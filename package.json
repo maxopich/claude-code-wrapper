@@ -1,0 +1,17 @@
+{
+  "name": "cebab",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev:server": "npm --workspace server run dev",
+    "dev:web": "npm --workspace web run dev",
+    "build": "npm --workspace shared run build && npm --workspace server run build && npm --workspace web run build",
+    "smoke": "npm --workspace server run smoke"
+  }
+}

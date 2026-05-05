@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.DS_Store
+
+# Local cebab data — kept out of git on purpose
+data/
+logs/
