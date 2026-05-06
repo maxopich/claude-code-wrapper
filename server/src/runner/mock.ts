@@ -1,19 +1,19 @@
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { RunOptions } from "./claude.js";
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { RunOptions } from './claude.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function fixturesDir(): string {
   // src/runner/mock.ts → ../../../fixtures (or dist/runner/mock.js → ../../../fixtures)
   const candidates = [
-    path.resolve(__dirname, "..", "..", "..", "fixtures"),
-    path.resolve(__dirname, "..", "..", "fixtures"),
+    path.resolve(__dirname, '..', '..', '..', 'fixtures'),
+    path.resolve(__dirname, '..', '..', 'fixtures'),
   ];
   const found = candidates.find((p) => fs.existsSync(p));
-  if (!found) throw new Error(`fixtures dir not found, tried: ${candidates.join(", ")}`);
+  if (!found) throw new Error(`fixtures dir not found, tried: ${candidates.join(', ')}`);
   return found;
 }
 
@@ -30,14 +30,14 @@ export type MockOptions = RunOptions & {
  * so downstream persistence and WS forwarding work without surprises.
  */
 export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & { close: () => void } {
-  const file = path.join(fixturesDir(), opts.fixture ?? "hello.jsonl");
+  const file = path.join(fixturesDir(), opts.fixture ?? 'hello.jsonl');
   if (!fs.existsSync(file)) throw new Error(`fixture not found: ${file}`);
   const intervalMs = opts.intervalMs ?? 50;
-  const sessionId = opts.sessionId ?? opts.resume ?? "mock-session";
+  const sessionId = opts.sessionId ?? opts.resume ?? 'mock-session';
 
   const lines = fs
-    .readFileSync(file, "utf8")
-    .split("\n")
+    .readFileSync(file, 'utf8')
+    .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
@@ -47,9 +47,9 @@ export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & { close:
       const t = setTimeout(resolve, ms);
       const onAbort = () => {
         clearTimeout(t);
-        reject(new Error("aborted"));
+        reject(new Error('aborted'));
       };
-      opts.abortController?.signal.addEventListener("abort", onAbort, { once: true });
+      opts.abortController?.signal.addEventListener('abort', onAbort, { once: true });
     });
 
   async function* iter(): AsyncGenerator<SDKMessage, void, unknown> {

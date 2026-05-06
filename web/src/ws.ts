@@ -1,4 +1,4 @@
-import type { ClientMsg, ServerMsg } from "@cebab/shared/protocol";
+import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
 
 export type WsHandle = {
   send(msg: ClientMsg): void;
@@ -12,13 +12,13 @@ export function connectWs(opts: {
   onMessage: (msg: ServerMsg) => void;
 }): WsHandle {
   const ws = new WebSocket(opts.url);
-  ws.addEventListener("open", opts.onOpen);
-  ws.addEventListener("close", opts.onClose);
-  ws.addEventListener("message", (ev) => {
+  ws.addEventListener('open', opts.onOpen);
+  ws.addEventListener('close', opts.onClose);
+  ws.addEventListener('message', (ev) => {
     try {
       opts.onMessage(JSON.parse(ev.data) as ServerMsg);
     } catch (err) {
-      console.error("[ws] bad server json", err);
+      console.error('[ws] bad server json', err);
     }
   });
   return {

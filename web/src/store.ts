@@ -4,31 +4,38 @@ import type {
   ServerMsg,
   SessionSummary,
   WrapperErrorKind,
-} from "@cebab/shared/protocol";
+} from '@cebab/shared/protocol';
 
 export type MessageView =
-  | { kind: "user"; id: string; text: string }
+  | { kind: 'user'; id: string; text: string }
   | {
-      kind: "assistant";
+      kind: 'assistant';
       id: string;
       blocks: ContentBlock[];
     }
-  | { kind: "system"; id: string; subtype: string; text: string }
-  | { kind: "result"; id: string; subtype: string; cost: number; result?: string; errors?: string[] }
-  | { kind: "error"; id: string; errorKind: WrapperErrorKind; message: string }
+  | { kind: 'system'; id: string; subtype: string; text: string }
   | {
-      kind: "permission_request";
+      kind: 'result';
+      id: string;
+      subtype: string;
+      cost: number;
+      result?: string;
+      errors?: string[];
+    }
+  | { kind: 'error'; id: string; errorKind: WrapperErrorKind; message: string }
+  | {
+      kind: 'permission_request';
       id: string;
       requestId: string;
       toolName: string;
       input: unknown;
-      decided?: "allow" | "deny";
+      decided?: 'allow' | 'deny';
     };
 
 export type SessionView = {
   id: string;
   projectId: number;
-  status: "idle" | "running" | "done" | "error";
+  status: 'idle' | 'running' | 'done' | 'error';
   messages: MessageView[];
   // Single rolling buffer for in-flight text deltas; cleared on assistant_message.
   streamingText: string;
@@ -74,7 +81,7 @@ export const initialState: AppState = {
 let _id = 0;
 const nextId = () => `m${++_id}`;
 
-const PENDING_PREFIX = "pending:";
+const PENDING_PREFIX = 'pending:';
 const newPendingId = () => `${PENDING_PREFIX}${++_id}`;
 
 function getActiveSessionId(state: AppState, projectId: number): string | undefined {
@@ -117,26 +124,26 @@ function projectFor(state: AppState, sessionId: string): number | null {
 }
 
 export type Action =
-  | { type: "ws_open" }
-  | { type: "ws_close" }
-  | { type: "server"; msg: ServerMsg }
-  | { type: "select_project"; projectId: number }
-  | { type: "select_session"; projectId: number; sessionId: string }
-  | { type: "new_session"; projectId: number }
-  | { type: "user_send"; text: string };
+  | { type: 'ws_open' }
+  | { type: 'ws_close' }
+  | { type: 'server'; msg: ServerMsg }
+  | { type: 'select_project'; projectId: number }
+  | { type: 'select_session'; projectId: number; sessionId: string }
+  | { type: 'new_session'; projectId: number }
+  | { type: 'user_send'; text: string };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
-    case "ws_open":
+    case 'ws_open':
       return { ...state, connected: true };
-    case "ws_close":
+    case 'ws_close':
       // Disconnect wipes liveness — any "running on this WS" claim is gone now.
       return { ...state, connected: false, liveSessions: {} };
 
-    case "select_project":
+    case 'select_project':
       return { ...state, activeProjectId: action.projectId };
 
-    case "select_session":
+    case 'select_session':
       return {
         ...state,
         activeProjectId: action.projectId,
@@ -146,7 +153,7 @@ export function reduce(state: AppState, action: Action): AppState {
         },
       };
 
-    case "new_session": {
+    case 'new_session': {
       // Drop the active session id for this project so the next user_send
       // creates a fresh "pending:*" placeholder. We deliberately keep the
       // sessionsByProject map intact — the user might come back via the list.
@@ -162,7 +169,7 @@ export function reduce(state: AppState, action: Action): AppState {
       };
     }
 
-    case "user_send": {
+    case 'user_send': {
       const projectId = state.activeProjectId;
       if (projectId === null) return state;
       let sessionId = getActiveSessionId(state, projectId);
@@ -174,19 +181,16 @@ export function reduce(state: AppState, action: Action): AppState {
         session = {
           id: sessionId,
           projectId,
-          status: "running",
+          status: 'running',
           messages: [],
-          streamingText: "",
+          streamingText: '',
         };
       }
 
       const next: SessionView = {
         ...session,
-        status: "running",
-        messages: [
-          ...session.messages,
-          { kind: "user", id: nextId(), text: action.text },
-        ],
+        status: 'running',
+        messages: [...session.messages, { kind: 'user', id: nextId(), text: action.text }],
       };
 
       let s: AppState = putSession(state, projectId, sessionId!, next);
@@ -207,17 +211,17 @@ export function reduce(state: AppState, action: Action): AppState {
       return s;
     }
 
-    case "server":
+    case 'server':
       return reduceServer(state, action.msg);
   }
 }
 
 function reduceServer(state: AppState, msg: ServerMsg): AppState {
   switch (msg.type) {
-    case "projects":
+    case 'projects':
       return { ...state, projects: msg.projects };
 
-    case "project_opened": {
+    case 'project_opened': {
       const live: Record<string, true> = { ...state.liveSessions };
       const sessionToProject = { ...state.sessionToProject };
       for (const sid of msg.runningSessionIds) {
@@ -235,7 +239,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case "session_running": {
+    case 'session_running': {
       const live: Record<string, true> = { ...state.liveSessions };
       if (msg.running) live[msg.sessionId] = true;
       else delete live[msg.sessionId];
@@ -249,15 +253,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case "session_history_start": {
+    case 'session_history_start': {
       // Reset the target session bucket so we can replay cleanly.
       const projectMap = { ...(state.sessionsByProject[msg.projectId] ?? {}) };
       projectMap[msg.sessionId] = {
         id: msg.sessionId,
         projectId: msg.projectId,
-        status: "running",
+        status: 'running',
         messages: [],
-        streamingText: "",
+        streamingText: '',
       };
       return {
         ...state,
@@ -276,18 +280,18 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case "session_history_end": {
+    case 'session_history_end': {
       const session = state.sessionsByProject[msg.projectId]?.[msg.sessionId];
       if (!session) return state;
       // After replay, session is idle unless server signals it's still running.
       const stillRunning = state.liveSessions[msg.sessionId] === true;
       return putSession(state, msg.projectId, msg.sessionId, {
         ...session,
-        status: stillRunning ? "running" : session.status === "running" ? "done" : session.status,
+        status: stillRunning ? 'running' : session.status === 'running' ? 'done' : session.status,
       });
     }
 
-    case "session_started": {
+    case 'session_started': {
       const projectId = msg.projectId;
       const projectMap = state.sessionsByProject[projectId] ?? {};
       const pendingId = state.pendingByProject[projectId];
@@ -295,23 +299,23 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // Migrate the optimistic "pending:*" session into the real id, so the
       // user message we appended optimistically isn't lost.
       let session: SessionView;
-      let nextProjectMap = { ...projectMap };
+      const nextProjectMap = { ...projectMap };
       if (pendingId && nextProjectMap[pendingId]) {
         session = {
           ...nextProjectMap[pendingId],
           id: msg.sessionId,
-          status: "running",
+          status: 'running',
         };
         delete nextProjectMap[pendingId];
       } else if (nextProjectMap[msg.sessionId]) {
-        session = { ...nextProjectMap[msg.sessionId], status: "running" };
+        session = { ...nextProjectMap[msg.sessionId], status: 'running' };
       } else {
         session = {
           id: msg.sessionId,
           projectId,
-          status: "running",
+          status: 'running',
           messages: [],
-          streamingText: "",
+          streamingText: '',
         };
       }
 
@@ -320,9 +324,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         messages: [
           ...session.messages,
           {
-            kind: "system",
+            kind: 'system',
             id: nextId(),
-            subtype: "init",
+            subtype: 'init',
             text: `session ${msg.sessionId.slice(0, 8)} • model ${msg.model} • ${msg.tools.length} tools`,
           },
         ],
@@ -360,8 +364,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case "stream_delta": {
-      if (msg.delta.kind !== "text") return state;
+    case 'stream_delta': {
+      if (msg.delta.kind !== 'text') return state;
       const projectId = projectFor(state, msg.sessionId);
       if (projectId === null) return state;
       const session = state.sessionsByProject[projectId]?.[msg.sessionId];
@@ -372,46 +376,43 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       });
     }
 
-    case "assistant_message": {
+    case 'assistant_message': {
       const projectId = projectFor(state, msg.sessionId);
       if (projectId === null) return state;
       const session = state.sessionsByProject[projectId]?.[msg.sessionId];
       if (!session) return state;
       return putSession(state, projectId, msg.sessionId, {
         ...session,
-        streamingText: "",
-        messages: [
-          ...session.messages,
-          { kind: "assistant", id: msg.uuid, blocks: msg.blocks },
-        ],
+        streamingText: '',
+        messages: [...session.messages, { kind: 'assistant', id: msg.uuid, blocks: msg.blocks }],
       });
     }
 
-    case "user_message": {
+    case 'user_message': {
       const projectId = projectFor(state, msg.sessionId);
       if (projectId === null) return state;
       const text = msg.blocks
         .map((b) => {
-          if (b.type === "tool_result") {
+          if (b.type === 'tool_result') {
             const c = b.content;
-            return typeof c === "string" ? c : JSON.stringify(c);
+            return typeof c === 'string' ? c : JSON.stringify(c);
           }
           return JSON.stringify(b);
         })
-        .join("\n");
+        .join('\n');
       return appendMessage(state, projectId, msg.sessionId, {
-        kind: "system",
+        kind: 'system',
         id: nextId(),
-        subtype: "tool_result",
+        subtype: 'tool_result',
         text,
       });
     }
 
-    case "permission_request": {
+    case 'permission_request': {
       const projectId = projectFor(state, msg.sessionId);
       if (projectId === null) return state;
       return appendMessage(state, projectId, msg.sessionId, {
-        kind: "permission_request",
+        kind: 'permission_request',
         id: nextId(),
         requestId: msg.requestId,
         toolName: msg.toolName,
@@ -419,30 +420,30 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       });
     }
 
-    case "system_event": {
-      if (msg.subtype === "status") return state;
+    case 'system_event': {
+      if (msg.subtype === 'status') return state;
       const projectId = projectFor(state, msg.sessionId);
       if (projectId === null) return state;
       return appendMessage(state, projectId, msg.sessionId, {
-        kind: "system",
+        kind: 'system',
         id: nextId(),
         subtype: msg.subtype,
         text: summarizeSystemEvent(msg.subtype, msg.payload),
       });
     }
 
-    case "result": {
+    case 'result': {
       const projectId = projectFor(state, msg.sessionId);
       if (projectId === null) return state;
       const session = state.sessionsByProject[projectId]?.[msg.sessionId];
       if (!session) return state;
       return putSession(state, projectId, msg.sessionId, {
         ...session,
-        status: msg.subtype === "success" ? "done" : "error",
+        status: msg.subtype === 'success' ? 'done' : 'error',
         messages: [
           ...session.messages,
           {
-            kind: "result",
+            kind: 'result',
             id: nextId(),
             subtype: msg.subtype,
             cost: msg.totalCostUsd,
@@ -453,28 +454,27 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       });
     }
 
-    case "wrapper_error": {
+    case 'wrapper_error': {
       const projectId = msg.sessionId
-        ? projectFor(state, msg.sessionId) ?? state.activeProjectId
+        ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
         : state.activeProjectId;
       if (projectId === null) return state;
-      const sessionId =
-        msg.sessionId ?? getActiveSessionId(state, projectId) ?? newPendingId();
+      const sessionId = msg.sessionId ?? getActiveSessionId(state, projectId) ?? newPendingId();
       const existing = state.sessionsByProject[projectId]?.[sessionId];
       const session: SessionView = existing ?? {
         id: sessionId,
         projectId,
-        status: "error",
+        status: 'error',
         messages: [],
-        streamingText: "",
+        streamingText: '',
       };
       return putSession(state, projectId, sessionId, {
         ...session,
-        status: "error",
+        status: 'error',
         messages: [
           ...session.messages,
           {
-            kind: "error",
+            kind: 'error',
             id: nextId(),
             errorKind: msg.kind,
             message: msg.message,
@@ -486,11 +486,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
 }
 
 function summarizeSystemEvent(subtype: string, payload: unknown): string {
-  if (subtype === "rate_limit" && typeof payload === "object" && payload) {
+  if (subtype === 'rate_limit' && typeof payload === 'object' && payload) {
     const p = payload as Record<string, unknown>;
-    return `rate limit: ${p.status ?? "?"} (${p.rateLimitType ?? "?"})`;
+    return `rate limit: ${p.status ?? '?'} (${p.rateLimitType ?? '?'})`;
   }
-  if (subtype === "api_retry" && typeof payload === "object" && payload) {
+  if (subtype === 'api_retry' && typeof payload === 'object' && payload) {
     const p = payload as Record<string, unknown>;
     return `api retry ${p.attempt}/${p.max_retries} in ${p.retry_delay_ms}ms (${p.error})`;
   }

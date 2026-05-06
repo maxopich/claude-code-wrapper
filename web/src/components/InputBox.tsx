@@ -1,17 +1,17 @@
-import { useState, type KeyboardEvent } from "react";
+import { useState, type KeyboardEvent } from 'react';
 
 export function InputBox(props: { disabled?: boolean; onSend: (text: string) => void }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState('');
 
   function send() {
     const v = text.trim();
     if (!v) return;
     props.onSend(v);
-    setText("");
+    setText('');
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       send();
     }

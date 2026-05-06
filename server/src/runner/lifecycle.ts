@@ -15,7 +15,7 @@ export function closeAllQueries(): void {
     try {
       q.close?.();
     } catch (err) {
-      console.error("[lifecycle] close failed", err);
+      console.error('[lifecycle] close failed', err);
     }
   }
   inFlight.clear();
