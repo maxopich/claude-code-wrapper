@@ -1,15 +1,15 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import type { ContentBlock } from "@cebab/shared/protocol";
-import type { MessageView } from "../store";
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import type { ContentBlock } from '@cebab/shared/protocol';
+import type { MessageView } from '../store';
 
 export function MessageBlock(props: {
   message: MessageView;
-  onPermissionDecide?: (requestId: string, decision: "allow" | "deny") => void;
+  onPermissionDecide?: (requestId: string, decision: 'allow' | 'deny') => void;
 }) {
   const { message: m, onPermissionDecide } = props;
 
-  if (m.kind === "user") {
+  if (m.kind === 'user') {
     return (
       <div className="msg user">
         <div className="role">you</div>
@@ -18,7 +18,7 @@ export function MessageBlock(props: {
     );
   }
 
-  if (m.kind === "assistant") {
+  if (m.kind === 'assistant') {
     return (
       <div className="msg assistant">
         <div className="role">claude</div>
@@ -29,22 +29,22 @@ export function MessageBlock(props: {
     );
   }
 
-  if (m.kind === "system") {
+  if (m.kind === 'system') {
     return null;
   }
 
-  if (m.kind === "result") {
+  if (m.kind === 'result') {
     return (
-      <div className={`msg result ${m.subtype === "success" ? "ok" : "err"}`}>
+      <div className={`msg result ${m.subtype === 'success' ? 'ok' : 'err'}`}>
         <div className="role">
           {m.subtype} · ${m.cost.toFixed(4)}
         </div>
-        {m.errors && m.errors.length > 0 && <pre>{m.errors.join("\n")}</pre>}
+        {m.errors && m.errors.length > 0 && <pre>{m.errors.join('\n')}</pre>}
       </div>
     );
   }
 
-  if (m.kind === "error") {
+  if (m.kind === 'error') {
     return (
       <div className="msg error">
         <div className="role">error · {m.errorKind}</div>
@@ -53,7 +53,7 @@ export function MessageBlock(props: {
     );
   }
 
-  if (m.kind === "permission_request") {
+  if (m.kind === 'permission_request') {
     return (
       <div className="msg permission">
         <div className="role">permission · {m.toolName}</div>
@@ -62,8 +62,8 @@ export function MessageBlock(props: {
           <div className="decided">decided: {m.decided}</div>
         ) : (
           <div className="actions">
-            <button onClick={() => onPermissionDecide?.(m.requestId, "allow")}>Allow</button>
-            <button onClick={() => onPermissionDecide?.(m.requestId, "deny")}>Deny</button>
+            <button onClick={() => onPermissionDecide?.(m.requestId, 'allow')}>Allow</button>
+            <button onClick={() => onPermissionDecide?.(m.requestId, 'deny')}>Deny</button>
           </div>
         )}
       </div>
@@ -74,21 +74,25 @@ export function MessageBlock(props: {
 }
 
 function BlockRender({ block }: { block: ContentBlock }) {
-  if (block.type === "text") return <Markdown text={block.text} />;
-  if (block.type === "tool_use")
+  if (block.type === 'text') return <Markdown text={block.text} />;
+  if (block.type === 'tool_use')
     return (
       <div className="block-tool-use">
         <div className="tool-name">→ {block.name}</div>
         <pre>{JSON.stringify(block.input, null, 2)}</pre>
       </div>
     );
-  if (block.type === "tool_result")
+  if (block.type === 'tool_result')
     return (
       <div className="block-tool-result">
-        <pre>{typeof block.content === "string" ? block.content : JSON.stringify(block.content, null, 2)}</pre>
+        <pre>
+          {typeof block.content === 'string'
+            ? block.content
+            : JSON.stringify(block.content, null, 2)}
+        </pre>
       </div>
     );
-  if (block.type === "thinking")
+  if (block.type === 'thinking')
     return (
       <details className="block-thinking">
         <summary>thinking</summary>

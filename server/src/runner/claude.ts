@@ -1,4 +1,4 @@
-import { query, type Options, type Query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type Query } from '@anthropic-ai/claude-agent-sdk';
 
 export type RunOptions = {
   cwd: string;
@@ -8,9 +8,9 @@ export type RunOptions = {
   /** Resume an existing session by UUID. Mutually exclusive with sessionId. */
   resume?: string;
   /** Override permission mode. Default: "default" (asks via canUseTool). */
-  permissionMode?: Options["permissionMode"];
+  permissionMode?: Options['permissionMode'];
   /** Permission callback. Required unless permissionMode is "bypassPermissions" / "acceptEdits" covers everything. */
-  canUseTool?: Options["canUseTool"];
+  canUseTool?: Options['canUseTool'];
   /** Token-by-token deltas via stream_event. Default: true. */
   includePartialMessages?: boolean;
   /** Hard turn cap. */
@@ -26,11 +26,11 @@ export type RunOptions = {
  */
 function subscriptionOnlyEnv(env: NodeJS.ProcessEnv): Record<string, string> {
   const blocked = new Set([
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
+    'ANTHROPIC_API_KEY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+    'CLAUDE_CODE_USE_FOUNDRY',
   ]);
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
@@ -45,9 +45,9 @@ export function runClaude(opts: RunOptions): Query {
   const options: Options = {
     cwd: opts.cwd,
     env: subscriptionOnlyEnv(process.env),
-    settingSources: ["user", "project", "local"],
+    settingSources: ['user', 'project', 'local'],
     includePartialMessages: opts.includePartialMessages ?? true,
-    permissionMode: opts.permissionMode ?? "default",
+    permissionMode: opts.permissionMode ?? 'default',
     canUseTool: opts.canUseTool,
     abortController: opts.abortController,
   };

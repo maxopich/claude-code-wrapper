@@ -1,10 +1,10 @@
-import { useEffect, useRef } from "react";
-import type { SessionView } from "../store";
-import { MessageBlock, StreamingPlaceholder } from "./MessageBlock";
+import { useEffect, useRef } from 'react';
+import type { SessionView } from '../store';
+import { MessageBlock, StreamingPlaceholder } from './MessageBlock';
 
 export function ChatView(props: {
   session: SessionView | null;
-  onPermissionDecide: (requestId: string, decision: "allow" | "deny") => void;
+  onPermissionDecide: (requestId: string, decision: 'allow' | 'deny') => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -22,15 +22,9 @@ export function ChatView(props: {
   return (
     <div className="chat" ref={scrollRef}>
       {props.session.messages.map((m) => (
-        <MessageBlock
-          key={m.id}
-          message={m}
-          onPermissionDecide={props.onPermissionDecide}
-        />
+        <MessageBlock key={m.id} message={m} onPermissionDecide={props.onPermissionDecide} />
       ))}
-      {props.session.streamingText && (
-        <StreamingPlaceholder text={props.session.streamingText} />
-      )}
+      {props.session.streamingText && <StreamingPlaceholder text={props.session.streamingText} />}
     </div>
   );
 }

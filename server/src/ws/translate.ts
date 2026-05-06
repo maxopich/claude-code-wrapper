@@ -1,5 +1,5 @@
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import type { ContentBlock, ServerMsg, StreamDelta } from "@cebab/shared/protocol";
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { ContentBlock, ServerMsg, StreamDelta } from '@cebab/shared/protocol';
 
 type AnyMsg = Record<string, unknown> & { type: string; subtype?: string };
 
@@ -10,17 +10,17 @@ type AnyMsg = Record<string, unknown> & { type: string; subtype?: string };
  */
 export function translate(msg: SDKMessage, projectId: number): ServerMsg | null {
   const m = msg as unknown as AnyMsg;
-  const sessionId = String(m.session_id ?? "");
+  const sessionId = String(m.session_id ?? '');
 
   switch (m.type) {
-    case "system":
-      if (m.subtype === "init") {
+    case 'system':
+      if (m.subtype === 'init') {
         const init = m as AnyMsg & {
           model: string;
           tools: string[];
         };
         return {
-          type: "session_started",
+          type: 'session_started',
           sessionId,
           projectId,
           model: init.model,
@@ -28,59 +28,66 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         };
       }
       return {
-        type: "system_event",
+        type: 'system_event',
         sessionId,
-        subtype: String(m.subtype ?? "system"),
+        subtype: String(m.subtype ?? 'system'),
         payload: m,
       };
 
-    case "rate_limit_event":
+    case 'rate_limit_event':
       return {
-        type: "system_event",
+        type: 'system_event',
         sessionId,
-        subtype: "rate_limit",
+        subtype: 'rate_limit',
         payload: (m as AnyMsg & { rate_limit_info?: unknown }).rate_limit_info ?? m,
       };
 
-    case "assistant": {
+    case 'assistant': {
       const a = m as AnyMsg & { uuid: string; message: { content: ContentBlock[] } };
       return {
-        type: "assistant_message",
+        type: 'assistant_message',
         sessionId,
         uuid: a.uuid,
         blocks: a.message.content,
       };
     }
 
-    case "user": {
+    case 'user': {
       const u = m as AnyMsg & { uuid?: string; message: { content: ContentBlock[] } };
       return {
-        type: "user_message",
+        type: 'user_message',
         sessionId,
-        uuid: u.uuid ?? "",
+        uuid: u.uuid ?? '',
         blocks: u.message.content,
       };
     }
 
-    case "stream_event": {
+    case 'stream_event': {
       const s = m as AnyMsg & {
         uuid: string;
-        event: { type: string; index?: number; delta?: { type: string; text?: string; partial_json?: string } };
+        event: {
+          type: string;
+          index?: number;
+          delta?: { type: string; text?: string; partial_json?: string };
+        };
       };
       const ev = s.event;
-      if (ev.type !== "content_block_delta") return null;
+      if (ev.type !== 'content_block_delta') return null;
       const idx = ev.index ?? 0;
       let delta: StreamDelta | null = null;
-      if (ev.delta?.type === "text_delta" && typeof ev.delta.text === "string") {
-        delta = { kind: "text", blockIndex: idx, text: ev.delta.text };
-      } else if (ev.delta?.type === "input_json_delta" && typeof ev.delta.partial_json === "string") {
-        delta = { kind: "input_json", blockIndex: idx, partialJson: ev.delta.partial_json };
+      if (ev.delta?.type === 'text_delta' && typeof ev.delta.text === 'string') {
+        delta = { kind: 'text', blockIndex: idx, text: ev.delta.text };
+      } else if (
+        ev.delta?.type === 'input_json_delta' &&
+        typeof ev.delta.partial_json === 'string'
+      ) {
+        delta = { kind: 'input_json', blockIndex: idx, partialJson: ev.delta.partial_json };
       }
       if (!delta) return null;
-      return { type: "stream_delta", sessionId, uuid: s.uuid, delta };
+      return { type: 'stream_delta', sessionId, uuid: s.uuid, delta };
     }
 
-    case "result": {
+    case 'result': {
       const r = m as AnyMsg & {
         subtype: string;
         duration_ms: number;
@@ -89,9 +96,9 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         errors?: string[];
       };
       return {
-        type: "result",
+        type: 'result',
         sessionId,
-        subtype: r.subtype as ServerMsg & { type: "result" } extends infer X
+        subtype: r.subtype as ServerMsg & { type: 'result' } extends infer X
           ? X extends { subtype: infer S }
             ? S
             : never
@@ -105,6 +112,6 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
 
     default:
       // Forward-compat: unknown SDK message types render as a small system note client-side.
-      return { type: "system_event", sessionId, subtype: `unknown:${m.type}`, payload: m };
+      return { type: 'system_event', sessionId, subtype: `unknown:${m.type}`, payload: m };
   }
 }
