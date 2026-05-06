@@ -15,7 +15,7 @@
     "smoke": "npm --workspace server run smoke",
     "prepare": "husky",
     "lint": "eslint . --max-warnings 0",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p shared && tsc --noEmit -p server && tsc --noEmit -p web",
     "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
