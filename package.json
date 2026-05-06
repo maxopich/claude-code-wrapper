@@ -13,7 +13,10 @@
     "dev:web": "npm --workspace web run dev",
     "build": "npm --workspace shared run build && npm --workspace server run build && npm --workspace web run build",
     "smoke": "npm --workspace server run smoke",
-    "prepare": "husky"
+    "prepare": "husky",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -21,7 +24,8 @@
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
     "prettier": "^3.8.3",
-    "typescript-eslint": "^8.59.2"
+    "typescript-eslint": "^8.59.2",
+    "vitest": "^4.1.5"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx}": [
