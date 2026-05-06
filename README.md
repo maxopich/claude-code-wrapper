@@ -1,4 +1,4 @@
-# cebab
+# CEBAB
 
 Personal browser-based wrapper around the local `claude` CLI on macOS. Spawns the
 Claude Code Agent SDK (which itself wraps `claude`), routes its typed message
