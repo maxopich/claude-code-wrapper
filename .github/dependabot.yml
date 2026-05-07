@@ -1,0 +1,27 @@
+version: 2
+updates:
+  # npm-залежності
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+      time: '06:00'
+    open-pull-requests-limit: 5
+    groups:
+      patch-updates:
+        update-types: ['patch']
+      dev-dependencies:
+        dependency-type: 'development'
+        update-types: ['minor', 'patch']
+    labels:
+      - 'dependencies'
+
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'monday'
+    labels:
+      - 'dependencies'
+      - 'github-actions'
