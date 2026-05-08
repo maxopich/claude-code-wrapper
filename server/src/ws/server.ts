@@ -32,6 +32,7 @@ import {
 } from '../workspace.js';
 import { translate } from './translate.js';
 import { classifyError } from './errors.js';
+import { shouldAutoAllow } from './permission.js';
 
 type PendingPermission = {
   sessionId: string;
@@ -354,9 +355,26 @@ async function runOneTurn(
     | { behavior: 'allow'; updatedInput: Record<string, unknown> }
     | { behavior: 'deny'; message: string }
   > => {
-    // The trusted path bypasses canUseTool because we pre-set acceptEdits, but
-    // also catch edge tools by allowing here.
-    if (trusted) return { behavior: 'allow', updatedInput: input };
+    // Read the live mode from `inFlight` (mutated by `set_permission_mode`).
+    // The closure-captured `permissionMode` is the bootstrap fallback for the
+    // narrow window before `inFlight.set(...)` runs below — in practice the SDK
+    // doesn't emit tool calls before that, but be defensive.
+    const liveMode = conn.inFlight.get(sessionId)?.permissionMode ?? permissionMode;
+    if (shouldAutoAllow(trusted, liveMode, toolName)) {
+      // Persist a silent record so replays can show "tool was auto-allowed"
+      // without a card. We don't emit a ServerMsg — the tool_use block itself
+      // is the user-visible signal that the tool ran.
+      await persistMessage(sessionId, {
+        type: 'wrapper',
+        subtype: 'permission_auto_allowed',
+        session_id: sessionId,
+        uuid: randomUUID(),
+        toolName,
+        input,
+        mode: liveMode,
+      } as never);
+      return { behavior: 'allow', updatedInput: input };
+    }
     const requestId = randomUUID();
     send(conn.ws, {
       type: 'permission_request',
