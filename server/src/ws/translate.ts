@@ -106,6 +106,39 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
       return { type: 'stream_delta', sessionId, uuid: s.uuid, delta };
     }
 
+    case 'wrapper': {
+      // Wrapper events are synthesized by the WS layer (not the SDK) and round-trip
+      // through the events table for replay. Map them back to UI-visible ServerMsgs.
+      const w = m as AnyMsg & {
+        requestId?: string;
+        toolName?: string;
+        input?: unknown;
+        decision?: 'allow' | 'deny';
+        kind?: string;
+        message?: string;
+      };
+      if (m.subtype === 'permission_request' && w.requestId && w.toolName !== undefined) {
+        return {
+          type: 'permission_request',
+          requestId: w.requestId,
+          sessionId,
+          toolName: w.toolName,
+          input: w.input,
+        };
+      }
+      if (m.subtype === 'permission_decided' && w.requestId && w.decision) {
+        return {
+          type: 'permission_decided',
+          sessionId,
+          requestId: w.requestId,
+          decision: w.decision,
+        };
+      }
+      // Wrapper-level errors land here too; the wrapper_error replay path
+      // is best-effort — the original kind is in subtype.
+      return null;
+    }
+
     case 'result': {
       const r = m as AnyMsg & {
         subtype: string;

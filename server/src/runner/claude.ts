@@ -49,6 +49,10 @@ export function runClaude(opts: RunOptions): Query {
   const options: Options = {
     cwd: opts.cwd,
     env: subscriptionOnlyEnv(process.env),
+    // Default is intentionally narrow: only ~/.claude/settings.json is layered in.
+    // The WS layer widens to ['user', 'project', 'local'] only for trusted projects
+    // so a hostile sibling repo's `.claude/settings.local.json` can't auto-load
+    // hooks the moment the user clicks it. Don't widen here without revisiting Trust.
     settingSources: opts.settingSources ?? ['user'],
     includePartialMessages: opts.includePartialMessages ?? true,
     permissionMode: opts.permissionMode ?? 'default',

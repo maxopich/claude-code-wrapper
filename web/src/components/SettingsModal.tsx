@@ -38,6 +38,9 @@ export function SettingsModal(props: {
             <code>CLAUDE.md</code>, <code>.claude/skills/</code>, and <code>.claude/mcp.json</code>{' '}
             auto-load.
           </p>
+          {props.settings.workspaceRoot === null && (
+            <p className="hint">No workspace folder set yet. Pick one to begin.</p>
+          )}
           {!props.settings.workspaceRootValid && props.settings.workspaceRoot && (
             <p className="hint warn">
               Current path is missing or not a directory:{' '}

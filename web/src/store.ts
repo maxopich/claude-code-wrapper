@@ -452,6 +452,22 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       });
     }
 
+    case 'permission_decided': {
+      const projectId = projectFor(state, msg.sessionId);
+      if (projectId === null) return state;
+      const session = state.sessionsByProject[projectId]?.[msg.sessionId];
+      if (!session) return state;
+      // Locate the matching permission_request card and mark it decided.
+      // Idempotent — both the optimistic local dispatch and the server echo
+      // produce the same final state.
+      const messages = session.messages.map((mm) =>
+        mm.kind === 'permission_request' && mm.requestId === msg.requestId
+          ? { ...mm, decided: msg.decision }
+          : mm,
+      );
+      return putSession(state, projectId, msg.sessionId, { ...session, messages });
+    }
+
     case 'system_event': {
       if (msg.subtype === 'status') return state;
       const projectId = projectFor(state, msg.sessionId);

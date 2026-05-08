@@ -1,3 +1,5 @@
+import type { SessionPermissionMode } from '@cebab/shared/protocol';
+import { isSessionPermissionMode } from '@cebab/shared/protocol';
 import { getDb } from '../db.js';
 
 export type SessionRow = {
@@ -7,6 +9,7 @@ export type SessionRow = {
   created_at: number;
   last_event_at: number;
   total_cost_usd: number;
+  permission_mode: string | null;
 };
 
 export function createSession(
@@ -48,4 +51,16 @@ export function setSessionCost(id: string, totalCostUsd: number): void {
   getDb()
     .prepare('UPDATE sessions SET last_event_at = ?, total_cost_usd = ? WHERE id = ?')
     .run(Date.now(), totalCostUsd, id);
+}
+
+/** Read the user's last in-session mode preference, or null if unset. */
+export function getSessionPermissionMode(id: string): SessionPermissionMode | null {
+  const row = getSession(id);
+  if (!row) return null;
+  return isSessionPermissionMode(row.permission_mode) ? row.permission_mode : null;
+}
+
+/** Persist the user's in-session mode preference; survives across turns. */
+export function setSessionPermissionMode(id: string, mode: SessionPermissionMode): void {
+  getDb().prepare('UPDATE sessions SET permission_mode = ? WHERE id = ?').run(mode, id);
 }
