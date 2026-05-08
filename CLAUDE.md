@@ -16,19 +16,30 @@ browser ── WS ── Node server ── Agent SDK query() ── claude subp
 ```
 
 **Runner: `@anthropic-ai/claude-agent-sdk`, not raw subprocess.** The SDK still spawns the `claude` CLI under the hood and uses the same OAuth credentials, but it gives us:
+
 - typed `SDKMessage` union (`system` / `assistant` / `user` / `result` / `stream_event`)
 - in-process `canUseTool` callback (no MCP permission server needed)
 - `query.interrupt()` / `query.setPermissionMode()` / `query.close()` mid-flight
 
 This is the most important architectural decision in the repo — see `~/.claude/plans/claude-code-wrapper-twinkly-balloon.md` for the full reasoning.
 
-**One subprocess per user message**, with `--resume <session_id>` for continuity across messages. The `--input-format stream-json` long-running mode is *not* used in v1.
+**One subprocess per user message**, with `--resume <session_id>` for continuity across messages. The `--input-format stream-json` long-running mode is _not_ used in v1.
 
 **Permission flow** (when project isn't trusted):
+
 1. SDK calls `canUseTool(name, input)` in `server/src/ws/server.ts`.
 2. Handler emits `permission_request` over WS, parks a `Promise<PermissionResult>` in `Conn.pendingPermissions`.
 3. Browser's approval card resolves it via `permission_decision` ClientMsg.
 4. Trusted projects skip the round-trip and pre-set `permissionMode: "acceptEdits"`.
+
+**Trust model**. The per-project Trust toggle controls TWO things: the initial `permissionMode` AND the `settingSources` scope passed to the SDK.
+
+- _Trusted_: `permissionMode: "acceptEdits"` and `settingSources: ['user', 'project', 'local']`. The project's own `.claude/settings*.json` (hooks, env injectors, MCP servers) are layered in.
+- _Untrusted_: `permissionMode: "default"` and `settingSources: ['user']`. Only `~/.claude/settings.json` applies. A hostile or careless `.claude/settings.local.json` checked into a sibling repo can't auto-load hooks the moment the user clicks that project.
+
+The chat UI also exposes a per-session toggle that flips between `default` and `acceptEdits` mid-flight via `query.setPermissionMode()`. This is independent of the project Trust setting; it doesn't alter `settingSources` (already locked in when the run started).
+
+**Browser threat model**. The WS upgrade is gated on `Origin` and `Host`: the browser must come from `http://127.0.0.1:5173` (Vite dev) / `http://localhost:5173` / `http://127.0.0.1:$PORT`. Extra origins via `CEBAB_ALLOWED_ORIGINS` (comma-separated). Empty `Origin` is allowed — browsers always set it on WS upgrades, so an absent header means a non-browser client (smoke tests, curl), and the server is bound to 127.0.0.1 anyway. Without the Origin check, any tab the user has open could connect to the local server (Cross-Site WebSocket Hijacking). Per-launch tokens are deliberately out of scope for v1.
 
 **Persistence**: every SDKMessage hits `persistMessage()` → DB row in `events` (raw + denormalized type/subtype) AND a line in `~/.cebab/logs/<session_id>.jsonl`. The JSONL files are the source for mock-mode fixtures.
 
@@ -64,6 +75,7 @@ Out: file/git/cost panels, multi-session UI, hooks/plugins/skills UI, theming, w
 ## Stream-json oddities (verified live, undocumented)
 
 The captured fixture surfaced two event types missing from the docs:
+
 - top-level `rate_limit_event` (with `rate_limit_info: { status, resetsAt, rateLimitType, ... }`)
 - `system/status` (e.g. `{ status: "requesting" }`)
 

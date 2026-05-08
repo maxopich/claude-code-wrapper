@@ -6,6 +6,7 @@ export type ProjectRow = {
   name: string;
   path: string;
   trusted: number;
+  missing: number;
   created_at: number;
   last_used_at: number | null;
 };
@@ -13,11 +14,17 @@ export type ProjectRow = {
 export function upsertProject(name: string, path: string): ProjectRow {
   const db = getDb();
   const existing = findProjectByPath(path);
-  if (existing) return existing;
+  if (existing) {
+    if (existing.missing === 1) {
+      db.prepare('UPDATE projects SET missing = 0 WHERE id = ?').run(existing.id);
+      return { ...existing, missing: 0 };
+    }
+    return existing;
+  }
   const now = Date.now();
   const result = db
     .prepare(
-      'INSERT INTO projects (name, path, trusted, created_at, last_used_at) VALUES (?, ?, 0, ?, NULL)',
+      'INSERT INTO projects (name, path, trusted, missing, created_at, last_used_at) VALUES (?, ?, 0, 0, ?, NULL)',
     )
     .run(name, path, now);
   return getProject(Number(result.lastInsertRowid))!;
@@ -31,13 +38,30 @@ export function findProjectByPath(path: string): ProjectRow | undefined {
   return getDb().prepare<[string], ProjectRow>('SELECT * FROM projects WHERE path = ?').get(path);
 }
 
+/** Lists only projects whose directories are still present on disk. */
 export function listProjects(): ProjectRow[] {
   return getDb()
     .prepare<
       [],
       ProjectRow
-    >('SELECT * FROM projects ORDER BY last_used_at DESC NULLS LAST, name ASC')
+    >('SELECT * FROM projects WHERE missing = 0 ORDER BY last_used_at DESC NULLS LAST, name ASC')
     .all();
+}
+
+export function markProjectsMissingByPaths(paths: string[]): void {
+  if (paths.length === 0) return;
+  const db = getDb();
+  const stmt = db.prepare('UPDATE projects SET missing = 1 WHERE path = ?');
+  db.transaction(() => {
+    for (const p of paths) stmt.run(p);
+  })();
+}
+
+export function listProjectPaths(): string[] {
+  return getDb()
+    .prepare<[], { path: string }>('SELECT path FROM projects')
+    .all()
+    .map((r) => r.path);
 }
 
 export function setProjectTrusted(id: number, trusted: boolean): void {

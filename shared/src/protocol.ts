@@ -34,6 +34,14 @@ export type ResultSubtype =
   | 'error_max_budget_usd'
   | 'error_max_structured_output_retries';
 
+export const RESULT_SUBTYPES: ReadonlySet<ResultSubtype> = new Set([
+  'success',
+  'error_max_turns',
+  'error_during_execution',
+  'error_max_budget_usd',
+  'error_max_structured_output_retries',
+]);
+
 export type WrapperErrorKind =
   | 'claude_not_found'
   | 'auth_expired'
@@ -41,15 +49,29 @@ export type WrapperErrorKind =
   | 'process_crashed'
   | 'parse_error';
 
+/** Per-session permission mode the wrapper exposes to the UI. */
+export type SessionPermissionMode = 'default' | 'acceptEdits';
+
 // ---- Browser → Server ----
 export type ClientMsg =
   | { type: 'list_projects' }
   | { type: 'open_project'; projectId: number }
   | { type: 'send_message'; projectId: number; sessionId?: string; text: string }
   | { type: 'interrupt'; sessionId: string }
-  | { type: 'permission_decision'; requestId: string; decision: 'allow' | 'deny'; message?: string }
+  | {
+      type: 'permission_decision';
+      sessionId: string;
+      requestId: string;
+      decision: 'allow' | 'deny';
+      /** Reserved for a future UI affordance to edit tool input before approving. */
+      updatedInput?: Record<string, unknown>;
+      message?: string;
+    }
   | { type: 'set_trusted'; projectId: number; trusted: boolean }
-  | { type: 'load_session'; projectId: number; sessionId: string };
+  | { type: 'load_session'; projectId: number; sessionId: string }
+  | { type: 'get_settings' }
+  | { type: 'set_workspace_root'; path: string }
+  | { type: 'set_permission_mode'; sessionId: string; mode: SessionPermissionMode };
 
 // ---- Server → Browser ----
 export type ServerMsg =
@@ -80,6 +102,11 @@ export type ServerMsg =
       toolName: string;
       input: unknown;
     }
+  | {
+      type: 'permission_mode_changed';
+      sessionId: string;
+      mode: SessionPermissionMode;
+    }
   | { type: 'system_event'; sessionId: string; subtype: string; payload: unknown }
   | {
       type: 'result';
@@ -89,5 +116,11 @@ export type ServerMsg =
       totalCostUsd: number;
       result?: string;
       errors?: string[];
+    }
+  | {
+      type: 'settings';
+      workspaceRoot: string | null;
+      workspaceRootValid: boolean;
+      defaultWorkspaceRoot: string;
     }
   | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string };

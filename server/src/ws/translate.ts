@@ -1,5 +1,24 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import type { ContentBlock, ServerMsg, StreamDelta } from '@cebab/shared/protocol';
+import {
+  RESULT_SUBTYPES,
+  type ContentBlock,
+  type ResultSubtype,
+  type ServerMsg,
+  type StreamDelta,
+} from '@cebab/shared/protocol';
+
+let warnedUnknownResultSubtypes: Set<string> | null = null;
+function coerceResultSubtype(raw: string): ResultSubtype {
+  if (RESULT_SUBTYPES.has(raw as ResultSubtype)) return raw as ResultSubtype;
+  warnedUnknownResultSubtypes ??= new Set();
+  if (!warnedUnknownResultSubtypes.has(raw)) {
+    warnedUnknownResultSubtypes.add(raw);
+    console.warn(
+      `[translate] unknown result.subtype "${raw}" — coercing to error_during_execution`,
+    );
+  }
+  return 'error_during_execution';
+}
 
 type AnyMsg = Record<string, unknown> & { type: string; subtype?: string };
 
@@ -98,11 +117,7 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
       return {
         type: 'result',
         sessionId,
-        subtype: r.subtype as ServerMsg & { type: 'result' } extends infer X
-          ? X extends { subtype: infer S }
-            ? S
-            : never
-          : never,
+        subtype: coerceResultSubtype(r.subtype),
         durationMs: r.duration_ms,
         totalCostUsd: r.total_cost_usd,
         result: r.result,

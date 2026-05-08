@@ -1,5 +1,7 @@
 import { query, type Options, type Query } from '@anthropic-ai/claude-agent-sdk';
 
+export type SettingSource = NonNullable<Options['settingSources']>[number];
+
 export type RunOptions = {
   cwd: string;
   prompt: string;
@@ -15,6 +17,8 @@ export type RunOptions = {
   includePartialMessages?: boolean;
   /** Hard turn cap. */
   maxTurns?: number;
+  /** Which scopes of settings.json the SDK should layer. Default: ['user']. */
+  settingSources?: SettingSource[];
   /** External cancellation. */
   abortController?: AbortController;
 };
@@ -45,7 +49,7 @@ export function runClaude(opts: RunOptions): Query {
   const options: Options = {
     cwd: opts.cwd,
     env: subscriptionOnlyEnv(process.env),
-    settingSources: ['user', 'project', 'local'],
+    settingSources: opts.settingSources ?? ['user'],
     includePartialMessages: opts.includePartialMessages ?? true,
     permissionMode: opts.permissionMode ?? 'default',
     canUseTool: opts.canUseTool,

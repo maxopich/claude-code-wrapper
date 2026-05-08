@@ -1,20 +1,28 @@
 import { randomUUID } from 'node:crypto';
-import type { Server as HttpServer } from 'node:http';
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { IncomingMessage, Server as HttpServer } from 'node:http';
+import type { PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { WebSocket, WebSocketServer } from 'ws';
-import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
+import type { ClientMsg, ServerMsg, SessionPermissionMode } from '@cebab/shared/protocol';
+import { config } from '../config.js';
 import { getProject, setProjectTrusted, touchProject } from '../repo/projects.js';
 import { createSession, getSession, listSessionsForProject } from '../repo/sessions.js';
 import { listEvents } from '../repo/events.js';
 import { persistMessage } from '../runner/orchestrator.js';
 import { closeLogger } from '../runner/logger.js';
-import { pickRunner } from '../runner/index.js';
+import { pickRunner, type Runner } from '../runner/index.js';
 import { registerQuery } from '../runner/lifecycle.js';
-import { rowToProject, syncWorkspaceProjects } from '../workspace.js';
+import {
+  resolveWorkspaceRoot,
+  rowToProject,
+  setWorkspaceRoot,
+  syncWorkspaceProjects,
+  workspaceRootValid,
+} from '../workspace.js';
 import { translate } from './translate.js';
 import { classifyError } from './errors.js';
 
 type PendingPermission = {
+  sessionId: string;
   resolve: (
     decision:
       | { behavior: 'allow'; updatedInput: Record<string, unknown> }
@@ -23,7 +31,12 @@ type PendingPermission = {
   toolInput: Record<string, unknown>;
 };
 
-type InFlight = { ac: AbortController; projectId: number };
+type InFlight = {
+  ac: AbortController;
+  projectId: number;
+  runner: Runner;
+  permissionMode: SessionPermissionMode;
+};
 
 type Conn = {
   ws: WebSocket;
@@ -31,8 +44,47 @@ type Conn = {
   inFlight: Map<string, InFlight>;
 };
 
+/** Origins permitted to upgrade to a WS. Built once, lazily. */
+function buildAllowedOrigins(): Set<string> {
+  const base = new Set<string>([
+    `http://127.0.0.1:5173`,
+    `http://localhost:5173`,
+    `http://127.0.0.1:${config.port}`,
+    `http://localhost:${config.port}`,
+  ]);
+  for (const o of config.allowedOrigins) base.add(o);
+  return base;
+}
+
+function isAllowedHost(host: string): boolean {
+  return host === `127.0.0.1:${config.port}` || host === `localhost:${config.port}`;
+}
+
 export function startWsServer(server: HttpServer): WebSocketServer {
-  const wss = new WebSocketServer({ server });
+  const allowedOrigins = buildAllowedOrigins();
+  const wss = new WebSocketServer({
+    server,
+    verifyClient: (info, cb) => {
+      const req = info.req as IncomingMessage;
+      const origin = String(req.headers.origin ?? '');
+      const host = String(req.headers.host ?? '');
+      // Empty Origin is allowed only for non-browser clients (smoke tests,
+      // curl). Browsers ALWAYS set Origin on WS upgrades, so an absent
+      // Origin can't be a Cross-Site WebSocket Hijack — and the server is
+      // bound to 127.0.0.1 anyway, so the threat surface is local-only.
+      if (origin && !allowedOrigins.has(origin)) {
+        console.warn(`[ws] reject: bad origin ${JSON.stringify(origin)}`);
+        cb(false, 403, 'forbidden origin');
+        return;
+      }
+      if (!isAllowedHost(host)) {
+        console.warn(`[ws] reject: bad host ${JSON.stringify(host)}`);
+        cb(false, 403, 'forbidden host');
+        return;
+      }
+      cb(true);
+    },
+  });
   wss.on('connection', (ws) => onConnection(ws));
   return wss;
 }
@@ -65,21 +117,47 @@ function onConnection(ws: WebSocket): void {
 
   ws.on('close', () => {
     console.log('[ws] client disconnected');
-    // Resolve any blocked permission requests so the SDK doesn't hang.
     for (const pending of conn.pendingPermissions.values()) {
       pending.resolve({ behavior: 'deny', message: 'client disconnected' });
     }
     conn.pendingPermissions.clear();
-    // Abort any in-flight runs.
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
+  });
+}
+
+function emitSettings(conn: Conn): void {
+  const root = resolveWorkspaceRoot();
+  send(conn.ws, {
+    type: 'settings',
+    workspaceRoot: root,
+    workspaceRootValid: workspaceRootValid(),
+    defaultWorkspaceRoot: config.workspaceRootDefault,
   });
 }
 
 async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
   switch (msg.type) {
     case 'list_projects': {
-      const rows = syncWorkspaceProjects();
+      const rows = await syncWorkspaceProjects();
+      send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      return;
+    }
+    case 'get_settings': {
+      emitSettings(conn);
+      return;
+    }
+    case 'set_workspace_root': {
+      try {
+        setWorkspaceRoot(msg.path);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        emitSettings(conn);
+        return;
+      }
+      const rows = await syncWorkspaceProjects();
+      emitSettings(conn);
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
       return;
     }
@@ -110,16 +188,25 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     }
     case 'set_trusted': {
       setProjectTrusted(msg.projectId, msg.trusted);
-      const rows = syncWorkspaceProjects();
+      const rows = await syncWorkspaceProjects();
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
       return;
     }
     case 'permission_decision': {
       const pending = conn.pendingPermissions.get(msg.requestId);
       if (!pending) return;
+      // Lie-detection: a decision must reference the same session that
+      // produced the pending request. Otherwise something is confused.
+      if (pending.sessionId !== msg.sessionId) {
+        console.warn(
+          `[ws] permission_decision sessionId mismatch: pending=${pending.sessionId} got=${msg.sessionId}`,
+        );
+        return;
+      }
       conn.pendingPermissions.delete(msg.requestId);
       if (msg.decision === 'allow') {
-        pending.resolve({ behavior: 'allow', updatedInput: pending.toolInput });
+        const updated = msg.updatedInput ?? pending.toolInput;
+        pending.resolve({ behavior: 'allow', updatedInput: updated });
       } else {
         pending.resolve({
           behavior: 'deny',
@@ -128,8 +215,42 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       return;
     }
+    case 'set_permission_mode': {
+      const f = conn.inFlight.get(msg.sessionId);
+      if (!f) return;
+      try {
+        await f.runner.setPermissionMode?.(msg.mode as PermissionMode);
+        f.permissionMode = msg.mode;
+        send(conn.ws, {
+          type: 'permission_mode_changed',
+          sessionId: msg.sessionId,
+          mode: msg.mode,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message,
+        });
+      }
+      return;
+    }
     case 'interrupt': {
-      conn.inFlight.get(msg.sessionId)?.ac.abort();
+      const f = conn.inFlight.get(msg.sessionId);
+      if (!f) return;
+      // Prefer the SDK's graceful interrupt; fall back to AbortController.abort
+      // (which is harder — it kills the subprocess rather than letting it wrap up).
+      try {
+        if (f.runner.interrupt) {
+          await f.runner.interrupt();
+          return;
+        }
+      } catch (err) {
+        console.warn('[ws] runner.interrupt failed; falling back to abort', err);
+      }
+      f.ac.abort();
       return;
     }
     case 'send_message': {
@@ -158,16 +279,14 @@ async function runOneTurn(
   touchProject(project.id);
 
   const ac = new AbortController();
-  conn.inFlight.set(sessionId, { ac, projectId: project.id });
-  send(conn.ws, {
-    type: 'session_running',
-    projectId: project.id,
-    sessionId,
-    running: true,
-  });
 
   const trusted = project.trusted === 1;
-  const permissionMode: 'default' | 'acceptEdits' = trusted ? 'acceptEdits' : 'default';
+  // Trusted: auto-approve edits for the whole turn AND let the project's
+  // `.claude/settings*.json` (hooks, env injectors, MCP servers) layer in.
+  // Untrusted: only ~/.claude/settings.json applies — a hostile project's
+  // local hooks can't run on click.
+  const permissionMode: SessionPermissionMode = trusted ? 'acceptEdits' : 'default';
+  const settingSources = trusted ? (['user', 'project', 'local'] as const) : (['user'] as const);
 
   const canUseTool = async (
     toolName: string,
@@ -176,17 +295,18 @@ async function runOneTurn(
     | { behavior: 'allow'; updatedInput: Record<string, unknown> }
     | { behavior: 'deny'; message: string }
   > => {
+    // The trusted path bypasses canUseTool because we pre-set acceptEdits, but
+    // also catch edge tools by allowing here.
     if (trusted) return { behavior: 'allow', updatedInput: input };
     const requestId = randomUUID();
-    const reqMsg: ServerMsg = {
+    send(conn.ws, {
       type: 'permission_request',
       requestId,
       sessionId,
       toolName,
       input,
-    };
-    send(conn.ws, reqMsg);
-    persistMessage(sessionId, {
+    });
+    await persistMessage(sessionId, {
       type: 'wrapper',
       subtype: 'permission_request',
       session_id: sessionId,
@@ -196,7 +316,7 @@ async function runOneTurn(
       input,
     } as never);
     return new Promise((resolve) => {
-      conn.pendingPermissions.set(requestId, { resolve, toolInput: input });
+      conn.pendingPermissions.set(requestId, { sessionId, resolve, toolInput: input });
     });
   };
 
@@ -207,21 +327,37 @@ async function runOneTurn(
     resume: msg.sessionId,
     includePartialMessages: true,
     permissionMode,
+    settingSources: [...settingSources],
     canUseTool,
     abortController: ac,
+    maxTurns: config.maxTurns,
   });
   const unregister = registerQuery(runner as { close?: () => void });
 
+  conn.inFlight.set(sessionId, { ac, projectId: project.id, runner, permissionMode });
+  send(conn.ws, {
+    type: 'session_running',
+    projectId: project.id,
+    sessionId,
+    running: true,
+  });
+  // Tell the client the starting permission mode so its toggle is correct.
+  send(conn.ws, {
+    type: 'permission_mode_changed',
+    sessionId,
+    mode: permissionMode,
+  });
+
   try {
     for await (const sdkMsg of runner) {
-      persistMessage(sessionId, sdkMsg);
+      await persistMessage(sessionId, sdkMsg);
       const out = translate(sdkMsg, project.id);
       if (out) send(conn.ws, out);
     }
   } catch (err) {
     const wrap = classifyError(err);
     send(conn.ws, { type: 'wrapper_error', sessionId, kind: wrap.kind, message: wrap.message });
-    persistMessage(sessionId, {
+    await persistMessage(sessionId, {
       type: 'wrapper',
       subtype: wrap.kind,
       session_id: sessionId,
@@ -229,7 +365,6 @@ async function runOneTurn(
       message: wrap.message,
     } as never);
   } finally {
-    // Close the SDK Query so its spawned `claude` subprocess exits.
     try {
       (runner as { close?: () => void }).close?.();
     } catch (err) {
@@ -270,11 +405,16 @@ async function replaySession(conn: Conn, projectId: number, sessionId: string): 
     if (out) send(conn.ws, out);
   }
   send(conn.ws, { type: 'session_history_end', projectId, sessionId });
-  // If the session is currently in flight on this connection, the live status
-  // is implicit (we already sent session_running:true when the turn began);
-  // just nudge the client so it knows after a fresh load.
-  if (conn.inFlight.has(sessionId)) {
+  // If the session is currently in flight on this connection, re-emit liveness
+  // and the current permission mode so the freshly hydrated UI matches reality.
+  const live = conn.inFlight.get(sessionId);
+  if (live) {
     send(conn.ws, { type: 'session_running', projectId, sessionId, running: true });
+    send(conn.ws, {
+      type: 'permission_mode_changed',
+      sessionId,
+      mode: live.permissionMode,
+    });
   }
 }
 
