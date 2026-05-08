@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { RunOptions } from './claude.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,7 +29,11 @@ export type MockOptions = RunOptions & {
  * The yielded objects have their `session_id` rewritten to match the active session,
  * so downstream persistence and WS forwarding work without surprises.
  */
-export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & { close: () => void } {
+export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & {
+  close: () => void;
+  interrupt: () => Promise<void>;
+  setPermissionMode: (mode: PermissionMode) => Promise<void>;
+} {
   const file = path.join(fixturesDir(), opts.fixture ?? 'hello.jsonl');
   if (!fs.existsSync(file)) throw new Error(`fixture not found: ${file}`);
   const intervalMs = opts.intervalMs ?? 50;
@@ -42,19 +46,24 @@ export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & { close:
     .filter((l) => l.length > 0);
 
   let cancelled = false;
+  // Single listener for the whole run rather than one per sleep iteration —
+  // long fixtures previously accumulated O(n) listeners on the signal.
+  opts.abortController?.signal.addEventListener(
+    'abort',
+    () => {
+      cancelled = true;
+    },
+    { once: true },
+  );
+
   const sleep = (ms: number) =>
-    new Promise<void>((resolve, reject) => {
-      const t = setTimeout(resolve, ms);
-      const onAbort = () => {
-        clearTimeout(t);
-        reject(new Error('aborted'));
-      };
-      opts.abortController?.signal.addEventListener('abort', onAbort, { once: true });
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
     });
 
   async function* iter(): AsyncGenerator<SDKMessage, void, unknown> {
     for (const line of lines) {
-      if (cancelled || opts.abortController?.signal.aborted) return;
+      if (cancelled) return;
       let parsed: Record<string, unknown>;
       try {
         parsed = JSON.parse(line);
@@ -63,9 +72,8 @@ export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & { close:
       }
       parsed.session_id = sessionId;
       yield parsed as unknown as SDKMessage;
-      await sleep(intervalMs).catch(() => {
-        cancelled = true;
-      });
+      if (cancelled) return;
+      await sleep(intervalMs);
     }
   }
 
@@ -76,6 +84,12 @@ export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & { close:
     },
     close() {
       cancelled = true;
+    },
+    async interrupt() {
+      cancelled = true;
+    },
+    async setPermissionMode() {
+      // no-op in mock; real Query forwards to the spawned claude
     },
   };
 }

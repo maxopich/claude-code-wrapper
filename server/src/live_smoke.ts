@@ -66,7 +66,12 @@ ws.on('message', (raw) => {
   } else if (msg.type === 'permission_request') {
     approvals++;
     console.log('[live] auto-allowing', msg.toolName);
-    send({ type: 'permission_decision', requestId: msg.requestId, decision: 'allow' });
+    send({
+      type: 'permission_decision',
+      sessionId: msg.sessionId,
+      requestId: msg.requestId,
+      decision: 'allow',
+    });
   } else if (msg.type === 'result') {
     if (msg.result) lastResultText = msg.result;
     console.log(`[live] phase=${phase} cost=$${msg.totalCostUsd.toFixed(6)}`);

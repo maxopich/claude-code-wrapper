@@ -2,6 +2,7 @@ import type {
   ContentBlock,
   Project,
   ServerMsg,
+  SessionPermissionMode,
   SessionSummary,
   WrapperErrorKind,
 } from '@cebab/shared/protocol';
@@ -64,6 +65,16 @@ export type AppState = {
   knownSessions: Record<number, SessionSummary[]>;
   // Sessions currently running on this WebSocket connection.
   liveSessions: Record<string, true>;
+  // Per-session permission mode (mirrors server-side state).
+  permissionModeBySession: Record<string, SessionPermissionMode>;
+  // Workspace settings reported by the server. `null` means we haven't asked yet.
+  settings: SettingsView | null;
+};
+
+export type SettingsView = {
+  workspaceRoot: string | null;
+  workspaceRootValid: boolean;
+  defaultWorkspaceRoot: string;
 };
 
 export const initialState: AppState = {
@@ -76,6 +87,8 @@ export const initialState: AppState = {
   sessionToProject: {},
   knownSessions: {},
   liveSessions: {},
+  permissionModeBySession: {},
+  settings: null,
 };
 
 let _id = 0;
@@ -220,6 +233,25 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
   switch (msg.type) {
     case 'projects':
       return { ...state, projects: msg.projects };
+
+    case 'settings':
+      return {
+        ...state,
+        settings: {
+          workspaceRoot: msg.workspaceRoot,
+          workspaceRootValid: msg.workspaceRootValid,
+          defaultWorkspaceRoot: msg.defaultWorkspaceRoot,
+        },
+      };
+
+    case 'permission_mode_changed':
+      return {
+        ...state,
+        permissionModeBySession: {
+          ...state.permissionModeBySession,
+          [msg.sessionId]: msg.mode,
+        },
+      };
 
     case 'project_opened': {
       const live: Record<string, true> = { ...state.liveSessions };

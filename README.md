@@ -62,16 +62,24 @@ npm --workspace server exec tsx src/ws_smoke.ts
 PROJECT=Cebab npm --workspace server exec tsx src/live_smoke.ts
 ```
 
+## Setting the workspace folder
+
+On first run the chat pane shows a **Choose a folder** prompt. Click it (or the
+gear icon in the sidebar header) and enter an absolute or `~`-prefixed path.
+The setting is persisted in `~/.cebab/cebab.sqlite` and survives restarts.
+`WORKSPACE_ROOT` from the env stays as a fallback for fresh installs and
+scripted launches.
+
 ## Switching projects
 
-The sidebar lists every subdirectory under `WORKSPACE_ROOT` (default
-`~/Claude_Space`). Each project's `cwd` is set to its directory when the agent
-spawns, so the project's `CLAUDE.md`, `.claude/skills/`, and `.claude/mcp.json`
-all auto-load.
+The sidebar lists every subdirectory under the active workspace folder. Each
+project's `cwd` is set to its directory when the agent spawns, so the
+project's `CLAUDE.md`, `.claude/skills/`, and `.claude/mcp.json` all auto-load.
 
-The "asks" / "trusted" toggle next to each project flips between
-`permissionMode: "default"` (every restricted tool prompts) and `"acceptEdits"`
-(file edits + common filesystem commands auto-approve).
+The "asks" / "trusted" toggle per project flips between `permissionMode:
+"default"` (every restricted tool prompts) and `"acceptEdits"` (file edits +
+common filesystem commands auto-approve). For a single-session override there's
+also an inline pill above the chat that flips the same modes mid-flight.
 
 ## Layout
 
