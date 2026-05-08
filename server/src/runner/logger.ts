@@ -25,6 +25,28 @@ function streamFor(sessionId: string): StreamEntry {
   return entry;
 }
 
+/** How long we'll wait on a single drain cycle before giving up on the stream. */
+const DRAIN_TIMEOUT_MS = 5000;
+
+function drainOrTimeout(stream: fs.WriteStream): Promise<void> {
+  return new Promise((resolve) => {
+    const ac = new AbortController();
+    const timer = setTimeout(() => {
+      ac.abort();
+      resolve();
+    }, DRAIN_TIMEOUT_MS);
+    once(stream, 'drain', { signal: ac.signal })
+      .then(() => {
+        clearTimeout(timer);
+        resolve();
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+  });
+}
+
 /** Append one JSON-encodable event. Honors backpressure; logs once on stream error. */
 export async function logEvent(sessionId: string, payload: unknown): Promise<void> {
   const entry = streamFor(sessionId);
@@ -32,10 +54,15 @@ export async function logEvent(sessionId: string, payload: unknown): Promise<voi
   const line = JSON.stringify(payload) + '\n';
   const ok = entry.stream.write(line);
   if (!ok) {
-    try {
-      await once(entry.stream, 'drain');
-    } catch {
-      // 'error' will already have fired; the failed flag will be set.
+    // Race the drain against a 5s timeout so a wedged FS handle (full disk on
+    // some filesystems, locked NFS) can't stall every subsequent persist.
+    await drainOrTimeout(entry.stream);
+    if (entry.stream.writableNeedDrain) {
+      // Still backed up after the timeout — give up on this stream.
+      if (!entry.failed) {
+        entry.failed = true;
+        console.error(`[logger] drain timeout on ${sessionId}.jsonl; suppressing further writes`);
+      }
     }
   }
 }

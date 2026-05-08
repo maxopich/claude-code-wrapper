@@ -1,16 +1,28 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
-import type { PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { WebSocket, WebSocketServer } from 'ws';
-import type { ClientMsg, ServerMsg, SessionPermissionMode } from '@cebab/shared/protocol';
+import {
+  isSessionPermissionMode,
+  type ClientMsg,
+  type ServerMsg,
+  type SessionPermissionMode,
+} from '@cebab/shared/protocol';
 import { config } from '../config.js';
 import { getProject, setProjectTrusted, touchProject } from '../repo/projects.js';
-import { createSession, getSession, listSessionsForProject } from '../repo/sessions.js';
+import {
+  createSession,
+  getSession,
+  getSessionPermissionMode,
+  listSessionsForProject,
+  setSessionPermissionMode,
+} from '../repo/sessions.js';
 import { listEvents } from '../repo/events.js';
 import { persistMessage } from '../runner/orchestrator.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { registerQuery } from '../runner/lifecycle.js';
+import { getSetting } from '../repo/settings.js';
 import {
   resolveWorkspaceRoot,
   rowToProject,
@@ -127,13 +139,29 @@ function onConnection(ws: WebSocket): void {
 }
 
 function emitSettings(conn: Conn): void {
-  const root = resolveWorkspaceRoot();
+  // Return the *raw* setting so the client can distinguish "user hasn't set
+  // anything yet" (null) from "set, but pointing at a missing folder" (string
+  // + workspaceRootValid=false). resolveWorkspaceRoot would mask the unset
+  // case behind the env-var fallback.
+  const stored = getSetting<string>('workspace_root');
   send(conn.ws, {
     type: 'settings',
-    workspaceRoot: root,
+    workspaceRoot: typeof stored === 'string' && stored.length > 0 ? stored : null,
     workspaceRootValid: workspaceRootValid(),
     defaultWorkspaceRoot: config.workspaceRootDefault,
   });
+}
+
+/** Pick the permission mode for a (possibly resuming) turn. */
+function seedPermissionMode(
+  resumeSessionId: string | undefined,
+  trusted: boolean,
+): SessionPermissionMode {
+  if (resumeSessionId) {
+    const stored = getSessionPermissionMode(resumeSessionId);
+    if (stored) return stored;
+  }
+  return trusted ? 'acceptEdits' : 'default';
 }
 
 async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
@@ -156,6 +184,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         emitSettings(conn);
         return;
       }
+      // Reading the resolved root is harmless; mostly here so console logs are useful.
+      void resolveWorkspaceRoot();
       const rows = await syncWorkspaceProjects();
       emitSettings(conn);
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
@@ -213,14 +243,44 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           message: msg.message ?? 'User denied this action',
         });
       }
+      // Echo a permission_decided so the UI flips Allow/Deny → "decided" and
+      // any other connection on the same session sees the outcome too.
+      send(conn.ws, {
+        type: 'permission_decided',
+        sessionId: msg.sessionId,
+        requestId: msg.requestId,
+        decision: msg.decision,
+      });
+      // Persist so replay shows the resolution next to the request card.
+      await persistMessage(msg.sessionId, {
+        type: 'wrapper',
+        subtype: 'permission_decided',
+        session_id: msg.sessionId,
+        uuid: randomUUID(),
+        requestId: msg.requestId,
+        decision: msg.decision,
+      } as never);
       return;
     }
     case 'set_permission_mode': {
+      // Runtime validation: protocol type narrows to default|acceptEdits, but
+      // a non-browser local client could try to send anything.
+      if (!isSessionPermissionMode(msg.mode)) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `invalid permission mode: ${JSON.stringify(msg.mode)}`,
+        });
+        return;
+      }
       const f = conn.inFlight.get(msg.sessionId);
       if (!f) return;
       try {
-        await f.runner.setPermissionMode?.(msg.mode as PermissionMode);
+        await f.runner.setPermissionMode?.(msg.mode);
         f.permissionMode = msg.mode;
+        // Persist so the next turn (and replay) seed from this preference.
+        setSessionPermissionMode(msg.sessionId, msg.mode);
         send(conn.ws, {
           type: 'permission_mode_changed',
           sessionId: msg.sessionId,
@@ -240,17 +300,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     case 'interrupt': {
       const f = conn.inFlight.get(msg.sessionId);
       if (!f) return;
-      // Prefer the SDK's graceful interrupt; fall back to AbortController.abort
-      // (which is harder — it kills the subprocess rather than letting it wrap up).
-      try {
-        if (f.runner.interrupt) {
-          await f.runner.interrupt();
-          return;
-        }
-      } catch (err) {
-        console.warn('[ws] runner.interrupt failed; falling back to abort', err);
+      // Don't await — `runner.interrupt()` can take a second or two and we
+      // shouldn't back up the WS message queue. The for-await loop in
+      // runOneTurn will exit and clean up via finally.
+      if (f.runner.interrupt) {
+        f.runner.interrupt().catch((err) => {
+          console.warn('[ws] runner.interrupt failed; falling back to abort', err);
+          f.ac.abort();
+        });
+      } else {
+        f.ac.abort();
       }
-      f.ac.abort();
       return;
     }
     case 'send_message': {
@@ -281,11 +341,10 @@ async function runOneTurn(
   const ac = new AbortController();
 
   const trusted = project.trusted === 1;
-  // Trusted: auto-approve edits for the whole turn AND let the project's
-  // `.claude/settings*.json` (hooks, env injectors, MCP servers) layer in.
-  // Untrusted: only ~/.claude/settings.json applies — a hostile project's
-  // local hooks can't run on click.
-  const permissionMode: SessionPermissionMode = trusted ? 'acceptEdits' : 'default';
+  // Initial mode preserves the user's last in-session preference (persisted on
+  // `sessions.permission_mode`) across turns. Falls back to the trust-derived
+  // default for fresh sessions. Trust still drives `settingSources` either way.
+  const permissionMode = seedPermissionMode(msg.sessionId, trusted);
   const settingSources = trusted ? (['user', 'project', 'local'] as const) : (['user'] as const);
 
   const canUseTool = async (
@@ -332,16 +391,19 @@ async function runOneTurn(
     abortController: ac,
     maxTurns: config.maxTurns,
   });
-  const unregister = registerQuery(runner as { close?: () => void });
+  const unregister = registerQuery(runner);
 
   conn.inFlight.set(sessionId, { ac, projectId: project.id, runner, permissionMode });
+  // Persist the seed so subsequent runOneTurn calls (this same session) and
+  // replay see it. This also covers brand-new sessions where the row was just
+  // INSERTed with permission_mode = NULL.
+  setSessionPermissionMode(sessionId, permissionMode);
   send(conn.ws, {
     type: 'session_running',
     projectId: project.id,
     sessionId,
     running: true,
   });
-  // Tell the client the starting permission mode so its toggle is correct.
   send(conn.ws, {
     type: 'permission_mode_changed',
     sessionId,
@@ -366,7 +428,7 @@ async function runOneTurn(
     } as never);
   } finally {
     try {
-      (runner as { close?: () => void }).close?.();
+      runner.close?.();
     } catch (err) {
       console.error('[ws] runner.close failed', err);
     }
@@ -405,8 +467,15 @@ async function replaySession(conn: Conn, projectId: number, sessionId: string): 
     if (out) send(conn.ws, out);
   }
   send(conn.ws, { type: 'session_history_end', projectId, sessionId });
-  // If the session is currently in flight on this connection, re-emit liveness
-  // and the current permission mode so the freshly hydrated UI matches reality.
+
+  // Replay the persisted permission mode for past sessions too, so the toggle
+  // UI doesn't lie about what was active. Live sessions overwrite this with
+  // the in-memory mode below.
+  const stored = getSessionPermissionMode(sessionId);
+  if (stored) {
+    send(conn.ws, { type: 'permission_mode_changed', sessionId, mode: stored });
+  }
+
   const live = conn.inFlight.get(sessionId);
   if (live) {
     send(conn.ws, { type: 'session_running', projectId, sessionId, running: true });

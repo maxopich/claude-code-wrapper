@@ -10,10 +10,10 @@ export function ModeToggle(props: {
     props.onChange(mode);
   }
   const tooltip = props.disabled
-    ? 'Mode can only change while a session is running on this connection.'
+    ? 'Mode is read-only for past sessions. The next run will resume with this mode; toggle while a session is running to change it.'
     : props.mode === 'acceptEdits'
-      ? 'Auto-allowing file edits + common shell commands. Click to switch back to ask-for-each.'
-      : 'Asking for each tool use. Click to auto-allow file edits for this session.';
+      ? 'Auto-allowing file edits + common shell commands. Persists across turns until you toggle back.'
+      : 'Asking for each tool use. Persists across turns until you toggle to auto-edits.';
   return (
     <div className={`mode-toggle ${props.disabled ? 'is-disabled' : ''}`} title={tooltip}>
       <span className="label">permissions:</span>

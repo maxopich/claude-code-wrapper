@@ -80,6 +80,18 @@ export function App() {
 
   function decidePermission(requestId: string, decision: 'allow' | 'deny') {
     if (!session) return;
+    // Optimistic local update so the buttons flip to "decided: …" immediately.
+    // The server echoes a permission_decided ServerMsg back; the reducer is
+    // idempotent so the second arrival is a no-op.
+    dispatch({
+      type: 'server',
+      msg: {
+        type: 'permission_decided',
+        sessionId: session.id,
+        requestId,
+        decision,
+      },
+    });
     wsRef.current?.send({
       type: 'permission_decision',
       sessionId: session.id,

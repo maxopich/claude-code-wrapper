@@ -145,49 +145,47 @@ function Markdown({ text }: { text: string }) {
  * cadence rather than rendering whatever chunk just arrived. Keeps the
  * displayed string ~lagging the target by a frame or two so the eye sees
  * even motion. If `target` shrinks (e.g. session swap), reset to it.
+ *
+ * The RAF loop reads `renderedLenRef` instead of `displayed` so the effect
+ * doesn't need `displayed` in its deps — adding it would create a feedback
+ * loop where each character-set restarted the effect.
  */
 function useTypewriter(target: string, cps = 140): string {
-  const [displayed, setDisplayed] = useState(target);
-  const stateRef = useRef({ target, lastTs: 0, raf: 0 });
+  const [displayed, setDisplayed] = useState('');
+  const renderedLenRef = useRef(0);
 
   useEffect(() => {
-    const s = stateRef.current;
-    s.target = target;
-    // If the target retracted (new session, replay, etc.), snap to it.
-    if (target.length < displayed.length) {
+    // Target retracted (session swap, history replay): snap to it.
+    if (target.length < renderedLenRef.current) {
+      renderedLenRef.current = target.length;
       setDisplayed(target);
       return;
     }
-    // Already caught up.
-    if (displayed.length >= target.length) return;
+    if (renderedLenRef.current >= target.length) return;
 
     let cancelled = false;
-    s.lastTs = 0;
+    let lastTs = 0;
+    let raf = 0;
     const step = (ts: number) => {
       if (cancelled) return;
-      if (s.lastTs === 0) s.lastTs = ts;
-      const dt = (ts - s.lastTs) / 1000;
+      if (lastTs === 0) lastTs = ts;
+      const dt = (ts - lastTs) / 1000;
+      lastTs = ts;
       const advance = Math.max(1, Math.ceil(dt * cps));
-      s.lastTs = ts;
       setDisplayed((prev) => {
-        if (prev.length >= s.target.length) return prev;
-        return s.target.slice(0, Math.min(prev.length + advance, s.target.length));
+        if (prev.length >= target.length) return prev;
+        const next = target.slice(0, Math.min(prev.length + advance, target.length));
+        renderedLenRef.current = next.length;
+        return next;
       });
-      if (s.target.length > displayed.length + advance) {
-        s.raf = requestAnimationFrame(step);
-      } else {
-        // One more frame to catch any final tail.
-        s.raf = requestAnimationFrame((ts2) => {
-          if (cancelled) return;
-          setDisplayed(s.target);
-          s.lastTs = ts2;
-        });
+      if (renderedLenRef.current < target.length) {
+        raf = requestAnimationFrame(step);
       }
     };
-    s.raf = requestAnimationFrame(step);
+    raf = requestAnimationFrame(step);
     return () => {
       cancelled = true;
-      cancelAnimationFrame(s.raf);
+      cancelAnimationFrame(raf);
     };
   }, [target, cps]);
 

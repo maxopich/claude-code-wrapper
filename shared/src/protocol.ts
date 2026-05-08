@@ -52,6 +52,15 @@ export type WrapperErrorKind =
 /** Per-session permission mode the wrapper exposes to the UI. */
 export type SessionPermissionMode = 'default' | 'acceptEdits';
 
+export const SESSION_PERMISSION_MODES: ReadonlySet<SessionPermissionMode> = new Set([
+  'default',
+  'acceptEdits',
+]);
+
+export function isSessionPermissionMode(v: unknown): v is SessionPermissionMode {
+  return typeof v === 'string' && SESSION_PERMISSION_MODES.has(v as SessionPermissionMode);
+}
+
 // ---- Browser → Server ----
 export type ClientMsg =
   | { type: 'list_projects' }
@@ -103,6 +112,12 @@ export type ServerMsg =
       input: unknown;
     }
   | {
+      type: 'permission_decided';
+      sessionId: string;
+      requestId: string;
+      decision: 'allow' | 'deny';
+    }
+  | {
       type: 'permission_mode_changed';
       sessionId: string;
       mode: SessionPermissionMode;
@@ -119,7 +134,9 @@ export type ServerMsg =
     }
   | {
       type: 'settings';
+      /** Stored workspace root from the DB. `null` means the user hasn't set one yet. */
       workspaceRoot: string | null;
+      /** True iff the *resolved* workspace root (stored OR default fallback) exists. */
       workspaceRootValid: boolean;
       defaultWorkspaceRoot: string;
     }
