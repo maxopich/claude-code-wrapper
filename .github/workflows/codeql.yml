@@ -37,6 +37,14 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-and-quality
+          # Smoke scripts are dev-only CLIs that connect to our own localhost
+          # WebSocket. CodeQL flags branches/logs on the WS payload as
+          # user-controlled-bypass / log-injection — they're false positives
+          # in this context (we control both ends, server is bound to 127.0.0.1
+          # with Origin gating). Skip the smoke harnesses from analysis.
+          config: |
+            paths-ignore:
+              - 'server/src/*_smoke.ts'
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v4
