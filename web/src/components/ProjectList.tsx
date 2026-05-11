@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import type { Project, SessionSummary } from '@cebab/shared/protocol';
 
 export function ProjectList(props: {
@@ -10,6 +11,7 @@ export function ProjectList(props: {
   onSelectSession: (projectId: number, sessionId: string) => void;
   onNewSession: (projectId: number) => void;
   onToggleTrust: (id: number, trusted: boolean) => void;
+  onRenameSession: (sessionId: string, title: string | null) => void;
 }) {
   return (
     <ul className="project-list">
@@ -49,31 +51,125 @@ export function ProjectList(props: {
                   <span className="session-marker">+</span>
                   <span className="session-name">new chat</span>
                 </li>
-                {sessions.map((s) => {
-                  const live = props.liveSessions[s.id] === true;
-                  const isActive = s.id === activeSessionId;
-                  return (
-                    <li
-                      key={s.id}
-                      className={`session-row ${isActive ? 'active' : ''}`}
-                      title={`${s.id}\n${formatRelative(s.lastEventAt)} • $${s.totalCostUsd.toFixed(4)}`}
-                      onClick={() => props.onSelectSession(p.id, s.id)}
-                    >
-                      <span
-                        className={`session-marker ${live ? 'live' : ''}`}
-                        title={live ? 'running on this connection' : ''}
-                      />
-                      <span className="session-name">{s.title || s.id.slice(0, 8)}</span>
-                      <span className="session-meta">{formatRelative(s.lastEventAt)}</span>
-                    </li>
-                  );
-                })}
+                {sessions.map((s) => (
+                  <SessionRow
+                    key={s.id}
+                    session={s}
+                    live={props.liveSessions[s.id] === true}
+                    active={s.id === activeSessionId}
+                    onSelect={() => props.onSelectSession(p.id, s.id)}
+                    onRename={(title) => props.onRenameSession(s.id, title)}
+                  />
+                ))}
               </ul>
             )}
           </li>
         );
       })}
     </ul>
+  );
+}
+
+function SessionRow(props: {
+  session: SessionSummary;
+  live: boolean;
+  active: boolean;
+  onSelect: () => void;
+  onRename: (title: string | null) => void;
+}) {
+  const { session: s } = props;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-focus + select-all when entering edit mode so the user can immediately
+  // type a new name or overwrite the existing one.
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  function startEdit() {
+    setDraft(s.title ?? '');
+    setEditing(true);
+  }
+  function commit() {
+    if (!editing) return;
+    setEditing(false);
+    const trimmed = draft.trim();
+    const next = trimmed.length === 0 ? null : trimmed;
+    // Don't dispatch if the value hasn't actually changed — avoids a useless
+    // server round-trip on the common "open edit, hit Esc by reflex" path.
+    if (next !== (s.title ?? null)) props.onRename(next);
+  }
+  function cancel() {
+    setEditing(false);
+  }
+
+  return (
+    <li
+      className={`session-row ${props.active ? 'active' : ''} ${editing ? 'editing' : ''}`}
+      title={
+        editing
+          ? undefined
+          : `${s.id}\n${formatRelative(s.lastEventAt)} • $${s.totalCostUsd.toFixed(4)}\nDouble-click name to rename`
+      }
+      onClick={() => {
+        if (!editing) props.onSelect();
+      }}
+    >
+      <span
+        className={`session-marker ${props.live ? 'live' : ''}`}
+        title={props.live ? 'running on this connection' : ''}
+      />
+      {editing ? (
+        <input
+          ref={inputRef}
+          className="session-name-input"
+          value={draft}
+          maxLength={80}
+          placeholder={s.id.slice(0, 8)}
+          onChange={(e) => setDraft(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              commit();
+            } else if (e.key === 'Escape') {
+              e.preventDefault();
+              cancel();
+            }
+          }}
+          onBlur={commit}
+        />
+      ) : (
+        <span
+          className="session-name"
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            startEdit();
+          }}
+        >
+          {s.title || s.id.slice(0, 8)}
+        </span>
+      )}
+      {!editing && (
+        <button
+          className="session-rename-btn"
+          title="Rename session"
+          aria-label="Rename session"
+          onClick={(e) => {
+            e.stopPropagation();
+            startEdit();
+          }}
+        >
+          ✎
+        </button>
+      )}
+      {!editing && <span className="session-meta">{formatRelative(s.lastEventAt)}</span>}
+    </li>
   );
 }
 

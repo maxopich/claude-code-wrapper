@@ -238,6 +238,43 @@ pre {
 .session-row.new .session-name {
   font-family: inherit;
 }
+.session-name-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent-2);
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  outline: none;
+}
+.session-name-input:focus {
+  border-color: var(--accent);
+}
+.session-rename-btn {
+  background: transparent;
+  border: 0;
+  color: var(--fg-3);
+  cursor: pointer;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.session-row:hover .session-rename-btn,
+.session-row.active .session-rename-btn {
+  opacity: 1;
+}
+.session-rename-btn:hover {
+  color: var(--fg);
+}
+.session-row.editing {
+  background: var(--bg-3);
+  cursor: default;
+}
 .session-meta {
   color: var(--fg-3);
   font-size: 10px;

@@ -60,6 +60,21 @@ export function App() {
     wsRef.current?.send({ type: 'set_trusted', projectId, trusted });
   }
 
+  function renameSession(sessionId: string, title: string | null) {
+    const projectId = state.sessionToProject[sessionId];
+    if (projectId === undefined) return;
+    // Optimistic: dispatch the would-be ServerMsg locally so the sidebar flips
+    // immediately. The reducer is idempotent — when the server echo arrives
+    // with the normalized title (trimmed, capped at 80) it produces the same
+    // state. Mismatches (e.g. server rejected the rename) are rare on this
+    // single-user app; the server echo would correct them either way.
+    dispatch({
+      type: 'server',
+      msg: { type: 'session_renamed', sessionId, projectId, title },
+    });
+    wsRef.current?.send({ type: 'rename_session', sessionId, title });
+  }
+
   const session = activeSession(state);
   const resumeSessionId = session && !isSessionPending(session.id) ? session.id : undefined;
   const permissionMode: SessionPermissionMode = session
@@ -143,6 +158,7 @@ export function App() {
           onSelectSession={selectSession}
           onNewSession={newSession}
           onToggleTrust={toggleTrust}
+          onRenameSession={renameSession}
         />
       </aside>
       <main className="main">

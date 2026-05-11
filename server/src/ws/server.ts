@@ -16,6 +16,7 @@ import {
   getSessionPermissionMode,
   listSessionsForProject,
   setSessionPermissionMode,
+  setSessionTitle,
 } from '../repo/sessions.js';
 import { listEvents } from '../repo/events.js';
 import { persistMessage } from '../runner/orchestrator.js';
@@ -151,6 +152,22 @@ function emitSettings(conn: Conn): void {
     workspaceRootValid: workspaceRootValid(),
     defaultWorkspaceRoot: config.workspaceRootDefault,
   });
+}
+
+/** Display-label cap. Long enough for "Refactor the WS upgrade handler", short
+ * enough not to wreck the sidebar layout. */
+const MAX_SESSION_TITLE_LEN = 80;
+
+/**
+ * Normalize a user-supplied title. Returns null when the input is empty after
+ * trimming (the UI then falls back to the session id slice). Collapses CR/LF
+ * to spaces so a pasted multi-line value can't break the row.
+ */
+function normalizeSessionTitle(raw: string | null): string | null {
+  if (raw == null) return null;
+  const collapsed = raw.replace(/[\r\n]+/g, ' ').trim();
+  if (collapsed.length === 0) return null;
+  return collapsed.slice(0, MAX_SESSION_TITLE_LEN);
 }
 
 /** Pick the permission mode for a (possibly resuming) turn. */
@@ -296,6 +313,27 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           message,
         });
       }
+      return;
+    }
+    case 'rename_session': {
+      const row = getSession(msg.sessionId);
+      if (!row) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `unknown session ${msg.sessionId}`,
+        });
+        return;
+      }
+      const normalized = normalizeSessionTitle(msg.title);
+      setSessionTitle(msg.sessionId, normalized);
+      send(conn.ws, {
+        type: 'session_renamed',
+        sessionId: msg.sessionId,
+        projectId: row.project_id,
+        title: normalized,
+      });
       return;
     }
     case 'interrupt': {

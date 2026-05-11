@@ -80,7 +80,16 @@ export type ClientMsg =
   | { type: 'load_session'; projectId: number; sessionId: string }
   | { type: 'get_settings' }
   | { type: 'set_workspace_root'; path: string }
-  | { type: 'set_permission_mode'; sessionId: string; mode: SessionPermissionMode };
+  | { type: 'set_permission_mode'; sessionId: string; mode: SessionPermissionMode }
+  | {
+      /**
+       * Rename a session (display label only — the session id is unchanged).
+       * `title: null` clears the nickname and reverts the UI to the id slice.
+       */
+      type: 'rename_session';
+      sessionId: string;
+      title: string | null;
+    };
 
 // ---- Server → Browser ----
 export type ServerMsg =
@@ -121,6 +130,13 @@ export type ServerMsg =
       type: 'permission_mode_changed';
       sessionId: string;
       mode: SessionPermissionMode;
+    }
+  | {
+      /** Echoed in response to `rename_session`; also broadcast for replays. */
+      type: 'session_renamed';
+      sessionId: string;
+      projectId: number;
+      title: string | null;
     }
   | { type: 'system_event'; sessionId: string; subtype: string; payload: unknown }
   | {
