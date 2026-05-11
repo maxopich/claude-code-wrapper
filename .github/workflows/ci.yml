@@ -35,5 +35,51 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: Audit dependencies
+        # Fails the job on high or critical advisories. Moderate/low are
+        # reported but don't block — dependabot handles those on a weekly
+        # cadence. If a sustained `high` CVE has no fix yet, temporarily
+        # set `continue-on-error: true` here on a per-PR basis.
+        run: npm audit --audit-level=high
+
       - name: Test
         run: npm test
+
+      - name: DB migration smoke
+        # Verifies migrations apply cleanly on a fresh DB. The CI runner is
+        # ephemeral so `~/.cebab/cebab.sqlite` is always brand new.
+        run: npm run smoke
+
+      - name: Build
+        # Catches Vite-specific build failures and tsc --emit errors that
+        # --noEmit doesn't surface (e.g. import resolution, asset pipeline).
+        run: npm run build
+
+      - name: Set up workspace fixture
+        # ws_smoke.ts hardcodes looking for a project named "Cebab" in the
+        # workspace. Create an empty stub so syncWorkspaceProjects() picks
+        # it up. The mock runner ignores the directory contents — only the
+        # project name matters for the smoke.
+        run: |
+          mkdir -p /tmp/cebab-ws/Cebab
+          echo "WORKSPACE_ROOT=/tmp/cebab-ws" >> $GITHUB_ENV
+
+      - name: Start mock server (background)
+        # MOCK=1 routes pickRunner() to runner/mock.ts, which replays
+        # fixtures/hello.jsonl — no Claude CLI / no quota burn.
+        run: |
+          MOCK=1 npm --workspace server exec tsx src/index.ts &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+        env:
+          PORT: '4319'
+
+      - name: Wait for server
+        run: timeout 30 bash -c 'until nc -z 127.0.0.1 4319; do sleep 0.2; done'
+
+      - name: WS protocol smoke
+        # Exercises the full WS protocol end-to-end against the mock runner.
+        run: npm --workspace server exec tsx src/ws_smoke.ts
+
+      - name: Stop mock server
+        if: always()
+        run: kill $SERVER_PID 2>/dev/null || true
