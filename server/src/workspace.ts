@@ -83,5 +83,20 @@ export function rowToProject(row: ProjectRow) {
     path: row.path,
     trusted: row.trusted === 1,
     lastUsedAt: row.last_used_at,
+    hasClaudeMd: hasClaudeMdAt(row.path),
   };
+}
+
+/**
+ * True iff `<projectPath>/CLAUDE.md` exists. Synchronous `fs.existsSync` is
+ * fine here — a single stat call, called once per project at projects-list
+ * render time. On macOS APFS this is case-insensitive, so `Claude.md` and
+ * `claude.md` match too without a separate check.
+ */
+function hasClaudeMdAt(projectPath: string): boolean {
+  try {
+    return fs.statSync(path.join(projectPath, 'CLAUDE.md')).isFile();
+  } catch {
+    return false;
+  }
 }

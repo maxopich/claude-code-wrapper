@@ -229,3 +229,158 @@ describe('store / session_renamed', () => {
     expect(after).toEqual(before);
   });
 });
+
+describe('store / projects refresh (workspace switch)', () => {
+  /**
+   * Simulates: user is in workspace A with project P=2 selected + a session
+   * loaded. Server then emits a fresh `projects` ServerMsg for a different
+   * workspace where P doesn't exist. The reducer should:
+   *   - swap state.projects to the new list (core "list updates" behavior)
+   *   - drop activeProjectId so the new sidebar doesn't claim a project is
+   *     selected when none of the new ones match
+   *   - drop the orphan session data so the chat pane doesn't keep showing
+   *     the previously-active session from the gone-project
+   */
+  function seedActiveInWorkspaceA() {
+    let s = open();
+    // Pretend the server already told us about Workspace A's projects.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 1,
+            name: 'Cebab',
+            path: '/ws-a/Cebab',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+          {
+            id: 2,
+            name: 'agentic',
+            path: '/ws-a/agentic',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+        ],
+      },
+    });
+    s = reduce(s, { type: 'select_project', projectId: 1 });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sid-A',
+        projectId: 1,
+        model: 'opus-4',
+        tools: [],
+      },
+    });
+    return s;
+  }
+
+  test('projects swap replaces the list when the workspace changes', () => {
+    let s = seedActiveInWorkspaceA();
+    expect(s.projects.map((p) => p.name)).toEqual(['Cebab', 'agentic']);
+
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 11,
+            name: 'Alpha',
+            path: '/ws-b/Alpha',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+          {
+            id: 12,
+            name: 'Beta',
+            path: '/ws-b/Beta',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+        ],
+      },
+    });
+
+    expect(s.projects.map((p) => p.name)).toEqual(['Alpha', 'Beta']);
+  });
+
+  test('switching to a workspace where the active project is gone drops activeProjectId', () => {
+    let s = seedActiveInWorkspaceA();
+    expect(s.activeProjectId).toBe(1);
+    expect(activeSession(s)).not.toBeNull();
+
+    // New workspace has no project with id=1.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 11,
+            name: 'Alpha',
+            path: '/ws-b/Alpha',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+        ],
+      },
+    });
+
+    expect(s.activeProjectId).toBeNull();
+    expect(activeSession(s)).toBeNull();
+  });
+
+  test('staying on the same workspace (active project still present) keeps activeProjectId', () => {
+    let s = seedActiveInWorkspaceA();
+
+    // Same workspace, just a refresh — project id=1 still exists.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 1,
+            name: 'Cebab',
+            path: '/ws-a/Cebab',
+            trusted: true,
+            lastUsedAt: 1000,
+            hasClaudeMd: true,
+          },
+          {
+            id: 2,
+            name: 'agentic',
+            path: '/ws-a/agentic',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+          {
+            id: 3,
+            name: 'newcomer',
+            path: '/ws-a/newcomer',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+        ],
+      },
+    });
+
+    expect(s.activeProjectId).toBe(1);
+    expect(activeSession(s)).not.toBeNull();
+    // The trust flag flipped server-side; verify it reflects.
+    expect(s.projects.find((p) => p.id === 1)!.trusted).toBe(true);
+  });
+});

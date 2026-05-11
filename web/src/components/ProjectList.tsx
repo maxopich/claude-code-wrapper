@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Project, SessionSummary } from '@cebab/shared/protocol';
+import { ClaudeMark } from './ClaudeMark';
 
 export function ProjectList(props: {
   projects: Project[];
@@ -24,12 +25,20 @@ export function ProjectList(props: {
           <li key={p.id} className={`project-row ${expanded ? 'expanded' : ''}`}>
             <div
               className={`project-header ${expanded ? 'active' : ''}`}
+              title={
+                p.hasClaudeMd
+                  ? undefined
+                  : `No CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
+              }
               onClick={() => props.onSelectProject(p.id)}
             >
               <span
                 className={`project-live-dot ${projectIsLive ? 'on' : ''}`}
                 title={projectIsLive ? 'session running' : ''}
               />
+              {p.hasClaudeMd && (
+                <ClaudeMark className="claude-mark" title="Agent project (CLAUDE.md present)" />
+              )}
               <span className="project-name">{p.name}</span>
               <button
                 className={`trust ${p.trusted ? 'on' : 'off'}`}

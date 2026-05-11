@@ -76,11 +76,6 @@ pre {
   background: var(--err);
 }
 
-.sidebar-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .icon-btn {
   background: transparent;
   border: 1px solid transparent;
@@ -131,6 +126,56 @@ pre {
   margin: 0;
   padding: 6px 0;
   overflow-y: auto;
+  /* Grow to fill the gap between header and footer so the footer stays pinned. */
+  flex: 1;
+  min-height: 0;
+}
+.sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 10px 12px;
+  background: var(--bg-2);
+}
+.workspace-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+.workspace-btn:hover {
+  background: var(--bg);
+  border-color: var(--accent-2);
+}
+.workspace-btn.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.workspace-btn-icon {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--fg-2);
+  flex-shrink: 0;
+}
+.workspace-btn:hover .workspace-btn-icon {
+  color: var(--fg);
+}
+.workspace-btn-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  letter-spacing: 0.01em;
 }
 .project-list .project-row {
   list-style: none;
@@ -148,6 +193,17 @@ pre {
 }
 .project-header.active {
   background: var(--accent-2);
+}
+/* Claude brand mark, rendered next to projects that contain a CLAUDE.md.
+ * The presence/absence of this mark is the sidebar's "is this an agent
+ * project?" signal — non-agent folders simply don't render the mark.
+ * Color is Anthropic's coral; size inherits from the SVG component default. */
+.claude-mark {
+  color: #cc785c;
+  flex-shrink: 0;
+  /* Slight vertical nudge so the 8-spoke star aligns with the text baseline
+   * rather than sitting heavy on the top of the line box. */
+  margin-top: 1px;
 }
 .project-name {
   font-weight: 500;

@@ -138,15 +138,10 @@ export function App() {
       <aside className="sidebar">
         <header>
           <h1>cebab</h1>
-          <div className="sidebar-header-actions">
-            <button className="icon-btn" title="Settings" onClick={() => setSettingsOpen(true)}>
-              ⚙
-            </button>
-            <span
-              className={state.connected ? 'dot on' : 'dot off'}
-              title={state.connected ? 'connected' : 'disconnected'}
-            />
-          </div>
+          <span
+            className={state.connected ? 'dot on' : 'dot off'}
+            title={state.connected ? 'connected' : 'disconnected'}
+          />
         </header>
         <ProjectList
           projects={state.projects}
@@ -160,6 +155,26 @@ export function App() {
           onToggleTrust={toggleTrust}
           onRenameSession={renameSession}
         />
+        <footer className="sidebar-footer">
+          <button
+            className={`workspace-btn ${
+              state.settings && !state.settings.workspaceRootValid ? 'warn' : ''
+            }`}
+            title={
+              state.settings?.workspaceRoot
+                ? `${state.settings.workspaceRoot}\nClick to change workspace`
+                : 'Pick a workspace folder'
+            }
+            onClick={() => setSettingsOpen(true)}
+          >
+            <span className="workspace-btn-icon" aria-hidden="true">
+              ⚙
+            </span>
+            <span className="workspace-btn-label">
+              {workspaceLabel(state.settings?.workspaceRoot ?? null)}
+            </span>
+          </button>
+        </footer>
       </aside>
       <main className="main">
         {!workspaceReady ? (
@@ -194,4 +209,17 @@ export function App() {
       )}
     </div>
   );
+}
+
+/**
+ * Label for the sidebar footer's workspace button: the trailing folder name of
+ * the workspace path (e.g. `/Users/foo/agents` → `agents`). The server resolves
+ * `~`-paths and relative paths server-side, so by the time we see them here
+ * they're absolute POSIX paths — split-pop is enough.
+ */
+function workspaceLabel(workspaceRoot: string | null): string {
+  if (!workspaceRoot) return 'Set workspace';
+  const trimmed = workspaceRoot.replace(/\/+$/, '');
+  const base = trimmed.split('/').pop();
+  return base && base.length > 0 ? base : trimmed;
 }

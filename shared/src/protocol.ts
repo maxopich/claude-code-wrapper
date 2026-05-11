@@ -7,6 +7,16 @@ export type Project = {
   path: string;
   trusted: boolean;
   lastUsedAt: number | null;
+  /**
+   * True iff a `CLAUDE.md` file exists at the project root. The UI uses this
+   * to visually distinguish actual agent projects from random subdirectories
+   * that happen to live in the workspace folder.
+   *
+   * Computed fresh each time the project list is sent (via fs.existsSync),
+   * not stored in the DB — cheap to recompute and always reflects on-disk
+   * state without needing an explicit refresh.
+   */
+  hasClaudeMd: boolean;
 };
 
 export type SessionSummary = {
