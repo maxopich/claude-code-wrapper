@@ -47,9 +47,6 @@ export function SettingsModal(props: {
               <code>{props.settings.workspaceRoot}</code>
             </p>
           )}
-          <p className="hint">
-            Default (env override): <code>{props.settings.defaultWorkspaceRoot}</code>
-          </p>
         </section>
         <footer>
           <button className="ghost-btn" onClick={props.onClose}>

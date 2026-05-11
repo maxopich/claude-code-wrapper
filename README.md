@@ -14,7 +14,7 @@ npm install
 cp .env.example .env   # then edit WORKSPACE_ROOT to point at your agent projects
 ```
 
-The repo-root `.env` is loaded automatically by both server (`--env-file-if-exists`) and web (Vite `envDir`). If you don't create one, the defaults from `.env.example` apply: `WORKSPACE_ROOT=~/Claude_Space`, `PORT=4319`, mock mode off.
+The repo-root `.env` is loaded automatically by both server (`--env-file-if-exists`) and web (Vite `envDir`). If you don't create one, the defaults from `.env.example` apply: `WORKSPACE_ROOT=~/agents`, `PORT=4319`, mock mode off.
 
 Requires `claude` installed and logged in (verify with `claude auth status`).
 
@@ -65,10 +65,10 @@ PROJECT=Cebab npm --workspace server exec tsx src/live_smoke.ts
 ## Setting the workspace folder
 
 On first run the chat pane shows a **Choose a folder** prompt. Click it (or the
-gear icon in the sidebar header) and enter an absolute or `~`-prefixed path.
-The setting is persisted in `~/.cebab/cebab.sqlite` and survives restarts.
-`WORKSPACE_ROOT` from the env stays as a fallback for fresh installs and
-scripted launches.
+workspace button at the bottom of the sidebar) and enter an absolute or
+`~`-prefixed path. The setting is persisted in `~/.cebab/cebab.sqlite` and
+survives restarts. `WORKSPACE_ROOT` from the env stays as a fallback for fresh
+installs and scripted launches.
 
 ## Switching projects
 
