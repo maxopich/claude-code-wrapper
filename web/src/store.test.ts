@@ -161,3 +161,71 @@ describe('store / permission_decided', () => {
     expect(activeSession(s)!.messages).toEqual(activeSession(before)!.messages);
   });
 });
+
+describe('store / session_renamed', () => {
+  function seedProjectWithSession(sessionId: string) {
+    let s = open();
+    // project_opened populates knownSessions with a real SessionSummary.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'project_opened',
+        projectId: PID,
+        sessions: [
+          {
+            id: sessionId,
+            title: null,
+            createdAt: 1000,
+            lastEventAt: 2000,
+            totalCostUsd: 0.01,
+          },
+        ],
+        runningSessionIds: [],
+      },
+    });
+    return s;
+  }
+
+  test('sets a title on a known session', () => {
+    let s = seedProjectWithSession('sid-r1');
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_renamed', sessionId: 'sid-r1', projectId: PID, title: 'Refactor WS' },
+    });
+    expect(s.knownSessions[PID]).toEqual([
+      expect.objectContaining({ id: 'sid-r1', title: 'Refactor WS' }),
+    ]);
+  });
+
+  test('clears the title when null is sent', () => {
+    let s = seedProjectWithSession('sid-r2');
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_renamed', sessionId: 'sid-r2', projectId: PID, title: 'tmp' },
+    });
+    expect(s.knownSessions[PID]![0]!.title).toBe('tmp');
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_renamed', sessionId: 'sid-r2', projectId: PID, title: null },
+    });
+    expect(s.knownSessions[PID]![0]!.title).toBeNull();
+  });
+
+  test('rename for an unknown session id is a silent no-op', () => {
+    const before = seedProjectWithSession('sid-r3');
+    const after = reduce(before, {
+      type: 'server',
+      msg: { type: 'session_renamed', sessionId: 'no-such-sid', projectId: PID, title: 'x' },
+    });
+    expect(after).toEqual(before);
+  });
+
+  test('rename for an unknown projectId is a silent no-op', () => {
+    const before = seedProjectWithSession('sid-r4');
+    const after = reduce(before, {
+      type: 'server',
+      msg: { type: 'session_renamed', sessionId: 'sid-r4', projectId: 999, title: 'x' },
+    });
+    expect(after).toEqual(before);
+  });
+});

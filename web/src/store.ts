@@ -253,6 +253,23 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         },
       };
 
+    case 'session_renamed': {
+      // Swap the title in knownSessions[projectId]. If the session somehow
+      // isn't tracked yet (e.g. the user renames before opening the project on
+      // this connection), the next project_opened will refresh from the DB
+      // anyway — drop the message silently rather than fabricate an entry.
+      const list = state.knownSessions[msg.projectId];
+      if (!list) return state;
+      const idx = list.findIndex((s) => s.id === msg.sessionId);
+      if (idx === -1) return state;
+      const nextList = list.slice();
+      nextList[idx] = { ...list[idx], title: msg.title };
+      return {
+        ...state,
+        knownSessions: { ...state.knownSessions, [msg.projectId]: nextList },
+      };
+    }
+
     case 'project_opened': {
       const live: Record<string, true> = { ...state.liveSessions };
       const sessionToProject = { ...state.sessionToProject };

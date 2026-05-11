@@ -64,3 +64,12 @@ export function getSessionPermissionMode(id: string): SessionPermissionMode | nu
 export function setSessionPermissionMode(id: string, mode: SessionPermissionMode): void {
   getDb().prepare('UPDATE sessions SET permission_mode = ? WHERE id = ?').run(mode, id);
 }
+
+/**
+ * Rename a session. Pass null to clear the title (UI then falls back to the
+ * short session id). Caller is responsible for length/whitespace normalization
+ * — we just write what we're given.
+ */
+export function setSessionTitle(id: string, title: string | null): void {
+  getDb().prepare('UPDATE sessions SET title = ? WHERE id = ?').run(title, id);
+}
