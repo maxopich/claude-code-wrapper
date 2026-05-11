@@ -23,7 +23,14 @@ export function ProjectList(props: {
         return (
           <li key={p.id} className={`project-row ${expanded ? 'expanded' : ''}`}>
             <div
-              className={`project-header ${expanded ? 'active' : ''}`}
+              className={`project-header ${expanded ? 'active' : ''} ${
+                p.hasClaudeMd ? '' : 'no-claude-md'
+              }`}
+              title={
+                p.hasClaudeMd
+                  ? undefined
+                  : `No CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
+              }
               onClick={() => props.onSelectProject(p.id)}
             >
               <span

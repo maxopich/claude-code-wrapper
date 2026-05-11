@@ -194,6 +194,18 @@ pre {
 .project-header.active {
   background: var(--accent-2);
 }
+/* Folders that don't contain a CLAUDE.md — render the row dimmed so the user
+ * can scan the sidebar and tell at a glance which subdirectories are actually
+ * agent projects vs. random folders that happen to live in the workspace. The
+ * row stays clickable; project-level instructions just won't auto-load. */
+.project-header.no-claude-md .project-name {
+  color: var(--fg-3);
+  font-weight: 400;
+  font-style: italic;
+}
+.project-header.no-claude-md .project-live-dot {
+  opacity: 0.5;
+}
 .project-name {
   font-weight: 500;
   flex: 1;

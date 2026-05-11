@@ -249,8 +249,22 @@ describe('store / projects refresh (workspace switch)', () => {
       msg: {
         type: 'projects',
         projects: [
-          { id: 1, name: 'Cebab', path: '/ws-a/Cebab', trusted: false, lastUsedAt: null },
-          { id: 2, name: 'agentic', path: '/ws-a/agentic', trusted: false, lastUsedAt: null },
+          {
+            id: 1,
+            name: 'Cebab',
+            path: '/ws-a/Cebab',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+          {
+            id: 2,
+            name: 'agentic',
+            path: '/ws-a/agentic',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
         ],
       },
     });
@@ -277,8 +291,22 @@ describe('store / projects refresh (workspace switch)', () => {
       msg: {
         type: 'projects',
         projects: [
-          { id: 11, name: 'Alpha', path: '/ws-b/Alpha', trusted: false, lastUsedAt: null },
-          { id: 12, name: 'Beta', path: '/ws-b/Beta', trusted: false, lastUsedAt: null },
+          {
+            id: 11,
+            name: 'Alpha',
+            path: '/ws-b/Alpha',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+          {
+            id: 12,
+            name: 'Beta',
+            path: '/ws-b/Beta',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
         ],
       },
     });
@@ -297,7 +325,14 @@ describe('store / projects refresh (workspace switch)', () => {
       msg: {
         type: 'projects',
         projects: [
-          { id: 11, name: 'Alpha', path: '/ws-b/Alpha', trusted: false, lastUsedAt: null },
+          {
+            id: 11,
+            name: 'Alpha',
+            path: '/ws-b/Alpha',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
         ],
       },
     });
@@ -315,9 +350,30 @@ describe('store / projects refresh (workspace switch)', () => {
       msg: {
         type: 'projects',
         projects: [
-          { id: 1, name: 'Cebab', path: '/ws-a/Cebab', trusted: true, lastUsedAt: 1000 },
-          { id: 2, name: 'agentic', path: '/ws-a/agentic', trusted: false, lastUsedAt: null },
-          { id: 3, name: 'newcomer', path: '/ws-a/newcomer', trusted: false, lastUsedAt: null },
+          {
+            id: 1,
+            name: 'Cebab',
+            path: '/ws-a/Cebab',
+            trusted: true,
+            lastUsedAt: 1000,
+            hasClaudeMd: true,
+          },
+          {
+            id: 2,
+            name: 'agentic',
+            path: '/ws-a/agentic',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
+          {
+            id: 3,
+            name: 'newcomer',
+            path: '/ws-a/newcomer',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+          },
         ],
       },
     });
