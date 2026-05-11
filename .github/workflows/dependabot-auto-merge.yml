@@ -1,0 +1,34 @@
+name: Dependabot auto-merge
+
+# Auto-enable merge on dependabot patch PRs once their CI is green.
+# Minor and major bumps still require manual review — they get the same
+# CI gate but no auto-merge.
+#
+# Prerequisites (configured at the repo level, not in this file):
+#   - "Allow auto-merge" enabled in repo settings.
+#   - Branch protection on `main` with required status checks. Without
+#     this, auto-merge fires immediately, which defeats the gate.
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge for patch updates
+        if: steps.meta.outputs.update-type == 'version-update:semver-patch'
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
