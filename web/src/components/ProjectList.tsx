@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Project, SessionSummary } from '@cebab/shared/protocol';
+import { ClaudeMark } from './ClaudeMark';
 
 export function ProjectList(props: {
   projects: Project[];
@@ -23,9 +24,7 @@ export function ProjectList(props: {
         return (
           <li key={p.id} className={`project-row ${expanded ? 'expanded' : ''}`}>
             <div
-              className={`project-header ${expanded ? 'active' : ''} ${
-                p.hasClaudeMd ? '' : 'no-claude-md'
-              }`}
+              className={`project-header ${expanded ? 'active' : ''}`}
               title={
                 p.hasClaudeMd
                   ? undefined
@@ -37,6 +36,9 @@ export function ProjectList(props: {
                 className={`project-live-dot ${projectIsLive ? 'on' : ''}`}
                 title={projectIsLive ? 'session running' : ''}
               />
+              {p.hasClaudeMd && (
+                <ClaudeMark className="claude-mark" title="Agent project (CLAUDE.md present)" />
+              )}
               <span className="project-name">{p.name}</span>
               <button
                 className={`trust ${p.trusted ? 'on' : 'off'}`}

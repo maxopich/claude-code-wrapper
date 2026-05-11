@@ -194,17 +194,16 @@ pre {
 .project-header.active {
   background: var(--accent-2);
 }
-/* Folders that don't contain a CLAUDE.md — render the row dimmed so the user
- * can scan the sidebar and tell at a glance which subdirectories are actually
- * agent projects vs. random folders that happen to live in the workspace. The
- * row stays clickable; project-level instructions just won't auto-load. */
-.project-header.no-claude-md .project-name {
-  color: var(--fg-3);
-  font-weight: 400;
-  font-style: italic;
-}
-.project-header.no-claude-md .project-live-dot {
-  opacity: 0.5;
+/* Claude brand mark, rendered next to projects that contain a CLAUDE.md.
+ * The presence/absence of this mark is the sidebar's "is this an agent
+ * project?" signal — non-agent folders simply don't render the mark.
+ * Color is Anthropic's coral; size inherits from the SVG component default. */
+.claude-mark {
+  color: #cc785c;
+  flex-shrink: 0;
+  /* Slight vertical nudge so the 8-spoke star aligns with the text baseline
+   * rather than sitting heavy on the top of the line box. */
+  margin-top: 1px;
 }
 .project-name {
   font-weight: 500;
