@@ -55,6 +55,15 @@ jobs:
         # --noEmit doesn't surface (e.g. import resolution, asset pipeline).
         run: npm run build
 
+      - name: Set up workspace fixture
+        # ws_smoke.ts hardcodes looking for a project named "Cebab" in the
+        # workspace. Create an empty stub so syncWorkspaceProjects() picks
+        # it up. The mock runner ignores the directory contents — only the
+        # project name matters for the smoke.
+        run: |
+          mkdir -p /tmp/cebab-ws/Cebab
+          echo "WORKSPACE_ROOT=/tmp/cebab-ws" >> $GITHUB_ENV
+
       - name: Start mock server (background)
         # MOCK=1 routes pickRunner() to runner/mock.ts, which replays
         # fixtures/hello.jsonl — no Claude CLI / no quota burn.
