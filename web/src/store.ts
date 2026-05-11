@@ -231,8 +231,34 @@ export function reduce(state: AppState, action: Action): AppState {
 
 function reduceServer(state: AppState, msg: ServerMsg): AppState {
   switch (msg.type) {
-    case 'projects':
-      return { ...state, projects: msg.projects };
+    case 'projects': {
+      // When a fresh project list arrives that no longer contains the
+      // currently-active project (typical case: user changed the workspace
+      // root), drop activeProjectId and the orphaned session state. Without
+      // this, the sidebar shows the new projects but the chat pane keeps
+      // rendering the previously-active session via activeSession(state),
+      // and the user feels like "the list didn't refresh".
+      const activeStillPresent =
+        state.activeProjectId !== null && msg.projects.some((p) => p.id === state.activeProjectId);
+      if (activeStillPresent) {
+        return { ...state, projects: msg.projects };
+      }
+      return {
+        ...state,
+        projects: msg.projects,
+        activeProjectId: null,
+        // The session-related state below is keyed by project id; without a
+        // valid active project, none of it can render meaningfully. Clear it
+        // so a future workspace switch starts clean (re-populated via
+        // open_project / load_session when the user picks a new entry).
+        activeSessionByProject: {},
+        sessionsByProject: {},
+        pendingByProject: {},
+        sessionToProject: {},
+        knownSessions: {},
+        permissionModeBySession: {},
+      };
+    }
 
     case 'settings':
       return {
