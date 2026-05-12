@@ -52,7 +52,7 @@ import {
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
 } from '../repo/multi_agent.js';
-import { busIterationDir } from '../bus/paths.js';
+import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type { IterationSummary } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
@@ -304,6 +304,47 @@ function seedPermissionMode(
     if (stored) return stored;
   }
   return trusted ? 'acceptEdits' : 'default';
+}
+
+/**
+ * Build the iteration browser list from the DB. Exported for direct unit
+ * testing without standing up a WS connection.
+ *
+ * artifactsDir resolution:
+ *   - Post-007 rows (`session_folder` set) live under
+ *     `<session_folder>/iterations/<id>/`.
+ *   - Pre-007 rows (`session_folder` null) used the legacy global layout
+ *     under `~/.cebab/bus/iterations/<id>/`.
+ * Always emitting `busIterationDir(...)` collapsed both onto the legacy
+ * path and broke per-session iteration browsing.
+ */
+export function buildIterationsList(): IterationSummary[] {
+  const rows = listMultiAgentSessionsWithIteration();
+  return rows.map((row) => {
+    const participants = listResolvedParticipants(row.id);
+    const workerNames = participants
+      .map((p) => p.bus_agent_name)
+      .filter((n): n is string => n !== null);
+    const participantAgentNames =
+      row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+    const artifactsDir =
+      row.session_folder !== null
+        ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
+        : busIterationDir(row.iteration_id!);
+    return {
+      iterationId: row.iteration_id!,
+      sessionId: row.id,
+      mode: row.mode as 'chain' | 'orchestrator',
+      status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      participantAgentNames,
+      // Absolute path so the browser can render it for clipboard / `cd`
+      // use. The filesystem layout under iterations/NNN/ is the
+      // operator's source of truth — Cebab doesn't proxy it.
+      artifactsDir,
+    };
+  });
 }
 
 async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
@@ -740,32 +781,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'list_iterations': {
-      // Read all sessions with iteration_id (post-006). For each, JOIN
-      // participants → projects to get the agent slug list. Filter to a
-      // status the iteration browser cares about.
-      const rows = listMultiAgentSessionsWithIteration();
-      const items: IterationSummary[] = rows.map((row) => {
-        const participants = listResolvedParticipants(row.id);
-        const workerNames = participants
-          .map((p) => p.bus_agent_name)
-          .filter((n): n is string => n !== null);
-        const participantAgentNames =
-          row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
-        return {
-          iterationId: row.iteration_id!,
-          sessionId: row.id,
-          mode: row.mode as 'chain' | 'orchestrator',
-          status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
-          startedAt: row.started_at,
-          endedAt: row.ended_at,
-          participantAgentNames,
-          // Absolute path so the browser can render it for clipboard /
-          // `cd` use. The filesystem layout under iterations/NNN/ is the
-          // operator's source of truth — Cebab doesn't proxy it.
-          artifactsDir: busIterationDir(row.iteration_id!),
-        };
-      });
-      send(conn.ws, { type: 'iterations', items });
+      send(conn.ws, { type: 'iterations', items: buildIterationsList() });
       return;
     }
     case 'send_message': {
