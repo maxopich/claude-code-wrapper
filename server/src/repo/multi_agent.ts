@@ -138,6 +138,65 @@ export function listMultiAgentSessionsWithIteration(): MultiAgentSessionRow[] {
     .all();
 }
 
+/**
+ * Return the tmux session names of every currently-running multi-agent
+ * row, filtering out any null entries (older rows that predate the
+ * `tmux_session` column or were inserted without one).
+ *
+ * Used by the WS `clear_iterations` handler to compute the "protected" set
+ * of tmux session names: anything matching `cebab-bus-*` that isn't in
+ * this list is an orphan and gets killed when Clear runs.
+ */
+export function listRunningTmuxSessionNames(): string[] {
+  return getDb()
+    .prepare<[], { tmux_session: string | null }>(
+      `SELECT tmux_session FROM multi_agent_sessions WHERE status = 'running'`,
+    )
+    .all()
+    .map((r) => r.tmux_session)
+    .filter((s): s is string => s !== null);
+}
+
+/**
+ * Delete every multi-agent session whose status is NOT `'running'`, along
+ * with all rows in `multi_agent_events` and `multi_agent_participants` that
+ * reference them. Returns the number of session rows actually removed.
+ *
+ * Used by the WS `clear_iterations` handler to wipe the iterations browser
+ * — the active session (if any) is preserved so a click on "Clear" can't
+ * orphan a live run.
+ *
+ * The three deletes run inside a single SQLite transaction so we don't
+ * end up with dangling events/participants on a partial failure. SQLite
+ * has no FK ON DELETE CASCADE here (the original schema doesn't declare
+ * foreign keys on these tables), so the deletes have to be explicit and
+ * the order matters only insofar as we delete children before parents.
+ *
+ * Does NOT touch on-disk artifacts (`~/.cebab/bus/iterations/`, per-session
+ * folders). Those are useful for post-mortem inspection and recreating them
+ * isn't Cebab's job; the operator can wipe them manually.
+ */
+export function clearFinishedMultiAgentSessions(): number {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    db.prepare(
+      `DELETE FROM multi_agent_events
+        WHERE session_id IN (
+          SELECT id FROM multi_agent_sessions WHERE status != 'running'
+        )`,
+    ).run();
+    db.prepare(
+      `DELETE FROM multi_agent_participants
+        WHERE session_id IN (
+          SELECT id FROM multi_agent_sessions WHERE status != 'running'
+        )`,
+    ).run();
+    const info = db.prepare(`DELETE FROM multi_agent_sessions WHERE status != 'running'`).run();
+    return info.changes;
+  });
+  return tx() as number;
+}
+
 // ---- participants ----
 
 export function addParticipant(

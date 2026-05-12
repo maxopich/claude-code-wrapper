@@ -198,6 +198,14 @@ export function App() {
   function refreshIterations() {
     wsRef.current?.send({ type: 'list_iterations' });
   }
+  function clearIterations() {
+    // Server-side: deletes every multi_agent_sessions row whose status is
+    // not 'running', along with its events and participants, then re-sends
+    // the (now empty / running-only) iterations list. No client-side
+    // optimistic update — we wait for the server reply so the cache stays
+    // consistent with the DB even if the WS round-trip fails.
+    wsRef.current?.send({ type: 'clear_iterations' });
+  }
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
   // refresh after each `multi_agent_ended` so a just-finished run appears
@@ -325,6 +333,7 @@ export function App() {
                 onSendUserPrompt={sendMultiAgentUserPrompt}
                 onDismissActive={dismissActiveRun}
                 onRefreshIterations={refreshIterations}
+                onClearIterations={clearIterations}
               />
             )}
           </>

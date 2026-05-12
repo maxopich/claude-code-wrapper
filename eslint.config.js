@@ -10,6 +10,10 @@ export default tseslint.config(
       '**/*.config.js',
       '**/*.config.mjs',
       '.husky/**',
+      // Claude Code's local state. Worktrees in particular shadow every
+      // .ts in the repo and cause tseslint to bail with "multiple
+      // candidate tsconfigRootDirs". Never user-authored code.
+      '.claude/**',
     ],
   },
   js.configs.recommended,

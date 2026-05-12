@@ -47,12 +47,19 @@ import {
   type OrchestratorSessionHandle,
 } from '../bus/orchestrator.js';
 import { ResolveAgentError } from '../bus/runtime.js';
-import { attemptResumeMultiAgent } from '../bus/resume.js';
+import { attemptResumeMultiAgent, type ResumeFailureReason } from '../bus/resume.js';
 import {
+  clearFinishedMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
+  listRunningTmuxSessionNames,
 } from '../repo/multi_agent.js';
 import { busIterationDir } from '../bus/paths.js';
+import { killSession, listSessions as listTmuxSessions } from '../bus/tmux.js';
+
+/** Prefix every Cebab-spawned multi-agent tmux session shares. Used by the
+ *  `clear_iterations` reaper to scope its kill loop to sessions we own. */
+const CEBAB_BUS_TMUX_PREFIX = 'cebab-bus-';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type { IterationSummary } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
@@ -220,6 +227,19 @@ async function resumeOnConnect(conn: Conn): Promise<void> {
           conn.multiAgent = null;
         }
       },
+      onResumeFailed: (sessionId, reason) => {
+        // Surface auto-resume failures as a wrapper_error toast so the
+        // operator notices instead of "Cebab silently lost my session".
+        // The row is already crash-marked at this point — the toast
+        // just makes that state observable without opening the
+        // Iterations browser.
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId,
+          kind: 'process_crashed',
+          message: resumeFailureMessage(sessionId, reason),
+        });
+      },
     });
     if (!resumed) return;
 
@@ -276,6 +296,27 @@ function emitSettings(conn: Conn): void {
     workspaceRootValid: workspaceRootValid(),
     defaultWorkspaceRoot: config.workspaceRootDefault,
   });
+}
+
+/**
+ * Map a `ResumeFailureReason` to the user-facing message that ships in the
+ * `wrapper_error.message` field. Kept close to the WS layer so the wording
+ * (which the operator sees in a toast) doesn't drift away from the
+ * symptoms it describes. The session id slice helps disambiguate when the
+ * operator has run multiple multi-agent sessions in a row.
+ */
+function resumeFailureMessage(sessionId: string, reason: ResumeFailureReason): string {
+  const slug = sessionId.slice(0, 8);
+  switch (reason) {
+    case 'tmux-unavailable':
+      return `Couldn't resume multi-agent session ${slug}: tmux isn't running. The session has been marked crashed.`;
+    case 'tmux-missing':
+      return `Couldn't resume multi-agent session ${slug}: its tmux session is gone (likely killed by reboot or manual cleanup). Marked crashed.`;
+    case 'legacy-row':
+      return `Couldn't resume multi-agent session ${slug}: legacy DB row missing tmux/iteration info. Marked crashed.`;
+    case 'reattach-failed':
+      return `Couldn't reattach to multi-agent session ${slug}: a participant likely lost its bus integration. Marked crashed.`;
+  }
 }
 
 /** Display-label cap. Long enough for "Refactor the WS upgrade handler", short
@@ -740,32 +781,43 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'list_iterations': {
-      // Read all sessions with iteration_id (post-006). For each, JOIN
-      // participants → projects to get the agent slug list. Filter to a
-      // status the iteration browser cares about.
-      const rows = listMultiAgentSessionsWithIteration();
-      const items: IterationSummary[] = rows.map((row) => {
-        const participants = listResolvedParticipants(row.id);
-        const workerNames = participants
-          .map((p) => p.bus_agent_name)
-          .filter((n): n is string => n !== null);
-        const participantAgentNames =
-          row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
-        return {
-          iterationId: row.iteration_id!,
-          sessionId: row.id,
-          mode: row.mode as 'chain' | 'orchestrator',
-          status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
-          startedAt: row.started_at,
-          endedAt: row.ended_at,
-          participantAgentNames,
-          // Absolute path so the browser can render it for clipboard /
-          // `cd` use. The filesystem layout under iterations/NNN/ is the
-          // operator's source of truth — Cebab doesn't proxy it.
-          artifactsDir: busIterationDir(row.iteration_id!),
-        };
-      });
-      send(conn.ws, { type: 'iterations', items });
+      send(conn.ws, { type: 'iterations', items: buildIterationsList() });
+      return;
+    }
+    case 'clear_iterations': {
+      // Two-step cleanup. (1) Reap any orphan tmux sessions: live
+      // `cebab-bus-*` sessions whose DB row no longer says
+      // `status='running'`. These accumulate when Cebab restarts mid-
+      // session, when the operator manually deletes DB rows, or when a
+      // session's `running` row was cleared by a previous Clear before
+      // this reaper shipped. Sessions still backed by a running DB row
+      // are preserved (matched by exact `tmux_session` name). (2) Delete
+      // finished DB rows + their events + their participants. Disk
+      // artifacts under the per-session folder are left in place —
+      // useful for post-mortem; operator can `rm -rf` by hand.
+      try {
+        const protectedNames = new Set(listRunningTmuxSessionNames());
+        const live = await listTmuxSessions();
+        for (const name of live) {
+          if (!name.startsWith(CEBAB_BUS_TMUX_PREFIX)) continue;
+          if (protectedNames.has(name)) continue;
+          try {
+            await killSession(name);
+          } catch (err) {
+            // killSession itself is idempotent on the missing-session
+            // case; any other failure is logged but not surfaced — the
+            // operator's Clear request still completes for the DB side.
+            console.warn(`[ws] orphan killSession(${name}) failed during clear`, err);
+          }
+        }
+      } catch (err) {
+        // tmux not installed, or list-sessions returned an unexpected
+        // error. Either way, the DB clear below is independent and
+        // worth completing. Logged for diagnosis.
+        console.warn('[ws] tmux orphan scan during clear failed', err);
+      }
+      clearFinishedMultiAgentSessions();
+      send(conn.ws, { type: 'iterations', items: buildIterationsList() });
       return;
     }
     case 'send_message': {
@@ -773,6 +825,42 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
   }
+}
+
+/**
+ * Build the `iterations` reply payload from the DB. Shared by the
+ * `list_iterations` and `clear_iterations` WS handlers — both end with
+ * the same shape: send the current set of iteration rows so the UI can
+ * replace its cache wholesale.
+ *
+ * Filters to rows with an `iteration_id` (post-migration-006) so the
+ * iteration browser doesn't render placeholders for pre-006 rows; the
+ * JOIN to `projects` via `listResolvedParticipants` drops participants
+ * whose project row has been deleted since the session ran.
+ */
+function buildIterationsList(): IterationSummary[] {
+  const rows = listMultiAgentSessionsWithIteration();
+  return rows.map((row) => {
+    const participants = listResolvedParticipants(row.id);
+    const workerNames = participants
+      .map((p) => p.bus_agent_name)
+      .filter((n): n is string => n !== null);
+    const participantAgentNames =
+      row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+    return {
+      iterationId: row.iteration_id!,
+      sessionId: row.id,
+      mode: row.mode as 'chain' | 'orchestrator',
+      status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      participantAgentNames,
+      // Absolute path so the browser can render it for clipboard / `cd`
+      // use. The filesystem layout under iterations/NNN/ is the
+      // operator's source of truth — Cebab doesn't proxy it.
+      artifactsDir: busIterationDir(row.iteration_id!),
+    };
+  });
 }
 
 async function runOneTurn(

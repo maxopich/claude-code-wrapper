@@ -37,6 +37,7 @@ export function MultiAgentTab(props: {
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
+  onClearIterations: () => void;
 }) {
   const { multiAgent } = props;
   if (multiAgent.active) {
@@ -66,6 +67,7 @@ function DraftView(props: {
   onStartChain: () => void;
   onStartOrchestrator: () => void;
   onRefreshIterations: () => void;
+  onClearIterations: () => void;
 }) {
   const { multiAgent, projects } = props;
   const participants = multiAgent.draftParticipants
@@ -320,13 +322,51 @@ function DraftView(props: {
       <section className="multi-agent-section">
         <div className="iterations-header">
           <h3>Iterations</h3>
-          <button
-            className="ghost-btn iterations-refresh"
-            onClick={props.onRefreshIterations}
-            title="Re-query the server for past iterations. The list also auto-refreshes when a run ends."
-          >
-            Refresh
-          </button>
+          <div className="iterations-actions">
+            <button
+              className="ghost-btn iterations-refresh"
+              onClick={props.onRefreshIterations}
+              title="Re-query the server for past iterations. The list also auto-refreshes when a run ends."
+            >
+              Refresh
+            </button>
+            <button
+              className="ghost-btn iterations-clear"
+              // Disable when there's nothing to clear (loading or empty);
+              // also disable if a session is currently running — the
+              // server preserves the running row, so a click would be a
+              // no-op, but the affordance reads as misleading.
+              disabled={
+                multiAgent.iterations === null ||
+                multiAgent.iterations.length === 0 ||
+                multiAgent.iterations.every((it) => it.status === 'running')
+              }
+              onClick={() => {
+                const finished =
+                  multiAgent.iterations?.filter((it) => it.status !== 'running').length ?? 0;
+                // Browser-native confirm keeps this lightweight; no
+                // custom modal needed for a destructive-but-recoverable
+                // action (disk artifacts survive, so the operator can
+                // still `cd` into transcripts on iterations they care
+                // about). Confirm explicitly enumerates what runs:
+                // orphan tmux reap + DB row delete + disk preservation.
+                if (
+                  window.confirm(
+                    `Clear ${finished} iteration${finished === 1 ? '' : 's'} from the list?\n\n` +
+                      `This runs two cleanups:\n` +
+                      `  • Kills any orphan cebab-bus-* tmux sessions (i.e., still-alive panes whose Cebab record is gone — these accumulate after restarts or crashes). Tmux sessions tied to a still-running multi-agent session, if any, are preserved.\n` +
+                      `  • Removes finished session rows (events + participants + the session itself) from the Cebab database.\n\n` +
+                      `On-disk transcripts and prompt/reply files inside each session folder stay where they are; you can still inspect them by path.`,
+                  )
+                ) {
+                  props.onClearIterations();
+                }
+              }}
+              title="Reap orphan cebab-bus-* tmux sessions AND remove finished iterations from the list. On-disk artifacts are preserved; running sessions (if any) are kept."
+            >
+              Clear
+            </button>
+          </div>
         </div>
         <IterationsList items={multiAgent.iterations} />
       </section>
