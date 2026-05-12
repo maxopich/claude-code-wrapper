@@ -52,11 +52,32 @@ export type PersistedEvent = {
   dbEventId: number;
 };
 
+/**
+ * Reason an auto-resume couldn't bring back a `running` DB row. Bubbled
+ * up to the WS layer so the operator sees a toast instead of silent
+ * crash-marking. Reasons map 1:1 with the early-return branches in
+ * `attemptResumeMultiAgent`; the WS layer renders them into a user-
+ * readable `wrapper_error.message`.
+ */
+export type ResumeFailureReason =
+  | 'tmux-unavailable' // `tmuxAvailable()` returned false
+  | 'legacy-row' // pre-006: row missing `tmux_session` or `iteration_id`
+  | 'tmux-missing' // `hasSession()` returned false for the row's tmux name
+  | 'reattach-failed'; // resume{Chain,Orchestrator}Session returned null
+
 export type ResumeCallbacks = {
   /** Same shape as `StartChainOpts.onEvent`. Used both for live events
    *  picked up by the re-attached tailer AND for replayed history. */
   onEvent: ResumeChainOpts['onEvent'];
   onEnded: ResumeChainOpts['onEnded'];
+  /** Called once (at most) when the primary resume candidate can't be
+   *  brought back — see `ResumeFailureReason`. Fires only for the
+   *  candidate row the operator most likely cares about (the most-
+   *  recently-started running row); secondary `running` rows that are
+   *  marked crashed under the single-active invariant don't trigger
+   *  this. Optional: callers that don't supply it just get the existing
+   *  silent crash-mark behavior. */
+  onResumeFailed?: (sessionId: string, reason: ResumeFailureReason) => void;
 };
 
 export type ResumedSession = {
@@ -87,19 +108,24 @@ export async function attemptResumeMultiAgent(
   const activeRows = listActiveMultiAgentSessions();
   if (activeRows.length === 0) return null;
 
+  // The most recently started row is the most likely candidate; we
+  // resolve it before the tmux-availability check so we can attribute
+  // the failure to a specific session id in any onResumeFailed call.
+  const candidate = activeRows[0]!;
+
   if (!(await tmuxAvailable())) {
     // No tmux means nothing is recoverable. Mark all running rows crashed.
     for (const r of activeRows) {
       markCrashedSilent(r.id);
     }
+    callbacks.onResumeFailed?.(candidate.id, 'tmux-unavailable');
     return null;
   }
 
-  // The most recently started row is the most likely candidate. Older
-  // rows that are still `running` AND still alive in tmux are treated as
-  // orphans — we mark them crashed (single-active invariant). Operator
-  // can manually `tmux kill-session` if they want to clean up.
-  const candidate = activeRows[0]!;
+  // Older rows that are still `running` AND still alive in tmux are
+  // treated as orphans — we mark them crashed (single-active invariant).
+  // No onResumeFailed for these: they're not what the operator's UI was
+  // attached to, and emitting per-row would be toast spam.
   for (const r of activeRows.slice(1)) {
     markCrashedSilent(r.id);
   }
@@ -108,10 +134,12 @@ export async function attemptResumeMultiAgent(
     // Pre-006 row, or one that was created without these fields. Can't
     // resume — mark crashed.
     markCrashedSilent(candidate.id);
+    callbacks.onResumeFailed?.(candidate.id, 'legacy-row');
     return null;
   }
   if (!(await hasSession(candidate.tmux_session))) {
     markCrashedSilent(candidate.id);
+    callbacks.onResumeFailed?.(candidate.id, 'tmux-missing');
     return null;
   }
 
@@ -136,6 +164,7 @@ export async function attemptResumeMultiAgent(
     // Reattach failed despite tmux being alive — likely a participant lost
     // bus integration. Mark crashed and bail.
     markCrashedSilent(candidate.id);
+    callbacks.onResumeFailed?.(candidate.id, 'reattach-failed');
     return null;
   }
 

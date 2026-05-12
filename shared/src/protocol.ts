@@ -193,6 +193,25 @@ export type ClientMsg =
        * Multi-Agent tab's Iterations section.
        */
       type: 'list_iterations';
+    }
+  | {
+      /**
+       * Wipe the iterations browser: delete the DB rows (sessions, events,
+       * participants) for every multi-agent session whose status is NOT
+       * `'running'`. The active session — if any — is preserved so the
+       * operator can't accidentally orphan a live run by clicking Clear.
+       *
+       * Disk artifacts under `~/.cebab/bus/iterations/` and per-session
+       * folders (`<workspace>/.cebab-session-<id>/`) are intentionally
+       * left behind: they're useful for post-mortem inspection (transcripts,
+       * prompt/reply files) and recreating them is not Cebab's job. The
+       * operator can `rm -rf` those by hand if they want a full wipe.
+       *
+       * Server replies with a fresh `iterations` ServerMsg (the same shape
+       * as for `list_iterations`), so the UI updates without a second
+       * round-trip.
+       */
+      type: 'clear_iterations';
     };
 
 // ---- Server → Browser ----

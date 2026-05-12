@@ -173,6 +173,31 @@ export async function killSession(name: string): Promise<void> {
   await run(['kill-session', '-t', name]);
 }
 
+/**
+ * Enumerate live tmux session names via `list-sessions -F #{session_name}`.
+ *
+ * Returns an empty array on any failure: tmux not installed, no server
+ * running (tmux 3.x exits non-zero with "no server running on ..." when
+ * there are zero sessions), or any other surprise. Callers treat "no live
+ * sessions" identically to "tmux unavailable" — both mean "nothing to act
+ * on" — so collapsing both into `[]` keeps the call sites tidy.
+ *
+ * Used by the WS `clear_iterations` handler to reap `cebab-bus-*` tmux
+ * sessions whose DB rows no longer exist (Cebab restarts, crashes, or a
+ * past Clear that landed before this code shipped).
+ */
+export async function listSessions(): Promise<string[]> {
+  try {
+    const { stdout } = await run(['list-sessions', '-F', '#{session_name}']);
+    return stdout
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 /** Capture the recent visible contents of a pane (for debug/snapshot use). */
 export async function capturePane(target: string): Promise<string> {
   const { stdout } = await run(['capture-pane', '-t', target, '-p']);

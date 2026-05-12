@@ -959,7 +959,13 @@ pre {
 .iterations-header h3 {
   margin: 0;
 }
-.iterations-refresh {
+.iterations-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.iterations-refresh,
+.iterations-clear {
   font-size: 11.5px;
 }
 .iterations-empty {
