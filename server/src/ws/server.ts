@@ -54,12 +54,8 @@ import {
   listResolvedParticipants,
   listRunningTmuxSessionNames,
 } from '../repo/multi_agent.js';
-import { busIterationDir } from '../bus/paths.js';
+import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { killSession, listSessions as listTmuxSessions } from '../bus/tmux.js';
-
-/** Prefix every Cebab-spawned multi-agent tmux session shares. Used by the
- *  `clear_iterations` reaper to scope its kill loop to sessions we own. */
-const CEBAB_BUS_TMUX_PREFIX = 'cebab-bus-';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type { IterationSummary } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
@@ -323,6 +319,11 @@ function resumeFailureMessage(sessionId: string, reason: ResumeFailureReason): s
  * enough not to wreck the sidebar layout. */
 const MAX_SESSION_TITLE_LEN = 80;
 
+/** Prefix every Cebab-spawned multi-agent tmux session shares. Used by the
+ *  `clear_iterations` reaper to scope its kill loop to sessions we own
+ *  (operator's unrelated tmux sessions are left untouched). */
+const CEBAB_BUS_TMUX_PREFIX = 'cebab-bus-';
+
 /**
  * Normalize a user-supplied title. Returns null when the input is empty after
  * trimming (the UI then falls back to the session id slice). Collapses CR/LF
@@ -345,6 +346,47 @@ function seedPermissionMode(
     if (stored) return stored;
   }
   return trusted ? 'acceptEdits' : 'default';
+}
+
+/**
+ * Build the iteration browser list from the DB. Exported for direct unit
+ * testing without standing up a WS connection.
+ *
+ * artifactsDir resolution:
+ *   - Post-007 rows (`session_folder` set) live under
+ *     `<session_folder>/iterations/<id>/`.
+ *   - Pre-007 rows (`session_folder` null) used the legacy global layout
+ *     under `~/.cebab/bus/iterations/<id>/`.
+ * Always emitting `busIterationDir(...)` collapsed both onto the legacy
+ * path and broke per-session iteration browsing.
+ */
+export function buildIterationsList(): IterationSummary[] {
+  const rows = listMultiAgentSessionsWithIteration();
+  return rows.map((row) => {
+    const participants = listResolvedParticipants(row.id);
+    const workerNames = participants
+      .map((p) => p.bus_agent_name)
+      .filter((n): n is string => n !== null);
+    const participantAgentNames =
+      row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+    const artifactsDir =
+      row.session_folder !== null
+        ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
+        : busIterationDir(row.iteration_id!);
+    return {
+      iterationId: row.iteration_id!,
+      sessionId: row.id,
+      mode: row.mode as 'chain' | 'orchestrator',
+      status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      participantAgentNames,
+      // Absolute path so the browser can render it for clipboard / `cd`
+      // use. The filesystem layout under iterations/NNN/ is the
+      // operator's source of truth — Cebab doesn't proxy it.
+      artifactsDir,
+    };
+  });
 }
 
 async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
@@ -825,42 +867,6 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
   }
-}
-
-/**
- * Build the `iterations` reply payload from the DB. Shared by the
- * `list_iterations` and `clear_iterations` WS handlers — both end with
- * the same shape: send the current set of iteration rows so the UI can
- * replace its cache wholesale.
- *
- * Filters to rows with an `iteration_id` (post-migration-006) so the
- * iteration browser doesn't render placeholders for pre-006 rows; the
- * JOIN to `projects` via `listResolvedParticipants` drops participants
- * whose project row has been deleted since the session ran.
- */
-function buildIterationsList(): IterationSummary[] {
-  const rows = listMultiAgentSessionsWithIteration();
-  return rows.map((row) => {
-    const participants = listResolvedParticipants(row.id);
-    const workerNames = participants
-      .map((p) => p.bus_agent_name)
-      .filter((n): n is string => n !== null);
-    const participantAgentNames =
-      row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
-    return {
-      iterationId: row.iteration_id!,
-      sessionId: row.id,
-      mode: row.mode as 'chain' | 'orchestrator',
-      status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
-      startedAt: row.started_at,
-      endedAt: row.ended_at,
-      participantAgentNames,
-      // Absolute path so the browser can render it for clipboard / `cd`
-      // use. The filesystem layout under iterations/NNN/ is the
-      // operator's source of truth — Cebab doesn't proxy it.
-      artifactsDir: busIterationDir(row.iteration_id!),
-    };
-  });
 }
 
 async function runOneTurn(
