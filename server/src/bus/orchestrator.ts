@@ -220,15 +220,25 @@ function renderOrchestratorSettingsJson(): string {
 }
 
 function writeIfChanged(filePath: string, content: string): 'created' | 'updated' | 'unchanged' {
-  if (!fs.existsSync(filePath)) {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, content, 'utf8');
-    return 'created';
+  // Try-read instead of existsSync+read: collapses the check and the
+  // operation into a single fs call, so there's no TOCTOU window where
+  // an attacker could swap the path between an existence check and the
+  // subsequent write. (In our context the workspace is operator-owned
+  // and there's no realistic attacker, but the simpler control flow is
+  // also genuinely nicer to read.)
+  let existing: string | null = null;
+  try {
+    existing = fs.readFileSync(filePath, 'utf8');
+  } catch (err) {
+    // Most commonly ENOENT — the file doesn't exist yet. Any other
+    // error (EACCES, EISDIR, …) is surfaced by the writeFileSync
+    // below, which is what we want.
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
   }
-  const existing = fs.readFileSync(filePath, 'utf8');
   if (existing === content) return 'unchanged';
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, 'utf8');
-  return 'updated';
+  return existing === null ? 'created' : 'updated';
 }
 
 // ============================================================================

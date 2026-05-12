@@ -196,12 +196,18 @@ export async function installBusForProject(projectId: number): Promise<InstallRe
   fs.mkdirSync(cebabDir, { recursive: true });
   const commPath = projectCommMdPath(project.path);
   const commContent = renderCommMd(agentName);
-  if (fs.existsSync(commPath)) {
-    changes.commMd = 'updated';
-    // (Always rewrite — content is fully derived from the slug.)
-  } else {
-    changes.commMd = 'created';
+  // Probe via try-readFile (not existsSync / access) to collapse the
+  // existence check and the subsequent write into a single I/O
+  // operation each — no separate-check-then-operate TOCTOU pattern.
+  // We always rewrite regardless; the probe just distinguishes
+  // 'created' vs 'updated' in the result struct.
+  let priorContent: string | null = null;
+  try {
+    priorContent = await fsp.readFile(commPath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
   }
+  changes.commMd = priorContent === null ? 'created' : 'updated';
   await fsp.writeFile(commPath, commContent, 'utf8');
 
   // Migrate any legacy global comm.md left behind by a pre-fix install.

@@ -201,12 +201,13 @@ describe('installBusForProject — idempotency and non-destruction', () => {
     expect(second.changes.settingsJson).toBe('already-present');
     expect(second.changes.busRow).toBe('unchanged');
 
-    // No duplicated @import lines.
+    // No duplicated @import lines. Count via split rather than a
+    // dynamically-constructed RegExp — the regex form needs metachar
+    // escaping that's easy to get partly-right (incomplete-sanitization).
     const projectPath = path.join(tmpRoot, 'workspace', 'Evaluator');
     const claudeMd = fs.readFileSync(path.join(projectPath, 'CLAUDE.md'), 'utf8');
-    const importMatches =
-      claudeMd.match(new RegExp(`@${PROJECT_COMM_MD_REL.replace(/\./g, '\\.')}`, 'g')) ?? [];
-    expect(importMatches).toHaveLength(1);
+    const importOccurrences = claudeMd.split(`@${PROJECT_COMM_MD_REL}`).length - 1;
+    expect(importOccurrences).toBe(1);
 
     // No duplicated Stop hooks or permission entries.
     const settings = JSON.parse(
@@ -320,12 +321,14 @@ describe('uninstallBusForProject', () => {
     expect(again.agentName).toBe('coder');
     expect(again.changes.busRow).toBe('inserted');
 
-    // The CLAUDE.md @import line is present exactly once after the round trip.
+    // The CLAUDE.md @import line is present exactly once after the
+    // round trip. (Same `split`-based count as the duplicate-prevention
+    // test above; avoids the brittle regex-escape pattern that CodeQL
+    // flagged as incomplete sanitization.)
     const projectPath = path.join(tmpRoot, 'workspace', 'Coder');
     const claudeMd = fs.readFileSync(path.join(projectPath, 'CLAUDE.md'), 'utf8');
-    const importMatches =
-      claudeMd.match(new RegExp(`@${PROJECT_COMM_MD_REL.replace(/\./g, '\\.')}`, 'g')) ?? [];
-    expect(importMatches).toHaveLength(1);
+    const importOccurrences = claudeMd.split(`@${PROJECT_COMM_MD_REL}`).length - 1;
+    expect(importOccurrences).toBe(1);
   });
 });
 
