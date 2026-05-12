@@ -1,5 +1,8 @@
 import type {
   ContentBlock,
+  IterationSummary,
+  MultiAgentEventKind,
+  MultiAgentLifecycle,
   Project,
   ServerMsg,
   SessionPermissionMode,
@@ -42,6 +45,83 @@ export type SessionView = {
   streamingText: string;
 };
 
+/**
+ * One inter-agent event as shown in the multi-agent scrollback. Mirrors the
+ * payload of the `multi_agent_event` ServerMsg with the runtime fields the
+ * scrollback view needs.
+ */
+export type MultiAgentEventView = {
+  eventId: number;
+  ts: number;
+  source: string;
+  destination: string;
+  kind: MultiAgentEventKind;
+  text: string;
+};
+
+export type MultiAgentRunStatus = 'running' | 'completed' | 'stopped' | 'crashed';
+
+/**
+ * Live state for an in-progress (or just-finished) multi-agent session.
+ * Cleared by the operator via `ma_dismiss_active` once they're done
+ * reviewing — returns the tab to its draft view.
+ */
+export type MultiAgentRun = {
+  sessionId: string;
+  mode: 'chain' | 'orchestrator';
+  participantAgentNames: string[];
+  tmuxSession: string;
+  status: MultiAgentRunStatus;
+  events: MultiAgentEventView[];
+  /** Set when the chain completes successfully and Cebab archived the run
+   *  to `~/.cebab/bus/iterations/NNN/`. */
+  iterationId: string | null;
+  /** Lifecycle mode echoed back from the server. Drives the End-button
+   *  affordance (persistent → "Stop"; temp → "End & cleanup" with
+   *  confirm dialog). */
+  lifecycle: MultiAgentLifecycle;
+  /** Absolute path to the on-disk session folder. Shown in the
+   *  active-run header so the operator can copy/inspect. */
+  sessionFolder: string;
+};
+
+/**
+ * Multi-agent / bus runtime UI state. Lives alongside the existing
+ * SDK-runtime state because the two runtimes are independent — the
+ * operator can have a chat session open and a multi-agent draft being
+ * assembled at the same time.
+ */
+export type MultiAgentState = {
+  /** Which top-level main view is showing. */
+  view: 'chat' | 'multi-agent';
+  /** Currently selected mode for the multi-agent tab. */
+  mode: 'chain' | 'orchestrator';
+  /** Currently selected lifecycle for the next start. Defaults to
+   *  'persistent' (safer — folder survives End, can be resumed). The
+   *  operator opts into 'temp' explicitly. */
+  draftLifecycle: MultiAgentLifecycle;
+  /** Ordered project ids currently in the Multi-Agent drop zone. Order
+   * matters for chain mode and is preserved as-dropped for orchestrator
+   * mode too (cosmetic but predictable). */
+  draftParticipants: number[];
+  /** The seed input the operator types before clicking Start. In chain
+   *  mode it's sent to the first participant's inbox. */
+  draftPrompt: string;
+  /** Non-null while a chain (or future orchestrator session) is running, and
+   *  until the operator dismisses it. */
+  active: MultiAgentRun | null;
+  /**
+   * Past iterations, populated by the `iterations` ServerMsg in response to
+   * `list_iterations`. The Multi-Agent tab requests the list on mount and
+   * after each `multi_agent_ended` event so the most-recent run shows up
+   * without a manual refresh.
+   *
+   * `null` means "not yet fetched on this connection". An empty array
+   * means "fetched, no iterations recorded".
+   */
+  iterations: IterationSummary[] | null;
+};
+
 export type AppState = {
   connected: boolean;
   projects: Project[];
@@ -69,6 +149,8 @@ export type AppState = {
   permissionModeBySession: Record<string, SessionPermissionMode>;
   // Workspace settings reported by the server. `null` means we haven't asked yet.
   settings: SettingsView | null;
+  // Multi-agent draft + view state.
+  multiAgent: MultiAgentState;
 };
 
 export type SettingsView = {
@@ -89,6 +171,15 @@ export const initialState: AppState = {
   liveSessions: {},
   permissionModeBySession: {},
   settings: null,
+  multiAgent: {
+    view: 'chat',
+    mode: 'orchestrator',
+    draftLifecycle: 'persistent',
+    draftParticipants: [],
+    draftPrompt: '',
+    active: null,
+    iterations: null,
+  },
 };
 
 let _id = 0;
@@ -143,7 +234,15 @@ export type Action =
   | { type: 'select_project'; projectId: number }
   | { type: 'select_session'; projectId: number; sessionId: string }
   | { type: 'new_session'; projectId: number }
-  | { type: 'user_send'; text: string };
+  | { type: 'user_send'; text: string }
+  | { type: 'ma_set_view'; view: 'chat' | 'multi-agent' }
+  | { type: 'ma_set_mode'; mode: 'chain' | 'orchestrator' }
+  | { type: 'ma_set_lifecycle'; lifecycle: MultiAgentLifecycle }
+  | { type: 'ma_add_participant'; projectId: number }
+  | { type: 'ma_remove_participant'; projectId: number }
+  | { type: 'ma_reorder_participant'; projectId: number; direction: 'up' | 'down' }
+  | { type: 'ma_set_draft_prompt'; text: string }
+  | { type: 'ma_dismiss_active' };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -224,6 +323,66 @@ export function reduce(state: AppState, action: Action): AppState {
       return s;
     }
 
+    case 'ma_set_view':
+      return { ...state, multiAgent: { ...state.multiAgent, view: action.view } };
+
+    case 'ma_set_mode':
+      return { ...state, multiAgent: { ...state.multiAgent, mode: action.mode } };
+
+    case 'ma_set_lifecycle':
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, draftLifecycle: action.lifecycle },
+      };
+
+    case 'ma_add_participant': {
+      const cur = state.multiAgent.draftParticipants;
+      // Drag-twice is a no-op. Order preserved by append-only.
+      if (cur.includes(action.projectId)) return state;
+      // Reject ids that aren't in the current project list — protects against
+      // a stale drag payload (e.g. project deleted in another tab between
+      // dragstart and drop).
+      if (!state.projects.some((p) => p.id === action.projectId)) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          draftParticipants: [...cur, action.projectId],
+        },
+      };
+    }
+
+    case 'ma_remove_participant':
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          draftParticipants: state.multiAgent.draftParticipants.filter(
+            (id) => id !== action.projectId,
+          ),
+        },
+      };
+
+    case 'ma_reorder_participant': {
+      const list = state.multiAgent.draftParticipants;
+      const idx = list.indexOf(action.projectId);
+      if (idx === -1) return state;
+      const swap = action.direction === 'up' ? idx - 1 : idx + 1;
+      if (swap < 0 || swap >= list.length) return state;
+      const next = list.slice();
+      [next[idx], next[swap]] = [next[swap]!, next[idx]!];
+      return { ...state, multiAgent: { ...state.multiAgent, draftParticipants: next } };
+    }
+
+    case 'ma_set_draft_prompt':
+      return { ...state, multiAgent: { ...state.multiAgent, draftPrompt: action.text } };
+
+    case 'ma_dismiss_active':
+      // Only allow dismissing an ended run; refusing to drop a live session
+      // protects against an accidental click while events are still streaming.
+      if (!state.multiAgent.active || state.multiAgent.active.status === 'running') return state;
+      return { ...state, multiAgent: { ...state.multiAgent, active: null } };
+
     case 'server':
       return reduceServer(state, action.msg);
   }
@@ -232,6 +391,17 @@ export function reduce(state: AppState, action: Action): AppState {
 function reduceServer(state: AppState, msg: ServerMsg): AppState {
   switch (msg.type) {
     case 'projects': {
+      // Prune any drafted multi-agent participants that vanished from the
+      // refreshed list. Without this, a workspace switch would leave dangling
+      // ids in the drop zone that no longer match any project. The order of
+      // the remaining ids is preserved.
+      const knownIds = new Set(msg.projects.map((p) => p.id));
+      const prunedDraft = state.multiAgent.draftParticipants.filter((id) => knownIds.has(id));
+      const draftChanged = prunedDraft.length !== state.multiAgent.draftParticipants.length;
+      const nextMultiAgent = draftChanged
+        ? { ...state.multiAgent, draftParticipants: prunedDraft }
+        : state.multiAgent;
+
       // When a fresh project list arrives that no longer contains the
       // currently-active project (typical case: user changed the workspace
       // root), drop activeProjectId and the orphaned session state. Without
@@ -241,7 +411,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       const activeStillPresent =
         state.activeProjectId !== null && msg.projects.some((p) => p.id === state.activeProjectId);
       if (activeStillPresent) {
-        return { ...state, projects: msg.projects };
+        return { ...state, projects: msg.projects, multiAgent: nextMultiAgent };
       }
       return {
         ...state,
@@ -257,6 +427,102 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         sessionToProject: {},
         knownSessions: {},
         permissionModeBySession: {},
+        multiAgent: nextMultiAgent,
+      };
+    }
+
+    case 'bus_integration_changed': {
+      // Defensive in-place update — the server also sends a refreshed
+      // `projects` payload right after, but applying the targeted change
+      // first keeps the UI snappy and idempotent under reordering. If the
+      // project id isn't tracked (rare race; would be replaced by the
+      // followup `projects` anyway), skip silently.
+      const idx = state.projects.findIndex((p) => p.id === msg.projectId);
+      if (idx === -1) return state;
+      const next = state.projects.slice();
+      next[idx] = {
+        ...next[idx]!,
+        busInstalled: msg.installed,
+        busAgentName: msg.agentName,
+      };
+      return { ...state, projects: next };
+    }
+
+    case 'multi_agent_started': {
+      // Transition the Multi-Agent tab into "running" mode. Clear any prior
+      // run that the operator hadn't dismissed yet — a new Start is a
+      // deliberate signal that we're moving on.
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          // Auto-switch to the Multi-Agent view so the operator sees the
+          // scrollback even if the start was triggered from elsewhere.
+          view: 'multi-agent',
+          active: {
+            sessionId: msg.sessionId,
+            mode: msg.mode,
+            participantAgentNames: msg.participantAgentNames,
+            tmuxSession: msg.tmuxSession,
+            status: 'running',
+            events: [],
+            iterationId: null,
+            lifecycle: msg.lifecycle,
+            sessionFolder: msg.sessionFolder,
+          },
+        },
+      };
+    }
+
+    case 'multi_agent_event': {
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      // De-dupe by eventId. The server numbers events monotonically; in
+      // practice we never see duplicates, but a defensive check costs ~O(N)
+      // on an unbounded list. For a multi-agent session the event count is
+      // small (dozens, not thousands), so the scan is fine. If this grows,
+      // swap for a tail-only check or a Map<eventId, EventView>.
+      if (active.events.some((e) => e.eventId === msg.eventId)) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: {
+            ...active,
+            events: [
+              ...active.events,
+              {
+                eventId: msg.eventId,
+                ts: msg.ts,
+                source: msg.source,
+                destination: msg.destination,
+                kind: msg.kind,
+                text: msg.text,
+              },
+            ],
+          },
+        },
+      };
+    }
+
+    case 'multi_agent_ended': {
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, status: msg.reason, iterationId: msg.iterationId },
+        },
+      };
+    }
+
+    case 'iterations': {
+      // Reply to `list_iterations`. Replace the cached list wholesale —
+      // the server is the source of truth.
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, iterations: msg.items },
       };
     }
 

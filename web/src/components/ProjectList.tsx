@@ -12,6 +12,7 @@ export function ProjectList(props: {
   onSelectSession: (projectId: number, sessionId: string) => void;
   onNewSession: (projectId: number) => void;
   onToggleTrust: (id: number, trusted: boolean) => void;
+  onUninstallBus: (projectId: number) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
 }) {
   return (
@@ -30,6 +31,16 @@ export function ProjectList(props: {
                   ? undefined
                   : `No CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
               }
+              draggable
+              onDragStart={(e) => {
+                // JSON payload with a kind tag so the Multi-Agent drop zone
+                // can validate that it came from us rather than another app.
+                e.dataTransfer.setData(
+                  'application/json',
+                  JSON.stringify({ kind: 'cebab-project', id: p.id }),
+                );
+                e.dataTransfer.effectAllowed = 'copy';
+              }}
               onClick={() => props.onSelectProject(p.id)}
             >
               <span
@@ -40,6 +51,21 @@ export function ProjectList(props: {
                 <ClaudeMark className="claude-mark" title="Agent project (CLAUDE.md present)" />
               )}
               <span className="project-name">{p.name}</span>
+              {p.busInstalled && (
+                <button
+                  className="bus-installed-pill"
+                  title={`Bus integration installed (agent: ${p.busAgentName ?? '?'}).\nClick to uninstall: removes the @import line from CLAUDE.md and Cebab-owned entries from .claude/settings.json. Operator content is preserved. Inboxes and archive under the session folder are left in place.`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const ok = window.confirm(
+                      `Uninstall bus integration from "${p.name}"?\n\nThis removes the @import line from CLAUDE.md and the Cebab-owned entries from .claude/settings.json. Operator content is preserved.`,
+                    );
+                    if (ok) props.onUninstallBus(p.id);
+                  }}
+                >
+                  bus
+                </button>
+              )}
               <button
                 className={`trust ${p.trusted ? 'on' : 'off'}`}
                 title={p.trusted ? 'Trusted (auto-approve tools)' : 'Asks before tool use'}

@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
-import type { SessionPermissionMode } from '@cebab/shared/protocol';
+import type { MultiAgentLifecycle, SessionPermissionMode } from '@cebab/shared/protocol';
 import { connectWs, type WsHandle } from './ws';
 import { activeSession, initialState, isSessionPending, reduce } from './store';
 import { ProjectList } from './components/ProjectList';
@@ -7,6 +7,7 @@ import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
 import { SettingsModal } from './components/SettingsModal';
+import { MultiAgentTab } from './components/MultiAgentTab';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
@@ -129,9 +130,98 @@ export function App() {
     setSettingsOpen(false);
   }
 
+  function setMultiAgentMode(mode: 'chain' | 'orchestrator') {
+    dispatch({ type: 'ma_set_mode', mode });
+  }
+  function setMultiAgentLifecycle(lifecycle: MultiAgentLifecycle) {
+    dispatch({ type: 'ma_set_lifecycle', lifecycle });
+  }
+  function addParticipant(projectId: number) {
+    dispatch({ type: 'ma_add_participant', projectId });
+  }
+  function removeParticipant(projectId: number) {
+    dispatch({ type: 'ma_remove_participant', projectId });
+  }
+  function reorderParticipant(projectId: number, direction: 'up' | 'down') {
+    dispatch({ type: 'ma_reorder_participant', projectId, direction });
+  }
+  function installBus(projectId: number) {
+    wsRef.current?.send({ type: 'install_bus_integration', projectId });
+  }
+  function uninstallBus(projectId: number) {
+    wsRef.current?.send({ type: 'uninstall_bus_integration', projectId });
+  }
+  function setDraftPrompt(text: string) {
+    dispatch({ type: 'ma_set_draft_prompt', text });
+  }
+  function startChain() {
+    const { mode, draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
+    if (mode !== 'chain') return;
+    if (draftPrompt.trim().length === 0) return;
+    if (draftParticipants.length < 2) return;
+    wsRef.current?.send({
+      type: 'start_multi_agent',
+      mode: 'chain',
+      participants: draftParticipants,
+      initialPrompt: draftPrompt,
+      lifecycle: draftLifecycle,
+    });
+  }
+  function startOrchestrator() {
+    const { mode, draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
+    if (mode !== 'orchestrator') return;
+    if (draftPrompt.trim().length === 0) return;
+    // Orchestrator mode is hub-and-spoke; even one worker is functional
+    // (degenerate, but useful for smoke testing the routing path).
+    if (draftParticipants.length < 1) return;
+    wsRef.current?.send({
+      type: 'start_multi_agent',
+      mode: 'orchestrator',
+      participants: draftParticipants,
+      initialPrompt: draftPrompt,
+      lifecycle: draftLifecycle,
+    });
+  }
+  function stopMultiAgent(sessionId: string) {
+    wsRef.current?.send({ type: 'stop_multi_agent', sessionId });
+  }
+  function sendMultiAgentUserPrompt(sessionId: string, text: string) {
+    // Caller (the active-run input) already trims; nothing else to validate
+    // here. The reducer doesn't track an optimistic local copy — the prompt
+    // round-trips through bus.log as a `multi_agent_event` with
+    // source=cebab, so it shows up in the scrollback like any other event.
+    wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text });
+  }
+  function dismissActiveRun() {
+    dispatch({ type: 'ma_dismiss_active' });
+  }
+  function refreshIterations() {
+    wsRef.current?.send({ type: 'list_iterations' });
+  }
+
+  // Lazy-load iterations on first switch into the Multi-Agent tab. Also
+  // refresh after each `multi_agent_ended` so a just-finished run appears
+  // without an explicit user action.
+  const maView = state.multiAgent.view;
+  const iterationsLoaded = state.multiAgent.iterations !== null;
+  const activeStatus = state.multiAgent.active?.status;
+  useEffect(() => {
+    if (maView === 'multi-agent' && !iterationsLoaded) {
+      refreshIterations();
+    }
+  }, [maView, iterationsLoaded]);
+  useEffect(() => {
+    // status flips from 'running' → terminal exactly once per session.
+    // Refresh so the iteration browser picks up the just-ended row.
+    if (activeStatus && activeStatus !== 'running') {
+      refreshIterations();
+    }
+  }, [activeStatus]);
+
   const running = session?.status === 'running';
   const workspaceReady = state.settings?.workspaceRootValid ?? false;
   const inputDisabled = !state.activeProjectId || running || !workspaceReady;
+  const view = state.multiAgent.view;
 
   return (
     <div className="app">
@@ -153,6 +243,7 @@ export function App() {
           onSelectSession={selectSession}
           onNewSession={newSession}
           onToggleTrust={toggleTrust}
+          onUninstallBus={uninstallBus}
           onRenameSession={renameSession}
         />
         <footer className="sidebar-footer">
@@ -188,15 +279,54 @@ export function App() {
           </div>
         ) : (
           <>
-            {session && !isSessionPending(session.id) && (
-              <ModeToggle
-                mode={permissionMode}
-                disabled={!sessionIsLive}
-                onChange={setPermissionMode}
+            <nav className="main-tabs" aria-label="Main view">
+              <button
+                className={`main-tab ${view === 'chat' ? 'active' : ''}`}
+                onClick={() => dispatch({ type: 'ma_set_view', view: 'chat' })}
+                aria-pressed={view === 'chat'}
+              >
+                Chat
+              </button>
+              <button
+                className={`main-tab ${view === 'multi-agent' ? 'active' : ''}`}
+                onClick={() => dispatch({ type: 'ma_set_view', view: 'multi-agent' })}
+                aria-pressed={view === 'multi-agent'}
+              >
+                Multi-agent
+              </button>
+            </nav>
+            {view === 'chat' ? (
+              <>
+                {session && !isSessionPending(session.id) && (
+                  <ModeToggle
+                    mode={permissionMode}
+                    disabled={!sessionIsLive}
+                    onChange={setPermissionMode}
+                  />
+                )}
+                <ChatView session={session} onPermissionDecide={decidePermission} />
+                <InputBox disabled={inputDisabled} onSend={sendMessage} />
+              </>
+            ) : (
+              <MultiAgentTab
+                projects={state.projects}
+                multiAgent={state.multiAgent}
+                onSetMode={setMultiAgentMode}
+                onSetLifecycle={setMultiAgentLifecycle}
+                onAddParticipant={addParticipant}
+                onRemoveParticipant={removeParticipant}
+                onReorderParticipant={reorderParticipant}
+                onInstallBus={installBus}
+                onUninstallBus={uninstallBus}
+                onSetDraftPrompt={setDraftPrompt}
+                onStartChain={startChain}
+                onStartOrchestrator={startOrchestrator}
+                onStopMultiAgent={stopMultiAgent}
+                onSendUserPrompt={sendMultiAgentUserPrompt}
+                onDismissActive={dismissActiveRun}
+                onRefreshIterations={refreshIterations}
               />
             )}
-            <ChatView session={session} onPermissionDecide={decidePermission} />
-            <InputBox disabled={inputDisabled} onSend={sendMessage} />
           </>
         )}
       </main>

@@ -17,6 +17,22 @@ export type Project = {
    * state without needing an explicit refresh.
    */
   hasClaudeMd: boolean;
+  /**
+   * True iff Cebab has installed its bus integration into this project — i.e.
+   * appended the `@import` line to its CLAUDE.md and merged a Stop hook +
+   * pre-approved bash perms into its `.claude/settings.json`. Only projects
+   * with this flag can participate in a multi-agent session.
+   *
+   * Stored in the DB (column `projects.bus_installed`). Toggled by
+   * `install_bus_integration` / `uninstall_bus_integration` ClientMsgs.
+   */
+  busInstalled: boolean;
+  /**
+   * The filesystem-safe agent slug captured at install time (e.g. project
+   * name "Cebab" → `cebab`). Used to address this project in bus.log entries
+   * and in inter-agent messages. Null when `busInstalled` is false.
+   */
+  busAgentName: string | null;
 };
 
 export type SessionSummary = {
@@ -99,6 +115,84 @@ export type ClientMsg =
       type: 'rename_session';
       sessionId: string;
       title: string | null;
+    }
+  | {
+      /**
+       * Install bus integration into a project: append `@import` to its
+       * CLAUDE.md and merge Stop hook + scoped bash perms into its
+       * `.claude/settings.json`. Operator content in both files is preserved.
+       * Idempotent. Reply: `bus_integration_changed` + refreshed `projects`.
+       */
+      type: 'install_bus_integration';
+      projectId: number;
+    }
+  | {
+      /**
+       * Reverse of `install_bus_integration`. Removes our additions only;
+       * operator content stays. The bus directory entries (inboxes, archive,
+       * comm.md) are intentionally left in place for debugging — uninstall
+       * is logical, not destructive.
+       */
+      type: 'uninstall_bus_integration';
+      projectId: number;
+    }
+  | {
+      /**
+       * Start a multi-agent session. `participants` is an ordered list of
+       * project ids; for chain mode the order is the hop order, for
+       * orchestrator mode it's preserved cosmetically.
+       *
+       * `initialPrompt` is the seed input. In chain mode it's written to the
+       * first participant's inbox and triggers the chain. In orchestrator
+       * mode it's the first user prompt the orchestrator sees.
+       *
+       * `lifecycle` (optional, defaults server-side to 'persistent'):
+       *   - 'persistent': session folder + bus installs survive End;
+       *     resume works.
+       *   - 'temp': on End the session folder is rm-rf'd and bus install
+       *     is removed from each participant. Lets the operator run a
+       *     one-off session without leaving residue.
+       *
+       * v1 supports one active multi-agent session at a time per connection.
+       * Calling this while another is running yields a `wrapper_error`.
+       */
+      type: 'start_multi_agent';
+      mode: 'chain' | 'orchestrator';
+      participants: number[];
+      initialPrompt: string;
+      lifecycle?: MultiAgentLifecycle;
+    }
+  | {
+      /**
+       * Stop a running multi-agent session. Kills the tmux session, stops
+       * the bus log tailer, marks the DB row `stopped`. Idempotent.
+       */
+      type: 'stop_multi_agent';
+      sessionId: string;
+    }
+  | {
+      /**
+       * Forward a user prompt to the active orchestrator-routed session.
+       * Cebab writes the text to the orchestrator's bus inbox (`kind=prompt`,
+       * `source=cebab`) and wakes its TUI; the orchestrator then routes it
+       * to whichever participant best fits.
+       *
+       * Only meaningful in orchestrator mode — chain sessions ignore this
+       * with a `wrapper_error`. The first user prompt is delivered as part
+       * of `start_multi_agent.initialPrompt`; subsequent prompts come
+       * through this message.
+       */
+      type: 'multi_agent_user_prompt';
+      sessionId: string;
+      text: string;
+    }
+  | {
+      /**
+       * Ask the server for the list of past multi-agent runs (iterations).
+       * Server replies with an `iterations` ServerMsg. Used by the
+       * Multi-Agent tab's Iterations section.
+       */
+      type: 'list_iterations';
     };
 
 // ---- Server → Browser ----
@@ -166,4 +260,122 @@ export type ServerMsg =
       workspaceRootValid: boolean;
       defaultWorkspaceRoot: string;
     }
+  | {
+      /**
+       * Broadcast when a project's bus-integration state flips (install or
+       * uninstall succeeded). The client updates its local `Project` cache;
+       * a refreshed `projects` ServerMsg typically follows for completeness.
+       */
+      type: 'bus_integration_changed';
+      projectId: number;
+      installed: boolean;
+      agentName: string | null;
+    }
+  | {
+      /**
+       * Multi-agent session has been started. Carries enough info for the
+       * client to switch its Multi-Agent tab into "running" mode.
+       *
+       * `participantAgentNames` is the resolved bus slug for each participant
+       * (in the same order as the start request); the client uses these to
+       * tag events in the scrollback ("from: reviewer").
+       *
+       * `lifecycle` echoes back the persistent-vs-temp choice so the UI
+       * can render the right End-button affordance (e.g. a confirm
+       * dialog warning about cleanup for temp sessions).
+       *
+       * `sessionFolder` is the absolute on-disk path the session is
+       * writing to — surfaced so the operator can copy/inspect.
+       */
+      type: 'multi_agent_started';
+      sessionId: string;
+      mode: 'chain' | 'orchestrator';
+      participants: number[];
+      participantAgentNames: string[];
+      tmuxSession: string;
+      lifecycle: MultiAgentLifecycle;
+      sessionFolder: string;
+    }
+  | {
+      /**
+       * One inter-agent (or briefing, or final) message observed on the bus.
+       * Streamed live from the bus log tailer. `kind` matches the DB enum.
+       *
+       * `destination` is either another agent's bus slug or one of the
+       * sentinels: `user` (orchestrator → user, intercepted by Cebab) and
+       * `_sink` (chain terminal — last participant's reply).
+       */
+      type: 'multi_agent_event';
+      sessionId: string;
+      eventId: number;
+      ts: number;
+      source: string;
+      destination: string;
+      kind: MultiAgentEventKind;
+      text: string;
+    }
+  | {
+      /**
+       * Multi-agent session ended. `iterationId` is non-null on successful
+       * chain completion (points at the iteration store directory).
+       */
+      type: 'multi_agent_ended';
+      sessionId: string;
+      reason: 'completed' | 'stopped' | 'crashed';
+      iterationId: string | null;
+    }
+  | {
+      /**
+       * Reply to `list_iterations`. One entry per persisted multi-agent
+       * session that has an iteration id (post-migration-006 rows).
+       * `artifactsDir` is an absolute filesystem path to the on-disk
+       * iteration directory; the client renders it for the operator to
+       * copy or `cd` to.
+       */
+      type: 'iterations';
+      items: IterationSummary[];
+    }
   | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string };
+
+/**
+ * One past multi-agent run, as surfaced to the Iterations browser UI.
+ */
+export type IterationSummary = {
+  iterationId: string;
+  sessionId: string;
+  mode: 'chain' | 'orchestrator';
+  status: 'running' | 'completed' | 'stopped' | 'crashed';
+  startedAt: number;
+  endedAt: number | null;
+  /**
+   * For chain mode: agent slugs in hop order. For orchestrator mode: the
+   * worker slugs (orchestrator is implicit; the UI prepends it). The list
+   * filters out participants whose project row has been deleted since the
+   * session ran.
+   */
+  participantAgentNames: string[];
+  /** Absolute path to `~/.cebab/bus/iterations/<iterationId>/`. */
+  artifactsDir: string;
+};
+
+export type MultiAgentEventKind = 'intro' | 'prompt' | 'reply' | 'final' | 'error';
+
+/**
+ * Session lifecycle: 'persistent' sessions survive End and can be
+ * resumed; 'temp' sessions clean up their folder + uninstall bus from
+ * participants on End. Default in the server is 'persistent' so an
+ * absent `lifecycle` field in `start_multi_agent` resolves safely.
+ */
+export type MultiAgentLifecycle = 'persistent' | 'temp';
+
+export const MULTI_AGENT_EVENT_KINDS: ReadonlySet<MultiAgentEventKind> = new Set([
+  'intro',
+  'prompt',
+  'reply',
+  'final',
+  'error',
+]);
+
+export function isMultiAgentEventKind(v: unknown): v is MultiAgentEventKind {
+  return typeof v === 'string' && MULTI_AGENT_EVENT_KINDS.has(v as MultiAgentEventKind);
+}
