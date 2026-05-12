@@ -1,0 +1,15 @@
+-- Track which iteration directory a multi-agent session wrote artifacts to.
+--
+-- The iteration id is allocated by the bus runtime at session start (NNN,
+-- zero-padded; see `nextIterationId` in `server/src/bus/runtime.ts`) and
+-- used as the on-disk directory name under `~/.cebab/bus/iterations/`.
+--
+-- Storing it on the session row serves two purposes:
+--   1. Resume after Cebab restart can know where the session's artifacts
+--      live without scanning the iterations dir.
+--   2. The iteration browser (PR 6 UI) can list past runs and link straight
+--      to their artifact directory.
+--
+-- Pre-006 sessions are NULL — they predate this column. The iteration
+-- browser shows "(no iteration recorded)" for those.
+ALTER TABLE multi_agent_sessions ADD COLUMN iteration_id TEXT;

@@ -9,6 +9,10 @@ export type ProjectRow = {
   missing: number;
   created_at: number;
   last_used_at: number | null;
+  /** 1 if this project has had bus integration installed (PR 1). */
+  bus_installed: number;
+  /** Filesystem-safe agent slug captured at install time. NULL if not installed. */
+  bus_agent_name: string | null;
 };
 
 export function upsertProject(name: string, path: string): ProjectRow {

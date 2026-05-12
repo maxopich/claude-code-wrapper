@@ -31,9 +31,31 @@ import {
   syncWorkspaceProjects,
   workspaceRootValid,
 } from '../workspace.js';
+import type { MultiAgentLifecycle } from '@cebab/shared/protocol';
 import { translate } from './translate.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
+import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
+import {
+  resolveChainParticipants,
+  startChainSession,
+  type ChainSessionHandle,
+} from '../bus/chain.js';
+import {
+  resolveOrchestratorWorkers,
+  startOrchestratorSession,
+  type OrchestratorSessionHandle,
+} from '../bus/orchestrator.js';
+import { ResolveAgentError } from '../bus/runtime.js';
+import { attemptResumeMultiAgent } from '../bus/resume.js';
+import {
+  listMultiAgentSessionsWithIteration,
+  listResolvedParticipants,
+} from '../repo/multi_agent.js';
+import { busIterationDir } from '../bus/paths.js';
+import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
+import type { IterationSummary } from '@cebab/shared/protocol';
+import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
 
 type PendingPermission = {
   sessionId: string;
@@ -56,6 +78,12 @@ type Conn = {
   ws: WebSocket;
   pendingPermissions: Map<string, PendingPermission>;
   inFlight: Map<string, InFlight>;
+  /** At most one active multi-agent session per connection in v1 (per the
+   *  plan's "one active session at a time"). Cleared on completion, stop,
+   *  crash, or WS close. Orchestrator sessions carry an extra
+   *  `sendUserPrompt` method; the WS handler narrows via `'sendUserPrompt'
+   *  in active` rather than carrying a separate mode discriminator here. */
+  multiAgent: ChainSessionHandle | OrchestratorSessionHandle | null;
 };
 
 /** Origins permitted to upgrade to a WS. Built once, lazily. */
@@ -109,7 +137,12 @@ function send(ws: WebSocket, msg: ServerMsg): void {
 
 function onConnection(ws: WebSocket): void {
   console.log('[ws] client connected');
-  const conn: Conn = { ws, pendingPermissions: new Map(), inFlight: new Map() };
+  const conn: Conn = {
+    ws,
+    pendingPermissions: new Map(),
+    inFlight: new Map(),
+    multiAgent: null,
+  };
 
   ws.on('message', (raw) => {
     let parsed: ClientMsg;
@@ -137,7 +170,98 @@ function onConnection(ws: WebSocket): void {
     conn.pendingPermissions.clear();
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
+    // Multi-agent: detach but DON'T kill. The bus session keeps running in
+    // tmux; the DB row stays 'running'. A future WS connect (browser
+    // refresh, Cebab restart, second window) calls `attemptResumeMultiAgent`
+    // to re-attach. The Stop button is the only way an operator
+    // intentionally tears a session down.
+    if (conn.multiAgent) {
+      conn.multiAgent.detach();
+      conn.multiAgent = null;
+    }
   });
+
+  // Attempt to re-attach to any pre-existing multi-agent session. Runs in
+  // the background; we don't block the WS open. If a resume succeeds, the
+  // browser receives a `multi_agent_started` + the persisted event replay
+  // and its reducer transitions into the active-run view.
+  void resumeOnConnect(conn);
+}
+
+/**
+ * Async helper that runs after a WS connect: look up any active multi-agent
+ * session in the DB, validate against tmux, and re-attach if alive. Catches
+ * its own errors so a failed resume doesn't leak into the WS error handler.
+ */
+async function resumeOnConnect(conn: Conn): Promise<void> {
+  try {
+    const resumed = await attemptResumeMultiAgent({
+      onEvent: (sessionId, ev, dbEventId) => {
+        const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
+        send(conn.ws, {
+          type: 'multi_agent_event',
+          sessionId,
+          eventId: dbEventId,
+          ts: ev.ts,
+          source: ev.source,
+          destination: ev.destination,
+          kind,
+          text: ev.text,
+        });
+      },
+      onEnded: (sessionId, reason, iterationId) => {
+        send(conn.ws, {
+          type: 'multi_agent_ended',
+          sessionId,
+          reason,
+          iterationId,
+        });
+        if (conn.multiAgent?.sessionId === sessionId) {
+          conn.multiAgent = null;
+        }
+      },
+    });
+    if (!resumed) return;
+
+    conn.multiAgent = resumed.handle;
+    // Tell the browser this session is active. The reducer's
+    // `multi_agent_started` case CLEARS the event list to [], so the
+    // replay below populates it fresh in DB order.
+    send(conn.ws, {
+      type: 'multi_agent_started',
+      sessionId: resumed.handle.sessionId,
+      mode: resumed.mode,
+      // We don't know the original `participants` (project ids) because
+      // they're only carried on the start request, not the DB row. The
+      // reducer doesn't use this field beyond the started message; pass
+      // an empty list. (PR 6 could DB-persist the original project ids if
+      // we ever need them client-side — out of scope here.)
+      participants: [],
+      participantAgentNames: resumed.handle.participantAgentNames,
+      tmuxSession: resumed.handle.tmuxSession,
+      lifecycle: resumed.handle.lifecycle,
+      sessionFolder: resumed.handle.sessionFolder,
+    });
+    // Replay persisted events in DB-id order. The tailer is already
+    // attached (at EOF); live events from the resumed session will arrive
+    // after this loop completes since the JS event loop is busy
+    // synchronously sending these.
+    for (const ev of resumed.replayEvents) {
+      const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
+      send(conn.ws, {
+        type: 'multi_agent_event',
+        sessionId: resumed.handle.sessionId,
+        eventId: ev.dbEventId,
+        ts: ev.ts,
+        source: ev.source,
+        destination: ev.destination,
+        kind,
+        text: ev.text,
+      });
+    }
+  } catch (err) {
+    console.error('[ws] resumeOnConnect failed', err);
+  }
 }
 
 function emitSettings(conn: Conn): void {
@@ -350,6 +474,298 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       } else {
         f.ac.abort();
       }
+      return;
+    }
+    case 'install_bus_integration': {
+      try {
+        const result = await installBusForProject(msg.projectId);
+        send(conn.ws, {
+          type: 'bus_integration_changed',
+          projectId: msg.projectId,
+          installed: true,
+          agentName: result.agentName,
+        });
+        // Refresh the whole project list so any client tab that renders the
+        // `busInstalled` flag picks up the change in one place. Cheap on this
+        // single-user app; the project list is bounded by workspace size.
+        const rows = await syncWorkspaceProjects();
+        send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      } catch (err) {
+        const message =
+          err instanceof InstallError
+            ? `${err.code}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+      }
+      return;
+    }
+    case 'uninstall_bus_integration': {
+      try {
+        await uninstallBusForProject(msg.projectId);
+        send(conn.ws, {
+          type: 'bus_integration_changed',
+          projectId: msg.projectId,
+          installed: false,
+          agentName: null,
+        });
+        const rows = await syncWorkspaceProjects();
+        send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      } catch (err) {
+        const message =
+          err instanceof InstallError
+            ? `${err.code}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+      }
+      return;
+    }
+    case 'start_multi_agent': {
+      if (conn.multiAgent) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: `another multi-agent session is already running (${conn.multiAgent.sessionId}); stop it first.`,
+        });
+        return;
+      }
+      if (!Array.isArray(msg.participants) || msg.participants.length === 0) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: 'a multi-agent session needs at least one participant.',
+        });
+        return;
+      }
+      // Mode-specific minimum participant counts. Chain mode is a pipeline
+      // (≥2 hops to be useful); orchestrator mode is hub-and-spoke (one
+      // worker is degenerate but allowed for smoke testing).
+      if (msg.mode === 'chain' && msg.participants.length < 2) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: 'chain mode requires at least two participants.',
+        });
+        return;
+      }
+      // Event forwarders shared between modes — translate BusLogEvent →
+      // `multi_agent_event` ServerMsg. `sessionId` is passed by the runtime
+      // as the callback's first arg (NOT closed over from a `const handle =
+      // await ...` value), so callbacks firing DURING the await — which
+      // happens routinely while the tailer picks up the briefings / roster
+      // / initial-prompt writes during the 5s TUI warmup — don't hit TDZ.
+      const onEvent = (
+        sessionId: string,
+        ev: { ts: number; source: string; destination: string; kind: string; text: string },
+        dbEventId: number,
+      ) => {
+        const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
+        send(conn.ws, {
+          type: 'multi_agent_event',
+          sessionId,
+          eventId: dbEventId,
+          ts: ev.ts,
+          source: ev.source,
+          destination: ev.destination,
+          kind,
+          text: ev.text,
+        });
+      };
+      const onEnded = (
+        sessionId: string,
+        reason: 'completed' | 'stopped' | 'crashed',
+        iterationId: string | null,
+      ) => {
+        send(conn.ws, {
+          type: 'multi_agent_ended',
+          sessionId,
+          reason,
+          iterationId,
+        });
+        if (conn.multiAgent?.sessionId === sessionId) {
+          conn.multiAgent = null;
+        }
+      };
+
+      // Per-session folders live under the workspace root, so it must be
+      // a valid existing directory. The Settings modal validates on save,
+      // but a workspace that was deleted between then and now would slip
+      // through — bail with a useful error.
+      if (!workspaceRootValid()) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message:
+            'workspace root is not set or no longer exists; pick a workspace folder in Settings first.',
+        });
+        return;
+      }
+      const workspaceRoot = resolveWorkspaceRoot();
+      // Lifecycle is optional on the wire; default 'persistent' here so
+      // pre-007 clients (or any that forget to send it) get the safer
+      // resumable behavior.
+      const lifecycle: MultiAgentLifecycle = msg.lifecycle ?? 'persistent';
+
+      if (msg.mode === 'orchestrator') {
+        let workers;
+        try {
+          workers = resolveOrchestratorWorkers(msg.participants);
+        } catch (err) {
+          const message =
+            err instanceof ResolveAgentError
+              ? `${err.code}: ${err.message}`
+              : err instanceof Error
+                ? err.message
+                : String(err);
+          send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+          return;
+        }
+        try {
+          const handle = await startOrchestratorSession({
+            workers,
+            initialPrompt: msg.initialPrompt,
+            workspaceRoot,
+            lifecycle,
+            onEvent,
+            onEnded,
+          });
+          conn.multiAgent = handle;
+          send(conn.ws, {
+            type: 'multi_agent_started',
+            sessionId: handle.sessionId,
+            mode: 'orchestrator',
+            participants: msg.participants,
+            participantAgentNames: handle.participantAgentNames,
+            tmuxSession: handle.tmuxSession,
+            lifecycle: handle.lifecycle,
+            sessionFolder: handle.sessionFolder,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        }
+        return;
+      }
+
+      // Chain mode.
+      let participants;
+      try {
+        participants = resolveChainParticipants(msg.participants);
+      } catch (err) {
+        const message =
+          err instanceof ResolveAgentError
+            ? `${err.code}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        return;
+      }
+      try {
+        const handle = await startChainSession({
+          participants,
+          initialPrompt: msg.initialPrompt,
+          workspaceRoot,
+          lifecycle,
+          onEvent,
+          onEnded,
+        });
+        conn.multiAgent = handle;
+        send(conn.ws, {
+          type: 'multi_agent_started',
+          sessionId: handle.sessionId,
+          mode: 'chain',
+          participants: msg.participants,
+          participantAgentNames: handle.participantAgentNames,
+          tmuxSession: handle.tmuxSession,
+          lifecycle: handle.lifecycle,
+          sessionFolder: handle.sessionFolder,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+      }
+      return;
+    }
+    case 'multi_agent_user_prompt': {
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        // Either no active session or a different one. Drop silently — the
+        // client may have raced a `multi_agent_ended` event.
+        return;
+      }
+      if (!('sendUserPrompt' in active)) {
+        // Chain mode doesn't accept mid-flight user prompts; it's fire-
+        // and-forget after the initial input lands in participant[0]'s
+        // inbox. Surface as a wrapper_error so the operator gets feedback.
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: 'chain-mode sessions do not accept mid-flight user prompts.',
+        });
+        return;
+      }
+      try {
+        await active.sendUserPrompt(msg.text);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+      }
+      return;
+    }
+    case 'stop_multi_agent': {
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        // Either no active session or one with a different id. Idempotent
+        // no-op — the caller may have raced a `multi_agent_ended` event.
+        return;
+      }
+      try {
+        await active.stop('stopped');
+      } catch (err) {
+        console.error('[ws] stop_multi_agent failed', err);
+        // onEnded won't fire if stop threw; emit a synthetic ended so the
+        // client doesn't get stuck in 'running' state.
+        send(conn.ws, {
+          type: 'multi_agent_ended',
+          sessionId: active.sessionId,
+          reason: 'crashed',
+          iterationId: null,
+        });
+        conn.multiAgent = null;
+      }
+      return;
+    }
+    case 'list_iterations': {
+      // Read all sessions with iteration_id (post-006). For each, JOIN
+      // participants → projects to get the agent slug list. Filter to a
+      // status the iteration browser cares about.
+      const rows = listMultiAgentSessionsWithIteration();
+      const items: IterationSummary[] = rows.map((row) => {
+        const participants = listResolvedParticipants(row.id);
+        const workerNames = participants
+          .map((p) => p.bus_agent_name)
+          .filter((n): n is string => n !== null);
+        const participantAgentNames =
+          row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+        return {
+          iterationId: row.iteration_id!,
+          sessionId: row.id,
+          mode: row.mode as 'chain' | 'orchestrator',
+          status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
+          startedAt: row.started_at,
+          endedAt: row.ended_at,
+          participantAgentNames,
+          // Absolute path so the browser can render it for clipboard /
+          // `cd` use. The filesystem layout under iterations/NNN/ is the
+          // operator's source of truth — Cebab doesn't proxy it.
+          artifactsDir: busIterationDir(row.iteration_id!),
+        };
+      });
+      send(conn.ws, { type: 'iterations', items });
       return;
     }
     case 'send_message': {

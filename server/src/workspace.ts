@@ -84,6 +84,8 @@ export function rowToProject(row: ProjectRow) {
     trusted: row.trusted === 1,
     lastUsedAt: row.last_used_at,
     hasClaudeMd: hasClaudeMdAt(row.path),
+    busInstalled: row.bus_installed === 1,
+    busAgentName: row.bus_agent_name,
   };
 }
 

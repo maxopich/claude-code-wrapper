@@ -256,6 +256,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: false,
             lastUsedAt: null,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
           {
             id: 2,
@@ -264,6 +266,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: false,
             lastUsedAt: null,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
         ],
       },
@@ -298,6 +302,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: false,
             lastUsedAt: null,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
           {
             id: 12,
@@ -306,6 +312,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: false,
             lastUsedAt: null,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
         ],
       },
@@ -332,6 +340,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: false,
             lastUsedAt: null,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
         ],
       },
@@ -357,6 +367,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: true,
             lastUsedAt: 1000,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
           {
             id: 2,
@@ -365,6 +377,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: false,
             lastUsedAt: null,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
           {
             id: 3,
@@ -373,6 +387,8 @@ describe('store / projects refresh (workspace switch)', () => {
             trusted: false,
             lastUsedAt: null,
             hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
           },
         ],
       },
@@ -382,5 +398,188 @@ describe('store / projects refresh (workspace switch)', () => {
     expect(activeSession(s)).not.toBeNull();
     // The trust flag flipped server-side; verify it reflects.
     expect(s.projects.find((p) => p.id === 1)!.trusted).toBe(true);
+  });
+});
+
+describe('store / multi-agent reducer (PR 2)', () => {
+  // Helper: seed a state with three projects in the list so we can manipulate
+  // multiAgent.draftParticipants meaningfully.
+  function seedWithThreeProjects() {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 1,
+            name: 'Alpha',
+            path: '/ws/Alpha',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
+          },
+          {
+            id: 2,
+            name: 'Beta',
+            path: '/ws/Beta',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: true,
+            busAgentName: 'beta',
+          },
+          {
+            id: 3,
+            name: 'Gamma',
+            path: '/ws/Gamma',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
+          },
+        ],
+      },
+    });
+    return s;
+  }
+
+  test('ma_set_view flips the active main view', () => {
+    let s = initialState;
+    expect(s.multiAgent.view).toBe('chat');
+    s = reduce(s, { type: 'ma_set_view', view: 'multi-agent' });
+    expect(s.multiAgent.view).toBe('multi-agent');
+    s = reduce(s, { type: 'ma_set_view', view: 'chat' });
+    expect(s.multiAgent.view).toBe('chat');
+  });
+
+  test('ma_set_mode flips between orchestrator and chain without touching participants', () => {
+    let s = seedWithThreeProjects();
+    s = reduce(s, { type: 'ma_add_participant', projectId: 1 });
+    s = reduce(s, { type: 'ma_set_mode', mode: 'chain' });
+    expect(s.multiAgent.mode).toBe('chain');
+    expect(s.multiAgent.draftParticipants).toEqual([1]);
+    s = reduce(s, { type: 'ma_set_mode', mode: 'orchestrator' });
+    expect(s.multiAgent.mode).toBe('orchestrator');
+    expect(s.multiAgent.draftParticipants).toEqual([1]);
+  });
+
+  test('ma_add_participant appends, deduplicates, and rejects unknown ids', () => {
+    let s = seedWithThreeProjects();
+    s = reduce(s, { type: 'ma_add_participant', projectId: 1 });
+    s = reduce(s, { type: 'ma_add_participant', projectId: 2 });
+    expect(s.multiAgent.draftParticipants).toEqual([1, 2]);
+
+    // Drag-twice is a no-op (idempotent).
+    const before = s;
+    s = reduce(s, { type: 'ma_add_participant', projectId: 1 });
+    expect(s).toBe(before); // same reference — `return state` short-circuit
+
+    // Unknown id rejected without throwing — defends against stale drag payload.
+    s = reduce(s, { type: 'ma_add_participant', projectId: 999 });
+    expect(s.multiAgent.draftParticipants).toEqual([1, 2]);
+  });
+
+  test('ma_remove_participant removes only the targeted id and preserves order', () => {
+    let s = seedWithThreeProjects();
+    s = reduce(s, { type: 'ma_add_participant', projectId: 1 });
+    s = reduce(s, { type: 'ma_add_participant', projectId: 2 });
+    s = reduce(s, { type: 'ma_add_participant', projectId: 3 });
+    s = reduce(s, { type: 'ma_remove_participant', projectId: 2 });
+    expect(s.multiAgent.draftParticipants).toEqual([1, 3]);
+  });
+
+  test('ma_reorder_participant swaps with neighbour and is a no-op at boundaries', () => {
+    let s = seedWithThreeProjects();
+    s = reduce(s, { type: 'ma_add_participant', projectId: 1 });
+    s = reduce(s, { type: 'ma_add_participant', projectId: 2 });
+    s = reduce(s, { type: 'ma_add_participant', projectId: 3 });
+
+    s = reduce(s, { type: 'ma_reorder_participant', projectId: 2, direction: 'up' });
+    expect(s.multiAgent.draftParticipants).toEqual([2, 1, 3]);
+
+    s = reduce(s, { type: 'ma_reorder_participant', projectId: 3, direction: 'down' });
+    // Already at the bottom — no change.
+    expect(s.multiAgent.draftParticipants).toEqual([2, 1, 3]);
+
+    s = reduce(s, { type: 'ma_reorder_participant', projectId: 2, direction: 'up' });
+    // Already at the top — no change.
+    expect(s.multiAgent.draftParticipants).toEqual([2, 1, 3]);
+  });
+
+  test('workspace switch prunes draftParticipants of vanished projects', () => {
+    let s = seedWithThreeProjects();
+    s = reduce(s, { type: 'ma_add_participant', projectId: 1 });
+    s = reduce(s, { type: 'ma_add_participant', projectId: 2 });
+    s = reduce(s, { type: 'ma_add_participant', projectId: 3 });
+
+    // New workspace: only id=2 survives.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 2,
+            name: 'Beta',
+            path: '/ws/Beta',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: true,
+            busAgentName: 'beta',
+          },
+        ],
+      },
+    });
+    expect(s.multiAgent.draftParticipants).toEqual([2]);
+  });
+
+  test('bus_integration_changed updates the matching project in-place', () => {
+    let s = seedWithThreeProjects();
+    // Project 1 starts out un-installed.
+    expect(s.projects.find((p) => p.id === 1)!.busInstalled).toBe(false);
+
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 1,
+        installed: true,
+        agentName: 'alpha',
+      },
+    });
+    expect(s.projects.find((p) => p.id === 1)!.busInstalled).toBe(true);
+    expect(s.projects.find((p) => p.id === 1)!.busAgentName).toBe('alpha');
+
+    // And the reverse — uninstall clears the agent name.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 1,
+        installed: false,
+        agentName: null,
+      },
+    });
+    expect(s.projects.find((p) => p.id === 1)!.busInstalled).toBe(false);
+    expect(s.projects.find((p) => p.id === 1)!.busAgentName).toBeNull();
+  });
+
+  test('bus_integration_changed for an unknown projectId is a silent no-op', () => {
+    const before = seedWithThreeProjects();
+    const after = reduce(before, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 999,
+        installed: true,
+        agentName: 'ghost',
+      },
+    });
+    expect(after).toBe(before);
   });
 });

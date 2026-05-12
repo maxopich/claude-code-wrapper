@@ -347,9 +347,12 @@ pre {
 }
 
 .main {
-  display: grid;
-  grid-template-rows: 1fr auto;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+  /* Children: .main-tabs (content-sized), one of {.chat, .multi-agent}
+   * (flex: 1, scrolls internally), then .input-box (content-sized, only
+   * present in chat mode). .mode-toggle is content-sized too. */
 }
 
 .chat {
@@ -358,6 +361,11 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  /* Grow to fill the space between header rows (tabs / mode toggle) and the
+   * input box. min-height: 0 lets overflow-y: auto actually scroll inside a
+   * flex parent rather than expanding the row. */
+  flex: 1;
+  min-height: 0;
 }
 .chat.empty {
   align-items: center;
@@ -745,3 +753,501 @@ pre {
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* ---------- Top-level Chat / Multi-agent tab nav ---------- */
+.main-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.main-tab {
+  background: transparent;
+  color: var(--fg-2);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  position: relative;
+  top: 1px; /* nudge so the active tab's bottom border merges with the nav's */
+}
+.main-tab:hover {
+  color: var(--fg);
+}
+.main-tab.active {
+  background: var(--bg);
+  color: var(--fg);
+  border-color: var(--border);
+  border-bottom-color: var(--bg);
+}
+
+/* ---------- Multi-agent tab ---------- */
+.multi-agent {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.multi-agent-header h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.multi-agent-subtitle {
+  margin: 0;
+  color: var(--fg-2);
+  font-size: 12.5px;
+}
+.multi-agent-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.multi-agent-section h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+  margin: 0;
+}
+
+/* Mode pills (orchestrator | chain). Disabled-looking until selected. */
+.mode-pills {
+  display: flex;
+  gap: 6px;
+}
+.mode-pill {
+  background: var(--bg-2);
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.mode-pill:hover {
+  color: var(--fg);
+  border-color: var(--accent-2);
+}
+.mode-pill.active {
+  background: var(--accent-2);
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.mode-hint {
+  margin: 0;
+  color: var(--fg-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* The drop zone accepts dragged-in projects. Dashed border = "this is a
+ * target" affordance; thicker on the empty state, normal once there are
+ * participants. */
+.drop-zone {
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--bg-2);
+  min-height: 56px;
+}
+.drop-zone.empty {
+  border-style: dashed;
+  border-color: var(--fg-3);
+  padding: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.drop-zone-placeholder {
+  color: var(--fg-3);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+.participant-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.participant-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.participant-order {
+  width: 20px;
+  text-align: center;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color: var(--fg-3);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.participant-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+.participant-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.participant-bus-tag {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.participant-bus-tag.installed {
+  color: var(--ok);
+  border-color: rgba(92, 197, 138, 0.4);
+  background: rgba(92, 197, 138, 0.08);
+}
+.participant-bus-tag.missing {
+  color: var(--warn);
+  border-color: rgba(214, 181, 106, 0.4);
+  background: rgba(214, 181, 106, 0.08);
+}
+.participant-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* Start buttons row */
+.multi-agent-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.multi-agent-warning {
+  margin: 4px 0 0;
+  color: var(--warn);
+  font-size: 12px;
+}
+
+/* Iterations browser */
+.iterations-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.iterations-header h3 {
+  margin: 0;
+}
+.iterations-refresh {
+  font-size: 11.5px;
+}
+.iterations-empty {
+  margin: 0;
+  color: var(--fg-3);
+  font-size: 12.5px;
+  font-style: italic;
+}
+.iterations-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.iteration-row {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.iteration-status-running {
+  border-color: var(--accent-2);
+}
+.iteration-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.iteration-id {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-weight: 600;
+  color: var(--fg);
+}
+.iteration-mode {
+  color: var(--fg-2);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.iteration-when {
+  margin-left: auto;
+  color: var(--fg-3);
+  font-size: 11.5px;
+}
+.iteration-participants {
+  font-size: 12px;
+  color: var(--fg-2);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+.iteration-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.iteration-path code {
+  flex: 1;
+  font-size: 11.5px;
+  background: var(--bg-3);
+  padding: 3px 6px;
+  border-radius: 3px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.iteration-copy {
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+
+/* Initial prompt textarea */
+.multi-agent-prompt {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  min-height: 80px;
+  resize: vertical;
+}
+.multi-agent-prompt:focus {
+  outline: none;
+  border-color: var(--accent-2);
+}
+
+/* ---------- Active multi-agent run (running + ended) ---------- */
+.multi-agent-active-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.multi-agent-active-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.multi-agent-active-header h2 code {
+  font-size: 13px;
+  background: var(--bg-3);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: normal;
+}
+.multi-agent-active-actions {
+  flex-shrink: 0;
+}
+
+.run-status {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-weight: 600;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Lifecycle pill — small badge next to the session-id chip in the
+ * active-run header so the operator can see at a glance whether their
+ * End button will be a polite stop or a destructive cleanup. */
+.lifecycle-pill {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-weight: 500;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+.lifecycle-pill-persistent {
+  color: var(--fg-2);
+  background: var(--bg-3);
+}
+.lifecycle-pill-temp {
+  color: var(--warn);
+  border-color: rgba(226, 109, 109, 0.4);
+  background: rgba(226, 109, 109, 0.06);
+}
+
+/* Project-sidebar bus-installed pill — small affordance to surface
+ * which projects have the bus integration AND let the operator
+ * uninstall from the sidebar without opening the Multi-Agent tab. */
+.bus-installed-pill {
+  appearance: none;
+  background: rgba(110, 168, 254, 0.12);
+  border: 1px solid var(--accent-2);
+  color: var(--accent);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-left: 4px;
+  font-weight: 600;
+}
+.bus-installed-pill:hover {
+  background: rgba(226, 109, 109, 0.15);
+  border-color: rgba(226, 109, 109, 0.4);
+  color: var(--warn);
+}
+.run-status-running {
+  color: var(--accent);
+  border-color: var(--accent-2);
+  background: rgba(110, 168, 254, 0.12);
+}
+.run-status-completed {
+  color: var(--ok);
+  border-color: rgba(92, 197, 138, 0.4);
+  background: rgba(92, 197, 138, 0.10);
+}
+.run-status-stopped {
+  color: var(--fg-2);
+  background: var(--bg-3);
+}
+.run-status-crashed {
+  color: var(--err);
+  border-color: rgba(226, 109, 109, 0.4);
+  background: rgba(226, 109, 109, 0.10);
+}
+
+/* Event scrollback */
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.event-row {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.event-row.event-kind-intro {
+  border-color: rgba(168, 168, 174, 0.3);
+  background: rgba(168, 168, 174, 0.05);
+}
+.event-row.event-kind-final {
+  border-color: rgba(92, 197, 138, 0.4);
+  background: rgba(92, 197, 138, 0.06);
+}
+.event-row.event-kind-error {
+  border-color: rgba(226, 109, 109, 0.4);
+  background: rgba(226, 109, 109, 0.06);
+}
+.event-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.event-source,
+.event-destination {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color: var(--fg);
+  font-weight: 500;
+}
+.event-arrow {
+  color: var(--fg-3);
+}
+.event-kind {
+  color: var(--fg-3);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-3);
+}
+.event-ts {
+  margin-left: auto;
+  color: var(--fg-3);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+.event-text {
+  background: var(--bg);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 0;
+  font-size: 12.5px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+/* ---------- Orchestrator user-prompt input (active runs only) ---------- */
+.multi-agent-input-section {
+  /* Stick to bottom of the multi-agent pane so the input is always reachable
+   * as the scrollback grows. The parent (.multi-agent) doesn't flex, but
+   * scrolling lands inside the scrollback list — this margin keeps a small
+   * gap from the events without colliding. */
+  margin-top: auto;
+}
+.multi-agent-input {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.multi-agent-input-textarea {
+  flex: 1;
+  min-height: 60px;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  resize: vertical;
+}
+.multi-agent-input-textarea:focus {
+  outline: none;
+  border-color: var(--accent-2);
+}
+
