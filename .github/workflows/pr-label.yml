@@ -1,0 +1,66 @@
+name: pr-label
+
+# Auto-applies `awaiting-fixture-review` to any PR touching fixtures/*.jsonl,
+# then fails the `fixture-review-gate` status check while that label is
+# present. A CODEOWNER must verify the recorded SDK turns contain no real
+# OAuth artifacts / API keys (the default gitleaks rules don't see them in
+# JSONL prose payloads), then remove the label to clear the gate.
+#
+# Safety note: `pull_request_target` is used so the labeler has write
+# perms on PR labels even for fork PRs. The gate job runs no PR-head code
+# — it only reads label state from the API, so the elevated context is
+# not a footgun here.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apply-labels:
+    name: Apply path labels
+    # Don't re-add the label when a CODEOWNER removes it on (un)labeled
+    # events — only re-evaluate on opens / pushes / reopens.
+    if: contains(fromJSON('["opened","synchronize","reopened"]'), github.event.action)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: false
+
+  fixture-review-gate:
+    name: Fixture review gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    # Re-fetch labels via API rather than reading the event payload —
+    # avoids the race where apply-labels added the label in the same run
+    # but the event-payload labels are stale.
+    needs: [apply-labels]
+    if: always()
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Block while awaiting-fixture-review label is present
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          labels=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" -q '.[].name')
+          echo "Labels on PR #$PR_NUMBER:"
+          echo "$labels"
+          if echo "$labels" | grep -qx 'awaiting-fixture-review'; then
+            echo "::error::This PR touches fixtures/*.jsonl. A CODEOWNER must verify the recorded turns contain no real OAuth artifacts or API keys, then remove the 'awaiting-fixture-review' label."
+            exit 1
+          fi
+          echo "Gate clear."

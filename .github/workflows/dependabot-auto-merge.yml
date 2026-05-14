@@ -8,6 +8,18 @@ name: Dependabot auto-merge
 #   - "Allow auto-merge" enabled in repo settings.
 #   - Branch protection on `main` with required status checks. Without
 #     this, auto-merge fires immediately, which defeats the gate.
+#
+# Safety note on pull_request_target. This trigger runs with repo-write
+# perms even on fork PRs, which is the classic foot-gun. This workflow is
+# safe specifically because:
+#   1. `if: github.actor == 'dependabot[bot]'` gates every step — only
+#      dependabot's own PRs reach the body.
+#   2. No PR-head code is ever checked out. The only actions called are
+#      `dependabot/fetch-metadata` (reads PR metadata) and `gh pr merge`
+#      (operates on the merge queue). Do NOT add `actions/checkout` here
+#      without re-evaluating this trust posture.
+#   3. The merge-enable is filtered to `version-update:semver-patch` only;
+#      minor and major bumps still require a human reviewer.
 
 on: pull_request_target
 
@@ -22,7 +34,7 @@ jobs:
     steps:
       - name: Fetch dependabot metadata
         id: meta
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2.5.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
