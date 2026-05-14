@@ -1,0 +1,42 @@
+name: dependency-review
+
+# PR-time fail on new deps with high/critical advisories. Faster
+# feedback than the weekly OSV cron, and complements `npm audit
+# --audit-level=high` in ci.yml (which only catches transitive issues
+# at the npm level — dependency-review-action sees the resolved tree).
+#
+# Free for public repos; no GHAS subscription required.
+#
+# Plan reference: cebab-ci-cd-async-conway.md T2.2.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # Required by comment-summary-in-pr to drop a results comment on
+      # the PR. Same trust boundary as the existing dependabot-auto-merge
+      # workflow's `pull-requests: write`; the action only reads PR
+      # metadata + the base/head diff.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure

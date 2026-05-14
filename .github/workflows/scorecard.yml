@@ -1,0 +1,54 @@
+name: scorecard
+
+# OpenSSF Scorecard — weekly external posture signal. Several checks
+# will fail until T2.3 (signed commits) and branch protection are
+# fully configured at the repo level — keep this check informational
+# until the score stabilizes ≥7, then promote to required.
+#
+# Public scorecard at https://api.securityscorecards.dev/projects/github.com/maxopich/claude-code-wrapper
+#
+# Plan reference: cebab-ci-cd-async-conway.md T2.2.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 7 * * 1'
+  branch_protection_rule:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # SARIF upload to the Security tab.
+      security-events: write
+      # OIDC token for publishing scorecard results to the public DB.
+      id-token: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run scorecard
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          # Publish to the public scorecard DB so the badge / public
+          # query interface stays current. Public repos only.
+          publish_results: true
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
+        with:
+          sarif_file: scorecard-results.sarif
