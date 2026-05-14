@@ -83,10 +83,9 @@ also an inline pill above the chat that flips the same modes mid-flight.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor flow — signed commits
-(gitsign), pre-PR checks, and the security-critical paths to be aware of.
-Security issues go to **maxopich@gmail.com** under the policy in
-[SECURITY.md](SECURITY.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor flow — pre-PR checks
+and the security-critical paths to be aware of. Security issues go to
+**maxopich@gmail.com** under the policy in [SECURITY.md](SECURITY.md).
 
 ## Layout
 
