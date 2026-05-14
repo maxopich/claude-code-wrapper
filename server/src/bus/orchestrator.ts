@@ -38,7 +38,9 @@ import {
   createMultiAgentSession,
   endMultiAgentSession,
   getMultiAgentSession,
+  getProjectBusState,
   listResolvedParticipants,
+  setMultiAgentSessionLifecycle,
   type EventKind,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
@@ -54,7 +56,7 @@ import {
   type SessionPaths,
 } from './paths.js';
 import { renderCommMd } from './comm.js';
-import { ensureBusBootstrap, uninstallBusForProject } from './install.js';
+import { ensureBusBootstrap, installBusForProject, uninstallBusForProject } from './install.js';
 import { tailBusLog, type BusLogEvent, type BusLogTailerHandle } from './log_tailer.js';
 import {
   BUS_CLAUDE_COMMAND,
@@ -62,6 +64,7 @@ import {
   nextIterationId,
   prepareIterationDir,
   renderRosterPrompt,
+  renderRosterUpdate,
   resolveAgent,
   SINK_RECIPIENT,
   USER_RECIPIENT,
@@ -328,15 +331,29 @@ export type ResumeOrchestratorOpts = {
   onEnded: StartOrchestratorOpts['onEnded'];
 };
 
+/**
+ * Result of `addWorker` — surfaced back to the WS handler so the
+ * `multi_agent_participant_added` ServerMsg can tell the browser
+ * whether bus integration was already installed (operator picked an
+ * already-configured project) or auto-installed as a side effect
+ * (Cebab wrote the worker's `.claude/settings.json`).
+ */
+export type AddWorkerResult = {
+  agentName: string;
+  busWasAlreadyInstalled: boolean;
+};
+
 export type OrchestratorSessionHandle = {
   sessionId: string;
   iterationId: string;
   tmuxSession: string;
   /** [`orchestrator`, ...workerSlugs] — the orchestrator is first so the
-   *  UI can identify it as the hub. */
+   *  UI can identify it as the hub. Snapshot at start time; for the
+   *  CURRENT roster after any `addWorker` calls, query via
+   *  `getCurrentWorkerNames()`. */
   participantAgentNames: string[];
-  /** Lifecycle this session was started with — same field shape as
-   *  `ChainSessionHandle.lifecycle`. */
+  /** Lifecycle this session was started with. Mutable runtime value
+   *  available via `getCurrentLifecycle()` after any `setLifecycle`. */
   lifecycle: MultiAgentLifecycle;
   /** Absolute path to this session's on-disk folder. */
   sessionFolder: string;
@@ -353,6 +370,29 @@ export type OrchestratorSessionHandle = {
    * future WS connect can resume.
    */
   detach: () => void;
+  /**
+   * Append a worker to this running session. Resolves the project's
+   * agent name, auto-installs bus integration if missing, spawns a new
+   * tmux pane, registers the worker with the router's F2 source
+   * allowlist, persists a `multi_agent_participants` row, and writes an
+   * updated roster prompt to the orchestrator's inbox so it knows the
+   * new agent is reachable. Returns the resolved agent name and a
+   * `busWasAlreadyInstalled` flag.
+   *
+   * Throws if the project is already a participant, or if any of the
+   * underlying steps fails (the caller decides how to surface).
+   */
+  addWorker: (projectId: number) => Promise<AddWorkerResult>;
+  /**
+   * Flip persistent ↔ temp mid-run. Updates the DB row + the router's
+   * in-memory ref so the teardown branch picks the new value. Has no
+   * other effect while the session is running.
+   */
+  setLifecycle: (lifecycle: MultiAgentLifecycle) => Promise<void>;
+  /** Snapshot of the current worker slugs (changes after `addWorker`). */
+  getCurrentWorkerNames: () => readonly string[];
+  /** Snapshot of the current lifecycle (changes after `setLifecycle`). */
+  getCurrentLifecycle: () => MultiAgentLifecycle;
 };
 
 /**
@@ -367,9 +407,18 @@ export function createOrchestratorRouter(params: {
   workerNames: string[];
   tmuxSessionName: string;
   paths: SessionPaths;
+  /** Initial lifecycle — held internally as a mutable ref so a mid-run
+   *  `set_multi_agent_lifecycle` can flip the teardown branch without
+   *  restarting the session. */
+  lifecycle: MultiAgentLifecycle;
   onEvent: StartOrchestratorOpts['onEvent'];
   onEnded: StartOrchestratorOpts['onEnded'];
-  /** Optional cleanup hook — same contract as the chain router's. */
+  /** Cleanup hook for `temp` sessions (rm-rf folder + uninstall bus
+   *  per worker). Always-present now; the router only invokes it when
+   *  the current lifecycleRef is `'temp'` and reason !== 'crashed'.
+   *  Callers always provide it because the lifecycle can flip
+   *  mid-run; if it ends up at `'persistent'` at teardown time, the
+   *  hook is just not called. */
   onTeardown?: (reason: MultiAgentEndedReason) => Promise<void>;
 }): {
   teardown: (reason: MultiAgentEndedReason) => Promise<void>;
@@ -383,6 +432,18 @@ export function createOrchestratorRouter(params: {
    *  the loop so the operator's UI scrollback + DB transcript include
    *  Cebab's own utterances (roster, briefings, forwarded prompts). */
   forwardCebabEvent: (ev: BusLogEvent) => void;
+  /** Register a new worker slug with the F2 source allowlist + routing
+   *  table. Called by `addWorker` on the session handle after the new
+   *  tmux pane is spawned, so the next inbound event from that worker
+   *  passes the source check. Idempotent — re-adding an existing slug
+   *  is a no-op. */
+  registerWorker: (agentName: string) => void;
+  /** Read-only snapshot of the current worker slugs. */
+  getWorkerNames: () => readonly string[];
+  /** Mutate the in-memory lifecycle. Does NOT touch the DB — the
+   *  session handle's `setLifecycle` writes the row. */
+  setLifecycle: (lifecycle: MultiAgentLifecycle) => void;
+  getLifecycle: () => MultiAgentLifecycle;
 } {
   const {
     sessionId,
@@ -394,7 +455,12 @@ export function createOrchestratorRouter(params: {
     onEnded,
     onTeardown,
   } = params;
-  const workerSet = new Set(workerNames);
+  // Mutable mirrors so registerWorker + setLifecycle can update them
+  // post-start. workerSet tracks the same membership as workerNamesMut
+  // but as a Set for O(1) F2 lookup; both must stay in sync.
+  const workerNamesMut: string[] = [...workerNames];
+  const workerSet = new Set(workerNamesMut);
+  let lifecycleRef: MultiAgentLifecycle = params.lifecycle;
   const tmuxTarget = (agent: string) => `${tmuxSessionName}:${agent}`;
 
   let ended = false;
@@ -426,9 +492,13 @@ export function createOrchestratorRouter(params: {
     } catch (err) {
       console.error('[orchestrator] endMultiAgentSession failed', err);
     }
-    // Caller-supplied cleanup (temp-mode rm-rf + uninstall). Skip on
-    // 'crashed' so the operator can inspect.
-    if (onTeardown && reason !== 'crashed') {
+    // Caller-supplied cleanup (rm-rf folder + uninstall bus per
+    // worker). Skipped on 'crashed' so the operator can inspect, and
+    // skipped when the current lifecycle is 'persistent' — which may
+    // differ from the start-time lifecycle if `setLifecycle` flipped
+    // it mid-run. Reading from `lifecycleRef` (not the closure-captured
+    // start value) is what makes the runtime toggle work.
+    if (onTeardown && reason !== 'crashed' && lifecycleRef === 'temp') {
       try {
         await onTeardown(reason);
       } catch (err) {
@@ -587,7 +657,29 @@ export function createOrchestratorRouter(params: {
     }
   };
 
-  return { teardown, handleEvent, attachTailer, detach, sendUserPrompt, forwardCebabEvent };
+  const registerWorker = (agentName: string): void => {
+    if (workerSet.has(agentName)) return; // idempotent
+    workerSet.add(agentName);
+    workerNamesMut.push(agentName);
+  };
+  const getWorkerNames = (): readonly string[] => workerNamesMut;
+  const setLifecycle = (next: MultiAgentLifecycle): void => {
+    lifecycleRef = next;
+  };
+  const getLifecycle = (): MultiAgentLifecycle => lifecycleRef;
+
+  return {
+    teardown,
+    handleEvent,
+    attachTailer,
+    detach,
+    sendUserPrompt,
+    forwardCebabEvent,
+    registerWorker,
+    getWorkerNames,
+    setLifecycle,
+    getLifecycle,
+  };
 }
 
 export async function startOrchestratorSession(
@@ -607,6 +699,14 @@ export async function startOrchestratorSession(
   const workerNames = opts.workers.map((w) => w.agentName);
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...workerNames];
   const workerProjectIds = opts.workers.map((w) => w.projectId);
+  // Maintain projectName lookup alongside workerProjectIds so the
+  // post-add roster update can render `<participant>name</participant>
+  // — projectName` for every worker, including ones added mid-run.
+  // (router.getWorkerNames() only knows slugs; project names come from
+  // the resolve step.)
+  const workerProjectNames = new Map<string, string>(
+    opts.workers.map((w) => [w.agentName, w.projectName]),
+  );
 
   // Per-session folder under the workspace root. Created up front so
   // subsequent mkdirs and the orchestrator workspace generation land in
@@ -640,23 +740,25 @@ export async function startOrchestratorSession(
 
   prepareIterationDir(iterationId, participantAgentNames, paths);
 
-  const onTeardown: ((reason: MultiAgentEndedReason) => Promise<void>) | undefined =
-    lifecycle === 'temp'
-      ? async () => {
-          for (const projectId of workerProjectIds) {
-            try {
-              await uninstallBusForProject(projectId);
-            } catch (err) {
-              console.warn(`[orchestrator] temp-cleanup uninstall failed for ${projectId}`, err);
-            }
-          }
-          try {
-            fs.rmSync(paths.folder, { recursive: true, force: true });
-          } catch (err) {
-            console.warn('[orchestrator] temp-cleanup rmSync failed', err);
-          }
-        }
-      : undefined;
+  // Cleanup hook for `temp` sessions — always built. The router decides
+  // whether to invoke it based on the CURRENT `lifecycleRef`, which can
+  // flip mid-run via `setLifecycle`. `workerProjectIds` is captured by
+  // reference so `addWorker` can append to it (new workers join the
+  // temp-cleanup set if added after start).
+  const onTeardown = async () => {
+    for (const projectId of workerProjectIds) {
+      try {
+        await uninstallBusForProject(projectId);
+      } catch (err) {
+        console.warn(`[orchestrator] temp-cleanup uninstall failed for ${projectId}`, err);
+      }
+    }
+    try {
+      fs.rmSync(paths.folder, { recursive: true, force: true });
+    } catch (err) {
+      console.warn('[orchestrator] temp-cleanup rmSync failed', err);
+    }
+  };
 
   const router = createOrchestratorRouter({
     sessionId,
@@ -664,6 +766,7 @@ export async function startOrchestratorSession(
     workerNames,
     tmuxSessionName,
     paths,
+    lifecycle,
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onTeardown,
@@ -673,6 +776,25 @@ export async function startOrchestratorSession(
   router.attachTailer();
 
   const orchTarget = `${tmuxSessionName}:${ORCHESTRATOR_AGENT_NAME}`;
+
+  // Spawn one worker pane: window + pipe to transcript + dismiss the
+  // bypass-permissions modal. Used both for start-time workers (the
+  // loop below) and for `addWorker` mid-run — same three steps.
+  async function spawnWorkerPane(w: ResolvedAgent): Promise<void> {
+    await newWindow({
+      sessionName: tmuxSessionName,
+      windowName: w.agentName,
+      cwd: w.cwd,
+      // Same BUS_CLAUDE_COMMAND used by start-time workers — see
+      // chain.ts and runtime.ts for the trust rationale.
+      command: BUS_CLAUDE_COMMAND,
+      env: { BUS_AGENT_NAME: w.agentName, BUS_SESSION_ROOT: paths.folder },
+    });
+    await pipePane(
+      `${tmuxSessionName}:${w.agentName}`,
+      path.join(paths.iterationDir(iterationId, w.agentName), 'transcript.log'),
+    );
+  }
 
   // Spawn tmux: orchestrator window first (cwd = per-session
   // orchestrator workspace), then one per worker. BUS_SESSION_ROOT
@@ -699,26 +821,16 @@ export async function startOrchestratorSession(
       path.join(paths.iterationDir(iterationId, ORCHESTRATOR_AGENT_NAME), 'transcript.log'),
     );
     for (const w of opts.workers) {
-      await newWindow({
-        sessionName: tmuxSessionName,
-        windowName: w.agentName,
-        cwd: w.cwd,
-        // Workers use the same BUS_CLAUDE_COMMAND — see chain.ts and
-        // runtime.ts for the trust rationale.
-        command: BUS_CLAUDE_COMMAND,
-        env: { BUS_AGENT_NAME: w.agentName, BUS_SESSION_ROOT: paths.folder },
-      });
-      await pipePane(
-        `${tmuxSessionName}:${w.agentName}`,
-        path.join(paths.iterationDir(iterationId, w.agentName), 'transcript.log'),
-      );
+      await spawnWorkerPane(w);
     }
 
     // Dismiss claude-code's "Bypass Permissions mode" warning in every
     // pane — orchestrator AND workers (all bus panes use
     // BUS_CLAUDE_COMMAND now). Parallel so total delay is bounded by
     // one modal-render time. See `dismissBypassPermissionsModal` for
-    // the full rationale.
+    // the full rationale. The start-time workers are dismissed here;
+    // workers added later via `addWorker` are dismissed in that path's
+    // own spawn block.
     await Promise.all([
       dismissBypassPermissionsModal(orchTarget),
       ...opts.workers.map((w) =>
@@ -774,6 +886,77 @@ export async function startOrchestratorSession(
     await router.teardown('crashed');
   }
 
+  // addWorker — append a worker to this running session. Closure-scoped
+  // so it can mutate `workerProjectIds` (so the temp-cleanup hook
+  // sees the new worker) and call `spawnWorkerPane`. Step ordering is
+  // load-bearing:
+  //   1. duplicate check first (cheapest fail-fast)
+  //   2. auto-install bus integration if missing (most likely to fail
+  //      — DB constraint, FS perms — fail before any tmux state)
+  //   3. spawn pane
+  //   4. persist DB row
+  //   5. mutate router state (workerSet) — F2 source allowlist now
+  //      accepts inbound traffic from this slug
+  //   6. push to workerProjectIds so temp-cleanup includes it
+  //   7. send roster update — orchestrator processes on its next turn
+  //   8. wake orchestrator so the roster update is read promptly
+  // If step 2 throws (e.g. install fails), nothing later runs and the
+  // session state is unchanged. After step 4 every subsequent failure
+  // is a partial-state risk; in practice they're all best-effort.
+  async function addWorker(projectId: number): Promise<AddWorkerResult> {
+    if (workerProjectIds.includes(projectId)) {
+      throw new Error(`project ${projectId} is already a participant in this session`);
+    }
+    const busBefore = getProjectBusState(projectId);
+    const busWasAlreadyInstalled = busBefore.installed;
+    if (!busBefore.installed) {
+      await installBusForProject(projectId);
+    }
+    const newAgent = resolveAgent(projectId);
+    await spawnWorkerPane(newAgent);
+    await dismissBypassPermissionsModal(`${tmuxSessionName}:${newAgent.agentName}`);
+    addParticipant(sessionId, projectId, 'worker', null);
+    router.registerWorker(newAgent.agentName);
+    workerProjectIds.push(projectId);
+    workerProjectNames.set(newAgent.agentName, newAgent.projectName);
+    // Compose + forward the roster update so it lands in DB + UI
+    // scrollback. Pulled here (not in the router) because it needs
+    // projectName metadata we track alongside the router's slug list.
+    const currentWorkers = router.getWorkerNames().map((agentName) => ({
+      agentName,
+      projectName: workerProjectNames.get(agentName) ?? agentName,
+    }));
+    const rosterEv = writeInboxMessage({
+      recipient: ORCHESTRATOR_AGENT_NAME,
+      source: CEBAB_SOURCE,
+      text: renderRosterUpdate({
+        newWorker: { agentName: newAgent.agentName, projectName: newAgent.projectName },
+        currentWorkers,
+        hopBudget: DEFAULT_HOP_BUDGET,
+      }),
+      kind: 'prompt',
+      paths,
+    });
+    router.forwardCebabEvent(rosterEv);
+    try {
+      if (await hasSession(tmuxSessionName)) {
+        await sendKeys(orchTarget, [WAKE_TEXT, 'Enter']);
+      }
+    } catch (err) {
+      console.warn('[orchestrator] addWorker wake failed', err);
+    }
+    return { agentName: newAgent.agentName, busWasAlreadyInstalled };
+  }
+
+  async function setLifecycleHandle(next: MultiAgentLifecycle): Promise<void> {
+    // Persist first — if a crash happens between the DB update and the
+    // router mutation, on resume we'd reconstruct the router from the
+    // persisted value. If we did router-first and the DB write threw,
+    // the runtime would diverge from the resumable state.
+    setMultiAgentSessionLifecycle(sessionId, next);
+    router.setLifecycle(next);
+  }
+
   return {
     sessionId,
     iterationId,
@@ -786,6 +969,10 @@ export async function startOrchestratorSession(
     },
     sendUserPrompt: router.sendUserPrompt,
     detach: router.detach,
+    addWorker,
+    setLifecycle: setLifecycleHandle,
+    getCurrentWorkerNames: router.getWorkerNames,
+    getCurrentLifecycle: router.getLifecycle,
   };
 }
 
@@ -806,9 +993,14 @@ export async function resumeOrchestratorSession(
   if (row.status !== 'running') return null;
   if (!row.tmux_session) return null;
   if (!row.iteration_id) return null;
+  // Pin into locals so closures captured later (addWorker's
+  // spawnWorkerPane, etc.) don't lose the null-narrowing across
+  // the boundary.
+  const tmuxSession = row.tmux_session;
+  const iterationId = row.iteration_id;
 
   if (!(await tmuxAvailable())) return null;
-  if (!(await hasSession(row.tmux_session))) return null;
+  if (!(await hasSession(tmuxSession))) return null;
 
   const participants = listResolvedParticipants(opts.sessionId);
   if (participants.length < 1) return null;
@@ -827,41 +1019,120 @@ export async function resumeOrchestratorSession(
     ? sessionPathsFromFolder(row.session_folder)
     : legacyGlobalSessionPaths();
   const lifecycle = (row.lifecycle as MultiAgentLifecycle | undefined) ?? 'persistent';
+  // Maintain projectName lookup for the post-add roster render. On
+  // resume we get projectName from `listResolvedParticipants` (it
+  // joins through `projects.name`).
+  const workerProjectNames = new Map<string, string>(
+    participants
+      .filter((p) => p.bus_agent_name !== null)
+      .map((p) => [p.bus_agent_name!, p.project_name]),
+  );
+  const tmuxSessionName = tmuxSession;
+  const orchTarget = `${tmuxSessionName}:${ORCHESTRATOR_AGENT_NAME}`;
 
-  const onTeardown: ((reason: MultiAgentEndedReason) => Promise<void>) | undefined =
-    lifecycle === 'temp' && row.session_folder
-      ? async () => {
-          for (const projectId of workerProjectIds) {
-            try {
-              await uninstallBusForProject(projectId);
-            } catch (err) {
-              console.warn(`[orchestrator] temp-cleanup uninstall failed for ${projectId}`, err);
-            }
-          }
+  // Same always-build cleanup hook as the start path. The router
+  // gates execution on the current lifecycleRef + reason !== 'crashed'
+  // + a non-null `row.session_folder` (pre-007 rows had no folder
+  // to rm-rf, so skip the cleanup entirely).
+  const onTeardown = row.session_folder
+    ? async () => {
+        for (const projectId of workerProjectIds) {
           try {
-            fs.rmSync(paths.folder, { recursive: true, force: true });
+            await uninstallBusForProject(projectId);
           } catch (err) {
-            console.warn('[orchestrator] temp-cleanup rmSync failed', err);
+            console.warn(`[orchestrator] temp-cleanup uninstall failed for ${projectId}`, err);
           }
         }
-      : undefined;
+        try {
+          fs.rmSync(paths.folder, { recursive: true, force: true });
+        } catch (err) {
+          console.warn('[orchestrator] temp-cleanup rmSync failed', err);
+        }
+      }
+    : undefined;
 
   const router = createOrchestratorRouter({
     sessionId: opts.sessionId,
-    iterationId: row.iteration_id,
+    iterationId,
     workerNames,
-    tmuxSessionName: row.tmux_session,
+    tmuxSessionName,
     paths,
+    lifecycle,
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onTeardown,
   });
   router.attachTailer();
 
+  // Spawn helper for addWorker on this resumed handle. Identical to
+  // the start-path's `spawnWorkerPane` (same three steps + same
+  // BUS_CLAUDE_COMMAND); duplicated here because each session
+  // captures its own paths/tmuxSessionName/iterationId.
+  async function spawnWorkerPane(w: ResolvedAgent): Promise<void> {
+    await newWindow({
+      sessionName: tmuxSessionName,
+      windowName: w.agentName,
+      cwd: w.cwd,
+      command: BUS_CLAUDE_COMMAND,
+      env: { BUS_AGENT_NAME: w.agentName, BUS_SESSION_ROOT: paths.folder },
+    });
+    await pipePane(
+      `${tmuxSessionName}:${w.agentName}`,
+      path.join(paths.iterationDir(iterationId, w.agentName), 'transcript.log'),
+    );
+  }
+
+  async function addWorker(projectId: number): Promise<AddWorkerResult> {
+    if (workerProjectIds.includes(projectId)) {
+      throw new Error(`project ${projectId} is already a participant in this session`);
+    }
+    const busBefore = getProjectBusState(projectId);
+    const busWasAlreadyInstalled = busBefore.installed;
+    if (!busBefore.installed) {
+      await installBusForProject(projectId);
+    }
+    const newAgent = resolveAgent(projectId);
+    await spawnWorkerPane(newAgent);
+    await dismissBypassPermissionsModal(`${tmuxSessionName}:${newAgent.agentName}`);
+    addParticipant(opts.sessionId, projectId, 'worker', null);
+    router.registerWorker(newAgent.agentName);
+    workerProjectIds.push(projectId);
+    workerProjectNames.set(newAgent.agentName, newAgent.projectName);
+    const currentWorkers = router.getWorkerNames().map((agentName) => ({
+      agentName,
+      projectName: workerProjectNames.get(agentName) ?? agentName,
+    }));
+    const rosterEv = writeInboxMessage({
+      recipient: ORCHESTRATOR_AGENT_NAME,
+      source: CEBAB_SOURCE,
+      text: renderRosterUpdate({
+        newWorker: { agentName: newAgent.agentName, projectName: newAgent.projectName },
+        currentWorkers,
+        hopBudget: DEFAULT_HOP_BUDGET,
+      }),
+      kind: 'prompt',
+      paths,
+    });
+    router.forwardCebabEvent(rosterEv);
+    try {
+      if (await hasSession(tmuxSessionName)) {
+        await sendKeys(orchTarget, [WAKE_TEXT, 'Enter']);
+      }
+    } catch (err) {
+      console.warn('[orchestrator] addWorker wake failed', err);
+    }
+    return { agentName: newAgent.agentName, busWasAlreadyInstalled };
+  }
+
+  async function setLifecycleHandle(next: MultiAgentLifecycle): Promise<void> {
+    setMultiAgentSessionLifecycle(opts.sessionId, next);
+    router.setLifecycle(next);
+  }
+
   return {
     sessionId: opts.sessionId,
-    iterationId: row.iteration_id,
-    tmuxSession: row.tmux_session,
+    iterationId,
+    tmuxSession: tmuxSessionName,
     participantAgentNames,
     lifecycle,
     sessionFolder: paths.folder,
@@ -870,6 +1141,10 @@ export async function resumeOrchestratorSession(
     },
     sendUserPrompt: router.sendUserPrompt,
     detach: router.detach,
+    addWorker,
+    setLifecycle: setLifecycleHandle,
+    getCurrentWorkerNames: router.getWorkerNames,
+    getCurrentLifecycle: router.getLifecycle,
   };
 }
 

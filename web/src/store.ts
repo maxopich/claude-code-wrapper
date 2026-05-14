@@ -526,6 +526,43 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
+    case 'multi_agent_lifecycle_changed': {
+      // Echo of `set_multi_agent_lifecycle`. Update the active run's
+      // lifecycle so the settings panel toggle reflects the new value
+      // and the End-button affordance (confirm dialog for temp) is
+      // consistent with what teardown will actually do.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, lifecycle: msg.lifecycle },
+        },
+      };
+    }
+
+    case 'multi_agent_participant_added': {
+      // Echo of `add_multi_agent_participant`. Append the new worker
+      // slug to the active run's participant list so the settings
+      // panel re-renders with the new participant visible.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      // Idempotency guard — server should only emit once but a future
+      // resubscribe could replay.
+      if (active.participantAgentNames.includes(msg.agentName)) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: {
+            ...active,
+            participantAgentNames: [...active.participantAgentNames, msg.agentName],
+          },
+        },
+      };
+    }
+
     case 'settings':
       return {
         ...state,

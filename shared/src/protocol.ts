@@ -212,6 +212,42 @@ export type ClientMsg =
        * round-trip.
        */
       type: 'clear_iterations';
+    }
+  | {
+      /**
+       * Mutate the lifecycle of a running multi-agent session
+       * (`persistent` ↔ `temp`). Only affects teardown behavior — the
+       * session keeps running unchanged; on End/Stop the new value
+       * decides whether to keep or rm-rf the session folder (and
+       * uninstall bus from workers, for `temp`). Server-side this is
+       * a single row update on `multi_agent_sessions` plus an
+       * in-memory flip so the active router's teardown branch picks
+       * the new value.
+       *
+       * Chain-mode sessions reject this with `wrapper_error` for now —
+       * the chain handle doesn't expose lifecycle mutation in v1.
+       */
+      type: 'set_multi_agent_lifecycle';
+      sessionId: string;
+      lifecycle: MultiAgentLifecycle;
+    }
+  | {
+      /**
+       * Append a worker to an already-running orchestrator session.
+       * The server resolves the project's agent name, auto-installs
+       * bus integration if missing (writing the project's
+       * `.claude/settings.json`), spawns a new tmux pane in the
+       * session's tmux session, registers the worker with the
+       * router's F2 source allowlist, persists a `multi_agent_participants`
+       * row, and writes an updated roster prompt to the orchestrator's
+       * inbox so it knows the new agent is reachable.
+       *
+       * Chain-mode sessions reject this — chain ordering (`chain_order`)
+       * is baked in at start and the pipeline depends on it.
+       */
+      type: 'add_multi_agent_participant';
+      sessionId: string;
+      projectId: number;
     };
 
 // ---- Server → Browser ----
@@ -353,6 +389,33 @@ export type ServerMsg =
        */
       type: 'iterations';
       items: IterationSummary[];
+    }
+  | {
+      /**
+       * Echo of a successful `set_multi_agent_lifecycle`. The reducer
+       * updates `MultiAgentRun.lifecycle` so the UI affordances
+       * (End-button confirm dialog, settings panel) reflect the new
+       * value immediately.
+       */
+      type: 'multi_agent_lifecycle_changed';
+      sessionId: string;
+      lifecycle: MultiAgentLifecycle;
+    }
+  | {
+      /**
+       * Echo of a successful `add_multi_agent_participant`. The reducer
+       * appends `agentName` to `MultiAgentRun.participantAgentNames` so
+       * the settings panel re-renders with the new worker visible.
+       *
+       * `busWasAlreadyInstalled` lets the UI decide whether to surface
+       * "bus integration was installed for this project" as a side
+       * effect of the add.
+       */
+      type: 'multi_agent_participant_added';
+      sessionId: string;
+      projectId: number;
+      agentName: string;
+      busWasAlreadyInstalled: boolean;
     }
   | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string };
 

@@ -92,6 +92,18 @@ export function endMultiAgentSession(id: string, status: MultiAgentStatus): void
     .run(status, Date.now(), id);
 }
 
+/**
+ * Mutate the lifecycle of an existing multi-agent session row. Used by
+ * the `set_multi_agent_lifecycle` WS handler so the operator can flip
+ * persistent ↔ temp mid-run after seeing how a session is going. The
+ * router holds an in-memory mirror that decides teardown behavior; this
+ * row update is what lets a `resumeOrchestratorSession` after Cebab
+ * restart pick up the latest value.
+ */
+export function setMultiAgentSessionLifecycle(id: string, lifecycle: MultiAgentLifecycle): void {
+  getDb().prepare(`UPDATE multi_agent_sessions SET lifecycle = ? WHERE id = ?`).run(lifecycle, id);
+}
+
 export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefined {
   return getDb()
     .prepare<[string], MultiAgentSessionRow>('SELECT * FROM multi_agent_sessions WHERE id = ?')

@@ -215,6 +215,23 @@ export function App() {
     // source=cebab, so it shows up in the scrollback like any other event.
     wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text });
   }
+  function setActiveLifecycle(sessionId: string, lifecycle: MultiAgentLifecycle) {
+    // Server validates: orchestrator-mode only, sessionId must match the
+    // active session. On success, server echoes `multi_agent_lifecycle_changed`
+    // which the reducer applies to `state.multiAgent.active.lifecycle`.
+    // No optimistic update — wait for the echo so the UI never drifts
+    // from server truth.
+    wsRef.current?.send({ type: 'set_multi_agent_lifecycle', sessionId, lifecycle });
+  }
+  function addActiveParticipant(sessionId: string, projectId: number) {
+    // Server resolves the project, auto-installs bus if missing, spawns
+    // a new tmux pane, persists the participant row, and forwards an
+    // updated roster prompt to the orchestrator. On success the reducer
+    // gets `multi_agent_participant_added` (appends to
+    // participantAgentNames) and possibly `bus_integration_changed` +
+    // `projects` (if auto-install ran).
+    wsRef.current?.send({ type: 'add_multi_agent_participant', sessionId, projectId });
+  }
   function dismissActiveRun() {
     dispatch({ type: 'ma_dismiss_active' });
   }
@@ -354,6 +371,8 @@ export function App() {
                 onStartOrchestrator={startOrchestrator}
                 onStopMultiAgent={stopMultiAgent}
                 onSendUserPrompt={sendMultiAgentUserPrompt}
+                onSetActiveLifecycle={setActiveLifecycle}
+                onAddActiveParticipant={addActiveParticipant}
                 onDismissActive={dismissActiveRun}
                 onRefreshIterations={refreshIterations}
                 onClearIterations={clearIterations}
