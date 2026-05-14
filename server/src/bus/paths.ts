@@ -229,6 +229,10 @@ export function slugifyAgentName(rawName: string): string {
  * filesystem with caller-supplied names.
  */
 export function isValidAgentName(s: string): boolean {
+  // The alternation is anchored — each segment requires a literal `-` and
+  // at least one alnum, so there's no catastrophic backtracking. Mirrors
+  // the bash regex in bus-send-msg.sh (F6).
+  // eslint-disable-next-line security/detect-unsafe-regex
   return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s);
 }
 

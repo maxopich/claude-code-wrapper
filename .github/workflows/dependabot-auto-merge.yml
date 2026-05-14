@@ -40,8 +40,34 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check for CODEOWNERS-tagged paths
+        # Defense-in-depth: even patch-only bumps shouldn't auto-merge if
+        # they touch security-critical paths (auth / origin / bus / ws /
+        # migrations / CI workflows / security configs). In practice
+        # dependabot rarely touches these — github-actions bumps can hit
+        # .github/workflows/, and those should get a human reviewer too.
+        # Mirrors .github/CODEOWNERS, kept here as a hard gate not just
+        # a soft review requirement. Plan: T2.5(A).
+        id: codeowners_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate -q '.[].filename')
+          echo "Files in PR:"
+          echo "$files"
+          if echo "$files" | grep -qE '^(server/src/(auth|origin)\.ts|server/src/(ws|bus|migrations)/|\.github/|\.gitleaks\.toml|\.npmrc|\.husky/|\.semgrep/|osv-scanner\.toml)'; then
+            echo "touches_codeowners=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR touches CODEOWNERS-tagged paths; auto-merge skipped."
+          else
+            echo "touches_codeowners=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Enable auto-merge for patch updates
-        if: steps.meta.outputs.update-type == 'version-update:semver-patch'
+        if: |
+          steps.meta.outputs.update-type == 'version-update:semver-patch'
+          && steps.codeowners_check.outputs.touches_codeowners != 'true'
         run: gh pr merge --auto --squash "$PR_URL"
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
