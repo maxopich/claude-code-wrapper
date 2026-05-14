@@ -243,6 +243,40 @@ export function renderRosterPrompt(opts: {
 }
 
 /**
+ * Roster update for a mid-session `add_multi_agent_participant`. Sent
+ * to the orchestrator's inbox so the LLM learns about the new
+ * participant on its next turn. Same `<participant>` sanitization +
+ * delimiting as `renderRosterPrompt`.
+ *
+ * `currentWorkers` is the FULL post-add roster (including the new
+ * participant). The orchestrator should treat this as authoritative —
+ * it supersedes the start-time roster.
+ */
+export function renderRosterUpdate(opts: {
+  newWorker: { agentName: string; projectName: string };
+  currentWorkers: Array<{ agentName: string; projectName: string }>;
+  hopBudget: number;
+}): string {
+  const { newWorker, currentWorkers, hopBudget } = opts;
+  const tagAgent = (n: string) => `<participant>${sanitizeForPrompt(n)}</participant>`;
+  const newAgentSafe = sanitizeForPrompt(newWorker.agentName);
+  return [
+    `A new participant has joined this multi-agent session: ${tagAgent(newWorker.agentName)} (${sanitizeForPrompt(newWorker.projectName)}).`,
+    ``,
+    `Updated roster:`,
+    ...currentWorkers.map(
+      (w) => `- ${tagAgent(w.agentName)} — ${sanitizeForPrompt(w.projectName)}`,
+    ),
+    ``,
+    `Send the new participant a \`kind=intro\` message and collect their capability self-description, same as Step 1 of the original roster. Example:`,
+    ``,
+    `    bus-send-msg.sh --kind intro ${newAgentSafe} "You are joining a multi-agent conversation already in progress. Reply only to me (orchestrator). Please send a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at."`,
+    ``,
+    `Once they reply, route to them just like any existing worker. Hop budget for the current user prompt remains ${hopBudget}.`,
+  ].join('\n');
+}
+
+/**
  * Allocate the next iteration directory id: `001`, `002`, etc. — zero-padded
  * to 3 digits.
  *

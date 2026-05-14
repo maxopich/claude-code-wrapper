@@ -18,8 +18,12 @@ import {
   projectCebabDir,
   projectCommMdPath,
 } from './paths.js';
-import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
-import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
+import { CEBAB_SOURCE, USER_RECIPIENT, type MultiAgentEndedReason } from './runtime.js';
+import {
+  createMultiAgentSession,
+  listMultiAgentEvents,
+  type MultiAgentLifecycle,
+} from '../repo/multi_agent.js';
 import type { BusLogEvent } from './log_tailer.js';
 
 // Same isolation scaffolding as install.test.ts — each test gets its own
@@ -223,14 +227,29 @@ describe('ensureOrchestratorWorkspace — idempotency and refresh', () => {
 // helper builds a real router against the test DB (no tmux, no tailer) so
 // we can drive `handleEvent` / `forwardCebabEvent` directly and observe
 // the persist + onEvent surface in isolation.
-function buildRouter(workerNames: string[] = ['reviewer', 'editor']) {
+function buildRouter(
+  opts: {
+    workerNames?: string[];
+    lifecycle?: MultiAgentLifecycle;
+    onTeardown?: (reason: MultiAgentEndedReason) => Promise<void>;
+  } = {},
+) {
+  const workerNames = opts.workerNames ?? ['reviewer', 'editor'];
+  const lifecycle = opts.lifecycle ?? 'persistent';
   const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
   const iterationId = '001';
   const tmuxSessionName = `cebab-bus-${sessionId}`;
   const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
   // appendMultiAgentEvent has a foreign-key constraint on multi_agent_sessions;
   // seed the row before any handleEvent / forwardCebabEvent call.
-  createMultiAgentSession(sessionId, 'orchestrator', tmuxSessionName, iterationId, paths.folder);
+  createMultiAgentSession(
+    sessionId,
+    'orchestrator',
+    tmuxSessionName,
+    iterationId,
+    paths.folder,
+    lifecycle,
+  );
   const onEvent = vi.fn();
   const onEnded = vi.fn();
   const router = createOrchestratorRouter({
@@ -239,8 +258,10 @@ function buildRouter(workerNames: string[] = ['reviewer', 'editor']) {
     workerNames,
     tmuxSessionName,
     paths,
+    lifecycle,
     onEvent,
     onEnded,
+    onTeardown: opts.onTeardown,
   });
   return { router, sessionId, onEvent, onEnded };
 }
@@ -330,5 +351,76 @@ describe('createOrchestratorRouter — F3 forwardCebabEvent round-trip', () => {
     router.handleEvent(ev);
     expect(listMultiAgentEvents(sessionId)).toHaveLength(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createOrchestratorRouter — registerWorker (mid-run worker add)', () => {
+  // Pins the contract that `addWorker` on the session handle relies on:
+  // after registerWorker(slug), inbound events from `slug` pass F2's
+  // source allowlist (which would otherwise drop them as forgeries).
+  test('newly-registered slug passes the F2 source allowlist', () => {
+    const { router, sessionId, onEvent } = buildRouter();
+    // Before registration: a `newbie` source is dropped as non-participant.
+    router.handleEvent(
+      makeEvent({ source: 'newbie', destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply' }),
+    );
+    expect(listMultiAgentEvents(sessionId)).toHaveLength(0);
+    expect(onEvent).not.toHaveBeenCalled();
+
+    // After registration: same event is accepted.
+    router.registerWorker('newbie');
+    router.handleEvent(
+      makeEvent({
+        source: 'newbie',
+        destination: ORCHESTRATOR_AGENT_NAME,
+        kind: 'reply',
+        text: 'hello',
+      }),
+    );
+    expect(listMultiAgentEvents(sessionId)).toHaveLength(1);
+    expect(onEvent).toHaveBeenCalledTimes(1);
+  });
+
+  test('is idempotent (re-registering an existing slug is a no-op)', () => {
+    const { router } = buildRouter({ workerNames: ['reviewer'] });
+    expect(router.getWorkerNames()).toEqual(['reviewer']);
+    router.registerWorker('reviewer');
+    router.registerWorker('reviewer');
+    expect(router.getWorkerNames()).toEqual(['reviewer']);
+    router.registerWorker('editor');
+    expect(router.getWorkerNames()).toEqual(['reviewer', 'editor']);
+  });
+});
+
+describe('createOrchestratorRouter — setLifecycle (mid-run lifecycle flip)', () => {
+  // The router gates the onTeardown invocation on the CURRENT
+  // lifecycleRef + reason !== 'crashed'. setLifecycle must mutate that
+  // ref so a session started 'persistent' but flipped to 'temp' mid-run
+  // cleans up at end, and vice versa.
+  test('persistent → temp: onTeardown runs at teardown', async () => {
+    const onTeardown = vi.fn().mockResolvedValue(undefined);
+    const { router } = buildRouter({ lifecycle: 'persistent', onTeardown });
+    expect(router.getLifecycle()).toBe('persistent');
+    router.setLifecycle('temp');
+    expect(router.getLifecycle()).toBe('temp');
+    await router.teardown('stopped');
+    expect(onTeardown).toHaveBeenCalledTimes(1);
+  });
+
+  test('temp → persistent: onTeardown does NOT run at teardown', async () => {
+    const onTeardown = vi.fn().mockResolvedValue(undefined);
+    const { router } = buildRouter({ lifecycle: 'temp', onTeardown });
+    router.setLifecycle('persistent');
+    await router.teardown('stopped');
+    expect(onTeardown).not.toHaveBeenCalled();
+  });
+
+  test('onTeardown is skipped on `crashed` even when temp', async () => {
+    // Crash means the operator wants to inspect artifacts; lifecycle
+    // doesn't matter — never run the rm-rf + uninstall.
+    const onTeardown = vi.fn().mockResolvedValue(undefined);
+    const { router } = buildRouter({ lifecycle: 'temp', onTeardown });
+    await router.teardown('crashed');
+    expect(onTeardown).not.toHaveBeenCalled();
   });
 });
