@@ -33,10 +33,21 @@ die() { echo "bus-check-inbox: $*" >&2; exit 1; }
 [[ $# -eq 1 ]] || die "usage: bus-check-inbox.sh <self>"
 self="$1"
 
-# Self allow-list: same shape as bus-send-msg.sh's recipient check.
-# Defends against `bus-check-inbox.sh '../../../etc'` from a worker
-# subprocess under bypassPermissions.
-[[ "$self" =~ ^([a-z0-9]+(-[a-z0-9]+)*|user|_sink)$ ]] \
+# Self allow-list: must be an agent slug. Defends against
+# `bus-check-inbox.sh '../../../etc'` from a worker subprocess under
+# bypassPermissions.
+# R3: `$self` is the calling agent's own identity, never a protocol
+# sentinel or Cebab's own name. A worker invoking
+# `bus-check-inbox.sh user` would otherwise drain operator-bound
+# inboxes and inline their contents into its own next prompt
+# (`user` matches the agent-slug regex shape, so an explicit deny
+# is needed; `_sink` no longer matches after dropping the
+# `|_sink` alternation; `cebab` matches the slug shape and is
+# reserved for Cebab's own writes).
+case "$self" in
+  user|_sink|cebab) die "invalid self: $self (reserved)" ;;
+esac
+[[ "$self" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] \
   || die "invalid self: $self"
 
 inbox="$BUS_ROOT/inboxes/$self"
@@ -60,12 +71,33 @@ unset IFS
 # Build the human-formatted block + record what we consumed.
 formatted=""
 count=0
+rejected="$BUS_ROOT/rejected/$self"
 for msg_path in "${msgs[@]}"; do
   filename="$(basename "$msg_path")"
   # Parse <ts>-<from>-<rand>.msg
   ts_part="${filename%%-*}"
   rest="${filename#*-}"
   from_part="${rest%-*}"
+
+  # R3: a same-uid worker can `printf > foo.msg` directly into another
+  # agent's inbox, bypassing bus-send-msg.sh entirely. macOS APFS allows
+  # newlines in filenames, so `from_part` could otherwise carry control
+  # chars into the recipient's Stop-hook prompt. Strict-reject (move +
+  # continue) rather than degrade-to-unknown — the body is also
+  # attacker-controlled, so the whole file is suspect.
+  #   - The slug-shape regex rejects `_sink` (underscore not in [a-z0-9])
+  #     plus anything with control chars / newlines / path separators.
+  #   - `user` matches the slug shape so it needs an explicit deny —
+  #     a forged `123-user-rand.msg` would otherwise inline
+  #     `--- from user ---` and phish the recipient.
+  #   - `cebab` IS legitimate here: Cebab's in-process writeInboxMessage
+  #     calls go through this same parse with `source=cebab`.
+  if [[ ! "$from_part" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] || [[ "$from_part" == "user" ]]; then
+    echo "bus-check-inbox: reject malformed from_part in $filename" >&2
+    mkdir -p "$rejected"
+    mv "$msg_path" "$rejected/$filename"
+    continue
+  fi
 
   body="$(cat "$msg_path")"
   formatted+="--- from ${from_part} ---"$'\n'

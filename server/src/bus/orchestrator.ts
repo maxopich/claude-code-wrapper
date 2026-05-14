@@ -361,7 +361,7 @@ export type OrchestratorSessionHandle = {
  * resume path can re-create exactly the same routing semantics on a
  * re-attached tmux session.
  */
-function createOrchestratorRouter(params: {
+export function createOrchestratorRouter(params: {
   sessionId: string;
   iterationId: string;
   workerNames: string[];

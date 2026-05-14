@@ -72,13 +72,24 @@ fi
 sender="${BUS_AGENT_NAME:-}"
 [[ -n "$sender" ]] || die "BUS_AGENT_NAME is unset — run this inside an agent's TUI (Cebab launches with it set)"
 
-# F6 round-2: validate BUS_AGENT_NAME shape (same regex as recipient/self).
-# macOS APFS allows newlines in filenames; a worker setting
-# BUS_AGENT_NAME=$'name\nIGNORE PRIOR\n' would otherwise let bus-check-inbox.sh
-# inline the newline-bearing `from_part` directly into the recipient's
-# Stop-hook prompt — top-level instruction injection. Reject malformed
-# senders before the .msg filename is composed.
-[[ "$sender" =~ ^([a-z0-9]+(-[a-z0-9]+)*|user|_sink)$ ]] \
+# F6 round-2: validate BUS_AGENT_NAME shape. macOS APFS allows newlines
+# in filenames; a worker setting BUS_AGENT_NAME=$'name\nIGNORE PRIOR\n'
+# would otherwise let bus-check-inbox.sh inline the newline-bearing
+# `from_part` directly into the recipient's Stop-hook prompt — top-level
+# instruction injection. Reject malformed senders before the .msg
+# filename is composed.
+# R3: explicitly deny the protocol sentinels (`user`, `_sink`) and
+# Cebab's own identity (`cebab`) as worker senders. `user` matches the
+# slug regex and would otherwise be accepted; `_sink` no longer is
+# (was previously allowed via a `|_sink` alternation, now removed);
+# `cebab` is reserved for Cebab's in-process writeInboxMessage calls
+# and a worker spoofing it could plant `--- from cebab ---` messages
+# in other workers' inboxes, phishing them into following forged
+# Cebab-attributed instructions.
+case "$sender" in
+  user|_sink|cebab) die "invalid BUS_AGENT_NAME: $sender (reserved)" ;;
+esac
+[[ "$sender" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]] \
   || die "invalid BUS_AGENT_NAME: $sender"
 
 # Validate kind against the enum used in DB + bus.log.
