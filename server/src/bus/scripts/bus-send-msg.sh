@@ -54,6 +54,13 @@ done
 [[ $# -ge 1 ]] || die "usage: bus-send-msg.sh [--kind <kind>] <recipient> [<text>]"
 recipient="$1"; shift
 
+# Recipient allow-list: agent slug (lowercase alnum + internal hyphens) OR
+# the two protocol sentinels (user, _sink). Rejects path-traversal payloads
+# like '../../../tmp/pwn' before they reach mkdir/mv. Mirrors
+# isValidBusRecipient in server/src/bus/paths.ts.
+[[ "$recipient" =~ ^([a-z0-9]+(-[a-z0-9]+)*|user|_sink)$ ]] \
+  || die "invalid recipient: $recipient"
+
 # Body: positional arg if present, else stdin.
 if [[ $# -ge 1 ]]; then
   body="$1"
@@ -64,6 +71,15 @@ fi
 # Sender from env.
 sender="${BUS_AGENT_NAME:-}"
 [[ -n "$sender" ]] || die "BUS_AGENT_NAME is unset — run this inside an agent's TUI (Cebab launches with it set)"
+
+# F6 round-2: validate BUS_AGENT_NAME shape (same regex as recipient/self).
+# macOS APFS allows newlines in filenames; a worker setting
+# BUS_AGENT_NAME=$'name\nIGNORE PRIOR\n' would otherwise let bus-check-inbox.sh
+# inline the newline-bearing `from_part` directly into the recipient's
+# Stop-hook prompt — top-level instruction injection. Reject malformed
+# senders before the .msg filename is composed.
+[[ "$sender" =~ ^([a-z0-9]+(-[a-z0-9]+)*|user|_sink)$ ]] \
+  || die "invalid BUS_AGENT_NAME: $sender"
 
 # Validate kind against the enum used in DB + bus.log.
 case "$kind" in

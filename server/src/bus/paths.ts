@@ -233,6 +233,20 @@ export function isValidAgentName(s: string): boolean {
 }
 
 /**
+ * True iff `s` is a valid bus message recipient — either an agent slug
+ * (per `isValidAgentName`) or one of the two protocol sentinels (`user`
+ * for orchestrator → operator finals, `_sink` for chain terminations).
+ *
+ * Used by `writeInboxMessage` and the bus shell scripts to reject path-
+ * traversal payloads (`../../../tmp/pwn`) before they reach `mkdir`/`mv`.
+ * Sentinels are hardcoded here rather than imported from `runtime.ts`
+ * to keep this file free of cycles — `runtime.ts` imports from us.
+ */
+export function isValidBusRecipient(s: string): boolean {
+  return s === 'user' || s === '_sink' || isValidAgentName(s);
+}
+
+/**
  * Slugs reserved for system roles in the bus protocol. A project whose name
  * happens to slugify to one of these gets bumped to a `<slug>-<id>` fallback
  * by `chooseAgentName` — otherwise the project would shadow the system

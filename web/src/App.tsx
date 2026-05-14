@@ -10,6 +10,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { MultiAgentTab } from './components/MultiAgentTab';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
+const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
 const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
 
 export function App() {
@@ -18,18 +19,40 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
-    const ws = connectWs({
-      url: WS_URL,
-      onOpen: () => {
-        dispatch({ type: 'ws_open' });
-        ws.send({ type: 'get_settings' });
-        ws.send({ type: 'list_projects' });
-      },
-      onClose: () => dispatch({ type: 'ws_close' }),
-      onMessage: (msg) => dispatch({ type: 'server', msg }),
-    });
-    wsRef.current = ws;
-    return () => ws.close();
+    let cancelled = false;
+    let ws: WsHandle | null = null;
+    // F4: fetch the per-launch auth token before opening the WS. The
+    //     /auth-token endpoint is Origin+Host gated server-side; a
+    //     cross-origin tab can't read it. We then append `?token=` to
+    //     the WS URL so the server's verifyClient gate accepts the
+    //     upgrade. See server/src/auth.ts.
+    (async () => {
+      let token: string;
+      try {
+        const r = await fetch(`${HTTP_BASE}/auth-token`);
+        if (!r.ok) throw new Error(`status ${r.status}`);
+        token = (await r.text()).trim();
+      } catch (err) {
+        console.error('[ws] failed to fetch auth token', err);
+        return;
+      }
+      if (cancelled) return;
+      ws = connectWs({
+        url: `${WS_URL}/?token=${encodeURIComponent(token)}`,
+        onOpen: () => {
+          dispatch({ type: 'ws_open' });
+          ws?.send({ type: 'get_settings' });
+          ws?.send({ type: 'list_projects' });
+        },
+        onClose: () => dispatch({ type: 'ws_close' }),
+        onMessage: (msg) => dispatch({ type: 'server', msg }),
+      });
+      wsRef.current = ws;
+    })();
+    return () => {
+      cancelled = true;
+      ws?.close();
+    };
   }, []);
 
   // First-run UX: open the settings modal automatically when we learn the

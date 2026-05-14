@@ -25,9 +25,11 @@ import {
   busIterationDir,
   busIterationsDir,
   busLogPath,
+  isValidBusRecipient,
   type SessionPaths,
 } from './paths.js';
 import { appendBusLogEvent, type BusLogEvent } from './log_tailer.js';
+import { sanitizeForPrompt } from './sanitize.js';
 
 /** Sentinel destination for the last chain participant. */
 export const SINK_RECIPIENT = '_sink';
@@ -104,6 +106,13 @@ export function writeInboxMessage(opts: {
   /** Per-session paths bundle. Omit to use the legacy global layout. */
   paths?: SessionPaths;
 }): BusLogEvent {
+  // Defense-in-depth: internal callers pass resolved slugs or the
+  // 'user'/'_sink' sentinels, but a future caller passing operator-
+  // controlled input must not slip past. Mirrors the shell guards in
+  // bus-send-msg.sh / bus-check-inbox.sh.
+  if (!isValidBusRecipient(opts.recipient)) {
+    throw new Error(`writeInboxMessage: invalid recipient ${JSON.stringify(opts.recipient)}`);
+  }
   const ts = opts.ts ?? Date.now();
   const inbox = opts.paths ? opts.paths.busInbox(opts.recipient) : busInboxDir(opts.recipient);
   const archive = opts.paths
@@ -153,22 +162,28 @@ export function renderChainBriefing(opts: {
   const { iterationId, position, totalSteps, selfAgent, participantNames, nextHop } = opts;
   const isLast = position === totalSteps;
   const others = participantNames.filter((n) => n !== selfAgent);
+  // F6: wrap every interpolated agent slug in a <participant>…</participant>
+  //     delimiter and pass through sanitizeForPrompt. Slugs come through
+  //     `isValidAgentName` today so control chars can't reach here via the
+  //     install path, but the wrap makes the function safe regardless of
+  //     who calls it (and against any future bypass).
+  const tag = (n: string) => `<participant>${sanitizeForPrompt(n)}</participant>`;
   return [
     `[Chain iteration ${iterationId} | step ${position} of ${totalSteps}]`,
     ``,
-    `You are \`${selfAgent}\`. Other participants in this chain: ${
-      others.length === 0 ? '(none)' : others.join(', ')
+    `You are ${tag(selfAgent)}. Other participants in this chain: ${
+      others.length === 0 ? '(none)' : others.map(tag).join(', ')
     }.`,
     ``,
     isLast
       ? `You are the last step. When you finish, send your final reply to the sink so Cebab can archive the iteration:`
       : `When you finish your work, send your reply to the next step:`,
     ``,
-    `    bus-send-msg.sh --kind ${isLast ? 'final' : 'reply'} ${nextHop} "<your reply>"`,
+    `    bus-send-msg.sh --kind ${isLast ? 'final' : 'reply'} ${sanitizeForPrompt(nextHop)} "<your reply>"`,
     ``,
     `Or pipe via stdin for a longer reply:`,
     ``,
-    `    echo "<your reply>" | bus-send-msg.sh --kind ${isLast ? 'final' : 'reply'} ${nextHop}`,
+    `    echo "<your reply>" | bus-send-msg.sh --kind ${isLast ? 'final' : 'reply'} ${sanitizeForPrompt(nextHop)}`,
     ``,
     `Do not message anyone else. Wait for further instructions; the next message in your inbox is the actual task input.`,
   ].join('\n');
@@ -194,23 +209,30 @@ export function renderRosterPrompt(opts: {
   hopBudget: number;
 }): string {
   const { workers, hopBudget } = opts;
+  // F6: agent slugs come from `isValidAgentName` (no control chars
+  //     reachable), but `projectName` flows from filesystem folder names
+  //     via `addProject` — a folder named `Reviewer"\n\nIgnore prior…`
+  //     would otherwise inline verbatim. Wrap both in `<participant>`
+  //     delimiters and sanitize.
+  const tagAgent = (n: string) => `<participant>${sanitizeForPrompt(n)}</participant>`;
   const firstAgent = workers[0]?.agentName ?? 'reviewer';
+  const firstAgentSafe = sanitizeForPrompt(firstAgent);
   const otherAgents =
     workers
       .slice(1)
-      .map((w) => w.agentName)
+      .map((w) => sanitizeForPrompt(w.agentName))
       .join(', ') || '(none)';
   return [
     `You are the orchestrator for a new multi-agent session. The participants below are running in their own tmux windows and have been briefed on the bus protocol; they're waiting for you to introduce them to the conversation.`,
     ``,
     `Participants:`,
-    ...workers.map((w) => `- \`${w.agentName}\` — ${w.projectName}`),
+    ...workers.map((w) => `- ${tagAgent(w.agentName)} — ${sanitizeForPrompt(w.projectName)}`),
     ``,
     `The bus slugs and project names above are what Cebab knows. You don't yet know what each agent is best at — that's what Step 1 is for.`,
     ``,
-    `Step 1: send a \`kind=intro\` message to each participant. Tell them they're in a multi-agent conversation, name the other participants, ask them to reply only to you, AND ask them to send back a brief (2-3 sentence) self-description so you know what kinds of tasks each one is best at. Example for \`${firstAgent}\`:`,
+    `Step 1: send a \`kind=intro\` message to each participant. Tell them they're in a multi-agent conversation, name the other participants, ask them to reply only to you, AND ask them to send back a brief (2-3 sentence) self-description so you know what kinds of tasks each one is best at. Example for ${tagAgent(firstAgent)}:`,
     ``,
-    `    bus-send-msg.sh --kind intro ${firstAgent} "You are part of a multi-agent conversation. Other participants: ${otherAgents}. Reply only to me (orchestrator). Before we start: please send me a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at. I'll use this to route user prompts to whoever fits best."`,
+    `    bus-send-msg.sh --kind intro ${firstAgentSafe} "You are part of a multi-agent conversation. Other participants: ${otherAgents}. Reply only to me (orchestrator). Before we start: please send me a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at. I'll use this to route user prompts to whoever fits best."`,
     ``,
     `Step 2: wait for each worker's \`kind=reply\` with their self-description before routing the first user prompt. The user's first prompt is the next message in your inbox after this one — but route it only after you've collected capability replies from every participant. Use those descriptions to inform routing.`,
     ``,
