@@ -14,11 +14,13 @@
  * What this does NOT close: bus workers under `bypassPermissions` run
  * as the operator's uid, so they can read `~/.cebab/auth-token`
  * directly OR call `GET /auth-token` (empty-Origin branch returns the
- * token to local non-browser clients). See CLAUDE.md "Per-launch WS
- * auth tokens" for the full threat-model writeup — short version is
- * that with the F2 source allowlist + F6 `BUS_AGENT_NAME` regex in
- * place, a token-holding worker's surface reduces to WS control-plane
- * abuse (`set_trusted` etc.), and same-uid isolation is v2 work.
+ * token to local non-browser clients). With the F2 source allowlist
+ * (`bus/orchestrator.ts:handleEvent` source ∈ {orchestrator, workers})
+ * + F6 `BUS_AGENT_NAME` shape regex (`bus/scripts/bus-send-msg.sh`)
+ * in place, a token-holding worker's surface reduces to direct WS
+ * control-plane abuse — primarily `set_trusted` flipping a future
+ * session's Trust state. Same-uid isolation (Unix socket +
+ * `SO_PEERCRED`, or XPC with entitlements) is v2 work.
  *
  * Single-process, single-token: regenerated on every boot. There's no
  * persistence to disk beyond the file itself, and the in-process value
