@@ -1,8 +1,17 @@
 // WS smoke client: connects to the running server, sends a few ClientMsgs,
 // prints every ServerMsg. Used to verify the protocol end-to-end.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import WebSocket from 'ws';
 
-const url = process.env.WS_URL ?? 'ws://127.0.0.1:4319';
+// F4: read the per-launch token from the server's data dir. The same uid
+//     that started the server can read the file (mode 0600). Non-uid
+//     callers (CI on another user) can override via $CEBAB_AUTH_TOKEN.
+const tokenPath = process.env.CEBAB_AUTH_TOKEN_FILE ?? path.join(os.homedir(), '.cebab/auth-token');
+const token = process.env.CEBAB_AUTH_TOKEN ?? fs.readFileSync(tokenPath, 'utf8').trim();
+const base = process.env.WS_URL ?? 'ws://127.0.0.1:4319';
+const url = `${base}/?token=${encodeURIComponent(token)}`;
 const ws = new WebSocket(url);
 
 let projectId: number | undefined;

@@ -377,6 +377,12 @@ function createOrchestratorRouter(params: {
   attachTailer: () => BusLogTailerHandle;
   detach: () => void;
   sendUserPrompt: (text: string) => Promise<void>;
+  /** Persist + WS-forward a Cebab-originated event. The disk-side
+   *  `source=cebab` drop in `handleEvent` means the tailer would
+   *  otherwise treat our own writes as forgeries; this helper closes
+   *  the loop so the operator's UI scrollback + DB transcript include
+   *  Cebab's own utterances (roster, briefings, forwarded prompts). */
+  forwardCebabEvent: (ev: BusLogEvent) => void;
 } {
   const {
     sessionId,
@@ -437,6 +443,43 @@ function createOrchestratorRouter(params: {
 
   const handleEvent = (ev: BusLogEvent) => {
     if (ended) return;
+    // F3: Cebab routes its own events in-process via writeInboxMessage —
+    //     the same call also appends the bus.log line. The tailer then
+    //     re-reads that line, so any genuine Cebab-originated traffic has
+    //     already been handled by its in-process caller. An on-disk event
+    //     with source=cebab observed via the tailer is therefore a
+    //     forgery (e.g. a worker under bypassPermissions writing the
+    //     line directly). Drop before persistence + routing.
+    if (ev.source === CEBAB_SOURCE) {
+      console.warn(
+        `[orchestrator] drop forged source=cebab dest=${ev.destination} kind=${ev.kind}`,
+      );
+      return;
+    }
+    // F2: user-bound replies are orchestrator-only. A worker can't claim
+    //     to be replying to the user — that would phish the operator
+    //     with a spoofed "final answer" attributed to the orchestrator.
+    if (ev.destination === USER_RECIPIENT && ev.source !== ORCHESTRATOR_AGENT_NAME) {
+      console.warn(`[orchestrator] drop dest=user from non-orchestrator source=${ev.source}`);
+      return;
+    }
+    // F2: workers must reply via the orchestrator; direct worker→worker
+    //     traffic in orchestrator mode is a forgery (confused-deputy
+    //     prompt injection). Chain mode is different — that's chain.ts.
+    if (workerSet.has(ev.source) && workerSet.has(ev.destination)) {
+      console.warn(`[orchestrator] drop worker→worker ${ev.source}→${ev.destination}`);
+      return;
+    }
+    // F2 round-2: any source that isn't cebab (filtered above), the
+    //             orchestrator, or a known worker is a forgery. Mirrors
+    //             chain mode's participantSet check. Closes the
+    //             BUS_AGENT_NAME=<unknown> bypass — a worker setting
+    //             `BUS_AGENT_NAME=ghost` would otherwise pass the three
+    //             prior filters and be routed to its claimed destination.
+    if (ev.source !== ORCHESTRATOR_AGENT_NAME && !workerSet.has(ev.source)) {
+      console.warn(`[orchestrator] drop event from non-participant source=${ev.source}`);
+      return;
+    }
     // 1. Persist.
     let dbId = 0;
     try {
@@ -494,15 +537,47 @@ function createOrchestratorRouter(params: {
     tailer?.stop();
   };
 
+  // F3 round-2: handleEvent drops `source=cebab` at the tailer to defuse
+  //              forgeries. Cebab's own writeInboxMessage calls still
+  //              hit disk (so worker TUIs see the message), but the
+  //              tailer's drop means the UI scrollback and DB transcript
+  //              would otherwise miss everything Cebab "says". This
+  //              helper closes that loop in-process: capture the
+  //              BusLogEvent returned from writeInboxMessage and feed
+  //              it through the persist + onEvent block — same shape
+  //              as handleEvent's body minus the routing branch.
+  const forwardCebabEvent = (ev: BusLogEvent): void => {
+    if (ended) return;
+    let dbId = 0;
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        ev.source,
+        ev.destination,
+        ev.kind as EventKind,
+        ev.text,
+      );
+      dbId = row.id;
+    } catch (err) {
+      console.error('[orchestrator] persist cebab event failed', err);
+    }
+    try {
+      onEvent(sessionId, ev, dbId);
+    } catch (err) {
+      console.error('[orchestrator] cebab onEvent threw', err);
+    }
+  };
+
   const sendUserPrompt = async (text: string): Promise<void> => {
     if (ended) return;
-    writeInboxMessage({
+    const ev = writeInboxMessage({
       recipient: ORCHESTRATOR_AGENT_NAME,
       source: CEBAB_SOURCE,
       text,
       kind: 'prompt',
       paths,
     });
+    forwardCebabEvent(ev);
     try {
       if (await hasSession(tmuxSessionName)) {
         await sendKeys(tmuxTarget(ORCHESTRATOR_AGENT_NAME), [WAKE_TEXT, 'Enter']);
@@ -512,7 +587,7 @@ function createOrchestratorRouter(params: {
     }
   };
 
-  return { teardown, handleEvent, attachTailer, detach, sendUserPrompt };
+  return { teardown, handleEvent, attachTailer, detach, sendUserPrompt, forwardCebabEvent };
 }
 
 export async function startOrchestratorSession(
@@ -661,7 +736,11 @@ export async function startOrchestratorSession(
   // hook will concatenate both into the first turn's input — see the
   // orchestrator's CLAUDE.md for how it's expected to handle "roster + first
   // user message at once" (it sends intros first, then routes the prompt).
-  writeInboxMessage({
+  // F3 round-2: feed each Cebab-originated event through forwardCebabEvent
+  //              so the UI scrollback + DB transcript include them; the
+  //              tailer-side `source=cebab` drop keeps disk re-reads from
+  //              double-counting.
+  const rosterEv = writeInboxMessage({
     recipient: ORCHESTRATOR_AGENT_NAME,
     source: CEBAB_SOURCE,
     text: renderRosterPrompt({
@@ -671,13 +750,15 @@ export async function startOrchestratorSession(
     kind: 'prompt',
     paths,
   });
-  writeInboxMessage({
+  router.forwardCebabEvent(rosterEv);
+  const initialEv = writeInboxMessage({
     recipient: ORCHESTRATOR_AGENT_NAME,
     source: CEBAB_SOURCE,
     text: opts.initialPrompt,
     kind: 'prompt',
     paths,
   });
+  router.forwardCebabEvent(initialEv);
 
   // Wait for the orchestrator TUI to come up, then nudge a turn. Same
   // fixed-delay pattern as chain.ts.

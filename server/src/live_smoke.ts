@@ -3,9 +3,16 @@
 //   2. follow-up send_message with the same sessionId → resume context
 // Run the server first: MOCK=0 npm run dev:server (in another terminal)
 // Then:                  npm --workspace server exec tsx src/live_smoke.ts
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import WebSocket from 'ws';
 
-const url = process.env.WS_URL ?? 'ws://127.0.0.1:4319';
+// F4: per-launch auth token. See ws_smoke.ts for the same setup.
+const tokenPath = process.env.CEBAB_AUTH_TOKEN_FILE ?? path.join(os.homedir(), '.cebab/auth-token');
+const token = process.env.CEBAB_AUTH_TOKEN ?? fs.readFileSync(tokenPath, 'utf8').trim();
+const base = process.env.WS_URL ?? 'ws://127.0.0.1:4319';
+const url = `${base}/?token=${encodeURIComponent(token)}`;
 const PROJECT_NAME = process.env.PROJECT ?? 'Cebab';
 
 const ws = new WebSocket(url);

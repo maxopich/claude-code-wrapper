@@ -59,6 +59,8 @@ import { killSession, listSessions as listTmuxSessions } from '../bus/tmux.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type { IterationSummary } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
+import { buildAllowedOrigins, isAllowedHost } from '../origin.js';
+import { verifyToken } from '../auth.js';
 
 type PendingPermission = {
   sessionId: string;
@@ -89,22 +91,6 @@ type Conn = {
   multiAgent: ChainSessionHandle | OrchestratorSessionHandle | null;
 };
 
-/** Origins permitted to upgrade to a WS. Built once, lazily. */
-function buildAllowedOrigins(): Set<string> {
-  const base = new Set<string>([
-    `http://127.0.0.1:5173`,
-    `http://localhost:5173`,
-    `http://127.0.0.1:${config.port}`,
-    `http://localhost:${config.port}`,
-  ]);
-  for (const o of config.allowedOrigins) base.add(o);
-  return base;
-}
-
-function isAllowedHost(host: string): boolean {
-  return host === `127.0.0.1:${config.port}` || host === `localhost:${config.port}`;
-}
-
 export function startWsServer(server: HttpServer): WebSocketServer {
   const allowedOrigins = buildAllowedOrigins();
   const wss = new WebSocketServer({
@@ -115,8 +101,9 @@ export function startWsServer(server: HttpServer): WebSocketServer {
       const host = String(req.headers.host ?? '');
       // Empty Origin is allowed only for non-browser clients (smoke tests,
       // curl). Browsers ALWAYS set Origin on WS upgrades, so an absent
-      // Origin can't be a Cross-Site WebSocket Hijack — and the server is
-      // bound to 127.0.0.1 anyway, so the threat surface is local-only.
+      // Origin can't be a Cross-Site WebSocket Hijack. The per-launch
+      // auth token below is the real gate that closes worker→WS hijack —
+      // Origin/Host are kept as a cheap label and early reject.
       if (origin && !allowedOrigins.has(origin)) {
         console.warn(`[ws] reject: bad origin ${JSON.stringify(origin)}`);
         cb(false, 403, 'forbidden origin');
@@ -125,6 +112,16 @@ export function startWsServer(server: HttpServer): WebSocketServer {
       if (!isAllowedHost(host)) {
         console.warn(`[ws] reject: bad host ${JSON.stringify(host)}`);
         cb(false, 403, 'forbidden host');
+        return;
+      }
+      // F4: per-launch auth token. Workers under bypassPermissions can
+      //     spoof Origin/Host from a Node WS client trivially, so the
+      //     only real defense against a worker→WS hijack is requiring a
+      //     secret they can't read (mode 0600 on ~/.cebab/auth-token).
+      const u = new URL(req.url ?? '/', 'http://x');
+      if (!verifyToken(u.searchParams.get('token'))) {
+        console.warn('[ws] reject: bad token');
+        cb(false, 401, 'unauthorized');
         return;
       }
       cb(true);
@@ -546,6 +543,18 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     case 'interrupt': {
       const f = conn.inFlight.get(msg.sessionId);
       if (!f) return;
+      // F12: drain any pending permission Promises for this session before
+      //      abort/interrupt. Otherwise their entries leak in the map until
+      //      WS close — functionally benign (abort cancels the SDK's
+      //      canUseTool callback) but unbounded growth under a burst of
+      //      interrupts. Mirrors the close-handler pattern at the top of
+      //      onConnection. Filter by sessionId so other concurrent sessions
+      //      on the same WS connection aren't affected.
+      for (const [requestId, pending] of conn.pendingPermissions) {
+        if (pending.sessionId !== msg.sessionId) continue;
+        pending.resolve({ behavior: 'deny', message: 'interrupted' });
+        conn.pendingPermissions.delete(requestId);
+      }
       // Don't await — `runner.interrupt()` can take a second or two and we
       // shouldn't back up the WS message queue. The for-await loop in
       // runOneTurn will exit and clean up via finally.
@@ -881,6 +890,23 @@ async function runOneTurn(
       message: `unknown project ${msg.projectId}`,
     });
     return;
+  }
+
+  // F5: when the caller supplies an existing sessionId, verify it belongs
+  //     to the supplied projectId. Without this check a client could
+  //     resume project B's session with cwd=project A, mixing transcripts
+  //     across projects. Pattern mirrors `replaySession` below.
+  if (msg.sessionId) {
+    const existing = getSession(msg.sessionId);
+    if (!existing || existing.project_id !== project.id) {
+      send(conn.ws, {
+        type: 'wrapper_error',
+        sessionId: msg.sessionId,
+        kind: 'process_crashed',
+        message: `unknown session ${msg.sessionId} for project ${project.id}`,
+      });
+      return;
+    }
   }
 
   const sessionId = msg.sessionId ?? randomUUID();

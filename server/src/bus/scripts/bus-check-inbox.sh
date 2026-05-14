@@ -33,6 +33,12 @@ die() { echo "bus-check-inbox: $*" >&2; exit 1; }
 [[ $# -eq 1 ]] || die "usage: bus-check-inbox.sh <self>"
 self="$1"
 
+# Self allow-list: same shape as bus-send-msg.sh's recipient check.
+# Defends against `bus-check-inbox.sh '../../../etc'` from a worker
+# subprocess under bypassPermissions.
+[[ "$self" =~ ^([a-z0-9]+(-[a-z0-9]+)*|user|_sink)$ ]] \
+  || die "invalid self: $self"
+
 inbox="$BUS_ROOT/inboxes/$self"
 archive="$BUS_ROOT/archive/$self"
 mkdir -p "$archive"

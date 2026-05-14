@@ -8,6 +8,8 @@ import {
   busLogPath,
   busRoot,
   computeSessionPaths,
+  isValidAgentName,
+  isValidBusRecipient,
   legacyGlobalSessionPaths,
   sessionPathsFromFolder,
 } from './paths.js';
@@ -83,5 +85,45 @@ describe('legacyGlobalSessionPaths', () => {
     expect(paths.folder).toBe(busRoot());
     expect(paths.busInbox('reviewer')).toBe(busInboxDir('reviewer'));
     expect(paths.busLog).toBe(busLogPath());
+  });
+});
+
+describe('isValidAgentName / isValidBusRecipient', () => {
+  test.each([['reviewer'], ['my-agent'], ['a1b2c3'], ['x']])('accepts canonical slug %j', (s) => {
+    expect(isValidAgentName(s)).toBe(true);
+    expect(isValidBusRecipient(s)).toBe(true);
+  });
+
+  test.each([
+    [''],
+    ['UPPER'],
+    ['has space'],
+    ['has_underscore'],
+    ['-leading-hyphen'],
+    ['trailing-hyphen-'],
+    ['double--hyphen'],
+    ['has/slash'],
+    ['../traversal'],
+    ['has\nnewline'],
+  ])('rejects %j as an agent name', (s) => {
+    expect(isValidAgentName(s)).toBe(false);
+  });
+
+  test('isValidBusRecipient accepts the protocol sentinels', () => {
+    // user and _sink are NOT valid agent slugs (underscore disallowed),
+    // but they're legal recipients in the bus protocol.
+    expect(isValidAgentName('user')).toBe(true); // happens to look like a slug
+    expect(isValidAgentName('_sink')).toBe(false);
+    expect(isValidBusRecipient('user')).toBe(true);
+    expect(isValidBusRecipient('_sink')).toBe(true);
+  });
+
+  test('isValidBusRecipient rejects path traversal and empty input', () => {
+    // Same exclusions as isValidAgentName, plus the sentinels are the
+    // only underscore-bearing strings accepted.
+    expect(isValidBusRecipient('')).toBe(false);
+    expect(isValidBusRecipient('../etc')).toBe(false);
+    expect(isValidBusRecipient('reviewer/../etc')).toBe(false);
+    expect(isValidBusRecipient('_other_sentinel')).toBe(false);
   });
 });

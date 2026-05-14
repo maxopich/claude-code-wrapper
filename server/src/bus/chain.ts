@@ -182,6 +182,9 @@ function createChainRouter(params: {
   handleEvent: (ev: BusLogEvent) => void;
   attachTailer: () => BusLogTailerHandle;
   detach: () => void;
+  /** Persist + WS-forward a Cebab-originated event. Mirrors orchestrator
+   *  mode — see `createOrchestratorRouter` for the rationale. */
+  forwardCebabEvent: (ev: BusLogEvent) => void;
 } {
   const {
     sessionId,
@@ -233,6 +236,28 @@ function createChainRouter(params: {
 
   const handleEvent = (ev: BusLogEvent) => {
     if (ended) return;
+    // F3: same rationale as orchestrator.handleEvent — Cebab routes its
+    //     own events in-process; an on-disk source=cebab observed via
+    //     the tailer is a forgery.
+    if (ev.source === CEBAB_SOURCE) {
+      console.warn(`[chain] drop forged source=cebab dest=${ev.destination} kind=${ev.kind}`);
+      return;
+    }
+    // F2: chain mode legitimately has worker→next-worker traffic (that's
+    //     the pipeline), but `dest=user` is never legitimate in chain
+    //     mode — the chain terminates at `_sink`, never at `user`. Drop
+    //     spoofed user replies hard.
+    if (ev.destination === USER_RECIPIENT) {
+      console.warn(`[chain] drop dest=user from ${ev.source}`);
+      return;
+    }
+    // F2: the `source` must be a known participant. Cebab itself uses
+    //     CEBAB_SOURCE for briefings (filtered above); the only other
+    //     legitimate sources are the participants themselves.
+    if (!participantSet.has(ev.source)) {
+      console.warn(`[chain] drop event from non-participant source=${ev.source}`);
+      return;
+    }
     // 1. Persist.
     let dbId = 0;
     try {
@@ -285,10 +310,6 @@ function createChainRouter(params: {
       void teardown('completed');
       return;
     }
-    if (ev.destination === USER_RECIPIENT) {
-      console.warn(`[chain] unexpected destination=user from ${ev.source}`);
-      return;
-    }
     if (!participantSet.has(ev.destination)) {
       console.warn(`[chain] event for non-participant: ${ev.destination}`);
       return;
@@ -312,7 +333,35 @@ function createChainRouter(params: {
     tailer?.stop();
   };
 
-  return { teardown, handleEvent, attachTailer, detach };
+  // F3 round-2: see createOrchestratorRouter.forwardCebabEvent for the
+  //              shared rationale. Briefings + initial chain prompt come
+  //              from Cebab; without this in-process forwarding the
+  //              tailer-side `source=cebab` drop would silently swallow
+  //              them and the operator's UI would only see participant
+  //              traffic (no roster, no initial input).
+  const forwardCebabEvent = (ev: BusLogEvent): void => {
+    if (ended) return;
+    let dbId = 0;
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        ev.source,
+        ev.destination,
+        ev.kind as EventKind,
+        ev.text,
+      );
+      dbId = row.id;
+    } catch (err) {
+      console.error('[chain] persist cebab event failed', err);
+    }
+    try {
+      onEvent(sessionId, ev, dbId);
+    } catch (err) {
+      console.error('[chain] cebab onEvent threw', err);
+    }
+  };
+
+  return { teardown, handleEvent, attachTailer, detach, forwardCebabEvent };
 }
 
 export async function startChainSession(opts: StartChainOpts): Promise<ChainSessionHandle> {
@@ -455,6 +504,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   }
 
   // Briefings (parallel — they're independent file writes).
+  // F3 round-2: forwardCebabEvent so each briefing reaches the UI + DB.
   opts.participants.forEach((p, i) => {
     const nextHop =
       i === opts.participants.length - 1 ? SINK_RECIPIENT : opts.participants[i + 1]!.agentName;
@@ -466,24 +516,26 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       participantNames: agentNames,
       nextHop,
     });
-    writeInboxMessage({
+    const briefingEv = writeInboxMessage({
       recipient: p.agentName,
       source: CEBAB_SOURCE,
       text: briefing,
       kind: 'intro',
       paths,
     });
+    router.forwardCebabEvent(briefingEv);
   });
 
   // Initial task input goes to participant[0]'s inbox after the briefing so
   // the Stop hook concatenation order is [briefing, then input].
-  writeInboxMessage({
+  const initialEv = writeInboxMessage({
     recipient: opts.participants[0]!.agentName,
     source: CEBAB_SOURCE,
     text: opts.initialPrompt,
     kind: 'prompt',
     paths,
   });
+  router.forwardCebabEvent(initialEv);
 
   // Wait for the TUIs to be ready, then nudge participant[0]. We don't
   // poll capture-pane in v1 — a fixed delay is good enough on a fresh
