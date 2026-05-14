@@ -35,6 +35,7 @@ export function MultiAgentTab(props: {
   onStartOrchestrator: () => void;
   onStopMultiAgent: (sessionId: string) => void;
   onSendUserPrompt: (sessionId: string, text: string) => void;
+  onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
@@ -46,6 +47,7 @@ export function MultiAgentTab(props: {
         run={multiAgent.active}
         onStop={props.onStopMultiAgent}
         onSendUserPrompt={props.onSendUserPrompt}
+        onSetLifecycle={props.onSetActiveLifecycle}
         onDismiss={props.onDismissActive}
       />
     );
@@ -464,18 +466,13 @@ function ActiveRunView(props: {
   run: MultiAgentRun;
   onStop: (sessionId: string) => void;
   onSendUserPrompt: (sessionId: string, text: string) => void;
+  onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onDismiss: () => void;
 }) {
   const { run } = props;
   const isRunning = run.status === 'running';
   const isOrchestrator = run.mode === 'orchestrator';
   const isTemp = run.lifecycle === 'temp';
-  // Format the participant chain for the header. Chain mode is a linear
-  // pipeline (`a → b → c`); orchestrator mode is hub-and-spoke, so the
-  // first slot (always `orchestrator`) is rendered as a hub.
-  const participantSummary = isOrchestrator
-    ? `${run.participantAgentNames[0] ?? 'orchestrator'} ⟷ {${run.participantAgentNames.slice(1).join(', ')}}`
-    : run.participantAgentNames.join(' → ');
 
   function handleStop() {
     if (!isTemp) {
@@ -504,20 +501,7 @@ function ActiveRunView(props: {
           <h2>
             Multi-agent: <code>{run.sessionId.slice(0, 8)}</code>{' '}
             <span className={`run-status run-status-${run.status}`}>{run.status}</span>
-            <span className={`lifecycle-pill lifecycle-pill-${run.lifecycle}`}>
-              {run.lifecycle}
-            </span>
           </h2>
-          <p className="multi-agent-subtitle">
-            Mode: {run.mode}. tmux session: <code>{run.tmuxSession}</code>. Participants:{' '}
-            {participantSummary}. Session folder: <code>{run.sessionFolder}</code>.
-            {run.iterationId && (
-              <>
-                {' '}
-                Iteration: <code>{run.iterationId}</code>.
-              </>
-            )}
-          </p>
         </div>
         <div className="multi-agent-active-actions">
           {isRunning ? (
@@ -544,6 +528,12 @@ function ActiveRunView(props: {
         </div>
       </header>
 
+      <SessionSettingsPanel
+        run={run}
+        canEdit={isRunning && isOrchestrator}
+        onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
+      />
+
       <section className="multi-agent-section">
         <h3>Scrollback</h3>
         {run.events.length === 0 ? (
@@ -566,6 +556,107 @@ function ActiveRunView(props: {
         <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
       )}
     </div>
+  );
+}
+
+/**
+ * Active-session info + the one editable runtime knob (lifecycle).
+ *
+ * The lifecycle toggle is only editable while the session is running AND
+ * in orchestrator mode — chain handles don't expose `setLifecycle` in
+ * v1, and once the session has ended, toggling the value has no effect
+ * (teardown has already decided whether to run the cleanup). The pair
+ * is rendered as a button-pair so the operator can see both states at
+ * once with the active one highlighted.
+ *
+ * Everything else (mode, participants, sessionFolder, tmuxSession,
+ * iterationId) is read-only — exposes what was set at start so the
+ * operator can copy/inspect.
+ */
+function SessionSettingsPanel(props: {
+  run: MultiAgentRun;
+  canEdit: boolean;
+  onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
+}) {
+  const { run } = props;
+  const isOrchestrator = run.mode === 'orchestrator';
+  const orchestratorSlug = isOrchestrator ? (run.participantAgentNames[0] ?? 'orchestrator') : null;
+  const workerSlugs = isOrchestrator
+    ? run.participantAgentNames.slice(1)
+    : run.participantAgentNames;
+  return (
+    <section className="multi-agent-section multi-agent-settings">
+      <h3>Session info</h3>
+      <dl className="settings-grid">
+        <dt>Mode</dt>
+        <dd>{run.mode}</dd>
+
+        <dt>Lifecycle</dt>
+        <dd>
+          <div className="lifecycle-toggle" role="group" aria-label="Lifecycle">
+            <button
+              type="button"
+              className={`lifecycle-btn ${run.lifecycle === 'persistent' ? 'active' : ''}`}
+              disabled={!props.canEdit || run.lifecycle === 'persistent'}
+              onClick={() => props.onSetLifecycle('persistent')}
+              title="Session folder and bus installs survive End. The run can be resumed later."
+            >
+              persistent
+            </button>
+            <button
+              type="button"
+              className={`lifecycle-btn ${run.lifecycle === 'temp' ? 'active' : ''}`}
+              disabled={!props.canEdit || run.lifecycle === 'temp'}
+              onClick={() => props.onSetLifecycle('temp')}
+              title="On End: rm-rf the session folder AND uninstall bus from each participant. One-off runs without residue."
+            >
+              temp
+            </button>
+          </div>
+          {!props.canEdit && run.mode === 'chain' && (
+            <p className="settings-hint">Chain-mode sessions can't change lifecycle mid-run.</p>
+          )}
+        </dd>
+
+        <dt>Participants</dt>
+        <dd>
+          <ul className="settings-participants">
+            {isOrchestrator && orchestratorSlug && (
+              <li className="settings-participant settings-participant-hub">
+                <code>{orchestratorSlug}</code> <span className="hint">(hub)</span>
+              </li>
+            )}
+            {workerSlugs.map((slug, i) => (
+              <li key={slug} className="settings-participant">
+                <code>{slug}</code>
+                {!isOrchestrator && i < workerSlugs.length - 1 && (
+                  <span className="settings-arrow">→</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </dd>
+
+        <dt>tmux session</dt>
+        <dd>
+          <code>{run.tmuxSession}</code>
+        </dd>
+
+        <dt>Session folder</dt>
+        <dd>
+          <code>{run.sessionFolder}</code>
+        </dd>
+
+        {run.iterationId && (
+          <>
+            <dt>Iteration</dt>
+            <dd>
+              <code>{run.iterationId}</code>
+            </dd>
+          </>
+        )}
+      </dl>
+    </section>
   );
 }
 
