@@ -37,9 +37,12 @@ jobs:
         # The action exits non-zero on findings, failing the job. SARIF
         # upload to the Security tab is a Tier 3 follow-up; for now the
         # CI failure + run-log is enough signal.
+        #
+        # scan-args matches the action's documented default — newline-
+        # separated arg list. `--skip-git` was a v1 flag and was removed
+        # in v2; the default behavior already skips git submodule scans.
         uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
         with:
           scan-args: |-
             --recursive
-            --skip-git
             ./
