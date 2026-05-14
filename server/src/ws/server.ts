@@ -831,6 +831,95 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       return;
     }
+    case 'set_multi_agent_lifecycle': {
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        // No active session or a different one — drop silently. The
+        // client may have raced a `multi_agent_ended`.
+        return;
+      }
+      if (!('setLifecycle' in active)) {
+        // Chain handle doesn't expose setLifecycle in v1. Surface as
+        // wrapper_error so the operator gets feedback rather than a
+        // silent no-op.
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: 'chain-mode sessions do not support lifecycle changes mid-run.',
+        });
+        return;
+      }
+      try {
+        await active.setLifecycle(msg.lifecycle);
+        send(conn.ws, {
+          type: 'multi_agent_lifecycle_changed',
+          sessionId: msg.sessionId,
+          lifecycle: msg.lifecycle,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `set_multi_agent_lifecycle failed: ${message}`,
+        });
+      }
+      return;
+    }
+    case 'add_multi_agent_participant': {
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        return;
+      }
+      if (!('addWorker' in active)) {
+        // Chain-mode handle has no addWorker — chain_order is baked in
+        // at start. Surface as wrapper_error.
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: 'chain-mode sessions do not support adding participants mid-run.',
+        });
+        return;
+      }
+      try {
+        const result = await active.addWorker(msg.projectId);
+        send(conn.ws, {
+          type: 'multi_agent_participant_added',
+          sessionId: msg.sessionId,
+          projectId: msg.projectId,
+          agentName: result.agentName,
+          busWasAlreadyInstalled: result.busWasAlreadyInstalled,
+        });
+        // Project bus state may have changed via auto-install — notify
+        // the sidebar so its bus-installed indicator updates. Matches
+        // the `install_bus_integration` handler's two-message echo:
+        // `bus_integration_changed` for the single project, plus a
+        // refreshed `projects` list for any UI surface that reads the
+        // wider state.
+        if (!result.busWasAlreadyInstalled) {
+          send(conn.ws, {
+            type: 'bus_integration_changed',
+            projectId: msg.projectId,
+            installed: true,
+            agentName: result.agentName,
+          });
+          const rows = await syncWorkspaceProjects();
+          send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `add_multi_agent_participant failed: ${message}`,
+        });
+      }
+      return;
+    }
     case 'list_iterations': {
       send(conn.ws, { type: 'iterations', items: buildIterationsList() });
       return;
