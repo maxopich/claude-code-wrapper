@@ -1,0 +1,43 @@
+title = "Cebab gitleaks config"
+
+# Inherits gitleaks' built-in ruleset (AWS keys, GitHub tokens, etc).
+# Cebab-specific rules are appended below.
+[extend]
+useDefault = true
+
+# Anthropic API key. Stable prefix `sk-ant-` covers api03, oat01, sid01,
+# and any future shape — the prefix itself is reserved by Anthropic.
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key (sk-ant- prefix)"
+regex = '''sk-ant-[A-Za-z0-9_-]{20,}'''
+keywords = ["sk-ant-"]
+
+# OAuth artifacts. `oauth_` is a soft prefix the user may paste into a
+# session (refresh tokens, helper-script env exports). Lower confidence
+# than sk-ant-, but cheap to catch.
+[[rules]]
+id = "oauth-prefixed-token"
+description = "OAuth-prefixed token literal"
+regex = '''oauth_[A-Za-z0-9_-]{20,}'''
+keywords = ["oauth_"]
+
+# Cebab WS auth token: ~/.cebab/auth-token holds a 64-hex digest
+# (crypto.randomBytes(32).toString('hex')). Bare 64-hex is too noisy
+# (every SHA-256 matches), so this rule requires an `auth_token` /
+# `auth-token` keyword within 40 chars before the digest.
+[[rules]]
+id = "cebab-auth-token-context"
+description = "auth_token keyword adjacent to 64-hex digest (Cebab WS token shape)"
+regex = '''(?i)auth[_-]?token[^\n]{0,40}[0-9a-f]{64}'''
+keywords = ["auth_token", "auth-token", "authtoken"]
+
+[allowlist]
+description = "Cebab project allowlist"
+paths = [
+  # Canonical mock fixture — manually verified clean. Other fixture files
+  # are NOT allowlisted; they go through review via the path-label gate.
+  '''fixtures/hello\.jsonl$''',
+  # Vitest fixtures often inline synthetic credentials.
+  '''.*\.test\.ts$''',
+]

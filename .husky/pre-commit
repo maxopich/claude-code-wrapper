@@ -1,2 +1,8 @@
+#!/usr/bin/env sh
+# `set -e` is the critical bit: without it, if `lint-staged` exits non-zero
+# the script keeps going to gitleaks, and the commit can still succeed if
+# gitleaks passes — silently swallowing lint failures.
+set -e
+
 npx lint-staged
 gitleaks protect --staged --redact --no-banner

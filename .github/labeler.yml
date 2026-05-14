@@ -1,0 +1,5 @@
+# Path-based PR labels. Consumed by .github/workflows/pr-label.yml.
+
+awaiting-fixture-review:
+  - changed-files:
+      - any-glob-to-any-file: 'fixtures/**/*.jsonl'

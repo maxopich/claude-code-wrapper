@@ -1,0 +1,71 @@
+name: workflow-lint
+
+# Lints GitHub Actions workflows themselves. Catches expression-injection in
+# `run:` blocks, schema errors, dangerous pull_request_target patterns, weak
+# permissions, and secret-injection sinks. Cebab runs bus workers under
+# bypassPermissions; a CI workflow that leaks the GITHUB_TOKEN or executes
+# attacker-controlled input is a higher-severity surface than usual.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  schedule:
+    # Weekly auditor-persona zizmor run picks up the louder ruleset (low-severity
+    # smells that are too noisy as a required PR check).
+    - cron: '0 5 * * 1'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        run: |
+          bash <(curl --proto '=https' --tlsv1.2 -sSf \
+            https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+
+      - name: Run actionlint
+        run: ./actionlint -color
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        run: pipx install zizmor==1.24.1
+
+      - name: zizmor (default persona)
+        if: github.event_name != 'schedule'
+        run: zizmor --no-progress .github/workflows
+
+      - name: zizmor (auditor persona, weekly)
+        if: github.event_name == 'schedule'
+        run: zizmor --no-progress --persona auditor .github/workflows

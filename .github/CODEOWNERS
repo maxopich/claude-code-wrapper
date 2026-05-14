@@ -1,0 +1,33 @@
+# Code owners for high-blast-radius paths. A CODEOWNERS approval is
+# required on PRs touching these files (enforced via branch protection
+# on `main`).
+#
+# The rationale for each block is the threat model documented in
+# server/src/auth.ts and CLAUDE.md — same-uid worker surface, bypass-
+# permissions runtime trust, and irreversible state mutations.
+
+# Auth, origin gating, WS server entrypoint — same-uid threat surface.
+/server/src/auth.ts                   @maxopich
+/server/src/origin.ts                 @maxopich
+/server/src/ws/server.ts              @maxopich
+
+# Bus runtime: orchestrator, chain, scripts, install.
+# Worker / orchestrator both run with --permission-mode bypassPermissions.
+/server/src/bus/                      @maxopich
+/server/src/bus/scripts/              @maxopich
+/server/src/bus/install.ts            @maxopich
+
+# SQLite schema — migrations are not reversible once shipped.
+/server/src/migrations/               @maxopich
+
+# CI/CD itself. A workflow that leaks GITHUB_TOKEN or runs attacker-
+# controlled input compromises the supply chain.
+/.github/workflows/                   @maxopich
+/.github/CODEOWNERS                   @maxopich
+/.github/labeler.yml                  @maxopich
+/.github/dependabot.yml               @maxopich
+
+# Security-policy config files.
+/.gitleaks.toml                       @maxopich
+/.npmrc                               @maxopich
+/.husky/                              @maxopich
