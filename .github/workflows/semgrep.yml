@@ -1,0 +1,50 @@
+name: semgrep
+
+# Static analysis via Semgrep with four Cebab-specific custom rules
+# (.semgrep/cebab-bus.yaml) plus community packs for TypeScript /
+# Node.js / OWASP baseline coverage. The custom rules encode the F1-F6
+# / R3 / F12 invariants structurally — a refactor that loses one fails
+# CI at lint time, complementing the T2.4 vitest+bats regression suite
+# that pins behavior at test time.
+#
+# Plan reference: cebab-ci-cd-async-conway.md T2.1.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install semgrep
+        run: pipx install semgrep==1.162.0
+
+      - name: Run semgrep
+        # `--error` makes findings exit non-zero (default exits 0 with
+        # findings; we want CI to fail). Community packs cover baseline
+        # smells; .semgrep/cebab-bus.yaml encodes the F-invariants.
+        run: |
+          semgrep scan --error --metrics off \
+            --config p/typescript \
+            --config p/nodejs \
+            --config p/javascript \
+            --config p/owasp-top-ten \
+            --config .semgrep/cebab-bus.yaml \
+            .

@@ -65,6 +65,10 @@ function main(): void {
     // page to read the response. No preflight is involved — the fetch
     // sends no custom headers.
     if (origin) {
+      // Reflective CORS is the canonical safe pattern when the value is
+      // already gated against allowedOrigins (line 46 above). Semgrep's
+      // generic rule can't see the upstream check.
+      // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
     }
