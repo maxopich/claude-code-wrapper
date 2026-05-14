@@ -55,7 +55,7 @@ The defended invariants (F1–F6, R3, F12) are documented inline in code and pin
 | BUS_AGENT_NAME shape + sentinel deny-list (F6, R3)   | [server/src/bus/scripts/bus-send-msg.sh](server/src/bus/scripts/bus-send-msg.sh); tests at [bus-send-msg.bats](server/src/bus/scripts/bus-send-msg.bats)                 |
 | Permission-map cleanup on interrupt (F12)            | [server/src/ws/server.ts](server/src/ws/server.ts); tests at [server.security.test.ts](server/src/ws/server.security.test.ts)                                            |
 
-CI gates (Tier 1 + Tier 2): least-privilege workflow permissions, SHA-pinned actions, actionlint + zizmor lint, OSV-Scanner, dependency-review, CodeQL, Semgrep with three Cebab-specific custom rules (F1 silent-bug, F4 verifyClient, F2 spawn-non-literal), gitleaks with Cebab-specific rules, fixture-review gate on `fixtures/*.jsonl`, npm postinstall blocked via `.npmrc`.
+CI gates (Tier 1 + Tier 2): least-privilege workflow permissions, SHA-pinned actions, actionlint + zizmor lint, OSV-Scanner, dependency-review, CodeQL, Semgrep with three Cebab-specific custom rules (F1 silent-bug, F4 verifyClient, F2 spawn-non-literal), gitleaks with Cebab-specific rules, fixture-review gate on `fixtures/*.jsonl`, npm postinstall blocked via `.npmrc`. Commits to `main` are signed via [gitsign](https://github.com/sigstore/gitsign) (Sigstore keyless OIDC) — setup is documented in [CONTRIBUTING.md](CONTRIBUTING.md#signed-commits).
 
 ## Acknowledgements
 
