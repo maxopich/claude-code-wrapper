@@ -12,6 +12,9 @@ name: pr-label
 # not a footgun here.
 
 on:
+  # zizmor: ignore[dangerous-triggers]
+  # `pull_request_target` is required so the labeler has write perms on
+  # labels for fork PRs. No PR-head code is checked out in this workflow.
   pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled]
 
@@ -33,7 +36,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/labeler@v5
+      - uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5.0.0
         with:
           configuration-path: .github/labeler.yml
           sync-labels: false

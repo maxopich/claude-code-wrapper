@@ -12,8 +12,10 @@ name: Dependabot auto-merge
 # Safety note on pull_request_target. This trigger runs with repo-write
 # perms even on fork PRs, which is the classic foot-gun. This workflow is
 # safe specifically because:
-#   1. `if: github.actor == 'dependabot[bot]'` gates every step — only
-#      dependabot's own PRs reach the body.
+#   1. The job-level `if:` gates every step on
+#      `github.event.pull_request.user.login == 'dependabot[bot]'`
+#      (the PR author field, set at open time and not spoofable via
+#      workflow re-runs — `github.actor` is, which is why we don't use it).
 #   2. No PR-head code is ever checked out. The only actions called are
 #      `dependabot/fetch-metadata` (reads PR metadata) and `gh pr merge`
 #      (operates on the merge queue). Do NOT add `actions/checkout` here
@@ -21,7 +23,7 @@ name: Dependabot auto-merge
 #   3. The merge-enable is filtered to `version-update:semver-patch` only;
 #      minor and major bumps still require a human reviewer.
 
-on: pull_request_target
+on: pull_request_target # zizmor: ignore[dangerous-triggers]
 
 permissions:
   contents: write
@@ -29,7 +31,7 @@ permissions:
 
 jobs:
   auto-merge:
-    if: github.actor == 'dependabot[bot]'
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Fetch dependabot metadata
