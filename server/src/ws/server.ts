@@ -62,7 +62,7 @@ import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/p
 import { buildAllowedOrigins, isAllowedHost } from '../origin.js';
 import { verifyToken } from '../auth.js';
 
-type PendingPermission = {
+export type PendingPermission = {
   sessionId: string;
   resolve: (
     decision:
@@ -71,6 +71,26 @@ type PendingPermission = {
   ) => void;
   toolInput: Record<string, unknown>;
 };
+
+/**
+ * F12: drain pending permission Promises for a given session before
+ *      abort/interrupt. Otherwise their entries leak in the map until WS
+ *      close — functionally benign (the SDK's canUseTool callback is
+ *      cancelled by abort) but unbounded under a burst of interrupts.
+ *      Filter by sessionId so other concurrent sessions on the same WS
+ *      connection aren't affected. Same pattern is used on WS close,
+ *      with no sessionId filter (close drains everything).
+ */
+export function cleanupPendingPermissionsForSession(
+  pending: Map<string, PendingPermission>,
+  sessionId: string,
+): void {
+  for (const [requestId, p] of pending) {
+    if (p.sessionId !== sessionId) continue;
+    p.resolve({ behavior: 'deny', message: 'interrupted' });
+    pending.delete(requestId);
+  }
+}
 
 type InFlight = {
   ac: AbortController;
@@ -543,18 +563,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     case 'interrupt': {
       const f = conn.inFlight.get(msg.sessionId);
       if (!f) return;
-      // F12: drain any pending permission Promises for this session before
-      //      abort/interrupt. Otherwise their entries leak in the map until
-      //      WS close — functionally benign (abort cancels the SDK's
-      //      canUseTool callback) but unbounded growth under a burst of
-      //      interrupts. Mirrors the close-handler pattern at the top of
-      //      onConnection. Filter by sessionId so other concurrent sessions
-      //      on the same WS connection aren't affected.
-      for (const [requestId, pending] of conn.pendingPermissions) {
-        if (pending.sessionId !== msg.sessionId) continue;
-        pending.resolve({ behavior: 'deny', message: 'interrupted' });
-        conn.pendingPermissions.delete(requestId);
-      }
+      // F12 cleanup. Pure-function helper defined above for testability.
+      cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId);
       // Don't await — `runner.interrupt()` can take a second or two and we
       // shouldn't back up the WS message queue. The for-await loop in
       // runOneTurn will exit and clean up via finally.

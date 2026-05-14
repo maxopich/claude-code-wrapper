@@ -65,6 +65,14 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Install bats (for F6/R3 shell-script regression tests)
+        run: sudo apt-get update && sudo apt-get install -y bats
+
+      - name: Security regression tests
+        # F1/F4 (existing, tagged) + F2/F3/F5/F12 (new vitest) + F6/R3 (bats).
+        # See plans/cebab-ci-cd-async-conway.md T2.4 for the full map.
+        run: npm run test:security
+
       - name: DB migration smoke
         # Verifies migrations apply cleanly on a fresh DB. The CI runner is
         # ephemeral so `~/.cebab/cebab.sqlite` is always brand new.
