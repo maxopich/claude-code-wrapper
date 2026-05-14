@@ -278,7 +278,7 @@ describe('writeInboxMessage', () => {
     ['has\nnewline'],
     ['UPPERCASE'],
     ['under_score'], // underscores allowed only for the _sink sentinel
-  ])('rejects invalid recipient %j with a thrown error', (bad) => {
+  ])('[security][F1] rejects invalid recipient %j with a thrown error', (bad) => {
     expect(() =>
       writeInboxMessage({
         recipient: bad,

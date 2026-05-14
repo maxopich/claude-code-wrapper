@@ -164,7 +164,7 @@ export type ChainSessionHandle = {
  * empty `prompt.md` archived alongside its reply, because tracking
  * already-archived hops across restart isn't worth the bookkeeping in v1.
  */
-function createChainRouter(params: {
+export function createChainRouter(params: {
   sessionId: string;
   iterationId: string;
   agentNames: string[];

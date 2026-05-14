@@ -19,7 +19,7 @@ afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-describe('initAuthToken', () => {
+describe('[security][F4] initAuthToken', () => {
   test('writes the token to ~/.cebab/auth-token with mode 0600', () => {
     const tok = initAuthToken();
     expect(tok).toMatch(/^[0-9a-f]{64}$/);
@@ -50,7 +50,7 @@ describe('initAuthToken', () => {
   });
 });
 
-describe('verifyToken', () => {
+describe('[security][F4] verifyToken', () => {
   test('accepts the current in-memory token', () => {
     const tok = initAuthToken();
     expect(verifyToken(tok)).toBe(true);
