@@ -19,8 +19,18 @@
  * + F6 `BUS_AGENT_NAME` shape regex (`bus/scripts/bus-send-msg.sh`)
  * in place, a token-holding worker's surface reduces to direct WS
  * control-plane abuse — primarily `set_trusted` flipping a future
- * session's Trust state. Same-uid isolation (Unix socket +
- * `SO_PEERCRED`, or XPC with entitlements) is v2 work.
+ * session's Trust state.
+ *
+ * Residual after F2+F6+R3: a worker can still impersonate another
+ * *known* worker by setting `BUS_AGENT_NAME=<other-worker-slug>` —
+ * the slug is a valid shape AND is a participant, so both filters
+ * accept it. R3 closes the adjacent slug-shape spoofs (protocol
+ * sentinels `user`/`_sink` and Cebab's own `cebab` identity are now
+ * rejected as senders), but cross-worker impersonation requires
+ * Cebab-as-arbiter: a Unix-socket-mediated bus where Cebab stamps
+ * `source` from tmux pane identity rather than trusting the worker's
+ * env. Same-uid isolation primitives (`SO_PEERCRED`, XPC with
+ * entitlements) are v2 work.
  *
  * Single-process, single-token: regenerated on every boot. There's no
  * persistence to disk beyond the file itself, and the in-process value
