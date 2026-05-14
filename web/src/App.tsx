@@ -223,6 +223,15 @@ export function App() {
     // from server truth.
     wsRef.current?.send({ type: 'set_multi_agent_lifecycle', sessionId, lifecycle });
   }
+  function addActiveParticipant(sessionId: string, projectId: number) {
+    // Server resolves the project, auto-installs bus if missing, spawns
+    // a new tmux pane, persists the participant row, and forwards an
+    // updated roster prompt to the orchestrator. On success the reducer
+    // gets `multi_agent_participant_added` (appends to
+    // participantAgentNames) and possibly `bus_integration_changed` +
+    // `projects` (if auto-install ran).
+    wsRef.current?.send({ type: 'add_multi_agent_participant', sessionId, projectId });
+  }
   function dismissActiveRun() {
     dispatch({ type: 'ma_dismiss_active' });
   }
@@ -363,6 +372,7 @@ export function App() {
                 onStopMultiAgent={stopMultiAgent}
                 onSendUserPrompt={sendMultiAgentUserPrompt}
                 onSetActiveLifecycle={setActiveLifecycle}
+                onAddActiveParticipant={addActiveParticipant}
                 onDismissActive={dismissActiveRun}
                 onRefreshIterations={refreshIterations}
                 onClearIterations={clearIterations}

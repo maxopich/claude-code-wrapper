@@ -1218,6 +1218,65 @@ pre {
   margin-left: 4px;
 }
 
+/* Add-agent affordance + inline picker. The button sits below the
+ * participants list; clicking it expands a small list of eligible
+ * projects in place. */
+.add-participant {
+  margin-top: 12px;
+}
+.add-participant-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+}
+.add-participant-empty {
+  margin-top: 8px;
+}
+.add-participant-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-1);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.add-participant-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+.add-participant-row:hover {
+  background: var(--bg-3);
+}
+.add-participant-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.add-participant-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.add-participant-agent {
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.add-participant-pick-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  min-width: 56px;
+}
+
 /* Project-sidebar bus-installed pill — small affordance to surface
  * which projects have the bus integration AND let the operator
  * uninstall from the sidebar without opening the Multi-Agent tab. */

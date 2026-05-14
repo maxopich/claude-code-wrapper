@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { IterationSummary, MultiAgentLifecycle, Project } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
 
@@ -36,18 +36,21 @@ export function MultiAgentTab(props: {
   onStopMultiAgent: (sessionId: string) => void;
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
+  onAddActiveParticipant: (sessionId: string, projectId: number) => void;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
 }) {
-  const { multiAgent } = props;
+  const { multiAgent, projects } = props;
   if (multiAgent.active) {
     return (
       <ActiveRunView
         run={multiAgent.active}
+        projects={projects}
         onStop={props.onStopMultiAgent}
         onSendUserPrompt={props.onSendUserPrompt}
         onSetLifecycle={props.onSetActiveLifecycle}
+        onAddParticipant={props.onAddActiveParticipant}
         onDismiss={props.onDismissActive}
       />
     );
@@ -464,9 +467,11 @@ function formatDuration(ms: number): string {
 
 function ActiveRunView(props: {
   run: MultiAgentRun;
+  projects: Project[];
   onStop: (sessionId: string) => void;
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
+  onAddParticipant: (sessionId: string, projectId: number) => void;
   onDismiss: () => void;
 }) {
   const { run } = props;
@@ -530,8 +535,10 @@ function ActiveRunView(props: {
 
       <SessionSettingsPanel
         run={run}
+        projects={props.projects}
         canEdit={isRunning && isOrchestrator}
         onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
+        onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
       />
 
       <section className="multi-agent-section">
@@ -575,8 +582,10 @@ function ActiveRunView(props: {
  */
 function SessionSettingsPanel(props: {
   run: MultiAgentRun;
+  projects: Project[];
   canEdit: boolean;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
+  onAddParticipant: (projectId: number) => void;
 }) {
   const { run } = props;
   const isOrchestrator = run.mode === 'orchestrator';
@@ -584,6 +593,39 @@ function SessionSettingsPanel(props: {
   const workerSlugs = isOrchestrator
     ? run.participantAgentNames.slice(1)
     : run.participantAgentNames;
+  const [pickerOpen, setPickerOpen] = useState(false);
+  // Project id currently in flight for addWorker, cleared once the
+  // server's `multi_agent_participant_added` echo lands (signaled by
+  // the agent name appearing in participantAgentNames). Used to gate
+  // the Add buttons + show a small spinner.
+  const [pendingAddId, setPendingAddId] = useState<number | null>(null);
+  const currentAgentNames = new Set(run.participantAgentNames);
+  // A project is eligible to add IFF its current agent slug (if it has
+  // bus installed) is NOT already a participant. Not-installed projects
+  // are eligible — the server auto-installs during add.
+  const eligibleProjects = props.projects.filter((p) => {
+    if (p.busInstalled && p.busAgentName && currentAgentNames.has(p.busAgentName)) {
+      return false;
+    }
+    return true;
+  });
+  // When the server's `multi_agent_participant_added` echo lands, the
+  // reducer appends the new agent name to participantAgentNames. We
+  // notice by checking whether the pending project's agent slug is in
+  // the current set; on a match, clear the pending state and close
+  // the picker.
+  useEffect(() => {
+    if (pendingAddId === null) return;
+    const pending = props.projects.find((p) => p.id === pendingAddId);
+    if (pending?.busAgentName && run.participantAgentNames.includes(pending.busAgentName)) {
+      setPendingAddId(null);
+      setPickerOpen(false);
+    }
+  }, [pendingAddId, props.projects, run.participantAgentNames]);
+  function handleAddClick(projectId: number) {
+    setPendingAddId(projectId);
+    props.onAddParticipant(projectId);
+  }
   return (
     <section className="multi-agent-section multi-agent-settings">
       <h3>Session info</h3>
@@ -635,6 +677,26 @@ function SessionSettingsPanel(props: {
               </li>
             ))}
           </ul>
+          {props.canEdit && (
+            <div className="add-participant">
+              <button
+                type="button"
+                className="ghost-btn add-participant-btn"
+                onClick={() => setPickerOpen((open) => !open)}
+                aria-expanded={pickerOpen}
+                title="Add another worker to this orchestrator session. Bus integration is auto-installed if missing."
+              >
+                {pickerOpen ? 'Cancel' : '+ Add agent'}
+              </button>
+              {pickerOpen && (
+                <AddParticipantPicker
+                  eligibleProjects={eligibleProjects}
+                  pendingId={pendingAddId}
+                  onPick={handleAddClick}
+                />
+              )}
+            </div>
+          )}
         </dd>
 
         <dt>tmux session</dt>
@@ -657,6 +719,72 @@ function SessionSettingsPanel(props: {
         )}
       </dl>
     </section>
+  );
+}
+
+/**
+ * Inline picker for adding a worker to a running orchestrator session.
+ *
+ * Renders the eligible projects (those not already participating) as a
+ * list. Each row shows the project name + agent slug (or "(will be
+ * installed)" if bus isn't set up yet) and an Add button. Clicking Add
+ * fires `onPick(projectId)`, which the parent forwards via WS; while
+ * the request is in flight that row's button switches to a spinner
+ * label and disables the rest of the list.
+ *
+ * The picker is intentionally non-modal — it slides open under the
+ * Add button and disappears when the operator clicks Cancel or when
+ * the participants list grows past the pending project (handled by the
+ * parent's pending-tracking).
+ */
+function AddParticipantPicker(props: {
+  eligibleProjects: Project[];
+  pendingId: number | null;
+  onPick: (projectId: number) => void;
+}) {
+  if (props.eligibleProjects.length === 0) {
+    return (
+      <p className="settings-hint add-participant-empty">
+        No eligible projects. Every project in the workspace is already a participant in this
+        session.
+      </p>
+    );
+  }
+  const isPending = props.pendingId !== null;
+  return (
+    <ul className="add-participant-list">
+      {props.eligibleProjects.map((p) => {
+        const isThis = props.pendingId === p.id;
+        const installed = p.busInstalled && p.busAgentName !== null;
+        return (
+          <li key={p.id} className="add-participant-row">
+            <div className="add-participant-meta">
+              <span className="add-participant-name">{p.name}</span>
+              <span className="add-participant-agent">
+                {installed ? (
+                  <code>{p.busAgentName}</code>
+                ) : (
+                  <span className="hint">bus will be installed on add</span>
+                )}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="ghost-btn add-participant-pick-btn"
+              disabled={isPending}
+              onClick={() => props.onPick(p.id)}
+              title={
+                installed
+                  ? `Spawn a new tmux pane for ${p.busAgentName} and notify the orchestrator.`
+                  : `Install bus integration for ${p.name}, then spawn its tmux pane and notify the orchestrator.`
+              }
+            >
+              {isThis ? 'Adding…' : 'Add'}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
