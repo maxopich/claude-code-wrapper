@@ -1,0 +1,45 @@
+name: osv-scanner
+
+# OSV-Scanner — broader CVE coverage than `npm audit`. Pulls from OSV,
+# Snyk DB, GitHub Advisory, etc. Runs on PR (catch new vulns introduced
+# by the diff), push (catch what's currently in main), and weekly cron
+# (catch newly-disclosed CVEs for already-installed deps).
+#
+# Plan reference: cebab-ci-cd-async-conway.md T2.2.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: OSV scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run OSV-Scanner
+        # The action exits non-zero on findings, failing the job. SARIF
+        # upload to the Security tab is a Tier 3 follow-up; for now the
+        # CI failure + run-log is enough signal.
+        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        with:
+          scan-args: |-
+            --recursive
+            --skip-git
+            ./
