@@ -59,6 +59,15 @@ function main(): void {
     if (!origin) {
       console.warn('[http] /auth-token: serving to empty-Origin client');
     }
+    // CORS: in dev the web origin is :5173 but the API is :4319, so a
+    // bare fetch fails the browser's same-origin check. Echo back the
+    // (already allow-listed above) Origin so the browser permits the
+    // page to read the response. No preflight is involved — the fetch
+    // sends no custom headers.
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
     res.type('text/plain').send(getAuthToken());
   });
 
