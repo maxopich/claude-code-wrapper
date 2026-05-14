@@ -1,0 +1,39 @@
+# Baseline ignore-list for OSV-Scanner. Matches the existing
+# `npm audit --audit-level=high` policy in ci.yml — medium/low advisories
+# are reported but don't block. Each entry has an `ignoreUntil` so this
+# file forces a re-evaluation in 3 months if Dependabot hasn't already
+# retired the entry by bumping the affected dep.
+#
+# When Dependabot opens a PR to bump one of these packages past its
+# `FIXED VERSION`, REMOVE the entry rather than extending the date.
+#
+# Inventory captured at PR #39 (T2.2, 2026-05-14):
+#   @anthropic-ai/sdk 0.81.0 → 0.91.1
+#   hono              4.12.17 → 4.12.18
+#   ip-address        10.1.0 → 10.1.1
+# All transitives; no direct package.json change required.
+
+[[IgnoredVulns]]
+id = "GHSA-p7fg-763f-g4gf"
+ignoreUntil = "2026-08-14T00:00:00Z"
+reason = "@anthropic-ai/sdk 0.81.0 (transitive of @anthropic-ai/claude-agent-sdk). Medium (CVSS 4.8). Fix in 0.91.1. Awaiting upstream bump."
+
+[[IgnoredVulns]]
+id = "GHSA-hm8q-7f3q-5f36"
+ignoreUntil = "2026-08-14T00:00:00Z"
+reason = "hono 4.12.17 (transitive). Medium (CVSS 3.8). Fix in 4.12.18."
+
+[[IgnoredVulns]]
+id = "GHSA-p77w-8qqv-26rm"
+ignoreUntil = "2026-08-14T00:00:00Z"
+reason = "hono 4.12.17 (transitive). Medium (CVSS 5.3). Fix in 4.12.18."
+
+[[IgnoredVulns]]
+id = "GHSA-qp7p-654g-cw7p"
+ignoreUntil = "2026-08-14T00:00:00Z"
+reason = "hono 4.12.17 (transitive). Medium (CVSS 4.3). Fix in 4.12.18."
+
+[[IgnoredVulns]]
+id = "GHSA-v2v4-37r5-5v8g"
+ignoreUntil = "2026-08-14T00:00:00Z"
+reason = "ip-address 10.1.0 (transitive). Medium (CVSS 5.3). Fix in 10.1.1."
