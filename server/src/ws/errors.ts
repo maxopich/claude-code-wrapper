@@ -27,6 +27,10 @@ export function classifyError(err: unknown): { kind: WrapperErrorKind; message: 
   if (/(^|\s)(claude.*not.*found|spawn.*claude.*ENOENT)/i.test(message)) {
     return { kind: 'claude_not_found', message };
   }
+  // Alternation with one optional group containing `.*expired` — bounded
+  // backtracking, not catastrophic. ESLint's safe-regex check is overly
+  // conservative on alternated `.*` patterns.
+  // eslint-disable-next-line security/detect-unsafe-regex
   if (/please log in|not authenticated|oauth(?:.*expired)?/i.test(message)) {
     return { kind: 'auth_expired', message };
   }
