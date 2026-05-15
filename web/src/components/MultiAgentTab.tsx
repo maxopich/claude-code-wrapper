@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { IterationSummary, MultiAgentLifecycle, Project } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
+import { Markdown } from './Markdown';
 
 /**
  * Multi-Agent tab.
@@ -842,7 +843,9 @@ function EventRow(props: { event: MultiAgentEventView }) {
         <span className="event-kind">{event.kind}</span>
         <span className="event-ts">{formatTs(event.ts)}</span>
       </div>
-      <pre className="event-text">{event.text}</pre>
+      <div className="event-text">
+        <Markdown text={event.text} />
+      </div>
     </li>
   );
 }
