@@ -64,7 +64,15 @@ export function initAuthToken(): string {
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
   }
-  fs.writeFileSync(p, token, { mode: 0o600 });
+  // POSIX-only: `mode: 0o600` is the cross-uid protection (owner-only read
+  // of ~/.cebab/auth-token). Windows ignores POSIX mode bits — Node maps
+  // only the write bit to the read-only attribute, so 0o600 there grants
+  // no ACL guarantee. The file still lives under the operator's profile;
+  // multi-user Windows hardening (per-user ACLs) is a documented residual,
+  // not enforced here. Passing the mode on Windows is harmless but
+  // misleading, so gate it.
+  const writeOpts = process.platform === 'win32' ? {} : { mode: 0o600 };
+  fs.writeFileSync(p, token, writeOpts);
   return token;
 }
 

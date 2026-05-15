@@ -14,9 +14,13 @@ concurrency:
 
 jobs:
   quality:
-    name: Lint, Typecheck, Test
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: Lint, Typecheck, Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     permissions:
       contents: read
 
@@ -40,7 +44,10 @@ jobs:
       - name: Rebuild native modules
         # better-sqlite3 is the only legitimate native dep. `.npmrc` sets
         # ignore-scripts=true which suppresses install lifecycle scripts
-        # for `npm rebuild` too, so we must opt back in explicitly here.
+        # for `npm rebuild` too, so we opt back in explicitly here.
+        # prebuild-install pulls a prebuilt binary on both Linux and
+        # Windows x64 (no compiler toolchain needed) — this is also the
+        # documented cross-platform `npm run setup` step.
         run: npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false
 
       - name: Lockfile drift check
@@ -65,17 +72,16 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Install bats (for F6/R3 shell-script regression tests)
-        run: sudo apt-get update && sudo apt-get install -y bats
-
       - name: Security regression tests
-        # F1/F4 (existing, tagged) + F2/F3/F5/F12 (new vitest) + F6/R3 (bats).
-        # See plans/cebab-ci-cd-async-conway.md T2.4 for the full map.
+        # All security cases are Vitest unit tests tagged [security]. The
+        # old F6/R3 bats shell tests were deleted with the bus scripts in
+        # the pure-SDK rewrite, so there is no longer a bats dependency —
+        # this step runs identically on Linux and Windows.
         run: npm run test:security
 
       - name: DB migration smoke
-        # Verifies migrations apply cleanly on a fresh DB. The CI runner is
-        # ephemeral so `~/.cebab/cebab.sqlite` is always brand new.
+        # Verifies migrations apply cleanly on a fresh DB. The runner is
+        # ephemeral so the sqlite file is always brand new.
         run: npm run smoke
 
       - name: Build
@@ -83,31 +89,10 @@ jobs:
         # --noEmit doesn't surface (e.g. import resolution, asset pipeline).
         run: npm run build
 
-      - name: Set up workspace fixture
-        # ws_smoke.ts hardcodes looking for a project named "Cebab" in the
-        # workspace. Create an empty stub so syncWorkspaceProjects() picks
-        # it up. The mock runner ignores the directory contents — only the
-        # project name matters for the smoke.
-        run: |
-          mkdir -p /tmp/cebab-ws/Cebab
-          echo "WORKSPACE_ROOT=/tmp/cebab-ws" >> "$GITHUB_ENV"
-
-      - name: Start mock server (background)
-        # MOCK=1 routes pickRunner() to runner/mock.ts, which replays
-        # fixtures/hello.jsonl — no Claude CLI / no quota burn.
-        run: |
-          MOCK=1 npm --workspace server exec tsx src/index.ts &
-          echo "SERVER_PID=$!" >> "$GITHUB_ENV"
-        env:
-          PORT: '4319'
-
-      - name: Wait for server
-        run: timeout 30 bash -c 'until nc -z 127.0.0.1 4319; do sleep 0.2; done'
-
-      - name: WS protocol smoke
-        # Exercises the full WS protocol end-to-end against the mock runner.
-        run: npm --workspace server exec tsx src/ws_smoke.ts
-
-      - name: Stop mock server
-        if: always()
-        run: kill "$SERVER_PID" 2>/dev/null || true
+      - name: WS protocol smoke (mock, cross-platform)
+        # Pure-Node orchestrator (src/ci_smoke.ts): spawns the MOCK=1
+        # server, polls /health over fetch, runs ws_smoke, tears it down.
+        # Hermetic (isolated HOME/USERPROFILE) and shell-free, so it runs
+        # identically on ubuntu-latest and windows-latest — no `&` / `nc` /
+        # `timeout` / `kill` (the old Linux-only bash pipeline is gone).
+        run: npm --workspace server exec tsx src/ci_smoke.ts

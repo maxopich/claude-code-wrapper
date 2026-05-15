@@ -98,6 +98,12 @@ function main(): void {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // Windows: Ctrl+Break (and `taskkill` without /F) raises SIGBREAK, and
+  // SIGTERM is never delivered there. Registering SIGBREAK gives the same
+  // graceful drain (closeAllQueries → reap claude subprocesses) on Windows
+  // that SIGINT/SIGTERM give on POSIX. Harmless no-op on non-Windows
+  // (the signal is simply never emitted).
+  process.on('SIGBREAK', () => shutdown('SIGBREAK'));
 }
 
 main();
