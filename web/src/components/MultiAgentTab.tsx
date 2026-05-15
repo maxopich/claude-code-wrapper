@@ -532,6 +532,7 @@ function TemplateRow(props: {
     .filter((p): p is Project => p !== undefined);
   const unavailable = template.participants.length - resolved.length;
   const names = resolved.map((p) => p.name).join(' → ');
+  const isOrchestrator = template.mode === 'orchestrator';
   return (
     <li className="iteration-row">
       <div className="iteration-head">
@@ -543,9 +544,25 @@ function TemplateRow(props: {
           {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
         </span>
       </div>
-      <div className="iteration-participants">
-        {names.length > 0 ? names : '(no resolvable participants)'}
-      </div>
+      {resolved.length === 0 ? (
+        <div className="iteration-participants">(no resolvable participants)</div>
+      ) : isOrchestrator ? (
+        <div className="iteration-participants template-topo">
+          <div className="topo-hub">orchestrator</div>
+          <ul className="topo-spokes">
+            {resolved.map((p) => (
+              <li key={p.id} className="topo-worker">
+                <span className="topo-link" aria-hidden="true">
+                  ↕
+                </span>
+                <span className="topo-worker-name">{p.name}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <div className="iteration-participants">{names}</div>
+      )}
       <div className="iteration-path">
         <button className="ghost-btn" onClick={() => props.onApply(template)}>
           Apply

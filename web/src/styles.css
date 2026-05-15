@@ -1074,6 +1074,37 @@ pre {
   color: var(--fg-2);
   font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
+.template-topo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.template-topo .topo-hub {
+  font-weight: 600;
+  color: var(--fg);
+}
+.template-topo .topo-spokes {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px 14px;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.template-topo .topo-worker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1.2;
+}
+.template-topo .topo-link {
+  color: var(--fg-3);
+}
+.template-topo .topo-worker-name {
+  color: var(--fg-2);
+}
 .iteration-path {
   display: flex;
   align-items: center;
