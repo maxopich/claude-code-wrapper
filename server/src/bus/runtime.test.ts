@@ -219,8 +219,9 @@ describe('nextIterationId', () => {
 describe('busIterationDir', () => {
   test('with agent → returns the per-agent subdir; without → the iteration root', () => {
     const root = busIterationDir('007');
-    expect(root.endsWith('/iterations/007')).toBe(true);
+    // path.join suffix so the separator matches the host OS (Windows CI).
+    expect(root.endsWith(path.join('iterations', '007'))).toBe(true);
     const sub = busIterationDir('007', 'reviewer');
-    expect(sub.endsWith('/iterations/007/reviewer')).toBe(true);
+    expect(sub.endsWith(path.join('iterations', '007', 'reviewer'))).toBe(true);
   });
 });

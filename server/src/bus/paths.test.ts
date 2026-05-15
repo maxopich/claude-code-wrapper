@@ -31,15 +31,18 @@ describe('computeSessionPaths', () => {
   test('folder is `<workspace>/.cebab-session-<id>` (dot-prefixed hidden)', () => {
     const workspace = '/Users/test/agents';
     const paths = computeSessionPaths('abc-123', workspace);
-    expect(paths.folder).toBe('/Users/test/agents/.cebab-session-abc-123');
+    // Expected built with path.join so the separator matches the host OS
+    // (computeSessionPaths uses path.join — backslashes on Windows CI).
+    expect(paths.folder).toBe(path.join(workspace, '.cebab-session-abc-123'));
   });
 
   test('all sub-paths nest correctly under folder', () => {
     const paths = computeSessionPaths('s1', '/w');
-    expect(paths.orchestratorWorkspace).toBe('/w/.cebab-session-s1/orchestrator');
-    expect(paths.iterationDir('001')).toBe('/w/.cebab-session-s1/iterations/001');
+    const base = path.join('/w', '.cebab-session-s1');
+    expect(paths.orchestratorWorkspace).toBe(path.join(base, 'orchestrator'));
+    expect(paths.iterationDir('001')).toBe(path.join(base, 'iterations', '001'));
     expect(paths.iterationDir('001', 'reviewer')).toBe(
-      '/w/.cebab-session-s1/iterations/001/reviewer',
+      path.join(base, 'iterations', '001', 'reviewer'),
     );
   });
 
@@ -54,9 +57,13 @@ describe('computeSessionPaths', () => {
 
 describe('sessionPathsFromFolder', () => {
   test('rebuilds the same paths object given just the folder', () => {
-    const folder = '/Users/test/agents/.cebab-session-xyz';
+    const workspace = '/Users/test/agents';
+    // Build the folder via path.join too, so the inverse-relationship
+    // assertion holds on Windows (sessionPathsFromFolder stores `folder`
+    // verbatim; computeSessionPaths path.joins it).
+    const folder = path.join(workspace, '.cebab-session-xyz');
     const fromFolder = sessionPathsFromFolder(folder);
-    const fromCompute = computeSessionPaths('xyz', '/Users/test/agents');
+    const fromCompute = computeSessionPaths('xyz', workspace);
     // The two should produce identical paths — sessionPathsFromFolder is
     // the resume-time inverse of computeSessionPaths.
     expect(fromFolder.folder).toBe(fromCompute.folder);
