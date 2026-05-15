@@ -332,22 +332,6 @@ export function setProjectBusInstalled(
     .run(installed ? 1 : 0, installed ? agentName : null, projectId);
 }
 
-/**
- * Reverse lookup: given a bus agent name, find the project. Used when a
- * `bus_send` event carries `source: "<agent>"` and the router needs to
- * attribute it back to a project id for UI rendering.
- */
-export function findProjectByBusAgentName(
-  agentName: string,
-): { id: number; name: string; path: string } | undefined {
-  return getDb()
-    .prepare<
-      [string],
-      { id: number; name: string; path: string }
-    >('SELECT id, name, path FROM projects WHERE bus_agent_name = ? AND bus_installed = 1')
-    .get(agentName);
-}
-
 /** True iff some project already claims this agent name. Used by install pre-check. */
 export function isAgentNameTaken(agentName: string, excludingProjectId?: number): boolean {
   if (excludingProjectId === undefined) {

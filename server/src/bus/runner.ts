@@ -28,7 +28,6 @@ import { isValidBusRecipient } from './paths.js';
 /** Message kinds the bus understands. Cebab writes `intro`/`prompt`;
  *  agents emit `reply`/`final`. Mirrors the old `--kind` values. */
 export const BUS_KINDS = ['intro', 'prompt', 'reply', 'final'] as const;
-export type BusKind = (typeof BUS_KINDS)[number];
 
 /**
  * One bus message. Shape is intentionally identical to the old on-disk

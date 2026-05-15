@@ -72,11 +72,6 @@ export function unregisterLiveSession(sessionId: string): void {
   live.delete(sessionId);
 }
 
-/** Live sessions, in registration order. */
-export function listLiveSessions(): LiveBusSession[] {
-  return [...live.values()];
-}
-
 export function hasLiveSession(sessionId: string): boolean {
   return live.has(sessionId);
 }
