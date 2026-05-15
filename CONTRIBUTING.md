@@ -2,8 +2,7 @@
 
 Thanks for poking at the code. Cebab is a small macOS-only personal tool, so this
 guide is short — it documents the bits that aren't obvious from the README:
-how to sign your commits, what to run before opening a PR, and where the
-security-critical paths live.
+what to run before opening a PR, and where the security-critical paths live.
 
 ## Dev setup
 
@@ -24,38 +23,6 @@ native `better-sqlite3` binding — and installs the husky pre-commit hook.
 
 If your `prepare` script hasn't run, husky won't be wired up, so the gitleaks +
 lint-staged hook won't fire. `npm run setup` covers both.
-
-## Signed commits
-
-`main` requires every commit to be signed. Cebab uses
-[gitsign](https://github.com/sigstore/gitsign) (Sigstore keyless OIDC) — no GPG
-keys to generate, rotate, or lose. Your commit identity ties to your GitHub
-login at sign time.
-
-One-time setup:
-
-```sh
-brew install sigstore/tap/gitsign
-
-# Per-repo (recommended — doesn't touch your other repos' signing config)
-git config gpg.x509.program gitsign
-git config gpg.format x509
-git config commit.gpgsign true
-
-# Or, if you want gitsign everywhere:
-git config --global gpg.x509.program gitsign
-git config --global gpg.format x509
-git config --global commit.gpgsign true
-```
-
-On the next `git commit`, gitsign opens a browser tab for the OIDC flow (GitHub
-login), fetches a short-lived signing cert from Fulcio, signs, and records the
-transparency-log entry in Rekor. Subsequent commits within the cert's ~10
-minute validity window reuse the cached cert; after that it re-prompts.
-
-GitHub renders signed commits with a "Verified" badge on the PR page. CI does
-not block on the badge — `main` branch protection does — but if you see
-"Unverified" on your PR, your local gitsign config is off.
 
 ## Before opening a PR
 
