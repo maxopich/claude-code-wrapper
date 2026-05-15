@@ -96,3 +96,27 @@ jobs:
         # identically on ubuntu-latest and windows-latest — no `&` / `nc` /
         # `timeout` / `kill` (the old Linux-only bash pipeline is gone).
         run: npm --workspace server exec tsx src/ci_smoke.ts
+
+  # Stable required-status-check context. Branch protection on `main`
+  # requires the bare context "Lint, Typecheck, Test", but the matrix
+  # above reports per-OS contexts ("... (ubuntu-latest)" / "...
+  # (windows-latest)"), so the bare name is never produced and the
+  # required check hangs forever in "Expected — waiting for status".
+  # This 1-step aggregator emits exactly that context and is green iff
+  # every matrix leg passed — so the gate keeps working even if the
+  # matrix gains/renames OSes later, with no branch-protection edits.
+  required:
+    name: Lint, Typecheck, Test
+    needs: [quality]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every matrix leg to have passed
+        run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "quality matrix did not succeed (result=${{ needs.quality.result }})"
+            exit 1
+          fi
+          echo "All matrix legs passed."
