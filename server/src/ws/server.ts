@@ -59,15 +59,9 @@ import {
   clearFinishedMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
-  listRunningTmuxSessionNames,
 } from '../repo/multi_agent.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
-import {
-  hasSession,
-  killSession,
-  listSessions as listTmuxSessions,
-  tmuxAvailable,
-} from '../bus/tmux.js';
+import { hasLiveSession } from '../bus/session_registry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type { IterationSummary } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
@@ -202,11 +196,13 @@ function onConnection(ws: WebSocket): void {
     conn.pendingPermissions.clear();
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
-    // Multi-agent: detach but DON'T kill. The bus session keeps running in
-    // tmux; the DB row stays 'running'. A future WS connect (browser
-    // refresh, Cebab restart, second window) calls `attemptResumeMultiAgent`
-    // to re-attach. The Stop button is the only way an operator
-    // intentionally tears a session down.
+    // Multi-agent: detach but DON'T tear down. The bus session keeps
+    // running in-process (AgentRunner + router live in the session
+    // registry); the DB row stays 'running'. A future WS connect (browser
+    // refresh, second window) calls `attemptResumeMultiAgent` to re-attach
+    // by swapping the WS sink. The Stop button is the only way an operator
+    // intentionally tears a session down. (A Cebab server restart empties
+    // the registry — decision R-A — so runs do not survive that.)
     if (conn.multiAgent) {
       conn.multiAgent.detach();
       conn.multiAgent = null;
@@ -342,18 +338,13 @@ function resumeFailureMessage(sessionId: string, reason: ResumeFailureReason): s
     case 'legacy-row':
       return `Couldn't resume multi-agent session ${slug}: legacy DB row missing tmux/iteration info. Marked crashed.`;
     case 'reattach-failed':
-      return `Couldn't reattach to multi-agent session ${slug}: a participant likely lost its bus integration. Marked crashed.`;
+      return `Couldn't resume multi-agent session ${slug}: the Cebab server was restarted since it started, and multi-agent runs don't survive a server restart (decision R-A). Marked crashed. Single-agent chats are unaffected.`;
   }
 }
 
 /** Display-label cap. Long enough for "Refactor the WS upgrade handler", short
  * enough not to wreck the sidebar layout. */
 const MAX_SESSION_TITLE_LEN = 80;
-
-/** Prefix every Cebab-spawned multi-agent tmux session shares. Used by the
- *  `clear_iterations` reaper to scope its kill loop to sessions we own
- *  (operator's unrelated tmux sessions are left untouched). */
-const CEBAB_BUS_TMUX_PREFIX = 'cebab-bus-';
 
 /**
  * Normalize a user-supplied title. Returns null when the input is empty after
@@ -393,9 +384,6 @@ function seedPermissionMode(
  */
 export async function buildIterationsList(): Promise<IterationSummary[]> {
   const rows = listMultiAgentSessionsWithIteration();
-  // Probe tmux availability once; `hasSession` is only called for rows that
-  // could plausibly still be alive (never `completed`).
-  const tmuxOk = rows.length > 0 && (await tmuxAvailable());
   const out: IterationSummary[] = [];
   for (const row of rows) {
     const participants = listResolvedParticipants(row.id);
@@ -408,14 +396,11 @@ export async function buildIterationsList(): Promise<IterationSummary[]> {
       row.session_folder !== null
         ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
         : busIterationDir(row.iteration_id!);
-    // A row is resumable only if its tmux session is still alive. `completed`
-    // sessions finished cleanly and are never resumed; everything else is
-    // probed. Re-validated server-side on the actual resume request.
-    const resumable =
-      row.status !== 'completed' &&
-      tmuxOk &&
-      !!row.tmux_session &&
-      (await hasSession(row.tmux_session));
+    // A row is resumable only if it is still live in THIS process's
+    // session registry (the in-process analogue of the old tmux probe).
+    // After a Cebab server restart the registry is empty, so nothing is
+    // resumable — decision R-A. Re-validated on the actual resume request.
+    const resumable = hasLiveSession(row.id);
     out.push({
       iterationId: row.iteration_id!,
       sessionId: row.id,
@@ -1005,37 +990,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'clear_iterations': {
-      // Two-step cleanup. (1) Reap any orphan tmux sessions: live
-      // `cebab-bus-*` sessions whose DB row no longer says
-      // `status='running'`. These accumulate when Cebab restarts mid-
-      // session, when the operator manually deletes DB rows, or when a
-      // session's `running` row was cleared by a previous Clear before
-      // this reaper shipped. Sessions still backed by a running DB row
-      // are preserved (matched by exact `tmux_session` name). (2) Delete
-      // finished DB rows + their events + their participants. Disk
-      // artifacts under the per-session folder are left in place —
-      // useful for post-mortem; operator can `rm -rf` by hand.
-      try {
-        const protectedNames = new Set(listRunningTmuxSessionNames());
-        const live = await listTmuxSessions();
-        for (const name of live) {
-          if (!name.startsWith(CEBAB_BUS_TMUX_PREFIX)) continue;
-          if (protectedNames.has(name)) continue;
-          try {
-            await killSession(name);
-          } catch (err) {
-            // killSession itself is idempotent on the missing-session
-            // case; any other failure is logged but not surfaced — the
-            // operator's Clear request still completes for the DB side.
-            console.warn(`[ws] orphan killSession(${name}) failed during clear`, err);
-          }
-        }
-      } catch (err) {
-        // tmux not installed, or list-sessions returned an unexpected
-        // error. Either way, the DB clear below is independent and
-        // worth completing. Logged for diagnosis.
-        console.warn('[ws] tmux orphan scan during clear failed', err);
-      }
+      // Delete finished DB rows + their events + their participants. Disk
+      // artifacts under the per-session folder are left in place — useful
+      // for post-mortem; the operator can `rm -rf` by hand. The pure-SDK
+      // runtime has no out-of-process sessions to reap: a still-live run
+      // is in the in-process registry with a `running` row (never cleared
+      // here), and a server restart already ended every prior run.
       clearFinishedMultiAgentSessions();
       send(conn.ws, { type: 'iterations', items: await buildIterationsList() });
       return;

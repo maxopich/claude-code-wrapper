@@ -4,19 +4,14 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import {
-  busInboxDir,
-  busLogPath,
-  busRoot,
   computeSessionPaths,
   isValidAgentName,
   isValidBusRecipient,
-  legacyGlobalSessionPaths,
   sessionPathsFromFolder,
 } from './paths.js';
 
-// `config.dataDir` overrides are only needed for the legacy-fallback test
-// — the new SessionPaths helpers are pure path math and don't read it.
-// Set it anyway so every test gets a stable tmp root.
+// The SessionPaths helpers are pure path math and don't read config.dataDir;
+// the tmp override below just keeps every test on a stable isolated root.
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -42,9 +37,6 @@ describe('computeSessionPaths', () => {
   test('all sub-paths nest correctly under folder', () => {
     const paths = computeSessionPaths('s1', '/w');
     expect(paths.orchestratorWorkspace).toBe('/w/.cebab-session-s1/orchestrator');
-    expect(paths.busInbox('reviewer')).toBe('/w/.cebab-session-s1/inboxes/reviewer');
-    expect(paths.busArchive('reviewer')).toBe('/w/.cebab-session-s1/archive/reviewer');
-    expect(paths.busLog).toBe('/w/.cebab-session-s1/bus.log');
     expect(paths.iterationDir('001')).toBe('/w/.cebab-session-s1/iterations/001');
     expect(paths.iterationDir('001', 'reviewer')).toBe(
       '/w/.cebab-session-s1/iterations/001/reviewer',
@@ -69,22 +61,7 @@ describe('sessionPathsFromFolder', () => {
     // the resume-time inverse of computeSessionPaths.
     expect(fromFolder.folder).toBe(fromCompute.folder);
     expect(fromFolder.orchestratorWorkspace).toBe(fromCompute.orchestratorWorkspace);
-    expect(fromFolder.busInbox('r')).toBe(fromCompute.busInbox('r'));
-    expect(fromFolder.busArchive('r')).toBe(fromCompute.busArchive('r'));
-    expect(fromFolder.busLog).toBe(fromCompute.busLog);
     expect(fromFolder.iterationDir('1', 'r')).toBe(fromCompute.iterationDir('1', 'r'));
-  });
-});
-
-describe('legacyGlobalSessionPaths', () => {
-  test('points at the pre-007 `~/.cebab/bus/` layout', () => {
-    // Used by resume for sessions whose DB row has session_folder=NULL
-    // (predate migration 007). All sub-paths resolve to the legacy
-    // global locations.
-    const paths = legacyGlobalSessionPaths();
-    expect(paths.folder).toBe(busRoot());
-    expect(paths.busInbox('reviewer')).toBe(busInboxDir('reviewer'));
-    expect(paths.busLog).toBe(busLogPath());
   });
 });
 

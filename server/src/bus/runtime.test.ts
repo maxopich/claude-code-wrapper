@@ -5,21 +5,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import {
-  CEBAB_SOURCE,
   nextIterationId,
   renderChainBriefing,
   renderRosterPrompt,
   SINK_RECIPIENT,
-  writeInboxMessage,
 } from './runtime.js';
-import {
-  busArchiveDir,
-  busInboxDir,
-  busIterationDir,
-  busLogPath,
-  busRoot,
-  computeSessionPaths,
-} from './paths.js';
+import { busIterationDir, busRoot } from './paths.js';
 
 // Same scaffolding shape as install.test.ts — every test gets its own
 // ~/.cebab override so writes don't leak across tests or out to the real
@@ -36,7 +27,6 @@ beforeEach(() => {
   closeDb();
   getDb(); // run migrations against the tmp DB
   fs.mkdirSync(busRoot(), { recursive: true });
-  fs.writeFileSync(busLogPath(), ''); // start with an empty bus.log
 });
 
 afterEach(() => {
@@ -206,132 +196,6 @@ describe('nextIterationId', () => {
       });
     }
     expect(nextIterationId()).toBe('010');
-  });
-});
-
-describe('writeInboxMessage', () => {
-  test('writes a .msg file into the recipient inbox and appends bus.log', () => {
-    writeInboxMessage({
-      recipient: 'reviewer',
-      source: CEBAB_SOURCE,
-      text: 'hello world',
-      kind: 'prompt',
-      ts: 1700000000000,
-    });
-
-    // Inbox file exists with the expected body.
-    const inbox = busInboxDir('reviewer');
-    expect(fs.existsSync(inbox)).toBe(true);
-    const files = fs.readdirSync(inbox).filter((f) => f.endsWith('.msg'));
-    expect(files).toHaveLength(1);
-    const filename = files[0]!;
-    // Filename shape: <ts>-<from>-<rand>.msg
-    expect(filename).toMatch(/^1700000000000-cebab-[0-9a-f]{6}\.msg$/);
-    expect(fs.readFileSync(path.join(inbox, filename), 'utf8')).toBe('hello world');
-
-    // Pre-creates archive dir so bus-check-inbox doesn't have to race.
-    expect(fs.existsSync(busArchiveDir('reviewer'))).toBe(true);
-
-    // bus.log has exactly one JSONL line matching the event.
-    const log = fs.readFileSync(busLogPath(), 'utf8').trim();
-    expect(log.split('\n')).toHaveLength(1);
-    const parsed = JSON.parse(log);
-    expect(parsed).toMatchObject({
-      ts: 1700000000000,
-      source: 'cebab',
-      destination: 'reviewer',
-      kind: 'prompt',
-      text: 'hello world',
-    });
-  });
-
-  test('two writes to the same inbox produce distinct filenames', () => {
-    writeInboxMessage({ recipient: 'a', source: CEBAB_SOURCE, text: 'one', kind: 'prompt', ts: 1 });
-    writeInboxMessage({ recipient: 'a', source: CEBAB_SOURCE, text: 'two', kind: 'prompt', ts: 1 });
-    const files = fs.readdirSync(busInboxDir('a')).filter((f) => f.endsWith('.msg'));
-    expect(files).toHaveLength(2);
-    expect(new Set(files).size).toBe(2);
-  });
-
-  test('writes the iteration sentinel directly into the right inbox', () => {
-    // Sanity: _sink isn't a special path — it's just a recipient name. We
-    // write to it like any other.
-    writeInboxMessage({
-      recipient: SINK_RECIPIENT,
-      source: 'coder',
-      text: 'final reply',
-      kind: 'final',
-    });
-    const files = fs.readdirSync(busInboxDir(SINK_RECIPIENT)).filter((f) => f.endsWith('.msg'));
-    expect(files).toHaveLength(1);
-  });
-
-  // F1: defense-in-depth — `writeInboxMessage` rejects path-traversal and
-  // garbage recipient strings before `mkdir`/`writeFileSync` touch disk.
-  // Mirror checks live in the bus shell scripts (bus-send-msg.sh etc.).
-  test.each([
-    ['../etc/passwd'],
-    ['../../tmp/pwn'],
-    [''],
-    ['has space'],
-    ['has/slash'],
-    ['has\nnewline'],
-    ['UPPERCASE'],
-    ['under_score'], // underscores allowed only for the _sink sentinel
-  ])('[security][F1] rejects invalid recipient %j with a thrown error', (bad) => {
-    expect(() =>
-      writeInboxMessage({
-        recipient: bad,
-        source: CEBAB_SOURCE,
-        text: 'x',
-        kind: 'prompt',
-      }),
-    ).toThrow(/invalid recipient/);
-    // No traversal artifact left behind in $BUS_ROOT/inboxes/.
-    const inboxes = path.join(busRoot(), 'inboxes');
-    if (fs.existsSync(inboxes)) {
-      expect(fs.readdirSync(inboxes)).toEqual([]);
-    }
-  });
-
-  test('with SessionPaths, lands in the per-session inbox + bus.log (not global)', () => {
-    // Simulates a post-007 caller: a workspace + sessionId yield a
-    // SessionPaths whose folder is under the workspace. writeInboxMessage
-    // should write to that location and NOT touch the legacy global one.
-    const workspace = path.join(tmpRoot, 'workspace');
-    fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths('sess-abc', workspace);
-
-    writeInboxMessage({
-      recipient: 'reviewer',
-      source: CEBAB_SOURCE,
-      text: 'hello from cebab',
-      kind: 'prompt',
-      ts: 1700000000000,
-      paths,
-    });
-
-    // Per-session inbox exists with the message.
-    const inbox = paths.busInbox('reviewer');
-    expect(fs.existsSync(inbox)).toBe(true);
-    const files = fs.readdirSync(inbox).filter((f) => f.endsWith('.msg'));
-    expect(files).toHaveLength(1);
-    // Per-session bus.log got the JSONL line.
-    expect(fs.existsSync(paths.busLog)).toBe(true);
-    const log = fs.readFileSync(paths.busLog, 'utf8').trim();
-    expect(log).toContain('"destination":"reviewer"');
-    expect(log).toContain('"text":"hello from cebab"');
-
-    // Legacy globals were NOT created — confirms the per-session path
-    // really won, rather than being shadowed by a stray global write.
-    expect(fs.existsSync(busInboxDir('reviewer'))).toBe(false);
-    // bus.log might or might not exist as a directory; check the file
-    // contents specifically — if the global got accidentally written, it
-    // would contain our event too.
-    if (fs.existsSync(busLogPath())) {
-      const globalLog = fs.readFileSync(busLogPath(), 'utf8');
-      expect(globalLog).not.toContain('hello from cebab');
-    }
   });
 });
 

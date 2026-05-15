@@ -8,7 +8,7 @@ import { createChainRouter } from './chain.js';
 import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
 import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
-import type { BusLogEvent } from './log_tailer.js';
+import type { BusEvent } from './runner.js';
 
 // F2 / F3 regression coverage for chain-mode handleEvent drops at
 // chain.ts:237-260. The chain participant allowlist differs slightly
@@ -47,8 +47,6 @@ function makeRouter() {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
   const paths = computeSessionPaths(SESSION_ID, workspace);
-  fs.mkdirSync(path.dirname(paths.busLog), { recursive: true });
-  fs.writeFileSync(paths.busLog, '');
   const onEvent = vi.fn();
   const onEnded = vi.fn();
   const router = createChainRouter({
@@ -63,7 +61,7 @@ function makeRouter() {
   return { router, onEvent, onEnded };
 }
 
-function ev(partial: Partial<BusLogEvent>): BusLogEvent {
+function ev(partial: Partial<BusEvent>): BusEvent {
   return {
     ts: 1700000000000,
     source: 'coder',

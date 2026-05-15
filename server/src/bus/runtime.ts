@@ -1,34 +1,23 @@
 /**
  * Cebab-side helpers for driving a multi-agent runtime.
  *
- * Split out from the chain orchestrator so each helper can be tested in
- * isolation without touching tmux or the WS layer. Responsibilities:
+ * Split out from the chain/orchestrator runtimes so each helper can be
+ * tested in isolation without the WS layer. Responsibilities:
  *
- *   - Write a message into an agent's bus inbox (same on-disk format that
- *     `bus-send-msg.sh` writes, so the tailer cannot tell apart Cebab-
- *     originated traffic from agent-originated traffic).
- *   - Render the per-step briefing that primes each chain participant
- *     (who they are, who they forward to, what to do).
+ *   - Render the per-step briefing / roster prompts that prime each
+ *     participant (who they are, who they talk to, what to do).
  *   - Allocate and populate the next `iterations/NNN/` directory for a run.
+ *   - Archive a chain hop's prompt/reply.
  *   - Resolve a project id to its bus agent slug (or throw if not installed).
  *
- * No tmux, no DB writes (those live in `chain.ts`).
+ * Pure helpers — no DB writes (those live in chain.ts / orchestrator.ts),
+ * no message transport (that is the in-process `bus_send` tool in runner.ts).
  */
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getProject } from '../repo/projects.js';
 import { getProjectBusState } from '../repo/multi_agent.js';
-import {
-  busArchiveDir,
-  busInboxDir,
-  busIterationDir,
-  busIterationsDir,
-  busLogPath,
-  isValidBusRecipient,
-  type SessionPaths,
-} from './paths.js';
-import { appendBusLogEvent, type BusLogEvent } from './log_tailer.js';
+import { busIterationDir, busIterationsDir, type SessionPaths } from './paths.js';
 import { sanitizeForPrompt } from './sanitize.js';
 
 /** Sentinel destination for the last chain participant. */
@@ -39,109 +28,11 @@ export const USER_RECIPIENT = 'user';
 export const CEBAB_SOURCE = 'cebab';
 
 /**
- * Shell command tmux launches in EVERY bus-runtime pane — both workers
- * and the orchestrator. The `--permission-mode bypassPermissions` flag
- * makes claude-code skip every per-tool permission prompt.
- *
- * Bypass is necessary because:
- *   1. Bus panes run headless — there's no human at the tmux terminal
- *      to dismiss claude-code's per-tool permission card.
- *   2. claude-code parses bash structurally. Even a narrow allow-list
- *      like `Bash(.../bus-send-msg.sh:*)` matches only flat command
- *      invocations; the moment the LLM reaches for `cat <<EOF |
- *      bus-send-msg.sh …` (which it routinely does for long messages),
- *      the AST node type is `pipeline`, the allow-list doesn't match,
- *      and the agent stalls on a permission prompt forever. Verified
- *      in session `e82d6912` where the orchestrator got stuck on
- *      exactly this prompt while routing a long worker query.
- *
- * Trust gate:
- *   - Workers: the operator's explicit "Install bus integration" click
- *     per project. Documented in CLAUDE.md's Trust section and
- *     surfaced in the install UI confirmation.
- *   - Orchestrator: its workspace is `<sessionFolder>/orchestrator/`,
- *     entirely Cebab-generated (CLAUDE.md, comm.md, settings.json), so
- *     there's no operator code inside it to protect.
- *
- * Bypass is launched alongside `dismissBypassPermissionsModal` (in
- * `tmux.ts`) which auto-accepts claude-code's per-launch "Bypass
- * Permissions mode" warning so neither workers nor the orchestrator
- * stall on the startup acknowledgement modal.
- *
- * Only `rm -rf /` and `rm -rf ~` still circuit-break under bypass; every
- * other tool runs unprompted. See plan
- * `~/.claude/plans/here-is-the-list-foamy-gem.md` (top section) for
- * the full rationale.
- */
-export const BUS_CLAUDE_COMMAND = 'claude --permission-mode bypassPermissions';
-
-/**
  * Reason a multi-agent session ended. Shared between chain and orchestrator
  * runtimes so the WS layer can hold a union of handles without two parallel
  * `EndedReason` types.
  */
 export type MultiAgentEndedReason = 'completed' | 'stopped' | 'crashed';
-
-/**
- * Write a message to a recipient's bus inbox and append the matching event
- * to bus.log. Mirrors `bus-send-msg.sh` exactly so the tailer's parser
- * doesn't need to distinguish the two paths.
- *
- * Idempotency: each call creates a fresh file with a `<ts>-<from>-<rand>.msg`
- * name, so consecutive calls don't collide. Atomic write (.tmp → rename)
- * so the consumer never sees a half-written body via fs.watch.
- *
- * If `paths` is provided, writes land in the per-session folder (post-007
- * sessions). Otherwise falls back to the legacy global `~/.cebab/bus/`
- * layout — kept so existing tests and any in-flight pre-007 callers keep
- * working without churn.
- */
-export function writeInboxMessage(opts: {
-  recipient: string;
-  source: string;
-  text: string;
-  kind: BusLogEvent['kind'];
-  /** Override clock for tests; defaults to Date.now(). */
-  ts?: number;
-  /** Per-session paths bundle. Omit to use the legacy global layout. */
-  paths?: SessionPaths;
-}): BusLogEvent {
-  // Defense-in-depth: internal callers pass resolved slugs or the
-  // 'user'/'_sink' sentinels, but a future caller passing operator-
-  // controlled input must not slip past. Mirrors the shell guards in
-  // bus-send-msg.sh / bus-check-inbox.sh.
-  if (!isValidBusRecipient(opts.recipient)) {
-    throw new Error(`writeInboxMessage: invalid recipient ${JSON.stringify(opts.recipient)}`);
-  }
-  const ts = opts.ts ?? Date.now();
-  const inbox = opts.paths ? opts.paths.busInbox(opts.recipient) : busInboxDir(opts.recipient);
-  const archive = opts.paths
-    ? opts.paths.busArchive(opts.recipient)
-    : busArchiveDir(opts.recipient);
-  const logPath = opts.paths ? opts.paths.busLog : busLogPath();
-  fs.mkdirSync(inbox, { recursive: true });
-  // Also pre-create the archive dir so bus-check-inbox.sh's mv doesn't have
-  // to race the consumer.
-  fs.mkdirSync(archive, { recursive: true });
-
-  const rand = crypto.randomBytes(3).toString('hex');
-  const filename = `${ts}-${opts.source}-${rand}.msg`;
-  const tmp = path.join(inbox, `.tmp.${process.pid}.${rand}`);
-  const final = path.join(inbox, filename);
-  fs.writeFileSync(tmp, opts.text);
-  fs.renameSync(tmp, final);
-
-  return appendBusLogEvent(
-    {
-      ts,
-      source: opts.source,
-      destination: opts.recipient,
-      kind: opts.kind,
-      text: opts.text,
-    },
-    logPath,
-  );
-}
 
 /**
  * Render the chain briefing for one participant. Prepended once to that
@@ -361,8 +252,8 @@ export function archiveAgentHop(opts: {
 /**
  * Resolve a Cebab project id to its bus agent slug. Throws with a typed
  * error code (string) the WS layer can surface as a `wrapper_error`. Used
- * at chain start to validate every participant before any tmux session is
- * spawned (cheaper to bail early than to tear down a half-spawned session).
+ * at session start to validate every participant before anything is
+ * spawned (cheaper to bail early than to tear down a half-started session).
  */
 export class ResolveAgentError extends Error {
   constructor(
