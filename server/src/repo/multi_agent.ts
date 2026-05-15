@@ -75,10 +75,6 @@ export function createMultiAgentSession(
   lifecycle: MultiAgentLifecycle = 'persistent',
 ): MultiAgentSessionRow {
   const now = Date.now();
-  // The legacy `tmux_session` column is intentionally left in the schema and
-  // simply not written here (it stays NULL). `~/.cebab/cebab.sqlite` is shared
-  // with the still-tmux `main` checkout; a DROP COLUMN migration would break
-  // main's INSERT, so the column is retired in code only, not in SQL.
   getDb()
     .prepare(
       `INSERT INTO multi_agent_sessions
