@@ -12,7 +12,6 @@ export function ProjectList(props: {
   onSelectSession: (projectId: number, sessionId: string) => void;
   onNewSession: (projectId: number) => void;
   onToggleTrust: (id: number, trusted: boolean) => void;
-  onUninstallBus: (projectId: number) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
 }) {
   return (
@@ -53,21 +52,6 @@ export function ProjectList(props: {
                 <span className="claude-mark-spacer" aria-hidden="true" />
               )}
               <span className="project-name">{p.name}</span>
-              {p.busInstalled && (
-                <button
-                  className="bus-installed-pill"
-                  title={`Bus integration installed (agent: ${p.busAgentName ?? '?'}).\nThis is pure DB metadata — Cebab wrote nothing into the project. Click to uninstall: just clears the bus-eligible flag (nothing in the project is touched).`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const ok = window.confirm(
-                      `Uninstall bus integration from "${p.name}"?\n\nThis is pure DB metadata — it just clears the bus-eligible flag. Nothing in the project itself is touched.`,
-                    );
-                    if (ok) props.onUninstallBus(p.id);
-                  }}
-                >
-                  bus
-                </button>
-              )}
               <button
                 className={`trust ${p.trusted ? 'on' : 'off'}`}
                 title={p.trusted ? 'Trusted (auto-approve tools)' : 'Asks before tool use'}
