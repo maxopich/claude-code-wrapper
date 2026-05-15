@@ -1,0 +1,12 @@
+-- Drop the dead `tmux_session` column.
+--
+-- 005 added it so Cebab could re-attach to a tmux session after a
+-- reconnect. The pure-SDK bus has no tmux: live sessions are tracked in
+-- the in-process registry (`session_registry.ts`) and a server restart is
+-- unrecoverable by design (decision R-A). The column has been written
+-- NULL since the rewrite and is read by nothing.
+--
+-- The operator confirmed existing tmux sessions need not be preserved, so
+-- the column is removed outright rather than left inert. No index or
+-- foreign key references it, so the drop is clean.
+ALTER TABLE multi_agent_sessions DROP COLUMN tmux_session;

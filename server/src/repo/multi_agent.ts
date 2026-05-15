@@ -3,7 +3,8 @@
  *
  * These tables (multi_agent_sessions / _participants / _events) are completely
  * separate from the SDK-mode `sessions` table — they describe long-lived bus
- * sessions where persistent TUI agents talk via filesystem inboxes + tmux.
+ * sessions where each agent is its own in-process SDK `query()` exchanging
+ * messages via the `bus_send` tool.
  *
  * Project-level bus state (`bus_installed`, `bus_agent_name`) also lives here
  * to keep all multi-agent-runtime concerns in one repo module.
@@ -34,7 +35,6 @@ export type MultiAgentSessionRow = {
   started_at: number;
   ended_at: number | null;
   status: string; // narrowed to MultiAgentStatus at the boundary
-  tmux_session: string | null;
   /** Iteration directory id (e.g. `'042'`) for sessions started post-006.
    *  NULL for pre-006 rows that predate the column. */
   iteration_id: string | null;
@@ -70,7 +70,6 @@ export type MultiAgentEventRow = {
 export function createMultiAgentSession(
   id: string,
   mode: MultiAgentMode,
-  tmuxSession: string | null = null,
   iterationId: string | null = null,
   sessionFolder: string | null = null,
   lifecycle: MultiAgentLifecycle = 'persistent',
@@ -79,10 +78,10 @@ export function createMultiAgentSession(
   getDb()
     .prepare(
       `INSERT INTO multi_agent_sessions
-         (id, mode, started_at, ended_at, status, tmux_session, iteration_id, session_folder, lifecycle)
-       VALUES (?, ?, ?, NULL, 'running', ?, ?, ?, ?)`,
+         (id, mode, started_at, ended_at, status, iteration_id, session_folder, lifecycle)
+       VALUES (?, ?, ?, NULL, 'running', ?, ?, ?)`,
     )
-    .run(id, mode, now, tmuxSession, iterationId, sessionFolder, lifecycle);
+    .run(id, mode, now, iterationId, sessionFolder, lifecycle);
   return getMultiAgentSession(id)!;
 }
 
@@ -94,9 +93,10 @@ export function endMultiAgentSession(id: string, status: MultiAgentStatus): void
 
 /**
  * Flip a terminal row back to `running` for a manual re-attach. Inverse of
- * `endMultiAgentSession`. The caller MUST have already verified the tmux
- * session is still alive; on a failed re-attach the caller restores the
- * prior terminal status so the `resumeOnConnect` sweep stays consistent.
+ * `endMultiAgentSession`. The caller MUST have already verified the session
+ * is still live in the in-process registry; on a failed re-attach the caller
+ * restores the prior terminal status so the `resumeOnConnect` sweep stays
+ * consistent.
  */
 export function reactivateMultiAgentSession(id: string): void {
   getDb()
@@ -160,25 +160,6 @@ export function listMultiAgentSessionsWithIteration(): MultiAgentSessionRow[] {
         ORDER BY started_at DESC`,
     )
     .all();
-}
-
-/**
- * Return the tmux session names of every currently-running multi-agent
- * row, filtering out any null entries (older rows that predate the
- * `tmux_session` column or were inserted without one).
- *
- * Used by the WS `clear_iterations` handler to compute the "protected" set
- * of tmux session names: anything matching `cebab-bus-*` that isn't in
- * this list is an orphan and gets killed when Clear runs.
- */
-export function listRunningTmuxSessionNames(): string[] {
-  return getDb()
-    .prepare<[], { tmux_session: string | null }>(
-      `SELECT tmux_session FROM multi_agent_sessions WHERE status = 'running'`,
-    )
-    .all()
-    .map((r) => r.tmux_session)
-    .filter((s): s is string => s !== null);
 }
 
 /**
@@ -345,22 +326,6 @@ export function setProjectBusInstalled(
   getDb()
     .prepare('UPDATE projects SET bus_installed = ?, bus_agent_name = ? WHERE id = ?')
     .run(installed ? 1 : 0, installed ? agentName : null, projectId);
-}
-
-/**
- * Reverse lookup: given a bus agent name, find the project. Used when the
- * bus log tailer sees `source: "<agent>"` and needs to attribute it back to
- * a project id for UI rendering.
- */
-export function findProjectByBusAgentName(
-  agentName: string,
-): { id: number; name: string; path: string } | undefined {
-  return getDb()
-    .prepare<
-      [string],
-      { id: number; name: string; path: string }
-    >('SELECT id, name, path FROM projects WHERE bus_agent_name = ? AND bus_installed = 1')
-    .get(agentName);
 }
 
 /** True iff some project already claims this agent name. Used by install pre-check. */

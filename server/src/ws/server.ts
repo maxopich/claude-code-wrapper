@@ -51,7 +51,6 @@ import { ResolveAgentError } from '../bus/runtime.js';
 import {
   attemptResumeMultiAgent,
   resumeMultiAgentTarget,
-  type ResumeFailureReason,
   type ResumedSession,
   type ResumeCallbacks,
 } from '../bus/resume.js';
@@ -59,15 +58,9 @@ import {
   clearFinishedMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
-  listRunningTmuxSessionNames,
 } from '../repo/multi_agent.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
-import {
-  hasSession,
-  killSession,
-  listSessions as listTmuxSessions,
-  tmuxAvailable,
-} from '../bus/tmux.js';
+import { hasLiveSession } from '../bus/session_registry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type { IterationSummary } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
@@ -202,11 +195,13 @@ function onConnection(ws: WebSocket): void {
     conn.pendingPermissions.clear();
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
-    // Multi-agent: detach but DON'T kill. The bus session keeps running in
-    // tmux; the DB row stays 'running'. A future WS connect (browser
-    // refresh, Cebab restart, second window) calls `attemptResumeMultiAgent`
-    // to re-attach. The Stop button is the only way an operator
-    // intentionally tears a session down.
+    // Multi-agent: detach but DON'T tear down. The bus session keeps
+    // running in-process (AgentRunner + router live in the session
+    // registry); the DB row stays 'running'. A future WS connect (browser
+    // refresh, second window) calls `attemptResumeMultiAgent` to re-attach
+    // by swapping the WS sink. The Stop button is the only way an operator
+    // intentionally tears a session down. (A Cebab server restart empties
+    // the registry — decision R-A — so runs do not survive that.)
     if (conn.multiAgent) {
       conn.multiAgent.detach();
       conn.multiAgent = null;
@@ -265,7 +260,6 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // not the DB row; the reducer doesn't use this field post-start.
     participants: [],
     participantAgentNames: resumed.handle.participantAgentNames,
-    tmuxSession: resumed.handle.tmuxSession,
     lifecycle: resumed.handle.lifecycle,
     sessionFolder: resumed.handle.sessionFolder,
   });
@@ -286,21 +280,22 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
 
 /**
  * Async helper that runs after a WS connect: look up any active multi-agent
- * session in the DB, validate against tmux, and re-attach if alive. Catches
- * its own errors so a failed resume doesn't leak into the WS error handler.
+ * session in the DB, check the in-process registry, and re-attach if still
+ * live. Catches its own errors so a failed resume doesn't leak into the WS
+ * error handler.
  */
 async function resumeOnConnect(conn: Conn): Promise<void> {
   try {
     const resumed = await attemptResumeMultiAgent({
       ...resumeCallbacks(conn),
-      onResumeFailed: (sessionId, reason) => {
+      onResumeFailed: (sessionId) => {
         // Surface auto-resume failures as a wrapper_error toast so the
         // operator notices instead of "Cebab silently lost my session".
         send(conn.ws, {
           type: 'wrapper_error',
           sessionId,
           kind: 'process_crashed',
-          message: resumeFailureMessage(sessionId, reason),
+          message: resumeFailureMessage(sessionId),
         });
       },
     });
@@ -326,34 +321,21 @@ function emitSettings(conn: Conn): void {
 }
 
 /**
- * Map a `ResumeFailureReason` to the user-facing message that ships in the
- * `wrapper_error.message` field. Kept close to the WS layer so the wording
- * (which the operator sees in a toast) doesn't drift away from the
- * symptoms it describes. The session id slice helps disambiguate when the
- * operator has run multiple multi-agent sessions in a row.
+ * The user-facing message that ships in the `wrapper_error.message` field
+ * when an auto-resume fails. Kept close to the WS layer so the wording (which
+ * the operator sees in a toast) doesn't drift away from the symptom. Under
+ * the pure-SDK model the only failure is a server-restart registry miss
+ * (decision R-A). The session id slice helps disambiguate when the operator
+ * has run multiple multi-agent sessions in a row.
  */
-function resumeFailureMessage(sessionId: string, reason: ResumeFailureReason): string {
+function resumeFailureMessage(sessionId: string): string {
   const slug = sessionId.slice(0, 8);
-  switch (reason) {
-    case 'tmux-unavailable':
-      return `Couldn't resume multi-agent session ${slug}: tmux isn't running. The session has been marked crashed.`;
-    case 'tmux-missing':
-      return `Couldn't resume multi-agent session ${slug}: its tmux session is gone (likely killed by reboot or manual cleanup). Marked crashed.`;
-    case 'legacy-row':
-      return `Couldn't resume multi-agent session ${slug}: legacy DB row missing tmux/iteration info. Marked crashed.`;
-    case 'reattach-failed':
-      return `Couldn't reattach to multi-agent session ${slug}: a participant likely lost its bus integration. Marked crashed.`;
-  }
+  return `Couldn't resume multi-agent session ${slug}: the Cebab server was restarted since it started, and multi-agent runs don't survive a server restart (decision R-A). Marked crashed. Single-agent chats are unaffected.`;
 }
 
 /** Display-label cap. Long enough for "Refactor the WS upgrade handler", short
  * enough not to wreck the sidebar layout. */
 const MAX_SESSION_TITLE_LEN = 80;
-
-/** Prefix every Cebab-spawned multi-agent tmux session shares. Used by the
- *  `clear_iterations` reaper to scope its kill loop to sessions we own
- *  (operator's unrelated tmux sessions are left untouched). */
-const CEBAB_BUS_TMUX_PREFIX = 'cebab-bus-';
 
 /**
  * Normalize a user-supplied title. Returns null when the input is empty after
@@ -393,9 +375,6 @@ function seedPermissionMode(
  */
 export async function buildIterationsList(): Promise<IterationSummary[]> {
   const rows = listMultiAgentSessionsWithIteration();
-  // Probe tmux availability once; `hasSession` is only called for rows that
-  // could plausibly still be alive (never `completed`).
-  const tmuxOk = rows.length > 0 && (await tmuxAvailable());
   const out: IterationSummary[] = [];
   for (const row of rows) {
     const participants = listResolvedParticipants(row.id);
@@ -408,14 +387,11 @@ export async function buildIterationsList(): Promise<IterationSummary[]> {
       row.session_folder !== null
         ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
         : busIterationDir(row.iteration_id!);
-    // A row is resumable only if its tmux session is still alive. `completed`
-    // sessions finished cleanly and are never resumed; everything else is
-    // probed. Re-validated server-side on the actual resume request.
-    const resumable =
-      row.status !== 'completed' &&
-      tmuxOk &&
-      !!row.tmux_session &&
-      (await hasSession(row.tmux_session));
+    // A row is resumable only if it is still live in THIS process's
+    // session registry (the in-process analogue of the old tmux probe).
+    // After a Cebab server restart the registry is empty, so nothing is
+    // resumable — decision R-A. Re-validated on the actual resume request.
+    const resumable = hasLiveSession(row.id);
     out.push({
       iterationId: row.iteration_id!,
       sessionId: row.id,
@@ -769,7 +745,6 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             mode: 'orchestrator',
             participants: msg.participants,
             participantAgentNames: handle.participantAgentNames,
-            tmuxSession: handle.tmuxSession,
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
           });
@@ -810,7 +785,6 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           mode: 'chain',
           participants: msg.participants,
           participantAgentNames: handle.participantAgentNames,
-          tmuxSession: handle.tmuxSession,
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
         });
@@ -829,8 +803,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       if (!('sendUserPrompt' in active)) {
         // Chain mode doesn't accept mid-flight user prompts; it's fire-
-        // and-forget after the initial input lands in participant[0]'s
-        // inbox. Surface as a wrapper_error so the operator gets feedback.
+        // and-forget after the initial input rides participant[0]'s first
+        // turn. Surface as a wrapper_error so the operator gets feedback.
         send(conn.ws, {
           type: 'wrapper_error',
           kind: 'process_crashed',
@@ -888,9 +862,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
               ? 'That session no longer exists.'
               : result.reason === 'already-running'
                 ? 'That session is already running.'
-                : result.reason === 'tmux-missing'
-                  ? "This session's tmux is no longer alive — it can't be resumed."
-                  : 'Failed to re-attach (a participant may have lost its bus integration).';
+                : 'Failed to re-attach: the Cebab server was restarted, and multi-agent runs do not survive a server restart (decision R-A).';
           send(conn.ws, {
             type: 'wrapper_error',
             sessionId: msg.sessionId,
@@ -1005,37 +977,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'clear_iterations': {
-      // Two-step cleanup. (1) Reap any orphan tmux sessions: live
-      // `cebab-bus-*` sessions whose DB row no longer says
-      // `status='running'`. These accumulate when Cebab restarts mid-
-      // session, when the operator manually deletes DB rows, or when a
-      // session's `running` row was cleared by a previous Clear before
-      // this reaper shipped. Sessions still backed by a running DB row
-      // are preserved (matched by exact `tmux_session` name). (2) Delete
-      // finished DB rows + their events + their participants. Disk
-      // artifacts under the per-session folder are left in place —
-      // useful for post-mortem; operator can `rm -rf` by hand.
-      try {
-        const protectedNames = new Set(listRunningTmuxSessionNames());
-        const live = await listTmuxSessions();
-        for (const name of live) {
-          if (!name.startsWith(CEBAB_BUS_TMUX_PREFIX)) continue;
-          if (protectedNames.has(name)) continue;
-          try {
-            await killSession(name);
-          } catch (err) {
-            // killSession itself is idempotent on the missing-session
-            // case; any other failure is logged but not surfaced — the
-            // operator's Clear request still completes for the DB side.
-            console.warn(`[ws] orphan killSession(${name}) failed during clear`, err);
-          }
-        }
-      } catch (err) {
-        // tmux not installed, or list-sessions returned an unexpected
-        // error. Either way, the DB clear below is independent and
-        // worth completing. Logged for diagnosis.
-        console.warn('[ws] tmux orphan scan during clear failed', err);
-      }
+      // Delete finished DB rows + their events + their participants. Disk
+      // artifacts under the per-session folder are left in place — useful
+      // for post-mortem; the operator can `rm -rf` by hand. The pure-SDK
+      // runtime has no out-of-process sessions to reap: a still-live run
+      // is in the in-process registry with a `running` row (never cleared
+      // here), and a server restart already ended every prior run.
       clearFinishedMultiAgentSessions();
       send(conn.ws, { type: 'iterations', items: await buildIterationsList() });
       return;

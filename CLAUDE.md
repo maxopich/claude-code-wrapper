@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A browser-based wrapper around the local `claude` CLI on macOS. The user has many agent projects under some workspace root (e.g. `~/agents/<name>/` — set per-install via the Settings modal, stored in SQLite); this app lists them in a sidebar, runs each as its own `cwd`, and renders the streamed output as a chat UI with inline tool-approval cards. macOS-only, single-user, bound to `127.0.0.1`. **No Anthropic API** — it uses the user's existing Claude subscription via `~/.claude/.credentials.json`.
+A browser-based wrapper around the local `claude` CLI. The user has many agent projects under some workspace root (e.g. `~/agents/<name>/` — set per-install via the Settings modal, stored in SQLite); this app lists them in a sidebar, runs each as its own `cwd`, and renders the streamed output as a chat UI with inline tool-approval cards. Single-user, bound to `127.0.0.1`. **No Anthropic API** — it uses the user's existing Claude subscription via `~/.claude/.credentials.json`.
+
+**Cross-platform (macOS, Linux, Windows — no WSL).** Both the single-agent path and the multi-agent bus are pure in-process Agent SDK `query()` calls — no tmux, no shell scripts, no OS-specific IPC — so one codebase behaves identically on all three. CI runs `ubuntu-latest` + `windows-latest`. See `~/.claude/plans/now-it-s-time-to-lazy-castle.md` for the bus re-architecture (tmux → pure SDK) reasoning and decisions.
 
 ## Architecture
 
@@ -39,7 +41,11 @@ This is the most important architectural decision in the repo — see `~/.claude
 
 The chat UI also exposes a per-session toggle that flips between `default` and `acceptEdits` mid-flight via `query.setPermissionMode()`. This is independent of the project Trust setting; it doesn't alter `settingSources` (already locked in when the run started).
 
-**Bus-runtime trust** is a parallel gate to the SDK Trust toggle, not derived from it. Clicking "Install bus integration" on a project opts that project into being a multi-agent worker: Cebab writes a Stop hook + bus-script allow patterns into its `.claude/settings.json`, and at session start the worker's `claude` TUI is launched with `--permission-mode bypassPermissions`. The bypass is forced — bus panes run headless, so any per-tool permission prompt hangs the agent forever (no human to dismiss). It also can't be avoided by a narrower allow-list: claude-code parses bash structurally, so `Bash(/path/to/script:*)` only matches flat command invocations — the moment the LLM reaches for `cat <<EOF | script …` to send a long message, the AST becomes a pipeline and the prompt fires anyway. **The orchestrator runs under the same `bypassPermissions`** for the same reason; its trust justification is that the orchestrator workspace at `<sessionFolder>/orchestrator/` is entirely Cebab-generated (CLAUDE.md, comm.md, settings.json), so there's no operator-owned code inside to protect. Worker trust gate: the operator's per-project bus-install click. Orchestrator trust gate: Cebab owns its workspace. Only `rm -rf /` and `rm -rf ~` still circuit-break under bypass.
+**Multi-agent bus = pure in-process SDK.** The bus (chain + orchestrator modes) is a generalization of the single-agent runner from 1→N: each participant is its own SDK `query()` (via the same `pickRunner` seam, so it inherits mock-mode parity), one `query()` per hop with `--resume` to carry context. Agents exchange messages by calling an injected in-process `bus_send` MCP tool — there is **no tmux, no bash scripts, no Stop hook, no file IPC, no bus.log**. The tool's `source` is pinned per-agent in a Cebab-owned closure (`server/src/bus/runner.ts`), so a worker cannot spoof its identity — the security win over the old env/file model. `server/src/bus/{runner,chain,orchestrator,session_registry}.ts` are the core; F2/F3 source-allowlist drop filters are kept verbatim as defense-in-depth.
+
+**Bus install is pure DB metadata.** Clicking "Install bus integration" only assigns a stable agent slug + flips a row flag — Cebab writes **nothing** into the operator's project (no `.claude/settings.json` merge, no CLAUDE.md `@import`, no copied scripts, no Stop hook). Workers run with `settingSources: ['user']`. The bus protocol reaches each agent via a per-turn briefing Cebab prepends (`renderChainBriefing` for chain participants, `renderWorkerBriefing` for orchestrator workers, `renderRosterPrompt` + the Cebab-generated workspace `CLAUDE.md`/`comm.md` for the orchestrator) — never via project mutation. Both workers and the orchestrator still run headless `query()` with `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions` (no human to answer a per-tool prompt). Trust gates unchanged in spirit: workers = the operator's per-project bus-install click; orchestrator = Cebab owns its `<sessionFolder>/orchestrator/` workspace (generated `CLAUDE.md` + `comm.md`).
+
+**Bus resume (R-A).** Live sessions live in an in-process registry (`session_registry.ts`), the analogue of "tmux survived". A browser close/refresh/second window re-attaches by swapping the WS sink — the run keeps going. A Cebab **server** restart empties the registry, so a mid-run bus session is lost (marked `crashed`) and persisted transcripts/events still survive; single-agent resume is a separate path and is unaffected.
 
 **Browser threat model**. The WS upgrade is gated on `Origin` and `Host`: the browser must come from `http://127.0.0.1:5173` (Vite dev) / `http://localhost:5173` / `http://127.0.0.1:$PORT`. Extra origins via `CEBAB_ALLOWED_ORIGINS` (comma-separated). Empty `Origin` is allowed — browsers always set it on WS upgrades, so an absent header means a non-browser client (smoke tests, curl), and the server is bound to 127.0.0.1 anyway. Without the Origin check, any tab the user has open could connect to the local server (Cross-Site WebSocket Hijacking). Per-launch tokens are deliberately out of scope for v1.
 
@@ -47,7 +53,7 @@ The chat UI also exposes a per-session toggle that flips between `default` and `
 
 **Mock mode** (`MOCK=1`): `pickRunner()` routes to `runner/mock.ts` which replays `fixtures/*.jsonl` through the same persistence path. Required infrastructure, not optional — UI iteration on real claude burns quota.
 
-**Lifecycle**: `runner/lifecycle.ts` tracks every in-flight `Query` object globally. The server's SIGINT handler calls `closeAllQueries()` before exiting, and the per-turn `finally` block calls `query.close()`. Without this, SDK-spawned `claude` processes outlive the server and silently consume subscription quota.
+**Lifecycle**: `runner/lifecycle.ts` tracks every in-flight `Query` object globally (single-agent turns AND every bus agent's per-hop `query()`). The server's SIGINT/SIGTERM/SIGBREAK handlers call `closeAllQueries()` before exiting (SIGBREAK is the Windows path — SIGTERM is never delivered there), and the per-turn `finally` block calls `query.close()`. Without this, SDK-spawned `claude` processes outlive the server and silently consume subscription quota.
 
 **Auth precedence gotcha**: the CLI prefers `ANTHROPIC_API_KEY` over OAuth subscription. `runner/claude.ts` strips that var (and `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK/VERTEX/FOUNDRY`) from the spawn env so a stray export in `.zshrc` can't silently route to paid billing.
 
@@ -55,24 +61,32 @@ The chat UI also exposes a per-session toggle that flips between `default` and `
 
 ```sh
 npm install                                       # install all workspaces
+npm run setup                                     # rebuild better-sqlite3 (.npmrc ignore-scripts=true) + git hooks — REQUIRED on every OS
 npm run dev:server                                # start server (real claude, port 4319)
-MOCK=1 npm run dev:server                         # start server in mock mode
+MOCK=1 npm run dev:server                         # mock mode (POSIX shells; on Windows/PowerShell set MOCK=1 in .env instead)
 npm run dev:web                                   # start vite dev server (port 5173)
 npm run build                                     # build everything
 npm run smoke                                     # DB migration smoke (server only)
-npm --workspace server exec tsc --noEmit          # typecheck server
-npm --workspace web exec tsc --noEmit             # typecheck web
+npm run typecheck                                 # tsc --noEmit across shared/server/web
+npm run lint                                      # eslint, --max-warnings 0
+npm test                                          # vitest, whole repo
+npm run test:security                             # [security]-tagged vitest cases
+
+# NOTE: do NOT use `npm --workspace server exec tsc --noEmit` — npm consumes
+# `--noEmit` as its own (unknown) config and tsc then EMITS into server/dist/,
+# which vitest will then pick up and run stale compiled tests. Use the scripts.
 
 # Integration smokes (require a running server)
 npm --workspace server exec tsx src/ws_smoke.ts          # WS protocol via mock
+npm --workspace server exec tsx src/ci_smoke.ts          # cross-platform: spawn mock server + ws_smoke + teardown (no shell)
 PROJECT=Cebab npm --workspace server exec tsx src/live_smoke.ts   # live: permission + resume
 ```
 
 ## v1 scope (don't expand without asking)
 
-In: project sidebar, send a message, see streamed text + tool calls + approvals, persist, follow-up message resumes correctly, per-project Trust toggle, mock mode.
+In: project sidebar, send a message, see streamed text + tool calls + approvals, persist, follow-up message resumes correctly, per-project Trust toggle, mock mode, multi-agent bus (chain + orchestrator, pure-SDK), native macOS/Linux/Windows.
 
-Out: file/git/cost panels, multi-session UI, hooks/plugins/skills UI, theming, web/remote/auth, Linux/Windows. Resist scope creep aggressively.
+Out: file/git/cost panels, multi-session UI, hooks/plugins/skills UI, theming, web/remote/auth, WSL. Resist scope creep aggressively.
 
 ## Stream-json oddities (verified live, undocumented)
 

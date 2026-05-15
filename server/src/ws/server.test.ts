@@ -42,14 +42,7 @@ describe('buildIterationsList artifactsDir resolution', () => {
     setProjectBusInstalled(project.id, true, 'reviewer');
 
     const sessionFolder = path.join(tmpRoot, 'workspace', '.cebab-session-with-folder');
-    createMultiAgentSession(
-      'with-folder',
-      'orchestrator',
-      'tx-with-folder',
-      '042',
-      sessionFolder,
-      'persistent',
-    );
+    createMultiAgentSession('with-folder', 'orchestrator', '042', sessionFolder, 'persistent');
     addParticipant('with-folder', project.id, 'worker', null);
 
     const items = await buildIterationsList();
@@ -65,7 +58,7 @@ describe('buildIterationsList artifactsDir resolution', () => {
     const project = upsertProject('Reviewer', projectPath);
     setProjectBusInstalled(project.id, true, 'reviewer');
 
-    createMultiAgentSession('legacy', 'chain', 'tx-legacy', '007');
+    createMultiAgentSession('legacy', 'chain', '007');
     addParticipant('legacy', project.id, 'worker', 0);
 
     const items = await buildIterationsList();
@@ -89,19 +82,19 @@ describe('buildIterationsList artifactsDir resolution', () => {
 
     // Ensure distinct started_at timestamps so the DESC ordering is
     // deterministic (newest first → C, then B, then A).
-    createMultiAgentSession('A', 'chain', 'tx-A', '001', folderA, 'persistent');
+    createMultiAgentSession('A', 'chain', '001', folderA, 'persistent');
     addParticipant('A', project.id, 'worker', 0);
     let t = Date.now();
     while (Date.now() === t) {
       /* spin */
     }
-    createMultiAgentSession('B', 'orchestrator', 'tx-B', '002', folderB, 'persistent');
+    createMultiAgentSession('B', 'orchestrator', '002', folderB, 'persistent');
     addParticipant('B', project.id, 'worker', null);
     t = Date.now();
     while (Date.now() === t) {
       /* spin */
     }
-    createMultiAgentSession('C', 'chain', 'tx-C', '003'); // legacy, session_folder = null
+    createMultiAgentSession('C', 'chain', '003'); // legacy, session_folder = null
     addParticipant('C', project.id, 'worker', 0);
 
     const items = await buildIterationsList();

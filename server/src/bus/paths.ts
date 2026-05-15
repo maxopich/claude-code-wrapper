@@ -1,60 +1,40 @@
 /**
- * Filesystem layout for the local agent bus.
+ * Filesystem layout for the local agent bus (pure-SDK runtime).
  *
- * After migration 007 the layout splits into two locations:
+ * There is no on-disk message transport anymore: agents exchange messages
+ * via the in-process `bus_send` tool (see runner.ts), so there are no
+ * inboxes, no archive, no `bus.log`, and no shared shell scripts. What
+ * remains on disk is just the artifact/transcript tree and the
+ * Cebab-generated orchestrator workspace.
  *
- *   1. **Stable global state** under `~/.cebab/bus/` (Cebab data dir):
- *      ```
- *      ~/.cebab/bus/
- *        bin/{bus-send-msg,bus-check-inbox,bus-status}.sh   # shared scripts
- *      ```
- *      The shared scripts' absolute paths are baked into each project's
- *      `.claude/settings.json` (Stop hook, allow patterns) at install time,
- *      so they MUST stay stable across sessions and Cebab upgrades.
- *
- *   2. **Per-project state** under `<projectPath>/.cebab/`:
- *      ```
- *      <projectPath>/.cebab/comm.md                         # protocol doc
- *      ```
- *      `comm.md` is the per-agent bus-protocol doc imported from
- *      `CLAUDE.md` via `@.cebab/comm.md`. It lives **inside** the project
- *      so the import is a project-relative path, not an external one —
- *      external imports trigger claude-code's startup trust modal, which
- *      cannot be dismissed headlessly in a tmux-spawned TUI and silently
- *      eats the first wake keystroke. Keeping the import internal sidesteps
- *      that modal entirely. (Pre-fix builds wrote comm.md to a global
- *      `~/.cebab/bus/agents/<slug>/comm.md`; install/uninstall now migrate
- *      that legacy state.)
- *
- *   3. **Per-session state** under `<workspaceRoot>/.cebab-session-<id>/`,
+ *   1. **Per-session state** under `<workspaceRoot>/.cebab-session-<id>/`,
  *      computed via `computeSessionPaths`:
  *      ```
  *      <workspaceRoot>/.cebab-session-<sessionId>/
- *        orchestrator/{CLAUDE.md, .claude/settings.json, .cebab/comm.md}
- *        inboxes/<agent>/<ts>-<from>-<rand>.msg             # live traffic
- *        archive/<agent>/...                                # consumed messages
- *        bus.log                                            # JSONL event stream
- *        iterations/NNN/<agent>/{prompt.md, reply.md, transcript.log}
+ *        orchestrator/{CLAUDE.md, .cebab/comm.md}   # Cebab-owned workspace
+ *        iterations/NNN/<agent>/{prompt.md, reply.md, transcript.log,
+ *                                final.md}
  *      ```
- *      The bus scripts find these via the `BUS_SESSION_ROOT` env var that
- *      Cebab passes when spawning each tmux window (see `bus-*.sh`).
  *
- * For pre-007 sessions that predate this split, the legacy global helpers
- * (`busInboxDir`, `busArchiveDir`, `busLogPath`, `busIterationDir`,
- * `orchestratorWorkspaceDir`) still resolve to `~/.cebab/bus/...` and
- * `~/.cebab/orchestrator/`. Resume falls back to these when a session row
- * has `session_folder=NULL`.
+ *   2. **Legacy global iteration root** under `~/.cebab/bus/` — only the
+ *      `iterations/` subtree (`busIterationDir`) and the legacy
+ *      `orchestratorWorkspaceDir()` survive, used by pre-007 rows whose
+ *      `session_folder` column is NULL and by unit tests that don't need
+ *      the per-session split.
+ *
+ * `comm.md` is the orchestrator's bus-protocol doc, imported from its
+ * workspace `CLAUDE.md` via the project-relative `@.cebab/comm.md` (an
+ * external/absolute import would trip claude-code's startup trust modal).
+ * Worker projects get no comm.md and no project-file mutation at all —
+ * their protocol arrives via the per-turn briefing.
  */
 import path from 'node:path';
 import { config } from '../config.js';
 
-/** Root of all bus state. Tests can override `config.dataDir` to relocate. */
+/** Root of legacy global bus state (the `iterations/` subtree only). Tests
+ *  can override `config.dataDir` to relocate. */
 export function busRoot(): string {
   return path.join(config.dataDir, 'bus');
-}
-
-export function busBinDir(): string {
-  return path.join(busRoot(), 'bin');
 }
 
 /**
@@ -78,18 +58,6 @@ export function projectCommMdPath(projectPath: string): string {
   return path.join(projectCebabDir(projectPath), 'comm.md');
 }
 
-export function busInboxDir(agentName: string): string {
-  return path.join(busRoot(), 'inboxes', agentName);
-}
-
-export function busArchiveDir(agentName: string): string {
-  return path.join(busRoot(), 'archive', agentName);
-}
-
-export function busLogPath(): string {
-  return path.join(busRoot(), 'bus.log');
-}
-
 export function busIterationsDir(): string {
   return path.join(busRoot(), 'iterations');
 }
@@ -110,9 +78,8 @@ export function orchestratorWorkspaceDir(): string {
 /**
  * Bundle of every per-session path a runtime helper might need. Computed
  * once at session start (and on resume from the persisted
- * `session_folder` column), then threaded through `writeInboxMessage`,
- * `archiveAgentHop`, `prepareIterationDir`, `appendBusLogEvent`, and the
- * orchestrator workspace generator.
+ * `session_folder` column), then threaded through `archiveAgentHop`,
+ * `prepareIterationDir`, and the orchestrator workspace generator.
  *
  * The fields are functions (not pre-baked strings) for the path helpers
  * that take an agent slug — saves the caller from threading both the
@@ -123,16 +90,8 @@ export type SessionPaths = {
    *  `session_folder` column so resume can rebuild this object. */
   folder: string;
   /** `<folder>/orchestrator/` — where the orchestrator's CLAUDE.md +
-   *  `.claude/settings.json` live for THIS session. */
+   *  `.cebab/comm.md` live for THIS session. */
   orchestratorWorkspace: string;
-  /** `<folder>/inboxes/<agent>/` — where Cebab and the bus scripts
-   *  drop `.msg` files for the named agent. */
-  busInbox: (agent: string) => string;
-  /** `<folder>/archive/<agent>/` — where `bus-check-inbox.sh` moves
-   *  consumed messages. */
-  busArchive: (agent: string) => string;
-  /** `<folder>/bus.log` — append-only JSONL the tailer watches. */
-  busLog: string;
   /** `<folder>/iterations/<NNN>/[<agent>]` — iteration artifact dir
    *  (chain hops, orchestrator transcripts, final.md). */
   iterationDir: (iterationId: string, agentName?: string) => string;
@@ -155,9 +114,6 @@ export function computeSessionPaths(sessionId: string, workspaceRoot: string): S
   return {
     folder,
     orchestratorWorkspace: path.join(folder, 'orchestrator'),
-    busInbox: (agent: string) => path.join(folder, 'inboxes', agent),
-    busArchive: (agent: string) => path.join(folder, 'archive', agent),
-    busLog: path.join(folder, 'bus.log'),
     iterationDir: (iterationId: string, agentName?: string) =>
       agentName
         ? path.join(folder, 'iterations', iterationId, agentName)
@@ -175,32 +131,10 @@ export function sessionPathsFromFolder(folder: string): SessionPaths {
   return {
     folder,
     orchestratorWorkspace: path.join(folder, 'orchestrator'),
-    busInbox: (agent: string) => path.join(folder, 'inboxes', agent),
-    busArchive: (agent: string) => path.join(folder, 'archive', agent),
-    busLog: path.join(folder, 'bus.log'),
     iterationDir: (iterationId: string, agentName?: string) =>
       agentName
         ? path.join(folder, 'iterations', iterationId, agentName)
         : path.join(folder, 'iterations', iterationId),
-  };
-}
-
-/**
- * Legacy fallback SessionPaths pointing at the pre-007 global layout
- * (`~/.cebab/bus/`). Used when resuming a session whose DB row has
- * `session_folder=NULL` — its inboxes/archive/bus.log/iterations all
- * still live under `~/.cebab/bus/`, so we synthesize a SessionPaths
- * that points there.
- */
-export function legacyGlobalSessionPaths(): SessionPaths {
-  return {
-    folder: busRoot(),
-    orchestratorWorkspace: orchestratorWorkspaceDir(),
-    busInbox: (agent: string) => busInboxDir(agent),
-    busArchive: (agent: string) => busArchiveDir(agent),
-    busLog: busLogPath(),
-    iterationDir: (iterationId: string, agentName?: string) =>
-      busIterationDir(iterationId, agentName),
   };
 }
 
@@ -212,9 +146,9 @@ export function legacyGlobalSessionPaths(): SessionPaths {
  *   - leading/trailing `-` stripped
  *   - empty result is invalid — caller must fall back (e.g. `agent-<id>`)
  *
- * This is the on-disk name the operator will see in `bus.log`, in inbox file
- * names, and when the orchestrator addresses workers (`bus-send-msg reviewer`).
- * Keep it human-readable.
+ * This is the name the operator sees in the transcript UI and the iteration
+ * artifact dirs, and what the orchestrator uses to address workers via
+ * `bus_send(recipient="reviewer", ...)`. Keep it human-readable.
  */
 export function slugifyAgentName(rawName: string): string {
   return rawName
@@ -241,10 +175,10 @@ export function isValidAgentName(s: string): boolean {
  * (per `isValidAgentName`) or one of the two protocol sentinels (`user`
  * for orchestrator → operator finals, `_sink` for chain terminations).
  *
- * Used by `writeInboxMessage` and the bus shell scripts to reject path-
- * traversal payloads (`../../../tmp/pwn`) before they reach `mkdir`/`mv`.
- * Sentinels are hardcoded here rather than imported from `runtime.ts`
- * to keep this file free of cycles — `runtime.ts` imports from us.
+ * Used by the `bus_send` tool handler (runner.ts) to reject a bogus
+ * recipient before the event is routed. Sentinels are hardcoded here
+ * rather than imported from `runtime.ts` to keep this file free of
+ * cycles — `runtime.ts` imports from us.
  */
 export function isValidBusRecipient(s: string): boolean {
   return s === 'user' || s === '_sink' || isValidAgentName(s);

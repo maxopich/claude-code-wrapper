@@ -16,7 +16,7 @@ import { Markdown } from './Markdown';
  *
  *   - **Draft** (no active session): mode selector, drop zone, participant
  *     list, initial-prompt textarea, Start buttons. The operator assembles
- *     a chain (or, post-PR 5, an orchestrator-routed session).
+ *     a fixed chain or an orchestrator-routed session.
  *
  *   - **Running / Ended** (active session): a scrollback of inter-agent
  *     events with sender/recipient tags, plus a Stop button while live and
@@ -215,7 +215,7 @@ function DraftView(props: {
         </div>
         <p className="mode-hint">
           {multiAgent.mode === 'orchestrator'
-            ? 'A coordinator agent decides which participant handles each user prompt and replies when the request is fulfilled. (Wired up in PR 5.)'
+            ? 'A coordinator agent decides which participant handles each user prompt and replies when the request is fulfilled.'
             : 'Each iteration flows through participants in the order shown, top to bottom. The last hop writes a final reply that Cebab archives.'}
         </p>
       </section>
@@ -305,7 +305,7 @@ function DraftView(props: {
                     {p.busInstalled ? (
                       <button
                         className="ghost-btn"
-                        title="Uninstall bus integration from this project's CLAUDE.md and .claude/settings.json. Inboxes and history under .cebab/ are left in place for debugging."
+                        title="Uninstall bus integration. This is pure DB metadata — Cebab wrote nothing into the project, so nothing in it is touched; the project just stops being eligible for multi-agent sessions."
                         onClick={() => props.onUninstallBus(p.id)}
                       >
                         Uninstall
@@ -313,18 +313,16 @@ function DraftView(props: {
                     ) : (
                       <button
                         className="primary-btn"
-                        title="Install bus integration: appends one @import line to this project's CLAUDE.md, merges a Stop hook + scoped bash perms into its .claude/settings.json, and AUTHORISES Cebab to launch this project's `claude` TUI with `--permission-mode bypassPermissions` during multi-agent sessions (tool calls auto-approved — no human-in-the-loop in tmux). Operator content in CLAUDE.md and settings.json is preserved."
+                        title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless with bypassPermissions (tool calls auto-approved — no human-in-the-loop)."
                         onClick={() => {
                           const ok = window.confirm(
                             `Install bus integration for "${p.name}"?\n\n` +
-                              'Cebab will:\n' +
-                              `  • Add an @import line to ${p.name}/CLAUDE.md\n` +
-                              `  • Add a Stop hook + bus-script bash perms to ${p.name}/.claude/settings.json\n` +
-                              `  • Write the bus protocol doc to ${p.name}/.cebab/comm.md\n\n` +
-                              "During multi-agent sessions, this project's claude TUI runs with " +
-                              '`--permission-mode bypassPermissions` — tool calls are auto-approved ' +
-                              '(no human-in-the-loop is possible in a headless tmux pane). The orchestrator ' +
-                              'keeps narrow perms; only workers get bypass.',
+                              'This is pure DB metadata: Cebab assigns a stable\n' +
+                              'agent slug and marks the project bus-eligible.\n' +
+                              'Nothing is written into the project itself.\n\n' +
+                              "During multi-agent sessions this project's agent\n" +
+                              'runs headless with `bypassPermissions` — tool calls\n' +
+                              'are auto-approved (no human-in-the-loop).',
                           );
                           if (ok) props.onInstallBus(p.id);
                         }}
@@ -354,7 +352,7 @@ function DraftView(props: {
           placeholder={
             multiAgent.mode === 'chain'
               ? 'The task you want the chain to work on. Sent to the first participant as their initial input.'
-              : 'The first prompt the orchestrator hears. (Active in PR 5.)'
+              : 'The first prompt the orchestrator hears.'
           }
           value={multiAgent.draftPrompt}
           onChange={(e) => props.onSetDraftPrompt(e.target.value)}
@@ -369,7 +367,7 @@ function DraftView(props: {
             disabled={!orchestratorReady || !promptReady || startPending !== null}
             title={
               orchestratorReady && promptReady
-                ? "Spawns the canonical orchestrator TUI plus one worker TUI per participant in tmux. The orchestrator routes each user prompt to whichever worker fits, then replies to the user when it's done."
+                ? "Starts the orchestrator plus one worker per participant, each its own in-process SDK agent. The orchestrator routes each user prompt to whichever worker fits, then replies to the user when it's done."
                 : 'Pick orchestrator mode, add at least one bus-installed participant, and type an initial prompt.'
             }
             onClick={() => {
@@ -391,7 +389,7 @@ function DraftView(props: {
             disabled={!chainReady || !promptReady || startPending !== null}
             title={
               chainReady && promptReady
-                ? 'Spawns a tmux session with one window per participant, writes the initial prompt to the first inbox, and forwards each reply through the chain.'
+                ? 'Starts one in-process SDK agent per participant, rides the initial prompt on the first agent’s opening turn, and forwards each reply through the chain.'
                 : 'Pick chain mode, add at least two bus-installed participants, and type an initial prompt.'
             }
             onClick={() => {
@@ -443,21 +441,19 @@ function DraftView(props: {
                 // action (disk artifacts survive, so the operator can
                 // still `cd` into transcripts on iterations they care
                 // about). Confirm explicitly enumerates what runs:
-                // orphan tmux reap + DB row delete + disk preservation.
+                // DB row delete + disk preservation.
                 if (
                   window.confirm(
                     `Clear ${finished} iteration${finished === 1 ? '' : 's'} from the list?\n\n` +
-                      `This runs two cleanups:\n` +
-                      `  • Kills any orphan cebab-bus-* tmux sessions (i.e., still-alive panes whose Cebab record is gone — these accumulate after restarts or crashes). Tmux sessions tied to a still-running multi-agent session, if any, are preserved.\n` +
-                      `  • Removes finished session rows (events + participants + the session itself) from the Cebab database.\n\n` +
-                      `On-disk transcripts and prompt/reply files inside each session folder stay where they are; you can still inspect them by path.`,
+                      `Removes finished session rows (events + participants + the session itself) from the Cebab database. The active session, if any, is preserved.\n\n` +
+                      `On-disk transcripts and iteration files inside each session folder stay where they are; you can still inspect them by path.`,
                   )
                 ) {
                   setClearPending(true);
                   props.onClearIterations();
                 }
               }}
-              title="Reap orphan cebab-bus-* tmux sessions AND remove finished iterations from the list. On-disk artifacts are preserved; running sessions (if any) are kept."
+              title="Remove finished iterations from the list (DB rows only). On-disk artifacts are preserved; the active session, if any, is kept."
             >
               {clearPending ? (
                 <>
@@ -623,11 +619,11 @@ function TemplateNameModal(props: {
 
 const STATUS_TITLE: Record<IterationSummary['status'], string> = {
   running:
-    'Live — agents and tmux are running. If this shows under past runs, Cebab lost its attachment; Resume reconnects.',
+    'Live — agents are running in-process. If this shows under past runs, Cebab lost its attachment; Resume reconnects (same server process only).',
   completed: 'Finished on its own — the run reached its final reply. Not resumable.',
-  stopped: 'Ended by you via Stop — the tmux session was killed. Not resumable.',
+  stopped: 'Ended by you via Stop — every agent was aborted. Not resumable.',
   crashed:
-    "Lost — Cebab couldn't re-attach (tmux died, a newer run superseded it, or a participant lost bus integration). Resumable only if its tmux is somehow still alive.",
+    "Lost — Cebab couldn't re-attach (the server restarted, a newer run superseded it, or a participant lost bus integration). Resumable only while the session is still live in the running server process.",
 };
 
 function IterationsList(props: {
@@ -701,7 +697,7 @@ function IterationRow(props: {
           <button
             className="ghost-btn iteration-resume"
             disabled={props.resuming}
-            title="Re-attach to this still-running session (its tmux is alive). No agents are respawned — Cebab reconnects to the live tmux and resumes routing."
+            title="Re-attach to this session while it's still live in the running server process. No agents are respawned — Cebab swaps the WS sink back onto the live in-process router and resumes streaming. Unavailable after a server restart."
             onClick={() => props.onResume(item.sessionId)}
           >
             {props.resuming ? (
@@ -780,9 +776,9 @@ function ActiveRunView(props: {
       ? Math.max(0, run.participantAgentNames.length - 1)
       : run.participantAgentNames.length;
     const ok = window.confirm(
-      `End this temp session?\n\nCebab will:\n  • Remove bus integration from ${workerCount} participant${
+      `End this temp session?\n\nCebab will:\n  • Clear bus integration from ${workerCount} participant${
         workerCount === 1 ? '' : 's'
-      }\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, prompt.md / reply.md, bus.log) are wiped.`,
+      } (DB flag only)\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, iteration files) are wiped.`,
     );
     if (ok) {
       setStopPending(true);
@@ -812,8 +808,8 @@ function ActiveRunView(props: {
               onClick={handleStop}
               title={
                 isTemp
-                  ? "End & cleanup: send SIGINT to the orchestrator, kill the tmux session, uninstall bus from each participant, then rm-rf the session folder. You'll be asked to confirm."
-                  : 'Send SIGINT to the orchestrator window (if any) then tear down the tmux session. Folder + bus installs stay so you can resume later.'
+                  ? "End & cleanup: abort every agent's in-process query, clear bus integration from each participant (DB flag), then rm-rf the session folder. You'll be asked to confirm."
+                  : 'Abort every agent’s in-process query and tear the session down. Folder + bus installs stay so you can resume later (same server process only).'
               }
             >
               {stopPending ? (
@@ -853,8 +849,8 @@ function ActiveRunView(props: {
           <p className="iterations-empty">
             Waiting for the first event.{' '}
             {isOrchestrator
-              ? "The orchestrator TUI is starting up; it'll receive the roster + first prompt momentarily."
-              : "The first participant's TUI is starting up."}
+              ? "The orchestrator agent is starting up; it'll receive the roster + first prompt momentarily."
+              : 'The first participant agent is starting up.'}
           </p>
         ) : (
           <ol className="event-list">
@@ -882,9 +878,9 @@ function ActiveRunView(props: {
  * is rendered as a button-pair so the operator can see both states at
  * once with the active one highlighted.
  *
- * Everything else (mode, participants, sessionFolder, tmuxSession,
- * iterationId) is read-only — exposes what was set at start so the
- * operator can copy/inspect.
+ * Everything else (mode, participants, sessionFolder, iterationId) is
+ * read-only — exposes what was set at start so the operator can
+ * copy/inspect.
  */
 function SessionSettingsPanel(props: {
   run: MultiAgentRun;
@@ -1005,11 +1001,6 @@ function SessionSettingsPanel(props: {
           )}
         </dd>
 
-        <dt>tmux session</dt>
-        <dd>
-          <code>{run.tmuxSession}</code>
-        </dd>
-
         <dt>Session folder</dt>
         <dd>
           <code>{run.sessionFolder}</code>
@@ -1081,8 +1072,8 @@ function AddParticipantPicker(props: {
               onClick={() => props.onPick(p.id)}
               title={
                 installed
-                  ? `Spawn a new tmux pane for ${p.busAgentName} and notify the orchestrator.`
-                  : `Install bus integration for ${p.name}, then spawn its tmux pane and notify the orchestrator.`
+                  ? `Register ${p.busAgentName} as a new in-process agent and notify the orchestrator.`
+                  : `Install bus integration for ${p.name} (DB metadata), then register its agent and notify the orchestrator.`
               }
             >
               {isThis ? 'Adding…' : 'Add'}
@@ -1128,7 +1119,7 @@ function UserPromptInput(props: { onSend: (text: string) => void }) {
           className="primary-btn"
           onClick={submit}
           disabled={text.trim().length === 0}
-          title="Sends as a `prompt` from `cebab` to the orchestrator's bus inbox. The orchestrator's next turn will route it to a participant."
+          title="Delivered as a `prompt` from `cebab` on the orchestrator's next turn. The orchestrator then routes it to a participant."
         >
           Send
         </button>

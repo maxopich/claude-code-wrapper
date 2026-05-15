@@ -8,7 +8,7 @@ import { createOrchestratorRouter, ORCHESTRATOR_AGENT_NAME } from './orchestrato
 import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
 import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
-import type { BusLogEvent } from './log_tailer.js';
+import type { BusEvent } from './runner.js';
 
 // F2 / F3 regression coverage for the orchestrator router's handleEvent
 // source-allowlist + cebab-event-forgery drops at orchestrator.ts:514-552.
@@ -32,7 +32,7 @@ beforeEach(() => {
   fs.mkdirSync(config.dataDir, { recursive: true });
   closeDb();
   getDb();
-  createMultiAgentSession(SESSION_ID, 'orchestrator', 'tmux-test', 'iter-1');
+  createMultiAgentSession(SESSION_ID, 'orchestrator', 'iter-1');
   // Silence the drop-path warnings but capture them for assertions.
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
@@ -48,15 +48,12 @@ function makeRouter() {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
   const paths = computeSessionPaths(SESSION_ID, workspace);
-  fs.mkdirSync(path.dirname(paths.busLog), { recursive: true });
-  fs.writeFileSync(paths.busLog, '');
   const onEvent = vi.fn();
   const onEnded = vi.fn();
   const router = createOrchestratorRouter({
     sessionId: SESSION_ID,
     iterationId: 'iter-1',
     workerNames: WORKERS,
-    tmuxSessionName: 'tmux-test',
     paths,
     lifecycle: 'persistent',
     onEvent,
@@ -65,7 +62,7 @@ function makeRouter() {
   return { router, onEvent, onEnded };
 }
 
-function ev(partial: Partial<BusLogEvent>): BusLogEvent {
+function ev(partial: Partial<BusEvent>): BusEvent {
   return {
     ts: 1700000000000,
     source: 'coder',

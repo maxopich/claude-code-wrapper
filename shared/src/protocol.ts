@@ -18,10 +18,11 @@ export type Project = {
    */
   hasClaudeMd: boolean;
   /**
-   * True iff Cebab has installed its bus integration into this project — i.e.
-   * appended the `@import` line to its CLAUDE.md and merged a Stop hook +
-   * pre-approved bash perms into its `.claude/settings.json`. Only projects
-   * with this flag can participate in a multi-agent session.
+   * True iff Cebab has installed its bus integration into this project.
+   * Install is pure DB metadata — assigning a stable agent slug and flipping
+   * this flag. Cebab writes nothing into the project (no CLAUDE.md @import,
+   * no `.claude/settings.json` merge, no scripts, no Stop hook). Only
+   * projects with this flag can participate in a multi-agent session.
    *
    * Stored in the DB (column `projects.bus_installed`). Toggled by
    * `install_bus_integration` / `uninstall_bus_integration` ClientMsgs.
@@ -29,8 +30,8 @@ export type Project = {
   busInstalled: boolean;
   /**
    * The filesystem-safe agent slug captured at install time (e.g. project
-   * name "Cebab" → `cebab`). Used to address this project in bus.log entries
-   * and in inter-agent messages. Null when `busInstalled` is false.
+   * name "Cebab" → `cebab`). Used to address this project in `bus_send`
+   * messages and bus events. Null when `busInstalled` is false.
    */
   busAgentName: string | null;
 };
@@ -118,20 +119,19 @@ export type ClientMsg =
     }
   | {
       /**
-       * Install bus integration into a project: append `@import` to its
-       * CLAUDE.md and merge Stop hook + scoped bash perms into its
-       * `.claude/settings.json`. Operator content in both files is preserved.
-       * Idempotent. Reply: `bus_integration_changed` + refreshed `projects`.
+       * Install bus integration for a project: pure DB metadata — assign a
+       * stable agent slug and flip `projects.bus_installed`. Cebab writes
+       * nothing into the project itself. Idempotent. Reply:
+       * `bus_integration_changed` + refreshed `projects`.
        */
       type: 'install_bus_integration';
       projectId: number;
     }
   | {
       /**
-       * Reverse of `install_bus_integration`. Removes our additions only;
-       * operator content stays. The bus directory entries (inboxes, archive,
-       * comm.md) are intentionally left in place for debugging — uninstall
-       * is logical, not destructive.
+       * Reverse of `install_bus_integration`: clear the `bus_installed`
+       * flag (the agent slug is retained so a re-install is stable). Pure
+       * DB metadata — there is nothing in the project to clean up.
        */
       type: 'uninstall_bus_integration';
       projectId: number;
@@ -142,8 +142,8 @@ export type ClientMsg =
        * project ids; for chain mode the order is the hop order, for
        * orchestrator mode it's preserved cosmetically.
        *
-       * `initialPrompt` is the seed input. In chain mode it's written to the
-       * first participant's inbox and triggers the chain. In orchestrator
+       * `initialPrompt` is the seed input. In chain mode it rides the first
+       * participant's opening turn and triggers the chain. In orchestrator
        * mode it's the first user prompt the orchestrator sees.
        *
        * `lifecycle` (optional, defaults server-side to 'persistent'):
@@ -164,19 +164,21 @@ export type ClientMsg =
     }
   | {
       /**
-       * Stop a running multi-agent session. Kills the tmux session, stops
-       * the bus log tailer, marks the DB row `stopped`. Idempotent.
+       * Stop a running multi-agent session. Aborts every agent's in-process
+       * `query()`, unregisters it from the live registry, marks the DB row
+       * `stopped`. Idempotent.
        */
       type: 'stop_multi_agent';
       sessionId: string;
     }
   | {
       /**
-       * Manually re-attach to a still-alive multi-agent session whose tmux
-       * is still running (e.g. a row the single-active sweep marked crashed
-       * while its agents kept running, or a dropped connection). Pure
-       * re-attach: no tmux/agent respawn. Fails with `wrapper_error` if
-       * another session is active or the tmux is gone.
+       * Manually re-attach to a multi-agent session that is still live in
+       * the in-process registry (e.g. a row the single-active sweep marked
+       * crashed while its agents kept running, or a dropped connection).
+       * Pure re-attach: no agent respawn. Fails with `wrapper_error` if
+       * another session is active or the session is no longer live (e.g.
+       * after a Cebab server restart).
        */
       type: 'resume_multi_agent';
       sessionId: string;
@@ -184,9 +186,9 @@ export type ClientMsg =
   | {
       /**
        * Forward a user prompt to the active orchestrator-routed session.
-       * Cebab writes the text to the orchestrator's bus inbox (`kind=prompt`,
-       * `source=cebab`) and wakes its TUI; the orchestrator then routes it
-       * to whichever participant best fits.
+       * Cebab delivers it as the orchestrator's next turn (`kind=prompt`,
+       * `source=cebab`); the orchestrator then routes it to whichever
+       * participant best fits.
        *
        * Only meaningful in orchestrator mode — chain sessions ignore this
        * with a `wrapper_error`. The first user prompt is delivered as part
@@ -212,11 +214,11 @@ export type ClientMsg =
        * `'running'`. The active session — if any — is preserved so the
        * operator can't accidentally orphan a live run by clicking Clear.
        *
-       * Disk artifacts under `~/.cebab/bus/iterations/` and per-session
-       * folders (`<workspace>/.cebab-session-<id>/`) are intentionally
-       * left behind: they're useful for post-mortem inspection (transcripts,
-       * prompt/reply files) and recreating them is not Cebab's job. The
-       * operator can `rm -rf` those by hand if they want a full wipe.
+       * Disk artifacts under the per-session folders
+       * (`<workspace>/.cebab-session-<id>/`) are intentionally left behind:
+       * they're useful for post-mortem inspection (transcripts, iteration
+       * files) and recreating them is not Cebab's job. The operator can
+       * `rm -rf` those by hand if they want a full wipe.
        *
        * Server replies with a fresh `iterations` ServerMsg (the same shape
        * as for `list_iterations`), so the UI updates without a second
@@ -246,12 +248,11 @@ export type ClientMsg =
       /**
        * Append a worker to an already-running orchestrator session.
        * The server resolves the project's agent name, auto-installs
-       * bus integration if missing (writing the project's
-       * `.claude/settings.json`), spawns a new tmux pane in the
-       * session's tmux session, registers the worker with the
-       * router's F2 source allowlist, persists a `multi_agent_participants`
-       * row, and writes an updated roster prompt to the orchestrator's
-       * inbox so it knows the new agent is reachable.
+       * bus integration if missing (pure DB metadata), registers a new
+       * in-process agent with the AgentRunner and the router's F2 source
+       * allowlist, persists a `multi_agent_participants` row, and delivers
+       * an updated roster prompt as the orchestrator's next turn so it
+       * knows the new agent is reachable.
        *
        * Chain-mode sessions reject this — chain ordering (`chain_order`)
        * is baked in at start and the pipeline depends on it.
@@ -381,14 +382,14 @@ export type ServerMsg =
       mode: 'chain' | 'orchestrator';
       participants: number[];
       participantAgentNames: string[];
-      tmuxSession: string;
       lifecycle: MultiAgentLifecycle;
       sessionFolder: string;
     }
   | {
       /**
        * One inter-agent (or briefing, or final) message observed on the bus.
-       * Streamed live from the bus log tailer. `kind` matches the DB enum.
+       * Streamed live from the in-process router as each `bus_send` lands.
+       * `kind` matches the DB enum.
        *
        * `destination` is either another agent's bus slug or one of the
        * sentinels: `user` (orchestrator → user, intercepted by Cebab) and
@@ -479,14 +480,14 @@ export type IterationSummary = {
    * session ran.
    */
   participantAgentNames: string[];
-  /** Absolute path to `~/.cebab/bus/iterations/<iterationId>/`. */
+  /** Absolute path to the iteration directory under the session folder. */
   artifactsDir: string;
   /**
-   * True iff this session's tmux is still alive and it can be re-attached
-   * (no respawn). Computed server-side at list time and re-validated when
-   * the operator actually requests `resume_multi_agent`. `completed` rows
-   * are never resumable; `stopped` rows had their tmux killed so they're
-   * resumable only in the rare case the kill didn't take.
+   * True iff this session is still live in the in-process registry and can
+   * be re-attached (no respawn). Computed server-side at list time and
+   * re-validated when the operator actually requests `resume_multi_agent`.
+   * `completed`/`stopped` rows are never resumable; any row becomes
+   * non-resumable after a Cebab server restart empties the registry.
    */
   resumable: boolean;
 };

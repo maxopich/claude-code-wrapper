@@ -18,7 +18,7 @@
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit -p shared && tsc --noEmit -p server && tsc --noEmit -p web",
     "test": "vitest run --passWithNoTests",
-    "test:security": "vitest run -t '\\[security\\]' && bats server/src/bus/scripts/bus-send-msg.bats"
+    "test:security": "vitest run -t '\\[security\\]'"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

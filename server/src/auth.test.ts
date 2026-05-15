@@ -27,8 +27,12 @@ describe('[security][F4] initAuthToken', () => {
     expect(fs.readFileSync(authTokenPath(), 'utf8')).toBe(tok);
     // Mode 0600 — group/world have no access. We mask permissions because
     // some filesystems also set sticky/setuid bits we don't care about.
-    const st = fs.statSync(authTokenPath());
-    expect(st.mode & 0o777).toBe(0o600);
+    // Windows' fs layer doesn't carry Unix permission bits; auth.ts
+    // platform-gates the 0600 write the same way, so assert off-Windows.
+    if (process.platform !== 'win32') {
+      const st = fs.statSync(authTokenPath());
+      expect(st.mode & 0o777).toBe(0o600);
+    }
   });
 
   test('regenerates a fresh token on each call', () => {
@@ -46,7 +50,10 @@ describe('[security][F4] initAuthToken', () => {
     fs.mkdirSync(config.dataDir, { recursive: true });
     fs.writeFileSync(authTokenPath(), 'stale', { mode: 0o644 });
     initAuthToken();
-    expect(fs.statSync(authTokenPath()).mode & 0o777).toBe(0o600);
+    // See note above: the Unix-mode assertion only applies off-Windows.
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(authTokenPath()).mode & 0o777).toBe(0o600);
+    }
   });
 });
 

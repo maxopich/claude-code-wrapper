@@ -71,11 +71,10 @@ export type MultiAgentRun = {
   sessionId: string;
   mode: 'chain' | 'orchestrator';
   participantAgentNames: string[];
-  tmuxSession: string;
   status: MultiAgentRunStatus;
   events: MultiAgentEventView[];
-  /** Set when the chain completes successfully and Cebab archived the run
-   *  to `~/.cebab/bus/iterations/NNN/`. */
+  /** Set when the chain completes successfully; points at the iteration
+   *  directory under the session folder. */
   iterationId: string | null;
   /** Lifecycle mode echoed back from the server. Drives the End-button
    *  affordance (persistent → "Stop"; temp → "End & cleanup" with
@@ -106,7 +105,7 @@ export type MultiAgentState = {
    * mode too (cosmetic but predictable). */
   draftParticipants: number[];
   /** The seed input the operator types before clicking Start. In chain
-   *  mode it's sent to the first participant's inbox. */
+   *  mode it rides the first participant's opening turn. */
   draftPrompt: string;
   /** Non-null while a chain (or future orchestrator session) is running, and
    *  until the operator dismisses it. */
@@ -510,7 +509,6 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             sessionId: msg.sessionId,
             mode: msg.mode,
             participantAgentNames: msg.participantAgentNames,
-            tmuxSession: msg.tmuxSession,
             status: 'running',
             events: [],
             iterationId: null,

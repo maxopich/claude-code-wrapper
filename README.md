@@ -1,18 +1,33 @@
 # CEBAB
 
-Personal browser-based wrapper around the local `claude` CLI on macOS. Spawns the
+Personal browser-based wrapper around the local `claude` CLI. Spawns the
 Claude Code Agent SDK (which itself wraps `claude`), routes its typed message
 stream to a React UI over a WebSocket, and persists every event to SQLite.
 
 Single-user, bound to `127.0.0.1`, uses your existing Claude subscription via
 `~/.claude/.credentials.json` (no API key, no remote access).
 
+Runs natively on **macOS, Linux, and Windows** (no WSL). The multi-agent bus
+is a pure in-process SDK runtime — no tmux, no shell scripts — so the single
+codebase behaves the same on all three. CI exercises both `ubuntu-latest` and
+`windows-latest`.
+
 ## Setup
 
 ```sh
 npm install
+npm run setup          # rebuilds better-sqlite3's native binding + installs git hooks
 cp .env.example .env   # then edit WORKSPACE_ROOT to point at your agent projects
 ```
+
+`npm run setup` is **required on every platform**: the repo's `.npmrc` sets
+`ignore-scripts=true` (a supply-chain guard — bus agents run under
+`bypassPermissions`, so a malicious transitive `postinstall` would be direct
+RCE), which means `npm install` does **not** build `better-sqlite3`.
+`npm run setup` re-runs just that one native build via `prebuild-install`,
+which fetches a prebuilt binary on macOS/Linux/Windows x64 (no compiler
+toolchain needed). On Windows, run these in PowerShell or Git Bash — every
+project script is cross-platform (no shell-isms).
 
 The repo-root `.env` is loaded automatically by both server (`--env-file-if-exists`) and web (Vite `envDir`). If you don't create one, the defaults from `.env.example` apply: `WORKSPACE_ROOT=~/agents`, `PORT=4319`, mock mode off.
 
@@ -40,6 +55,11 @@ zero quota burn:
 ```sh
 MOCK=1 npm run dev:server
 ```
+
+The inline `MOCK=1 …` form is POSIX-shell syntax (macOS/Linux, Git Bash). In
+**PowerShell** that won't set the variable — put `MOCK=1` in your `.env`
+instead (it's read by the server on every start) and just run
+`npm run dev:server`.
 
 `fixtures/hello.jsonl` is a real captured `claude -p` run. Capture more with:
 

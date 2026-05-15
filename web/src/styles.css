@@ -39,16 +39,54 @@ pre {
 
 .app {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  /* Column track is set inline from App.tsx (resizable / collapsible). */
   height: 100vh;
 }
 
 .sidebar {
+  position: relative;
   background: var(--bg-2);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+}
+.sidebar-resizer:hover,
+.sidebar-resizer.dragging {
+  background: var(--accent-2);
+}
+.sidebar-collapse-btn {
+  font-size: 13px;
+  line-height: 1;
+}
+.sidebar-reopen-btn {
+  position: fixed;
+  top: 50%;
+  left: 0;
+  transform: translateY(-50%);
+  z-index: 20;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  padding: 12px 6px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.sidebar-reopen-btn:hover {
+  background: var(--accent-2);
+  color: var(--fg);
 }
 .sidebar header {
   display: flex;
@@ -63,6 +101,11 @@ pre {
   margin: 0;
   letter-spacing: 0.04em;
   text-transform: lowercase;
+}
+.sidebar-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .dot {
   width: 8px;
@@ -208,6 +251,14 @@ pre {
 .project-name {
   font-weight: 500;
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claude-mark-spacer {
+  width: 14px;
+  flex-shrink: 0;
 }
 .project-live-dot {
   width: 6px;
@@ -228,6 +279,7 @@ pre {
   padding: 1px 6px;
   font-size: 10px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 .trust.on {
   color: var(--warn);
@@ -1293,6 +1345,7 @@ pre {
   cursor: pointer;
   margin-left: 4px;
   font-weight: 600;
+  flex-shrink: 0;
 }
 .bus-installed-pill:hover {
   background: rgba(226, 109, 109, 0.15);
