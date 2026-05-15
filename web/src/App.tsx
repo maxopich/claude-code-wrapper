@@ -410,7 +410,6 @@ export function App() {
           onSelectSession={selectSession}
           onNewSession={newSession}
           onToggleTrust={toggleTrust}
-          onUninstallBus={uninstallBus}
           onRenameSession={renameSession}
         />
         <footer className="sidebar-footer">
