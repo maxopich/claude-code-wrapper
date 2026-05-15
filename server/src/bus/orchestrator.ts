@@ -61,6 +61,7 @@ import {
   prepareIterationDir,
   renderRosterPrompt,
   renderRosterUpdate,
+  renderWorkerBriefing,
   resolveAgent,
   SINK_RECIPIENT,
   USER_RECIPIENT,
@@ -481,8 +482,21 @@ export async function startOrchestratorSession(
     runner.register({ name: w.agentName, cwd: w.cwd, settingSources: ['user'] });
   }
 
+  // Worker briefing, prepended once to each worker's first turn (mirrors
+  // chain.ts). The orchestrator is NEVER prefixed — it learns the protocol
+  // from its Cebab-generated workspace CLAUDE.md + the roster prompt. Without
+  // this, orchestrator-mode workers have the bus_send tool but no
+  // instruction to use it, so their replies are emitted as plain turn text
+  // and lost (the install collapse removed the per-project comm.md that
+  // used to carry this).
+  const briefed = new Set<string>();
   const deliver = (agentName: string, text: string) => {
-    void runner.deliverTurn(agentName, text).catch((err) => {
+    let prompt = text;
+    if (agentName !== ORCHESTRATOR_AGENT_NAME && !briefed.has(agentName)) {
+      briefed.add(agentName);
+      prompt = `${renderWorkerBriefing({ selfAgent: agentName })}\n\n${text}`;
+    }
+    void runner.deliverTurn(agentName, prompt).catch((err) => {
       console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
       void router.teardown('crashed');
     });

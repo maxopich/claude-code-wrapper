@@ -174,6 +174,47 @@ export function renderRosterUpdate(opts: {
 }
 
 /**
+ * Render the orchestrator-mode worker briefing. Prepended once to each
+ * worker's first turn (the `briefed` set in `startOrchestratorSession`),
+ * exactly like `renderChainBriefing` is for chain participants.
+ *
+ * Why this exists: the tmux model wrote a per-project `comm.md` teaching
+ * the bus protocol into every bus-installed worker. The pure-SDK install
+ * collapsed to zero project mutation (security/portability win), so the
+ * worker now has the `bus_send` tool available but NO instruction that
+ * "reply to the orchestrator" means *calling* it. Chain mode compensates
+ * via `renderChainBriefing`; orchestrator-mode workers need this symmetric
+ * briefing or their replies are emitted as plain turn text and lost.
+ *
+ * Plain English (the reader is a model). F6: the slug is wrapped +
+ * sanitized like the other renderers.
+ */
+export function renderWorkerBriefing(opts: { selfAgent: string }): string {
+  const tag = (n: string) => `<participant>${sanitizeForPrompt(n)}</participant>`;
+  return [
+    `[Cebab multi-agent session — you are a worker]`,
+    ``,
+    `You are ${tag(opts.selfAgent)}, a participant in a Cebab multi-agent`,
+    `conversation. A coordinator agent named \`orchestrator\` routes all`,
+    `traffic. You talk to it through the \`bus_send\` tool — an in-process`,
+    `tool, not a shell script; there is no inbox and no terminal. Cebab`,
+    `delivers each message to you as a turn; reply by calling the tool.`,
+    ``,
+    `To send your reply (the orchestrator is the ONLY recipient you may`,
+    `address):`,
+    ``,
+    `    bus_send(recipient="orchestrator", kind="reply", text="<your reply>")`,
+    ``,
+    `Critical: anything you write in your normal turn output is INVISIBLE —`,
+    `only a \`bus_send\` call is delivered. Always finish a turn by sending`,
+    `exactly one \`reply\` to \`orchestrator\`. Do not message other workers`,
+    `or \`user\` (those are dropped). Each later turn is a follow-up from the`,
+    `orchestrator — answer it the same way. The orchestrator's message`,
+    `follows below.`,
+  ].join('\n');
+}
+
+/**
  * Allocate the next iteration directory id: `001`, `002`, etc. — zero-padded
  * to 3 digits.
  *

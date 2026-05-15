@@ -8,6 +8,7 @@ import {
   nextIterationId,
   renderChainBriefing,
   renderRosterPrompt,
+  renderWorkerBriefing,
   SINK_RECIPIENT,
 } from './runtime.js';
 import { busIterationDir, busRoot } from './paths.js';
@@ -173,6 +174,22 @@ describe('renderRosterPrompt', () => {
     // useful — without it the orchestrator would route blindly off the
     // initial roster.
     expect(text).toMatch(/before routing/i);
+  });
+});
+
+describe('renderWorkerBriefing', () => {
+  test('teaches the bus_send tool, the orchestrator recipient, and the invisibility rule', () => {
+    const text = renderWorkerBriefing({ selfAgent: 'reviewer' });
+    // F6 wrap of the agent's own slug.
+    expect(text).toContain('<participant>reviewer</participant>');
+    // The concrete tool call: reply to the orchestrator.
+    expect(text).toMatch(/bus_send\(recipient="orchestrator", kind="reply"/);
+    // The load-bearing warning — without bus_send the reply is lost (this
+    // is the exact bug the briefing fixes).
+    expect(text).toContain('INVISIBLE');
+    // Workers may only address the orchestrator.
+    expect(text).toContain('orchestrator');
+    expect(text).not.toContain('bus-send-msg.sh');
   });
 });
 
