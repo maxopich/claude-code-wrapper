@@ -172,6 +172,17 @@ export type ClientMsg =
     }
   | {
       /**
+       * Manually re-attach to a still-alive multi-agent session whose tmux
+       * is still running (e.g. a row the single-active sweep marked crashed
+       * while its agents kept running, or a dropped connection). Pure
+       * re-attach: no tmux/agent respawn. Fails with `wrapper_error` if
+       * another session is active or the tmux is gone.
+       */
+      type: 'resume_multi_agent';
+      sessionId: string;
+    }
+  | {
+      /**
        * Forward a user prompt to the active orchestrator-routed session.
        * Cebab writes the text to the orchestrator's bus inbox (`kind=prompt`,
        * `source=cebab`) and wakes its TUI; the orchestrator then routes it
@@ -470,6 +481,14 @@ export type IterationSummary = {
   participantAgentNames: string[];
   /** Absolute path to `~/.cebab/bus/iterations/<iterationId>/`. */
   artifactsDir: string;
+  /**
+   * True iff this session's tmux is still alive and it can be re-attached
+   * (no respawn). Computed server-side at list time and re-validated when
+   * the operator actually requests `resume_multi_agent`. `completed` rows
+   * are never resumable; `stopped` rows had their tmux killed so they're
+   * resumable only in the rare case the kill didn't take.
+   */
+  resumable: boolean;
 };
 
 export type MultiAgentEventKind = 'intro' | 'prompt' | 'reply' | 'final' | 'error';

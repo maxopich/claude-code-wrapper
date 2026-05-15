@@ -1423,3 +1423,102 @@ pre {
   border-color: var(--accent-2);
 }
 
+/* ---------- Interaction feedback (press / focus / pending) ----------
+ * Scoped to the explicit button classes — no global `button{}` or `:focus`
+ * rule, so text inputs keep their existing `outline:none` treatment. */
+.primary-btn,
+.ghost-btn,
+.icon-btn,
+.mode-pill,
+.main-tab,
+.lifecycle-btn,
+.mode-toggle .pill,
+.bus-installed-pill,
+.input-box button {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease,
+    transform 80ms ease;
+}
+.primary-btn:active:not(:disabled),
+.ghost-btn:active:not(:disabled),
+.icon-btn:active:not(:disabled),
+.mode-pill:active:not(:disabled),
+.main-tab:active:not(:disabled),
+.lifecycle-btn:active:not(:disabled),
+.mode-toggle .pill:active:not(:disabled),
+.bus-installed-pill:active:not(:disabled),
+.input-box button:active:not(:disabled) {
+  transform: translateY(1px);
+  opacity: 0.85;
+}
+.primary-btn:focus-visible,
+.ghost-btn:focus-visible,
+.icon-btn:focus-visible,
+.mode-pill:focus-visible,
+.main-tab:focus-visible,
+.lifecycle-btn:focus-visible,
+.mode-toggle .pill:focus-visible,
+.bus-installed-pill:focus-visible,
+.input-box button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* `.primary-btn` already has a :disabled rule; ghost/icon were missing one. */
+.ghost-btn:disabled,
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Inline spinner for buttons awaiting a server round-trip. Inherits the
+ * button's text color so it works on primary and ghost variants alike. */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.btn-spinner {
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-right: 0.45em;
+  vertical-align: -1px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary-btn,
+  .ghost-btn,
+  .icon-btn,
+  .mode-pill,
+  .main-tab,
+  .lifecycle-btn,
+  .mode-toggle .pill,
+  .bus-installed-pill,
+  .input-box button {
+    transition: none;
+  }
+  .primary-btn:active:not(:disabled),
+  .ghost-btn:active:not(:disabled),
+  .icon-btn:active:not(:disabled),
+  .mode-pill:active:not(:disabled),
+  .main-tab:active:not(:disabled),
+  .lifecycle-btn:active:not(:disabled),
+  .mode-toggle .pill:active:not(:disabled),
+  .bus-installed-pill:active:not(:disabled),
+  .input-box button:active:not(:disabled) {
+    transform: none;
+  }
+  .btn-spinner,
+  .session-marker.live,
+  .caret {
+    animation: none;
+  }
+}
+

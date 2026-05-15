@@ -40,6 +40,9 @@ export function MultiAgentTab(props: {
   onStartChain: () => void;
   onStartOrchestrator: () => void;
   onStopMultiAgent: (sessionId: string) => void;
+  onResumeSession: (sessionId: string) => void;
+  /** Monotonic; bumps on every wrapper_error so pending spinners clear on failure. */
+  wrapperErrorSeq: number;
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
@@ -81,6 +84,8 @@ function DraftView(props: {
   onSetDraftPrompt: (text: string) => void;
   onStartChain: () => void;
   onStartOrchestrator: () => void;
+  onResumeSession: (sessionId: string) => void;
+  wrapperErrorSeq: number;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
   onSaveTemplate: (name: string) => void;
@@ -92,6 +97,21 @@ function DraftView(props: {
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
   const [namingOpen, setNamingOpen] = useState(false);
+  // In-flight signals for async WS round-trips. Cleared on success (this
+  // view unmounts when a session becomes active) or on wrapperErrorSeq
+  // bumping (the attempt failed and we stayed on the draft view).
+  const [pendingResumeId, setPendingResumeId] = useState<string | null>(null);
+  const [startPending, setStartPending] = useState<'chain' | 'orchestrator' | null>(null);
+  const [clearPending, setClearPending] = useState(false);
+  useEffect(() => {
+    setPendingResumeId(null);
+    setStartPending(null);
+  }, [props.wrapperErrorSeq]);
+  useEffect(() => {
+    // Iterations list replaced (refresh / clear reply) — drop stale spinners.
+    setPendingResumeId(null);
+    setClearPending(false);
+  }, [multiAgent.iterations]);
 
   function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
     // The browser only fires `drop` if we preventDefault here — otherwise
@@ -346,27 +366,47 @@ function DraftView(props: {
         <div className="multi-agent-actions">
           <button
             className="primary-btn"
-            disabled={!orchestratorReady || !promptReady}
+            disabled={!orchestratorReady || !promptReady || startPending !== null}
             title={
               orchestratorReady && promptReady
                 ? "Spawns the canonical orchestrator TUI plus one worker TUI per participant in tmux. The orchestrator routes each user prompt to whichever worker fits, then replies to the user when it's done."
                 : 'Pick orchestrator mode, add at least one bus-installed participant, and type an initial prompt.'
             }
-            onClick={props.onStartOrchestrator}
+            onClick={() => {
+              setStartPending('orchestrator');
+              props.onStartOrchestrator();
+            }}
           >
-            Start orchestrator-routed
+            {startPending === 'orchestrator' ? (
+              <>
+                <span className="btn-spinner" />
+                Starting…
+              </>
+            ) : (
+              'Start orchestrator-routed'
+            )}
           </button>
           <button
             className="primary-btn"
-            disabled={!chainReady || !promptReady}
+            disabled={!chainReady || !promptReady || startPending !== null}
             title={
               chainReady && promptReady
                 ? 'Spawns a tmux session with one window per participant, writes the initial prompt to the first inbox, and forwards each reply through the chain.'
                 : 'Pick chain mode, add at least two bus-installed participants, and type an initial prompt.'
             }
-            onClick={props.onStartChain}
+            onClick={() => {
+              setStartPending('chain');
+              props.onStartChain();
+            }}
           >
-            Start fixed chain
+            {startPending === 'chain' ? (
+              <>
+                <span className="btn-spinner" />
+                Starting…
+              </>
+            ) : (
+              'Start fixed chain'
+            )}
           </button>
         </div>
         {validation !== null && <p className="multi-agent-warning">{validation}</p>}
@@ -390,6 +430,7 @@ function DraftView(props: {
               // server preserves the running row, so a click would be a
               // no-op, but the affordance reads as misleading.
               disabled={
+                clearPending ||
                 multiAgent.iterations === null ||
                 multiAgent.iterations.length === 0 ||
                 multiAgent.iterations.every((it) => it.status === 'running')
@@ -412,16 +453,31 @@ function DraftView(props: {
                       `On-disk transcripts and prompt/reply files inside each session folder stay where they are; you can still inspect them by path.`,
                   )
                 ) {
+                  setClearPending(true);
                   props.onClearIterations();
                 }
               }}
               title="Reap orphan cebab-bus-* tmux sessions AND remove finished iterations from the list. On-disk artifacts are preserved; running sessions (if any) are kept."
             >
-              Clear
+              {clearPending ? (
+                <>
+                  <span className="btn-spinner" />
+                  Clearing…
+                </>
+              ) : (
+                'Clear'
+              )}
             </button>
           </div>
         </div>
-        <IterationsList items={multiAgent.iterations} />
+        <IterationsList
+          items={multiAgent.iterations}
+          pendingResumeId={pendingResumeId}
+          onResume={(sessionId) => {
+            setPendingResumeId(sessionId);
+            props.onResumeSession(sessionId);
+          }}
+        />
       </section>
       {namingOpen && (
         <TemplateNameModal
@@ -565,7 +621,20 @@ function TemplateNameModal(props: {
   );
 }
 
-function IterationsList(props: { items: IterationSummary[] | null }) {
+const STATUS_TITLE: Record<IterationSummary['status'], string> = {
+  running:
+    'Live — agents and tmux are running. If this shows under past runs, Cebab lost its attachment; Resume reconnects.',
+  completed: 'Finished on its own — the run reached its final reply. Not resumable.',
+  stopped: 'Ended by you via Stop — the tmux session was killed. Not resumable.',
+  crashed:
+    "Lost — Cebab couldn't re-attach (tmux died, a newer run superseded it, or a participant lost bus integration). Resumable only if its tmux is somehow still alive.",
+};
+
+function IterationsList(props: {
+  items: IterationSummary[] | null;
+  pendingResumeId: string | null;
+  onResume: (sessionId: string) => void;
+}) {
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
   }
@@ -575,13 +644,22 @@ function IterationsList(props: { items: IterationSummary[] | null }) {
   return (
     <ol className="iterations-list">
       {props.items.map((it) => (
-        <IterationRow key={it.sessionId} item={it} />
+        <IterationRow
+          key={it.sessionId}
+          item={it}
+          resuming={props.pendingResumeId === it.sessionId}
+          onResume={props.onResume}
+        />
       ))}
     </ol>
   );
 }
 
-function IterationRow(props: { item: IterationSummary }) {
+function IterationRow(props: {
+  item: IterationSummary;
+  resuming: boolean;
+  onResume: (sessionId: string) => void;
+}) {
   const { item } = props;
   const [copied, setCopied] = useState(false);
   async function copyPath() {
@@ -602,7 +680,9 @@ function IterationRow(props: { item: IterationSummary }) {
       <div className="iteration-head">
         <span className="iteration-id">#{item.iterationId}</span>
         <span className="iteration-mode">{item.mode}</span>
-        <span className={`run-status run-status-${item.status}`}>{item.status}</span>
+        <span className={`run-status run-status-${item.status}`} title={STATUS_TITLE[item.status]}>
+          {item.status}
+        </span>
         <span className="iteration-when">
           {formatRelativeTime(item.startedAt)}
           {item.endedAt !== null && ` · ${formatDuration(item.endedAt - item.startedAt)}`}
@@ -617,6 +697,23 @@ function IterationRow(props: { item: IterationSummary }) {
       </div>
       <div className="iteration-path">
         <code>{item.artifactsDir}</code>
+        {item.resumable && (
+          <button
+            className="ghost-btn iteration-resume"
+            disabled={props.resuming}
+            title="Re-attach to this still-running session (its tmux is alive). No agents are respawned — Cebab reconnects to the live tmux and resumes routing."
+            onClick={() => props.onResume(item.sessionId)}
+          >
+            {props.resuming ? (
+              <>
+                <span className="btn-spinner" />
+                Resuming…
+              </>
+            ) : (
+              'Resume'
+            )}
+          </button>
+        )}
         <button
           className="ghost-btn iteration-copy"
           onClick={copyPath}
@@ -664,11 +761,16 @@ function ActiveRunView(props: {
   const isRunning = run.status === 'running';
   const isOrchestrator = run.mode === 'orchestrator';
   const isTemp = run.lifecycle === 'temp';
+  // Stop is in-flight until the run leaves 'running' (server's
+  // multi_agent_ended — or the synthetic 'crashed' if stop threw), at which
+  // point this whole button is replaced by Dismiss, so no clearing needed.
+  const [stopPending, setStopPending] = useState(false);
 
   function handleStop() {
     if (!isTemp) {
       // Persistent: stop is non-destructive (folder + installs survive).
       // No confirm needed.
+      setStopPending(true);
       props.onStop(run.sessionId);
       return;
     }
@@ -682,7 +784,10 @@ function ActiveRunView(props: {
         workerCount === 1 ? '' : 's'
       }\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, prompt.md / reply.md, bus.log) are wiped.`,
     );
-    if (ok) props.onStop(run.sessionId);
+    if (ok) {
+      setStopPending(true);
+      props.onStop(run.sessionId);
+    }
   }
 
   return (
@@ -691,13 +796,19 @@ function ActiveRunView(props: {
         <div>
           <h2>
             Multi-agent: <code>{run.sessionId.slice(0, 8)}</code>{' '}
-            <span className={`run-status run-status-${run.status}`}>{run.status}</span>
+            <span
+              className={`run-status run-status-${run.status}`}
+              title={STATUS_TITLE[run.status]}
+            >
+              {run.status}
+            </span>
           </h2>
         </div>
         <div className="multi-agent-active-actions">
           {isRunning ? (
             <button
               className="primary-btn"
+              disabled={stopPending}
               onClick={handleStop}
               title={
                 isTemp
@@ -705,7 +816,16 @@ function ActiveRunView(props: {
                   : 'Send SIGINT to the orchestrator window (if any) then tear down the tmux session. Folder + bus installs stay so you can resume later.'
               }
             >
-              {isTemp ? 'End & cleanup' : 'Stop'}
+              {stopPending ? (
+                <>
+                  <span className="btn-spinner" />
+                  Stopping…
+                </>
+              ) : isTemp ? (
+                'End & cleanup'
+              ) : (
+                'Stop'
+              )}
             </button>
           ) : (
             <button

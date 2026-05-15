@@ -163,6 +163,11 @@ export type AppState = {
   permissionModeBySession: Record<string, SessionPermissionMode>;
   // Workspace settings reported by the server. `null` means we haven't asked yet.
   settings: SettingsView | null;
+  // Monotonic counter bumped on every `wrapper_error`. Pending-state effects
+  // key off it to clear stuck spinners when an async action fails — it's the
+  // only generic "an error happened" signal (wrapper_error otherwise routes
+  // into a chat session's message list, invisible to the multi-agent tab).
+  wrapperErrorSeq: number;
   // Multi-agent draft + view state.
   multiAgent: MultiAgentState;
 };
@@ -185,6 +190,7 @@ export const initialState: AppState = {
   liveSessions: {},
   permissionModeBySession: {},
   settings: null,
+  wrapperErrorSeq: 0,
   multiAgent: {
     view: 'chat',
     mode: 'orchestrator',
@@ -911,19 +917,22 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         messages: [],
         streamingText: '',
       };
-      return putSession(state, projectId, sessionId, {
-        ...session,
-        status: 'error',
-        messages: [
-          ...session.messages,
-          {
-            kind: 'error',
-            id: nextId(),
-            errorKind: msg.kind,
-            message: msg.message,
-          },
-        ],
-      });
+      return {
+        ...putSession(state, projectId, sessionId, {
+          ...session,
+          status: 'error',
+          messages: [
+            ...session.messages,
+            {
+              kind: 'error',
+              id: nextId(),
+              errorKind: msg.kind,
+              message: msg.message,
+            },
+          ],
+        }),
+        wrapperErrorSeq: state.wrapperErrorSeq + 1,
+      };
     }
   }
 }

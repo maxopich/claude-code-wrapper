@@ -35,7 +35,7 @@ afterEach(() => {
 });
 
 describe('buildIterationsList artifactsDir resolution', () => {
-  test('post-007 row (session_folder set) points at <session_folder>/iterations/<id>/', () => {
+  test('post-007 row (session_folder set) points at <session_folder>/iterations/<id>/', async () => {
     const projectPath = path.join(tmpRoot, 'workspace', 'reviewer');
     fs.mkdirSync(projectPath, { recursive: true });
     const project = upsertProject('Reviewer', projectPath);
@@ -52,14 +52,14 @@ describe('buildIterationsList artifactsDir resolution', () => {
     );
     addParticipant('with-folder', project.id, 'worker', null);
 
-    const items = buildIterationsList();
+    const items = await buildIterationsList();
     expect(items).toHaveLength(1);
     expect(items[0]!.artifactsDir).toBe(sessionPathsFromFolder(sessionFolder).iterationDir('042'));
     // Sanity: must NOT collapse onto the legacy global path.
     expect(items[0]!.artifactsDir).not.toBe(busIterationDir('042'));
   });
 
-  test('pre-007 row (session_folder null) falls back to ~/.cebab/bus/iterations/<id>/', () => {
+  test('pre-007 row (session_folder null) falls back to ~/.cebab/bus/iterations/<id>/', async () => {
     const projectPath = path.join(tmpRoot, 'workspace', 'reviewer');
     fs.mkdirSync(projectPath, { recursive: true });
     const project = upsertProject('Reviewer', projectPath);
@@ -68,12 +68,12 @@ describe('buildIterationsList artifactsDir resolution', () => {
     createMultiAgentSession('legacy', 'chain', 'tx-legacy', '007');
     addParticipant('legacy', project.id, 'worker', 0);
 
-    const items = buildIterationsList();
+    const items = await buildIterationsList();
     expect(items).toHaveLength(1);
     expect(items[0]!.artifactsDir).toBe(busIterationDir('007'));
   });
 
-  test('mixed rows resolve independently — each gets its own path', () => {
+  test('mixed rows resolve independently — each gets its own path', async () => {
     // Two sessions, two distinct session folders + one legacy row.
     // Confirms a single buildIterationsList() call doesn't apply one
     // session's path to another row (the bug was: every row got
@@ -104,7 +104,7 @@ describe('buildIterationsList artifactsDir resolution', () => {
     createMultiAgentSession('C', 'chain', 'tx-C', '003'); // legacy, session_folder = null
     addParticipant('C', project.id, 'worker', 0);
 
-    const items = buildIterationsList();
+    const items = await buildIterationsList();
     expect(items).toHaveLength(3);
     const bySessionId = new Map(items.map((i) => [i.sessionId, i.artifactsDir]));
     expect(bySessionId.get('A')).toBe(sessionPathsFromFolder(folderA).iterationDir('001'));

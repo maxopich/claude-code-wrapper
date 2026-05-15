@@ -31,7 +31,9 @@ import {
   getActiveMultiAgentSession,
   getMultiAgentSession,
   listMultiAgentEvents,
+  reactivateMultiAgentSession,
   type MultiAgentSessionRow,
+  type MultiAgentStatus,
 } from '../repo/multi_agent.js';
 import { getDb } from '../db.js';
 import { hasSession, tmuxAvailable } from './tmux.js';
@@ -185,6 +187,86 @@ export async function attemptResumeMultiAgent(
     mode: candidate.mode as 'chain' | 'orchestrator',
     row: candidate,
     replayEvents,
+  };
+}
+
+/** Why a targeted `resumeMultiAgentTarget` couldn't bring a row back. */
+export type TargetResumeFailure =
+  | 'not-found' // no DB row for that id
+  | 'already-running' // row is already `running` (owned elsewhere / live)
+  | 'tmux-missing' // pre-006 row, or tmux not alive
+  | 'reattach-failed'; // resume{Chain,Orchestrator}Session returned null
+
+export type TargetResumeResult =
+  | { ok: true; resumed: ResumedSession }
+  | { ok: false; reason: TargetResumeFailure };
+
+/**
+ * Operator-triggered re-attach for ONE specific session (the Iterations
+ * "Resume" button). Unlike `attemptResumeMultiAgent` this targets a row by
+ * id, only acts on terminal rows whose tmux is still alive, and on failure
+ * RESTORES the prior terminal status (so the auto-resume sweep invariant is
+ * preserved — no phantom `running` row left behind). Pure re-attach: never
+ * spawns tmux/agents.
+ */
+export async function resumeMultiAgentTarget(
+  sessionId: string,
+  callbacks: Pick<ResumeCallbacks, 'onEvent' | 'onEnded'>,
+): Promise<TargetResumeResult> {
+  const row = getMultiAgentSession(sessionId);
+  if (!row) return { ok: false, reason: 'not-found' };
+  if (row.status === 'running') return { ok: false, reason: 'already-running' };
+  // Re-validate liveness BEFORE any DB write so a stale list (tmux died
+  // between list build and click) leaves the row untouched.
+  if (
+    !row.tmux_session ||
+    !row.iteration_id ||
+    !(await tmuxAvailable()) ||
+    !(await hasSession(row.tmux_session))
+  ) {
+    return { ok: false, reason: 'tmux-missing' };
+  }
+
+  const prevStatus = row.status as MultiAgentStatus;
+  reactivateMultiAgentSession(sessionId);
+
+  let handle: ChainSessionHandle | OrchestratorSessionHandle | null = null;
+  try {
+    if (row.mode === 'chain') {
+      handle = await resumeChainSession({
+        sessionId,
+        onEvent: callbacks.onEvent,
+        onEnded: callbacks.onEnded,
+      });
+    } else if (row.mode === 'orchestrator') {
+      handle = await resumeOrchestratorSession({
+        sessionId,
+        onEvent: callbacks.onEvent,
+        onEnded: callbacks.onEnded,
+      });
+    }
+  } catch (err) {
+    console.error(`[resume] targeted resume threw for ${sessionId}`, err);
+  }
+
+  if (!handle) {
+    // Restore the terminal status we flipped — otherwise a stuck `running`
+    // row would be mis-handled by the next `resumeOnConnect` sweep.
+    endMultiAgentSession(sessionId, prevStatus);
+    return { ok: false, reason: 'reattach-failed' };
+  }
+
+  const replayEvents: PersistedEvent[] = listMultiAgentEvents(sessionId).map((r) => ({
+    ts: r.ts,
+    source: r.source,
+    destination: r.destination,
+    kind: r.kind,
+    text: r.text,
+    dbEventId: r.id,
+  }));
+  return {
+    ok: true,
+    resumed: { handle, mode: row.mode as 'chain' | 'orchestrator', row, replayEvents },
   };
 }
 

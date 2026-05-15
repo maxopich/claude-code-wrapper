@@ -212,6 +212,11 @@ export function App() {
   function stopMultiAgent(sessionId: string) {
     wsRef.current?.send({ type: 'stop_multi_agent', sessionId });
   }
+  function resumeSession(sessionId: string) {
+    // Pure WS round-trip; success arrives as `multi_agent_started` (the
+    // reducer flips to the active-run view), failure as `wrapper_error`.
+    wsRef.current?.send({ type: 'resume_multi_agent', sessionId });
+  }
   function sendMultiAgentUserPrompt(sessionId: string, text: string) {
     // Caller (the active-run input) already trims; nothing else to validate
     // here. The reducer doesn't track an optimistic local copy — the prompt
@@ -402,6 +407,8 @@ export function App() {
                 onStartChain={startChain}
                 onStartOrchestrator={startOrchestrator}
                 onStopMultiAgent={stopMultiAgent}
+                onResumeSession={resumeSession}
+                wrapperErrorSeq={state.wrapperErrorSeq}
                 onSendUserPrompt={sendMultiAgentUserPrompt}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}
