@@ -85,6 +85,44 @@ async function main(): Promise<number> {
   return code;
 }
 
+/** Kill the server and AWAIT its real exit. On Windows the OS only
+ *  releases the better-sqlite3 file handles on `<tmpHome>/.cebab` once the
+ *  process is actually gone — deleting them while it lingers throws EPERM
+ *  (POSIX tolerates unlink-while-open, which is why this only bit CI on
+ *  windows-latest). Force-kill if a graceful stop doesn't land in time. */
+async function killAndWait(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve();
+    }, timeoutMs);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill();
+  });
+}
+
+/** rm with retry: even after the owning process exits, Windows can lag
+ *  briefly before the file lock clears (AV/indexer/OS). Best-effort —
+ *  CI runners are ephemeral, so a final failure only warns. */
+async function rmWithRetry(target: string): Promise<void> {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (attempt === 9) {
+        console.warn(`[ci-smoke] could not remove ${target}: ${String(err)}`);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+}
+
 main()
   .then((code) => {
     process.exitCode = code;
@@ -93,8 +131,8 @@ main()
     console.error('[ci-smoke] threw', err);
     process.exitCode = 1;
   })
-  .finally(() => {
-    if (server && server.exitCode === null) server.kill();
-    fs.rmSync(tmpHome, { recursive: true, force: true });
-    fs.rmSync(tmpWs, { recursive: true, force: true });
+  .finally(async () => {
+    if (server) await killAndWait(server);
+    await rmWithRetry(tmpHome);
+    await rmWithRetry(tmpWs);
   });
