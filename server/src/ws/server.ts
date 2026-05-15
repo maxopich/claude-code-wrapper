@@ -24,6 +24,7 @@ import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { getSetting } from '../repo/settings.js';
+import { listTemplates, saveTemplate, deleteTemplate } from '../repo/templates.js';
 import {
   resolveWorkspaceRoot,
   rowToProject,
@@ -968,6 +969,24 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       clearFinishedMultiAgentSessions();
       send(conn.ws, { type: 'iterations', items: buildIterationsList() });
+      return;
+    }
+    case 'list_templates': {
+      send(conn.ws, { type: 'templates', items: listTemplates() });
+      return;
+    }
+    case 'save_template': {
+      const items = saveTemplate({
+        name: msg.name,
+        mode: msg.mode,
+        lifecycle: msg.lifecycle,
+        participants: msg.participants,
+      });
+      send(conn.ws, { type: 'templates', items });
+      return;
+    }
+    case 'delete_template': {
+      send(conn.ws, { type: 'templates', items: deleteTemplate(msg.id) });
       return;
     }
     case 'send_message': {

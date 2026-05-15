@@ -1,5 +1,10 @@
 import { useEffect, useState } from 'react';
-import type { IterationSummary, MultiAgentLifecycle, Project } from '@cebab/shared/protocol';
+import type {
+  IterationSummary,
+  MultiAgentLifecycle,
+  MultiAgentTemplate,
+  Project,
+} from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
 import { Markdown } from './Markdown';
 
@@ -41,6 +46,10 @@ export function MultiAgentTab(props: {
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
+  onRefreshTemplates: () => void;
+  onSaveTemplate: (name: string) => void;
+  onDeleteTemplate: (id: string) => void;
+  onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
   const { multiAgent, projects } = props;
   if (multiAgent.active) {
@@ -74,11 +83,15 @@ function DraftView(props: {
   onStartOrchestrator: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
+  onSaveTemplate: (name: string) => void;
+  onDeleteTemplate: (id: string) => void;
+  onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
   const { multiAgent, projects } = props;
   const participants = multiAgent.draftParticipants
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
+  const [namingOpen, setNamingOpen] = useState(false);
 
   function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
     // The browser only fires `drop` if we preventDefault here — otherwise
@@ -125,6 +138,40 @@ function DraftView(props: {
           Drag projects from the sidebar to build a participant list, then pick a mode.
         </p>
       </header>
+
+      <section className="multi-agent-section">
+        <div className="iterations-header">
+          <h3>Templates</h3>
+          <div className="iterations-actions">
+            <button
+              className="ghost-btn"
+              disabled={participants.length === 0}
+              title={
+                participants.length === 0
+                  ? 'Add at least one participant before saving a template.'
+                  : 'Save the current mode, lifecycle, and participant list as a reusable preset.'
+              }
+              onClick={() => setNamingOpen(true)}
+            >
+              Save current as template
+            </button>
+          </div>
+        </div>
+        {multiAgent.lastAppliedDropped > 0 && (
+          <p className="multi-agent-warning">
+            {multiAgent.lastAppliedDropped} participant
+            {multiAgent.lastAppliedDropped === 1 ? '' : 's'} from this template
+            {multiAgent.lastAppliedDropped === 1 ? ' is' : ' are'} no longer in the workspace and{' '}
+            {multiAgent.lastAppliedDropped === 1 ? 'was' : 'were'} skipped.
+          </p>
+        )}
+        <TemplatesList
+          items={multiAgent.templates}
+          projects={projects}
+          onApply={props.onApplyTemplate}
+          onDelete={props.onDeleteTemplate}
+        />
+      </section>
 
       <section className="multi-agent-section">
         <h3>Mode</h3>
@@ -376,6 +423,144 @@ function DraftView(props: {
         </div>
         <IterationsList items={multiAgent.iterations} />
       </section>
+      {namingOpen && (
+        <TemplateNameModal
+          existingNames={(multiAgent.templates ?? []).map((t) => t.name)}
+          onClose={() => setNamingOpen(false)}
+          onSave={(name) => {
+            props.onSaveTemplate(name);
+            setNamingOpen(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function TemplatesList(props: {
+  items: MultiAgentTemplate[] | null;
+  projects: Project[];
+  onApply: (t: MultiAgentTemplate) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (props.items === null) {
+    return <p className="iterations-empty">Loading…</p>;
+  }
+  if (props.items.length === 0) {
+    return (
+      <p className="iterations-empty">
+        No templates yet. Save a draft setup to reuse it without re-dragging.
+      </p>
+    );
+  }
+  return (
+    <ol className="iterations-list">
+      {props.items.map((t) => (
+        <TemplateRow
+          key={t.id}
+          template={t}
+          projects={props.projects}
+          onApply={props.onApply}
+          onDelete={props.onDelete}
+        />
+      ))}
+    </ol>
+  );
+}
+
+function TemplateRow(props: {
+  template: MultiAgentTemplate;
+  projects: Project[];
+  onApply: (t: MultiAgentTemplate) => void;
+  onDelete: (id: string) => void;
+}) {
+  const { template, projects } = props;
+  const resolved = template.participants
+    .map((id) => projects.find((p) => p.id === id))
+    .filter((p): p is Project => p !== undefined);
+  const unavailable = template.participants.length - resolved.length;
+  const names = resolved.map((p) => p.name).join(' → ');
+  return (
+    <li className="iteration-row">
+      <div className="iteration-head">
+        <span className="iteration-id">{template.name}</span>
+        <span className="iteration-mode">{template.mode}</span>
+        <span className="run-status">{template.lifecycle}</span>
+        <span className="iteration-when">
+          {resolved.length} participant{resolved.length === 1 ? '' : 's'}
+          {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
+        </span>
+      </div>
+      <div className="iteration-participants">
+        {names.length > 0 ? names : '(no resolvable participants)'}
+      </div>
+      <div className="iteration-path">
+        <button className="ghost-btn" onClick={() => props.onApply(template)}>
+          Apply
+        </button>
+        <button
+          className="icon-btn"
+          title="Delete template"
+          onClick={() => props.onDelete(template.id)}
+        >
+          ×
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function TemplateNameModal(props: {
+  existingNames: string[];
+  onClose: () => void;
+  onSave: (name: string) => void;
+}) {
+  const [value, setValue] = useState('');
+  const trimmed = value.trim();
+  const canSave = trimmed.length > 0;
+  const isDup = props.existingNames.includes(trimmed);
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h2>Save as template</h2>
+          <button className="icon-btn" onClick={props.onClose} title="Close">
+            ✕
+          </button>
+        </header>
+        <section>
+          <label>
+            <div className="label">Template name</div>
+            <input
+              type="text"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="e.g. security review chain"
+              spellCheck={false}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canSave) props.onSave(trimmed);
+              }}
+            />
+          </label>
+          <p className="hint">
+            Saves the current mode, lifecycle, and participant list. The first prompt is never
+            stored — you type it fresh each time.
+          </p>
+          {isDup && (
+            <p className="hint warn">
+              A template named <code>{trimmed}</code> already exists — saving overwrites it.
+            </p>
+          )}
+        </section>
+        <footer>
+          <button className="ghost-btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="primary-btn" disabled={!canSave} onClick={() => props.onSave(trimmed)}>
+            Save
+          </button>
+        </footer>
+      </div>
     </div>
   );
 }
