@@ -14,23 +14,18 @@
  * What this does NOT close: bus workers under `bypassPermissions` run
  * as the operator's uid, so they can read `~/.cebab/auth-token`
  * directly OR call `GET /auth-token` (empty-Origin branch returns the
- * token to local non-browser clients). With the F2 source allowlist
- * (`bus/orchestrator.ts:handleEvent` source ∈ {orchestrator, workers})
- * + F6 `BUS_AGENT_NAME` shape regex (`bus/scripts/bus-send-msg.sh`)
- * in place, a token-holding worker's surface reduces to direct WS
- * control-plane abuse — primarily `set_trusted` flipping a future
- * session's Trust state.
+ * token to local non-browser clients). A token-holding worker's
+ * surface is direct WS control-plane abuse — primarily `set_trusted`
+ * flipping a future session's Trust state.
  *
- * Residual after F2+F6+R3: a worker can still impersonate another
- * *known* worker by setting `BUS_AGENT_NAME=<other-worker-slug>` —
- * the slug is a valid shape AND is a participant, so both filters
- * accept it. R3 closes the adjacent slug-shape spoofs (protocol
- * sentinels `user`/`_sink` and Cebab's own `cebab` identity are now
- * rejected as senders), but cross-worker impersonation requires
- * Cebab-as-arbiter: a Unix-socket-mediated bus where Cebab stamps
- * `source` from tmux pane identity rather than trusting the worker's
- * env. Same-uid isolation primitives (`SO_PEERCRED`, XPC with
- * entitlements) are v2 work.
+ * Bus identity spoofing is closed by construction in the pure-SDK
+ * model: a worker's `source` is pinned by Cebab in the per-agent
+ * `bus_send` tool closure (`bus/runner.ts`), not read from a
+ * worker-controlled env var or file, so a worker cannot forge another
+ * participant's identity. The F2/F3 source-allowlist drop filters in
+ * the routers are kept verbatim as defense-in-depth (source ∈
+ * {orchestrator, workers}; sentinels `user`/`_sink` and Cebab's own
+ * `cebab` identity rejected as senders).
  *
  * Single-process, single-token: regenerated on every boot. There's no
  * persistence to disk beyond the file itself, and the in-process value

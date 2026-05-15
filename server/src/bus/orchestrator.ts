@@ -199,8 +199,6 @@ export type AddWorkerResult = {
 export type OrchestratorSessionHandle = {
   sessionId: string;
   iterationId: string;
-  /** Opaque session label (was the tmux session name). No tmux now. */
-  tmuxSession: string;
   participantAgentNames: string[];
   lifecycle: MultiAgentLifecycle;
   sessionFolder: string;
@@ -236,7 +234,6 @@ export function createOrchestratorRouter(params: {
   sessionId: string;
   iterationId: string;
   workerNames: string[];
-  tmuxSessionName: string;
   paths: SessionPaths;
   lifecycle: MultiAgentLifecycle;
   onEvent: StartOrchestratorOpts['onEvent'];
@@ -420,7 +417,6 @@ export async function startOrchestratorSession(
   }
 
   const sessionId = crypto.randomUUID();
-  const sessionLabel = `cebab-bus-${sessionId.slice(0, 8)}`;
   const lifecycle: MultiAgentLifecycle = opts.lifecycle ?? 'persistent';
   const workerNames = opts.workers.map((w) => w.agentName);
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...workerNames];
@@ -435,14 +431,7 @@ export async function startOrchestratorSession(
 
   const iterationId = nextIterationId(paths);
 
-  createMultiAgentSession(
-    sessionId,
-    'orchestrator',
-    sessionLabel,
-    iterationId,
-    paths.folder,
-    lifecycle,
-  );
+  createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle);
   opts.workers.forEach((w) => addParticipant(sessionId, w.projectId, 'worker', null));
   prepareIterationDir(iterationId, participantAgentNames, paths);
 
@@ -506,7 +495,6 @@ export async function startOrchestratorSession(
     sessionId,
     iterationId,
     workerNames,
-    tmuxSessionName: sessionLabel,
     paths,
     lifecycle,
     onEvent: opts.onEvent,
@@ -558,7 +546,6 @@ export async function startOrchestratorSession(
   const handle: OrchestratorSessionHandle = {
     sessionId,
     iterationId,
-    tmuxSession: sessionLabel,
     participantAgentNames,
     lifecycle,
     sessionFolder: paths.folder,

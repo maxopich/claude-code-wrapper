@@ -43,7 +43,6 @@ export const NOOP_SINK: BusSink = {
 export type BusSessionHandle = {
   sessionId: string;
   iterationId: string;
-  tmuxSession: string;
   participantAgentNames: string[];
   lifecycle: MultiAgentLifecycle;
   sessionFolder: string;

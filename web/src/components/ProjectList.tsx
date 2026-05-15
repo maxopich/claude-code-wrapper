@@ -56,11 +56,11 @@ export function ProjectList(props: {
               {p.busInstalled && (
                 <button
                   className="bus-installed-pill"
-                  title={`Bus integration installed (agent: ${p.busAgentName ?? '?'}).\nClick to uninstall: removes the @import line from CLAUDE.md and Cebab-owned entries from .claude/settings.json. Operator content is preserved. Inboxes and archive under the session folder are left in place.`}
+                  title={`Bus integration installed (agent: ${p.busAgentName ?? '?'}).\nThis is pure DB metadata — Cebab wrote nothing into the project. Click to uninstall: just clears the bus-eligible flag (nothing in the project is touched).`}
                   onClick={(e) => {
                     e.stopPropagation();
                     const ok = window.confirm(
-                      `Uninstall bus integration from "${p.name}"?\n\nThis removes the @import line from CLAUDE.md and the Cebab-owned entries from .claude/settings.json. Operator content is preserved.`,
+                      `Uninstall bus integration from "${p.name}"?\n\nThis is pure DB metadata — it just clears the bus-eligible flag. Nothing in the project itself is touched.`,
                     );
                     if (ok) props.onUninstallBus(p.id);
                   }}

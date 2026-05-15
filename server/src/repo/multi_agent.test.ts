@@ -16,7 +16,6 @@ import {
   listMultiAgentSessionsWithIteration,
   listParticipants,
   listResolvedParticipants,
-  listRunningTmuxSessionNames,
   setProjectBusInstalled,
 } from './multi_agent.js';
 
@@ -43,7 +42,7 @@ afterEach(() => {
 
 describe('createMultiAgentSession + iteration_id', () => {
   test('round-trips iteration_id through insert + getMultiAgentSession', () => {
-    const row = createMultiAgentSession('s1', 'chain', 'cebab-bus-s1', '042');
+    const row = createMultiAgentSession('s1', 'chain', '042');
     expect(row.iteration_id).toBe('042');
 
     const rows = listMultiAgentSessions();
@@ -52,7 +51,7 @@ describe('createMultiAgentSession + iteration_id', () => {
   });
 
   test('iteration_id defaults to null when omitted', () => {
-    const row = createMultiAgentSession('s2', 'chain', 'cebab-bus-s2');
+    const row = createMultiAgentSession('s2', 'chain');
     expect(row.iteration_id).toBeNull();
   });
 });
@@ -61,27 +60,20 @@ describe('createMultiAgentSession + session_folder + lifecycle (migration 007)',
   test('round-trips session_folder and lifecycle through insert + read', () => {
     // Both fields explicit.
     const folder = '/Users/test/workspace/.cebab-session-abcd1234';
-    const row = createMultiAgentSession(
-      's1',
-      'orchestrator',
-      'cebab-bus-s1',
-      '001',
-      folder,
-      'temp',
-    );
+    const row = createMultiAgentSession('s1', 'orchestrator', '001', folder, 'temp');
     expect(row.session_folder).toBe(folder);
     expect(row.lifecycle).toBe('temp');
   });
 
   test('session_folder defaults to null, lifecycle defaults to persistent', () => {
-    // Mirrors a pre-007 caller that doesn't supply the new fields.
-    const row = createMultiAgentSession('s2', 'chain', 'cebab-bus-s2', '001');
+    // Mirrors a caller that doesn't supply the new fields.
+    const row = createMultiAgentSession('s2', 'chain', '001');
     expect(row.session_folder).toBeNull();
     expect(row.lifecycle).toBe('persistent');
   });
 
   test('persisted lifecycle survives across reads (not a default-only quirk)', () => {
-    createMultiAgentSession('s3', 'orchestrator', 'cebab-bus-s3', '001', '/somewhere', 'temp');
+    createMultiAgentSession('s3', 'orchestrator', '001', '/somewhere', 'temp');
     // Re-read from a fresh list — confirms the column write actually
     // landed, not just that the in-memory return is fabricated.
     const rows = listMultiAgentSessions();
@@ -93,8 +85,8 @@ describe('createMultiAgentSession + session_folder + lifecycle (migration 007)',
 
 describe('listMultiAgentSessionsWithIteration', () => {
   test('returns only rows with iteration_id (drops pre-006 / null rows)', () => {
-    createMultiAgentSession('with', 'chain', 'tx-with', '001');
-    createMultiAgentSession('without', 'chain', 'tx-without', null);
+    createMultiAgentSession('with', 'chain', '001');
+    createMultiAgentSession('without', 'chain', null);
     const filtered = listMultiAgentSessionsWithIteration();
     expect(filtered.map((r) => r.id)).toEqual(['with']);
   });
@@ -102,13 +94,13 @@ describe('listMultiAgentSessionsWithIteration', () => {
   test('orders by started_at descending (most recent first)', () => {
     // started_at is filled by now() at insert; insert with a delay to
     // guarantee distinct timestamps even on a fast machine.
-    createMultiAgentSession('older', 'chain', 'tx-older', '001');
+    createMultiAgentSession('older', 'chain', '001');
     // Sleep just enough to force a different ms timestamp on the next insert.
     const t = Date.now();
     while (Date.now() === t) {
       /* spin */
     }
-    createMultiAgentSession('newer', 'chain', 'tx-newer', '002');
+    createMultiAgentSession('newer', 'chain', '002');
 
     const rows = listMultiAgentSessionsWithIteration();
     expect(rows.map((r) => r.id)).toEqual(['newer', 'older']);
@@ -127,7 +119,7 @@ describe('listResolvedParticipants', () => {
     setProjectBusInstalled(reviewer.id, true, 'reviewer');
     setProjectBusInstalled(evaluator.id, true, 'evaluator');
 
-    createMultiAgentSession('s1', 'chain', 'tx-s1', '001');
+    createMultiAgentSession('s1', 'chain', '001');
     addParticipant('s1', reviewer.id, 'worker', 0);
     addParticipant('s1', evaluator.id, 'worker', 1);
 
@@ -153,7 +145,7 @@ describe('listResolvedParticipants', () => {
     setProjectBusInstalled(a.id, true, 'a');
     setProjectBusInstalled(b.id, true, 'b');
 
-    createMultiAgentSession('orch', 'orchestrator', 'tx-orch', '002');
+    createMultiAgentSession('orch', 'orchestrator', '002');
     // Add B before A so we can confirm the result is by project_id, not insert order.
     addParticipant('orch', b.id, 'worker', null);
     addParticipant('orch', a.id, 'worker', null);
@@ -165,7 +157,7 @@ describe('listResolvedParticipants', () => {
 
 describe('endMultiAgentSession status transitions', () => {
   test('marks status + ended_at; affects status filter in listMultiAgentSessions', () => {
-    createMultiAgentSession('s', 'chain', 'tx', '001');
+    createMultiAgentSession('s', 'chain', '001');
     let rows = listMultiAgentSessions();
     expect(rows[0]!.status).toBe('running');
     expect(rows[0]!.ended_at).toBeNull();
@@ -182,9 +174,9 @@ describe('clearFinishedMultiAgentSessions', () => {
   test('removes only sessions in a terminal status; running rows survive', () => {
     // Three sessions covering each interesting status: one still running
     // (must survive), one completed, one crashed (both must go).
-    createMultiAgentSession('alive', 'chain', 'tx-alive', '001');
-    createMultiAgentSession('done', 'chain', 'tx-done', '002');
-    createMultiAgentSession('boom', 'chain', 'tx-boom', '003');
+    createMultiAgentSession('alive', 'chain', '001');
+    createMultiAgentSession('done', 'chain', '002');
+    createMultiAgentSession('boom', 'chain', '003');
     endMultiAgentSession('done', 'completed');
     endMultiAgentSession('boom', 'crashed');
 
@@ -198,7 +190,7 @@ describe('clearFinishedMultiAgentSessions', () => {
   test('also wipes events + participants for the deleted sessions (no orphans)', () => {
     // Build out a session with both children, then end + clear, then
     // assert nothing references the deleted session id anymore.
-    createMultiAgentSession('s1', 'orchestrator', 'tx-s1', '001');
+    createMultiAgentSession('s1', 'orchestrator', '001');
     const projPath = path.join(tmpRoot, 'p1');
     fs.mkdirSync(projPath);
     const proj = upsertProject('p1', projPath);
@@ -220,7 +212,7 @@ describe('clearFinishedMultiAgentSessions', () => {
   });
 
   test('returns 0 and no-ops when only running sessions exist', () => {
-    createMultiAgentSession('alive', 'chain', 'tx-alive', '001');
+    createMultiAgentSession('alive', 'chain', '001');
     const removed = clearFinishedMultiAgentSessions();
     expect(removed).toBe(0);
     expect(listMultiAgentSessions()).toHaveLength(1);
@@ -229,8 +221,8 @@ describe('clearFinishedMultiAgentSessions', () => {
   test('keeps a running session intact even when finished siblings are wiped', () => {
     // Regression guard for the "operator clicks Clear mid-run" path: the
     // active session and its events/participants must survive cleanup.
-    createMultiAgentSession('alive', 'orchestrator', 'tx-alive', '042');
-    createMultiAgentSession('done', 'chain', 'tx-done', '041');
+    createMultiAgentSession('alive', 'orchestrator', '042');
+    createMultiAgentSession('done', 'chain', '041');
     endMultiAgentSession('done', 'completed');
 
     const projPath = path.join(tmpRoot, 'live-proj');
@@ -245,36 +237,5 @@ describe('clearFinishedMultiAgentSessions', () => {
     expect(listMultiAgentSessions().map((r) => r.id)).toEqual(['alive']);
     expect(listParticipants('alive')).toHaveLength(1);
     expect(listMultiAgentEvents('alive')).toHaveLength(1);
-  });
-});
-
-describe('listRunningTmuxSessionNames', () => {
-  test('returns only running rows; ended rows are filtered out', () => {
-    // Two running, one stopped — the stopped row's tmux name MUST NOT
-    // appear in the protected list (otherwise the orphan reaper would
-    // refuse to kill it on Clear).
-    createMultiAgentSession('a', 'chain', 'cebab-bus-aaaa', '001');
-    createMultiAgentSession('b', 'orchestrator', 'cebab-bus-bbbb', '001');
-    createMultiAgentSession('c', 'chain', 'cebab-bus-cccc', '002');
-    endMultiAgentSession('c', 'stopped');
-
-    expect(listRunningTmuxSessionNames().sort()).toEqual(['cebab-bus-aaaa', 'cebab-bus-bbbb']);
-  });
-
-  test('rows with null tmux_session are dropped (no undefined leaks)', () => {
-    // Pre-006 rows or any code path that inserts a row without a tmux
-    // session name yields a null `tmux_session`. The helper's `.filter`
-    // strips them so the caller's Set doesn't accidentally include
-    // `null` and protect every unnamed orphan.
-    createMultiAgentSession('a', 'chain', 'cebab-bus-aaaa', '001');
-    createMultiAgentSession('b', 'chain', null, '002'); // no tmux name
-
-    expect(listRunningTmuxSessionNames()).toEqual(['cebab-bus-aaaa']);
-  });
-
-  test('empty array when no sessions are running', () => {
-    createMultiAgentSession('done', 'chain', 'cebab-bus-done', '001');
-    endMultiAgentSession('done', 'completed');
-    expect(listRunningTmuxSessionNames()).toEqual([]);
   });
 });

@@ -35,7 +35,7 @@ beforeEach(() => {
   fs.mkdirSync(config.dataDir, { recursive: true });
   closeDb();
   getDb();
-  createMultiAgentSession(SESSION_ID, 'chain', 'label-1', 'iter-1');
+  createMultiAgentSession(SESSION_ID, 'chain', 'iter-1');
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
@@ -59,7 +59,6 @@ function setup() {
     sessionId: SESSION_ID,
     iterationId: 'iter-1',
     agentNames: AGENTS,
-    tmuxSessionName: 'label-1',
     paths,
     onEvent,
     onEnded,
@@ -152,7 +151,6 @@ describe('resumeChainSession (registry-based, R-A)', () => {
     const originalHandle = {
       sessionId: SESSION_ID,
       iterationId: 'iter-1',
-      tmuxSession: 'label-1',
       participantAgentNames: AGENTS,
       lifecycle: 'persistent' as const,
       sessionFolder: tmpRoot,
@@ -187,7 +185,6 @@ describe('resumeChainSession (registry-based, R-A)', () => {
       handle: {
         sessionId: SESSION_ID,
         iterationId: 'iter-1',
-        tmuxSession: 'label-1',
         participantAgentNames: AGENTS,
         lifecycle: 'persistent',
         sessionFolder: tmpRoot,

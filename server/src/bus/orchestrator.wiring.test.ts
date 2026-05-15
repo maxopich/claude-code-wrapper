@@ -33,7 +33,7 @@ beforeEach(() => {
   fs.mkdirSync(config.dataDir, { recursive: true });
   closeDb();
   getDb();
-  createMultiAgentSession(SESSION_ID, 'orchestrator', 'label-1', 'iter-1');
+  createMultiAgentSession(SESSION_ID, 'orchestrator', 'iter-1');
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
@@ -56,7 +56,6 @@ function setup() {
     sessionId: SESSION_ID,
     iterationId: 'iter-1',
     workerNames: WORKERS,
-    tmuxSessionName: 'label-1',
     paths,
     lifecycle: 'persistent',
     onEvent,
@@ -149,7 +148,6 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
     const originalHandle = {
       sessionId: SESSION_ID,
       iterationId: 'iter-1',
-      tmuxSession: 'label-1',
       participantAgentNames: [ORCHESTRATOR_AGENT_NAME, ...WORKERS],
       lifecycle: 'persistent' as const,
       sessionFolder: tmpRoot,
@@ -181,7 +179,6 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
       handle: {
         sessionId: SESSION_ID,
         iterationId: 'iter-1',
-        tmuxSession: 'label-1',
         participantAgentNames: WORKERS,
         lifecycle: 'persistent',
         sessionFolder: tmpRoot,

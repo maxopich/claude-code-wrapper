@@ -89,9 +89,6 @@ export type ResumeChainOpts = {
 export type ChainSessionHandle = {
   sessionId: string;
   iterationId: string;
-  /** Opaque session label (formerly the tmux session name). Kept on the
-   *  handle for protocol/UI compatibility — no tmux involved anymore. */
-  tmuxSession: string;
   participantAgentNames: string[];
   lifecycle: MultiAgentLifecycle;
   sessionFolder: string;
@@ -121,9 +118,6 @@ export function createChainRouter(params: {
   sessionId: string;
   iterationId: string;
   agentNames: string[];
-  /** Retained param name for call-site/test compatibility; it is just an
-   *  opaque session label now (no tmux). */
-  tmuxSessionName: string;
   paths: SessionPaths;
   onEvent: StartChainOpts['onEvent'];
   onEnded: StartChainOpts['onEnded'];
@@ -291,7 +285,6 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   }
 
   const sessionId = crypto.randomUUID();
-  const sessionLabel = `cebab-bus-${sessionId.slice(0, 8)}`;
   const lifecycle: MultiAgentLifecycle = opts.lifecycle ?? 'persistent';
   const agentNames = opts.participants.map((p) => p.agentName);
   const projectIds = opts.participants.map((p) => p.projectId);
@@ -301,7 +294,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
 
   const iterationId = nextIterationId(paths);
 
-  createMultiAgentSession(sessionId, 'chain', sessionLabel, iterationId, paths.folder, lifecycle);
+  createMultiAgentSession(sessionId, 'chain', iterationId, paths.folder, lifecycle);
   opts.participants.forEach((p, i) => addParticipant(sessionId, p.projectId, 'worker', i));
   prepareIterationDir(iterationId, agentNames, paths);
 
@@ -323,8 +316,8 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         }
       : undefined;
 
-  // Per-participant briefing, prepended once to that agent's first turn (the
-  // tmux model wrote this to the inbox; here it rides the first prompt).
+  // Per-participant briefing, prepended once to that agent's first turn (it
+  // rides the first prompt rather than living in a project file).
   const briefings = new Map<string, string>();
   opts.participants.forEach((p, i) => {
     const nextHop =
@@ -377,7 +370,6 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     sessionId,
     iterationId,
     agentNames,
-    tmuxSessionName: sessionLabel,
     paths,
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
@@ -388,7 +380,6 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   const handle: ChainSessionHandle = {
     sessionId,
     iterationId,
-    tmuxSession: sessionLabel,
     participantAgentNames: agentNames,
     lifecycle,
     sessionFolder: paths.folder,

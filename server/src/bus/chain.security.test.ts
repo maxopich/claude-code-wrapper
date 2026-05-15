@@ -32,7 +32,7 @@ beforeEach(() => {
   fs.mkdirSync(config.dataDir, { recursive: true });
   closeDb();
   getDb();
-  createMultiAgentSession(SESSION_ID, 'chain', 'tmux-test', 'iter-1');
+  createMultiAgentSession(SESSION_ID, 'chain', 'iter-1');
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
@@ -53,7 +53,6 @@ function makeRouter() {
     sessionId: SESSION_ID,
     iterationId: 'iter-1',
     agentNames: AGENTS,
-    tmuxSessionName: 'tmux-test',
     paths,
     onEvent,
     onEnded,

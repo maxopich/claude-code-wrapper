@@ -199,25 +199,16 @@ function buildRouter(
   const lifecycle = opts.lifecycle ?? 'persistent';
   const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
   const iterationId = '001';
-  const tmuxSessionName = `cebab-bus-${sessionId}`;
   const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
   // appendMultiAgentEvent has a foreign-key constraint on multi_agent_sessions;
   // seed the row before any handleEvent / forwardCebabEvent call.
-  createMultiAgentSession(
-    sessionId,
-    'orchestrator',
-    tmuxSessionName,
-    iterationId,
-    paths.folder,
-    lifecycle,
-  );
+  createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle);
   const onEvent = vi.fn();
   const onEnded = vi.fn();
   const router = createOrchestratorRouter({
     sessionId,
     iterationId,
     workerNames,
-    tmuxSessionName,
     paths,
     lifecycle,
     onEvent,

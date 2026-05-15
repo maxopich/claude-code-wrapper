@@ -51,7 +51,6 @@ import { ResolveAgentError } from '../bus/runtime.js';
 import {
   attemptResumeMultiAgent,
   resumeMultiAgentTarget,
-  type ResumeFailureReason,
   type ResumedSession,
   type ResumeCallbacks,
 } from '../bus/resume.js';
@@ -261,7 +260,6 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // not the DB row; the reducer doesn't use this field post-start.
     participants: [],
     participantAgentNames: resumed.handle.participantAgentNames,
-    tmuxSession: resumed.handle.tmuxSession,
     lifecycle: resumed.handle.lifecycle,
     sessionFolder: resumed.handle.sessionFolder,
   });
@@ -282,21 +280,22 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
 
 /**
  * Async helper that runs after a WS connect: look up any active multi-agent
- * session in the DB, validate against tmux, and re-attach if alive. Catches
- * its own errors so a failed resume doesn't leak into the WS error handler.
+ * session in the DB, check the in-process registry, and re-attach if still
+ * live. Catches its own errors so a failed resume doesn't leak into the WS
+ * error handler.
  */
 async function resumeOnConnect(conn: Conn): Promise<void> {
   try {
     const resumed = await attemptResumeMultiAgent({
       ...resumeCallbacks(conn),
-      onResumeFailed: (sessionId, reason) => {
+      onResumeFailed: (sessionId) => {
         // Surface auto-resume failures as a wrapper_error toast so the
         // operator notices instead of "Cebab silently lost my session".
         send(conn.ws, {
           type: 'wrapper_error',
           sessionId,
           kind: 'process_crashed',
-          message: resumeFailureMessage(sessionId, reason),
+          message: resumeFailureMessage(sessionId),
         });
       },
     });
@@ -322,24 +321,16 @@ function emitSettings(conn: Conn): void {
 }
 
 /**
- * Map a `ResumeFailureReason` to the user-facing message that ships in the
- * `wrapper_error.message` field. Kept close to the WS layer so the wording
- * (which the operator sees in a toast) doesn't drift away from the
- * symptoms it describes. The session id slice helps disambiguate when the
- * operator has run multiple multi-agent sessions in a row.
+ * The user-facing message that ships in the `wrapper_error.message` field
+ * when an auto-resume fails. Kept close to the WS layer so the wording (which
+ * the operator sees in a toast) doesn't drift away from the symptom. Under
+ * the pure-SDK model the only failure is a server-restart registry miss
+ * (decision R-A). The session id slice helps disambiguate when the operator
+ * has run multiple multi-agent sessions in a row.
  */
-function resumeFailureMessage(sessionId: string, reason: ResumeFailureReason): string {
+function resumeFailureMessage(sessionId: string): string {
   const slug = sessionId.slice(0, 8);
-  switch (reason) {
-    case 'tmux-unavailable':
-      return `Couldn't resume multi-agent session ${slug}: tmux isn't running. The session has been marked crashed.`;
-    case 'tmux-missing':
-      return `Couldn't resume multi-agent session ${slug}: its tmux session is gone (likely killed by reboot or manual cleanup). Marked crashed.`;
-    case 'legacy-row':
-      return `Couldn't resume multi-agent session ${slug}: legacy DB row missing tmux/iteration info. Marked crashed.`;
-    case 'reattach-failed':
-      return `Couldn't resume multi-agent session ${slug}: the Cebab server was restarted since it started, and multi-agent runs don't survive a server restart (decision R-A). Marked crashed. Single-agent chats are unaffected.`;
-  }
+  return `Couldn't resume multi-agent session ${slug}: the Cebab server was restarted since it started, and multi-agent runs don't survive a server restart (decision R-A). Marked crashed. Single-agent chats are unaffected.`;
 }
 
 /** Display-label cap. Long enough for "Refactor the WS upgrade handler", short
@@ -754,7 +745,6 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             mode: 'orchestrator',
             participants: msg.participants,
             participantAgentNames: handle.participantAgentNames,
-            tmuxSession: handle.tmuxSession,
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
           });
@@ -795,7 +785,6 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           mode: 'chain',
           participants: msg.participants,
           participantAgentNames: handle.participantAgentNames,
-          tmuxSession: handle.tmuxSession,
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
         });
@@ -814,8 +803,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       if (!('sendUserPrompt' in active)) {
         // Chain mode doesn't accept mid-flight user prompts; it's fire-
-        // and-forget after the initial input lands in participant[0]'s
-        // inbox. Surface as a wrapper_error so the operator gets feedback.
+        // and-forget after the initial input rides participant[0]'s first
+        // turn. Surface as a wrapper_error so the operator gets feedback.
         send(conn.ws, {
           type: 'wrapper_error',
           kind: 'process_crashed',
@@ -873,9 +862,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
               ? 'That session no longer exists.'
               : result.reason === 'already-running'
                 ? 'That session is already running.'
-                : result.reason === 'tmux-missing'
-                  ? "This session's tmux is no longer alive — it can't be resumed."
-                  : 'Failed to re-attach (a participant may have lost its bus integration).';
+                : 'Failed to re-attach: the Cebab server was restarted, and multi-agent runs do not survive a server restart (decision R-A).';
           send(conn.ws, {
             type: 'wrapper_error',
             sessionId: msg.sessionId,

@@ -32,7 +32,7 @@ beforeEach(() => {
   fs.mkdirSync(config.dataDir, { recursive: true });
   closeDb();
   getDb();
-  createMultiAgentSession(SESSION_ID, 'orchestrator', 'tmux-test', 'iter-1');
+  createMultiAgentSession(SESSION_ID, 'orchestrator', 'iter-1');
   // Silence the drop-path warnings but capture them for assertions.
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
@@ -54,7 +54,6 @@ function makeRouter() {
     sessionId: SESSION_ID,
     iterationId: 'iter-1',
     workerNames: WORKERS,
-    tmuxSessionName: 'tmux-test',
     paths,
     lifecycle: 'persistent',
     onEvent,

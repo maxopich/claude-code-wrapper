@@ -13,9 +13,9 @@
  *     to re-attach → mark the row `crashed` (decision R-A). Single-agent
  *     resume is a different path and is unaffected.
  *
- * Exported signatures are unchanged so the WS layer needs no edits. The
- * `ResumeFailureReason` union is kept intact (the WS message map references
- * all variants); the registry-miss case maps to `'reattach-failed'`.
+ * The only way an auto-resume fails under the pure-SDK model is a registry
+ * miss (a Cebab server restart), so `ResumeFailureReason` is the single
+ * `'reattach-failed'`.
  */
 import {
   endMultiAgentSession,
@@ -46,16 +46,11 @@ export type PersistedEvent = {
 };
 
 /**
- * Reason an auto-resume couldn't bring back a `running` DB row. Union kept
- * intact for the WS message map; the pure-SDK runtime only ever produces
- * `'reattach-failed'` (registry miss = the process that owned the session is
- * gone — i.e. a Cebab restart, decision R-A).
+ * Reason an auto-resume couldn't bring back a `running` DB row. The pure-SDK
+ * runtime only ever produces `'reattach-failed'`: a registry miss = the
+ * process that owned the session is gone (a Cebab restart, decision R-A).
  */
-export type ResumeFailureReason =
-  | 'tmux-unavailable'
-  | 'legacy-row'
-  | 'tmux-missing'
-  | 'reattach-failed';
+export type ResumeFailureReason = 'reattach-failed';
 
 export type ResumeCallbacks = {
   onEvent: ResumeChainOpts['onEvent'];
@@ -116,11 +111,7 @@ export async function attemptResumeMultiAgent(
 }
 
 /** Why a targeted `resumeMultiAgentTarget` couldn't bring a row back. */
-export type TargetResumeFailure =
-  | 'not-found'
-  | 'already-running'
-  | 'tmux-missing'
-  | 'reattach-failed';
+export type TargetResumeFailure = 'not-found' | 'already-running' | 'reattach-failed';
 
 export type TargetResumeResult =
   | { ok: true; resumed: ResumedSession }

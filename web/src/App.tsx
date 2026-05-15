@@ -285,8 +285,9 @@ export function App() {
   function sendMultiAgentUserPrompt(sessionId: string, text: string) {
     // Caller (the active-run input) already trims; nothing else to validate
     // here. The reducer doesn't track an optimistic local copy — the prompt
-    // round-trips through bus.log as a `multi_agent_event` with
-    // source=cebab, so it shows up in the scrollback like any other event.
+    // round-trips through the in-process router as a `multi_agent_event`
+    // with source=cebab, so it shows up in the scrollback like any other
+    // event.
     wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text });
   }
   function setActiveLifecycle(sessionId: string, lifecycle: MultiAgentLifecycle) {
@@ -298,9 +299,10 @@ export function App() {
     wsRef.current?.send({ type: 'set_multi_agent_lifecycle', sessionId, lifecycle });
   }
   function addActiveParticipant(sessionId: string, projectId: number) {
-    // Server resolves the project, auto-installs bus if missing, spawns
-    // a new tmux pane, persists the participant row, and forwards an
-    // updated roster prompt to the orchestrator. On success the reducer
+    // Server resolves the project, auto-installs bus if missing (DB
+    // metadata), registers a new in-process agent, persists the
+    // participant row, and delivers an updated roster prompt to the
+    // orchestrator. On success the reducer
     // gets `multi_agent_participant_added` (appends to
     // participantAgentNames) and possibly `bus_integration_changed` +
     // `projects` (if auto-install ran).
