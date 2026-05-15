@@ -11,7 +11,6 @@ import {
   ensureOrchestratorWorkspace,
 } from './orchestrator.js';
 import {
-  busBinDir,
   computeSessionPaths,
   orchestratorWorkspaceDir,
   PROJECT_COMM_MD_REL,
@@ -24,7 +23,7 @@ import {
   listMultiAgentEvents,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
-import type { BusLogEvent } from './log_tailer.js';
+import type { BusEvent } from './runner.js';
 
 // Same isolation scaffolding as install.test.ts — each test gets its own
 // tmp ~/.cebab so writes don't leak across tests or out to the real home.
@@ -51,30 +50,26 @@ afterEach(() => {
 });
 
 describe('ensureOrchestratorWorkspace — first run', () => {
-  test('creates workspace dir, CLAUDE.md, comm.md, settings.json, and bus state dirs', () => {
+  test('creates workspace dir, CLAUDE.md, comm.md, and the .cebab dir', () => {
     const result = ensureOrchestratorWorkspace();
 
-    // All three rendered files report 'created' on first run.
+    // Both rendered files report 'created' on first run. No settings.json
+    // is generated anymore — the orchestrator runs settingSources:['user'],
+    // so a workspace settings.json would never be read.
     expect(result.claudeMd).toBe('created');
     expect(result.commMd).toBe('created');
-    expect(result.settingsJson).toBe('created');
 
     // Workspace dir exists at the canonical path.
     const wsDir = orchestratorWorkspaceDir();
     expect(result.workspaceDir).toBe(wsDir);
     expect(fs.existsSync(wsDir)).toBe(true);
-    expect(fs.existsSync(path.join(wsDir, '.claude'))).toBe(true);
 
-    // The three workspace files exist. comm.md lives INSIDE the
-    // workspace's `.cebab/` so the @import line in CLAUDE.md is
-    // workspace-relative (no external-import trust modal at TUI start).
+    // The workspace files exist. comm.md lives INSIDE the workspace's
+    // `.cebab/` so the @import line in CLAUDE.md is workspace-relative
+    // (no external-import trust modal at agent start).
     expect(fs.existsSync(path.join(wsDir, 'CLAUDE.md'))).toBe(true);
-    expect(fs.existsSync(path.join(wsDir, '.claude', 'settings.json'))).toBe(true);
     expect(fs.existsSync(projectCommMdPath(wsDir))).toBe(true);
     expect(fs.existsSync(projectCebabDir(wsDir))).toBe(true);
-
-    // Bus bootstrap ran (scripts copied into bin/).
-    expect(fs.existsSync(path.join(busBinDir(), 'bus-send-msg.sh'))).toBe(true);
   });
 
   test('CLAUDE.md substitutes the comm.md path placeholder as a project-relative path', () => {
@@ -107,33 +102,16 @@ describe('ensureOrchestratorWorkspace — first run', () => {
     const comm = fs.readFileSync(projectCommMdPath(orchestratorWorkspaceDir()), 'utf8');
     // renderCommMd embeds the agent name into a fenced heading.
     expect(comm).toContain('agent: `orchestrator`');
+    // The protocol is the in-process bus_send tool — no scripts, no inbox.
+    expect(comm).toContain('bus_send');
+    expect(comm).not.toContain('bus-send-msg.sh');
   });
 
-  test('settings.json declares BUS_AGENT_NAME, bus-script perms, and Stop hook', () => {
+  test('no .claude/settings.json is generated (orchestrator uses settingSources:[user])', () => {
     ensureOrchestratorWorkspace();
-    const settings = JSON.parse(
-      fs.readFileSync(path.join(orchestratorWorkspaceDir(), '.claude', 'settings.json'), 'utf8'),
+    expect(fs.existsSync(path.join(orchestratorWorkspaceDir(), '.claude', 'settings.json'))).toBe(
+      false,
     );
-
-    expect(settings.env.BUS_AGENT_NAME).toBe(ORCHESTRATOR_AGENT_NAME);
-
-    // permissions.allow whitelists exactly our three bus scripts (no
-    // blanket bash, no anything-else).
-    expect(settings.permissions.allow).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('bus-send-msg.sh'),
-        expect.stringContaining('bus-check-inbox.sh'),
-        expect.stringContaining('bus-status.sh'),
-      ]),
-    );
-    expect(settings.permissions.allow).toHaveLength(3);
-
-    // The Stop hook runs bus-check-inbox.sh for our own agent name, so
-    // the orchestrator's own inbox drains at the end of every turn.
-    expect(settings.hooks.Stop).toHaveLength(1);
-    const cmd = settings.hooks.Stop[0].hooks[0].command;
-    expect(cmd).toContain('bus-check-inbox.sh');
-    expect(cmd).toContain(ORCHESTRATOR_AGENT_NAME);
   });
 });
 
@@ -146,7 +124,7 @@ describe('ensureOrchestratorWorkspace — per-session targetDir', () => {
     const result = ensureOrchestratorWorkspace(customDir);
     expect(result.workspaceDir).toBe(customDir);
     expect(fs.existsSync(path.join(customDir, 'CLAUDE.md'))).toBe(true);
-    expect(fs.existsSync(path.join(customDir, '.claude', 'settings.json'))).toBe(true);
+    expect(fs.existsSync(projectCommMdPath(customDir))).toBe(true);
     // The legacy global workspace was NOT created — only `customDir`.
     expect(fs.existsSync(path.join(orchestratorWorkspaceDir(), 'CLAUDE.md'))).toBe(false);
   });
@@ -173,7 +151,6 @@ describe('ensureOrchestratorWorkspace — idempotency and refresh', () => {
     const second = ensureOrchestratorWorkspace();
     expect(second.claudeMd).toBe('unchanged');
     expect(second.commMd).toBe('unchanged');
-    expect(second.settingsJson).toBe('unchanged');
   });
 
   test('overwrites stale CLAUDE.md content on next call', () => {
@@ -191,22 +168,6 @@ describe('ensureOrchestratorWorkspace — idempotency and refresh', () => {
     expect(after).not.toBe('old garbage content\n');
     expect(after).toContain('# Orchestrator');
     expect(after).toContain(`@${PROJECT_COMM_MD_REL}`);
-  });
-
-  test('overwrites stale settings.json content on next call', () => {
-    ensureOrchestratorWorkspace();
-    const settingsPath = path.join(orchestratorWorkspaceDir(), '.claude', 'settings.json');
-
-    // Hostile / stale settings.json — Cebab owns it, so we refresh.
-    fs.writeFileSync(settingsPath, JSON.stringify({ env: { OPS_INJECTION: 'evil' } }, null, 2));
-
-    const result = ensureOrchestratorWorkspace();
-    expect(result.settingsJson).toBe('updated');
-
-    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-    expect(after.env.OPS_INJECTION).toBeUndefined();
-    expect(after.env.BUS_AGENT_NAME).toBe(ORCHESTRATOR_AGENT_NAME);
-    expect(after.hooks.Stop).toHaveLength(1);
   });
 
   test('overwrites stale comm.md content on next call', () => {
@@ -266,7 +227,7 @@ function buildRouter(
   return { router, sessionId, onEvent, onEnded };
 }
 
-function makeEvent(overrides: Partial<BusLogEvent> = {}): BusLogEvent {
+function makeEvent(overrides: Partial<BusEvent> = {}): BusEvent {
   return {
     ts: Date.now(),
     source: 'reviewer',

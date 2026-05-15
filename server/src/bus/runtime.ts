@@ -144,9 +144,9 @@ export function writeInboxMessage(opts: {
 }
 
 /**
- * Render the chain briefing message for one participant. Sent to each
- * worker's inbox at chain start, before any task input lands. Concatenated
- * with the first real message when the worker's Stop hook drains the inbox.
+ * Render the chain briefing for one participant. Prepended once to that
+ * agent's first turn (the tmux model wrote it to an inbox; the pure-SDK
+ * runtime rides it on the first prompt — see chain.ts `deliver`).
  *
  * The text is plain English (not JSON) — the recipient is a language model,
  * not a parser. Keep it short and explicit; long preambles eat context.
@@ -175,24 +175,28 @@ export function renderChainBriefing(opts: {
       others.length === 0 ? '(none)' : others.map(tag).join(', ')
     }.`,
     ``,
+    `You communicate through the \`bus_send\` tool — an in-process tool, not a`,
+    `shell script. There is no inbox to check and no terminal: Cebab delivers`,
+    `each turn to you and forwards whatever you send.`,
+    ``,
     isLast
       ? `You are the last step. When you finish, send your final reply to the sink so Cebab can archive the iteration:`
       : `When you finish your work, send your reply to the next step:`,
     ``,
-    `    bus-send-msg.sh --kind ${isLast ? 'final' : 'reply'} ${sanitizeForPrompt(nextHop)} "<your reply>"`,
+    `    bus_send(recipient="${sanitizeForPrompt(nextHop)}", kind="${
+      isLast ? 'final' : 'reply'
+    }", text="<your ${isLast ? 'final ' : ''}reply>")`,
     ``,
-    `Or pipe via stdin for a longer reply:`,
-    ``,
-    `    echo "<your reply>" | bus-send-msg.sh --kind ${isLast ? 'final' : 'reply'} ${sanitizeForPrompt(nextHop)}`,
-    ``,
-    `Do not message anyone else. Wait for further instructions; the next message in your inbox is the actual task input.`,
+    `Send exactly one ${
+      isLast ? '`final`' : '`reply`'
+    } message when you are done. Do not message anyone else. The task you need to work on follows below.`,
   ].join('\n');
 }
 
 /**
- * Render the session-intro message Cebab writes into the orchestrator's
- * inbox at orchestrator-routed session start. Lists the participants by
- * bus slug + project name so the orchestrator knows who's available,
+ * Render the session-intro message Cebab delivers as the orchestrator's
+ * first turn at orchestrator-routed session start. Lists the participants
+ * by bus slug + project name so the orchestrator knows who's available,
  * instructs it to send `intro` to each (with a capability-handshake ask
  * so workers self-describe), and surfaces the hop budget.
  *
@@ -202,7 +206,7 @@ export function renderChainBriefing(opts: {
  *
  * Note: the orchestrator's CLAUDE.md template documents the same
  * capability-handshake flow at a higher level; this prompt is the
- * per-session reminder with the concrete `bus-send-msg.sh` example.
+ * per-session reminder with the concrete `bus_send` example.
  */
 export function renderRosterPrompt(opts: {
   workers: Array<{ agentName: string; projectName: string }>;
@@ -223,30 +227,32 @@ export function renderRosterPrompt(opts: {
       .map((w) => sanitizeForPrompt(w.agentName))
       .join(', ') || '(none)';
   return [
-    `You are the orchestrator for a new multi-agent session. The participants below are running in their own tmux windows and have been briefed on the bus protocol; they're waiting for you to introduce them to the conversation.`,
+    `You are the orchestrator for a new multi-agent session. The participants below are managed in-process by Cebab and have been briefed on the bus protocol; they're waiting for you to introduce them to the conversation.`,
+    ``,
+    `You talk to participants through the \`bus_send\` tool (recipient = an agent slug, or \`user\` for the operator-facing final answer). It is an in-process tool — there is no inbox, no shell script, no \`bus.log\`. Cebab delivers each participant reply to you as your next turn.`,
     ``,
     `Participants:`,
     ...workers.map((w) => `- ${tagAgent(w.agentName)} — ${sanitizeForPrompt(w.projectName)}`),
     ``,
     `The bus slugs and project names above are what Cebab knows. You don't yet know what each agent is best at — that's what Step 1 is for.`,
     ``,
-    `Step 1: send a \`kind=intro\` message to each participant. Tell them they're in a multi-agent conversation, name the other participants, ask them to reply only to you, AND ask them to send back a brief (2-3 sentence) self-description so you know what kinds of tasks each one is best at. Example for ${tagAgent(firstAgent)}:`,
+    `Step 1: call \`bus_send\` with kind=intro to each participant. Tell them they're in a multi-agent conversation, name the other participants, ask them to reply only to you, AND ask them to send back a brief (2-3 sentence) self-description so you know what kinds of tasks each one is best at. Example for ${tagAgent(firstAgent)}:`,
     ``,
-    `    bus-send-msg.sh --kind intro ${firstAgentSafe} "You are part of a multi-agent conversation. Other participants: ${otherAgents}. Reply only to me (orchestrator). Before we start: please send me a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at. I'll use this to route user prompts to whoever fits best."`,
+    `    bus_send(recipient="${firstAgentSafe}", kind="intro", text="You are part of a multi-agent conversation. Other participants: ${otherAgents}. Reply only to me (orchestrator). Before we start: please send me a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at. I'll use this to route user prompts to whoever fits best.")`,
     ``,
-    `Step 2: wait for each worker's \`kind=reply\` with their self-description before routing the first user prompt. The user's first prompt is the next message in your inbox after this one — but route it only after you've collected capability replies from every participant. Use those descriptions to inform routing.`,
+    `Step 2: wait for each worker's \`reply\` with their self-description before routing the first user prompt. The user's first prompt arrives as your next turn after this one — but route it only after you've collected capability replies from every participant. Use those descriptions to inform routing.`,
     ``,
     `Hop budget: ${hopBudget} hops per user prompt (soft cap — do a progress self-check at hop 5). Intro replies don't count toward the budget.`,
     ``,
-    `When you have a complete answer for the user, send \`kind=final\` to recipient \`user\` — Cebab forwards that to the operator's chat UI.`,
+    `When you have a complete answer for the user, call \`bus_send\` with kind=final to recipient \`user\` — Cebab forwards that to the operator's chat UI.`,
   ].join('\n');
 }
 
 /**
- * Roster update for a mid-session `add_multi_agent_participant`. Sent
- * to the orchestrator's inbox so the LLM learns about the new
- * participant on its next turn. Same `<participant>` sanitization +
- * delimiting as `renderRosterPrompt`.
+ * Roster update for a mid-session `add_multi_agent_participant`. Delivered
+ * as the orchestrator's next turn so the LLM learns about the new
+ * participant. Same `<participant>` sanitization + delimiting as
+ * `renderRosterPrompt`.
  *
  * `currentWorkers` is the FULL post-add roster (including the new
  * participant). The orchestrator should treat this as authoritative —
@@ -268,9 +274,9 @@ export function renderRosterUpdate(opts: {
       (w) => `- ${tagAgent(w.agentName)} — ${sanitizeForPrompt(w.projectName)}`,
     ),
     ``,
-    `Send the new participant a \`kind=intro\` message and collect their capability self-description, same as Step 1 of the original roster. Example:`,
+    `Call \`bus_send\` with kind=intro to the new participant and collect their capability self-description, same as Step 1 of the original roster. Example:`,
     ``,
-    `    bus-send-msg.sh --kind intro ${newAgentSafe} "You are joining a multi-agent conversation already in progress. Reply only to me (orchestrator). Please send a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at."`,
+    `    bus_send(recipient="${newAgentSafe}", kind="intro", text="You are joining a multi-agent conversation already in progress. Reply only to me (orchestrator). Please send a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at.")`,
     ``,
     `Once they reply, route to them just like any existing worker. Hop budget for the current user prompt remains ${hopBudget}.`,
   ].join('\n');

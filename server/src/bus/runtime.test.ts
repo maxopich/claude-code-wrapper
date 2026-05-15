@@ -65,8 +65,8 @@ describe('renderChainBriefing', () => {
     expect(text).toContain('coder');
     // The non-last guidance.
     expect(text).toContain('send your reply to the next step');
-    // The exact bus command, with the right kind tag.
-    expect(text).toMatch(/bus-send-msg\.sh --kind reply coder/);
+    // The exact bus_send tool call, with the right kind.
+    expect(text).toMatch(/bus_send\(recipient="coder", kind="reply"/);
   });
 
   test('flags the last step and routes to _sink', () => {
@@ -80,7 +80,7 @@ describe('renderChainBriefing', () => {
     });
     expect(text).toContain('step 3 of 3');
     expect(text).toContain('You are the last step');
-    expect(text).toMatch(/bus-send-msg\.sh --kind final _sink/);
+    expect(text).toMatch(/bus_send\(recipient="_sink", kind="final"/);
   });
 });
 
@@ -123,7 +123,7 @@ describe('renderRosterPrompt', () => {
     });
     // Example targets the first worker (reviewer) — "Other participants"
     // should list everyone EXCEPT reviewer.
-    expect(text).toMatch(/bus-send-msg\.sh --kind intro reviewer/);
+    expect(text).toMatch(/bus_send\(recipient="reviewer", kind="intro"/);
     expect(text).toContain('Other participants: evaluator, coder');
   });
 

@@ -6,18 +6,18 @@
  * reply back to the user. Its bus name is always `orchestrator`.
  *
  * Unlike worker projects (operator-owned), the orchestrator workspace is
- * Cebab-owned end-to-end: we ship a static CLAUDE.md template, generate
- * comm.md and `.claude/settings.json` from code, and overwrite them on
- * every call so a Cebab upgrade can roll out new behaviour without manual
- * intervention by the operator.
+ * Cebab-owned end-to-end: we ship a static CLAUDE.md template and generate
+ * comm.md from code, overwriting them on every call so a Cebab upgrade can
+ * roll out new behaviour without manual intervention by the operator. No
+ * settings.json is written — the orchestrator runs with
+ * `settingSources: ['user']`, so a workspace settings.json would never be
+ * read (its old Stop hook / bus-script perms are dead under pure-SDK).
  *
  * Layout produced by `ensureOrchestratorWorkspace()`:
  *
  *   <workspaceDir>/
  *     CLAUDE.md              # static template + path substitution
  *     .cebab/comm.md         # rendered protocol doc (imported via @.cebab/comm.md)
- *     .claude/
- *       settings.json        # BUS_AGENT_NAME, bus-script perms, Stop hook
  *
  * The legacy global `~/.cebab/orchestrator/` path is the default `targetDir`
  * for callers that don't pass one (pre-007 backwards compat + unit tests).
@@ -46,7 +46,6 @@ import {
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
 import {
-  busBinDir,
   computeSessionPaths,
   orchestratorWorkspaceDir,
   PROJECT_COMM_MD_REL,
@@ -55,7 +54,7 @@ import {
   type SessionPaths,
 } from './paths.js';
 import { renderCommMd } from './comm.js';
-import { ensureBusBootstrap, installBusForProject, uninstallBusForProject } from './install.js';
+import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
   CEBAB_SOURCE,
   nextIterationId,
@@ -89,8 +88,6 @@ export const DEFAULT_HOP_BUDGET = 8;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const SCRIPT_FILES = ['bus-send-msg.sh', 'bus-check-inbox.sh', 'bus-status.sh'] as const;
-
 const COMM_PATH_PLACEHOLDER = '{{BUS_COMM_PATH}}';
 
 /**
@@ -114,7 +111,6 @@ export type EnsureOrchestratorResult = {
   workspaceDir: string;
   claudeMd: 'created' | 'updated' | 'unchanged';
   commMd: 'created' | 'updated' | 'unchanged';
-  settingsJson: 'created' | 'updated' | 'unchanged';
 };
 
 /**
@@ -128,12 +124,8 @@ export type EnsureOrchestratorResult = {
  * so the `@import` line in CLAUDE.md is workspace-relative.
  */
 export function ensureOrchestratorWorkspace(targetDir?: string): EnsureOrchestratorResult {
-  // Bus root + scripts (stable global state). Safe to call repeatedly.
-  ensureBusBootstrap();
-
   const wsDir = targetDir ?? orchestratorWorkspaceDir();
   fs.mkdirSync(wsDir, { recursive: true });
-  fs.mkdirSync(path.join(wsDir, '.claude'), { recursive: true });
   fs.mkdirSync(projectCebabDir(wsDir), { recursive: true });
 
   const templateDir = templateSourceDir();
@@ -143,12 +135,7 @@ export function ensureOrchestratorWorkspace(targetDir?: string): EnsureOrchestra
 
   const commMd = writeIfChanged(projectCommMdPath(wsDir), renderCommMd(ORCHESTRATOR_AGENT_NAME));
 
-  const settingsJson = writeIfChanged(
-    path.join(wsDir, '.claude', 'settings.json'),
-    renderOrchestratorSettingsJson(),
-  );
-
-  return { workspaceDir: wsDir, claudeMd, commMd, settingsJson };
+  return { workspaceDir: wsDir, claudeMd, commMd };
 }
 
 /**
@@ -157,39 +144,6 @@ export function ensureOrchestratorWorkspace(targetDir?: string): EnsureOrchestra
  */
 function renderClaudeMd(template: string): string {
   return template.split(COMM_PATH_PLACEHOLDER).join(PROJECT_COMM_MD_REL);
-}
-
-/**
- * Render the orchestrator's `.claude/settings.json`. Retained for workspace
- * shape stability; under the pure-SDK runtime the orchestrator runs with
- * `settingSources: ['user']`, so this file's Stop hook / perms are inert
- * (the bus protocol is delivered via the prompt, not a hook). Phase 5
- * trims this; kept now to minimize churn.
- */
-function renderOrchestratorSettingsJson(): string {
-  const bin = busBinDir();
-  const settings = {
-    env: {
-      BUS_AGENT_NAME: ORCHESTRATOR_AGENT_NAME,
-    },
-    permissions: {
-      allow: SCRIPT_FILES.map((s) => `Bash(${path.join(bin, s)}:*)`),
-    },
-    hooks: {
-      Stop: [
-        {
-          matcher: '',
-          hooks: [
-            {
-              type: 'command',
-              command: `${path.join(bin, 'bus-check-inbox.sh')} ${ORCHESTRATOR_AGENT_NAME}`,
-            },
-          ],
-        },
-      ],
-    },
-  };
-  return JSON.stringify(settings, null, 2) + '\n';
 }
 
 function writeIfChanged(filePath: string, content: string): 'created' | 'updated' | 'unchanged' {
