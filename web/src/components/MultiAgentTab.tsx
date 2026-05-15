@@ -547,15 +547,14 @@ function TemplateRow(props: {
       {resolved.length === 0 ? (
         <div className="iteration-participants">(no resolvable participants)</div>
       ) : isOrchestrator ? (
-        <div className="iteration-participants template-topo">
+        <div className="iteration-participants topo-tree">
           <div className="topo-hub">orchestrator</div>
-          <ul className="topo-spokes">
+          <ul className="topo-row">
             {resolved.map((p) => (
-              <li key={p.id} className="topo-worker">
-                <span className="topo-link" aria-hidden="true">
-                  ↕
+              <li key={p.id}>
+                <span className="topo-worker" title={p.name}>
+                  {p.name}
                 </span>
-                <span className="topo-worker-name">{p.name}</span>
               </li>
             ))}
           </ul>

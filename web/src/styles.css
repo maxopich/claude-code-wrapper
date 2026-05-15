@@ -1074,36 +1074,96 @@ pre {
   color: var(--fg-2);
   font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
-.template-topo {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
+/* Orchestrator template topology: a hub-and-spoke org chart drawn with
+ * pure-CSS bracket connectors (no library). The hub is the synthetic
+ * 'orchestrator'; each worker hangs off a shared bus bar. */
+.topo-tree {
+  text-align: center;
+  padding: 2px 0 4px;
 }
-.template-topo .topo-hub {
+.topo-tree .topo-hub {
+  display: inline-block;
+  position: relative;
+  z-index: 1;
+  padding: 4px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: rgba(110, 168, 254, 0.1);
+  color: var(--accent);
   font-weight: 600;
-  color: var(--fg);
 }
-.template-topo .topo-spokes {
+/* stem from the hub down to the bus bar */
+.topo-tree .topo-hub::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  width: 0;
+  height: 16px;
+  border-left: 1px solid var(--fg-3);
+}
+.topo-tree .topo-row {
   display: flex;
-  flex-wrap: wrap;
   justify-content: center;
-  gap: 4px 14px;
   list-style: none;
-  padding: 0;
   margin: 0;
+  padding: 16px 0 0;
+  overflow-x: auto;
 }
-.template-topo .topo-worker {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  line-height: 1.2;
+.topo-tree .topo-row li {
+  position: relative;
+  padding: 16px 7px 0;
 }
-.template-topo .topo-link {
-  color: var(--fg-3);
+/* half-width segments meeting at center form the bus bar; the ::after
+ * border-left is the vertical drop from the bar to each worker chip */
+.topo-tree .topo-row li::before,
+.topo-tree .topo-row li::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 50%;
+  width: 50%;
+  height: 16px;
+  border-top: 1px solid var(--fg-3);
 }
-.template-topo .topo-worker-name {
+.topo-tree .topo-row li::after {
+  right: auto;
+  left: 50%;
+  border-left: 1px solid var(--fg-3);
+}
+/* trim the bar's outer ends and round the corners where it turns down */
+.topo-tree .topo-row li:first-child::before,
+.topo-tree .topo-row li:last-child::after {
+  border: 0 none;
+}
+.topo-tree .topo-row li:last-child::before {
+  border-right: 1px solid var(--fg-3);
+  border-radius: 0 6px 0 0;
+}
+.topo-tree .topo-row li:first-child::after {
+  border-radius: 6px 0 0 0;
+}
+/* single worker: no bar, just a straight stem→drop (placed last so it
+ * overrides the first/last-child rules, since only-child is both) */
+.topo-tree .topo-row li:only-child::before {
+  display: none;
+}
+.topo-tree .topo-row li:only-child::after {
+  right: auto;
+  left: 50%;
+  border-top: 0;
+  border-right: 0;
+  border-radius: 0;
+  border-left: 1px solid var(--fg-3);
+}
+.topo-tree .topo-worker {
+  display: inline-block;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-3);
   color: var(--fg-2);
+  white-space: nowrap;
 }
 .iteration-path {
   display: flex;
