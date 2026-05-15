@@ -19,6 +19,10 @@ export type RunOptions = {
   maxTurns?: number;
   /** Which scopes of settings.json the SDK should layer. Default: ['user']. */
   settingSources?: SettingSource[];
+  /** In-process MCP servers (e.g. the multi-agent `bus_send` tool). */
+  mcpServers?: Options['mcpServers'];
+  /** Required by the SDK when permissionMode is 'bypassPermissions'. */
+  allowDangerouslySkipPermissions?: boolean;
   /** External cancellation. */
   abortController?: AbortController;
 };
@@ -62,6 +66,8 @@ export function runClaude(opts: RunOptions): Query {
   if (opts.sessionId) options.sessionId = opts.sessionId;
   if (opts.resume) options.resume = opts.resume;
   if (opts.maxTurns !== undefined) options.maxTurns = opts.maxTurns;
+  if (opts.mcpServers) options.mcpServers = opts.mcpServers;
+  if (opts.allowDangerouslySkipPermissions) options.allowDangerouslySkipPermissions = true;
 
   return query({ prompt: opts.prompt, options });
 }
