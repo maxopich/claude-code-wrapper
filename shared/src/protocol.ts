@@ -172,6 +172,17 @@ export type ClientMsg =
     }
   | {
       /**
+       * Manually re-attach to a still-alive multi-agent session whose tmux
+       * is still running (e.g. a row the single-active sweep marked crashed
+       * while its agents kept running, or a dropped connection). Pure
+       * re-attach: no tmux/agent respawn. Fails with `wrapper_error` if
+       * another session is active or the tmux is gone.
+       */
+      type: 'resume_multi_agent';
+      sessionId: string;
+    }
+  | {
+      /**
        * Forward a user prompt to the active orchestrator-routed session.
        * Cebab writes the text to the orchestrator's bus inbox (`kind=prompt`,
        * `source=cebab`) and wakes its TUI; the orchestrator then routes it
@@ -248,6 +259,29 @@ export type ClientMsg =
       type: 'add_multi_agent_participant';
       sessionId: string;
       projectId: number;
+    }
+  | {
+      /** Ask the server for saved multi-agent templates. Reply: `templates`. */
+      type: 'list_templates';
+    }
+  | {
+      /**
+       * Upsert a multi-agent draft preset by exact name. Saving an existing
+       * name overwrites mode/lifecycle/participants but keeps the stored id;
+       * a new name gets a fresh server-minted id. No prompt is stored — the
+       * operator always types a fresh first prompt. Reply: a fresh
+       * `templates` ServerMsg.
+       */
+      type: 'save_template';
+      name: string;
+      mode: 'chain' | 'orchestrator';
+      lifecycle: MultiAgentLifecycle;
+      participants: number[];
+    }
+  | {
+      /** Delete a template by id. Reply: a fresh `templates` ServerMsg. */
+      type: 'delete_template';
+      id: string;
     };
 
 // ---- Server → Browser ----
@@ -392,6 +426,15 @@ export type ServerMsg =
     }
   | {
       /**
+       * Reply to `list_templates` / `save_template` / `delete_template`.
+       * The full current template list — the client replaces its cache
+       * wholesale (same contract as `iterations`).
+       */
+      type: 'templates';
+      items: MultiAgentTemplate[];
+    }
+  | {
+      /**
        * Echo of a successful `set_multi_agent_lifecycle`. The reducer
        * updates `MultiAgentRun.lifecycle` so the UI affordances
        * (End-button confirm dialog, settings panel) reflect the new
@@ -438,6 +481,14 @@ export type IterationSummary = {
   participantAgentNames: string[];
   /** Absolute path to `~/.cebab/bus/iterations/<iterationId>/`. */
   artifactsDir: string;
+  /**
+   * True iff this session's tmux is still alive and it can be re-attached
+   * (no respawn). Computed server-side at list time and re-validated when
+   * the operator actually requests `resume_multi_agent`. `completed` rows
+   * are never resumable; `stopped` rows had their tmux killed so they're
+   * resumable only in the rare case the kill didn't take.
+   */
+  resumable: boolean;
 };
 
 export type MultiAgentEventKind = 'intro' | 'prompt' | 'reply' | 'final' | 'error';
@@ -449,6 +500,22 @@ export type MultiAgentEventKind = 'intro' | 'prompt' | 'reply' | 'final' | 'erro
  * absent `lifecycle` field in `start_multi_agent` resolves safely.
  */
 export type MultiAgentLifecycle = 'persistent' | 'temp';
+
+/**
+ * A saved multi-agent draft preset. Stores everything needed to refill the
+ * draft EXCEPT the prompt — the operator always types a fresh first prompt.
+ * Persisted server-side as a single JSON array under one `settings` row
+ * (no dedicated table), mirroring the iterations browser's architecture.
+ */
+export type MultiAgentTemplate = {
+  /** Stable server-minted id; the delete key. Names are mutable, ids aren't. */
+  id: string;
+  name: string;
+  mode: 'chain' | 'orchestrator';
+  lifecycle: MultiAgentLifecycle;
+  /** Ordered project ids — same semantics as `start_multi_agent.participants`. */
+  participants: number[];
+};
 
 export const MULTI_AGENT_EVENT_KINDS: ReadonlySet<MultiAgentEventKind> = new Set([
   'intro',

@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
-import type { IterationSummary, MultiAgentLifecycle, Project } from '@cebab/shared/protocol';
+import type {
+  IterationSummary,
+  MultiAgentLifecycle,
+  MultiAgentTemplate,
+  Project,
+} from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
+import { Markdown } from './Markdown';
 
 /**
  * Multi-Agent tab.
@@ -34,12 +40,19 @@ export function MultiAgentTab(props: {
   onStartChain: () => void;
   onStartOrchestrator: () => void;
   onStopMultiAgent: (sessionId: string) => void;
+  onResumeSession: (sessionId: string) => void;
+  /** Monotonic; bumps on every wrapper_error so pending spinners clear on failure. */
+  wrapperErrorSeq: number;
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
+  onRefreshTemplates: () => void;
+  onSaveTemplate: (name: string) => void;
+  onDeleteTemplate: (id: string) => void;
+  onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
   const { multiAgent, projects } = props;
   if (multiAgent.active) {
@@ -71,13 +84,34 @@ function DraftView(props: {
   onSetDraftPrompt: (text: string) => void;
   onStartChain: () => void;
   onStartOrchestrator: () => void;
+  onResumeSession: (sessionId: string) => void;
+  wrapperErrorSeq: number;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
+  onSaveTemplate: (name: string) => void;
+  onDeleteTemplate: (id: string) => void;
+  onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
   const { multiAgent, projects } = props;
   const participants = multiAgent.draftParticipants
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
+  const [namingOpen, setNamingOpen] = useState(false);
+  // In-flight signals for async WS round-trips. Cleared on success (this
+  // view unmounts when a session becomes active) or on wrapperErrorSeq
+  // bumping (the attempt failed and we stayed on the draft view).
+  const [pendingResumeId, setPendingResumeId] = useState<string | null>(null);
+  const [startPending, setStartPending] = useState<'chain' | 'orchestrator' | null>(null);
+  const [clearPending, setClearPending] = useState(false);
+  useEffect(() => {
+    setPendingResumeId(null);
+    setStartPending(null);
+  }, [props.wrapperErrorSeq]);
+  useEffect(() => {
+    // Iterations list replaced (refresh / clear reply) — drop stale spinners.
+    setPendingResumeId(null);
+    setClearPending(false);
+  }, [multiAgent.iterations]);
 
   function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
     // The browser only fires `drop` if we preventDefault here — otherwise
@@ -124,6 +158,40 @@ function DraftView(props: {
           Drag projects from the sidebar to build a participant list, then pick a mode.
         </p>
       </header>
+
+      <section className="multi-agent-section">
+        <div className="iterations-header">
+          <h3>Templates</h3>
+          <div className="iterations-actions">
+            <button
+              className="ghost-btn"
+              disabled={participants.length === 0}
+              title={
+                participants.length === 0
+                  ? 'Add at least one participant before saving a template.'
+                  : 'Save the current mode, lifecycle, and participant list as a reusable preset.'
+              }
+              onClick={() => setNamingOpen(true)}
+            >
+              Save current as template
+            </button>
+          </div>
+        </div>
+        {multiAgent.lastAppliedDropped > 0 && (
+          <p className="multi-agent-warning">
+            {multiAgent.lastAppliedDropped} participant
+            {multiAgent.lastAppliedDropped === 1 ? '' : 's'} from this template
+            {multiAgent.lastAppliedDropped === 1 ? ' is' : ' are'} no longer in the workspace and{' '}
+            {multiAgent.lastAppliedDropped === 1 ? 'was' : 'were'} skipped.
+          </p>
+        )}
+        <TemplatesList
+          items={multiAgent.templates}
+          projects={projects}
+          onApply={props.onApplyTemplate}
+          onDelete={props.onDeleteTemplate}
+        />
+      </section>
 
       <section className="multi-agent-section">
         <h3>Mode</h3>
@@ -298,27 +366,47 @@ function DraftView(props: {
         <div className="multi-agent-actions">
           <button
             className="primary-btn"
-            disabled={!orchestratorReady || !promptReady}
+            disabled={!orchestratorReady || !promptReady || startPending !== null}
             title={
               orchestratorReady && promptReady
                 ? "Spawns the canonical orchestrator TUI plus one worker TUI per participant in tmux. The orchestrator routes each user prompt to whichever worker fits, then replies to the user when it's done."
                 : 'Pick orchestrator mode, add at least one bus-installed participant, and type an initial prompt.'
             }
-            onClick={props.onStartOrchestrator}
+            onClick={() => {
+              setStartPending('orchestrator');
+              props.onStartOrchestrator();
+            }}
           >
-            Start orchestrator-routed
+            {startPending === 'orchestrator' ? (
+              <>
+                <span className="btn-spinner" />
+                Starting…
+              </>
+            ) : (
+              'Start orchestrator-routed'
+            )}
           </button>
           <button
             className="primary-btn"
-            disabled={!chainReady || !promptReady}
+            disabled={!chainReady || !promptReady || startPending !== null}
             title={
               chainReady && promptReady
                 ? 'Spawns a tmux session with one window per participant, writes the initial prompt to the first inbox, and forwards each reply through the chain.'
                 : 'Pick chain mode, add at least two bus-installed participants, and type an initial prompt.'
             }
-            onClick={props.onStartChain}
+            onClick={() => {
+              setStartPending('chain');
+              props.onStartChain();
+            }}
           >
-            Start fixed chain
+            {startPending === 'chain' ? (
+              <>
+                <span className="btn-spinner" />
+                Starting…
+              </>
+            ) : (
+              'Start fixed chain'
+            )}
           </button>
         </div>
         {validation !== null && <p className="multi-agent-warning">{validation}</p>}
@@ -342,6 +430,7 @@ function DraftView(props: {
               // server preserves the running row, so a click would be a
               // no-op, but the affordance reads as misleading.
               disabled={
+                clearPending ||
                 multiAgent.iterations === null ||
                 multiAgent.iterations.length === 0 ||
                 multiAgent.iterations.every((it) => it.status === 'running')
@@ -364,22 +453,188 @@ function DraftView(props: {
                       `On-disk transcripts and prompt/reply files inside each session folder stay where they are; you can still inspect them by path.`,
                   )
                 ) {
+                  setClearPending(true);
                   props.onClearIterations();
                 }
               }}
               title="Reap orphan cebab-bus-* tmux sessions AND remove finished iterations from the list. On-disk artifacts are preserved; running sessions (if any) are kept."
             >
-              Clear
+              {clearPending ? (
+                <>
+                  <span className="btn-spinner" />
+                  Clearing…
+                </>
+              ) : (
+                'Clear'
+              )}
             </button>
           </div>
         </div>
-        <IterationsList items={multiAgent.iterations} />
+        <IterationsList
+          items={multiAgent.iterations}
+          pendingResumeId={pendingResumeId}
+          onResume={(sessionId) => {
+            setPendingResumeId(sessionId);
+            props.onResumeSession(sessionId);
+          }}
+        />
       </section>
+      {namingOpen && (
+        <TemplateNameModal
+          existingNames={(multiAgent.templates ?? []).map((t) => t.name)}
+          onClose={() => setNamingOpen(false)}
+          onSave={(name) => {
+            props.onSaveTemplate(name);
+            setNamingOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function IterationsList(props: { items: IterationSummary[] | null }) {
+function TemplatesList(props: {
+  items: MultiAgentTemplate[] | null;
+  projects: Project[];
+  onApply: (t: MultiAgentTemplate) => void;
+  onDelete: (id: string) => void;
+}) {
+  if (props.items === null) {
+    return <p className="iterations-empty">Loading…</p>;
+  }
+  if (props.items.length === 0) {
+    return (
+      <p className="iterations-empty">
+        No templates yet. Save a draft setup to reuse it without re-dragging.
+      </p>
+    );
+  }
+  return (
+    <ol className="iterations-list">
+      {props.items.map((t) => (
+        <TemplateRow
+          key={t.id}
+          template={t}
+          projects={props.projects}
+          onApply={props.onApply}
+          onDelete={props.onDelete}
+        />
+      ))}
+    </ol>
+  );
+}
+
+function TemplateRow(props: {
+  template: MultiAgentTemplate;
+  projects: Project[];
+  onApply: (t: MultiAgentTemplate) => void;
+  onDelete: (id: string) => void;
+}) {
+  const { template, projects } = props;
+  const resolved = template.participants
+    .map((id) => projects.find((p) => p.id === id))
+    .filter((p): p is Project => p !== undefined);
+  const unavailable = template.participants.length - resolved.length;
+  const names = resolved.map((p) => p.name).join(' → ');
+  return (
+    <li className="iteration-row">
+      <div className="iteration-head">
+        <span className="iteration-id">{template.name}</span>
+        <span className="iteration-mode">{template.mode}</span>
+        <span className="run-status">{template.lifecycle}</span>
+        <span className="iteration-when">
+          {resolved.length} participant{resolved.length === 1 ? '' : 's'}
+          {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
+        </span>
+      </div>
+      <div className="iteration-participants">
+        {names.length > 0 ? names : '(no resolvable participants)'}
+      </div>
+      <div className="iteration-path">
+        <button className="ghost-btn" onClick={() => props.onApply(template)}>
+          Apply
+        </button>
+        <button
+          className="icon-btn"
+          title="Delete template"
+          onClick={() => props.onDelete(template.id)}
+        >
+          ×
+        </button>
+      </div>
+    </li>
+  );
+}
+
+function TemplateNameModal(props: {
+  existingNames: string[];
+  onClose: () => void;
+  onSave: (name: string) => void;
+}) {
+  const [value, setValue] = useState('');
+  const trimmed = value.trim();
+  const canSave = trimmed.length > 0;
+  const isDup = props.existingNames.includes(trimmed);
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h2>Save as template</h2>
+          <button className="icon-btn" onClick={props.onClose} title="Close">
+            ✕
+          </button>
+        </header>
+        <section>
+          <label>
+            <div className="label">Template name</div>
+            <input
+              type="text"
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder="e.g. security review chain"
+              spellCheck={false}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canSave) props.onSave(trimmed);
+              }}
+            />
+          </label>
+          <p className="hint">
+            Saves the current mode, lifecycle, and participant list. The first prompt is never
+            stored — you type it fresh each time.
+          </p>
+          {isDup && (
+            <p className="hint warn">
+              A template named <code>{trimmed}</code> already exists — saving overwrites it.
+            </p>
+          )}
+        </section>
+        <footer>
+          <button className="ghost-btn" onClick={props.onClose}>
+            Cancel
+          </button>
+          <button className="primary-btn" disabled={!canSave} onClick={() => props.onSave(trimmed)}>
+            Save
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+const STATUS_TITLE: Record<IterationSummary['status'], string> = {
+  running:
+    'Live — agents and tmux are running. If this shows under past runs, Cebab lost its attachment; Resume reconnects.',
+  completed: 'Finished on its own — the run reached its final reply. Not resumable.',
+  stopped: 'Ended by you via Stop — the tmux session was killed. Not resumable.',
+  crashed:
+    "Lost — Cebab couldn't re-attach (tmux died, a newer run superseded it, or a participant lost bus integration). Resumable only if its tmux is somehow still alive.",
+};
+
+function IterationsList(props: {
+  items: IterationSummary[] | null;
+  pendingResumeId: string | null;
+  onResume: (sessionId: string) => void;
+}) {
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
   }
@@ -389,13 +644,22 @@ function IterationsList(props: { items: IterationSummary[] | null }) {
   return (
     <ol className="iterations-list">
       {props.items.map((it) => (
-        <IterationRow key={it.sessionId} item={it} />
+        <IterationRow
+          key={it.sessionId}
+          item={it}
+          resuming={props.pendingResumeId === it.sessionId}
+          onResume={props.onResume}
+        />
       ))}
     </ol>
   );
 }
 
-function IterationRow(props: { item: IterationSummary }) {
+function IterationRow(props: {
+  item: IterationSummary;
+  resuming: boolean;
+  onResume: (sessionId: string) => void;
+}) {
   const { item } = props;
   const [copied, setCopied] = useState(false);
   async function copyPath() {
@@ -416,7 +680,9 @@ function IterationRow(props: { item: IterationSummary }) {
       <div className="iteration-head">
         <span className="iteration-id">#{item.iterationId}</span>
         <span className="iteration-mode">{item.mode}</span>
-        <span className={`run-status run-status-${item.status}`}>{item.status}</span>
+        <span className={`run-status run-status-${item.status}`} title={STATUS_TITLE[item.status]}>
+          {item.status}
+        </span>
         <span className="iteration-when">
           {formatRelativeTime(item.startedAt)}
           {item.endedAt !== null && ` · ${formatDuration(item.endedAt - item.startedAt)}`}
@@ -431,6 +697,23 @@ function IterationRow(props: { item: IterationSummary }) {
       </div>
       <div className="iteration-path">
         <code>{item.artifactsDir}</code>
+        {item.resumable && (
+          <button
+            className="ghost-btn iteration-resume"
+            disabled={props.resuming}
+            title="Re-attach to this still-running session (its tmux is alive). No agents are respawned — Cebab reconnects to the live tmux and resumes routing."
+            onClick={() => props.onResume(item.sessionId)}
+          >
+            {props.resuming ? (
+              <>
+                <span className="btn-spinner" />
+                Resuming…
+              </>
+            ) : (
+              'Resume'
+            )}
+          </button>
+        )}
         <button
           className="ghost-btn iteration-copy"
           onClick={copyPath}
@@ -478,11 +761,16 @@ function ActiveRunView(props: {
   const isRunning = run.status === 'running';
   const isOrchestrator = run.mode === 'orchestrator';
   const isTemp = run.lifecycle === 'temp';
+  // Stop is in-flight until the run leaves 'running' (server's
+  // multi_agent_ended — or the synthetic 'crashed' if stop threw), at which
+  // point this whole button is replaced by Dismiss, so no clearing needed.
+  const [stopPending, setStopPending] = useState(false);
 
   function handleStop() {
     if (!isTemp) {
       // Persistent: stop is non-destructive (folder + installs survive).
       // No confirm needed.
+      setStopPending(true);
       props.onStop(run.sessionId);
       return;
     }
@@ -496,7 +784,10 @@ function ActiveRunView(props: {
         workerCount === 1 ? '' : 's'
       }\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, prompt.md / reply.md, bus.log) are wiped.`,
     );
-    if (ok) props.onStop(run.sessionId);
+    if (ok) {
+      setStopPending(true);
+      props.onStop(run.sessionId);
+    }
   }
 
   return (
@@ -505,13 +796,19 @@ function ActiveRunView(props: {
         <div>
           <h2>
             Multi-agent: <code>{run.sessionId.slice(0, 8)}</code>{' '}
-            <span className={`run-status run-status-${run.status}`}>{run.status}</span>
+            <span
+              className={`run-status run-status-${run.status}`}
+              title={STATUS_TITLE[run.status]}
+            >
+              {run.status}
+            </span>
           </h2>
         </div>
         <div className="multi-agent-active-actions">
           {isRunning ? (
             <button
               className="primary-btn"
+              disabled={stopPending}
               onClick={handleStop}
               title={
                 isTemp
@@ -519,7 +816,16 @@ function ActiveRunView(props: {
                   : 'Send SIGINT to the orchestrator window (if any) then tear down the tmux session. Folder + bus installs stay so you can resume later.'
               }
             >
-              {isTemp ? 'End & cleanup' : 'Stop'}
+              {stopPending ? (
+                <>
+                  <span className="btn-spinner" />
+                  Stopping…
+                </>
+              ) : isTemp ? (
+                'End & cleanup'
+              ) : (
+                'Stop'
+              )}
             </button>
           ) : (
             <button
@@ -833,17 +1139,60 @@ function UserPromptInput(props: { onSend: (text: string) => void }) {
 
 function EventRow(props: { event: MultiAgentEventView }) {
   const { event } = props;
+  const [collapsed, setCollapsed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   return (
     <li className={`event-row event-kind-${event.kind}`}>
       <div className="event-head">
+        <button
+          className="icon-btn event-toggle"
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? 'Show message' : 'Hide message (metadata only)'}
+          aria-expanded={!collapsed}
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
         <span className="event-source">{event.source}</span>
         <span className="event-arrow">→</span>
         <span className="event-destination">{event.destination}</span>
         <span className="event-kind">{event.kind}</span>
         <span className="event-ts">{formatTs(event.ts)}</span>
+        <button
+          className="icon-btn event-expand"
+          onClick={() => setExpanded(true)}
+          title="Open in larger window"
+        >
+          ⤢
+        </button>
       </div>
-      <pre className="event-text">{event.text}</pre>
+      {!collapsed && (
+        <div className="event-text">
+          <Markdown text={event.text} />
+        </div>
+      )}
+      {expanded && <EventModal event={event} onClose={() => setExpanded(false)} />}
     </li>
+  );
+}
+
+function EventModal(props: { event: MultiAgentEventView; onClose: () => void }) {
+  const { event } = props;
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal event-modal" onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h2>
+            {event.source} → {event.destination} · {event.kind} · {formatTs(event.ts)}
+          </h2>
+          <button className="icon-btn" onClick={props.onClose} title="Close">
+            ✕
+          </button>
+        </header>
+        <section>
+          <Markdown text={event.text} />
+        </section>
+      </div>
+    </div>
   );
 }
 

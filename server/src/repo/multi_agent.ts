@@ -93,6 +93,18 @@ export function endMultiAgentSession(id: string, status: MultiAgentStatus): void
 }
 
 /**
+ * Flip a terminal row back to `running` for a manual re-attach. Inverse of
+ * `endMultiAgentSession`. The caller MUST have already verified the tmux
+ * session is still alive; on a failed re-attach the caller restores the
+ * prior terminal status so the `resumeOnConnect` sweep stays consistent.
+ */
+export function reactivateMultiAgentSession(id: string): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET status = 'running', ended_at = NULL WHERE id = ?`)
+    .run(id);
+}
+
+/**
  * Mutate the lifecycle of an existing multi-agent session row. Used by
  * the `set_multi_agent_lifecycle` WS handler so the operator can flip
  * persistent ↔ temp mid-run after seeing how a session is going. The

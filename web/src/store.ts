@@ -3,6 +3,7 @@ import type {
   IterationSummary,
   MultiAgentEventKind,
   MultiAgentLifecycle,
+  MultiAgentTemplate,
   Project,
   ServerMsg,
   SessionPermissionMode,
@@ -120,6 +121,19 @@ export type MultiAgentState = {
    * means "fetched, no iterations recorded".
    */
   iterations: IterationSummary[] | null;
+  /**
+   * Saved draft presets, populated by the `templates` ServerMsg. `null`
+   * = not yet fetched on this connection; `[]` = fetched, none saved.
+   * Same lazy-load contract as `iterations`.
+   */
+  templates: MultiAgentTemplate[] | null;
+  /**
+   * Count of participant ids dropped by the most recent template apply
+   * because they're no longer in `projects` (deleted / workspace changed).
+   * 0 = clean apply. Reset to 0 by the next apply or any manual participant
+   * edit so a stale warning never lingers.
+   */
+  lastAppliedDropped: number;
 };
 
 export type AppState = {
@@ -149,6 +163,11 @@ export type AppState = {
   permissionModeBySession: Record<string, SessionPermissionMode>;
   // Workspace settings reported by the server. `null` means we haven't asked yet.
   settings: SettingsView | null;
+  // Monotonic counter bumped on every `wrapper_error`. Pending-state effects
+  // key off it to clear stuck spinners when an async action fails — it's the
+  // only generic "an error happened" signal (wrapper_error otherwise routes
+  // into a chat session's message list, invisible to the multi-agent tab).
+  wrapperErrorSeq: number;
   // Multi-agent draft + view state.
   multiAgent: MultiAgentState;
 };
@@ -171,6 +190,7 @@ export const initialState: AppState = {
   liveSessions: {},
   permissionModeBySession: {},
   settings: null,
+  wrapperErrorSeq: 0,
   multiAgent: {
     view: 'chat',
     mode: 'orchestrator',
@@ -179,6 +199,8 @@ export const initialState: AppState = {
     draftPrompt: '',
     active: null,
     iterations: null,
+    templates: null,
+    lastAppliedDropped: 0,
   },
 };
 
@@ -242,6 +264,7 @@ export type Action =
   | { type: 'ma_remove_participant'; projectId: number }
   | { type: 'ma_reorder_participant'; projectId: number; direction: 'up' | 'down' }
   | { type: 'ma_set_draft_prompt'; text: string }
+  | { type: 'ma_apply_template'; template: MultiAgentTemplate }
   | { type: 'ma_dismiss_active' };
 
 export function reduce(state: AppState, action: Action): AppState {
@@ -348,6 +371,7 @@ export function reduce(state: AppState, action: Action): AppState {
         multiAgent: {
           ...state.multiAgent,
           draftParticipants: [...cur, action.projectId],
+          lastAppliedDropped: 0,
         },
       };
     }
@@ -360,6 +384,7 @@ export function reduce(state: AppState, action: Action): AppState {
           draftParticipants: state.multiAgent.draftParticipants.filter(
             (id) => id !== action.projectId,
           ),
+          lastAppliedDropped: 0,
         },
       };
 
@@ -371,11 +396,33 @@ export function reduce(state: AppState, action: Action): AppState {
       if (swap < 0 || swap >= list.length) return state;
       const next = list.slice();
       [next[idx], next[swap]] = [next[swap]!, next[idx]!];
-      return { ...state, multiAgent: { ...state.multiAgent, draftParticipants: next } };
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, draftParticipants: next, lastAppliedDropped: 0 },
+      };
     }
 
     case 'ma_set_draft_prompt':
       return { ...state, multiAgent: { ...state.multiAgent, draftPrompt: action.text } };
+
+    case 'ma_apply_template': {
+      // Atomic fill: mode + lifecycle + participants in one transition.
+      // Reuse the `projects`-reducer staleness filter so a template that
+      // references a since-deleted project degrades instead of erroring;
+      // the dropped count drives a UI warning. draftPrompt is left alone.
+      const knownIds = new Set(state.projects.map((p) => p.id));
+      const filtered = action.template.participants.filter((id) => knownIds.has(id));
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          mode: action.template.mode,
+          draftLifecycle: action.template.lifecycle,
+          draftParticipants: filtered,
+          lastAppliedDropped: action.template.participants.length - filtered.length,
+        },
+      };
+    }
 
     case 'ma_dismiss_active':
       // Only allow dismissing an ended run; refusing to drop a live session
@@ -525,6 +572,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         multiAgent: { ...state.multiAgent, iterations: msg.items },
       };
     }
+
+    case 'templates':
+      // Reply to list/save/delete_template. Replace wholesale — the
+      // server is the source of truth (same contract as `iterations`).
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, templates: msg.items },
+      };
 
     case 'multi_agent_lifecycle_changed': {
       // Echo of `set_multi_agent_lifecycle`. Update the active run's
@@ -862,19 +917,22 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         messages: [],
         streamingText: '',
       };
-      return putSession(state, projectId, sessionId, {
-        ...session,
-        status: 'error',
-        messages: [
-          ...session.messages,
-          {
-            kind: 'error',
-            id: nextId(),
-            errorKind: msg.kind,
-            message: msg.message,
-          },
-        ],
-      });
+      return {
+        ...putSession(state, projectId, sessionId, {
+          ...session,
+          status: 'error',
+          messages: [
+            ...session.messages,
+            {
+              kind: 'error',
+              id: nextId(),
+              errorKind: msg.kind,
+              message: msg.message,
+            },
+          ],
+        }),
+        wrapperErrorSeq: state.wrapperErrorSeq + 1,
+      };
     }
   }
 }

@@ -1,5 +1,9 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
-import type { MultiAgentLifecycle, SessionPermissionMode } from '@cebab/shared/protocol';
+import type {
+  MultiAgentLifecycle,
+  MultiAgentTemplate,
+  SessionPermissionMode,
+} from '@cebab/shared/protocol';
 import { connectWs, type WsHandle } from './ws';
 import { activeSession, initialState, isSessionPending, reduce } from './store';
 import { ProjectList } from './components/ProjectList';
@@ -208,6 +212,11 @@ export function App() {
   function stopMultiAgent(sessionId: string) {
     wsRef.current?.send({ type: 'stop_multi_agent', sessionId });
   }
+  function resumeSession(sessionId: string) {
+    // Pure WS round-trip; success arrives as `multi_agent_started` (the
+    // reducer flips to the active-run view), failure as `wrapper_error`.
+    wsRef.current?.send({ type: 'resume_multi_agent', sessionId });
+  }
   function sendMultiAgentUserPrompt(sessionId: string, text: string) {
     // Caller (the active-run input) already trims; nothing else to validate
     // here. The reducer doesn't track an optimistic local copy — the prompt
@@ -246,18 +255,46 @@ export function App() {
     // consistent with the DB even if the WS round-trip fails.
     wsRef.current?.send({ type: 'clear_iterations' });
   }
+  function refreshTemplates() {
+    wsRef.current?.send({ type: 'list_templates' });
+  }
+  function saveTemplate(name: string) {
+    const { mode, draftLifecycle, draftParticipants } = state.multiAgent;
+    // No optimistic update — the server replies with the full refreshed
+    // `templates` list (settings is the source of truth), matching the
+    // iterations posture.
+    wsRef.current?.send({
+      type: 'save_template',
+      name,
+      mode,
+      lifecycle: draftLifecycle,
+      participants: draftParticipants,
+    });
+  }
+  function deleteTemplate(id: string) {
+    wsRef.current?.send({ type: 'delete_template', id });
+  }
+  function applyTemplate(t: MultiAgentTemplate) {
+    // Pure local reducer fill — no WS. The Start flow is unchanged; the
+    // operator types a fresh prompt and presses the existing Start button.
+    dispatch({ type: 'ma_apply_template', template: t });
+  }
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
   // refresh after each `multi_agent_ended` so a just-finished run appears
   // without an explicit user action.
   const maView = state.multiAgent.view;
   const iterationsLoaded = state.multiAgent.iterations !== null;
+  const templatesLoaded = state.multiAgent.templates !== null;
   const activeStatus = state.multiAgent.active?.status;
   useEffect(() => {
     if (maView === 'multi-agent' && !iterationsLoaded) {
       refreshIterations();
     }
-  }, [maView, iterationsLoaded]);
+    if (maView === 'multi-agent' && !templatesLoaded) {
+      refreshTemplates();
+    }
+  }, [maView, iterationsLoaded, templatesLoaded]);
   useEffect(() => {
     // status flips from 'running' → terminal exactly once per session.
     // Refresh so the iteration browser picks up the just-ended row.
@@ -370,12 +407,18 @@ export function App() {
                 onStartChain={startChain}
                 onStartOrchestrator={startOrchestrator}
                 onStopMultiAgent={stopMultiAgent}
+                onResumeSession={resumeSession}
+                wrapperErrorSeq={state.wrapperErrorSeq}
                 onSendUserPrompt={sendMultiAgentUserPrompt}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}
                 onDismissActive={dismissActiveRun}
                 onRefreshIterations={refreshIterations}
                 onClearIterations={clearIterations}
+                onRefreshTemplates={refreshTemplates}
+                onSaveTemplate={saveTemplate}
+                onDeleteTemplate={deleteTemplate}
+                onApplyTemplate={applyTemplate}
               />
             )}
           </>

@@ -24,6 +24,7 @@ import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { getSetting } from '../repo/settings.js';
+import { listTemplates, saveTemplate, deleteTemplate } from '../repo/templates.js';
 import {
   resolveWorkspaceRoot,
   rowToProject,
@@ -47,7 +48,13 @@ import {
   type OrchestratorSessionHandle,
 } from '../bus/orchestrator.js';
 import { ResolveAgentError } from '../bus/runtime.js';
-import { attemptResumeMultiAgent, type ResumeFailureReason } from '../bus/resume.js';
+import {
+  attemptResumeMultiAgent,
+  resumeMultiAgentTarget,
+  type ResumeFailureReason,
+  type ResumedSession,
+  type ResumeCallbacks,
+} from '../bus/resume.js';
 import {
   clearFinishedMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
@@ -55,7 +62,12 @@ import {
   listRunningTmuxSessionNames,
 } from '../repo/multi_agent.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
-import { killSession, listSessions as listTmuxSessions } from '../bus/tmux.js';
+import {
+  hasSession,
+  killSession,
+  listSessions as listTmuxSessions,
+  tmuxAvailable,
+} from '../bus/tmux.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type { IterationSummary } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
@@ -209,6 +221,70 @@ function onConnection(ws: WebSocket): void {
 }
 
 /**
+ * The onEvent/onEnded pair both the auto-resume sweep (`resumeOnConnect`)
+ * and the manual `resume_multi_agent` handler feed into the bus runtime:
+ * stream events to this WS and drop the active handle when it ends.
+ */
+function resumeCallbacks(conn: Conn): Pick<ResumeCallbacks, 'onEvent' | 'onEnded'> {
+  return {
+    onEvent: (sessionId, ev, dbEventId) => {
+      const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
+      send(conn.ws, {
+        type: 'multi_agent_event',
+        sessionId,
+        eventId: dbEventId,
+        ts: ev.ts,
+        source: ev.source,
+        destination: ev.destination,
+        kind,
+        text: ev.text,
+      });
+    },
+    onEnded: (sessionId, reason, iterationId) => {
+      send(conn.ws, { type: 'multi_agent_ended', sessionId, reason, iterationId });
+      if (conn.multiAgent?.sessionId === sessionId) {
+        conn.multiAgent = null;
+      }
+    },
+  };
+}
+
+/**
+ * Adopt a freshly re-attached session into this Conn and bring the browser
+ * up to date: emit `multi_agent_started` (the reducer clears the event list
+ * to []), then replay persisted events in DB-id order so the scrollback
+ * rebuilds before any live event from the re-attached tailer arrives.
+ */
+function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
+  conn.multiAgent = resumed.handle;
+  send(conn.ws, {
+    type: 'multi_agent_started',
+    sessionId: resumed.handle.sessionId,
+    mode: resumed.mode,
+    // Original `participants` (project ids) only ride the start request,
+    // not the DB row; the reducer doesn't use this field post-start.
+    participants: [],
+    participantAgentNames: resumed.handle.participantAgentNames,
+    tmuxSession: resumed.handle.tmuxSession,
+    lifecycle: resumed.handle.lifecycle,
+    sessionFolder: resumed.handle.sessionFolder,
+  });
+  for (const ev of resumed.replayEvents) {
+    const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
+    send(conn.ws, {
+      type: 'multi_agent_event',
+      sessionId: resumed.handle.sessionId,
+      eventId: ev.dbEventId,
+      ts: ev.ts,
+      source: ev.source,
+      destination: ev.destination,
+      kind,
+      text: ev.text,
+    });
+  }
+}
+
+/**
  * Async helper that runs after a WS connect: look up any active multi-agent
  * session in the DB, validate against tmux, and re-attach if alive. Catches
  * its own errors so a failed resume doesn't leak into the WS error handler.
@@ -216,36 +292,10 @@ function onConnection(ws: WebSocket): void {
 async function resumeOnConnect(conn: Conn): Promise<void> {
   try {
     const resumed = await attemptResumeMultiAgent({
-      onEvent: (sessionId, ev, dbEventId) => {
-        const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
-        send(conn.ws, {
-          type: 'multi_agent_event',
-          sessionId,
-          eventId: dbEventId,
-          ts: ev.ts,
-          source: ev.source,
-          destination: ev.destination,
-          kind,
-          text: ev.text,
-        });
-      },
-      onEnded: (sessionId, reason, iterationId) => {
-        send(conn.ws, {
-          type: 'multi_agent_ended',
-          sessionId,
-          reason,
-          iterationId,
-        });
-        if (conn.multiAgent?.sessionId === sessionId) {
-          conn.multiAgent = null;
-        }
-      },
+      ...resumeCallbacks(conn),
       onResumeFailed: (sessionId, reason) => {
         // Surface auto-resume failures as a wrapper_error toast so the
         // operator notices instead of "Cebab silently lost my session".
-        // The row is already crash-marked at this point — the toast
-        // just makes that state observable without opening the
-        // Iterations browser.
         send(conn.ws, {
           type: 'wrapper_error',
           sessionId,
@@ -255,43 +305,7 @@ async function resumeOnConnect(conn: Conn): Promise<void> {
       },
     });
     if (!resumed) return;
-
-    conn.multiAgent = resumed.handle;
-    // Tell the browser this session is active. The reducer's
-    // `multi_agent_started` case CLEARS the event list to [], so the
-    // replay below populates it fresh in DB order.
-    send(conn.ws, {
-      type: 'multi_agent_started',
-      sessionId: resumed.handle.sessionId,
-      mode: resumed.mode,
-      // We don't know the original `participants` (project ids) because
-      // they're only carried on the start request, not the DB row. The
-      // reducer doesn't use this field beyond the started message; pass
-      // an empty list. (PR 6 could DB-persist the original project ids if
-      // we ever need them client-side — out of scope here.)
-      participants: [],
-      participantAgentNames: resumed.handle.participantAgentNames,
-      tmuxSession: resumed.handle.tmuxSession,
-      lifecycle: resumed.handle.lifecycle,
-      sessionFolder: resumed.handle.sessionFolder,
-    });
-    // Replay persisted events in DB-id order. The tailer is already
-    // attached (at EOF); live events from the resumed session will arrive
-    // after this loop completes since the JS event loop is busy
-    // synchronously sending these.
-    for (const ev of resumed.replayEvents) {
-      const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
-      send(conn.ws, {
-        type: 'multi_agent_event',
-        sessionId: resumed.handle.sessionId,
-        eventId: ev.dbEventId,
-        ts: ev.ts,
-        source: ev.source,
-        destination: ev.destination,
-        kind,
-        text: ev.text,
-      });
-    }
+    emitResumedSession(conn, resumed);
   } catch (err) {
     console.error('[ws] resumeOnConnect failed', err);
   }
@@ -377,9 +391,13 @@ function seedPermissionMode(
  * Always emitting `busIterationDir(...)` collapsed both onto the legacy
  * path and broke per-session iteration browsing.
  */
-export function buildIterationsList(): IterationSummary[] {
+export async function buildIterationsList(): Promise<IterationSummary[]> {
   const rows = listMultiAgentSessionsWithIteration();
-  return rows.map((row) => {
+  // Probe tmux availability once; `hasSession` is only called for rows that
+  // could plausibly still be alive (never `completed`).
+  const tmuxOk = rows.length > 0 && (await tmuxAvailable());
+  const out: IterationSummary[] = [];
+  for (const row of rows) {
     const participants = listResolvedParticipants(row.id);
     const workerNames = participants
       .map((p) => p.bus_agent_name)
@@ -390,7 +408,15 @@ export function buildIterationsList(): IterationSummary[] {
       row.session_folder !== null
         ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
         : busIterationDir(row.iteration_id!);
-    return {
+    // A row is resumable only if its tmux session is still alive. `completed`
+    // sessions finished cleanly and are never resumed; everything else is
+    // probed. Re-validated server-side on the actual resume request.
+    const resumable =
+      row.status !== 'completed' &&
+      tmuxOk &&
+      !!row.tmux_session &&
+      (await hasSession(row.tmux_session));
+    out.push({
       iterationId: row.iteration_id!,
       sessionId: row.id,
       mode: row.mode as 'chain' | 'orchestrator',
@@ -402,8 +428,10 @@ export function buildIterationsList(): IterationSummary[] {
       // use. The filesystem layout under iterations/NNN/ is the
       // operator's source of truth — Cebab doesn't proxy it.
       artifactsDir,
-    };
-  });
+      resumable,
+    });
+  }
+  return out;
 }
 
 async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
@@ -841,6 +869,48 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       return;
     }
+    case 'resume_multi_agent': {
+      // Single-active invariant — same posture as start_multi_agent.
+      if (conn.multiAgent) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: 'Another multi-agent session is already running; stop it first.',
+        });
+        return;
+      }
+      try {
+        const result = await resumeMultiAgentTarget(msg.sessionId, resumeCallbacks(conn));
+        if (!result.ok) {
+          const message =
+            result.reason === 'not-found'
+              ? 'That session no longer exists.'
+              : result.reason === 'already-running'
+                ? 'That session is already running.'
+                : result.reason === 'tmux-missing'
+                  ? "This session's tmux is no longer alive — it can't be resumed."
+                  : 'Failed to re-attach (a participant may have lost its bus integration).';
+          send(conn.ws, {
+            type: 'wrapper_error',
+            sessionId: msg.sessionId,
+            kind: 'process_crashed',
+            message,
+          });
+          return;
+        }
+        emitResumedSession(conn, result.resumed);
+      } catch (err) {
+        console.error('[ws] resume_multi_agent failed', err);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: 'Failed to resume this session.',
+        });
+      }
+      return;
+    }
     case 'set_multi_agent_lifecycle': {
       const active = conn.multiAgent;
       if (!active || active.sessionId !== msg.sessionId) {
@@ -931,7 +1001,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'list_iterations': {
-      send(conn.ws, { type: 'iterations', items: buildIterationsList() });
+      send(conn.ws, { type: 'iterations', items: await buildIterationsList() });
       return;
     }
     case 'clear_iterations': {
@@ -967,7 +1037,25 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         console.warn('[ws] tmux orphan scan during clear failed', err);
       }
       clearFinishedMultiAgentSessions();
-      send(conn.ws, { type: 'iterations', items: buildIterationsList() });
+      send(conn.ws, { type: 'iterations', items: await buildIterationsList() });
+      return;
+    }
+    case 'list_templates': {
+      send(conn.ws, { type: 'templates', items: listTemplates() });
+      return;
+    }
+    case 'save_template': {
+      const items = saveTemplate({
+        name: msg.name,
+        mode: msg.mode,
+        lifecycle: msg.lifecycle,
+        participants: msg.participants,
+      });
+      send(conn.ws, { type: 'templates', items });
+      return;
+    }
+    case 'delete_template': {
+      send(conn.ws, { type: 'templates', items: deleteTemplate(msg.id) });
       return;
     }
     case 'send_message': {
