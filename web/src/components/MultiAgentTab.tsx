@@ -834,19 +834,60 @@ function UserPromptInput(props: { onSend: (text: string) => void }) {
 
 function EventRow(props: { event: MultiAgentEventView }) {
   const { event } = props;
+  const [collapsed, setCollapsed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   return (
     <li className={`event-row event-kind-${event.kind}`}>
       <div className="event-head">
+        <button
+          className="icon-btn event-toggle"
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? 'Show message' : 'Hide message (metadata only)'}
+          aria-expanded={!collapsed}
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
         <span className="event-source">{event.source}</span>
         <span className="event-arrow">→</span>
         <span className="event-destination">{event.destination}</span>
         <span className="event-kind">{event.kind}</span>
         <span className="event-ts">{formatTs(event.ts)}</span>
+        <button
+          className="icon-btn event-expand"
+          onClick={() => setExpanded(true)}
+          title="Open in larger window"
+        >
+          ⤢
+        </button>
       </div>
-      <div className="event-text">
-        <Markdown text={event.text} />
-      </div>
+      {!collapsed && (
+        <div className="event-text">
+          <Markdown text={event.text} />
+        </div>
+      )}
+      {expanded && <EventModal event={event} onClose={() => setExpanded(false)} />}
     </li>
+  );
+}
+
+function EventModal(props: { event: MultiAgentEventView; onClose: () => void }) {
+  const { event } = props;
+  return (
+    <div className="modal-backdrop" onClick={props.onClose}>
+      <div className="modal event-modal" onClick={(e) => e.stopPropagation()}>
+        <header>
+          <h2>
+            {event.source} → {event.destination} · {event.kind} · {formatTs(event.ts)}
+          </h2>
+          <button className="icon-btn" onClick={props.onClose} title="Close">
+            ✕
+          </button>
+        </header>
+        <section>
+          <Markdown text={event.text} />
+        </section>
+      </div>
+    </div>
   );
 }
 

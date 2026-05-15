@@ -1389,6 +1389,9 @@ pre {
 .event-text .markdown {
   font-size: 12.5px;
 }
+.modal.event-modal {
+  width: min(900px, 92vw);
+}
 
 /* ---------- Orchestrator user-prompt input (active runs only) ---------- */
 .multi-agent-input-section {
