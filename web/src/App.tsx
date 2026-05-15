@@ -17,10 +17,75 @@ const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
 const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
 
+// Sidebar layout prefs. First localStorage usage in the app — kept to two
+// plain keys, no abstraction. Reads/writes are try/catch'd so private mode
+// or a full quota can't break the app over a non-critical preference.
+const SIDEBAR_MIN = 170;
+const SIDEBAR_MAX = 480;
+const SIDEBAR_DEFAULT = 220;
+
+function clampSidebarWidth(n: number): number {
+  if (!Number.isFinite(n)) return SIDEBAR_DEFAULT;
+  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Math.round(n)));
+}
+function readStored<T>(key: string, fallback: T, parse: (raw: string) => T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw == null ? fallback : parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+function writeStored(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    /* non-critical preference — ignore */
+  }
+}
+
 export function App() {
   const [state, dispatch] = useReducer(reduce, initialState);
   const wsRef = useRef<WsHandle | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    readStored('cebab.sidebarCollapsed', false, (r) => r === 'true'),
+  );
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    readStored('cebab.sidebarWidth', SIDEBAR_DEFAULT, (r) => clampSidebarWidth(Number(r))),
+  );
+  const [sidebarResizing, setSidebarResizing] = useState(false);
+  const sidebarResizingRef = useRef(false);
+
+  useEffect(() => {
+    writeStored('cebab.sidebarCollapsed', String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+  useEffect(() => {
+    writeStored('cebab.sidebarWidth', String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  function startSidebarResize(e: React.MouseEvent) {
+    e.preventDefault();
+    sidebarResizingRef.current = true;
+    setSidebarResizing(true);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    // Sidebar's left edge is viewport x=0, so pointer x is the new width.
+    const onMove = (ev: MouseEvent) => {
+      if (sidebarResizingRef.current) setSidebarWidth(clampSidebarWidth(ev.clientX));
+    };
+    const onUp = () => {
+      sidebarResizingRef.current = false;
+      setSidebarResizing(false);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -309,14 +374,29 @@ export function App() {
   const view = state.multiAgent.view;
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      style={{
+        gridTemplateColumns: sidebarCollapsed ? '0 1fr' : `${sidebarWidth}px 1fr`,
+      }}
+    >
       <aside className="sidebar">
         <header>
           <h1>cebab</h1>
-          <span
-            className={state.connected ? 'dot on' : 'dot off'}
-            title={state.connected ? 'connected' : 'disconnected'}
-          />
+          <div className="sidebar-header-controls">
+            <span
+              className={state.connected ? 'dot on' : 'dot off'}
+              title={state.connected ? 'connected' : 'disconnected'}
+            />
+            <button
+              className="icon-btn sidebar-collapse-btn"
+              title="Hide sidebar"
+              aria-label="Hide sidebar"
+              onClick={() => setSidebarCollapsed(true)}
+            >
+              «
+            </button>
+          </div>
         </header>
         <ProjectList
           projects={state.projects}
@@ -351,7 +431,25 @@ export function App() {
             </span>
           </button>
         </footer>
+        {!sidebarCollapsed && (
+          <div
+            className={`sidebar-resizer ${sidebarResizing ? 'dragging' : ''}`}
+            onMouseDown={startSidebarResize}
+            title="Drag to resize sidebar"
+            aria-hidden="true"
+          />
+        )}
       </aside>
+      {sidebarCollapsed && (
+        <button
+          className="sidebar-reopen-btn"
+          title="Show sidebar"
+          aria-label="Show sidebar"
+          onClick={() => setSidebarCollapsed(false)}
+        >
+          »
+        </button>
+      )}
       <main className="main">
         {!workspaceReady ? (
           <div className="chat empty">

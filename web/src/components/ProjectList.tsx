@@ -47,8 +47,10 @@ export function ProjectList(props: {
                 className={`project-live-dot ${projectIsLive ? 'on' : ''}`}
                 title={projectIsLive ? 'session running' : ''}
               />
-              {p.hasClaudeMd && (
+              {p.hasClaudeMd ? (
                 <ClaudeMark className="claude-mark" title="Agent project (CLAUDE.md present)" />
+              ) : (
+                <span className="claude-mark-spacer" aria-hidden="true" />
               )}
               <span className="project-name">{p.name}</span>
               {p.busInstalled && (
