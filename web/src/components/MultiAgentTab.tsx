@@ -506,7 +506,7 @@ function TemplatesList(props: {
     );
   }
   return (
-    <ol className="iterations-list">
+    <ol className="template-list">
       {props.items.map((t) => (
         <TemplateRow
           key={t.id}
@@ -534,46 +534,48 @@ function TemplateRow(props: {
   const names = resolved.map((p) => p.name).join(' → ');
   const isOrchestrator = template.mode === 'orchestrator';
   return (
-    <li className="iteration-row">
-      <div className="iteration-head">
-        <span className="iteration-id">{template.name}</span>
-        <span className="iteration-mode">{template.mode}</span>
-        <span className="run-status">{template.lifecycle}</span>
-        <span className="iteration-when">
-          {resolved.length} participant{resolved.length === 1 ? '' : 's'}
-          {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
-        </span>
-      </div>
-      {resolved.length === 0 ? (
-        <div className="iteration-participants">(no resolvable participants)</div>
-      ) : isOrchestrator ? (
-        <div className="iteration-participants topo-tree">
-          <div className="topo-hub">orchestrator</div>
-          <ul className="topo-row">
-            {resolved.map((p) => (
-              <li key={p.id}>
-                <span className="topo-worker" title={p.name}>
-                  {p.name}
-                </span>
-              </li>
-            ))}
-          </ul>
+    <li className="template-card">
+      <button
+        className="template-del"
+        title="Delete template"
+        aria-label="Delete template"
+        onClick={() => props.onDelete(template.id)}
+      >
+        ×
+      </button>
+      <div className="template-head">
+        <div className="template-name" title={template.name}>
+          {template.name}
         </div>
-      ) : (
-        <div className="iteration-participants">{names}</div>
-      )}
-      <div className="iteration-path">
-        <button className="ghost-btn" onClick={() => props.onApply(template)}>
-          Apply
-        </button>
-        <button
-          className="icon-btn"
-          title="Delete template"
-          onClick={() => props.onDelete(template.id)}
-        >
-          ×
-        </button>
+        <div className="template-meta">
+          {template.mode} · {template.lifecycle} · {resolved.length} participant
+          {resolved.length === 1 ? '' : 's'}
+          {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
+        </div>
       </div>
+      <div className="template-body">
+        {resolved.length === 0 ? (
+          <div className="template-empty">(no resolvable participants)</div>
+        ) : isOrchestrator ? (
+          <div className="topo-tree">
+            <div className="topo-hub">orchestrator</div>
+            <ul className="topo-row">
+              {resolved.map((p) => (
+                <li key={p.id}>
+                  <span className="topo-worker" title={p.name}>
+                    {p.name}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : (
+          <div className="template-chain">{names}</div>
+        )}
+      </div>
+      <button className="template-apply" onClick={() => props.onApply(template)}>
+        Apply
+      </button>
     </li>
   );
 }

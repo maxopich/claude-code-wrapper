@@ -1074,12 +1074,117 @@ pre {
   color: var(--fg-2);
   font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
-/* Orchestrator template topology: a hub-and-spoke org chart drawn with
- * pure-CSS bracket connectors (no library). The hub is the synthetic
- * 'orchestrator'; each worker hangs off a shared bus bar. */
-.topo-tree {
+/* ── Multi-agent templates ───────────────────────────────────────────
+ * Dedicated classes (NOT the shared .iteration-* ones) so the
+ * Iterations history list is unaffected. Square tiles that wrap into
+ * a responsive grid when there are several templates. */
+.template-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 340px));
+  justify-content: start;
+  gap: 10px;
+}
+.template-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px 14px;
+  min-width: 0;
+}
+/* delete: quiet icon pinned to the corner opposite the name */
+.template-del {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.template-del:hover {
+  color: var(--fg);
+  background: var(--bg-3);
+  border-color: var(--border);
+}
+.template-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 26px;
+}
+.template-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.template-meta {
+  font-size: 11.5px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.template-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 92px;
+  padding: 2px 0;
+}
+.template-chain {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--fg-2);
   text-align: center;
-  padding: 2px 0 4px;
+  overflow-wrap: anywhere;
+}
+.template-empty {
+  font-size: 12px;
+  color: var(--fg-3);
+  font-style: italic;
+}
+.template-apply {
+  width: 100%;
+  background: transparent;
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+.template-apply:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-color: var(--accent-2);
+}
+
+/* Orchestrator topology: a hub-and-spoke org chart drawn with pure-CSS
+ * bracket connectors (no library). Equal-width columns keep the hub
+ * stem, the bus-bar midpoint and the middle worker perfectly aligned
+ * regardless of how long each agent name is. */
+.topo-tree {
+  width: 100%;
+  text-align: center;
 }
 .topo-tree .topo-hub {
   display: inline-block;
@@ -1091,6 +1196,7 @@ pre {
   background: rgba(110, 168, 254, 0.1);
   color: var(--accent);
   font-weight: 600;
+  font-size: 12px;
 }
 /* stem from the hub down to the bus bar */
 .topo-tree .topo-hub::after {
@@ -1104,15 +1210,15 @@ pre {
 }
 .topo-tree .topo-row {
   display: flex;
-  justify-content: center;
   list-style: none;
   margin: 0;
   padding: 16px 0 0;
-  overflow-x: auto;
 }
 .topo-tree .topo-row li {
+  flex: 1 1 0;
+  min-width: 0;
   position: relative;
-  padding: 16px 7px 0;
+  padding: 16px 6px 0;
 }
 /* half-width segments meeting at center form the bus bar; the ::after
  * border-left is the vertical drop from the bar to each worker chip */
@@ -1157,13 +1263,17 @@ pre {
   border-left: 1px solid var(--fg-3);
 }
 .topo-tree .topo-worker {
-  display: inline-block;
-  padding: 3px 10px;
+  display: block;
+  width: 100%;
+  padding: 3px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-3);
   color: var(--fg-2);
-  white-space: nowrap;
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
 }
 .iteration-path {
   display: flex;
