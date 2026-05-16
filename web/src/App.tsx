@@ -222,9 +222,6 @@ export function App() {
     setSettingsOpen(false);
   }
 
-  function setMultiAgentMode(mode: 'chain' | 'orchestrator') {
-    dispatch({ type: 'ma_set_mode', mode });
-  }
   function setMultiAgentLifecycle(lifecycle: MultiAgentLifecycle) {
     dispatch({ type: 'ma_set_lifecycle', lifecycle });
   }
@@ -247,8 +244,8 @@ export function App() {
     dispatch({ type: 'ma_set_draft_prompt', text });
   }
   function startChain() {
-    const { mode, draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
-    if (mode !== 'chain') return;
+    // Mode is enforced by the mounted tab (Chained Chat) — no mode guard.
+    const { draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
     if (draftPrompt.trim().length === 0) return;
     if (draftParticipants.length < 2) return;
     wsRef.current?.send({
@@ -260,8 +257,8 @@ export function App() {
     });
   }
   function startOrchestrator() {
-    const { mode, draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
-    if (mode !== 'orchestrator') return;
+    // Mode is enforced by the mounted tab (Multi-Agent) — no mode guard.
+    const { draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
     if (draftPrompt.trim().length === 0) return;
     // Orchestrator mode is hub-and-spoke; even one worker is functional
     // (degenerate, but useful for smoke testing the routing path).
@@ -325,9 +322,10 @@ export function App() {
   function refreshTemplates() {
     wsRef.current?.send({ type: 'list_templates' });
   }
-  function saveTemplate(name: string) {
-    const { mode, draftLifecycle, draftParticipants } = state.multiAgent;
-    // No optimistic update — the server replies with the full refreshed
+  function saveTemplate(name: string, notes: string, mode: 'chain' | 'orchestrator') {
+    const { draftLifecycle, draftParticipants } = state.multiAgent;
+    // Mode comes from the active tab (passed down), not draft state. No
+    // optimistic update — the server replies with the full refreshed
     // `templates` list (settings is the source of truth), matching the
     // iterations posture.
     wsRef.current?.send({
@@ -336,6 +334,20 @@ export function App() {
       mode,
       lifecycle: draftLifecycle,
       participants: draftParticipants,
+      notes,
+    });
+  }
+  function updateTemplateNotes(t: MultiAgentTemplate, notes: string) {
+    // Edit notes WITHOUT clobbering the template: save_template upserts by
+    // name and replaces mode/lifecycle/participants wholesale, so resend the
+    // template's OWN fields (not the current draft) with just notes changed.
+    wsRef.current?.send({
+      type: 'save_template',
+      name: t.name,
+      mode: t.mode,
+      lifecycle: t.lifecycle,
+      participants: t.participants,
+      notes,
     });
   }
   function deleteTemplate(id: string) {
@@ -355,10 +367,11 @@ export function App() {
   const templatesLoaded = state.multiAgent.templates !== null;
   const activeStatus = state.multiAgent.active?.status;
   useEffect(() => {
-    if (maView === 'multi-agent' && !iterationsLoaded) {
+    const onMultiTab = maView === 'multi-agent' || maView === 'chained-chat';
+    if (onMultiTab && !iterationsLoaded) {
       refreshIterations();
     }
-    if (maView === 'multi-agent' && !templatesLoaded) {
+    if (onMultiTab && !templatesLoaded) {
       refreshTemplates();
     }
   }, [maView, iterationsLoaded, templatesLoaded]);
@@ -476,7 +489,14 @@ export function App() {
                 onClick={() => dispatch({ type: 'ma_set_view', view: 'multi-agent' })}
                 aria-pressed={view === 'multi-agent'}
               >
-                Multi-agent
+                Multi-Agent
+              </button>
+              <button
+                className={`main-tab ${view === 'chained-chat' ? 'active' : ''}`}
+                onClick={() => dispatch({ type: 'ma_set_view', view: 'chained-chat' })}
+                aria-pressed={view === 'chained-chat'}
+              >
+                Chained Chat
               </button>
             </nav>
             {view === 'chat' ? (
@@ -493,9 +513,9 @@ export function App() {
               </>
             ) : (
               <MultiAgentTab
+                mode={view === 'chained-chat' ? 'chain' : 'orchestrator'}
                 projects={state.projects}
                 multiAgent={state.multiAgent}
-                onSetMode={setMultiAgentMode}
                 onSetLifecycle={setMultiAgentLifecycle}
                 onAddParticipant={addParticipant}
                 onRemoveParticipant={removeParticipant}
@@ -503,8 +523,7 @@ export function App() {
                 onInstallBus={installBus}
                 onUninstallBus={uninstallBus}
                 onSetDraftPrompt={setDraftPrompt}
-                onStartChain={startChain}
-                onStartOrchestrator={startOrchestrator}
+                onStart={view === 'chained-chat' ? startChain : startOrchestrator}
                 onStopMultiAgent={stopMultiAgent}
                 onResumeSession={resumeSession}
                 wrapperErrorSeq={state.wrapperErrorSeq}
@@ -516,6 +535,7 @@ export function App() {
                 onClearIterations={clearIterations}
                 onRefreshTemplates={refreshTemplates}
                 onSaveTemplate={saveTemplate}
+                onUpdateTemplateNotes={updateTemplateNotes}
                 onDeleteTemplate={deleteTemplate}
                 onApplyTemplate={applyTemplate}
               />

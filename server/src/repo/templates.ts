@@ -21,6 +21,7 @@ export function saveTemplate(input: {
   mode: MultiAgentTemplate['mode'];
   lifecycle: MultiAgentTemplate['lifecycle'];
   participants: number[];
+  notes?: string;
 }): MultiAgentTemplate[] {
   const name = input.name.trim();
   const list = listTemplates();
@@ -31,6 +32,7 @@ export function saveTemplate(input: {
     mode: input.mode,
     lifecycle: input.lifecycle,
     participants: input.participants,
+    notes: input.notes,
   };
   const out = idx >= 0 ? list.map((t, i) => (i === idx ? next : t)) : [...list, next];
   setSetting(SETTING_KEY, out);

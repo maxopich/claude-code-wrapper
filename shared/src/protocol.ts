@@ -278,6 +278,8 @@ export type ClientMsg =
       mode: 'chain' | 'orchestrator';
       lifecycle: MultiAgentLifecycle;
       participants: number[];
+      /** Optional freeform operator notes. Absent on pre-notes clients. */
+      notes?: string;
     }
   | {
       /** Delete a template by id. Reply: a fresh `templates` ServerMsg. */
@@ -516,6 +518,12 @@ export type MultiAgentTemplate = {
   lifecycle: MultiAgentLifecycle;
   /** Ordered project ids — same semantics as `start_multi_agent.participants`. */
   participants: number[];
+  /**
+   * Optional freeform operator notes (roles, goals, reminders). Surfaced in
+   * the expanded template card. Undefined on templates saved before this
+   * field existed — always read as `notes ?? ''`.
+   */
+  notes?: string;
 };
 
 export const MULTI_AGENT_EVENT_KINDS: ReadonlySet<MultiAgentEventKind> = new Set([

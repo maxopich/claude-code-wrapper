@@ -6,6 +6,7 @@ import type {
   Project,
 } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
+import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
 
 /**
@@ -27,9 +28,10 @@ import { Markdown } from './Markdown';
  * are the source of truth.
  */
 export function MultiAgentTab(props: {
+  /** The active tab IS the mode: orchestrator (Multi-Agent) or chain (Chained Chat). */
+  mode: 'chain' | 'orchestrator';
   projects: Project[];
   multiAgent: MultiAgentState;
-  onSetMode: (mode: 'chain' | 'orchestrator') => void;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
   onRemoveParticipant: (projectId: number) => void;
@@ -37,8 +39,7 @@ export function MultiAgentTab(props: {
   onInstallBus: (projectId: number) => void;
   onUninstallBus: (projectId: number) => void;
   onSetDraftPrompt: (text: string) => void;
-  onStartChain: () => void;
-  onStartOrchestrator: () => void;
+  onStart: () => void;
   onStopMultiAgent: (sessionId: string) => void;
   onResumeSession: (sessionId: string) => void;
   /** Monotonic; bumps on every wrapper_error so pending spinners clear on failure. */
@@ -50,7 +51,8 @@ export function MultiAgentTab(props: {
   onRefreshIterations: () => void;
   onClearIterations: () => void;
   onRefreshTemplates: () => void;
-  onSaveTemplate: (name: string) => void;
+  onSaveTemplate: (name: string, notes: string, mode: 'chain' | 'orchestrator') => void;
+  onUpdateTemplateNotes: (t: MultiAgentTemplate, notes: string) => void;
   onDeleteTemplate: (id: string) => void;
   onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
@@ -59,6 +61,7 @@ export function MultiAgentTab(props: {
     return (
       <ActiveRunView
         run={multiAgent.active}
+        tabMode={props.mode}
         projects={projects}
         onStop={props.onStopMultiAgent}
         onSendUserPrompt={props.onSendUserPrompt}
@@ -72,9 +75,9 @@ export function MultiAgentTab(props: {
 }
 
 function DraftView(props: {
+  mode: 'chain' | 'orchestrator';
   projects: Project[];
   multiAgent: MultiAgentState;
-  onSetMode: (mode: 'chain' | 'orchestrator') => void;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
   onRemoveParticipant: (projectId: number) => void;
@@ -82,13 +85,13 @@ function DraftView(props: {
   onInstallBus: (projectId: number) => void;
   onUninstallBus: (projectId: number) => void;
   onSetDraftPrompt: (text: string) => void;
-  onStartChain: () => void;
-  onStartOrchestrator: () => void;
+  onStart: () => void;
   onResumeSession: (sessionId: string) => void;
   wrapperErrorSeq: number;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
-  onSaveTemplate: (name: string) => void;
+  onSaveTemplate: (name: string, notes: string, mode: 'chain' | 'orchestrator') => void;
+  onUpdateTemplateNotes: (t: MultiAgentTemplate, notes: string) => void;
   onDeleteTemplate: (id: string) => void;
   onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
@@ -145,342 +148,283 @@ function DraftView(props: {
     props.onAddParticipant(id);
   }
 
-  const validation = validateDraft(participants, multiAgent);
-  const chainReady = validation === null && multiAgent.mode === 'chain';
-  const orchestratorReady = validation === null && multiAgent.mode === 'orchestrator';
-  const promptReady = multiAgent.draftPrompt.trim().length > 0;
+  const [iterOpen, setIterOpen] = useState(false);
+  const validation = validateDraft(participants, props.mode);
+  const startReady = validation === null && multiAgent.draftPrompt.trim().length > 0;
+  const isOrch = props.mode === 'orchestrator';
+  const tabTemplates =
+    multiAgent.templates === null
+      ? null
+      : multiAgent.templates.filter((t) => t.mode === props.mode);
+  const tabIterations =
+    multiAgent.iterations === null
+      ? null
+      : multiAgent.iterations.filter((it) => it.mode === props.mode);
+  const clearableCount = (tabIterations ?? []).filter((it) => it.status !== 'running').length;
 
   return (
-    <div className="multi-agent">
-      <header className="multi-agent-header">
-        <h2>Multi-agent</h2>
-        <p className="multi-agent-subtitle">
-          Drag projects from the sidebar to build a participant list, then pick a mode.
-        </p>
-      </header>
-
-      <section className="multi-agent-section">
-        <div className="iterations-header">
-          <h3>Templates</h3>
-          <div className="iterations-actions">
-            <button
-              className="ghost-btn"
-              disabled={participants.length === 0}
-              title={
-                participants.length === 0
-                  ? 'Add at least one participant before saving a template.'
-                  : 'Save the current mode, lifecycle, and participant list as a reusable preset.'
-              }
-              onClick={() => setNamingOpen(true)}
-            >
-              Save current as template
-            </button>
-          </div>
-        </div>
-        {multiAgent.lastAppliedDropped > 0 && (
-          <p className="multi-agent-warning">
-            {multiAgent.lastAppliedDropped} participant
-            {multiAgent.lastAppliedDropped === 1 ? '' : 's'} from this template
-            {multiAgent.lastAppliedDropped === 1 ? ' is' : ' are'} no longer in the workspace and{' '}
-            {multiAgent.lastAppliedDropped === 1 ? 'was' : 'were'} skipped.
+    <div className="multi-agent multi-agent-draft">
+      <div className="multi-agent-draft-body">
+        <header className="multi-agent-header">
+          <h2>{isOrch ? 'Multi-Agent' : 'Chained Chat'}</h2>
+          <p className="multi-agent-subtitle">
+            {isOrch
+              ? 'A coordinator agent routes each prompt to whichever participant fits, then replies when the request is done. Drag projects from the sidebar to add workers.'
+              : 'Each turn flows through the participants in order, top to bottom. The last writes the final reply Cebab archives. Drag projects from the sidebar to build the chain.'}
           </p>
-        )}
-        <TemplatesList
-          items={multiAgent.templates}
-          projects={projects}
-          onApply={props.onApplyTemplate}
-          onDelete={props.onDeleteTemplate}
-        />
-      </section>
+        </header>
 
-      <section className="multi-agent-section">
-        <h3>Mode</h3>
-        <div className="mode-pills" role="tablist">
-          <button
-            role="tab"
-            aria-selected={multiAgent.mode === 'orchestrator'}
-            className={`mode-pill ${multiAgent.mode === 'orchestrator' ? 'active' : ''}`}
-            onClick={() => props.onSetMode('orchestrator')}
-          >
-            Orchestrator-routed
-          </button>
-          <button
-            role="tab"
-            aria-selected={multiAgent.mode === 'chain'}
-            className={`mode-pill ${multiAgent.mode === 'chain' ? 'active' : ''}`}
-            onClick={() => props.onSetMode('chain')}
-          >
-            Fixed chain
-          </button>
-        </div>
-        <p className="mode-hint">
-          {multiAgent.mode === 'orchestrator'
-            ? 'A coordinator agent decides which participant handles each user prompt and replies when the request is fulfilled.'
-            : 'Each iteration flows through participants in the order shown, top to bottom. The last hop writes a final reply that Cebab archives.'}
-        </p>
-      </section>
-
-      <section className="multi-agent-section">
-        <h3>Lifecycle</h3>
-        <div className="mode-pills" role="tablist">
-          <button
-            role="tab"
-            aria-selected={multiAgent.draftLifecycle === 'persistent'}
-            className={`mode-pill ${multiAgent.draftLifecycle === 'persistent' ? 'active' : ''}`}
-            onClick={() => props.onSetLifecycle('persistent')}
-          >
-            Persistent
-          </button>
-          <button
-            role="tab"
-            aria-selected={multiAgent.draftLifecycle === 'temp'}
-            className={`mode-pill ${multiAgent.draftLifecycle === 'temp' ? 'active' : ''}`}
-            onClick={() => props.onSetLifecycle('temp')}
-          >
-            Temp
-          </button>
-        </div>
-        <p className="mode-hint">
-          {multiAgent.draftLifecycle === 'persistent'
-            ? 'Session folder survives End so the conversation can be resumed later. Bus install on participants stays in place. Pick this for ongoing work.'
-            : 'On End, Cebab deletes the session folder AND removes bus integration from each participant. Pick this for a one-off task you don’t want to leave residue from.'}
-        </p>
-      </section>
-
-      <section className="multi-agent-section">
-        <h3>Participants</h3>
-        <div
-          className={`drop-zone ${participants.length === 0 ? 'empty' : ''}`}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-        >
-          {participants.length === 0 ? (
-            <div className="drop-zone-placeholder">
-              Drag a project here to add it as a participant.
-            </div>
-          ) : (
-            <ol className="participant-list">
-              {participants.map((p, i) => (
-                <li key={p.id} className="participant-row">
-                  <span className="participant-order">{i + 1}</span>
-                  <div className="participant-meta">
-                    <span className="participant-name">{p.name}</span>
-                    {p.busInstalled ? (
-                      <span
-                        className="participant-bus-tag installed"
-                        title={`Bus agent: ${p.busAgentName ?? '?'}`}
-                      >
-                        bus: {p.busAgentName}
-                      </span>
-                    ) : (
-                      <span
-                        className="participant-bus-tag missing"
-                        title="This project has no bus integration installed yet."
-                      >
-                        no bus integration
-                      </span>
-                    )}
-                  </div>
-                  <div className="participant-actions">
-                    {multiAgent.mode === 'chain' && (
-                      <>
-                        <button
-                          className="icon-btn"
-                          title="Move up"
-                          disabled={i === 0}
-                          onClick={() => props.onReorderParticipant(p.id, 'up')}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          className="icon-btn"
-                          title="Move down"
-                          disabled={i === participants.length - 1}
-                          onClick={() => props.onReorderParticipant(p.id, 'down')}
-                        >
-                          ↓
-                        </button>
-                      </>
-                    )}
-                    {p.busInstalled ? (
-                      <button
-                        className="ghost-btn"
-                        title="Uninstall bus integration. This is pure DB metadata — Cebab wrote nothing into the project, so nothing in it is touched; the project just stops being eligible for multi-agent sessions."
-                        onClick={() => props.onUninstallBus(p.id)}
-                      >
-                        Uninstall
-                      </button>
-                    ) : (
-                      <button
-                        className="primary-btn"
-                        title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless with bypassPermissions (tool calls auto-approved — no human-in-the-loop)."
-                        onClick={() => {
-                          const ok = window.confirm(
-                            `Install bus integration for "${p.name}"?\n\n` +
-                              'This is pure DB metadata: Cebab assigns a stable\n' +
-                              'agent slug and marks the project bus-eligible.\n' +
-                              'Nothing is written into the project itself.\n\n' +
-                              "During multi-agent sessions this project's agent\n" +
-                              'runs headless with `bypassPermissions` — tool calls\n' +
-                              'are auto-approved (no human-in-the-loop).',
-                          );
-                          if (ok) props.onInstallBus(p.id);
-                        }}
-                      >
-                        Install bus
-                      </button>
-                    )}
-                    <button
-                      className="icon-btn"
-                      title="Remove from this draft"
-                      onClick={() => props.onRemoveParticipant(p.id)}
-                    >
-                      ×
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          )}
-        </div>
-      </section>
-
-      <section className="multi-agent-section">
-        <h3>Initial prompt</h3>
-        <textarea
-          className="multi-agent-prompt"
-          placeholder={
-            multiAgent.mode === 'chain'
-              ? 'The task you want the chain to work on. Sent to the first participant as their initial input.'
-              : 'The first prompt the orchestrator hears.'
-          }
-          value={multiAgent.draftPrompt}
-          onChange={(e) => props.onSetDraftPrompt(e.target.value)}
-        />
-      </section>
-
-      <section className="multi-agent-section">
-        <h3>Start</h3>
-        <div className="multi-agent-actions">
-          <button
-            className="primary-btn"
-            disabled={!orchestratorReady || !promptReady || startPending !== null}
-            title={
-              orchestratorReady && promptReady
-                ? "Starts the orchestrator plus one worker per participant, each its own in-process SDK agent. The orchestrator routes each user prompt to whichever worker fits, then replies to the user when it's done."
-                : 'Pick orchestrator mode, add at least one bus-installed participant, and type an initial prompt.'
-            }
-            onClick={() => {
-              setStartPending('orchestrator');
-              props.onStartOrchestrator();
-            }}
-          >
-            {startPending === 'orchestrator' ? (
-              <>
-                <span className="btn-spinner" />
-                Starting…
-              </>
-            ) : (
-              'Start orchestrator-routed'
-            )}
-          </button>
-          <button
-            className="primary-btn"
-            disabled={!chainReady || !promptReady || startPending !== null}
-            title={
-              chainReady && promptReady
-                ? 'Starts one in-process SDK agent per participant, rides the initial prompt on the first agent’s opening turn, and forwards each reply through the chain.'
-                : 'Pick chain mode, add at least two bus-installed participants, and type an initial prompt.'
-            }
-            onClick={() => {
-              setStartPending('chain');
-              props.onStartChain();
-            }}
-          >
-            {startPending === 'chain' ? (
-              <>
-                <span className="btn-spinner" />
-                Starting…
-              </>
-            ) : (
-              'Start fixed chain'
-            )}
-          </button>
-        </div>
-        {validation !== null && <p className="multi-agent-warning">{validation}</p>}
-      </section>
-
-      <section className="multi-agent-section">
-        <div className="iterations-header">
-          <h3>Iterations</h3>
-          <div className="iterations-actions">
-            <button
-              className="ghost-btn iterations-refresh"
-              onClick={props.onRefreshIterations}
-              title="Re-query the server for past iterations. The list also auto-refreshes when a run ends."
-            >
-              Refresh
-            </button>
-            <button
-              className="ghost-btn iterations-clear"
-              // Disable when there's nothing to clear (loading or empty);
-              // also disable if a session is currently running — the
-              // server preserves the running row, so a click would be a
-              // no-op, but the affordance reads as misleading.
-              disabled={
-                clearPending ||
-                multiAgent.iterations === null ||
-                multiAgent.iterations.length === 0 ||
-                multiAgent.iterations.every((it) => it.status === 'running')
-              }
-              onClick={() => {
-                const finished =
-                  multiAgent.iterations?.filter((it) => it.status !== 'running').length ?? 0;
-                // Browser-native confirm keeps this lightweight; no
-                // custom modal needed for a destructive-but-recoverable
-                // action (disk artifacts survive, so the operator can
-                // still `cd` into transcripts on iterations they care
-                // about). Confirm explicitly enumerates what runs:
-                // DB row delete + disk preservation.
-                if (
-                  window.confirm(
-                    `Clear ${finished} iteration${finished === 1 ? '' : 's'} from the list?\n\n` +
-                      `Removes finished session rows (events + participants + the session itself) from the Cebab database. The active session, if any, is preserved.\n\n` +
-                      `On-disk transcripts and iteration files inside each session folder stay where they are; you can still inspect them by path.`,
-                  )
-                ) {
-                  setClearPending(true);
-                  props.onClearIterations();
-                }
-              }}
-              title="Remove finished iterations from the list (DB rows only). On-disk artifacts are preserved; the active session, if any, is kept."
-            >
-              {clearPending ? (
-                <>
-                  <span className="btn-spinner" />
-                  Clearing…
-                </>
-              ) : (
-                'Clear'
-              )}
-            </button>
+        <section className="multi-agent-section">
+          <div className="iterations-header">
+            <h3>Templates</h3>
           </div>
-        </div>
-        <IterationsList
-          items={multiAgent.iterations}
-          pendingResumeId={pendingResumeId}
-          onResume={(sessionId) => {
-            setPendingResumeId(sessionId);
-            props.onResumeSession(sessionId);
-          }}
-        />
-      </section>
+          {multiAgent.lastAppliedDropped > 0 && (
+            <p className="multi-agent-warning">
+              {multiAgent.lastAppliedDropped} participant
+              {multiAgent.lastAppliedDropped === 1 ? '' : 's'} from this template
+              {multiAgent.lastAppliedDropped === 1 ? ' is' : ' are'} no longer in the workspace and{' '}
+              {multiAgent.lastAppliedDropped === 1 ? 'was' : 'were'} skipped.
+            </p>
+          )}
+          <TemplatesList
+            items={tabTemplates}
+            mode={props.mode}
+            projects={projects}
+            onApply={props.onApplyTemplate}
+            onDelete={props.onDeleteTemplate}
+            onUpdateNotes={props.onUpdateTemplateNotes}
+          />
+        </section>
+
+        <section className="multi-agent-section">
+          <div className="iterations-header">
+            <h3>Participants</h3>
+            <div className="iterations-actions">
+              <button
+                className="ghost-btn"
+                disabled={participants.length === 0}
+                title={
+                  participants.length === 0
+                    ? 'Add at least one participant before saving a template.'
+                    : 'Save the current participant list + lifecycle as a reusable preset for this tab.'
+                }
+                onClick={() => setNamingOpen(true)}
+              >
+                Save current as template
+              </button>
+            </div>
+          </div>
+          <div
+            className={`drop-zone ${participants.length === 0 ? 'empty' : ''}`}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+          >
+            {participants.length === 0 ? (
+              <div className="drop-zone-placeholder">
+                Drag a project here to add it as a participant.
+              </div>
+            ) : (
+              <ol className="participant-list">
+                {participants.map((p, i) => (
+                  <li key={p.id} className="participant-row">
+                    <span className="participant-order">{i + 1}</span>
+                    <div className="participant-meta">
+                      <span className="participant-name">{p.name}</span>
+                      {p.busInstalled ? (
+                        <span
+                          className="participant-bus-tag installed"
+                          title={`Bus agent: ${p.busAgentName ?? '?'}`}
+                        >
+                          bus: {p.busAgentName}
+                        </span>
+                      ) : (
+                        <span
+                          className="participant-bus-tag missing"
+                          title="This project has no bus integration installed yet."
+                        >
+                          no bus integration
+                        </span>
+                      )}
+                    </div>
+                    <div className="participant-actions">
+                      {props.mode === 'chain' && (
+                        <>
+                          <button
+                            className="icon-btn"
+                            title="Move up"
+                            disabled={i === 0}
+                            onClick={() => props.onReorderParticipant(p.id, 'up')}
+                          >
+                            ↑
+                          </button>
+                          <button
+                            className="icon-btn"
+                            title="Move down"
+                            disabled={i === participants.length - 1}
+                            onClick={() => props.onReorderParticipant(p.id, 'down')}
+                          >
+                            ↓
+                          </button>
+                        </>
+                      )}
+                      {p.busInstalled ? (
+                        <button
+                          className="ghost-btn"
+                          title="Uninstall bus integration. This is pure DB metadata — Cebab wrote nothing into the project, so nothing in it is touched; the project just stops being eligible for multi-agent sessions."
+                          onClick={() => props.onUninstallBus(p.id)}
+                        >
+                          Uninstall
+                        </button>
+                      ) : (
+                        <button
+                          className="primary-btn"
+                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless with bypassPermissions (tool calls auto-approved — no human-in-the-loop)."
+                          onClick={() => {
+                            const ok = window.confirm(
+                              `Install bus integration for "${p.name}"?\n\n` +
+                                'This is pure DB metadata: Cebab assigns a stable\n' +
+                                'agent slug and marks the project bus-eligible.\n' +
+                                'Nothing is written into the project itself.\n\n' +
+                                "During multi-agent sessions this project's agent\n" +
+                                'runs headless with `bypassPermissions` — tool calls\n' +
+                                'are auto-approved (no human-in-the-loop).',
+                            );
+                            if (ok) props.onInstallBus(p.id);
+                          }}
+                        >
+                          Install bus
+                        </button>
+                      )}
+                      <button
+                        className="icon-btn"
+                        title="Remove from this draft"
+                        onClick={() => props.onRemoveParticipant(p.id)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+          <div className="ma-lifecycle-inline">
+            <span className="ma-lifecycle-label">Lifecycle</span>
+            <div className="lifecycle-toggle" role="group" aria-label="Lifecycle">
+              <button
+                className={`lifecycle-btn ${multiAgent.draftLifecycle === 'persistent' ? 'active' : ''}`}
+                onClick={() => props.onSetLifecycle('persistent')}
+                title="Persistent: session folder survives End so the conversation can be resumed later; bus install on participants stays in place. Pick this for ongoing work."
+              >
+                persistent
+              </button>
+              <button
+                className={`lifecycle-btn ${multiAgent.draftLifecycle === 'temp' ? 'active' : ''}`}
+                onClick={() => props.onSetLifecycle('temp')}
+                title="Temp: on End, Cebab deletes the session folder AND removes bus integration from each participant. Pick this for a one-off task you don’t want to leave residue from."
+              >
+                temp
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="multi-agent-section">
+          <div className="iterations-header iterations-collapsible">
+            <button
+              className="iterations-toggle"
+              onClick={() => setIterOpen((o) => !o)}
+              aria-expanded={iterOpen}
+              title="Past runs on this tab. Resume re-attaches to a still-live session; Copy path opens transcripts."
+            >
+              <span className="iterations-chevron">{iterOpen ? '▾' : '▸'}</span>
+              <h3>Iterations</h3>
+              <span className="iterations-count">
+                {tabIterations === null
+                  ? ''
+                  : tabIterations.length === 0
+                    ? 'none'
+                    : tabIterations.length}
+              </span>
+            </button>
+            {iterOpen && (
+              <div className="iterations-actions">
+                <button
+                  className="ghost-btn iterations-refresh"
+                  onClick={props.onRefreshIterations}
+                  title="Re-query the server for past iterations. The list also auto-refreshes when a run ends."
+                >
+                  Refresh
+                </button>
+                <button
+                  className="ghost-btn iterations-clear"
+                  // Disable when there's nothing to clear (loading or empty);
+                  // also disable if a session is currently running — the
+                  // server preserves the running row, so a click would be a
+                  // no-op, but the affordance reads as misleading.
+                  disabled={clearPending || tabIterations === null || clearableCount === 0}
+                  onClick={() => {
+                    // Browser-native confirm keeps this lightweight; disk
+                    // artifacts survive, so this is destructive-but-recoverable.
+                    if (
+                      window.confirm(
+                        `Clear ${clearableCount} iteration${clearableCount === 1 ? '' : 's'} from the list?\n\n` +
+                          `Removes finished session rows (events + participants + the session itself) from the Cebab database. The active session, if any, is preserved.\n\n` +
+                          `On-disk transcripts and iteration files inside each session folder stay where they are; you can still inspect them by path.`,
+                      )
+                    ) {
+                      setClearPending(true);
+                      props.onClearIterations();
+                    }
+                  }}
+                  title="Remove finished iterations from the list (DB rows only). On-disk artifacts are preserved; the active session, if any, is kept."
+                >
+                  {clearPending ? (
+                    <>
+                      <span className="btn-spinner" />
+                      Clearing…
+                    </>
+                  ) : (
+                    'Clear'
+                  )}
+                </button>
+              </div>
+            )}
+          </div>
+          {iterOpen && (
+            <IterationsList
+              items={tabIterations}
+              pendingResumeId={pendingResumeId}
+              onResume={(sessionId) => {
+                setPendingResumeId(sessionId);
+                props.onResumeSession(sessionId);
+              }}
+            />
+          )}
+        </section>
+      </div>
+
+      {validation !== null && (
+        <p className="multi-agent-warning multi-agent-warning-composer">{validation}</p>
+      )}
+      <MultiAgentComposer
+        mode={props.mode}
+        value={multiAgent.draftPrompt}
+        onChange={props.onSetDraftPrompt}
+        pending={startPending !== null}
+        disabled={!startReady}
+        onStart={() => {
+          setStartPending(props.mode);
+          props.onStart();
+        }}
+      />
+
       {namingOpen && (
         <TemplateNameModal
           existingNames={(multiAgent.templates ?? []).map((t) => t.name)}
           onClose={() => setNamingOpen(false)}
-          onSave={(name) => {
-            props.onSaveTemplate(name);
+          onSave={(name, notes) => {
+            props.onSaveTemplate(name, notes, props.mode);
             setNamingOpen(false);
           }}
         />
@@ -489,11 +433,67 @@ function DraftView(props: {
   );
 }
 
+function MultiAgentComposer(props: {
+  mode: 'chain' | 'orchestrator';
+  value: string;
+  onChange: (t: string) => void;
+  onStart: () => void;
+  pending: boolean;
+  disabled: boolean;
+}) {
+  const blocked = props.disabled || props.pending;
+  const isChain = props.mode === 'chain';
+  return (
+    <div className="input-box multi-agent-composer">
+      <GrowTextarea
+        value={props.value}
+        onChange={props.onChange}
+        onSubmit={() => {
+          if (!blocked) props.onStart();
+        }}
+        placeholder={
+          isChain
+            ? 'The task for the chain — sent to the first participant. Enter to start, Shift+Enter for newline.'
+            : 'The first prompt the orchestrator hears. Enter to start, Shift+Enter for newline.'
+        }
+        ariaLabel="Initial prompt"
+      />
+      <button
+        className="primary-btn"
+        disabled={blocked}
+        onClick={props.onStart}
+        title={
+          props.disabled
+            ? isChain
+              ? 'Add at least two bus-installed participants and type an initial prompt.'
+              : 'Add at least one bus-installed participant and type an initial prompt.'
+            : isChain
+              ? 'Start one in-process SDK agent per participant; the initial prompt rides the first agent’s opening turn and each reply forwards down the chain.'
+              : 'Start the orchestrator plus one worker per participant. The orchestrator routes each prompt to whichever worker fits, then replies when done.'
+        }
+      >
+        {props.pending ? (
+          <>
+            <span className="btn-spinner" />
+            Starting…
+          </>
+        ) : isChain ? (
+          'Start chain'
+        ) : (
+          'Start'
+        )}
+      </button>
+    </div>
+  );
+}
+
 function TemplatesList(props: {
   items: MultiAgentTemplate[] | null;
+  mode: 'chain' | 'orchestrator';
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
   onDelete: (id: string) => void;
+  onUpdateNotes: (t: MultiAgentTemplate, notes: string) => void;
 }) {
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
@@ -501,7 +501,8 @@ function TemplatesList(props: {
   if (props.items.length === 0) {
     return (
       <p className="iterations-empty">
-        No templates yet. Save a draft setup to reuse it without re-dragging.
+        No {props.mode === 'chain' ? 'chained-chat' : 'multi-agent'} templates yet. Save a setup to
+        reuse it without re-dragging.
       </p>
     );
   }
@@ -514,6 +515,7 @@ function TemplatesList(props: {
           projects={props.projects}
           onApply={props.onApply}
           onDelete={props.onDelete}
+          onUpdateNotes={props.onUpdateNotes}
         />
       ))}
     </ol>
@@ -525,16 +527,26 @@ function TemplateRow(props: {
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
   onDelete: (id: string) => void;
+  onUpdateNotes: (t: MultiAgentTemplate, notes: string) => void;
 }) {
   const { template, projects } = props;
   const resolved = template.participants
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
   const unavailable = template.participants.length - resolved.length;
-  const names = resolved.map((p) => p.name).join(' → ');
   const isOrchestrator = template.mode === 'orchestrator';
+  const [open, setOpen] = useState(false);
+  const [notes, setNotes] = useState(template.notes ?? '');
+  // Re-seed when the saved value changes (e.g. after our own save round-trips
+  // back through the templates list, or another window edits it).
+  useEffect(() => {
+    setNotes(template.notes ?? '');
+  }, [template.notes]);
+  const notesDirty = notes !== (template.notes ?? '');
+  const hasNotes = (template.notes ?? '').trim().length > 0;
+
   return (
-    <li className="template-card">
+    <li className={`template-card ${open ? 'open' : ''}`}>
       <button
         className="template-del"
         title="Delete template"
@@ -543,37 +555,111 @@ function TemplateRow(props: {
       >
         ×
       </button>
-      <div className="template-head">
-        <div className="template-name" title={template.name}>
-          {template.name}
-        </div>
-        <div className="template-meta">
-          {template.mode} · {template.lifecycle} · {resolved.length} participant
-          {resolved.length === 1 ? '' : 's'}
-          {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
-        </div>
-      </div>
-      <div className="template-body">
-        {resolved.length === 0 ? (
-          <div className="template-empty">(no resolvable participants)</div>
-        ) : isOrchestrator ? (
-          <div className="topo-tree">
-            <div className="topo-hub">orchestrator</div>
-            <ul className="topo-row">
-              {resolved.map((p) => (
-                <li key={p.id}>
-                  <span className="topo-worker" title={p.name}>
-                    {p.name}
-                  </span>
-                </li>
-              ))}
-            </ul>
+      <button
+        className="template-card-main"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        title={open ? 'Collapse' : 'Expand for full names, bus slugs and notes'}
+      >
+        <div className="template-head">
+          <div className="template-name" title={template.name}>
+            {template.name}
           </div>
-        ) : (
-          <div className="template-chain">{names}</div>
-        )}
-      </div>
-      <button className="template-apply" onClick={() => props.onApply(template)}>
+          <div className="template-meta">
+            {template.mode} · {template.lifecycle} · {resolved.length} participant
+            {resolved.length === 1 ? '' : 's'}
+            {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
+            {hasNotes ? ' · notes' : ''}
+          </div>
+        </div>
+        <div className="template-mini" aria-hidden="true">
+          {resolved.length === 0 ? (
+            <span className="template-empty">(no resolvable participants)</span>
+          ) : isOrchestrator ? (
+            <>
+              <span className="template-chip template-chip-hub">O</span>
+              <span className="template-mini-spokes">
+                {resolved.map((p, i) => (
+                  <span key={p.id} className="template-chip">{`W${i + 1}`}</span>
+                ))}
+              </span>
+            </>
+          ) : (
+            resolved.map((p, i) => (
+              <span key={p.id} className="template-mini-step">
+                {i > 0 && <span className="template-arrow">→</span>}
+                <span className="template-chip">{`A${i + 1}`}</span>
+              </span>
+            ))
+          )}
+        </div>
+      </button>
+      {open && (
+        <div className="template-expand">
+          <div className="template-body">
+            {resolved.length === 0 ? (
+              <div className="template-empty">(no resolvable participants)</div>
+            ) : isOrchestrator ? (
+              <div className="topo-tree">
+                <div className="topo-hub">orchestrator</div>
+                <ul className="topo-row">
+                  {resolved.map((p) => (
+                    <li key={p.id}>
+                      <span className="topo-worker" title={p.name}>
+                        {p.name}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <div className="template-chain">{resolved.map((p) => p.name).join(' → ')}</div>
+            )}
+          </div>
+          {resolved.length > 0 && (
+            <dl className="template-bus-list">
+              {resolved.map((p) => (
+                <div key={p.id} className="template-bus-row">
+                  <dt>{p.name}</dt>
+                  <dd>
+                    {p.busInstalled ? (
+                      <code>{p.busAgentName}</code>
+                    ) : (
+                      <span className="template-nobus">no bus</span>
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          )}
+          <div className="template-notes">
+            <span className="template-notes-label">Notes</span>
+            <GrowTextarea
+              value={notes}
+              onChange={setNotes}
+              onSubmit={() => {}}
+              submitOnEnter={false}
+              placeholder="Roles, goals, reminders…"
+              minRows={2}
+              maxHeightPx={200}
+              ariaLabel={`Notes for ${template.name}`}
+            />
+            <button
+              className="ghost-btn template-notes-save"
+              disabled={!notesDirty}
+              onClick={() => props.onUpdateNotes(template, notes)}
+              title="Save notes back to this template. Participants, mode and lifecycle are unchanged."
+            >
+              {notesDirty ? 'Save notes' : 'Saved'}
+            </button>
+          </div>
+        </div>
+      )}
+      <button
+        className="template-apply"
+        onClick={() => props.onApply(template)}
+        title="Fill the participant list + lifecycle from this template. Type a fresh prompt and Start."
+      >
         Apply
       </button>
     </li>
@@ -583,9 +669,10 @@ function TemplateRow(props: {
 function TemplateNameModal(props: {
   existingNames: string[];
   onClose: () => void;
-  onSave: (name: string) => void;
+  onSave: (name: string, notes: string) => void;
 }) {
   const [value, setValue] = useState('');
+  const [notes, setNotes] = useState('');
   const trimmed = value.trim();
   const canSave = trimmed.length > 0;
   const isDup = props.existingNames.includes(trimmed);
@@ -605,16 +692,27 @@ function TemplateNameModal(props: {
               type="text"
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              placeholder="e.g. security review chain"
+              placeholder="e.g. security review"
               spellCheck={false}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && canSave) props.onSave(trimmed);
+                if (e.key === 'Enter' && canSave) props.onSave(trimmed, notes.trim());
               }}
             />
           </label>
+          <label>
+            <div className="label">Notes (optional)</div>
+            <textarea
+              className="multi-agent-prompt"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Roles, goals, reminders shown in the expanded card."
+              rows={3}
+              spellCheck={false}
+            />
+          </label>
           <p className="hint">
-            Saves the current mode, lifecycle, and participant list. The first prompt is never
-            stored — you type it fresh each time.
+            Saves the current participant list + lifecycle. The first prompt is never stored — you
+            type it fresh each time.
           </p>
           {isDup && (
             <p className="hint warn">
@@ -626,7 +724,11 @@ function TemplateNameModal(props: {
           <button className="ghost-btn" onClick={props.onClose}>
             Cancel
           </button>
-          <button className="primary-btn" disabled={!canSave} onClick={() => props.onSave(trimmed)}>
+          <button
+            className="primary-btn"
+            disabled={!canSave}
+            onClick={() => props.onSave(trimmed, notes.trim())}
+          >
             Save
           </button>
         </footer>
@@ -764,6 +866,8 @@ function formatDuration(ms: number): string {
 
 function ActiveRunView(props: {
   run: MultiAgentRun;
+  /** The tab this view is mounted under; used only for a cross-tab notice. */
+  tabMode: 'chain' | 'orchestrator';
   projects: Project[];
   onStop: (sessionId: string) => void;
   onSendUserPrompt: (sessionId: string, text: string) => void;
@@ -772,6 +876,7 @@ function ActiveRunView(props: {
   onDismiss: () => void;
 }) {
   const { run } = props;
+  const crossTab = run.mode !== props.tabMode;
   const isRunning = run.status === 'running';
   const isOrchestrator = run.mode === 'orchestrator';
   const isTemp = run.lifecycle === 'temp';
@@ -809,7 +914,8 @@ function ActiveRunView(props: {
       <header className="multi-agent-header multi-agent-active-header">
         <div>
           <h2>
-            Multi-agent: <code>{run.sessionId.slice(0, 8)}</code>{' '}
+            {run.mode === 'chain' ? 'Chained Chat' : 'Multi-Agent'}:{' '}
+            <code>{run.sessionId.slice(0, 8)}</code>{' '}
             <span
               className={`run-status run-status-${run.status}`}
               title={STATUS_TITLE[run.status]}
@@ -852,6 +958,13 @@ function ActiveRunView(props: {
           )}
         </div>
       </header>
+
+      {crossTab && (
+        <p className="multi-agent-warning">
+          This {run.mode === 'chain' ? 'Chained Chat' : 'Multi-Agent'} run was started from the
+          other tab. It’s shown here because a run is global; switch tabs to match.
+        </p>
+      )}
 
       <SessionSettingsPanel
         run={run}
@@ -1121,17 +1234,12 @@ function UserPromptInput(props: { onSend: (text: string) => void }) {
     <section className="multi-agent-section multi-agent-input-section">
       <h3>Send a prompt</h3>
       <div className="multi-agent-input">
-        <textarea
-          className="multi-agent-input-textarea"
-          placeholder="Type a message for the orchestrator. It'll route to whichever worker fits."
+        <GrowTextarea
           value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
-          }}
+          onChange={setText}
+          onSubmit={submit}
+          placeholder="Type a message for the orchestrator. It'll route to whichever worker fits."
+          ariaLabel="Message the orchestrator"
         />
         <button
           className="primary-btn"
@@ -1222,10 +1330,10 @@ function formatTs(ts: number): string {
  *   - orchestrator: ≥1 worker (the orchestrator itself is implicit; one
  *     worker is degenerate but functional for smoke testing).
  */
-function validateDraft(participants: Project[], multiAgent: MultiAgentState): string | null {
+function validateDraft(participants: Project[], mode: 'chain' | 'orchestrator'): string | null {
   if (participants.length === 0) return 'Add at least one participant.';
-  if (multiAgent.mode === 'chain' && participants.length < 2) {
-    return 'Fixed chain needs at least two participants.';
+  if (mode === 'chain' && participants.length < 2) {
+    return 'A chained chat needs at least two participants.';
   }
   const missing = participants.filter((p) => !p.busInstalled).map((p) => p.name);
   if (missing.length > 0) {

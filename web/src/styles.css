@@ -649,7 +649,64 @@ pre {
   padding: 8px 10px;
   font-family: inherit;
   font-size: 14px;
-  resize: vertical;
+}
+/* Auto-grow textarea + custom TOP drag handle. Replaces the native
+ * `resize: vertical` grabber, which sat bottom-right and — because every
+ * composer is pinned to the bottom of the viewport — could only ever
+ * shrink the box. Growth happens upward for free from the pinned flex
+ * child. Used by single-chat, both multi-agent composers, the orchestrator
+ * prompt, and the template notes editor. */
+.grow-textarea-wrap {
+  position: relative;
+  display: block;
+}
+.multi-agent-input .grow-textarea-wrap {
+  flex: 1;
+}
+.grow-textarea-wrap textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 14px;
+  resize: none;
+  overflow-y: hidden;
+}
+.grow-textarea-wrap textarea:focus {
+  outline: none;
+  border-color: var(--accent-2);
+}
+.grow-textarea-wrap textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.grow-textarea-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 9px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.grow-textarea-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 30px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border);
+}
+.grow-textarea-handle:hover::after {
+  background: var(--fg-3);
 }
 .input-box button {
   background: var(--accent-2);
@@ -871,6 +928,66 @@ pre {
   margin: 0;
 }
 
+/* Draft tab = a non-scrolling flex column: the body scrolls, the composer
+ * pins to the bottom exactly like single-chat's .input-box. These override
+ * the shared .multi-agent rules (same element carries both classes; placed
+ * after so they win on equal specificity). ActiveRunView keeps plain
+ * .multi-agent (its own subtree + inline orchestrator input). */
+.multi-agent-draft {
+  overflow: hidden;
+  padding: 0;
+  gap: 0;
+}
+.multi-agent-draft-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 22px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.multi-agent-warning-composer {
+  margin: 0;
+  padding: 6px 24px 0;
+}
+.ma-lifecycle-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.ma-lifecycle-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+}
+/* Collapsible iterations: the header IS the toggle. */
+.iterations-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.iterations-toggle h3 {
+  margin: 0;
+}
+.iterations-chevron {
+  width: 10px;
+  color: var(--fg-3);
+  font-size: 10px;
+}
+.iterations-count {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
 /* Mode pills (orchestrator | chain). Disabled-looking until selected. */
 .mode-pills {
   display: flex;
@@ -1083,8 +1200,8 @@ pre {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 340px));
-  justify-content: start;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  grid-auto-rows: 1fr;
   gap: 10px;
 }
 .template-card {
@@ -1097,6 +1214,115 @@ pre {
   border-radius: 8px;
   padding: 12px 14px 14px;
   min-width: 0;
+}
+.template-card.open {
+  border-color: var(--accent-2);
+}
+/* The clickable head+mini region. Grows so Apply pins to the card bottom,
+ * keeping Apply aligned across every card in a row (grid-auto-rows: 1fr
+ * equalizes row height; this flex:1 takes up the slack). */
+.template-card-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.template-mini {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 60px;
+  padding: 2px 0;
+}
+.template-mini-spokes {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 5px;
+}
+.template-mini-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.template-chip {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-2);
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+.template-chip-hub {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(110, 168, 254, 0.1);
+  font-weight: 600;
+}
+.template-arrow {
+  color: var(--fg-3);
+}
+.template-expand {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
+}
+.template-bus-list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+}
+.template-bus-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+.template-bus-row dt {
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.template-bus-row dd {
+  margin: 0;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color: var(--fg-3);
+}
+.template-nobus {
+  color: var(--warn);
+  font-style: italic;
+}
+.template-notes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.template-notes-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+}
+.template-notes-save {
+  align-self: flex-start;
+  font-size: 11.5px;
 }
 /* delete: quiet icon pinned to the corner opposite the name */
 .template-del {

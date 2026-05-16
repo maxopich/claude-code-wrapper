@@ -447,24 +447,15 @@ describe('store / multi-agent reducer (PR 2)', () => {
     return s;
   }
 
-  test('ma_set_view flips the active main view', () => {
+  test('ma_set_view flips between the three main views', () => {
     let s = initialState;
     expect(s.multiAgent.view).toBe('chat');
     s = reduce(s, { type: 'ma_set_view', view: 'multi-agent' });
     expect(s.multiAgent.view).toBe('multi-agent');
+    s = reduce(s, { type: 'ma_set_view', view: 'chained-chat' });
+    expect(s.multiAgent.view).toBe('chained-chat');
     s = reduce(s, { type: 'ma_set_view', view: 'chat' });
     expect(s.multiAgent.view).toBe('chat');
-  });
-
-  test('ma_set_mode flips between orchestrator and chain without touching participants', () => {
-    let s = seedWithThreeProjects();
-    s = reduce(s, { type: 'ma_add_participant', projectId: 1 });
-    s = reduce(s, { type: 'ma_set_mode', mode: 'chain' });
-    expect(s.multiAgent.mode).toBe('chain');
-    expect(s.multiAgent.draftParticipants).toEqual([1]);
-    s = reduce(s, { type: 'ma_set_mode', mode: 'orchestrator' });
-    expect(s.multiAgent.mode).toBe('orchestrator');
-    expect(s.multiAgent.draftParticipants).toEqual([1]);
   });
 
   test('ma_add_participant appends, deduplicates, and rejects unknown ids', () => {
