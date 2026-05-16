@@ -322,32 +322,31 @@ export function App() {
   function refreshTemplates() {
     wsRef.current?.send({ type: 'list_templates' });
   }
-  function saveTemplate(name: string, notes: string, mode: 'chain' | 'orchestrator') {
+  function saveTemplate(name: string, mode: 'chain' | 'orchestrator') {
     const { draftLifecycle, draftParticipants } = state.multiAgent;
-    // Mode comes from the active tab (passed down), not draft state. No
+    // Mode comes from the active tab (passed down), not draft state. Per-agent
+    // roles are authored later in the expanded card, not at save time. No
     // optimistic update — the server replies with the full refreshed
-    // `templates` list (settings is the source of truth), matching the
-    // iterations posture.
+    // `templates` list (settings is the source of truth).
     wsRef.current?.send({
       type: 'save_template',
       name,
       mode,
       lifecycle: draftLifecycle,
       participants: draftParticipants,
-      notes,
     });
   }
-  function updateTemplateNotes(t: MultiAgentTemplate, notes: string) {
-    // Edit notes WITHOUT clobbering the template: save_template upserts by
-    // name and replaces mode/lifecycle/participants wholesale, so resend the
-    // template's OWN fields (not the current draft) with just notes changed.
+  function updateTemplateRoles(t: MultiAgentTemplate, roles: Record<string, string>) {
+    // Edit per-agent roles WITHOUT clobbering the template: save_template
+    // upserts by name and replaces mode/lifecycle/participants wholesale, so
+    // resend the template's OWN fields with just the roles map changed.
     wsRef.current?.send({
       type: 'save_template',
       name: t.name,
       mode: t.mode,
       lifecycle: t.lifecycle,
       participants: t.participants,
-      notes,
+      roles,
     });
   }
   function deleteTemplate(id: string) {
@@ -535,7 +534,7 @@ export function App() {
                 onClearIterations={clearIterations}
                 onRefreshTemplates={refreshTemplates}
                 onSaveTemplate={saveTemplate}
-                onUpdateTemplateNotes={updateTemplateNotes}
+                onUpdateTemplateRoles={updateTemplateRoles}
                 onDeleteTemplate={deleteTemplate}
                 onApplyTemplate={applyTemplate}
               />

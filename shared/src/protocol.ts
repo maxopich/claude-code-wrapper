@@ -278,8 +278,11 @@ export type ClientMsg =
       mode: 'chain' | 'orchestrator';
       lifecycle: MultiAgentLifecycle;
       participants: number[];
-      /** Optional freeform operator notes. Absent on pre-notes clients. */
-      notes?: string;
+      /**
+       * Optional per-participant role/goal text, keyed by `String(projectId)`.
+       * Absent on pre-roles clients; unknown/stale keys are ignored.
+       */
+      roles?: Record<string, string>;
     }
   | {
       /** Delete a template by id. Reply: a fresh `templates` ServerMsg. */
@@ -519,11 +522,12 @@ export type MultiAgentTemplate = {
   /** Ordered project ids — same semantics as `start_multi_agent.participants`. */
   participants: number[];
   /**
-   * Optional freeform operator notes (roles, goals, reminders). Surfaced in
-   * the expanded template card. Undefined on templates saved before this
-   * field existed — always read as `notes ?? ''`.
+   * Optional per-participant role/goal text, keyed by `String(projectId)`.
+   * Shown next to each agent node in the expanded template card. Undefined
+   * on templates saved before this field existed; read as `roles?.[id] ?? ''`.
+   * Stale keys (project since removed) are harmless and ignored.
    */
-  notes?: string;
+  roles?: Record<string, string>;
 };
 
 export const MULTI_AGENT_EVENT_KINDS: ReadonlySet<MultiAgentEventKind> = new Set([

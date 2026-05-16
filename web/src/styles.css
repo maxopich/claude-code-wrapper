@@ -1195,14 +1195,19 @@ pre {
  * Dedicated classes (NOT the shared .iteration-* ones) so the
  * Iterations history list is unaffected. Square tiles that wrap into
  * a responsive grid when there are several templates. */
+/* Square tiles that wrap into a responsive grid. Fixed-ish tracks (not
+ * 1fr) keep cards reading as squares, not stretched bands; expanding a
+ * card grows it in place without dragging row-mates taller. The
+ * Iterations history list is unaffected (its own classes). */
 .template-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
-  grid-auto-rows: 1fr;
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 340px));
+  justify-content: start;
+  align-items: start;
+  gap: 12px;
 }
 .template-card {
   position: relative;
@@ -1211,21 +1216,23 @@ pre {
   gap: 10px;
   background: var(--bg-2);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px 14px;
+  border-radius: 10px;
+  padding: 14px 16px 16px;
   min-width: 0;
 }
 .template-card.open {
   border-color: var(--accent-2);
+  box-shadow: 0 0 0 1px var(--accent-2) inset;
 }
-/* The clickable head+mini region. Grows so Apply pins to the card bottom,
- * keeping Apply aligned across every card in a row (grid-auto-rows: 1fr
- * equalizes row height; this flex:1 takes up the slack). */
+/* Clickable head + compact figure. In the collapsed state it grows so
+ * Apply pins to the card bottom and aligns across the uniform-height
+ * compact cards; when expanded it shrinks to just the head so the
+ * expanded detail + Apply flow naturally below. */
 .template-card-main {
-  flex: 1;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
   background: none;
   border: 0;
   padding: 0;
@@ -1236,95 +1243,9 @@ pre {
   color: inherit;
   cursor: pointer;
 }
-.template-mini {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  min-height: 60px;
-  padding: 2px 0;
+.template-card:not(.open) .template-card-main {
+  flex: 1;
 }
-.template-mini-spokes {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 5px;
-}
-.template-mini-step {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.template-chip {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 11px;
-  color: var(--fg-2);
-  background: var(--bg-3);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 2px 7px;
-}
-.template-chip-hub {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: rgba(110, 168, 254, 0.1);
-  font-weight: 600;
-}
-.template-arrow {
-  color: var(--fg-3);
-}
-.template-expand {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  border-top: 1px dashed var(--border);
-  padding-top: 10px;
-}
-.template-bus-list {
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 11.5px;
-}
-.template-bus-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-}
-.template-bus-row dt {
-  color: var(--fg-2);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.template-bus-row dd {
-  margin: 0;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  color: var(--fg-3);
-}
-.template-nobus {
-  color: var(--warn);
-  font-style: italic;
-}
-.template-notes {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.template-notes-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--fg-3);
-}
-.template-notes-save {
-  align-self: flex-start;
-  font-size: 11.5px;
-}
-/* delete: quiet icon pinned to the corner opposite the name */
 .template-del {
   position: absolute;
   top: 8px;
@@ -1342,6 +1263,7 @@ pre {
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
+  z-index: 2;
 }
 .template-del:hover {
   color: var(--fg);
@@ -1369,24 +1291,29 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.template-body {
+/* Compact face: a fixed, square-ish stage holding the mini diagram. */
+.template-figure {
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 92px;
-  padding: 2px 0;
+  min-height: 132px;
+  padding: 4px 0;
+  overflow: hidden;
 }
-.template-chain {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 12px;
-  color: var(--fg-2);
-  text-align: center;
-  overflow-wrap: anywhere;
+.template-expand {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-top: 1px dashed var(--border);
+  padding-top: 12px;
 }
-.template-empty {
-  font-size: 12px;
-  color: var(--fg-3);
-  font-style: italic;
+.template-roles-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.template-roles-actions .ghost-btn {
+  font-size: 11.5px;
 }
 .template-apply {
   width: 100%;
@@ -1404,102 +1331,252 @@ pre {
   border-color: var(--accent-2);
 }
 
-/* Orchestrator topology: a hub-and-spoke org chart drawn with pure-CSS
- * bracket connectors (no library). Equal-width columns keep the hub
- * stem, the bus-bar midpoint and the middle worker perfectly aligned
- * regardless of how long each agent name is. */
-.topo-tree {
+/* ---- Agent topology: the "thin architecture" diagram ----
+ * One component, two variants (compact face / expanded detail). Node
+ * geometry + class names are stable across variants and carry
+ * `--topo-line` + `[data-agent]` so a later message-flow animation can
+ * hook in (pulse the connectors, glow a node) without a layout rewrite.
+ * Pure CSS connectors — no diagram library. */
+.topo {
+  --topo-line: var(--fg-3);
   width: 100%;
+}
+.topo-empty {
+  color: var(--fg-3);
+  font-size: 12px;
+  font-style: italic;
   text-align: center;
 }
-.topo-tree .topo-hub {
+.topo-node-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-3);
+}
+.topo-node-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+.topo-node-bus {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--fg-3);
+  text-align: center;
+}
+.topo-node-nobus {
+  color: var(--warn);
+  font-style: italic;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .topo-node-card,
+  .topo-hub {
+    transition:
+      border-color 0.16s ease,
+      background-color 0.16s ease,
+      box-shadow 0.16s ease;
+  }
+}
+
+/* Orchestrator: a hub above its workers. Compact draws a pure-CSS bracket
+ * fan (equal columns keep hub stem, bracket midpoint and middle worker
+ * aligned); expanded stacks full-width worker cards so each has room for
+ * its role editor. */
+.topo-orch {
+  text-align: center;
+}
+.topo-hub {
   display: inline-block;
   position: relative;
   z-index: 1;
-  padding: 4px 12px;
+  padding: 4px 14px;
   border: 1px solid var(--accent);
-  border-radius: 6px;
-  background: rgba(110, 168, 254, 0.1);
+  border-radius: 7px;
+  background: rgba(110, 168, 254, 0.12);
   color: var(--accent);
   font-weight: 600;
   font-size: 12px;
 }
-/* stem from the hub down to the bus bar */
-.topo-tree .topo-hub::after {
+.topo-orch .topo-hub::after {
   content: '';
   position: absolute;
   top: 100%;
   left: 50%;
   width: 0;
   height: 16px;
-  border-left: 1px solid var(--fg-3);
+  border-left: 1px solid var(--topo-line);
 }
-.topo-tree .topo-row {
+.topo-orch .topo-workers {
   display: flex;
   list-style: none;
   margin: 0;
   padding: 16px 0 0;
 }
-.topo-tree .topo-row li {
+
+/* Compact orchestrator — horizontal bracket fan. */
+.topo-compact.topo-orch .topo-workers .topo-node {
   flex: 1 1 0;
   min-width: 0;
   position: relative;
   padding: 16px 6px 0;
 }
-/* half-width segments meeting at center form the bus bar; the ::after
- * border-left is the vertical drop from the bar to each worker chip */
-.topo-tree .topo-row li::before,
-.topo-tree .topo-row li::after {
+.topo-compact.topo-orch .topo-workers .topo-node::before,
+.topo-compact.topo-orch .topo-workers .topo-node::after {
   content: '';
   position: absolute;
   top: 0;
   right: 50%;
   width: 50%;
   height: 16px;
-  border-top: 1px solid var(--fg-3);
+  border-top: 1px solid var(--topo-line);
 }
-.topo-tree .topo-row li::after {
+.topo-compact.topo-orch .topo-workers .topo-node::after {
   right: auto;
   left: 50%;
-  border-left: 1px solid var(--fg-3);
+  border-left: 1px solid var(--topo-line);
 }
-/* trim the bar's outer ends and round the corners where it turns down */
-.topo-tree .topo-row li:first-child::before,
-.topo-tree .topo-row li:last-child::after {
+.topo-compact.topo-orch .topo-workers .topo-node:first-child::before,
+.topo-compact.topo-orch .topo-workers .topo-node:last-child::after {
   border: 0 none;
 }
-.topo-tree .topo-row li:last-child::before {
-  border-right: 1px solid var(--fg-3);
+.topo-compact.topo-orch .topo-workers .topo-node:last-child::before {
+  border-right: 1px solid var(--topo-line);
   border-radius: 0 6px 0 0;
 }
-.topo-tree .topo-row li:first-child::after {
+.topo-compact.topo-orch .topo-workers .topo-node:first-child::after {
   border-radius: 6px 0 0 0;
 }
-/* single worker: no bar, just a straight stem→drop (placed last so it
- * overrides the first/last-child rules, since only-child is both) */
-.topo-tree .topo-row li:only-child::before {
+.topo-compact.topo-orch .topo-workers .topo-node:only-child::before {
   display: none;
 }
-.topo-tree .topo-row li:only-child::after {
+.topo-compact.topo-orch .topo-workers .topo-node:only-child::after {
   right: auto;
   left: 50%;
   border-top: 0;
   border-right: 0;
   border-radius: 0;
-  border-left: 1px solid var(--fg-3);
+  border-left: 1px solid var(--topo-line);
 }
-.topo-tree .topo-worker {
-  display: block;
+
+/* Expanded orchestrator — hub, then full-width worker cards stacked
+ * below it (the centered hub stem connects into the group). */
+.topo-expanded.topo-orch .topo-workers {
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+.topo-expanded.topo-orch .topo-workers .topo-node {
+  min-width: 0;
+}
+
+/* Chain: a top-down sequence with arrowed links. */
+.topo-chain {
+  display: flex;
+  justify-content: center;
+}
+.topo-seq {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  min-width: 0;
   width: 100%;
-  padding: 3px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-3);
-  color: var(--fg-2);
+  max-width: 280px;
+}
+.topo-seq .topo-node {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+.topo-link {
+  align-self: center;
+  width: 0;
+  height: 18px;
+  border-left: 1px solid var(--topo-line);
+  position: relative;
+}
+.topo-link-arrow {
+  position: absolute;
+  left: 50%;
+  bottom: -1px;
+  transform: translateX(-50%);
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid var(--topo-line);
+}
+
+/* Compact face: scaled down, names only (the component omits bus + role
+ * editor unless expanded). Square-friendly. */
+.topo-compact .topo-hub {
+  padding: 3px 10px;
+  font-size: 11px;
+}
+.topo-compact .topo-node-card {
+  padding: 4px 8px;
+}
+.topo-compact .topo-node-name {
+  font-size: 11px;
+}
+.topo-compact .topo-link {
+  height: 14px;
+}
+/* Compact chain runs left→right so it fits the short square figure;
+ * expanded chain stays top→down with room for the role editors. */
+.topo-compact.topo-chain .topo-seq {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  max-width: none;
+}
+.topo-compact.topo-chain .topo-node {
+  flex-direction: row;
+  align-items: center;
+}
+.topo-compact.topo-chain .topo-link {
+  width: 16px;
+  height: 0;
+  border-left: 0;
+  border-top: 1px solid var(--topo-line);
+}
+.topo-compact.topo-chain .topo-link-arrow {
+  left: auto;
+  right: -1px;
+  bottom: auto;
+  top: 50%;
+  transform: translateY(-50%);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--topo-line);
+  border-right: 0;
+}
+
+/* Expanded detail: roomy node cards with the per-agent role editor. */
+.topo-expanded .topo-node-card {
+  text-align: left;
+}
+.topo-expanded .topo-node-name {
+  text-align: left;
+}
+.topo-expanded.topo-chain .topo-seq {
+  max-width: none;
+}
+.topo-node-card .grow-textarea-wrap textarea {
+  background: var(--bg-2);
   font-size: 12px;
-  line-height: 1.25;
-  text-align: center;
-  overflow-wrap: anywhere;
+  padding: 6px 8px;
 }
 .iteration-path {
   display: flex;

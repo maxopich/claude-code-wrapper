@@ -51,8 +51,8 @@ export function MultiAgentTab(props: {
   onRefreshIterations: () => void;
   onClearIterations: () => void;
   onRefreshTemplates: () => void;
-  onSaveTemplate: (name: string, notes: string, mode: 'chain' | 'orchestrator') => void;
-  onUpdateTemplateNotes: (t: MultiAgentTemplate, notes: string) => void;
+  onSaveTemplate: (name: string, mode: 'chain' | 'orchestrator') => void;
+  onUpdateTemplateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
   onDeleteTemplate: (id: string) => void;
   onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
@@ -90,8 +90,8 @@ function DraftView(props: {
   wrapperErrorSeq: number;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
-  onSaveTemplate: (name: string, notes: string, mode: 'chain' | 'orchestrator') => void;
-  onUpdateTemplateNotes: (t: MultiAgentTemplate, notes: string) => void;
+  onSaveTemplate: (name: string, mode: 'chain' | 'orchestrator') => void;
+  onUpdateTemplateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
   onDeleteTemplate: (id: string) => void;
   onApplyTemplate: (t: MultiAgentTemplate) => void;
 }) {
@@ -192,7 +192,7 @@ function DraftView(props: {
             projects={projects}
             onApply={props.onApplyTemplate}
             onDelete={props.onDeleteTemplate}
-            onUpdateNotes={props.onUpdateTemplateNotes}
+            onUpdateRoles={props.onUpdateTemplateRoles}
           />
         </section>
 
@@ -423,8 +423,8 @@ function DraftView(props: {
         <TemplateNameModal
           existingNames={(multiAgent.templates ?? []).map((t) => t.name)}
           onClose={() => setNamingOpen(false)}
-          onSave={(name, notes) => {
-            props.onSaveTemplate(name, notes, props.mode);
+          onSave={(name) => {
+            props.onSaveTemplate(name, props.mode);
             setNamingOpen(false);
           }}
         />
@@ -493,7 +493,7 @@ function TemplatesList(props: {
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
   onDelete: (id: string) => void;
-  onUpdateNotes: (t: MultiAgentTemplate, notes: string) => void;
+  onUpdateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
 }) {
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
@@ -515,11 +515,102 @@ function TemplatesList(props: {
           projects={props.projects}
           onApply={props.onApply}
           onDelete={props.onDelete}
-          onUpdateNotes={props.onUpdateNotes}
+          onUpdateRoles={props.onUpdateRoles}
         />
       ))}
     </ol>
   );
+}
+
+/**
+ * The "thin architecture" agent diagram, shared by the compact card face
+ * and the expanded detail. Orchestrator = a hub fanning to worker nodes via
+ * pure-CSS bracket connectors; chain = a top-down sequence with arrowed
+ * links. Node geometry is identical across both variants so a future
+ * message-flow animation can target `.topo-link` / `[data-agent]` without a
+ * layout rewrite. No diagram library — crisp, scalable, dependency-free.
+ */
+function AgentTopology(props: {
+  mode: 'chain' | 'orchestrator';
+  participants: Project[];
+  variant: 'compact' | 'expanded';
+  roles: Record<string, string>;
+  onRoleChange: (projectId: number, text: string) => void;
+}) {
+  const { participants, variant } = props;
+  const expanded = variant === 'expanded';
+  const isOrch = props.mode === 'orchestrator';
+
+  if (participants.length === 0) {
+    return <div className="topo topo-empty">(no resolvable participants)</div>;
+  }
+
+  const node = (p: Project) => (
+    <div className="topo-node-card" data-agent={p.id}>
+      <span className="topo-node-name" title={p.name}>
+        {p.name}
+      </span>
+      {expanded && (
+        <span className="topo-node-bus">
+          {p.busInstalled ? p.busAgentName : <span className="topo-node-nobus">no bus</span>}
+        </span>
+      )}
+      {expanded && (
+        <GrowTextarea
+          value={props.roles[String(p.id)] ?? ''}
+          onChange={(v) => props.onRoleChange(p.id, v)}
+          onSubmit={() => {}}
+          submitOnEnter={false}
+          placeholder="Role / goal…"
+          minRows={2}
+          maxHeightPx={160}
+          ariaLabel={`Role for ${p.name}`}
+        />
+      )}
+    </div>
+  );
+
+  if (isOrch) {
+    return (
+      <div className={`topo topo-orch ${expanded ? 'topo-expanded' : 'topo-compact'}`}>
+        <div className="topo-hub" data-agent="orchestrator">
+          orchestrator
+        </div>
+        <ul className="topo-workers">
+          {participants.map((p) => (
+            <li key={p.id} className="topo-node">
+              {node(p)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+  return (
+    <div className={`topo topo-chain ${expanded ? 'topo-expanded' : 'topo-compact'}`}>
+      <ol className="topo-seq">
+        {participants.map((p, i) => (
+          <li key={p.id} className="topo-node">
+            {i > 0 && (
+              <span className="topo-link" aria-hidden="true">
+                <span className="topo-link-arrow" />
+              </span>
+            )}
+            {node(p)}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+/** Drop empty entries so a roles map of all-blanks compares equal to none. */
+function normalizeRoles(r: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(r)) {
+    if (v.trim().length > 0) out[k] = v;
+  }
+  return out;
 }
 
 function TemplateRow(props: {
@@ -527,23 +618,23 @@ function TemplateRow(props: {
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
   onDelete: (id: string) => void;
-  onUpdateNotes: (t: MultiAgentTemplate, notes: string) => void;
+  onUpdateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
 }) {
   const { template, projects } = props;
   const resolved = template.participants
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
   const unavailable = template.participants.length - resolved.length;
-  const isOrchestrator = template.mode === 'orchestrator';
   const [open, setOpen] = useState(false);
-  const [notes, setNotes] = useState(template.notes ?? '');
-  // Re-seed when the saved value changes (e.g. after our own save round-trips
-  // back through the templates list, or another window edits it).
+  const [roles, setRoles] = useState<Record<string, string>>(template.roles ?? {});
+  // Re-seed when the saved value changes (our own save round-trips back
+  // through the templates list, or another window edits it).
   useEffect(() => {
-    setNotes(template.notes ?? '');
-  }, [template.notes]);
-  const notesDirty = notes !== (template.notes ?? '');
-  const hasNotes = (template.notes ?? '').trim().length > 0;
+    setRoles(template.roles ?? {});
+  }, [template.roles]);
+  const rolesDirty =
+    JSON.stringify(normalizeRoles(roles)) !== JSON.stringify(normalizeRoles(template.roles ?? {}));
+  const roleCount = Object.values(normalizeRoles(template.roles ?? {})).length;
 
   return (
     <li className={`template-card ${open ? 'open' : ''}`}>
@@ -559,7 +650,7 @@ function TemplateRow(props: {
         className="template-card-main"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        title={open ? 'Collapse' : 'Expand for full names, bus slugs and notes'}
+        title={open ? 'Collapse' : 'Expand for full names, bus slugs and per-agent roles'}
       >
         <div className="template-head">
           <div className="template-name" title={template.name}>
@@ -569,90 +660,42 @@ function TemplateRow(props: {
             {template.mode} · {template.lifecycle} · {resolved.length} participant
             {resolved.length === 1 ? '' : 's'}
             {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
-            {hasNotes ? ' · notes' : ''}
+            {roleCount > 0 ? ` · ${roleCount} role${roleCount === 1 ? '' : 's'}` : ''}
           </div>
         </div>
-        <div className="template-mini" aria-hidden="true">
-          {resolved.length === 0 ? (
-            <span className="template-empty">(no resolvable participants)</span>
-          ) : isOrchestrator ? (
-            <>
-              <span className="template-chip template-chip-hub">O</span>
-              <span className="template-mini-spokes">
-                {resolved.map((p, i) => (
-                  <span key={p.id} className="template-chip">{`W${i + 1}`}</span>
-                ))}
-              </span>
-            </>
-          ) : (
-            resolved.map((p, i) => (
-              <span key={p.id} className="template-mini-step">
-                {i > 0 && <span className="template-arrow">→</span>}
-                <span className="template-chip">{`A${i + 1}`}</span>
-              </span>
-            ))
-          )}
-        </div>
+        {!open && (
+          <div className="template-figure" aria-hidden="true">
+            <AgentTopology
+              mode={template.mode}
+              participants={resolved}
+              variant="compact"
+              roles={roles}
+              onRoleChange={() => {}}
+            />
+          </div>
+        )}
       </button>
       {open && (
         <div className="template-expand">
-          <div className="template-body">
-            {resolved.length === 0 ? (
-              <div className="template-empty">(no resolvable participants)</div>
-            ) : isOrchestrator ? (
-              <div className="topo-tree">
-                <div className="topo-hub">orchestrator</div>
-                <ul className="topo-row">
-                  {resolved.map((p) => (
-                    <li key={p.id}>
-                      <span className="topo-worker" title={p.name}>
-                        {p.name}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : (
-              <div className="template-chain">{resolved.map((p) => p.name).join(' → ')}</div>
-            )}
-          </div>
+          <AgentTopology
+            mode={template.mode}
+            participants={resolved}
+            variant="expanded"
+            roles={roles}
+            onRoleChange={(id, text) => setRoles((r) => ({ ...r, [String(id)]: text }))}
+          />
           {resolved.length > 0 && (
-            <dl className="template-bus-list">
-              {resolved.map((p) => (
-                <div key={p.id} className="template-bus-row">
-                  <dt>{p.name}</dt>
-                  <dd>
-                    {p.busInstalled ? (
-                      <code>{p.busAgentName}</code>
-                    ) : (
-                      <span className="template-nobus">no bus</span>
-                    )}
-                  </dd>
-                </div>
-              ))}
-            </dl>
+            <div className="template-roles-actions">
+              <button
+                className="ghost-btn"
+                disabled={!rolesDirty}
+                onClick={() => props.onUpdateRoles(template, normalizeRoles(roles))}
+                title="Save the per-agent roles back to this template. Participants, mode and lifecycle are unchanged."
+              >
+                {rolesDirty ? 'Save roles' : 'Saved'}
+              </button>
+            </div>
           )}
-          <div className="template-notes">
-            <span className="template-notes-label">Notes</span>
-            <GrowTextarea
-              value={notes}
-              onChange={setNotes}
-              onSubmit={() => {}}
-              submitOnEnter={false}
-              placeholder="Roles, goals, reminders…"
-              minRows={2}
-              maxHeightPx={200}
-              ariaLabel={`Notes for ${template.name}`}
-            />
-            <button
-              className="ghost-btn template-notes-save"
-              disabled={!notesDirty}
-              onClick={() => props.onUpdateNotes(template, notes)}
-              title="Save notes back to this template. Participants, mode and lifecycle are unchanged."
-            >
-              {notesDirty ? 'Save notes' : 'Saved'}
-            </button>
-          </div>
         </div>
       )}
       <button
@@ -669,10 +712,9 @@ function TemplateRow(props: {
 function TemplateNameModal(props: {
   existingNames: string[];
   onClose: () => void;
-  onSave: (name: string, notes: string) => void;
+  onSave: (name: string) => void;
 }) {
   const [value, setValue] = useState('');
-  const [notes, setNotes] = useState('');
   const trimmed = value.trim();
   const canSave = trimmed.length > 0;
   const isDup = props.existingNames.includes(trimmed);
@@ -695,24 +737,13 @@ function TemplateNameModal(props: {
               placeholder="e.g. security review"
               spellCheck={false}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && canSave) props.onSave(trimmed, notes.trim());
+                if (e.key === 'Enter' && canSave) props.onSave(trimmed);
               }}
             />
           </label>
-          <label>
-            <div className="label">Notes (optional)</div>
-            <textarea
-              className="multi-agent-prompt"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Roles, goals, reminders shown in the expanded card."
-              rows={3}
-              spellCheck={false}
-            />
-          </label>
           <p className="hint">
-            Saves the current participant list + lifecycle. The first prompt is never stored — you
-            type it fresh each time.
+            Saves the current participant list + lifecycle. Per-agent roles are authored after, in
+            the expanded card. The first prompt is never stored — you type it fresh each time.
           </p>
           {isDup && (
             <p className="hint warn">
@@ -724,11 +755,7 @@ function TemplateNameModal(props: {
           <button className="ghost-btn" onClick={props.onClose}>
             Cancel
           </button>
-          <button
-            className="primary-btn"
-            disabled={!canSave}
-            onClick={() => props.onSave(trimmed, notes.trim())}
-          >
+          <button className="primary-btn" disabled={!canSave} onClick={() => props.onSave(trimmed)}>
             Save
           </button>
         </footer>
