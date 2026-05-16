@@ -12,6 +12,8 @@ import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
 import { SettingsModal } from './components/SettingsModal';
 import { MultiAgentTab } from './components/MultiAgentTab';
+import { ClaudeMark } from './components/ClaudeMark';
+import { Icon } from './components/Icon';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -396,6 +398,7 @@ export function App() {
     >
       <aside className="sidebar">
         <header>
+          <ClaudeMark className="brand-mark" />
           <h1>cebab</h1>
           <div className="sidebar-header-controls">
             <span
@@ -481,6 +484,7 @@ export function App() {
                 onClick={() => dispatch({ type: 'ma_set_view', view: 'chat' })}
                 aria-pressed={view === 'chat'}
               >
+                <Icon name="chat" />
                 Chat
               </button>
               <button
@@ -488,6 +492,7 @@ export function App() {
                 onClick={() => dispatch({ type: 'ma_set_view', view: 'multi-agent' })}
                 aria-pressed={view === 'multi-agent'}
               >
+                <Icon name="agents" />
                 Multi-Agent
               </button>
               <button
@@ -495,6 +500,7 @@ export function App() {
                 onClick={() => dispatch({ type: 'ma_set_view', view: 'chained-chat' })}
                 aria-pressed={view === 'chained-chat'}
               >
+                <Icon name="chain" />
                 Chained Chat
               </button>
             </nav>

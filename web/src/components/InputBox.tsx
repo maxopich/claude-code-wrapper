@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { GrowTextarea } from './GrowTextarea';
+import { Icon } from './Icon';
 
 export function InputBox(props: { disabled?: boolean; onSend: (text: string) => void }) {
   const [text, setText] = useState('');
@@ -22,6 +23,7 @@ export function InputBox(props: { disabled?: boolean; onSend: (text: string) => 
         ariaLabel="Message Claude"
       />
       <button onClick={send} disabled={props.disabled || !text.trim()}>
+        <Icon name="send" />
         Send
       </button>
     </div>

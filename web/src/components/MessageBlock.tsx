@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ContentBlock } from '@cebab/shared/protocol';
 import type { MessageView } from '../store';
 import { Markdown } from './Markdown';
+import { ClaudeMark } from './ClaudeMark';
 
 export function MessageBlock(props: {
   message: MessageView;
@@ -11,20 +12,30 @@ export function MessageBlock(props: {
 
   if (m.kind === 'user') {
     return (
-      <div className="msg user">
-        <div className="role">you</div>
-        <pre>{m.text}</pre>
+      <div className="msg user msg-group">
+        <div className="avatar user" aria-hidden="true">
+          U
+        </div>
+        <div className="msg-body">
+          <div className="role">you</div>
+          <pre>{m.text}</pre>
+        </div>
       </div>
     );
   }
 
   if (m.kind === 'assistant') {
     return (
-      <div className="msg assistant">
-        <div className="role">claude</div>
-        {m.blocks.map((b, i) => (
-          <BlockRender key={i} block={b} />
-        ))}
+      <div className="msg assistant msg-group">
+        <div className="avatar assistant" aria-hidden="true">
+          <ClaudeMark />
+        </div>
+        <div className="msg-body">
+          <div className="role">claude</div>
+          {m.blocks.map((b, i) => (
+            <BlockRender key={i} block={b} />
+          ))}
+        </div>
       </div>
     );
   }
@@ -35,37 +46,52 @@ export function MessageBlock(props: {
 
   if (m.kind === 'result') {
     return (
-      <div className={`msg result ${m.subtype === 'success' ? 'ok' : 'err'}`}>
-        <div className="role">
-          {m.subtype} · ${m.cost.toFixed(4)}
+      <div className={`msg result msg-group ${m.subtype === 'success' ? 'ok' : 'err'}`}>
+        <div className="avatar tool" aria-hidden="true">
+          Σ
         </div>
-        {m.errors && m.errors.length > 0 && <pre>{m.errors.join('\n')}</pre>}
+        <div className="msg-body">
+          <div className="role">
+            {m.subtype} · ${m.cost.toFixed(4)}
+          </div>
+          {m.errors && m.errors.length > 0 && <pre>{m.errors.join('\n')}</pre>}
+        </div>
       </div>
     );
   }
 
   if (m.kind === 'error') {
     return (
-      <div className="msg error">
-        <div className="role">error · {m.errorKind}</div>
-        <pre>{m.message}</pre>
+      <div className="msg error msg-group">
+        <div className="avatar system" aria-hidden="true">
+          !
+        </div>
+        <div className="msg-body">
+          <div className="role">error · {m.errorKind}</div>
+          <pre>{m.message}</pre>
+        </div>
       </div>
     );
   }
 
   if (m.kind === 'permission_request') {
     return (
-      <div className="msg permission">
-        <div className="role">permission · {m.toolName}</div>
-        <pre>{JSON.stringify(m.input, null, 2)}</pre>
-        {m.decided ? (
-          <div className="decided">decided: {m.decided}</div>
-        ) : (
-          <div className="actions">
-            <button onClick={() => onPermissionDecide?.(m.requestId, 'allow')}>Allow</button>
-            <button onClick={() => onPermissionDecide?.(m.requestId, 'deny')}>Deny</button>
-          </div>
-        )}
+      <div className="msg permission msg-group">
+        <div className="avatar tool" aria-hidden="true">
+          ?
+        </div>
+        <div className="msg-body">
+          <div className="role">permission · {m.toolName}</div>
+          <pre>{JSON.stringify(m.input, null, 2)}</pre>
+          {m.decided ? (
+            <div className="decided">decided: {m.decided}</div>
+          ) : (
+            <div className="actions">
+              <button onClick={() => onPermissionDecide?.(m.requestId, 'allow')}>Allow</button>
+              <button onClick={() => onPermissionDecide?.(m.requestId, 'deny')}>Deny</button>
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -160,12 +186,17 @@ export function StreamingPlaceholder({ text }: { text: string }) {
   // expensive. The full assistant_message replaces this block with <Markdown>.
   const displayed = useTypewriter(text);
   return (
-    <div className="msg assistant streaming">
-      <div className="role">claude…</div>
-      <pre className="streaming-text">
-        {displayed}
-        <span className="caret" />
-      </pre>
+    <div className="msg assistant streaming msg-group">
+      <div className="avatar assistant" aria-hidden="true">
+        <ClaudeMark />
+      </div>
+      <div className="msg-body">
+        <div className="role">claude…</div>
+        <pre className="streaming-text">
+          {displayed}
+          <span className="caret" />
+        </pre>
+      </div>
     </div>
   );
 }
