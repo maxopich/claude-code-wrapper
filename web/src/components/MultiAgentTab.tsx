@@ -8,6 +8,7 @@ import type {
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
+import { useModalKeys } from '../useModalKeys';
 
 /**
  * Multi-Agent tab.
@@ -691,6 +692,10 @@ function AgentDiagram(props: {
   participants: Project[];
   roles: Record<string, string>;
   onRoleChange: (projectId: number, text: string) => void;
+  /** Called only when a cell is committed via the Enter key, so the parent
+   *  can return focus to the pane (next Enter → Save roles / Apply). Not
+   *  called on blur/scroll close — grabbing focus back then is intrusive. */
+  onAfterCommit?: () => void;
 }) {
   const { participants, mode, roles, onRoleChange } = props;
   const n = participants.length;
@@ -796,11 +801,12 @@ function AgentDiagram(props: {
           if (e.key === 'Escape') {
             e.preventDefault();
             cancelEditing();
-          } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          } else if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             commitIfEditing();
+            props.onAfterCommit?.();
           }
-          // plain Enter falls through → newline (multi-line role)
+          // Shift+Enter falls through → newline (multi-line role)
         }}
         placeholder="Role / goal…"
         aria-label="Edit role"
@@ -1123,8 +1129,31 @@ function TemplatePreview(props: {
   const rolesDirty =
     JSON.stringify(normalizeRoles(roles)) !== JSON.stringify(normalizeRoles(template.roles ?? {}));
 
+  // The pane is the keyboard target for Save roles / Apply. tabIndex={-1}:
+  // focusable via .focus() / click, but not an awkward Tab stop on a huge
+  // panel. Parent remounts us via key={template.id}, so this focuses the
+  // pane each time a template is selected → Enter applies straight away.
+  const paneRef = useRef<HTMLDivElement>(null);
+  const focusPane = () => paneRef.current?.focus({ preventScroll: true });
+  useEffect(() => {
+    focusPane();
+  }, []);
+
   return (
-    <div className="tpl-preview">
+    <div
+      className="tpl-preview"
+      ref={paneRef}
+      tabIndex={-1}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter') return;
+        // A child control (button / role textarea / SVG node) owns its own
+        // keys; only act when the pane container itself is focused.
+        if (e.target !== paneRef.current) return;
+        e.preventDefault();
+        if (resolved.length > 0 && rolesDirty) props.onUpdateRoles(template, normalizeRoles(roles));
+        else props.onApply(template);
+      }}
+    >
       <div className="tpl-preview-head">
         <div className="tpl-preview-name" title={template.name}>
           {template.name}
@@ -1141,6 +1170,7 @@ function TemplatePreview(props: {
         participants={resolved}
         roles={roles}
         onRoleChange={(id, text) => setRoles((r) => ({ ...r, [String(id)]: text }))}
+        onAfterCommit={() => requestAnimationFrame(focusPane)}
       />
 
       <div className="tpl-actions">
@@ -1175,6 +1205,11 @@ function TemplateNameModal(props: {
   const trimmed = value.trim();
   const canSave = trimmed.length > 0;
   const isDup = props.existingNames.includes(trimmed);
+  useModalKeys({
+    onClose: props.onClose,
+    onConfirm: () => props.onSave(trimmed),
+    canConfirm: canSave,
+  });
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1193,9 +1228,7 @@ function TemplateNameModal(props: {
               onChange={(e) => setValue(e.target.value)}
               placeholder="e.g. security review"
               spellCheck={false}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && canSave) props.onSave(trimmed);
-              }}
+              autoFocus
             />
           </label>
           <p className="hint">
