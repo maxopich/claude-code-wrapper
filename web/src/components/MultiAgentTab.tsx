@@ -610,6 +610,23 @@ function truncLabel(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+/** Wrap `text` into ≤2 lines of ~`perLine` chars for an SVG role label
+ * (SVG <text> has no wrapping). Roles can be one long space-less token, so
+ * this is char-based; if a space sits within the last BREAK_SLACK chars
+ * before the cut we break there for a nicer wrap. Line 2 is ellipsised
+ * (truncLabel) only when text still remains past the 2-line budget. Full
+ * text always stays in the node <title> + the click-to-edit overlay. */
+function wrap2(text: string, perLine: number): [string] | [string, string] {
+  const per = Math.max(1, perLine);
+  if (text.length <= per) return [text];
+  const BREAK_SLACK = 8;
+  let cut = per;
+  const sp = text.lastIndexOf(' ', per);
+  if (sp >= per - BREAK_SLACK && sp > 0) cut = sp;
+  const rest = text.slice(cut === sp ? cut + 1 : cut);
+  return [text.slice(0, cut), truncLabel(rest, per)];
+}
+
 /** The trimmed role text for an agent (whitespace-only ⇒ empty). */
 function roleOf(roles: Record<string, string>, id: number): string {
   return (roles[String(id)] ?? '').trim();
@@ -620,9 +637,16 @@ function roleOf(roles: Record<string, string>, id: number): string {
 // tiles are clamped and each line is ellipsised to the final width.
 const FACTOR_SANS = 0.58;
 const FACTOR_BOLD = 0.62;
-const FACTOR_MONO = 0.6;
 const TILE_PAD_X = 10;
 const ROLE_PLACEHOLDER = 'Role / goal…';
+
+// Stage square side as a function of agent count: small (the diagram
+// meet-scales up to fill it, so tiles read big) for a few agents, growing
+// per agent up to a hard cap — past the cap more agents meet-scale the
+// text down rather than growing the square unbounded.
+const SQ_BASE = 320;
+const SQ_STEP = 26;
+const SQ_CAP = 460;
 
 function estTextW(text: string, fontSize: number, factor: number): number {
   return text.length * fontSize * factor;
@@ -634,23 +658,20 @@ function fitChars(maxPx: number, fontSize: number, factor: number): number {
   return Math.max(1, Math.floor(maxPx / (fontSize * factor)));
 }
 
-/** Tile width sized to the widest of its three single lines, clamped to
+/** Tile width sized so the name fits one line and the role fits in ≤2
+ * lines (≈half the single-line role estimate, since it wraps), clamped to
  * [minW, maxW]. Empty role uses the placeholder so empty tiles aren't
  * hairline-thin. */
 function tileWidth(
   name: string,
   role: string,
-  slugText: string,
-  fsizes: { name: number; role: number; slug: number },
+  fsizes: { name: number; role: number },
   minW: number,
   maxW: number,
 ): number {
   const roleForSize = role || ROLE_PLACEHOLDER;
-  const content = Math.max(
-    estTextW(name, fsizes.name, FACTOR_BOLD),
-    estTextW(roleForSize, fsizes.role, FACTOR_SANS),
-    estTextW(slugText, fsizes.slug, FACTOR_MONO),
-  );
+  const roleHalfW = estTextW(roleForSize, fsizes.role, FACTOR_SANS) / 2;
+  const content = Math.max(estTextW(name, fsizes.name, FACTOR_BOLD), roleHalfW);
   return Math.round(Math.min(Math.max(minW, content + 2 * TILE_PAD_X), maxW));
 }
 
@@ -728,7 +749,7 @@ function AgentDiagram(props: {
     return <div className="tpl-diagram-empty">(no resolvable participants)</div>;
   }
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const slug = (p: Project) => (p.busInstalled ? (p.busAgentName ?? 'no bus') : 'no bus');
+  const squarePx = Math.min(SQ_CAP, SQ_BASE + (n - 1) * SQ_STEP);
 
   function commitIfEditing() {
     if (editingId != null) {
@@ -788,25 +809,26 @@ function AgentDiagram(props: {
     ) : null;
 
   if (mode === 'orchestrator') {
-    const GAP = 12;
-    const SIDE_PAD = 16;
+    const GAP = 10;
+    const SIDE_PAD = 14;
     const HUB_H = 30;
-    const HUB_Y = 22;
+    const HUB_Y = 20;
     const HY = 52;
-    const midY = HY + 22;
-    const WORKER_Y = 96;
-    const WORKER_H = 44;
-    const HEIGHT = 152;
-    const FS_NAME = 10;
-    const FS_ROLE = 9.5;
-    const FS_SLUG = 8.5;
-    const MIN_W = 84;
-    const MAX_W = 150;
-    const fsizes = { name: FS_NAME, role: FS_ROLE, slug: FS_SLUG };
+    const midY = 70;
+    const WORKER_Y = 88;
+    const WORKER_H = 56;
+    const HEIGHT = 150;
+    const FS_NAME = 11;
+    const FS_ROLE = 10;
+    const MIN_W = 96;
+    const MAX_W = 168;
+    const ROLE_Y1 = WORKER_Y + 30;
+    const ROLE_Y2 = WORKER_Y + 42;
+    const fsizes = { name: FS_NAME, role: FS_ROLE };
     let acc = SIDE_PAD;
     const laid = participants.map((p) => {
       const role = roleOf(roles, p.id);
-      const tw = tileWidth(p.name, role, slug(p), fsizes, MIN_W, MAX_W);
+      const tw = tileWidth(p.name, role, fsizes, MIN_W, MAX_W);
       const t = { p, role, x: acc, w: tw };
       acc += tw + GAP;
       return t;
@@ -822,13 +844,11 @@ function AgentDiagram(props: {
     const first = laid[0];
     const firstEdge = first ? edgePath(first.x + first.w / 2) : null;
     return (
-      <div className="tpl-stage" ref={stageRef}>
+      <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
         <svg
           className="tpl-svg"
-          width={width}
-          height={HEIGHT}
           viewBox={`0 0 ${width} ${HEIGHT}`}
-          preserveAspectRatio="xMinYMid meet"
+          preserveAspectRatio="xMidYMid meet"
           role="img"
           aria-label={`Orchestrator routing to ${n} worker${n === 1 ? '' : 's'}`}
         >
@@ -887,31 +907,43 @@ function AgentDiagram(props: {
                 <text
                   className="tpl-node-name"
                   x={cx}
-                  y={WORKER_Y + 13}
+                  y={WORKER_Y + 16}
                   textAnchor="middle"
                   fontSize={FS_NAME}
                   fontWeight={600}
                 >
                   {truncLabel(p.name, fitChars(innerW, FS_NAME, FACTOR_BOLD))}
                 </text>
-                <text
-                  className={role ? 'tpl-node-role' : 'tpl-node-role empty'}
-                  x={cx}
-                  y={WORKER_Y + 26}
-                  textAnchor="middle"
-                  fontSize={FS_ROLE}
-                >
-                  {truncLabel(roleText, fitChars(innerW, FS_ROLE, FACTOR_SANS))}
-                </text>
-                <text
-                  className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
-                  x={cx}
-                  y={WORKER_Y + 38}
-                  textAnchor="middle"
-                  fontSize={FS_SLUG}
-                >
-                  {truncLabel(slug(p), fitChars(innerW, FS_SLUG, FACTOR_MONO))}
-                </text>
+                {(() => {
+                  const lines = wrap2(roleText, fitChars(innerW, FS_ROLE, FACTOR_SANS));
+                  const cls = role ? 'tpl-node-role' : 'tpl-node-role empty';
+                  return lines.length === 2 ? (
+                    <>
+                      <text
+                        className={cls}
+                        x={cx}
+                        y={ROLE_Y1}
+                        textAnchor="middle"
+                        fontSize={FS_ROLE}
+                      >
+                        {lines[0]}
+                      </text>
+                      <text
+                        className={cls}
+                        x={cx}
+                        y={ROLE_Y2}
+                        textAnchor="middle"
+                        fontSize={FS_ROLE}
+                      >
+                        {lines[1]}
+                      </text>
+                    </>
+                  ) : (
+                    <text className={cls} x={cx} y={ROLE_Y1} textAnchor="middle" fontSize={FS_ROLE}>
+                      {lines[0]}
+                    </text>
+                  );
+                })()}
               </g>
             );
           })}
@@ -929,22 +961,23 @@ function AgentDiagram(props: {
   }
 
   // Chain — a left→right sequence with arrowed links.
-  const GAP = 40;
-  const SIDE_PAD = 16;
-  const NODE_H = 46;
-  const NODE_Y = 16;
-  const HEIGHT = 80;
-  const FS_NAME = 10.5;
-  const FS_ROLE = 9.5;
-  const FS_SLUG = 9;
-  const MIN_W = 120;
-  const MAX_W = 240;
+  const GAP = 32;
+  const SIDE_PAD = 14;
+  const NODE_H = 56;
+  const NODE_Y = 14;
+  const HEIGHT = 84;
+  const FS_NAME = 11.5;
+  const FS_ROLE = 10;
+  const MIN_W = 132;
+  const MAX_W = 248;
   const cy = NODE_Y + NODE_H / 2;
-  const fsizes = { name: FS_NAME, role: FS_ROLE, slug: FS_SLUG };
+  const ROLE_Y1 = NODE_Y + 33;
+  const ROLE_Y2 = NODE_Y + 46;
+  const fsizes = { name: FS_NAME, role: FS_ROLE };
   let acc = SIDE_PAD;
   const laid = participants.map((p) => {
     const role = roleOf(roles, p.id);
-    const tw = tileWidth(p.name, role, slug(p), fsizes, MIN_W, MAX_W);
+    const tw = tileWidth(p.name, role, fsizes, MIN_W, MAX_W);
     const t = { p, role, x: acc, w: tw };
     acc += tw + GAP;
     return t;
@@ -955,13 +988,11 @@ function AgentDiagram(props: {
   const dotPath =
     first && last ? `M${first.x + first.w / 2} ${cy} L ${last.x + last.w / 2} ${cy}` : null;
   return (
-    <div className="tpl-stage" ref={stageRef}>
+    <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
       <svg
         className="tpl-svg"
-        width={width}
-        height={HEIGHT}
         viewBox={`0 0 ${width} ${HEIGHT}`}
-        preserveAspectRatio="xMinYMid meet"
+        preserveAspectRatio="xMidYMid meet"
         role="img"
         aria-label={`Chain of ${n} agent${n === 1 ? '' : 's'}`}
       >
@@ -1017,31 +1048,31 @@ function AgentDiagram(props: {
               <text
                 className="tpl-node-name"
                 x={cx}
-                y={NODE_Y + 14}
+                y={NODE_Y + 18}
                 textAnchor="middle"
                 fontSize={FS_NAME}
                 fontWeight={600}
               >
                 {truncLabel(p.name, fitChars(innerW, FS_NAME, FACTOR_BOLD))}
               </text>
-              <text
-                className={role ? 'tpl-node-role' : 'tpl-node-role empty'}
-                x={cx}
-                y={NODE_Y + 28}
-                textAnchor="middle"
-                fontSize={FS_ROLE}
-              >
-                {truncLabel(roleText, fitChars(innerW, FS_ROLE, FACTOR_SANS))}
-              </text>
-              <text
-                className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
-                x={cx}
-                y={NODE_Y + 40}
-                textAnchor="middle"
-                fontSize={FS_SLUG}
-              >
-                {truncLabel(slug(p), fitChars(innerW, FS_SLUG, FACTOR_MONO))}
-              </text>
+              {(() => {
+                const lines = wrap2(roleText, fitChars(innerW, FS_ROLE, FACTOR_SANS));
+                const cls = role ? 'tpl-node-role' : 'tpl-node-role empty';
+                return lines.length === 2 ? (
+                  <>
+                    <text className={cls} x={cx} y={ROLE_Y1} textAnchor="middle" fontSize={FS_ROLE}>
+                      {lines[0]}
+                    </text>
+                    <text className={cls} x={cx} y={ROLE_Y2} textAnchor="middle" fontSize={FS_ROLE}>
+                      {lines[1]}
+                    </text>
+                  </>
+                ) : (
+                  <text className={cls} x={cx} y={ROLE_Y1} textAnchor="middle" fontSize={FS_ROLE}>
+                    {lines[0]}
+                  </text>
+                );
+              })()}
             </g>
           );
         })}
