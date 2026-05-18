@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { SettingsView } from '../store';
+import { useModalKeys } from '../useModalKeys';
 
 export function SettingsModal(props: {
   settings: SettingsView;
@@ -11,6 +12,11 @@ export function SettingsModal(props: {
   );
   const trimmed = value.trim();
   const canSave = trimmed.length > 0 && trimmed !== props.settings.workspaceRoot;
+  useModalKeys({
+    onClose: props.onClose,
+    onConfirm: () => props.onSave(trimmed),
+    canConfirm: canSave,
+  });
 
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
@@ -30,6 +36,7 @@ export function SettingsModal(props: {
               onChange={(e) => setValue(e.target.value)}
               placeholder="/Users/you/agents"
               spellCheck={false}
+              autoFocus
             />
           </label>
           <p className="hint">

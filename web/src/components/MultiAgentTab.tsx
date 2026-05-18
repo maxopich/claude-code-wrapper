@@ -8,6 +8,7 @@ import type {
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
+import { useModalKeys } from '../useModalKeys';
 
 /**
  * Multi-Agent tab.
@@ -527,7 +528,14 @@ function TemplatesPanel(props: {
         items={items}
         projects={props.projects}
         selectedId={selected.id}
-        onSelect={setSelectedId}
+        onSelect={(id) => {
+          // Clicking a template both opens its preview (for role edits)
+          // and applies it — fills participants/lifecycle so the operator
+          // can just type a prompt and press Enter to start.
+          setSelectedId(id);
+          const t = items.find((x) => x.id === id);
+          if (t) props.onApply(t);
+        }}
         onDelete={props.onDelete}
       />
       <TemplatePreview
@@ -691,6 +699,12 @@ function AgentDiagram(props: {
   participants: Project[];
   roles: Record<string, string>;
   onRoleChange: (projectId: number, text: string) => void;
+  /** Called only when a cell is committed via the Enter key, with the
+   *  committed (projectId, text), so the parent can persist roles right
+   *  away (no separate "Save roles" click) and return focus to the pane.
+   *  NOT called on blur/scroll close — those stay in-memory only, and
+   *  grabbing focus back then is intrusive. */
+  onCommitRole?: (projectId: number, text: string) => void;
 }) {
   const { participants, mode, roles, onRoleChange } = props;
   const n = participants.length;
@@ -796,11 +810,14 @@ function AgentDiagram(props: {
           if (e.key === 'Escape') {
             e.preventDefault();
             cancelEditing();
-          } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          } else if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
+            const pid = editingId;
+            const text = draft;
             commitIfEditing();
+            if (pid != null) props.onCommitRole?.(pid, text);
           }
-          // plain Enter falls through → newline (multi-line role)
+          // Shift+Enter falls through → newline (multi-line role)
         }}
         placeholder="Role / goal…"
         aria-label="Edit role"
@@ -1123,8 +1140,31 @@ function TemplatePreview(props: {
   const rolesDirty =
     JSON.stringify(normalizeRoles(roles)) !== JSON.stringify(normalizeRoles(template.roles ?? {}));
 
+  // The pane is the keyboard target for Save roles / Apply. tabIndex={-1}:
+  // focusable via .focus() / click, but not an awkward Tab stop on a huge
+  // panel. Parent remounts us via key={template.id}, so this focuses the
+  // pane each time a template is selected → Enter applies straight away.
+  const paneRef = useRef<HTMLDivElement>(null);
+  const focusPane = () => paneRef.current?.focus({ preventScroll: true });
+  useEffect(() => {
+    focusPane();
+  }, []);
+
   return (
-    <div className="tpl-preview">
+    <div
+      className="tpl-preview"
+      ref={paneRef}
+      tabIndex={-1}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter') return;
+        // A child control (button / role textarea / SVG node) owns its own
+        // keys; only act when the pane container itself is focused.
+        if (e.target !== paneRef.current) return;
+        e.preventDefault();
+        if (resolved.length > 0 && rolesDirty) props.onUpdateRoles(template, normalizeRoles(roles));
+        else props.onApply(template);
+      }}
+    >
       <div className="tpl-preview-head">
         <div className="tpl-preview-name" title={template.name}>
           {template.name}
@@ -1141,6 +1181,14 @@ function TemplatePreview(props: {
         participants={resolved}
         roles={roles}
         onRoleChange={(id, text) => setRoles((r) => ({ ...r, [String(id)]: text }))}
+        onCommitRole={(id, text) => {
+          // Enter in a cell persists straight away — no "Save roles" click.
+          // Build the next map from the committed cell (local `roles` may
+          // not have it yet) so the saved value is never a step behind.
+          const next = { ...roles, [String(id)]: text };
+          props.onUpdateRoles(template, normalizeRoles(next));
+          requestAnimationFrame(focusPane);
+        }}
       />
 
       <div className="tpl-actions">
@@ -1175,6 +1223,11 @@ function TemplateNameModal(props: {
   const trimmed = value.trim();
   const canSave = trimmed.length > 0;
   const isDup = props.existingNames.includes(trimmed);
+  useModalKeys({
+    onClose: props.onClose,
+    onConfirm: () => props.onSave(trimmed),
+    canConfirm: canSave,
+  });
   return (
     <div className="modal-backdrop" onClick={props.onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1193,9 +1246,7 @@ function TemplateNameModal(props: {
               onChange={(e) => setValue(e.target.value)}
               placeholder="e.g. security review"
               spellCheck={false}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && canSave) props.onSave(trimmed);
-              }}
+              autoFocus
             />
           </label>
           <p className="hint">
