@@ -997,6 +997,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         mode: msg.mode,
         lifecycle: msg.lifecycle,
         participants: msg.participants,
+        roles: msg.roles,
       });
       send(conn.ws, { type: 'templates', items });
       return;

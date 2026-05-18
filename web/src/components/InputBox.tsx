@@ -1,4 +1,6 @@
-import { useState, type KeyboardEvent } from 'react';
+import { useState } from 'react';
+import { GrowTextarea } from './GrowTextarea';
+import { Icon } from './Icon';
 
 export function InputBox(props: { disabled?: boolean; onSend: (text: string) => void }) {
   const [text, setText] = useState('');
@@ -10,24 +12,18 @@ export function InputBox(props: { disabled?: boolean; onSend: (text: string) => 
     setText('');
   }
 
-  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
-  }
-
   return (
     <div className="input-box">
-      <textarea
+      <GrowTextarea
         value={text}
-        onChange={(e) => setText(e.target.value)}
-        onKeyDown={onKey}
-        rows={3}
-        placeholder="Message Claude. Enter to send, Shift+Enter for newline."
+        onChange={setText}
+        onSubmit={send}
         disabled={props.disabled}
+        placeholder="Message Claude. Enter to send, Shift+Enter for newline."
+        ariaLabel="Message Claude"
       />
       <button onClick={send} disabled={props.disabled || !text.trim()}>
+        <Icon name="send" />
         Send
       </button>
     </div>

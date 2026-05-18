@@ -92,10 +92,10 @@ export type MultiAgentRun = {
  * assembled at the same time.
  */
 export type MultiAgentState = {
-  /** Which top-level main view is showing. */
-  view: 'chat' | 'multi-agent';
-  /** Currently selected mode for the multi-agent tab. */
-  mode: 'chain' | 'orchestrator';
+  /** Which top-level main view is showing. The two multi-agent tabs ARE
+   * the mode: 'multi-agent' = orchestrator-routed, 'chained-chat' = chain.
+   * There is no separate mode field — the active tab is the source of truth. */
+  view: 'chat' | 'multi-agent' | 'chained-chat';
   /** Currently selected lifecycle for the next start. Defaults to
    *  'persistent' (safer — folder survives End, can be resumed). The
    *  operator opts into 'temp' explicitly. */
@@ -192,7 +192,6 @@ export const initialState: AppState = {
   wrapperErrorSeq: 0,
   multiAgent: {
     view: 'chat',
-    mode: 'orchestrator',
     draftLifecycle: 'persistent',
     draftParticipants: [],
     draftPrompt: '',
@@ -256,8 +255,7 @@ export type Action =
   | { type: 'select_session'; projectId: number; sessionId: string }
   | { type: 'new_session'; projectId: number }
   | { type: 'user_send'; text: string }
-  | { type: 'ma_set_view'; view: 'chat' | 'multi-agent' }
-  | { type: 'ma_set_mode'; mode: 'chain' | 'orchestrator' }
+  | { type: 'ma_set_view'; view: 'chat' | 'multi-agent' | 'chained-chat' }
   | { type: 'ma_set_lifecycle'; lifecycle: MultiAgentLifecycle }
   | { type: 'ma_add_participant'; projectId: number }
   | { type: 'ma_remove_participant'; projectId: number }
@@ -348,9 +346,6 @@ export function reduce(state: AppState, action: Action): AppState {
     case 'ma_set_view':
       return { ...state, multiAgent: { ...state.multiAgent, view: action.view } };
 
-    case 'ma_set_mode':
-      return { ...state, multiAgent: { ...state.multiAgent, mode: action.mode } };
-
     case 'ma_set_lifecycle':
       return {
         ...state,
@@ -405,7 +400,9 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, multiAgent: { ...state.multiAgent, draftPrompt: action.text } };
 
     case 'ma_apply_template': {
-      // Atomic fill: mode + lifecycle + participants in one transition.
+      // Atomic fill: lifecycle + participants in one transition. Mode is NOT
+      // applied — the active tab is the mode, and template lists are filtered
+      // to the tab's mode, so an applied template's mode always matches.
       // Reuse the `projects`-reducer staleness filter so a template that
       // references a since-deleted project degrades instead of erroring;
       // the dropped count drives a UI warning. draftPrompt is left alone.
@@ -415,7 +412,6 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          mode: action.template.mode,
           draftLifecycle: action.template.lifecycle,
           draftParticipants: filtered,
           lastAppliedDropped: action.template.participants.length - filtered.length,
@@ -502,9 +498,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          // Auto-switch to the Multi-Agent view so the operator sees the
+          // Auto-switch to the matching tab so the operator sees the
           // scrollback even if the start was triggered from elsewhere.
-          view: 'multi-agent',
+          view: msg.mode === 'chain' ? 'chained-chat' : 'multi-agent',
           active: {
             sessionId: msg.sessionId,
             mode: msg.mode,

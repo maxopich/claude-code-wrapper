@@ -1,16 +1,92 @@
+/* ── Design tokens — Linear-inspired, ported from cebab-redesign.html.
+ * Two :root blocks on purpose: this first one is the full new palette;
+ * the second (legacy 12-token set) is re-pointed at it so the ~254
+ * existing var() refs adopt the new look in one move. --bg-2/--bg-3 are
+ * deliberately NOT declared here — they collide with the legacy ramp
+ * (different surface layers); the legacy block owns them with legacy
+ * semantics (--bg-2 = panel, --bg-3 = card). New CSS uses these tokens. */
 :root {
-  --bg: #0f0f10;
-  --bg-2: #18181a;
-  --bg-3: #222226;
-  --fg: #e8e8ea;
-  --fg-2: #a8a8ae;
-  --fg-3: #6c6c72;
-  --accent: #6ea8fe;
-  --accent-2: #2c5b9c;
-  --ok: #5cc58a;
-  --err: #e26d6d;
-  --warn: #d6b56a;
-  --border: #2a2a2e;
+  /* Surface ramp (–0 page · –1 panel · –4 hover · –5 pressed) */
+  --bg-0: #08090b;
+  --bg-1: #0d0e11;
+  --bg-4: #1f2127;
+  --bg-5: #272a32;
+  /* Foreground */
+  --fg-0: #f5f6f8;
+  --fg-1: #c6c9d1;
+  --fg-2: #8b8f99;
+  --fg-3: #5b5f6a;
+  /* Borders — soft, layered */
+  --line-1: rgba(255, 255, 255, 0.04);
+  --line-2: rgba(255, 255, 255, 0.07);
+  --line-3: rgba(255, 255, 255, 0.12);
+  /* Brand — electric violet */
+  --accent: #8b5cf6;
+  --accent-soft: #6e3bff;
+  --accent-glow: rgba(139, 92, 246, 0.22);
+  --accent-ink: #c4b5fd;
+  /* Semantic */
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.12);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.12);
+  --err: #f87171;
+  --err-soft: rgba(248, 113, 113, 0.12);
+  --info: #60a5fa;
+  --info-soft: rgba(96, 165, 250, 0.1);
+  /* Claude coral — agent/brand mark */
+  --coral: #cc785c;
+  /* Type scale */
+  --t-xs: 11px;
+  --t-sm: 12px;
+  --t-md: 13px;
+  --t-lg: 14px;
+  --t-xl: 16px;
+  --t-2xl: 20px;
+  /* Spacing */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+  /* Radii */
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.32);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.55);
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-1: 120ms;
+  --dur-2: 200ms;
+  --dur-3: 320ms;
+  /* Fonts */
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+/* Legacy 12-token set — re-pointed at the palette above. --accent-2 is the
+ * solid-fill accent (primary buttons, active rows, focus borders); --accent
+ * is the brighter hover. --bg-2 = panel, --bg-3 = card. */
+:root {
+  --bg: #08090b;
+  --bg-2: #0d0e11;
+  --bg-3: #181a1f;
+  --fg: #f5f6f8;
+  --fg-2: #8b8f99;
+  --fg-3: #5b5f6a;
+  --accent: #8b5cf6;
+  --accent-2: #6e3bff;
+  --ok: #34d399;
+  --err: #f87171;
+  --warn: #fbbf24;
+  --border: rgba(255, 255, 255, 0.1);
 }
 
 * {
@@ -23,13 +99,18 @@ body,
   margin: 0;
 }
 body {
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
   background: var(--bg);
   color: var(--fg);
   font-size: 14px;
+  line-height: 1.5;
+  font-feature-settings: 'cv11', 'ss03', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 pre {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
   margin: 0;
@@ -41,6 +122,33 @@ pre {
   display: grid;
   /* Column track is set inline from App.tsx (resizable / collapsible). */
   height: 100vh;
+}
+
+/* Inline-SVG icon helper (Icon.tsx) + sidebar brand mark — ported from
+ * cebab-redesign.html. .brand-mark is applied to a <ClaudeMark> svg, so
+ * padding (inside the 22px box via global border-box) leaves a 14px star. */
+.ic {
+  width: 14px;
+  height: 14px;
+  display: inline-block;
+  vertical-align: -2px;
+  flex-shrink: 0;
+}
+.ic-lg {
+  width: 16px;
+  height: 16px;
+}
+.brand-mark {
+  width: 22px;
+  height: 22px;
+  padding: 4px;
+  border-radius: var(--r-sm);
+  background: linear-gradient(135deg, var(--accent) 0%, var(--coral) 100%);
+  box-shadow:
+    0 0 0 1px var(--line-3),
+    0 6px 14px var(--accent-glow);
+  color: #fff;
+  flex-shrink: 0;
 }
 
 .sidebar {
@@ -91,60 +199,69 @@ pre {
 .sidebar header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
+  gap: 8px;
+  height: 52px;
+  padding: 0 var(--s-4);
+  border-bottom: 1px solid var(--line-1);
 }
 .sidebar h1 {
-  font-size: 14px;
+  font-size: var(--t-md);
   font-weight: 600;
   margin: 0;
-  letter-spacing: 0.04em;
+  letter-spacing: -0.01em;
   text-transform: lowercase;
 }
 .sidebar-header-controls {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
 }
 .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
 }
 .dot.on {
   background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
 }
 .dot.off {
   background: var(--err);
+  box-shadow: 0 0 8px var(--err);
 }
 
 .icon-btn {
   background: transparent;
   border: 1px solid transparent;
   color: var(--fg-2);
-  border-radius: 4px;
+  border-radius: 5px;
   padding: 1px 6px;
-  font-size: 13px;
+  font-size: var(--t-md);
   cursor: pointer;
   line-height: 1;
 }
 .icon-btn:hover {
   background: var(--bg-3);
   color: var(--fg);
-  border-color: var(--border);
+  border-color: var(--line-3);
 }
 .primary-btn {
-  background: var(--accent-2);
-  color: var(--fg);
+  background: var(--accent);
+  color: #fff;
   border: 1px solid var(--accent);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 6px 14px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 0 0 1px rgba(0, 0, 0, 0.04),
+    0 6px 16px var(--accent-glow);
 }
 .primary-btn:hover {
-  background: var(--accent);
+  background: var(--accent-2);
 }
 .primary-btn:disabled {
   opacity: 0.4;
@@ -154,14 +271,16 @@ pre {
   background: transparent;
   color: var(--fg-2);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 6px 14px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--t-sm);
+  font-weight: 500;
 }
 .ghost-btn:hover {
   background: var(--bg-3);
   color: var(--fg);
+  border-color: var(--line-3);
 }
 
 .project-list {
@@ -174,7 +293,7 @@ pre {
   min-height: 0;
 }
 .sidebar-footer {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line-1);
   padding: 10px 12px;
   background: var(--bg-2);
 }
@@ -187,17 +306,17 @@ pre {
   background: var(--bg-3);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--t-sm);
   text-align: left;
   transition:
-    background 120ms ease,
-    border-color 120ms ease;
+    background var(--dur-1) var(--ease),
+    border-color var(--dur-1) var(--ease);
 }
 .workspace-btn:hover {
-  background: var(--bg);
-  border-color: var(--accent-2);
+  background: var(--bg-4);
+  border-color: var(--line-3);
 }
 .workspace-btn.warn {
   border-color: var(--warn);
@@ -227,22 +346,31 @@ pre {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 14px;
+  padding: 6px 8px;
+  margin: 1px 6px;
+  border-radius: var(--r-sm);
+  color: var(--fg-1);
   cursor: pointer;
   user-select: none;
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
 }
 .project-header:hover {
   background: var(--bg-3);
+  color: var(--fg);
 }
 .project-header.active {
-  background: var(--accent-2);
+  background: linear-gradient(180deg, rgba(139, 92, 246, 0.18), rgba(139, 92, 246, 0.1));
+  color: var(--fg);
+  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.3);
 }
 /* Claude brand mark, rendered next to projects that contain a CLAUDE.md.
  * The presence/absence of this mark is the sidebar's "is this an agent
  * project?" signal — non-agent folders simply don't render the mark.
  * Color is Anthropic's coral; size inherits from the SVG component default. */
 .claude-mark {
-  color: #cc785c;
+  color: var(--coral);
   flex-shrink: 0;
   /* Slight vertical nudge so the 8-spoke star aligns with the text baseline
    * rather than sitting heavy on the top of the line box. */
@@ -250,6 +378,7 @@ pre {
 }
 .project-name {
   font-weight: 500;
+  font-size: var(--t-md);
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -269,46 +398,58 @@ pre {
 }
 .project-live-dot.on {
   background: var(--ok);
-  box-shadow: 0 0 6px var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+  animation: pulse 1.6s ease-in-out infinite;
 }
 .trust {
-  background: transparent;
-  color: var(--fg-3);
+  background: var(--bg-3);
+  color: var(--fg-2);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  padding: 2px 6px;
   font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   cursor: pointer;
   flex-shrink: 0;
 }
 .trust.on {
   color: var(--warn);
-  border-color: var(--warn);
+  background: var(--warn-soft);
+  border-color: rgba(251, 191, 36, 0.35);
 }
 
 .session-list {
   list-style: none;
   margin: 0;
   padding: 2px 0 6px;
-  background: rgba(0, 0, 0, 0.18);
-  border-bottom: 1px solid var(--border);
+  background: transparent;
+  border-bottom: 1px solid var(--line-1);
 }
 .session-row {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 5px 14px 5px 26px;
+  margin: 1px 6px;
+  border-radius: 5px;
   cursor: pointer;
   user-select: none;
-  font-size: 12px;
+  font-size: var(--t-sm);
   color: var(--fg-2);
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
 }
 .session-row:hover {
   background: var(--bg-3);
+  color: var(--fg);
 }
 .session-row.active {
-  background: rgba(110, 168, 254, 0.12);
+  background: rgba(139, 92, 246, 0.12);
   color: var(--fg);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .session-marker {
   width: 6px;
@@ -328,7 +469,7 @@ pre {
   width: auto;
   height: auto;
   border-radius: 0;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   text-align: center;
   line-height: 1;
 }
@@ -341,7 +482,8 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
 }
 .session-row.new .session-name {
   font-family: inherit;
@@ -354,7 +496,7 @@ pre {
   border: 1px solid var(--accent-2);
   border-radius: 3px;
   padding: 2px 5px;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   outline: none;
 }
@@ -418,6 +560,9 @@ pre {
    * flex parent rather than expanding the row. */
   flex: 1;
   min-height: 0;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, rgba(139, 92, 246, 0.05), transparent 60%),
+    var(--bg);
 }
 .chat.empty {
   align-items: center;
@@ -425,28 +570,63 @@ pre {
   color: var(--fg-3);
 }
 
+/* Avatar + author/body layout (ported from cebab-redesign.html). The
+ * result/error/system kinds keep a thin semantic left rail; user &
+ * assistant drop it — the avatar carries identity. */
 .msg {
-  border-left: 2px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  border-left: 2px solid var(--line-2);
   padding: 6px 12px;
 }
-.msg .role {
+.msg.user,
+.msg.assistant {
+  border-left: 0;
+  padding: 0;
+}
+.msg-body {
+  flex: 1;
+  min-width: 0;
+}
+.avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
   font-size: 11px;
-  text-transform: lowercase;
-  letter-spacing: 0.05em;
+  font-weight: 600;
+  margin-top: 2px;
+  color: #fff;
+}
+.avatar svg {
+  width: 14px;
+  height: 14px;
+}
+.avatar.user {
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+}
+.avatar.assistant {
+  background: linear-gradient(135deg, var(--accent), var(--coral));
+}
+.avatar.system {
+  background: var(--bg-4);
   color: var(--fg-2);
+}
+.avatar.tool {
+  background: var(--bg-4);
+  color: var(--info);
+}
+.msg .role {
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--fg-1);
   margin-bottom: 4px;
 }
-.msg.user {
-  border-color: var(--accent);
-}
-.msg.assistant {
-  border-color: #8a8a8e;
-}
-.msg.assistant.streaming {
-  border-color: var(--warn);
-}
 .msg.system {
-  border-color: #555;
+  border-color: var(--line-3);
   color: var(--fg-2);
   font-style: italic;
 }
@@ -461,8 +641,11 @@ pre {
   color: var(--err);
 }
 .msg.permission {
-  border-color: var(--warn);
-  background: rgba(214, 181, 106, 0.08);
+  border-left: 0;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: var(--warn-soft);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
 }
 .msg.permission .actions {
   margin-top: 6px;
@@ -473,34 +656,46 @@ pre {
   background: var(--bg-3);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   padding: 4px 12px;
   cursor: pointer;
 }
-.msg.permission button:hover {
-  background: var(--accent-2);
-  border-color: var(--accent);
+.msg.permission .actions button:first-child {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #0c1a12;
+  font-weight: 600;
+}
+.msg.permission .actions button:first-child:hover {
+  background: #2bbf86;
+}
+.msg.permission .actions button:last-child:hover {
+  background: var(--bg-4);
+  border-color: var(--line-3);
 }
 .msg.permission .decided {
   color: var(--fg-3);
-  font-size: 12px;
+  font-size: var(--t-sm);
 }
 
 .block-tool-use {
-  background: var(--bg-3);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
   padding: 8px 10px;
-  border-radius: 4px;
-  margin-top: 4px;
+  border-radius: var(--r-md);
+  margin-top: var(--s-2);
 }
 .block-tool-use .tool-name {
   color: var(--accent);
-  font-family: ui-monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
+  font-weight: 500;
 }
 .block-tool-result {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
   padding: 6px 10px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   margin-top: 4px;
 }
 .block-thinking {
@@ -587,11 +782,12 @@ pre {
   margin: 1em 0;
 }
 .markdown code {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9em;
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .markdown pre {
   background: var(--bg-3);
@@ -634,35 +830,107 @@ pre {
 }
 
 .input-box {
-  border-top: 1px solid var(--border);
-  padding: 12px 24px;
+  padding: var(--s-3) var(--s-6) var(--s-4);
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 10px;
-  background: var(--bg-2);
+  gap: var(--s-2);
+  background: linear-gradient(180deg, transparent, var(--bg) 40%);
 }
 .input-box textarea {
   background: var(--bg-3);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 10px;
+  border-radius: var(--r-lg);
+  padding: 10px 12px;
   font-family: inherit;
-  font-size: 14px;
-  resize: vertical;
+  font-size: var(--t-lg);
+}
+/* Auto-grow textarea + custom TOP drag handle. Replaces the native
+ * `resize: vertical` grabber, which sat bottom-right and — because every
+ * composer is pinned to the bottom of the viewport — could only ever
+ * shrink the box. Growth happens upward for free from the pinned flex
+ * child. Used by single-chat, both multi-agent composers, the orchestrator
+ * prompt, and the template notes editor. */
+.grow-textarea-wrap {
+  position: relative;
+  display: block;
+}
+.multi-agent-input .grow-textarea-wrap {
+  flex: 1;
+}
+.grow-textarea-wrap textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: var(--t-lg);
+  resize: none;
+  overflow-y: hidden;
+  transition:
+    border-color var(--dur-1) var(--ease),
+    box-shadow var(--dur-2) var(--ease);
+}
+.grow-textarea-wrap textarea:focus {
+  outline: none;
+  border-color: rgba(139, 92, 246, 0.5);
+  box-shadow: 0 0 0 4px var(--accent-glow);
+}
+.grow-textarea-wrap textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.grow-textarea-handle {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 9px;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.grow-textarea-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 30px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border);
+}
+.grow-textarea-handle:hover::after {
+  background: var(--fg-3);
 }
 .input-box button {
-  background: var(--accent-2);
-  color: var(--fg);
-  border: 1px solid var(--accent);
-  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: var(--r-sm);
   padding: 0 16px;
   cursor: pointer;
   align-self: end;
   height: 36px;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  box-shadow: 0 6px 16px var(--accent-glow);
+}
+.input-box button:hover:not(:disabled) {
+  background: var(--accent-2);
+  transform: translateY(-1px);
 }
 .input-box button:disabled {
-  opacity: 0.4;
+  background: var(--bg-4);
+  color: var(--fg-3);
+  box-shadow: none;
   cursor: not-allowed;
 }
 
@@ -671,11 +939,11 @@ pre {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 24px;
-  border-bottom: 1px solid var(--border);
+  padding: var(--s-2) var(--s-6);
+  border-bottom: 1px solid var(--line-1);
   background: var(--bg-2);
-  font-size: 12px;
-  color: var(--fg-3);
+  font-size: var(--t-sm);
+  color: var(--fg-2);
 }
 .mode-toggle .label {
   text-transform: lowercase;
@@ -683,21 +951,21 @@ pre {
 }
 .mode-toggle .pill {
   background: transparent;
-  color: var(--fg-3);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 2px 10px;
-  font-size: 11px;
+  color: var(--fg-2);
+  border: 0;
+  border-radius: var(--r-pill);
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
   cursor: pointer;
 }
 .mode-toggle .pill:hover {
-  background: var(--bg-3);
-  color: var(--fg-2);
+  color: var(--fg);
 }
 .mode-toggle .pill.on {
-  background: var(--accent-2);
+  background: var(--bg-4);
   color: var(--fg);
-  border-color: var(--accent);
+  box-shadow: var(--shadow-sm);
 }
 .mode-toggle.is-disabled {
   opacity: 0.55;
@@ -711,14 +979,14 @@ pre {
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.55;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
 }
 .caret {
   display: inline-block;
-  width: 7px;
+  width: 2px;
   height: 1em;
-  margin-left: 1px;
+  margin-left: 2px;
   vertical-align: -2px;
   background: var(--accent);
   animation: blink 0.9s steps(2, start) infinite;
@@ -730,34 +998,57 @@ pre {
 }
 
 /* ---- Settings modal ---- */
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes modal-rise {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
 .modal-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
+  animation: backdrop-in var(--dur-2) var(--ease);
 }
 .modal {
   background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-lg);
   width: min(560px, 92vw);
   max-height: 86vh;
   overflow: auto;
   display: flex;
   flex-direction: column;
+  animation: modal-rise var(--dur-2) var(--ease);
 }
 .modal header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 12px 18px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line-1);
 }
 .modal h2 {
-  font-size: 14px;
+  font-size: var(--t-lg);
   margin: 0;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -767,7 +1058,7 @@ pre {
   padding: 18px;
 }
 .modal section .label {
-  font-size: 12px;
+  font-size: var(--t-sm);
   color: var(--fg-2);
   margin-bottom: 6px;
   text-transform: lowercase;
@@ -778,13 +1069,21 @@ pre {
   background: var(--bg-3);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 8px 10px;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 13px;
+  border-radius: var(--r-sm);
+  padding: 9px 11px;
+  font-family: var(--font-mono);
+  font-size: var(--t-md);
+  transition:
+    border-color var(--dur-1) var(--ease),
+    box-shadow var(--dur-2) var(--ease);
+}
+.modal input[type='text']:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 .modal .hint {
-  font-size: 12px;
+  font-size: var(--t-sm);
   color: var(--fg-3);
   margin: 10px 0 0;
   line-height: 1.5;
@@ -796,11 +1095,11 @@ pre {
   font-size: 11.5px;
   background: var(--bg-3);
   padding: 1px 5px;
-  border-radius: 3px;
+  border-radius: 4px;
 }
 .modal footer {
   padding: 12px 18px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line-1);
   display: flex;
   justify-content: flex-end;
   gap: 8px;
@@ -809,53 +1108,57 @@ pre {
 /* ---------- Top-level Chat / Multi-agent tab nav ---------- */
 .main-tabs {
   display: flex;
-  gap: 4px;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid var(--border);
+  gap: 2px;
+  margin: var(--s-2) var(--s-3);
+  padding: 2px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  align-self: flex-start;
   flex-shrink: 0;
 }
 .main-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  appearance: none;
   background: transparent;
   color: var(--fg-2);
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: 6px 6px 0 0;
-  padding: 8px 14px;
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 12px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--t-sm);
   font-weight: 500;
-  letter-spacing: 0.01em;
-  position: relative;
-  top: 1px; /* nudge so the active tab's bottom border merges with the nav's */
 }
 .main-tab:hover {
   color: var(--fg);
 }
 .main-tab.active {
-  background: var(--bg);
+  background: var(--bg-4);
   color: var(--fg);
-  border-color: var(--border);
-  border-bottom-color: var(--bg);
+  box-shadow: var(--shadow-sm);
 }
 
 /* ---------- Multi-agent tab ---------- */
 .multi-agent {
   flex: 1;
   overflow-y: auto;
-  padding: 18px 22px 24px;
+  padding: var(--s-6) var(--s-8);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--s-6);
 }
 .multi-agent-header h2 {
   margin: 0 0 4px;
-  font-size: 16px;
+  font-size: var(--t-2xl);
   font-weight: 600;
+  letter-spacing: -0.02em;
 }
 .multi-agent-subtitle {
   margin: 0;
   color: var(--fg-2);
-  font-size: 12.5px;
+  font-size: var(--t-md);
 }
 .multi-agent-section {
   display: flex;
@@ -871,28 +1174,91 @@ pre {
   margin: 0;
 }
 
+/* Draft tab = a non-scrolling flex column: the body scrolls, the composer
+ * pins to the bottom exactly like single-chat's .input-box. These override
+ * the shared .multi-agent rules (same element carries both classes; placed
+ * after so they win on equal specificity). ActiveRunView keeps plain
+ * .multi-agent (its own subtree + inline orchestrator input). */
+.multi-agent-draft {
+  overflow: hidden;
+  padding: 0;
+  gap: 0;
+}
+.multi-agent-draft-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s-6) var(--s-8) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-6);
+}
+.multi-agent-warning-composer {
+  margin: 0;
+  padding: 6px 24px 0;
+}
+.ma-lifecycle-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.ma-lifecycle-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3);
+}
+/* Collapsible iterations: the header IS the toggle. */
+.iterations-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+.iterations-toggle h3 {
+  margin: 0;
+}
+.iterations-chevron {
+  width: 10px;
+  color: var(--fg-3);
+  font-size: 10px;
+}
+.iterations-count {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+
 /* Mode pills (orchestrator | chain). Disabled-looking until selected. */
 .mode-pills {
-  display: flex;
-  gap: 6px;
+  display: inline-flex;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 3px;
 }
 .mode-pill {
-  background: var(--bg-2);
+  background: transparent;
   color: var(--fg-2);
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  border: 0;
+  border-radius: 5px;
   padding: 6px 14px;
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: var(--t-sm);
+  font-weight: 500;
 }
 .mode-pill:hover {
   color: var(--fg);
-  border-color: var(--accent-2);
 }
 .mode-pill.active {
-  background: var(--accent-2);
+  background: var(--bg-4);
   color: var(--fg);
-  border-color: var(--accent);
+  box-shadow: var(--shadow-sm);
 }
 .mode-hint {
   margin: 0;
@@ -905,23 +1271,23 @@ pre {
  * target" affordance; thicker on the empty state, normal once there are
  * participants. */
 .drop-zone {
-  border: 1px dashed var(--border);
-  border-radius: 8px;
+  border: 1.5px dashed var(--line-3);
+  border-radius: var(--r-md);
   padding: 8px;
   background: var(--bg-2);
+  color: var(--fg-2);
   min-height: 56px;
 }
 .drop-zone.empty {
-  border-style: dashed;
-  border-color: var(--fg-3);
-  padding: 22px;
+  border-color: var(--line-3);
+  padding: var(--s-4);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .drop-zone-placeholder {
-  color: var(--fg-3);
-  font-size: 12.5px;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
   font-style: italic;
 }
 
@@ -936,18 +1302,29 @@ pre {
 .participant-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--s-3);
   background: var(--bg-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  transition:
+    border-color var(--dur-1) var(--ease),
+    background var(--dur-1) var(--ease);
+}
+.participant-row:hover {
+  border-color: var(--line-3);
 }
 .participant-order {
-  width: 20px;
-  text-align: center;
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  color: var(--fg-3);
-  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-4);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  color: var(--fg-2);
+  font-size: 11px;
+  font-weight: 600;
   flex-shrink: 0;
 }
 .participant-meta {
@@ -958,28 +1335,30 @@ pre {
   min-width: 0;
 }
 .participant-name {
-  font-weight: 500;
+  font-weight: 550;
+  color: var(--fg);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .participant-bus-tag {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
-  font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--border);
   flex-shrink: 0;
 }
 .participant-bus-tag.installed {
   color: var(--ok);
-  border-color: rgba(92, 197, 138, 0.4);
-  background: rgba(92, 197, 138, 0.08);
+  border-color: rgba(52, 211, 153, 0.35);
+  background: var(--ok-soft);
 }
 .participant-bus-tag.missing {
   color: var(--warn);
-  border-color: rgba(214, 181, 106, 0.4);
-  background: rgba(214, 181, 106, 0.08);
+  border-color: rgba(251, 191, 36, 0.35);
+  background: var(--warn-soft);
 }
 .participant-actions {
   display: flex;
@@ -1037,14 +1416,14 @@ pre {
 .iteration-row {
   background: var(--bg-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 12px;
+  border-radius: var(--r-md);
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 .iteration-status-running {
-  border-color: var(--accent-2);
+  border-color: var(--accent);
 }
 .iteration-head {
   display: flex;
@@ -1054,7 +1433,7 @@ pre {
   font-size: 12.5px;
 }
 .iteration-id {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--fg);
 }
@@ -1072,7 +1451,301 @@ pre {
 .iteration-participants {
   font-size: 12px;
   color: var(--fg-2);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
+}
+/* ── Multi-agent templates ───────────────────────────────────────────
+ * Dedicated classes (NOT the shared .iteration-* ones) so the
+ * Iterations history list is unaffected. Square tiles that wrap into
+ * a responsive grid when there are several templates. */
+/* Square tiles that wrap into a responsive grid. Fixed-ish tracks (not
+ * 1fr) keep cards reading as squares, not stretched bands; expanding a
+ * card grows it in place without dragging row-mates taller. The
+ * Iterations history list is unaffected (its own classes). */
+/* ---- Templates: master list → architecture preview ----
+ * Left = a narrow list of saved templates (name + agent count only).
+ * Right = the selected template's SVG architecture (hub-and-spoke or
+ * chain) with a single calm "message" dot flowing one representative
+ * path, plus the per-agent role/description editors. SVG (not CSS
+ * brackets) so the diagram scales to any N and the dot can follow the
+ * real connector path; the dot is a CSS Motion Path animation so it
+ * sits in the same prefers-reduced-motion blocks as every other
+ * animation. No diagram library. */
+.tpl-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .tpl-panel {
+    grid-template-columns: 1fr;
+  }
+}
+.tpl-master {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.tpl-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.tpl-item:not(.is-selected):hover {
+  border-color: var(--line-3);
+}
+.tpl-item.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.tpl-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 0;
+  margin: 0;
+  padding: 9px 10px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tpl-item-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: var(--t-md);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tpl-item-count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: var(--bg-4);
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+.tpl-item-del {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin-right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--fg-3);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.tpl-item-del:hover {
+  color: var(--fg);
+  background: var(--bg-3);
+  border-color: var(--border);
+}
+.tpl-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.tpl-preview-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tpl-preview-name {
+  font-weight: 600;
+  font-size: var(--t-lg);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tpl-preview-meta {
+  font-size: 11.5px;
+  color: var(--fg-3);
+}
+/* SVG stage — ported from the mockup's .topo-stage (grid-dot field +
+ * faint accent wash), tokenized. Scrolls horizontally when a wide
+ * topology (many agents) exceeds the pane rather than squashing labels. */
+.tpl-stage {
+  position: relative;
+  max-width: 100%;
+  aspect-ratio: 1 / 1;
+  margin-inline: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  padding: 10px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background-image:
+    radial-gradient(circle at center, rgba(139, 92, 246, 0.04), transparent 60%),
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: auto, 24px 24px, 24px 24px;
+}
+.tpl-svg {
+  width: 100%;
+  height: 100%;
+}
+.tpl-diagram-empty {
+  color: var(--fg-3);
+  font-size: 12px;
+  font-style: italic;
+  text-align: center;
+}
+.tpl-edge {
+  stroke: var(--line-3);
+  stroke-width: 1;
+  fill: none;
+}
+.tpl-arrowhead {
+  fill: var(--accent);
+}
+.tpl-node-rect {
+  fill: var(--line-1);
+  stroke: var(--line-3);
+  cursor: pointer;
+}
+/* Editable-node affordance. .tpl-node-rect is already in both
+ * prefers-reduced-motion blocks (no-pref: stroke/fill transition;
+ * reduce: transition:none) — a :hover state adds no new transitioned
+ * selector, so motion parity holds with no reduce-block edit. The hub
+ * (.tpl-hub-rect) is a separate selector and gets neither. */
+.tpl-node-rect:hover {
+  stroke: var(--accent);
+}
+/* Hub = an --accent tint at the mockup's alpha stops (no token exposes
+ * these exact alphas). */
+.tpl-hub-rect {
+  fill: rgba(139, 92, 246, 0.2);
+  stroke: rgba(139, 92, 246, 0.55);
+}
+.tpl-node-name {
+  fill: var(--fg);
+  font-family: var(--font-sans);
+}
+.tpl-hub-text {
+  fill: var(--accent-ink);
+  font-family: var(--font-sans);
+}
+.tpl-node-role {
+  fill: var(--fg-2);
+  font-family: var(--font-sans);
+}
+.tpl-node-role.empty {
+  fill: var(--fg-3);
+  font-style: italic;
+}
+.tpl-node-slug {
+  fill: var(--fg-3);
+  font-family: var(--font-mono);
+}
+.tpl-flow-dot {
+  fill: var(--accent);
+  offset-distance: 0%;
+}
+/* Click-to-edit overlay: one absolutely-positioned textarea over the
+ * clicked node, inside the (position:relative) .tpl-stage, stacked above
+ * the SVG + flow dot. No transition/animation → no reduced-motion entry
+ * needed (parity invariant trivially preserved). */
+.tpl-role-edit {
+  position: absolute;
+  z-index: 5;
+  margin: 0;
+  padding: 6px 8px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--fg);
+  background: var(--bg-4);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+  resize: none;
+  overflow: auto;
+  outline: none;
+}
+.tpl-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.tpl-actions .ghost-btn {
+  font-size: 11.5px;
+}
+.tpl-apply {
+  background: transparent;
+  color: var(--fg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 7px 18px;
+  font-size: var(--t-md);
+  font-weight: 500;
+  cursor: pointer;
+}
+.tpl-apply:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-color: var(--line-3);
+}
+
+/* ---- Templates: motion ----
+ * The "message" dot drifts one representative connector path on a calm
+ * 2.2s loop (the cadence of the old topo-edge pulse it replaces). Path
+ * geometry is dynamic, so it's supplied inline as `offset-path`; the
+ * keyframe + duration live here so reduced-motion users (who never match
+ * this block, and are also covered by the reduce block below) never
+ * animate. The component additionally omits the dot element entirely
+ * under reduced motion, belt-and-braces. */
+@media (prefers-reduced-motion: no-preference) {
+  .tpl-item {
+    transition:
+      border-color var(--dur-1) var(--ease),
+      background var(--dur-1) var(--ease);
+  }
+  .tpl-node-rect,
+  .tpl-hub-rect {
+    transition:
+      stroke var(--dur-2) var(--ease),
+      fill var(--dur-2) var(--ease);
+  }
+  @keyframes tpl-flow {
+    from {
+      offset-distance: 0%;
+    }
+    to {
+      offset-distance: 100%;
+    }
+  }
+  .tpl-flow-dot {
+    animation: tpl-flow 2.2s linear infinite;
+  }
 }
 .iteration-path {
   display: flex;
@@ -1099,16 +1772,17 @@ pre {
   background: var(--bg-3);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--r-md);
+  padding: 10px 12px;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--t-md);
   min-height: 80px;
   resize: vertical;
 }
 .multi-agent-prompt:focus {
   outline: none;
-  border-color: var(--accent-2);
+  border-color: rgba(139, 92, 246, 0.5);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ---------- Active multi-agent run (running + ended) ---------- */
@@ -1140,10 +1814,10 @@ pre {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   padding: 2px 8px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   border: 1px solid var(--border);
   font-weight: 600;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
 }
 
 /* Lifecycle pill — small badge next to the session-id chip in the
@@ -1157,7 +1831,7 @@ pre {
   border-radius: 999px;
   border: 1px solid var(--border);
   font-weight: 500;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
 }
 .lifecycle-pill-persistent {
   color: var(--fg-2);
@@ -1165,8 +1839,8 @@ pre {
 }
 .lifecycle-pill-temp {
   color: var(--warn);
-  border-color: rgba(226, 109, 109, 0.4);
-  background: rgba(226, 109, 109, 0.06);
+  border-color: rgba(251, 191, 36, 0.35);
+  background: var(--warn-soft);
 }
 
 /* Session settings panel — replaces the chip-strip subtitle in the
@@ -1175,8 +1849,8 @@ pre {
  * mid-run (orchestrator mode only). */
 .multi-agent-settings {
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px;
+  border-radius: var(--r-md);
+  padding: var(--s-4);
   background: var(--bg-2);
 }
 .settings-grid {
@@ -1207,38 +1881,38 @@ pre {
 }
 .lifecycle-toggle {
   display: inline-flex;
+  background: var(--bg-3);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
+  border-radius: var(--r-sm);
+  padding: 3px;
 }
 .lifecycle-btn {
   appearance: none;
-  background: var(--bg-1);
+  background: transparent;
   color: var(--fg-2);
   border: 0;
-  padding: 4px 12px;
-  font-size: 12px;
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  border-radius: 5px;
+  padding: 6px 14px;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  font-family: var(--font-sans);
   cursor: pointer;
   text-transform: lowercase;
 }
-.lifecycle-btn + .lifecycle-btn {
-  border-left: 1px solid var(--border);
-}
 .lifecycle-btn:hover:not(:disabled):not(.active) {
-  background: var(--bg-3);
   color: var(--fg);
 }
 .lifecycle-btn.active {
-  background: var(--bg-3);
+  background: var(--bg-4);
   color: var(--fg);
+  box-shadow: var(--shadow-sm);
   cursor: default;
 }
 .lifecycle-btn.active:nth-child(2) {
-  /* Highlight 'temp' with the same warn-tone as the old lifecycle pill
-   * so the destructive-on-End semantics stay legible at a glance. */
+  /* Highlight 'temp' with a warn-tone so the destructive-on-End
+   * semantics stay legible at a glance. */
   color: var(--warn);
-  background: rgba(226, 109, 109, 0.08);
+  background: var(--warn-soft);
 }
 .lifecycle-btn:disabled:not(.active) {
   opacity: 0.5;
@@ -1330,14 +2004,14 @@ pre {
 }
 
 .run-status-running {
-  color: var(--accent);
-  border-color: var(--accent-2);
-  background: rgba(110, 168, 254, 0.12);
+  color: var(--accent-ink);
+  border-color: rgba(139, 92, 246, 0.35);
+  background: rgba(139, 92, 246, 0.12);
 }
 .run-status-completed {
   color: var(--ok);
-  border-color: rgba(92, 197, 138, 0.4);
-  background: rgba(92, 197, 138, 0.10);
+  border-color: rgba(52, 211, 153, 0.35);
+  background: var(--ok-soft);
 }
 .run-status-stopped {
   color: var(--fg-2);
@@ -1345,8 +2019,8 @@ pre {
 }
 .run-status-crashed {
   color: var(--err);
-  border-color: rgba(226, 109, 109, 0.4);
-  background: rgba(226, 109, 109, 0.10);
+  border-color: rgba(248, 113, 113, 0.35);
+  background: var(--err-soft);
 }
 
 /* Event scrollback */
@@ -1365,16 +2039,16 @@ pre {
   padding: 8px 12px;
 }
 .event-row.event-kind-intro {
-  border-color: rgba(168, 168, 174, 0.3);
-  background: rgba(168, 168, 174, 0.05);
+  border-color: rgba(139, 143, 153, 0.3);
+  background: rgba(139, 143, 153, 0.05);
 }
 .event-row.event-kind-final {
-  border-color: rgba(92, 197, 138, 0.4);
-  background: rgba(92, 197, 138, 0.06);
+  border-color: rgba(52, 211, 153, 0.35);
+  background: var(--ok-soft);
 }
 .event-row.event-kind-error {
-  border-color: rgba(226, 109, 109, 0.4);
-  background: rgba(226, 109, 109, 0.06);
+  border-color: rgba(248, 113, 113, 0.35);
+  background: var(--err-soft);
 }
 .event-head {
   display: flex;
@@ -1386,7 +2060,7 @@ pre {
 }
 .event-source,
 .event-destination {
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   color: var(--fg);
   font-weight: 500;
 }
@@ -1405,7 +2079,7 @@ pre {
 .event-ts {
   margin-left: auto;
   color: var(--fg-3);
-  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 .event-text {
   background: var(--bg);
@@ -1442,15 +2116,16 @@ pre {
   background: var(--bg-3);
   color: var(--fg);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 8px 10px;
+  border-radius: var(--r-md);
+  padding: 10px 12px;
   font-family: inherit;
-  font-size: 13px;
+  font-size: var(--t-md);
   resize: vertical;
 }
 .multi-agent-input-textarea:focus {
   outline: none;
-  border-color: var(--accent-2);
+  border-color: rgba(139, 92, 246, 0.5);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 /* ---------- Interaction feedback (press / focus / pending) ----------
@@ -1527,7 +2202,16 @@ pre {
   .main-tab,
   .lifecycle-btn,
   .mode-toggle .pill,
-  .input-box button {
+  .input-box button,
+  .tpl-item,
+  .participant-row,
+  .workspace-btn,
+  .project-header,
+  .session-row,
+  .tpl-node-rect,
+  .tpl-hub-rect,
+  .modal input[type='text'],
+  .grow-textarea-wrap textarea {
     transition: none;
   }
   .primary-btn:active:not(:disabled),
@@ -1537,13 +2221,23 @@ pre {
   .main-tab:active:not(:disabled),
   .lifecycle-btn:active:not(:disabled),
   .mode-toggle .pill:active:not(:disabled),
-  .input-box button:active:not(:disabled) {
+  .input-box button:active:not(:disabled),
+  .input-box button:hover:not(:disabled) {
     transform: none;
   }
   .btn-spinner,
   .session-marker.live,
-  .caret {
+  .caret,
+  .project-live-dot.on,
+  .modal,
+  .modal-backdrop,
+  .tpl-flow-dot {
     animation: none;
+  }
+  /* Stopped, the motion-path dot would just sit parked at 0% — hide it
+   * so reduced-motion users get a clean static diagram. */
+  .tpl-flow-dot {
+    display: none;
   }
 }
 
