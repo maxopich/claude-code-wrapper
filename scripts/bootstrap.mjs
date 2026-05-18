@@ -26,7 +26,28 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 function run(args) {
   return new Promise((resolve) => {
-    const child = spawn(npm, args, { cwd: root, env: process.env, stdio: 'inherit' });
+    let child;
+    try {
+      // Windows: `npm` is `npm.cmd`. Since the CVE-2024-27980 fix (Node
+      // >=18.20.2 / 20.12.2 / 21.7.3, and all 22/24) Node refuses to spawn a
+      // .cmd/.bat without `shell: true` and throws a *synchronous*
+      // `spawn EINVAL`. So shell out only on win32 — the POSIX path keeps its
+      // exact no-shell behavior. Args here are fixed literals with no spaces
+      // or shell metacharacters, so the shell adds no injection surface.
+      child = spawn(npm, args, {
+        cwd: root,
+        env: process.env,
+        stdio: 'inherit',
+        shell: process.platform === 'win32',
+      });
+    } catch (err) {
+      // spawn can throw synchronously (the EINVAL above); the 'error' event
+      // only covers async failures. Funnel both to the same clean abort
+      // instead of an unhandled rejection dumping a raw stack.
+      console.error(`[bootstrap] could not spawn ${npm}: ${String(err)}`);
+      resolve(1);
+      return;
+    }
     child.on('exit', (code) => resolve(code ?? 1));
     child.on('error', (err) => {
       console.error(`[bootstrap] could not spawn ${npm}: ${String(err)}`);
