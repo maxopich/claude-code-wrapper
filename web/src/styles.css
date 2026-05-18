@@ -1591,6 +1591,7 @@ pre {
  * faint accent wash), tokenized. Scrolls horizontally when a wide
  * topology (many agents) exceeds the pane rather than squashing labels. */
 .tpl-stage {
+  position: relative;
   background: var(--bg-2);
   border: 1px solid var(--line-2);
   border-radius: var(--r-md);
@@ -1627,6 +1628,15 @@ pre {
 .tpl-node-rect {
   fill: var(--line-1);
   stroke: var(--line-3);
+  cursor: pointer;
+}
+/* Editable-node affordance. .tpl-node-rect is already in both
+ * prefers-reduced-motion blocks (no-pref: stroke/fill transition;
+ * reduce: transition:none) — a :hover state adds no new transitioned
+ * selector, so motion parity holds with no reduce-block edit. The hub
+ * (.tpl-hub-rect) is a separate selector and gets neither. */
+.tpl-node-rect:hover {
+  stroke: var(--accent);
 }
 /* Hub = an --accent tint at the mockup's alpha stops (no token exposes
  * these exact alphas). */
@@ -1642,8 +1652,16 @@ pre {
   fill: var(--accent-ink);
   font-family: var(--font-sans);
 }
-.tpl-node-slug {
+.tpl-node-role {
   fill: var(--fg-2);
+  font-family: var(--font-sans);
+}
+.tpl-node-role.empty {
+  fill: var(--fg-3);
+  font-style: italic;
+}
+.tpl-node-slug {
+  fill: var(--fg-3);
   font-family: var(--font-mono);
 }
 .tpl-node-slug.nobus {
@@ -1653,41 +1671,26 @@ pre {
   fill: var(--accent);
   offset-distance: 0%;
 }
-.tpl-roles {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  border-top: 1px dashed var(--border);
-  padding-top: 12px;
-}
-.tpl-role-row {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.tpl-role-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.tpl-role-name {
-  font-weight: 600;
-  font-size: 12px;
-  color: var(--fg);
-}
-.tpl-role-slug {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--fg-2);
-}
-.tpl-role-slug.nobus {
-  color: var(--warn);
-  font-style: italic;
-}
-.tpl-role-row .grow-textarea-wrap textarea {
-  background: var(--bg-2);
-  font-size: 12px;
+/* Click-to-edit overlay: one absolutely-positioned textarea over the
+ * clicked node, inside the (position:relative) .tpl-stage, stacked above
+ * the SVG + flow dot. No transition/animation → no reduced-motion entry
+ * needed (parity invariant trivially preserved). */
+.tpl-role-edit {
+  position: absolute;
+  z-index: 5;
+  margin: 0;
   padding: 6px 8px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--fg);
+  background: var(--bg-4);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+  resize: none;
+  overflow: auto;
+  outline: none;
 }
 .tpl-actions {
   display: flex;

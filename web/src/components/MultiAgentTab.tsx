@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type {
   IterationSummary,
   MultiAgentLifecycle,
@@ -610,6 +610,11 @@ function truncLabel(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
+/** The trimmed role text for an agent (whitespace-only ⇒ empty). */
+function roleOf(roles: Record<string, string>, id: number): string {
+  return (roles[String(id)] ?? '').trim();
+}
+
 /**
  * SVG architecture diagram for a template preview: orchestrator
  * hub-and-spoke or a left→right chain, with one calm "message" dot
@@ -621,20 +626,133 @@ function truncLabel(s: string, max: number): string {
  * reduced-motion guard also drops the dot element belt-and-braces.
  * No diagram library — crisp, scalable, dependency-free.
  */
-function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Project[] }) {
-  const { participants, mode } = props;
+function AgentDiagram(props: {
+  mode: 'chain' | 'orchestrator';
+  participants: Project[];
+  roles: Record<string, string>;
+  onRoleChange: (projectId: number, text: string) => void;
+}) {
+  const { participants, mode, roles, onRoleChange } = props;
   const n = participants.length;
+
+  // Click-to-edit overlay. Hooks must precede the n===0 early return
+  // (Rules of Hooks). The editor is one absolutely-positioned <textarea>
+  // in the (position:relative) .tpl-stage, placed from the clicked node's
+  // getBoundingClientRect — scale-proof, so the SVG stays responsive.
+  // Live values are mirrored into refs so the scroll/resize listener
+  // commits the latest text without re-subscribing per keystroke.
+  const stageRef = useRef<HTMLDivElement>(null);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');
+  const [box, setBox] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const editingIdRef = useRef<number | null>(null);
+  const draftRef = useRef('');
+  const onRoleChangeRef = useRef(onRoleChange);
+  editingIdRef.current = editingId;
+  draftRef.current = draft;
+  onRoleChangeRef.current = onRoleChange;
+  useLayoutEffect(() => {
+    if (editingId != null && taRef.current) {
+      taRef.current.focus();
+      taRef.current.select();
+    }
+  }, [editingId]);
+  useEffect(() => {
+    if (editingId == null) return;
+    const stage = stageRef.current;
+    // Commit-and-close on scroll/resize: the responsive SVG re-lays-out
+    // and .tpl-stage scrolls, so the cached box would drift. Text is
+    // never lost (committed); the user re-clicks to keep editing.
+    const close = () => {
+      const id = editingIdRef.current;
+      if (id != null) {
+        onRoleChangeRef.current(id, draftRef.current);
+        setEditingId(null);
+        setBox(null);
+      }
+    };
+    stage?.addEventListener('scroll', close, { passive: true });
+    window.addEventListener('resize', close);
+    return () => {
+      stage?.removeEventListener('scroll', close);
+      window.removeEventListener('resize', close);
+    };
+  }, [editingId]);
+
   if (n === 0) {
     return <div className="tpl-diagram-empty">(no resolvable participants)</div>;
   }
   const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const slug = (p: Project) => (p.busInstalled ? (p.busAgentName ?? 'no bus') : 'no bus');
 
+  function commitIfEditing() {
+    if (editingId != null) {
+      onRoleChange(editingId, draft);
+      setEditingId(null);
+      setBox(null);
+    }
+  }
+  function cancelEditing() {
+    setEditingId(null);
+    setBox(null);
+  }
+  function openEditor(pid: number, gEl: SVGGElement) {
+    // Switching nodes mid-edit commits the current one first.
+    commitIfEditing();
+    const stage = stageRef.current;
+    if (!stage) return;
+    const g = gEl.getBoundingClientRect();
+    const s = stage.getBoundingClientRect();
+    setBox({
+      left: g.left - s.left + stage.scrollLeft,
+      top: g.top - s.top + stage.scrollTop,
+      width: g.width,
+      height: g.height,
+    });
+    setDraft(roles[String(pid)] ?? '');
+    setEditingId(pid);
+  }
+  const editor =
+    editingId != null && box ? (
+      <textarea
+        ref={taRef}
+        className="tpl-role-edit"
+        style={{
+          left: box.left,
+          top: box.top,
+          width: Math.max(box.width, 140),
+          minHeight: box.height,
+        }}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commitIfEditing}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            cancelEditing();
+          } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            commitIfEditing();
+          }
+          // plain Enter falls through → newline (multi-line role)
+        }}
+        placeholder="Role / goal…"
+        aria-label="Edit role"
+        spellCheck={false}
+      />
+    ) : null;
+
   if (mode === 'orchestrator') {
-    const WORKER_W = 104;
-    const WORKER_H = 40;
+    const WORKER_W = 120;
+    const WORKER_H = 56;
     const GAP = 14;
-    const WORKER_Y = 140;
+    const WORKER_Y = 132;
     const HEIGHT = 220;
     const contentW = n * WORKER_W + (n - 1) * GAP;
     const width = Math.max(360, contentW + 40);
@@ -649,7 +767,7 @@ function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Pro
         ? `M${HX} ${HY} V${WORKER_Y}`
         : `M${HX} ${HY} V${midY} H${workerCx(i)} V${WORKER_Y}`;
     return (
-      <div className="tpl-stage">
+      <div className="tpl-stage" ref={stageRef}>
         <svg
           className="tpl-svg"
           viewBox={`0 0 ${width} ${HEIGHT}`}
@@ -674,38 +792,63 @@ function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Pro
           <text className="tpl-node-slug" x={HX} y={63} textAnchor="middle" fontSize={9}>
             cebab
           </text>
-          {participants.map((p, i) => (
-            <g key={`w${p.id}`}>
-              <title>{p.name}</title>
-              <rect
-                className="tpl-node-rect"
-                x={workerX(i)}
-                y={WORKER_Y}
-                width={WORKER_W}
-                height={WORKER_H}
-                rx={8}
-              />
-              <text
-                className="tpl-node-name"
-                x={workerCx(i)}
-                y={WORKER_Y + 17}
-                textAnchor="middle"
-                fontSize={11}
-                fontWeight={600}
+          {participants.map((p, i) => {
+            const role = roleOf(roles, p.id);
+            return (
+              <g
+                key={`w${p.id}`}
+                data-pid={p.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`Edit role for ${p.name}`}
+                onClick={(e) => openEditor(p.id, e.currentTarget)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openEditor(p.id, e.currentTarget);
+                  }
+                }}
               >
-                {truncLabel(p.name, 14)}
-              </text>
-              <text
-                className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
-                x={workerCx(i)}
-                y={WORKER_Y + 30}
-                textAnchor="middle"
-                fontSize={9}
-              >
-                {truncLabel(slug(p), 16)}
-              </text>
-            </g>
-          ))}
+                <title>{role ? `${p.name} — ${role}` : p.name}</title>
+                <rect
+                  className="tpl-node-rect"
+                  x={workerX(i)}
+                  y={WORKER_Y}
+                  width={WORKER_W}
+                  height={WORKER_H}
+                  rx={8}
+                />
+                <text
+                  className="tpl-node-name"
+                  x={workerCx(i)}
+                  y={WORKER_Y + 15}
+                  textAnchor="middle"
+                  fontSize={11}
+                  fontWeight={600}
+                >
+                  {truncLabel(p.name, 16)}
+                </text>
+                <text
+                  className={role ? 'tpl-node-role' : 'tpl-node-role empty'}
+                  x={workerCx(i)}
+                  y={WORKER_Y + 31}
+                  textAnchor="middle"
+                  fontSize={10.5}
+                >
+                  {role ? truncLabel(role, 18) : 'Role / goal…'}
+                </text>
+                <text
+                  className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
+                  x={workerCx(i)}
+                  y={WORKER_Y + 46}
+                  textAnchor="middle"
+                  fontSize={9}
+                >
+                  {truncLabel(slug(p), 18)}
+                </text>
+              </g>
+            );
+          })}
           {!reduce && (
             <circle
               className="tpl-flow-dot"
@@ -714,16 +857,17 @@ function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Pro
             />
           )}
         </svg>
+        {editor}
       </div>
     );
   }
 
   // Chain — a left→right sequence with arrowed links.
-  const NODE_W = 160;
-  const NODE_H = 44;
+  const NODE_W = 200;
+  const NODE_H = 60;
   const GAP = 72;
-  const NODE_Y = 30;
-  const HEIGHT = 100;
+  const NODE_Y = 24;
+  const HEIGHT = 110;
   const cy = NODE_Y + NODE_H / 2;
   const contentW = n * NODE_W + (n - 1) * GAP;
   const width = Math.max(700, contentW + 40);
@@ -731,7 +875,7 @@ function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Pro
   const nodeX = (i: number) => startX + i * (NODE_W + GAP);
   const nodeCx = (i: number) => nodeX(i) + NODE_W / 2;
   return (
-    <div className="tpl-stage">
+    <div className="tpl-stage" ref={stageRef}>
       <svg
         className="tpl-svg"
         viewBox={`0 0 ${width} ${HEIGHT}`}
@@ -766,38 +910,63 @@ function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Pro
             />
           );
         })}
-        {participants.map((p, i) => (
-          <g key={`n${p.id}`}>
-            <title>{p.name}</title>
-            <rect
-              className="tpl-node-rect"
-              x={nodeX(i)}
-              y={NODE_Y}
-              width={NODE_W}
-              height={NODE_H}
-              rx={8}
-            />
-            <text
-              className="tpl-node-name"
-              x={nodeCx(i)}
-              y={cy - 2}
-              textAnchor="middle"
-              fontSize={13}
-              fontWeight={600}
+        {participants.map((p, i) => {
+          const role = roleOf(roles, p.id);
+          return (
+            <g
+              key={`n${p.id}`}
+              data-pid={p.id}
+              role="button"
+              tabIndex={0}
+              aria-label={`Edit role for ${p.name}`}
+              onClick={(e) => openEditor(p.id, e.currentTarget)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  openEditor(p.id, e.currentTarget);
+                }
+              }}
             >
-              {truncLabel(p.name, 18)}
-            </text>
-            <text
-              className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
-              x={nodeCx(i)}
-              y={cy + 14}
-              textAnchor="middle"
-              fontSize={10}
-            >
-              {truncLabel(slug(p), 20)}
-            </text>
-          </g>
-        ))}
+              <title>{role ? `${p.name} — ${role}` : p.name}</title>
+              <rect
+                className="tpl-node-rect"
+                x={nodeX(i)}
+                y={NODE_Y}
+                width={NODE_W}
+                height={NODE_H}
+                rx={8}
+              />
+              <text
+                className="tpl-node-name"
+                x={nodeCx(i)}
+                y={NODE_Y + 18}
+                textAnchor="middle"
+                fontSize={13}
+                fontWeight={600}
+              >
+                {truncLabel(p.name, 24)}
+              </text>
+              <text
+                className={role ? 'tpl-node-role' : 'tpl-node-role empty'}
+                x={nodeCx(i)}
+                y={NODE_Y + 36}
+                textAnchor="middle"
+                fontSize={12}
+              >
+                {role ? truncLabel(role, 28) : 'Role / goal…'}
+              </text>
+              <text
+                className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
+                x={nodeCx(i)}
+                y={NODE_Y + 52}
+                textAnchor="middle"
+                fontSize={10}
+              >
+                {truncLabel(slug(p), 30)}
+              </text>
+            </g>
+          );
+        })}
         {!reduce && n >= 2 && (
           <circle
             className="tpl-flow-dot"
@@ -806,6 +975,7 @@ function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Pro
           />
         )}
       </svg>
+      {editor}
     </div>
   );
 }
@@ -861,32 +1031,12 @@ function TemplatePreview(props: {
         </div>
       </div>
 
-      <AgentDiagram mode={template.mode} participants={resolved} />
-
-      {resolved.length > 0 && (
-        <div className="tpl-roles">
-          {resolved.map((p) => (
-            <div key={p.id} className="tpl-role-row">
-              <div className="tpl-role-head">
-                <span className="tpl-role-name">{p.name}</span>
-                <span className={`tpl-role-slug${p.busInstalled ? '' : ' nobus'}`}>
-                  {p.busInstalled ? p.busAgentName : 'no bus'}
-                </span>
-              </div>
-              <GrowTextarea
-                value={roles[String(p.id)] ?? ''}
-                onChange={(v) => setRoles((r) => ({ ...r, [String(p.id)]: v }))}
-                onSubmit={() => {}}
-                submitOnEnter={false}
-                placeholder="Role / goal…"
-                minRows={2}
-                maxHeightPx={160}
-                ariaLabel={`Role for ${p.name}`}
-              />
-            </div>
-          ))}
-        </div>
-      )}
+      <AgentDiagram
+        mode={template.mode}
+        participants={resolved}
+        roles={roles}
+        onRoleChange={(id, text) => setRoles((r) => ({ ...r, [String(id)]: text }))}
+      />
 
       <div className="tpl-actions">
         {resolved.length > 0 && (
