@@ -2241,3 +2241,140 @@ pre {
   }
 }
 
+/* ---- Thinking indicator ----------------------------------------------
+ * Animated "the agent is computing" feedback for the dead time before the
+ * first token / during tool execution (single-agent chat) and for the
+ * currently-active bus participant (multi-agent roster). Motif: a violet
+ * orb that breathes. Escalation (calm → active → long) is entirely CSS,
+ * driven by custom props swapped on the `ti-tier-*` class — the component
+ * only picks the tier. Swapping the motif = editing only this section.
+ *
+ * `--ti-dur`  animation period (shorter = more urgent)
+ * `--ti-peak` breathe peak scale
+ * `--ti-glow` / `--ti-accent` colour (amber while a tool runs)
+ */
+.ti-block,
+.ti-inline {
+  --ti-accent: var(--accent);
+  --ti-glow: var(--accent-glow);
+}
+.ti-block {
+  --ti-dur: 2.4s;
+  --ti-peak: 1.04;
+}
+.ti-block.ti-tier-active {
+  --ti-dur: 1.6s;
+  --ti-peak: 1.07;
+}
+.ti-block.ti-tier-long {
+  --ti-dur: 1.05s;
+  --ti-peak: 1.11;
+}
+.ti-inline {
+  --ti-dur: 2s;
+  --ti-peak: 1.05;
+}
+.ti-inline.ti-tier-active {
+  --ti-dur: 1.5s;
+}
+.ti-inline.ti-tier-long {
+  --ti-dur: 1s;
+}
+.ti-phase-tool-running {
+  --ti-accent: var(--warn);
+  --ti-glow: var(--warn-soft);
+}
+
+/* Block (chat): the Claude-mark avatar itself is the orb. */
+.ti-block .thinking-indicator {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: var(--t-sm);
+}
+.ti-label {
+  color: var(--fg-2);
+}
+.ti-elapsed {
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.75;
+}
+.ti-tier-long .ti-elapsed {
+  opacity: 1;
+}
+.ti-reassure {
+  flex-basis: 100%;
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+}
+
+/* Inline (bus roster): a small breathing dot after the participant slug. */
+.thinking-indicator.ti-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.ti-inline .ti-orb {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ti-accent);
+  flex-shrink: 0;
+}
+.ti-inline .ti-elapsed {
+  font-size: var(--t-xs);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ti-breathe-host {
+    0%,
+    100% {
+      transform: scale(1);
+      box-shadow: 0 0 0 0 transparent;
+    }
+    50% {
+      transform: scale(var(--ti-peak, 1.05));
+      box-shadow: 0 0 18px 5px var(--ti-glow);
+    }
+  }
+  @keyframes ti-breathe-dot {
+    0%,
+    100% {
+      transform: scale(0.78);
+      box-shadow: 0 0 0 0 transparent;
+      opacity: 0.6;
+    }
+    50% {
+      transform: scale(var(--ti-peak, 1.05));
+      box-shadow: 0 0 9px 2px var(--ti-glow);
+      opacity: 1;
+    }
+  }
+  .ti-block .ti-orb-host {
+    animation: ti-breathe-host var(--ti-dur, 2.4s) var(--ease) infinite;
+  }
+  .ti-inline .ti-orb {
+    animation: ti-breathe-dot var(--ti-dur, 2s) var(--ease) infinite;
+  }
+}
+
+/* Reduced motion: still communicate "working" — a steady glow + the live
+ * (non-animated) timer. Deliberately NOT display:none — this is a load
+ * indicator, not the decorative tpl-flow dot. */
+@media (prefers-reduced-motion: reduce) {
+  .ti-block .ti-orb-host,
+  .ti-inline .ti-orb {
+    animation: none;
+  }
+  .ti-block .ti-orb-host {
+    box-shadow: 0 0 12px 3px var(--ti-glow);
+  }
+  .ti-inline .ti-orb {
+    box-shadow: 0 0 6px 1px var(--ti-glow);
+  }
+}
+
