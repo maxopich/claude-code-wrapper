@@ -12,12 +12,20 @@ import {
   createOrchestratorRouter,
   ORCHESTRATOR_AGENT_NAME,
   resumeOrchestratorSession,
+  wireOrchestratorSession,
 } from './orchestrator.js';
 import { computeSessionPaths } from './paths.js';
-import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
+import { CEBAB_SOURCE, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import { registerLiveSession, unregisterLiveSession } from './session_registry.js';
-import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
+import {
+  createMultiAgentSession,
+  listMultiAgentEvents,
+  setProjectBusInstalled,
+} from '../repo/multi_agent.js';
+import { upsertProject } from '../repo/projects.js';
 import type { BusEvent } from './runner.js';
+import type { Runner } from '../runner/index.js';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -194,5 +202,158 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
         onEnded: vi.fn(),
       }),
     ).toBeNull();
+  });
+});
+
+describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
+  // Capture {cwd, prompt} so we can attribute each faked turn to its agent.
+  function fakeFactory(captured: Array<{ cwd: string; prompt: string }>) {
+    return (opts: { cwd: string; prompt: string }): Runner => {
+      captured.push({ cwd: opts.cwd, prompt: opts.prompt });
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function worker(name: string, claudeMd: string | null): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    if (claudeMd !== null) fs.writeFileSync(path.join(dir, 'CLAUDE.md'), claudeMd);
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  function wire(
+    workers: ResolvedAgent[],
+    captured: Array<{ cwd: string; prompt: string }>,
+    briefedAgents?: string[],
+  ) {
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+    return wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      briefedAgents,
+      runnerFactory: fakeFactory(captured),
+    });
+  }
+
+  const flush = () => new Promise((r) => setImmediate(r));
+  const markers = (agent: string) =>
+    listMultiAgentEvents(SESSION_ID).filter(
+      (e) =>
+        e.source === CEBAB_SOURCE &&
+        e.destination === agent &&
+        e.text.includes(`Cebab injected ${agent}/CLAUDE.md`),
+    );
+
+  test('worker first turn gets fenced rules + a compact marker; orchestrator never does', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const coder = worker('coder', '# Coder\n\n- Always cite sources\n- Do not invent APIs');
+    const { deliver } = wire([coder, worker('reviewer', null)], captured);
+
+    deliver('coder', 'review this');
+    deliver(ORCHESTRATOR_AGENT_NAME, 'orchestrate');
+    await flush();
+
+    const coderTurn = captured.find((c) => c.cwd === coder.cwd)!;
+    expect(coderTurn.prompt).toContain('<project_claude_md>');
+    expect(coderTurn.prompt).toContain('- Always cite sources');
+    expect(coderTurn.prompt).toContain('AUTHORITATIVE project rules');
+    // bus protocol → rules → task ordering.
+    expect(coderTurn.prompt.indexOf('bus_send')).toBeLessThan(
+      coderTurn.prompt.indexOf('<project_claude_md>'),
+    );
+    expect(coderTurn.prompt.indexOf('<project_claude_md>')).toBeLessThan(
+      coderTurn.prompt.indexOf('review this'),
+    );
+    // Orchestrator gets the raw text only (never briefed, never rules).
+    const orchTurn = captured.find((c) => c.prompt === 'orchestrate');
+    expect(orchTurn).toBeDefined();
+
+    expect(markers('coder')).toHaveLength(1);
+    expect(markers('coder')[0]!.text).toMatch(
+      /Cebab injected coder\/CLAUDE\.md \(\d+\.\d KB\) into coder/,
+    );
+    // The rule body is never echoed into scrollback.
+    expect(
+      listMultiAgentEvents(SESSION_ID).some((e) => e.text.includes('Do not invent APIs')),
+    ).toBe(false);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('second turn to the same worker does not re-inject and adds no second marker', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const coder = worker('coder', '# Coder rules');
+    const { deliver } = wire([coder], captured);
+
+    deliver('coder', 'turn one');
+    await flush();
+    deliver('coder', 'turn two');
+    await flush();
+
+    const turns = captured.filter((c) => c.cwd === coder.cwd);
+    expect(turns).toHaveLength(2);
+    expect(turns[0]!.prompt).toContain('<project_claude_md>');
+    expect(turns[1]!.prompt).not.toContain('<project_claude_md>');
+    expect(turns[1]!.prompt).toBe('turn two');
+    expect(markers('coder')).toHaveLength(1);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('R-B: a worker pre-marked briefed (it spoke before the restart) is not re-injected', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const coder = worker('coder', '# Coder rules');
+    const reviewer = worker('reviewer', '# Reviewer rules');
+    // coder already spoke before the restart → in briefedAgents.
+    const { deliver } = wire([coder, reviewer], captured, ['coder']);
+
+    deliver('coder', 'resumed turn');
+    deliver('reviewer', 'first turn');
+    await flush();
+
+    const coderTurn = captured.find((c) => c.cwd === coder.cwd)!;
+    const reviewerTurn = captured.find((c) => c.cwd === reviewer.cwd)!;
+    // coder: its resumed transcript already carries the rules → not re-sent.
+    expect(coderTurn.prompt).toBe('resumed turn');
+    expect(markers('coder')).toHaveLength(0);
+    // reviewer: never spoke pre-restart → injected fresh on its first turn.
+    expect(reviewerTurn.prompt).toContain('<project_claude_md>');
+    expect(markers('reviewer')).toHaveLength(1);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('addWorker: a mid-session participant gets its CLAUDE.md on its first turn', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle, deliver } = wire([worker('coder', null)], captured);
+
+    const dir = path.join(tmpRoot, 'newbie');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# Newbie\n\n- Follow the house style');
+    const proj = upsertProject('newbie', dir);
+    setProjectBusInstalled(proj.id, true, 'newbie');
+
+    await handle.addWorker(proj.id);
+    deliver('newbie', 'your task');
+    await flush();
+
+    const newbieTurn = captured.find((c) => c.cwd === dir)!;
+    expect(newbieTurn.prompt).toContain('<project_claude_md>');
+    expect(newbieTurn.prompt).toContain('- Follow the house style');
+    expect(markers('newbie')).toHaveLength(1);
+
+    unregisterLiveSession(SESSION_ID);
   });
 });

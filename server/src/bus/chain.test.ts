@@ -4,9 +4,9 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
-import { createChainRouter, resumeChainSession } from './chain.js';
+import { createChainRouter, resumeChainSession, startChainSession } from './chain.js';
 import { computeSessionPaths } from './paths.js';
-import { CEBAB_SOURCE, SINK_RECIPIENT } from './runtime.js';
+import { CEBAB_SOURCE, SINK_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import {
   getLiveSession,
   hasLiveSession,
@@ -19,7 +19,10 @@ import {
   getMultiAgentSession,
   listMultiAgentEvents,
 } from '../repo/multi_agent.js';
+import { upsertProject } from '../repo/projects.js';
 import type { BusEvent } from './runner.js';
+import type { Runner } from '../runner/index.js';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -196,5 +199,97 @@ describe('resumeChainSession (registry-based, R-A)', () => {
     expect(
       await resumeChainSession({ sessionId: SESSION_ID, onEvent: vi.fn(), onEnded: vi.fn() }),
     ).toBeNull();
+  });
+});
+
+describe('startChainSession — project CLAUDE.md injection', () => {
+  // Capture the prompt string that actually reaches the (faked) runner so we
+  // can assert what participant[0] sees on its first turn.
+  function fakeRunnerFactory(captured: string[]) {
+    return (opts: { prompt: string }): Runner => {
+      captured.push(opts.prompt);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function participant(name: string, withClaudeMd: string | null): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    if (withClaudeMd !== null) fs.writeFileSync(path.join(dir, 'CLAUDE.md'), withClaudeMd);
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  test('participant[0] first turn gets the fenced CLAUDE.md; scrollback gets only a compact marker', async () => {
+    const workspace = path.join(tmpRoot, 'ws');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: string[] = [];
+    const claudeMd = '# Coder rules\n\n- Run `npm test` before every reply\n- Never touch prod';
+    const participants = [participant('coder', claudeMd), participant('reviewer', null)];
+
+    const handle = await startChainSession({
+      participants,
+      initialPrompt: 'do the task',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: fakeRunnerFactory(captured),
+    });
+    // deliverTurn is fire-and-forget; flush the microtask + immediate queue.
+    await new Promise((r) => setImmediate(r));
+
+    // (a) coder's first delivered prompt carries the fenced, framed rules.
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('<project_claude_md>');
+    expect(captured[0]).toContain('- Run `npm test` before every reply');
+    expect(captured[0]).toContain('AUTHORITATIVE project rules');
+    // Order: bus protocol → rules → task.
+    expect(captured[0]!.indexOf('bus_send')).toBeLessThan(
+      captured[0]!.indexOf('<project_claude_md>'),
+    );
+    expect(captured[0]!.indexOf('<project_claude_md>')).toBeLessThan(
+      captured[0]!.indexOf('do the task'),
+    );
+
+    // (b) scrollback: the protocol briefing + a ONE-LINE marker, never the body.
+    const events = listMultiAgentEvents(handle.sessionId);
+    const coderIntros = events.filter(
+      (e) => e.source === CEBAB_SOURCE && e.destination === 'coder' && e.kind === 'intro',
+    );
+    const marker = coderIntros.find((e) => e.text.includes('Cebab injected coder/CLAUDE.md'));
+    expect(marker).toBeDefined();
+    expect(marker!.text).toMatch(/Cebab injected coder\/CLAUDE\.md \(\d+\.\d KB\) into coder/);
+    // No persisted scrollback event leaks the actual rule text.
+    expect(events.some((e) => e.text.includes('Never touch prod'))).toBe(false);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  test('participant without a CLAUDE.md is briefed normally, no marker', async () => {
+    const workspace = path.join(tmpRoot, 'ws2');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: string[] = [];
+    const participants = [participant('coder2', null), participant('reviewer2', null)];
+
+    const handle = await startChainSession({
+      participants,
+      initialPrompt: 'task',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: fakeRunnerFactory(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).not.toContain('<project_claude_md>');
+    const events = listMultiAgentEvents(handle.sessionId);
+    expect(events.some((e) => e.text.includes('Cebab injected'))).toBe(false);
+
+    unregisterLiveSession(handle.sessionId);
   });
 });
