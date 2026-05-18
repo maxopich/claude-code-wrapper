@@ -186,7 +186,7 @@ function DraftView(props: {
               {multiAgent.lastAppliedDropped === 1 ? 'was' : 'were'} skipped.
             </p>
           )}
-          <TemplatesList
+          <TemplatesPanel
             items={tabTemplates}
             mode={props.mode}
             projects={projects}
@@ -487,7 +487,14 @@ function MultiAgentComposer(props: {
   );
 }
 
-function TemplatesList(props: {
+/**
+ * Templates browser — a master-detail pane. Left: a narrow list of saved
+ * templates (name + agent count only). Right: the selected template's
+ * architecture preview (SVG diagram + flowing dot + per-agent role
+ * editors). Selection is derived, not asserted, so deleting the selected
+ * template self-heals to the first remaining one with no dangling id.
+ */
+function TemplatesPanel(props: {
   items: MultiAgentTemplate[] | null;
   mode: 'chain' | 'orchestrator';
   projects: Project[];
@@ -495,6 +502,8 @@ function TemplatesList(props: {
   onDelete: (id: string) => void;
   onUpdateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
 }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
   }
@@ -506,100 +515,297 @@ function TemplatesList(props: {
       </p>
     );
   }
+  const items = props.items;
+  // Derive, don't assert: an explicit click sticks via selectedId, but a
+  // deleted/filtered-out selection falls back to the first template.
+  const selected = items.find((t) => t.id === selectedId) ?? items[0];
+  if (!selected) return null; // unreachable: items is non-empty here
+
   return (
-    <ol className="template-list">
-      {props.items.map((t) => (
-        <TemplateRow
-          key={t.id}
-          template={t}
-          projects={props.projects}
-          onApply={props.onApply}
-          onDelete={props.onDelete}
-          onUpdateRoles={props.onUpdateRoles}
-        />
-      ))}
-    </ol>
+    <div className="tpl-panel">
+      <TemplateMasterList
+        items={items}
+        projects={props.projects}
+        selectedId={selected.id}
+        onSelect={setSelectedId}
+        onDelete={props.onDelete}
+      />
+      <TemplatePreview
+        key={selected.id}
+        template={selected}
+        projects={props.projects}
+        onApply={props.onApply}
+        onUpdateRoles={props.onUpdateRoles}
+      />
+    </div>
   );
 }
 
-/**
- * The "thin architecture" agent diagram, shared by the compact card face
- * and the expanded detail. Orchestrator = a hub fanning to worker nodes via
- * pure-CSS bracket connectors; chain = a top-down sequence with arrowed
- * links. Node geometry is identical across both variants so a future
- * message-flow animation can target `.topo-link` / `[data-agent]` without a
- * layout rewrite. No diagram library — crisp, scalable, dependency-free.
- */
-function AgentTopology(props: {
-  mode: 'chain' | 'orchestrator';
-  participants: Project[];
-  variant: 'compact' | 'expanded';
-  roles: Record<string, string>;
-  onRoleChange: (projectId: number, text: string) => void;
+function TemplateMasterList(props: {
+  items: MultiAgentTemplate[];
+  projects: Project[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
-  const { participants, variant } = props;
-  const expanded = variant === 'expanded';
-  const isOrch = props.mode === 'orchestrator';
-
-  if (participants.length === 0) {
-    return <div className="topo topo-empty">(no resolvable participants)</div>;
-  }
-
-  const node = (p: Project) => (
-    <div className="topo-node-card" data-agent={p.id}>
-      <span className="topo-node-name" title={p.name}>
-        {p.name}
-      </span>
-      {expanded && (
-        <span className="topo-node-bus">
-          {p.busInstalled ? p.busAgentName : <span className="topo-node-nobus">no bus</span>}
-        </span>
-      )}
-      {expanded && (
-        <GrowTextarea
-          value={props.roles[String(p.id)] ?? ''}
-          onChange={(v) => props.onRoleChange(p.id, v)}
-          onSubmit={() => {}}
-          submitOnEnter={false}
-          placeholder="Role / goal…"
-          minRows={2}
-          maxHeightPx={160}
-          ariaLabel={`Role for ${p.name}`}
+  return (
+    <ul className="tpl-master">
+      {props.items.map((t) => (
+        <TemplateListItem
+          key={t.id}
+          template={t}
+          projects={props.projects}
+          selected={t.id === props.selectedId}
+          onSelect={props.onSelect}
+          onDelete={props.onDelete}
         />
-      )}
-    </div>
+      ))}
+    </ul>
   );
+}
 
-  if (isOrch) {
+function TemplateListItem(props: {
+  template: MultiAgentTemplate;
+  projects: Project[];
+  selected: boolean;
+  onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
+  const { template, projects } = props;
+  const resolvedCount = template.participants.filter((id) =>
+    projects.some((p) => p.id === id),
+  ).length;
+  const unavailable = template.participants.length - resolvedCount;
+  const countLabel = `${resolvedCount} agent${resolvedCount === 1 ? '' : 's'}${
+    unavailable > 0 ? `, ${unavailable} unavailable` : ''
+  }`;
+  return (
+    <li className={`tpl-item ${props.selected ? 'is-selected' : ''}`}>
+      <button
+        className="tpl-item-main"
+        onClick={() => props.onSelect(template.id)}
+        aria-current={props.selected ? 'true' : undefined}
+        title={`${template.name} — ${countLabel}`}
+      >
+        <span className="tpl-item-name">{template.name}</span>
+        <span className="tpl-item-count" aria-label={countLabel}>
+          {resolvedCount}
+        </span>
+      </button>
+      <button
+        className="tpl-item-del"
+        title="Delete template"
+        aria-label="Delete template"
+        onClick={() => props.onDelete(template.id)}
+      >
+        ×
+      </button>
+    </li>
+  );
+}
+
+/** Clip an SVG text label (SVG text has no auto-ellipsis); full name
+ * still shows in the role list and the node's <title> tooltip. */
+function truncLabel(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/**
+ * SVG architecture diagram for a template preview: orchestrator
+ * hub-and-spoke or a left→right chain, with one calm "message" dot
+ * flowing a representative connector path. Geometry is computed for
+ * arbitrary N (the mockup hardcoded 3); a fixed-height viewBox + computed
+ * width keeps labels legible (the .tpl-stage scrolls when wide). The dot
+ * is a CSS Motion Path animation (not SMIL) so it lives in the same
+ * prefers-reduced-motion blocks as every other animation; a JS
+ * reduced-motion guard also drops the dot element belt-and-braces.
+ * No diagram library — crisp, scalable, dependency-free.
+ */
+function AgentDiagram(props: { mode: 'chain' | 'orchestrator'; participants: Project[] }) {
+  const { participants, mode } = props;
+  const n = participants.length;
+  if (n === 0) {
+    return <div className="tpl-diagram-empty">(no resolvable participants)</div>;
+  }
+  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const slug = (p: Project) => (p.busInstalled ? (p.busAgentName ?? 'no bus') : 'no bus');
+
+  if (mode === 'orchestrator') {
+    const WORKER_W = 104;
+    const WORKER_H = 40;
+    const GAP = 14;
+    const WORKER_Y = 140;
+    const HEIGHT = 220;
+    const contentW = n * WORKER_W + (n - 1) * GAP;
+    const width = Math.max(360, contentW + 40);
+    const firstX = (width - contentW) / 2;
+    const HX = width / 2;
+    const HY = 68;
+    const midY = HY + 32;
+    const workerX = (i: number) => firstX + i * (WORKER_W + GAP);
+    const workerCx = (i: number) => workerX(i) + WORKER_W / 2;
+    const edgePath = (i: number) =>
+      workerCx(i) === HX
+        ? `M${HX} ${HY} V${WORKER_Y}`
+        : `M${HX} ${HY} V${midY} H${workerCx(i)} V${WORKER_Y}`;
     return (
-      <div className={`topo topo-orch ${expanded ? 'topo-expanded' : 'topo-compact'}`}>
-        <div className="topo-hub" data-agent="orchestrator">
-          orchestrator
-        </div>
-        <ul className="topo-workers">
-          {participants.map((p) => (
-            <li key={p.id} className="topo-node">
-              {node(p)}
-            </li>
+      <div className="tpl-stage">
+        <svg
+          className="tpl-svg"
+          viewBox={`0 0 ${width} ${HEIGHT}`}
+          preserveAspectRatio="xMinYMid meet"
+          role="img"
+          aria-label={`Orchestrator routing to ${n} worker${n === 1 ? '' : 's'}`}
+        >
+          {participants.map((p, i) => (
+            <path key={`e${p.id}`} className="tpl-edge" d={edgePath(i)} />
           ))}
-        </ul>
+          <rect className="tpl-hub-rect" x={HX - 58} y={32} width={116} height={36} rx={9} />
+          <text
+            className="tpl-hub-text"
+            x={HX}
+            y={52}
+            textAnchor="middle"
+            fontSize={12}
+            fontWeight={600}
+          >
+            orchestrator
+          </text>
+          <text className="tpl-node-slug" x={HX} y={63} textAnchor="middle" fontSize={9}>
+            cebab
+          </text>
+          {participants.map((p, i) => (
+            <g key={`w${p.id}`}>
+              <title>{p.name}</title>
+              <rect
+                className="tpl-node-rect"
+                x={workerX(i)}
+                y={WORKER_Y}
+                width={WORKER_W}
+                height={WORKER_H}
+                rx={8}
+              />
+              <text
+                className="tpl-node-name"
+                x={workerCx(i)}
+                y={WORKER_Y + 17}
+                textAnchor="middle"
+                fontSize={11}
+                fontWeight={600}
+              >
+                {truncLabel(p.name, 14)}
+              </text>
+              <text
+                className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
+                x={workerCx(i)}
+                y={WORKER_Y + 30}
+                textAnchor="middle"
+                fontSize={9}
+              >
+                {truncLabel(slug(p), 16)}
+              </text>
+            </g>
+          ))}
+          {!reduce && (
+            <circle
+              className="tpl-flow-dot"
+              r={3.5}
+              style={{ offsetPath: `path('${edgePath(0)}')` }}
+            />
+          )}
+        </svg>
       </div>
     );
   }
+
+  // Chain — a left→right sequence with arrowed links.
+  const NODE_W = 160;
+  const NODE_H = 44;
+  const GAP = 72;
+  const NODE_Y = 30;
+  const HEIGHT = 100;
+  const cy = NODE_Y + NODE_H / 2;
+  const contentW = n * NODE_W + (n - 1) * GAP;
+  const width = Math.max(700, contentW + 40);
+  const startX = (width - contentW) / 2;
+  const nodeX = (i: number) => startX + i * (NODE_W + GAP);
+  const nodeCx = (i: number) => nodeX(i) + NODE_W / 2;
   return (
-    <div className={`topo topo-chain ${expanded ? 'topo-expanded' : 'topo-compact'}`}>
-      <ol className="topo-seq">
+    <div className="tpl-stage">
+      <svg
+        className="tpl-svg"
+        viewBox={`0 0 ${width} ${HEIGHT}`}
+        preserveAspectRatio="xMinYMid meet"
+        role="img"
+        aria-label={`Chain of ${n} agent${n === 1 ? '' : 's'}`}
+      >
+        <defs>
+          <marker
+            id="tpl-arrow"
+            viewBox="0 0 10 10"
+            refX="9"
+            refY="5"
+            markerWidth="6"
+            markerHeight="6"
+            orient="auto-start-reverse"
+          >
+            <path className="tpl-arrowhead" d="M0 0 L10 5 L0 10 z" />
+          </marker>
+        </defs>
+        {participants.slice(1).map((p, idx) => {
+          const i = idx + 1;
+          return (
+            <line
+              key={`l${p.id}`}
+              className="tpl-edge"
+              x1={nodeX(i - 1) + NODE_W}
+              y1={cy}
+              x2={nodeX(i)}
+              y2={cy}
+              markerEnd="url(#tpl-arrow)"
+            />
+          );
+        })}
         {participants.map((p, i) => (
-          <li key={p.id} className="topo-node">
-            {i > 0 && (
-              <span className="topo-link" aria-hidden="true">
-                <span className="topo-link-arrow" />
-              </span>
-            )}
-            {node(p)}
-          </li>
+          <g key={`n${p.id}`}>
+            <title>{p.name}</title>
+            <rect
+              className="tpl-node-rect"
+              x={nodeX(i)}
+              y={NODE_Y}
+              width={NODE_W}
+              height={NODE_H}
+              rx={8}
+            />
+            <text
+              className="tpl-node-name"
+              x={nodeCx(i)}
+              y={cy - 2}
+              textAnchor="middle"
+              fontSize={13}
+              fontWeight={600}
+            >
+              {truncLabel(p.name, 18)}
+            </text>
+            <text
+              className={`tpl-node-slug${p.busInstalled ? '' : ' nobus'}`}
+              x={nodeCx(i)}
+              y={cy + 14}
+              textAnchor="middle"
+              fontSize={10}
+            >
+              {truncLabel(slug(p), 20)}
+            </text>
+          </g>
         ))}
-      </ol>
+        {!reduce && n >= 2 && (
+          <circle
+            className="tpl-flow-dot"
+            r={3.5}
+            style={{ offsetPath: `path('M${nodeCx(0)} ${cy} L ${nodeCx(n - 1)} ${cy}')` }}
+          />
+        )}
+      </svg>
     </div>
   );
 }
@@ -613,11 +819,19 @@ function normalizeRoles(r: Record<string, string>): Record<string, string> {
   return out;
 }
 
-function TemplateRow(props: {
+/**
+ * Right pane of the templates browser: the selected template's
+ * architecture preview + editable per-agent role/description list +
+ * Save-roles / Apply. The parent remounts this via `key={template.id}`
+ * on selection change, so the `roles` useState initializer re-seeds
+ * correctly per template (don't feed it changing props long-lived —
+ * that would leak stale roles across selections). Switching templates
+ * discards unsaved role edits, by design.
+ */
+function TemplatePreview(props: {
   template: MultiAgentTemplate;
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
-  onDelete: (id: string) => void;
   onUpdateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
 }) {
   const { template, projects } = props;
@@ -625,7 +839,6 @@ function TemplateRow(props: {
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
   const unavailable = template.participants.length - resolved.length;
-  const [open, setOpen] = useState(false);
   const [roles, setRoles] = useState<Record<string, string>>(template.roles ?? {});
   // Re-seed when the saved value changes (our own save round-trips back
   // through the templates list, or another window edits it).
@@ -634,78 +847,67 @@ function TemplateRow(props: {
   }, [template.roles]);
   const rolesDirty =
     JSON.stringify(normalizeRoles(roles)) !== JSON.stringify(normalizeRoles(template.roles ?? {}));
-  const roleCount = Object.values(normalizeRoles(template.roles ?? {})).length;
 
   return (
-    <li className={`template-card ${open ? 'open' : ''}`}>
-      <button
-        className="template-del"
-        title="Delete template"
-        aria-label="Delete template"
-        onClick={() => props.onDelete(template.id)}
-      >
-        ×
-      </button>
-      <button
-        className="template-card-main"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        title={open ? 'Collapse' : 'Expand for full names, bus slugs and per-agent roles'}
-      >
-        <div className="template-head">
-          <div className="template-name" title={template.name}>
-            {template.name}
-          </div>
-          <div className="template-meta">
-            {template.mode} · {template.lifecycle} · {resolved.length} participant
-            {resolved.length === 1 ? '' : 's'}
-            {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
-            {roleCount > 0 ? ` · ${roleCount} role${roleCount === 1 ? '' : 's'}` : ''}
-          </div>
+    <div className="tpl-preview">
+      <div className="tpl-preview-head">
+        <div className="tpl-preview-name" title={template.name}>
+          {template.name}
         </div>
-        {!open && (
-          <div className="template-figure" aria-hidden="true">
-            <AgentTopology
-              mode={template.mode}
-              participants={resolved}
-              variant="compact"
-              roles={roles}
-              onRoleChange={() => {}}
-            />
-          </div>
-        )}
-      </button>
-      {open && (
-        <div className="template-expand">
-          <AgentTopology
-            mode={template.mode}
-            participants={resolved}
-            variant="expanded"
-            roles={roles}
-            onRoleChange={(id, text) => setRoles((r) => ({ ...r, [String(id)]: text }))}
-          />
-          {resolved.length > 0 && (
-            <div className="template-roles-actions">
-              <button
-                className="ghost-btn"
-                disabled={!rolesDirty}
-                onClick={() => props.onUpdateRoles(template, normalizeRoles(roles))}
-                title="Save the per-agent roles back to this template. Participants, mode and lifecycle are unchanged."
-              >
-                {rolesDirty ? 'Save roles' : 'Saved'}
-              </button>
+        <div className="tpl-preview-meta">
+          {template.mode} · {template.lifecycle} · {resolved.length} participant
+          {resolved.length === 1 ? '' : 's'}
+          {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
+        </div>
+      </div>
+
+      <AgentDiagram mode={template.mode} participants={resolved} />
+
+      {resolved.length > 0 && (
+        <div className="tpl-roles">
+          {resolved.map((p) => (
+            <div key={p.id} className="tpl-role-row">
+              <div className="tpl-role-head">
+                <span className="tpl-role-name">{p.name}</span>
+                <span className={`tpl-role-slug${p.busInstalled ? '' : ' nobus'}`}>
+                  {p.busInstalled ? p.busAgentName : 'no bus'}
+                </span>
+              </div>
+              <GrowTextarea
+                value={roles[String(p.id)] ?? ''}
+                onChange={(v) => setRoles((r) => ({ ...r, [String(p.id)]: v }))}
+                onSubmit={() => {}}
+                submitOnEnter={false}
+                placeholder="Role / goal…"
+                minRows={2}
+                maxHeightPx={160}
+                ariaLabel={`Role for ${p.name}`}
+              />
             </div>
-          )}
+          ))}
         </div>
       )}
-      <button
-        className="template-apply"
-        onClick={() => props.onApply(template)}
-        title="Fill the participant list + lifecycle from this template. Type a fresh prompt and Start."
-      >
-        Apply
-      </button>
-    </li>
+
+      <div className="tpl-actions">
+        {resolved.length > 0 && (
+          <button
+            className="ghost-btn"
+            disabled={!rolesDirty}
+            onClick={() => props.onUpdateRoles(template, normalizeRoles(roles))}
+            title="Save the per-agent roles back to this template. Participants, mode and lifecycle are unchanged."
+          >
+            {rolesDirty ? 'Save roles' : 'Saved'}
+          </button>
+        )}
+        <button
+          className="tpl-apply"
+          onClick={() => props.onApply(template)}
+          title="Fill the participant list + lifecycle from this template. Type a fresh prompt and Start."
+        >
+          Apply
+        </button>
+      </div>
+    </div>
   );
 }
 

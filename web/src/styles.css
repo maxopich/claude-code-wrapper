@@ -1461,69 +1461,92 @@ pre {
  * 1fr) keep cards reading as squares, not stretched bands; expanding a
  * card grows it in place without dragging row-mates taller. The
  * Iterations history list is unaffected (its own classes). */
-.template-list {
+/* ---- Templates: master list → architecture preview ----
+ * Left = a narrow list of saved templates (name + agent count only).
+ * Right = the selected template's SVG architecture (hub-and-spoke or
+ * chain) with a single calm "message" dot flowing one representative
+ * path, plus the per-agent role/description editors. SVG (not CSS
+ * brackets) so the diagram scales to any N and the dot can follow the
+ * real connector path; the dot is a CSS Motion Path animation so it
+ * sits in the same prefers-reduced-motion blocks as every other
+ * animation. No diagram library. */
+.tpl-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 720px) {
+  .tpl-panel {
+    grid-template-columns: 1fr;
+  }
+}
+.tpl-master {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 340px));
-  justify-content: start;
-  align-items: start;
-  gap: 12px;
-}
-.template-card {
-  position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
+  min-width: 0;
+}
+.tpl-item {
+  position: relative;
+  display: flex;
+  align-items: center;
   background: var(--bg-2);
   border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  padding: 14px 16px 16px;
-  min-width: 0;
-  transition:
-    border-color var(--dur-1) var(--ease),
-    background var(--dur-1) var(--ease),
-    transform var(--dur-2) var(--ease);
+  border-radius: var(--r-md);
 }
-.template-card:hover {
+.tpl-item:not(.is-selected):hover {
   border-color: var(--line-3);
 }
-.template-card:not(.open):hover {
-  transform: translateY(-1px);
-}
-.template-card.open {
+.tpl-item.is-selected {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
-/* Clickable head + compact figure. In the collapsed state it grows so
- * Apply pins to the card bottom and aligns across the uniform-height
- * compact cards; when expanded it shrinks to just the head so the
- * expanded detail + Apply flow naturally below. */
-.template-card-main {
-  flex: 0 0 auto;
+.tpl-item-main {
+  flex: 1;
+  min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 12px;
+  align-items: center;
+  gap: 8px;
   background: none;
   border: 0;
-  padding: 0;
   margin: 0;
-  width: 100%;
-  text-align: left;
+  padding: 9px 10px;
   font: inherit;
   color: inherit;
+  text-align: left;
   cursor: pointer;
 }
-.template-card:not(.open) .template-card-main {
+.tpl-item-name {
   flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  font-size: var(--t-md);
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.template-del {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  width: 22px;
-  height: 22px;
+.tpl-item-count {
+  flex: 0 0 auto;
+  min-width: 20px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-2);
+  background: var(--bg-4);
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+.tpl-item-del {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  margin-right: 6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1535,20 +1558,24 @@ pre {
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
-  z-index: 2;
 }
-.template-del:hover {
+.tpl-item-del:hover {
   color: var(--fg);
   background: var(--bg-3);
   border-color: var(--border);
 }
-.template-head {
+.tpl-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.tpl-preview-head {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding-right: 26px;
 }
-.template-name {
+.tpl-preview-name {
   font-weight: 600;
   font-size: var(--t-lg);
   color: var(--fg);
@@ -1556,327 +1583,168 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.template-meta {
+.tpl-preview-meta {
   font-size: 11.5px;
   color: var(--fg-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-/* Compact face: a fixed, square-ish stage holding the mini diagram. */
-.template-figure {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 132px;
-  padding: 12px;
-  overflow: hidden;
-  background: var(--bg-3);
-  border: 1px solid var(--line-1);
-  border-radius: var(--r-sm);
+/* SVG stage — ported from the mockup's .topo-stage (grid-dot field +
+ * faint accent wash), tokenized. Scrolls horizontally when a wide
+ * topology (many agents) exceeds the pane rather than squashing labels. */
+.tpl-stage {
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  padding: 16px;
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  overflow-x: auto;
+  background-image:
+    radial-gradient(circle at center, rgba(139, 92, 246, 0.04), transparent 60%),
+    linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+  background-size: auto, 24px 24px, 24px 24px;
 }
-.template-expand {
+.tpl-svg {
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+}
+.tpl-diagram-empty {
+  color: var(--fg-3);
+  font-size: 12px;
+  font-style: italic;
+  text-align: center;
+}
+.tpl-edge {
+  stroke: var(--line-3);
+  stroke-width: 1;
+  fill: none;
+}
+.tpl-arrowhead {
+  fill: var(--accent);
+}
+.tpl-node-rect {
+  fill: var(--line-1);
+  stroke: var(--line-3);
+}
+/* Hub = an --accent tint at the mockup's alpha stops (no token exposes
+ * these exact alphas). */
+.tpl-hub-rect {
+  fill: rgba(139, 92, 246, 0.2);
+  stroke: rgba(139, 92, 246, 0.55);
+}
+.tpl-node-name {
+  fill: var(--fg);
+  font-family: var(--font-sans);
+}
+.tpl-hub-text {
+  fill: var(--accent-ink);
+  font-family: var(--font-sans);
+}
+.tpl-node-slug {
+  fill: var(--fg-2);
+  font-family: var(--font-mono);
+}
+.tpl-node-slug.nobus {
+  fill: var(--warn);
+}
+.tpl-flow-dot {
+  fill: var(--accent);
+  offset-distance: 0%;
+}
+.tpl-roles {
   display: flex;
   flex-direction: column;
   gap: 12px;
   border-top: 1px dashed var(--border);
   padding-top: 12px;
 }
-.template-roles-actions {
+.tpl-role-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tpl-role-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.tpl-role-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--fg);
+}
+.tpl-role-slug {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--fg-2);
+}
+.tpl-role-slug.nobus {
+  color: var(--warn);
+  font-style: italic;
+}
+.tpl-role-row .grow-textarea-wrap textarea {
+  background: var(--bg-2);
+  font-size: 12px;
+  padding: 6px 8px;
+}
+.tpl-actions {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
 }
-.template-roles-actions .ghost-btn {
+.tpl-actions .ghost-btn {
   font-size: 11.5px;
 }
-.template-apply {
-  width: 100%;
+.tpl-apply {
   background: transparent;
   color: var(--fg-2);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
-  padding: 7px 0;
+  padding: 7px 18px;
   font-size: var(--t-md);
   font-weight: 500;
   cursor: pointer;
 }
-.template-apply:hover {
+.tpl-apply:hover {
   background: var(--bg-3);
   color: var(--fg);
   border-color: var(--line-3);
 }
 
-/* ---- Agent topology: the "thin architecture" diagram ----
- * One component, two variants (compact face / expanded detail). Node
- * geometry + class names are stable across variants and carry
- * `--topo-line` + `[data-agent]` so a later message-flow animation can
- * hook in (pulse the connectors, glow a node) without a layout rewrite.
- * Pure CSS connectors — no diagram library. */
-.topo {
-  --topo-line: var(--fg-3);
-  width: 100%;
-}
-.topo-empty {
-  color: var(--fg-3);
-  font-size: 12px;
-  font-style: italic;
-  text-align: center;
-}
-.topo-node-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--bg-3);
-  box-shadow: var(--shadow-sm);
-}
-.topo-node-name {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--fg);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  text-align: center;
-}
-.topo-node-bus {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--fg-2);
-  text-align: center;
-}
-.topo-node-nobus {
-  color: var(--warn);
-  font-style: italic;
-}
+/* ---- Templates: motion ----
+ * The "message" dot drifts one representative connector path on a calm
+ * 2.2s loop (the cadence of the old topo-edge pulse it replaces). Path
+ * geometry is dynamic, so it's supplied inline as `offset-path`; the
+ * keyframe + duration live here so reduced-motion users (who never match
+ * this block, and are also covered by the reduce block below) never
+ * animate. The component additionally omits the dot element entirely
+ * under reduced motion, belt-and-braces. */
 @media (prefers-reduced-motion: no-preference) {
-  .topo-node-card,
-  .topo-hub {
+  .tpl-item {
     transition:
-      border-color var(--dur-2) var(--ease),
-      background-color var(--dur-2) var(--ease),
-      box-shadow var(--dur-2) var(--ease);
+      border-color var(--dur-1) var(--ease),
+      background var(--dur-1) var(--ease);
   }
-  /* Connectors slowly pulse toward the accent — a calm "alive" cue and
-   * the hook for a later message-flow animation. Connectors are 1px
-   * pseudo-element borders colored var(--topo-line); animating
-   * border-color tints whichever single side each one draws. The
-   * arrowheads (transparent triangle sides) are intentionally excluded
-   * so their geometry stays intact. Reduced-motion users never reach
-   * this block, and the reduce block below disables it belt-and-braces. */
-  @keyframes topo-edge {
-    0%,
-    100% {
-      border-color: var(--topo-line);
+  .tpl-node-rect,
+  .tpl-hub-rect {
+    transition:
+      stroke var(--dur-2) var(--ease),
+      fill var(--dur-2) var(--ease);
+  }
+  @keyframes tpl-flow {
+    from {
+      offset-distance: 0%;
     }
-    50% {
-      border-color: var(--accent);
+    to {
+      offset-distance: 100%;
     }
   }
-  .topo-orch .topo-hub::after,
-  .topo-orch .topo-workers .topo-node::before,
-  .topo-orch .topo-workers .topo-node::after,
-  .topo-chain .topo-link {
-    animation: topo-edge 2.2s var(--ease) infinite;
+  .tpl-flow-dot {
+    animation: tpl-flow 2.2s linear infinite;
   }
-}
-
-/* Orchestrator: a hub above its workers. Compact draws a pure-CSS bracket
- * fan (equal columns keep hub stem, bracket midpoint and middle worker
- * aligned); expanded stacks full-width worker cards so each has room for
- * its role editor. */
-.topo-orch {
-  text-align: center;
-}
-.topo-hub {
-  display: inline-block;
-  position: relative;
-  z-index: 1;
-  padding: 4px 14px;
-  border: 1px solid rgba(139, 92, 246, 0.45);
-  border-radius: var(--r-md);
-  background: linear-gradient(180deg, rgba(139, 92, 246, 0.2), rgba(139, 92, 246, 0.08));
-  color: var(--accent-ink);
-  font-weight: 600;
-  font-size: 12px;
-  box-shadow: 0 6px 20px var(--accent-glow);
-}
-.topo-orch .topo-hub::after {
-  content: '';
-  position: absolute;
-  top: 100%;
-  left: 50%;
-  width: 0;
-  height: 16px;
-  border-left: 1px solid var(--topo-line);
-}
-.topo-orch .topo-workers {
-  display: flex;
-  list-style: none;
-  margin: 0;
-  padding: 16px 0 0;
-}
-
-/* Compact orchestrator — horizontal bracket fan. */
-.topo-compact.topo-orch .topo-workers .topo-node {
-  flex: 1 1 0;
-  min-width: 0;
-  position: relative;
-  padding: 16px 6px 0;
-}
-.topo-compact.topo-orch .topo-workers .topo-node::before,
-.topo-compact.topo-orch .topo-workers .topo-node::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: 50%;
-  width: 50%;
-  height: 16px;
-  border-top: 1px solid var(--topo-line);
-}
-.topo-compact.topo-orch .topo-workers .topo-node::after {
-  right: auto;
-  left: 50%;
-  border-left: 1px solid var(--topo-line);
-}
-.topo-compact.topo-orch .topo-workers .topo-node:first-child::before,
-.topo-compact.topo-orch .topo-workers .topo-node:last-child::after {
-  border: 0 none;
-}
-.topo-compact.topo-orch .topo-workers .topo-node:last-child::before {
-  border-right: 1px solid var(--topo-line);
-  border-radius: 0 6px 0 0;
-}
-.topo-compact.topo-orch .topo-workers .topo-node:first-child::after {
-  border-radius: 6px 0 0 0;
-}
-.topo-compact.topo-orch .topo-workers .topo-node:only-child::before {
-  display: none;
-}
-.topo-compact.topo-orch .topo-workers .topo-node:only-child::after {
-  right: auto;
-  left: 50%;
-  border-top: 0;
-  border-right: 0;
-  border-radius: 0;
-  border-left: 1px solid var(--topo-line);
-}
-
-/* Expanded orchestrator — hub, then full-width worker cards stacked
- * below it (the centered hub stem connects into the group). */
-.topo-expanded.topo-orch .topo-workers {
-  flex-direction: column;
-  gap: 10px;
-  text-align: left;
-}
-.topo-expanded.topo-orch .topo-workers .topo-node {
-  min-width: 0;
-}
-
-/* Chain: a top-down sequence with arrowed links. */
-.topo-chain {
-  display: flex;
-  justify-content: center;
-}
-.topo-seq {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 0;
-  min-width: 0;
-  width: 100%;
-  max-width: 280px;
-}
-.topo-seq .topo-node {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-}
-.topo-link {
-  align-self: center;
-  width: 0;
-  height: 18px;
-  border-left: 1px solid var(--topo-line);
-  position: relative;
-}
-.topo-link-arrow {
-  position: absolute;
-  left: 50%;
-  bottom: -1px;
-  transform: translateX(-50%);
-  width: 0;
-  height: 0;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  border-top: 5px solid var(--topo-line);
-}
-
-/* Compact face: scaled down, names only (the component omits bus + role
- * editor unless expanded). Square-friendly. */
-.topo-compact .topo-hub {
-  padding: 3px 10px;
-  font-size: 11px;
-}
-.topo-compact .topo-node-card {
-  padding: 4px 8px;
-}
-.topo-compact .topo-node-name {
-  font-size: 11px;
-}
-.topo-compact .topo-link {
-  height: 14px;
-}
-/* Compact chain runs left→right so it fits the short square figure;
- * expanded chain stays top→down with room for the role editors. */
-.topo-compact.topo-chain .topo-seq {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  max-width: none;
-}
-.topo-compact.topo-chain .topo-node {
-  flex-direction: row;
-  align-items: center;
-}
-.topo-compact.topo-chain .topo-link {
-  width: 16px;
-  height: 0;
-  border-left: 0;
-  border-top: 1px solid var(--topo-line);
-}
-.topo-compact.topo-chain .topo-link-arrow {
-  left: auto;
-  right: -1px;
-  bottom: auto;
-  top: 50%;
-  transform: translateY(-50%);
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  border-left: 5px solid var(--topo-line);
-  border-right: 0;
-}
-
-/* Expanded detail: roomy node cards with the per-agent role editor. */
-.topo-expanded .topo-node-card {
-  text-align: left;
-}
-.topo-expanded .topo-node-name {
-  text-align: left;
-}
-.topo-expanded.topo-chain .topo-seq {
-  max-width: none;
-}
-.topo-node-card .grow-textarea-wrap textarea {
-  background: var(--bg-2);
-  font-size: 12px;
-  padding: 6px 8px;
 }
 .iteration-path {
   display: flex;
@@ -2334,13 +2202,13 @@ pre {
   .lifecycle-btn,
   .mode-toggle .pill,
   .input-box button,
-  .template-card,
+  .tpl-item,
   .participant-row,
   .workspace-btn,
   .project-header,
   .session-row,
-  .topo-node-card,
-  .topo-hub,
+  .tpl-node-rect,
+  .tpl-hub-rect,
   .modal input[type='text'],
   .grow-textarea-wrap textarea {
     transition: none;
@@ -2353,8 +2221,7 @@ pre {
   .lifecycle-btn:active:not(:disabled),
   .mode-toggle .pill:active:not(:disabled),
   .input-box button:active:not(:disabled),
-  .input-box button:hover:not(:disabled),
-  .template-card:not(.open):hover {
+  .input-box button:hover:not(:disabled) {
     transform: none;
   }
   .btn-spinner,
@@ -2363,11 +2230,13 @@ pre {
   .project-live-dot.on,
   .modal,
   .modal-backdrop,
-  .topo-orch .topo-hub::after,
-  .topo-orch .topo-workers .topo-node::before,
-  .topo-orch .topo-workers .topo-node::after,
-  .topo-chain .topo-link {
+  .tpl-flow-dot {
     animation: none;
+  }
+  /* Stopped, the motion-path dot would just sit parked at 0% — hide it
+   * so reduced-motion users get a clean static diagram. */
+  .tpl-flow-dot {
+    display: none;
   }
 }
 
