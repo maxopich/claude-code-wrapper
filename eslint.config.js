@@ -51,4 +51,21 @@ export default tseslint.config(
       },
     },
   },
+  {
+    // Repo-level Node launchers (scripts/*.mjs) are plain ESM with no
+    // tsconfig, so `no-undef` has no TS lib to pull Node globals from.
+    // Declare the handful they use — avoids adding a `globals` dep.
+    files: ['scripts/**/*.mjs'],
+    languageOptions: {
+      sourceType: 'module',
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        URL: 'readonly',
+        Buffer: 'readonly',
+      },
+    },
+  },
 );

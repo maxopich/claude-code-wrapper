@@ -9,10 +9,12 @@
     "web"
   ],
   "scripts": {
+    "dev": "node scripts/dev.mjs",
     "dev:server": "npm --workspace server run dev",
     "dev:web": "npm --workspace web run dev",
     "build": "npm --workspace shared run build && npm --workspace server run build && npm --workspace web run build",
     "smoke": "npm --workspace server run smoke",
+    "bootstrap": "node scripts/bootstrap.mjs",
     "setup": "npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false && husky",
     "prepare": "husky",
     "lint": "eslint . --max-warnings 0",
