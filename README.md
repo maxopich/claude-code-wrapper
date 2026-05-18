@@ -21,9 +21,28 @@ npm run bootstrap        # deps + native better-sqlite3 build + git hooks
 cp .env.example .env     # optional — overrides defaults (workspace root, port, mock)
 ```
 
-**Windows (PowerShell)** — download and install in one go (works in both
-Windows PowerShell 5.1 and PowerShell 7+; needs Git and Node.js already
-installed, plus the `claude` CLI prerequisite noted below):
+**Windows (PowerShell)** — one command, no prerequisites assumed (works in
+Windows PowerShell 5.1 and PowerShell 7+):
+
+```powershell
+irm https://raw.githubusercontent.com/maxopich/claude-code-wrapper/main/install.ps1 | iex
+```
+
+This auto-installs Git and Node.js LTS via `winget` if they're missing
+(Windows prompts for elevation on those), clones the repo into
+`.\claude-code-wrapper`, then runs `npm run bootstrap`. It checks for the
+`claude` CLI (the hard prerequisite noted below) and, if absent, prints how to
+install + log in and stops — it never touches your global npm. `irm | iex`
+runs the script as a string, so no `Set-ExecutionPolicy` is needed, and it's
+idempotent (safe to re-run; the clone becomes a fast-forward pull). It does
+fetch and run code — read it first at the raw URL, or pin `main` to a
+tag/commit, if you prefer. Preview with zero changes:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/maxopich/claude-code-wrapper/main/install.ps1))) -DryRun
+```
+
+Already have Git and Node? The manual three-liner still works:
 
 ```powershell
 git clone https://github.com/maxopich/claude-code-wrapper.git
@@ -120,7 +139,7 @@ also an inline pill above the chat that flips the same modes mid-flight.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor flow — pre-PR checks
-and the security-critical paths to be aware of. 
+and the security-critical paths to be aware of.
 
 ## Layout
 
