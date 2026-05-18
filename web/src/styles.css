@@ -1595,10 +1595,10 @@ pre {
   background: var(--bg-2);
   border: 1px solid var(--line-2);
   border-radius: var(--r-md);
-  padding: 16px;
+  padding: 10px;
   display: grid;
   place-items: center;
-  min-height: 240px;
+  min-height: 150px;
   overflow-x: auto;
   background-image:
     radial-gradient(circle at center, rgba(139, 92, 246, 0.04), transparent 60%),
@@ -1607,9 +1607,8 @@ pre {
   background-size: auto, 24px 24px, 24px 24px;
 }
 .tpl-svg {
-  width: 100%;
-  height: auto;
   max-width: 100%;
+  height: auto;
 }
 .tpl-diagram-empty {
   color: var(--fg-3);
