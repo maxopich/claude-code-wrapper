@@ -14,20 +14,22 @@ codebase behaves the same on all three. CI exercises both `ubuntu-latest` and
 
 ## Setup
 
+One command, identical on macOS, Linux and Windows:
+
 ```sh
-npm install
-npm run setup          # rebuilds better-sqlite3's native binding + installs git hooks
-cp .env.example .env   # then edit WORKSPACE_ROOT to point at your agent projects
+npm run bootstrap        # deps + native better-sqlite3 build + git hooks
+cp .env.example .env     # optional — overrides defaults (workspace root, port, mock)
 ```
 
-`npm run setup` is **required on every platform**: the repo's `.npmrc` sets
+`npm run bootstrap` exists because the repo's `.npmrc` sets
 `ignore-scripts=true` (a supply-chain guard — bus agents run under
 `bypassPermissions`, so a malicious transitive `postinstall` would be direct
-RCE), which means `npm install` does **not** build `better-sqlite3`.
-`npm run setup` re-runs just that one native build via `prebuild-install`,
-which fetches a prebuilt binary on macOS/Linux/Windows x64 (no compiler
-toolchain needed). On Windows, run these in PowerShell or Git Bash — every
-project script is cross-platform (no shell-isms).
+RCE), which means a plain `npm install` deliberately does **not** build
+`better-sqlite3`. The bootstrap script — pure Node, no shell, runnable on a
+fresh clone — does the three required steps in order: `npm install`, then the
+one re-enabled native build via `prebuild-install` (a prebuilt binary on
+macOS/Linux/Windows x64, no compiler toolchain needed), then git hooks. The
+older `npm install` && `npm run setup` two-step still works.
 
 The repo-root `.env` is loaded automatically by both server (`--env-file-if-exists`) and web (Vite `envDir`). If you don't create one, the defaults from `.env.example` apply: `WORKSPACE_ROOT=~/agents`, `PORT=4319`, mock mode off.
 
@@ -35,17 +37,17 @@ Requires `claude` installed and logged in (verify with `claude auth status`).
 
 ## Run
 
-Two terminals:
+One command — starts the server (`:4319`) and the web UI (`:5173`) together:
 
 ```sh
-# terminal 1 — server (default: real claude)
-npm run dev:server
-
-# terminal 2 — web
-npm run dev:web
+npm run dev
 ```
 
-Then open http://127.0.0.1:5173.
+Then open http://127.0.0.1:5173. **Ctrl+C stops both.** Output is interleaved
+and line-tagged `[server]` / `[web]`.
+
+To run or debug one side on its own, the two-terminal form still works —
+`npm run dev:server` and `npm run dev:web` in separate terminals.
 
 ## Mock mode
 
@@ -60,6 +62,10 @@ The inline `MOCK=1 …` form is POSIX-shell syntax (macOS/Linux, Git Bash). In
 **PowerShell** that won't set the variable — put `MOCK=1` in your `.env`
 instead (it's read by the server on every start) and just run
 `npm run dev:server`.
+
+`MOCK=1` in `.env` also drives the one-line `npm run dev`: its server child
+reads the repo-root `.env` exactly like `npm run dev:server`, so the whole
+stack runs mock on every OS with no shell-specific syntax.
 
 `fixtures/hello.jsonl` is a real captured `claude -p` run. Capture more with:
 
