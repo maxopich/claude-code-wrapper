@@ -21,6 +21,16 @@ npm run bootstrap        # deps + native better-sqlite3 build + git hooks
 cp .env.example .env     # optional — overrides defaults (workspace root, port, mock)
 ```
 
+**Windows (PowerShell)** — download and install in one go (works in both
+Windows PowerShell 5.1 and PowerShell 7+; needs Git and Node.js already
+installed, plus the `claude` CLI prerequisite noted below):
+
+```powershell
+git clone https://github.com/maxopich/claude-code-wrapper.git
+cd claude-code-wrapper
+npm run bootstrap
+```
+
 `npm run bootstrap` exists because the repo's `.npmrc` sets
 `ignore-scripts=true` (a supply-chain guard — bus agents run under
 `bypassPermissions`, so a malicious transitive `postinstall` would be direct
