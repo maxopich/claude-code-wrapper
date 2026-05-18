@@ -75,12 +75,36 @@ export type ProjectRules = { framed: string; sizeLabel: string };
  */
 export function readProjectClaudeMd(projectPath: string): ProjectRules | null {
   let raw: string;
+  // Resolve the path EXACTLY ONCE. A path-based stat-then-read is a TOCTOU
+  // race (CodeQL js/file-system-race): a malicious project could swap
+  // CLAUDE.md for a symlink to a secret between the check and the read, and
+  // we'd inject that file into an agent's prompt. Opening once, then
+  // fstat-ing and reading the SAME descriptor, closes that window — the
+  // check and the use act on one inode, not a re-resolved path. O_NONBLOCK
+  // so a FIFO planted as CLAUDE.md can't hang the bus turn (a DoS the old
+  // stat-first code happened to avoid; openSync alone would block).
+  let fd: number;
   try {
-    const p = path.join(projectPath, 'CLAUDE.md');
-    if (!fs.statSync(p).isFile()) return null; // dir / symlink-to-dir / device
-    raw = fs.readFileSync(p, 'utf8'); // invalid bytes -> U+FFFD, never throws
+    fd = fs.openSync(
+      path.join(projectPath, 'CLAUDE.md'),
+      fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
+    );
   } catch {
-    return null; // ENOENT / EACCES / ELOOP / EISDIR / moved-away dir …
+    return null; // ENOENT / EACCES / ELOOP / (Windows) dir → no readable file
+  }
+  try {
+    // fstat the open fd, not the path: a regular file at open time stays the
+    // file we read. Reject dir / device / fifo / symlink-to-dir.
+    if (!fs.fstatSync(fd).isFile()) return null;
+    raw = fs.readFileSync(fd, 'utf8'); // invalid bytes -> U+FFFD, never throws
+  } catch {
+    return null; // EISDIR / read error — a project file must not crash a turn
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* fd already gone — nothing to release */
+    }
   }
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
