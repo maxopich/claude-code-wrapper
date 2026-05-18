@@ -289,6 +289,14 @@ export function App() {
     // event.
     wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text });
   }
+  function continueMultiAgent(sessionId: string) {
+    // R-B: the operator reviewed a restart-recovered (read-only) run and
+    // chose to continue. Optimistically drop the read-only gate; the server
+    // delivers the "continue where you left off" nudge to the orchestrator
+    // and the resumed turn streams back as normal events.
+    dispatch({ type: 'ma_clear_awaiting' });
+    wsRef.current?.send({ type: 'continue_multi_agent', sessionId });
+  }
   function setActiveLifecycle(sessionId: string, lifecycle: MultiAgentLifecycle) {
     // Server validates: orchestrator-mode only, sessionId must match the
     // active session. On success, server echoes `multi_agent_lifecycle_changed`
@@ -533,6 +541,7 @@ export function App() {
                 onResumeSession={resumeSession}
                 wrapperErrorSeq={state.wrapperErrorSeq}
                 onSendUserPrompt={sendMultiAgentUserPrompt}
+                onContinueMultiAgent={continueMultiAgent}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}
                 onDismissActive={dismissActiveRun}

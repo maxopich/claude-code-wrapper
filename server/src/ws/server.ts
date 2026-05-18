@@ -56,9 +56,13 @@ import {
 } from '../bus/resume.js';
 import {
   clearFinishedMultiAgentSessions,
+  getMultiAgentSession,
+  listMultiAgentEvents,
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
+  setAwaitingContinue,
 } from '../repo/multi_agent.js';
+import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { hasLiveSession } from '../bus/session_registry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
@@ -201,7 +205,8 @@ function onConnection(ws: WebSocket): void {
     // refresh, second window) calls `attemptResumeMultiAgent` to re-attach
     // by swapping the WS sink. The Stop button is the only way an operator
     // intentionally tears a session down. (A Cebab server restart empties
-    // the registry — decision R-A — so runs do not survive that.)
+    // the registry; an orchestrated run is then rebuilt from persisted
+    // state and re-attached READ-ONLY — R-B — pending an operator Continue.)
     if (conn.multiAgent) {
       conn.multiAgent.detach();
       conn.multiAgent = null;
@@ -252,6 +257,10 @@ function resumeCallbacks(conn: Conn): Pick<ResumeCallbacks, 'onEvent' | 'onEnded
  */
 function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   conn.multiAgent = resumed.handle;
+  // Fresh read: R-B reconstruction sets `awaiting_continue` AFTER the
+  // resume sweep snapshots its `candidate` row, so `resumed.row` can be
+  // stale. The DB is authoritative.
+  const awaitingContinue = getMultiAgentSession(resumed.handle.sessionId)?.awaiting_continue === 1;
   send(conn.ws, {
     type: 'multi_agent_started',
     sessionId: resumed.handle.sessionId,
@@ -262,6 +271,7 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     participantAgentNames: resumed.handle.participantAgentNames,
     lifecycle: resumed.handle.lifecycle,
     sessionFolder: resumed.handle.sessionFolder,
+    awaitingContinue,
   });
   for (const ev of resumed.replayEvents) {
     const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
@@ -323,14 +333,54 @@ function emitSettings(conn: Conn): void {
 /**
  * The user-facing message that ships in the `wrapper_error.message` field
  * when an auto-resume fails. Kept close to the WS layer so the wording (which
- * the operator sees in a toast) doesn't drift away from the symptom. Under
- * the pure-SDK model the only failure is a server-restart registry miss
- * (decision R-A). The session id slice helps disambiguate when the operator
- * has run multiple multi-agent sessions in a row.
+ * the operator sees in a toast) doesn't drift away from the symptom. With
+ * R-B, an orchestrated run is reconstructed after a server restart; this
+ * fires only when reconstruction is impossible — chain mode, or a guard
+ * failed (no persisted session map for a pre-009 row, a deleted participant,
+ * a missing session folder, …). The session id slice helps disambiguate
+ * when the operator has run multiple multi-agent sessions in a row.
  */
 function resumeFailureMessage(sessionId: string): string {
   const slug = sessionId.slice(0, 8);
-  return `Couldn't resume multi-agent session ${slug}: the Cebab server was restarted since it started, and multi-agent runs don't survive a server restart (decision R-A). Marked crashed. Single-agent chats are unaffected.`;
+  return `Couldn't resume multi-agent session ${slug}: the Cebab server was restarted and this run couldn't be reconstructed (chain-mode runs, or runs missing their persisted resume state, can't come back). Marked crashed. Single-agent chats are unaffected.`;
+}
+
+/**
+ * Build the orchestrator "continue after restart" nudge for R-B. The
+ * orchestrator is resumed with its full prior reasoning transcript intact
+ * (its CLI session was seeded), so it only needs the bus activity that
+ * landed after its last action — not the whole log. Excludes the
+ * cebab→user recovery banner (operator-facing, not orchestrator input).
+ */
+function buildContinueNudge(sessionId: string): string {
+  const events = listMultiAgentEvents(sessionId);
+  let lastOrchIdx = -1;
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i]!.source === ORCHESTRATOR_AGENT_NAME) {
+      lastOrchIdx = i;
+      break;
+    }
+  }
+  const since = events
+    .slice(lastOrchIdx + 1)
+    .filter((e) => !(e.source === 'cebab' && e.destination === 'user'));
+  const log =
+    since.length > 0
+      ? since.map((e) => `- ${e.source} → ${e.destination} [${e.kind}]: ${e.text}`).join('\n')
+      : '(no bus messages were recorded since your last action)';
+  return [
+    'The Cebab server was restarted while this session was running, so your',
+    'turn was interrupted. You have been resumed with your full prior context',
+    'intact. Bus activity since your last action:',
+    '',
+    log,
+    '',
+    'Continue the task from where you left off. If you had already dispatched',
+    'work to a participant, wait for or re-request their reply as appropriate.',
+    'Anything you wrote in the interrupted turn was not delivered — re-send it',
+    'via bus_send. When you have the complete answer, bus_send(recipient="user",',
+    'kind="final", ...).',
+  ].join('\n');
 }
 
 /** Display-label cap. Long enough for "Refactor the WS upgrade handler", short
@@ -387,11 +437,11 @@ export async function buildIterationsList(): Promise<IterationSummary[]> {
       row.session_folder !== null
         ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
         : busIterationDir(row.iteration_id!);
-    // A row is resumable only if it is still live in THIS process's
-    // session registry (the in-process analogue of the old tmux probe).
-    // After a Cebab server restart the registry is empty, so nothing is
-    // resumable — decision R-A. Re-validated on the actual resume request.
-    const resumable = hasLiveSession(row.id);
+    // Resumable if it's still live in THIS process's registry (same-process
+    // re-attach) OR — for an orchestrated run — it can be reconstructed
+    // from persisted state after a Cebab server restart (R-B). Chain rows
+    // are only resumable while live. Re-validated on the actual resume.
+    const resumable = hasLiveSession(row.id) || canReconstruct(row);
     out.push({
       iterationId: row.iteration_id!,
       sessionId: row.id,
@@ -862,7 +912,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
               ? 'That session no longer exists.'
               : result.reason === 'already-running'
                 ? 'That session is already running.'
-                : 'Failed to re-attach: the Cebab server was restarted, and multi-agent runs do not survive a server restart (decision R-A).';
+                : 'Failed to re-attach: the server restarted and this run could not be reconstructed (chain-mode, or missing persisted resume state).';
           send(conn.ws, {
             type: 'wrapper_error',
             sessionId: msg.sessionId,
@@ -880,6 +930,41 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           kind: 'process_crashed',
           message: 'Failed to resume this session.',
         });
+      }
+      return;
+    }
+    case 'continue_multi_agent': {
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        // Not the active session — drop (raced an ended, or never
+        // re-attached). The browser only shows Continue on the active run.
+        return;
+      }
+      if (!('sendUserPrompt' in active)) {
+        // Chain handles have no sendUserPrompt — chain reconstruction is
+        // out of scope, so this should be unreachable, but fail loud.
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: 'Only orchestrator sessions can be continued.',
+        });
+        return;
+      }
+      const row = getMultiAgentSession(msg.sessionId);
+      if (!row || row.awaiting_continue !== 1) {
+        // Already continued (or never a recovered session). Idempotent
+        // no-op so a double-click can't double-deliver the nudge.
+        return;
+      }
+      try {
+        // Clear the flag BEFORE delivering so a racing second click sees
+        // awaiting_continue=0 and the guard above no-ops it.
+        setAwaitingContinue(msg.sessionId, false);
+        await active.sendUserPrompt(buildContinueNudge(msg.sessionId));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
       }
       return;
     }

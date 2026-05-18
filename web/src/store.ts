@@ -83,6 +83,11 @@ export type MultiAgentRun = {
   /** Absolute path to the on-disk session folder. Shown in the
    *  active-run header so the operator can copy/inspect. */
   sessionFolder: string;
+  /** True when this run was reconstructed after a Cebab server restart
+   *  (R-B) and is re-attached READ-ONLY. The UI shows a Continue banner
+   *  instead of the prompt input until the operator continues; cleared
+   *  optimistically on click (`ma_clear_awaiting`). */
+  awaitingContinue: boolean;
 };
 
 /**
@@ -262,7 +267,8 @@ export type Action =
   | { type: 'ma_reorder_participant'; projectId: number; direction: 'up' | 'down' }
   | { type: 'ma_set_draft_prompt'; text: string }
   | { type: 'ma_apply_template'; template: MultiAgentTemplate }
-  | { type: 'ma_dismiss_active' };
+  | { type: 'ma_dismiss_active' }
+  | { type: 'ma_clear_awaiting' };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -425,6 +431,21 @@ export function reduce(state: AppState, action: Action): AppState {
       if (!state.multiAgent.active || state.multiAgent.active.status === 'running') return state;
       return { ...state, multiAgent: { ...state.multiAgent, active: null } };
 
+    case 'ma_clear_awaiting': {
+      // Optimistic: the operator clicked Continue. Drop the read-only gate
+      // immediately so the prompt input returns; the server clears the DB
+      // flag and streams the orchestrator's resumed turn.
+      const active = state.multiAgent.active;
+      if (!active || !active.awaitingContinue) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, awaitingContinue: false },
+        },
+      };
+    }
+
     case 'server':
       return reduceServer(state, action.msg);
   }
@@ -510,6 +531,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             iterationId: null,
             lifecycle: msg.lifecycle,
             sessionFolder: msg.sessionFolder,
+            awaitingContinue: msg.awaitingContinue ?? false,
           },
         },
       };

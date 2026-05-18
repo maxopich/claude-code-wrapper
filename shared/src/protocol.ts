@@ -185,6 +185,22 @@ export type ClientMsg =
     }
   | {
       /**
+       * Continue a session that was reconstructed after a Cebab server
+       * restart and re-attached READ-ONLY (R-B; `awaiting_continue`). Cebab
+       * delivers a "you were interrupted — here is the bus activity since
+       * your last action, continue" nudge to the orchestrator (which
+       * resumes its real CLI session) and clears the awaiting flag.
+       * Orchestrator mode only; this is the ONLY action that re-runs agents
+       * after a restart-recovery (conservative: an interrupted turn's side
+       * effects are not auto-replayed without this explicit operator click).
+       * No-op / `wrapper_error` if the session isn't the active
+       * awaiting-continue one.
+       */
+      type: 'continue_multi_agent';
+      sessionId: string;
+    }
+  | {
+      /**
        * Forward a user prompt to the active orchestrator-routed session.
        * Cebab delivers it as the orchestrator's next turn (`kind=prompt`,
        * `source=cebab`); the orchestrator then routes it to whichever
@@ -389,6 +405,15 @@ export type ServerMsg =
       participantAgentNames: string[];
       lifecycle: MultiAgentLifecycle;
       sessionFolder: string;
+      /**
+       * True iff this session was reconstructed after a Cebab server
+       * restart (R-B) and is re-attached READ-ONLY: nothing runs until the
+       * operator sends `continue_multi_agent`. Absent/false for normal
+       * starts and same-process live re-attaches. The scrollback also
+       * carries a persisted cebab→user banner explaining the state and the
+       * one caveat (an interrupted turn's side effects are not rolled back).
+       */
+      awaitingContinue?: boolean;
     }
   | {
       /**
@@ -488,11 +513,12 @@ export type IterationSummary = {
   /** Absolute path to the iteration directory under the session folder. */
   artifactsDir: string;
   /**
-   * True iff this session is still live in the in-process registry and can
-   * be re-attached (no respawn). Computed server-side at list time and
-   * re-validated when the operator actually requests `resume_multi_agent`.
-   * `completed`/`stopped` rows are never resumable; any row becomes
-   * non-resumable after a Cebab server restart empties the registry.
+   * True iff this session can be brought back: either it is still live in
+   * the in-process registry (same-process re-attach, no respawn), OR — for
+   * an orchestrated run — it can be reconstructed from persisted state after
+   * a Cebab server restart (R-B). Computed server-side at list time and
+   * re-validated on the actual `resume_multi_agent`. Chain rows are only
+   * resumable while still live (reconstruction is orchestrator-only for now).
    */
   resumable: boolean;
 };

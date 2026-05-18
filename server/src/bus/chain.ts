@@ -28,10 +28,13 @@
  *      wake the destination. `_sink` ends the chain (write final.md,
  *      teardown 'completed'). `dest=user` is never legitimate in chain mode.
  *
- * Resume (R-A): a still-live session is re-attached from the in-process
- * registry on browser reconnect. After a Cebab *server* restart the registry
- * is empty → `resumeChainSession` returns null and the WS layer marks the
- * row crashed. (Single-agent resume is unaffected; that is a different path.)
+ * Resume: a still-live session is re-attached from the in-process registry
+ * on browser reconnect. After a Cebab *server* restart the registry is empty
+ * → `resumeChainSession` returns null and the WS layer marks the row
+ * crashed. Chain-mode reconstruction is intentionally out of scope, so a
+ * chain run still does NOT survive a server restart (the old R-A behavior);
+ * orchestrated runs do (R-B, see `reconstruct.ts`). Single-agent resume is
+ * unaffected; that is a different path.
  */
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -425,9 +428,10 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
 
 /**
  * Re-attach to a still-live chain session (browser reconnect, same process).
- * Returns null when the session is not live in this process — i.e. after a
- * Cebab server restart (decision R-A) — so the WS layer marks the row
- * crashed. Pure re-attach: never respawns agents.
+ * Returns null when the session is not live in this process — e.g. after a
+ * Cebab server restart — so the WS layer marks the row crashed. Chain
+ * reconstruction is deferred (orchestrated runs get R-B; chain does not).
+ * Pure re-attach: never respawns agents.
  */
 export async function resumeChainSession(
   opts: ResumeChainOpts,

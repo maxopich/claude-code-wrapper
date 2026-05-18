@@ -9,12 +9,17 @@
  *   - browser refresh / second window, SAME server process → the session is
  *     in the registry → re-attach by swapping its WS sink (`rebind`), replay
  *     persisted events so the scrollback rebuilds.
- *   - Cebab SERVER restart → the registry is empty (process died) → nothing
- *     to re-attach → mark the row `crashed` (decision R-A). Single-agent
+ *   - Cebab SERVER restart → the registry is empty (process died). R-B:
+ *     for an *orchestrated* run we rebuild it from persisted state
+ *     (`reconstruct.ts`) and re-attach it READ-ONLY — paused until the
+ *     operator continues (`awaiting_continue`). Only when reconstruction
+ *     is impossible (chain mode, or a guard fails: no persisted session
+ *     map / no folder / deleted participant / …) do we fall back to
+ *     marking the row `crashed` (the old R-A behavior). Single-agent
  *     resume is a different path and is unaffected.
  *
- * The only way an auto-resume fails under the pure-SDK model is a registry
- * miss (a Cebab server restart), so `ResumeFailureReason` is the single
+ * An auto-resume still only fails one way — reconstruction couldn't bring
+ * the row back — so `ResumeFailureReason` stays the single
  * `'reattach-failed'`.
  */
 import {
@@ -28,6 +33,7 @@ import {
 } from '../repo/multi_agent.js';
 import { getDb } from '../db.js';
 import { getLiveSession, type BusSink } from './session_registry.js';
+import { reconstructOrchestratorSession } from './reconstruct.js';
 import type { ChainSessionHandle, ResumeChainOpts } from './chain.js';
 import type { OrchestratorSessionHandle } from './orchestrator.js';
 
@@ -46,9 +52,10 @@ export type PersistedEvent = {
 };
 
 /**
- * Reason an auto-resume couldn't bring back a `running` DB row. The pure-SDK
- * runtime only ever produces `'reattach-failed'`: a registry miss = the
- * process that owned the session is gone (a Cebab restart, decision R-A).
+ * Reason an auto-resume couldn't bring back a `running` DB row. Still a
+ * single value: a registry miss that R-B reconstruction also couldn't
+ * recover (chain mode, or a guard failed). Orchestrated runs that *can* be
+ * rebuilt no longer reach this path.
  */
 export type ResumeFailureReason = 'reattach-failed';
 
@@ -91,9 +98,24 @@ export async function attemptResumeMultiAgent(
   // Single-active invariant: any older running rows are orphans.
   for (const r of activeRows.slice(1)) markCrashedSilent(r.id);
 
-  const live = getLiveSession(candidate.id);
+  let live = getLiveSession(candidate.id);
   if (!live) {
-    // Process that owned this session is gone (Cebab restarted) — R-A.
+    // The process that owned this session is gone (Cebab restarted). R-B:
+    // rebuild an orchestrated run from persisted state instead of crashing.
+    // Conservative — reconstruction re-attaches READ-ONLY and sets
+    // awaiting_continue; nothing runs until the operator continues. Chain
+    // mode / guard failures fall through to the crashed path below
+    // (behavior never worse than R-A).
+    if (
+      reconstructOrchestratorSession(candidate, {
+        onEvent: callbacks.onEvent,
+        onEnded: callbacks.onEnded,
+      })
+    ) {
+      live = getLiveSession(candidate.id);
+    }
+  }
+  if (!live) {
     markCrashedSilent(candidate.id);
     callbacks.onResumeFailed?.(candidate.id, 'reattach-failed');
     return null;
@@ -131,7 +153,21 @@ export async function resumeMultiAgentTarget(
   if (!row) return { ok: false, reason: 'not-found' };
   if (row.status === 'running') return { ok: false, reason: 'already-running' };
 
-  const live = getLiveSession(sessionId);
+  let live = getLiveSession(sessionId);
+  if (!live) {
+    // R-B: operator clicked Resume on a session whose owning process is
+    // gone (Cebab restarted). Rebuild it read-only — same conservative
+    // contract as the auto-resume path. Chain / guard failures keep the
+    // old "reattach-failed" behavior.
+    if (
+      reconstructOrchestratorSession(row, {
+        onEvent: callbacks.onEvent,
+        onEnded: callbacks.onEnded,
+      })
+    ) {
+      live = getLiveSession(sessionId);
+    }
+  }
   if (!live) return { ok: false, reason: 'reattach-failed' };
 
   const prevStatus = row.status as MultiAgentStatus;
