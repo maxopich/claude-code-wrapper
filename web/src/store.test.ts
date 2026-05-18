@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'vitest';
-import { activeSession, initialState, isSessionPending, reduce } from './store';
+import {
+  activeSession,
+  eventDefaultCollapsed,
+  initialState,
+  isSessionPending,
+  reduce,
+} from './store';
+import type { MultiAgentEventView, MultiAgentRun } from './store';
 
 const PID = 1;
 
@@ -572,5 +579,82 @@ describe('store / multi-agent reducer (PR 2)', () => {
       },
     });
     expect(after).toBe(before);
+  });
+});
+
+describe('store / eventDefaultCollapsed', () => {
+  function makeRun(mode: 'chain' | 'orchestrator'): MultiAgentRun {
+    return {
+      sessionId: 's1',
+      mode,
+      participantAgentNames: mode === 'orchestrator' ? ['orchestrator', 'beta'] : ['alpha', 'beta'],
+      status: 'running',
+      events: [],
+      iterationId: null,
+      lifecycle: 'persistent',
+      sessionFolder: '/ws/.cebab/s1',
+      awaitingContinue: false,
+    };
+  }
+  function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
+    return {
+      eventId: 1,
+      ts: 0,
+      source: 'beta',
+      destination: 'orchestrator',
+      kind: 'reply',
+      text: 'x',
+      ...over,
+    };
+  }
+
+  test('orchestrator mode: final answer to the user stays expanded', () => {
+    const run = makeRun('orchestrator');
+    expect(
+      eventDefaultCollapsed(
+        run,
+        ev({ source: 'orchestrator', destination: 'user', kind: 'final' }),
+      ),
+    ).toBe(false);
+  });
+
+  test('orchestrator mode: worker → orchestrator reply collapses by default', () => {
+    const run = makeRun('orchestrator');
+    expect(
+      eventDefaultCollapsed(
+        run,
+        ev({ source: 'beta', destination: 'orchestrator', kind: 'reply' }),
+      ),
+    ).toBe(true);
+  });
+
+  test('orchestrator mode: cebab briefing/intro collapses by default', () => {
+    const run = makeRun('orchestrator');
+    expect(
+      eventDefaultCollapsed(
+        run,
+        ev({ source: 'cebab', destination: 'orchestrator', kind: 'intro' }),
+      ),
+    ).toBe(true);
+  });
+
+  test('orchestrator mode: error events are never auto-hidden', () => {
+    const run = makeRun('orchestrator');
+    expect(
+      eventDefaultCollapsed(
+        run,
+        ev({ source: 'beta', destination: 'orchestrator', kind: 'error' }),
+      ),
+    ).toBe(false);
+  });
+
+  test('chain mode: nothing is auto-hidden, even non-user destinations', () => {
+    const run = makeRun('chain');
+    expect(
+      eventDefaultCollapsed(run, ev({ source: 'alpha', destination: 'beta', kind: 'reply' })),
+    ).toBe(false);
+    expect(
+      eventDefaultCollapsed(run, ev({ source: 'cebab', destination: 'alpha', kind: 'intro' })),
+    ).toBe(false);
   });
 });

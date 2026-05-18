@@ -11,7 +11,7 @@ import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
 import { SettingsModal } from './components/SettingsModal';
-import { MultiAgentTab } from './components/MultiAgentTab';
+import { MultiAgentTab, MultiAgentActivityBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
 import { Icon } from './components/Icon';
 
@@ -512,6 +512,7 @@ export function App() {
                 Chained Chat
               </button>
             </nav>
+            {view !== 'chat' && <MultiAgentActivityBar run={state.multiAgent.active} />}
             {view === 'chat' ? (
               <>
                 {session && !isSessionPending(session.id) && (
