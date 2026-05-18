@@ -1093,3 +1093,17 @@ export function activeAgent(run: MultiAgentRun): string | null {
   if (MA_SENTINELS.has(last.destination)) return null;
   return last.destination;
 }
+
+/**
+ * Whether a scrollback event renders metadata-only by default. Orchestrator
+ * mode only — chain runs have no orchestrator and are never auto-hidden. The
+ * only events worth defaulting open are the orchestrator's final answers to
+ * the operator (`destination === 'user'`; the bus guarantees only the
+ * orchestrator can target `user`). Errors are always shown — burying them
+ * behind a collapsed header would hide failures.
+ */
+export function eventDefaultCollapsed(run: MultiAgentRun, ev: MultiAgentEventView): boolean {
+  if (run.mode !== 'orchestrator') return false;
+  if (ev.kind === 'error') return false;
+  return ev.destination !== 'user';
+}

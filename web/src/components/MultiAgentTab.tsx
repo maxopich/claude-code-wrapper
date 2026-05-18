@@ -6,7 +6,7 @@ import type {
   Project,
 } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
-import { activeAgent } from '../store';
+import { activeAgent, eventDefaultCollapsed } from '../store';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
@@ -1529,7 +1529,11 @@ function ActiveRunView(props: {
         ) : (
           <ol className="event-list">
             {run.events.map((ev) => (
-              <EventRow key={ev.eventId} event={ev} />
+              <EventRow
+                key={ev.eventId}
+                event={ev}
+                defaultCollapsed={eventDefaultCollapsed(run, ev)}
+              />
             ))}
           </ol>
         )}
@@ -1836,15 +1840,59 @@ function UserPromptInput(props: { onSend: (text: string) => void }) {
   );
 }
 
-function EventRow(props: { event: MultiAgentEventView }) {
+/**
+ * Slim "what's running right now" strip, anchored under the main tab nav so
+ * the operator can see the active agent without scrolling the scrollback.
+ * Renders nothing unless a run is genuinely computing — hidden for the draft
+ * view, finished runs, and R-B read-only recovered runs (awaitingContinue).
+ */
+export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
+  const run = props.run;
+  if (!run || run.status !== 'running' || run.awaitingContinue) return null;
+  const agent = activeAgent(run);
+  if (!agent) return null;
+  // Last event's ts is the closest proxy for "when this turn started"
+  // (same approximation SessionSettingsPanel uses for the inline orb).
+  const turnStartedAt = run.events.length ? run.events[run.events.length - 1].ts : null;
+  return (
+    <div className="ma-activity-bar" role="status">
+      <ThinkingIndicator
+        variant="inline"
+        phase="thinking"
+        startedAt={turnStartedAt}
+        label={agent}
+      />
+      <span className="ma-activity-text">
+        <code>{agent}</code> working…
+      </span>
+    </div>
+  );
+}
+
+function EventRow(props: { event: MultiAgentEventView; defaultCollapsed: boolean }) {
   const { event } = props;
-  const [collapsed, setCollapsed] = useState(false);
+  // Initializer runs once per mount. Rows are keyed by eventId, so a
+  // newly-streamed event mounts at its computed default while any row the
+  // operator already toggled keeps its state as later events arrive.
+  const [collapsed, setCollapsed] = useState(props.defaultCollapsed);
   const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+  async function copyText() {
+    try {
+      await navigator.clipboard.writeText(event.text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      // Clipboard API can fail under non-secure-context or denied
+      // permissions. Leave the affordance idle; the operator can still
+      // expand the message and select the text manually.
+    }
+  }
   return (
     <li className={`event-row event-kind-${event.kind}`}>
       <div className="event-head">
         <button
-          className="icon-btn event-toggle"
+          className={`icon-btn event-toggle${collapsed ? ' is-collapsed' : ''}`}
           onClick={() => setCollapsed((c) => !c)}
           title={collapsed ? 'Show message' : 'Hide message (metadata only)'}
           aria-expanded={!collapsed}
@@ -1856,6 +1904,13 @@ function EventRow(props: { event: MultiAgentEventView }) {
         <span className="event-destination">{event.destination}</span>
         <span className="event-kind">{event.kind}</span>
         <span className="event-ts">{formatTs(event.ts)}</span>
+        <button
+          className="icon-btn event-copy"
+          onClick={copyText}
+          title={copied ? 'Copied' : 'Copy message text'}
+        >
+          {copied ? '✓' : '⧉'}
+        </button>
         <button
           className="icon-btn event-expand"
           onClick={() => setExpanded(true)}
