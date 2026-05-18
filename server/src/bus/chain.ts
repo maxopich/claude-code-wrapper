@@ -52,14 +52,16 @@ import {
   CEBAB_SOURCE,
   nextIterationId,
   prepareIterationDir,
+  readProjectClaudeMd,
   renderChainBriefing,
   resolveAgent,
   SINK_RECIPIENT,
   USER_RECIPIENT,
   type MultiAgentEndedReason,
+  type ProjectRules,
   type ResolvedAgent,
 } from './runtime.js';
-import { AgentRunner, type BusEvent } from './runner.js';
+import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
 import { uninstallBusForProject } from './install.js';
 import { computeSessionPaths, type SessionPaths } from './paths.js';
 import {
@@ -81,6 +83,9 @@ export type StartChainOpts = {
    *  first turn) still address the right session. */
   onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
+  /** Injectable for tests; threaded into the AgentRunner. Defaults to the
+   *  real (mock-aware) `pickRunner` when omitted. */
+  runnerFactory?: AgentRunnerDeps['runnerFactory'];
 };
 
 export type ResumeChainOpts = {
@@ -320,8 +325,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       : undefined;
 
   // Per-participant briefing, prepended once to that agent's first turn (it
-  // rides the first prompt rather than living in a project file).
+  // rides the first prompt rather than living in a project file). The
+  // project's own root CLAUDE.md is read here too (the SDK can't auto-load
+  // it for bus agents — settingSources lacks 'project') and injected on the
+  // same first turn; null when the project has none.
   const briefings = new Map<string, string>();
+  const projectRules = new Map<string, ProjectRules | null>();
   opts.participants.forEach((p, i) => {
     const nextHop =
       i === opts.participants.length - 1 ? SINK_RECIPIENT : opts.participants[i + 1]!.agentName;
@@ -336,6 +345,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         nextHop,
       }),
     );
+    projectRules.set(p.agentName, readProjectClaudeMd(p.cwd));
   });
 
   const abortController = new AbortController();
@@ -351,6 +361,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => writeTranscript(paths, iterationId, agent, msg),
     abortController,
+    runnerFactory: opts.runnerFactory,
   });
   for (const p of opts.participants) {
     runner.register({ name: p.agentName, cwd: p.cwd, settingSources: ['user'] });
@@ -361,7 +372,11 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     let prompt = text;
     if (briefing && !briefed.has(agentName)) {
       briefed.add(agentName);
-      prompt = `${briefing}\n\n${text}`;
+      // Order: bus protocol → project rules → task. Rules sit after the
+      // protocol so the "bus protocol wins" framing holds; the task still
+      // visibly follows the fenced block.
+      const pr = projectRules.get(agentName);
+      prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${text}` : `${briefing}\n\n${text}`;
     }
     void runner.deliverTurn(agentName, prompt).catch((err) => {
       console.error(`[chain] deliverTurn(${agentName}) failed`, err);
@@ -403,6 +418,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   });
 
   // Briefings + initial prompt → UI scrollback + DB parity (source=cebab).
+  // The CLAUDE.md the agent actually receives is NOT echoed here (it would
+  // flood the operator's chat and is already in the on-disk iteration
+  // transcript); scrollback gets a one-line marker instead.
   for (const p of opts.participants) {
     router.forwardCebabEvent({
       ts: Date.now(),
@@ -411,6 +429,16 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       kind: 'intro',
       text: briefings.get(p.agentName)!,
     });
+    const pr = projectRules.get(p.agentName);
+    if (pr) {
+      router.forwardCebabEvent({
+        ts: Date.now(),
+        source: CEBAB_SOURCE,
+        destination: p.agentName,
+        kind: 'intro',
+        text: `Cebab injected ${p.projectName}/CLAUDE.md (${pr.sizeLabel}) into ${p.agentName}'s first turn`,
+      });
+    }
   }
   router.forwardCebabEvent({
     ts: Date.now(),

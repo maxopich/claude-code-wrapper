@@ -60,6 +60,7 @@ import {
   CEBAB_SOURCE,
   nextIterationId,
   prepareIterationDir,
+  readProjectClaudeMd,
   renderRosterPrompt,
   renderRosterUpdate,
   renderWorkerBriefing,
@@ -67,9 +68,10 @@ import {
   SINK_RECIPIENT,
   USER_RECIPIENT,
   type MultiAgentEndedReason,
+  type ProjectRules,
   type ResolvedAgent,
 } from './runtime.js';
-import { AgentRunner, type BusEvent } from './runner.js';
+import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
 import {
   getLiveSession,
   NOOP_SINK,
@@ -434,6 +436,9 @@ export function wireOrchestratorSession(p: {
   onEnded: StartOrchestratorOpts['onEnded'];
   seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
   briefedAgents?: ReadonlyArray<string>;
+  /** Injectable for tests; threaded into the AgentRunner. Defaults to the
+   *  real (mock-aware) `pickRunner` when omitted. */
+  runnerFactory?: AgentRunnerDeps['runnerFactory'];
 }): {
   handle: OrchestratorSessionHandle;
   router: OrchestratorRouter;
@@ -445,6 +450,15 @@ export function wireOrchestratorSession(p: {
   const workerProjectIds = p.workers.map((w) => w.projectId);
   const workerProjectNames = new Map<string, string>(
     p.workers.map((w) => [w.agentName, w.projectName]),
+  );
+  // Each worker's own root CLAUDE.md, read here because the SDK won't load
+  // it for bus agents (settingSources lacks 'project'). Injected once on the
+  // worker's first turn (see `deliver`). Recomputed automatically on R-B
+  // resume since `reconstructOrchestratorSession` rebuilds `p.workers` with
+  // each `cwd` and re-enters this function. The orchestrator itself is never
+  // in this map — its cwd is the Cebab workspace, not a target project.
+  const workerProjectRules = new Map<string, ProjectRules | null>(
+    p.workers.map((w) => [w.agentName, readProjectClaudeMd(w.cwd)]),
   );
 
   const onTeardown = async () => {
@@ -483,6 +497,7 @@ export function wireOrchestratorSession(p: {
       }
     },
     abortController,
+    runnerFactory: p.runnerFactory,
   });
   runner.register({
     name: ORCHESTRATOR_AGENT_NAME,
@@ -517,7 +532,23 @@ export function wireOrchestratorSession(p: {
     let prompt = text;
     if (agentName !== ORCHESTRATOR_AGENT_NAME && !briefed.has(agentName)) {
       briefed.add(agentName);
-      prompt = `${renderWorkerBriefing({ selfAgent: agentName })}\n\n${text}`;
+      // Order: bus protocol → project rules → task (same as chain mode).
+      const brief = renderWorkerBriefing({ selfAgent: agentName });
+      const pr = workerProjectRules.get(agentName) ?? null;
+      prompt = pr ? `${brief}\n\n${pr.framed}\n\n${text}` : `${brief}\n\n${text}`;
+      if (pr) {
+        // Compact scrollback marker only — the full CLAUDE.md is in the
+        // delivered prompt + the on-disk iteration transcript, not echoed
+        // into the operator's chat. `router` is always assigned before any
+        // `deliver` call (same forward-decl pattern as `addWorker`).
+        router.forwardCebabEvent({
+          ts: Date.now(),
+          source: CEBAB_SOURCE,
+          destination: agentName,
+          kind: 'intro',
+          text: `Cebab injected ${workerProjectNames.get(agentName) ?? agentName}/CLAUDE.md (${pr.sizeLabel}) into ${agentName}'s first turn`,
+        });
+      }
     }
     void runner.deliverTurn(agentName, prompt).catch((err) => {
       console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
@@ -552,6 +583,10 @@ export function wireOrchestratorSession(p: {
     addParticipant(sessionId, projectId, 'worker', null);
     workerProjectIds.push(projectId);
     workerProjectNames.set(newAgent.agentName, newAgent.projectName);
+    // Read the new participant's CLAUDE.md so its first delivered turn
+    // injects + marks it via the same `deliver`/`briefed` path as a
+    // start-time worker.
+    workerProjectRules.set(newAgent.agentName, readProjectClaudeMd(newAgent.cwd));
     const currentWorkers = router.getWorkerNames().map((agentName) => ({
       agentName,
       projectName: workerProjectNames.get(agentName) ?? agentName,
