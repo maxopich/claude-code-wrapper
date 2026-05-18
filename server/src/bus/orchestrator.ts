@@ -42,6 +42,7 @@ import {
   endMultiAgentSession,
   getProjectBusState,
   setMultiAgentSessionLifecycle,
+  upsertAgentSession,
   type EventKind,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
@@ -406,34 +407,45 @@ function writeTranscript(paths: SessionPaths, iterationId: string, agent: string
   }
 }
 
-export async function startOrchestratorSession(
-  opts: StartOrchestratorOpts,
-): Promise<OrchestratorSessionHandle> {
-  if (opts.workers.length < 1) {
-    throw new Error('orchestrator mode requires at least one worker participant');
-  }
-  if (!fs.existsSync(opts.workspaceRoot)) {
-    throw new Error(`workspaceRoot does not exist: ${opts.workspaceRoot}`);
-  }
-
-  const sessionId = crypto.randomUUID();
-  const lifecycle: MultiAgentLifecycle = opts.lifecycle ?? 'persistent';
-  const workerNames = opts.workers.map((w) => w.agentName);
+/**
+ * Shared wiring for an orchestrator session: AgentRunner + router + handle +
+ * live-registry registration. Both a fresh start and an R-B reconstruction
+ * go through this ONE function so the F2/F3 routing filters and the
+ * handle/closure shape can never drift between the two paths.
+ *
+ * It does NOT create the DB session/participant rows, allocate an iteration,
+ * or deliver any prompt — those differ between start (fresh) and reconstruct
+ * (read-only) and are the caller's responsibility.
+ *
+ * R-B hooks:
+ *   - `seededSessions`: pre-load each agent's last-completed CLI session id
+ *     so its next turn `--resume`s its real transcript.
+ *   - `briefedAgents`: workers that already consumed their one-time briefing
+ *     in the prior process (their resumed transcript still contains it) —
+ *     don't re-prefix it.
+ */
+export function wireOrchestratorSession(p: {
+  sessionId: string;
+  iterationId: string;
+  lifecycle: MultiAgentLifecycle;
+  paths: SessionPaths;
+  workers: ResolvedAgent[];
+  onEvent: StartOrchestratorOpts['onEvent'];
+  onEnded: StartOrchestratorOpts['onEnded'];
+  seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
+  briefedAgents?: ReadonlyArray<string>;
+}): {
+  handle: OrchestratorSessionHandle;
+  router: OrchestratorRouter;
+  deliver: (agentName: string, text: string) => void;
+} {
+  const { sessionId, iterationId, lifecycle, paths } = p;
+  const workerNames = p.workers.map((w) => w.agentName);
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...workerNames];
-  const workerProjectIds = opts.workers.map((w) => w.projectId);
+  const workerProjectIds = p.workers.map((w) => w.projectId);
   const workerProjectNames = new Map<string, string>(
-    opts.workers.map((w) => [w.agentName, w.projectName]),
+    p.workers.map((w) => [w.agentName, w.projectName]),
   );
-
-  const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
-  fs.mkdirSync(paths.folder, { recursive: true });
-  ensureOrchestratorWorkspace(paths.orchestratorWorkspace);
-
-  const iterationId = nextIterationId(paths);
-
-  createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle);
-  opts.workers.forEach((w) => addParticipant(sessionId, w.projectId, 'worker', null));
-  prepareIterationDir(iterationId, participantAgentNames, paths);
 
   const onTeardown = async () => {
     for (const projectId of workerProjectIds) {
@@ -460,6 +472,16 @@ export async function startOrchestratorSession(
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => writeTranscript(paths, iterationId, agent, msg),
+    onSessionId: (agent, cli) => {
+      // Persist each agent's `--resume` checkpoint so this session can be
+      // reconstructed after a Cebab server restart (R-B). Covers the
+      // orchestrator itself and every worker, including mid-run addWorker.
+      try {
+        upsertAgentSession(sessionId, agent, cli);
+      } catch (err) {
+        console.error('[orchestrator] persist agent session failed', err);
+      }
+    },
     abortController,
   });
   runner.register({
@@ -467,8 +489,16 @@ export async function startOrchestratorSession(
     cwd: paths.orchestratorWorkspace,
     settingSources: ['user'],
   });
-  for (const w of opts.workers) {
+  for (const w of p.workers) {
     runner.register({ name: w.agentName, cwd: w.cwd, settingSources: ['user'] });
+  }
+
+  // R-B: rehydrate each agent's `--resume` checkpoint from the persisted
+  // map so its next turn continues its real CLI transcript. Rows for
+  // unknown agents are ignored; an agent with no row stays fresh (correct —
+  // it never completed a turn before the restart).
+  for (const s of p.seededSessions ?? []) {
+    if (runner.has(s.agentName)) runner.seedSession(s.agentName, s.cliSessionId);
   }
 
   // Worker briefing, prepended once to each worker's first turn (mirrors
@@ -478,7 +508,11 @@ export async function startOrchestratorSession(
   // instruction to use it, so their replies are emitted as plain turn text
   // and lost (the install collapse removed the per-project comm.md that
   // used to carry this).
-  const briefed = new Set<string>();
+  //
+  // R-B: a worker that already spoke in the prior process consumed this
+  // briefing (its resumed transcript still has it), so it is pre-marked
+  // here and `deliver` won't duplicate it.
+  const briefed = new Set<string>(p.briefedAgents ?? []);
   const deliver = (agentName: string, text: string) => {
     let prompt = text;
     if (agentName !== ORCHESTRATOR_AGENT_NAME && !briefed.has(agentName)) {
@@ -497,8 +531,8 @@ export async function startOrchestratorSession(
     workerNames,
     paths,
     lifecycle,
-    onEvent: opts.onEvent,
-    onEnded: opts.onEnded,
+    onEvent: p.onEvent,
+    onEnded: p.onEnded,
     onTeardown,
     deliver,
   });
@@ -570,6 +604,43 @@ export async function startOrchestratorSession(
     rebind: (s) => router.rebind(s),
   });
 
+  return { handle, router, deliver };
+}
+
+export async function startOrchestratorSession(
+  opts: StartOrchestratorOpts,
+): Promise<OrchestratorSessionHandle> {
+  if (opts.workers.length < 1) {
+    throw new Error('orchestrator mode requires at least one worker participant');
+  }
+  if (!fs.existsSync(opts.workspaceRoot)) {
+    throw new Error(`workspaceRoot does not exist: ${opts.workspaceRoot}`);
+  }
+
+  const sessionId = crypto.randomUUID();
+  const lifecycle: MultiAgentLifecycle = opts.lifecycle ?? 'persistent';
+  const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...opts.workers.map((w) => w.agentName)];
+
+  const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
+  fs.mkdirSync(paths.folder, { recursive: true });
+  ensureOrchestratorWorkspace(paths.orchestratorWorkspace);
+
+  const iterationId = nextIterationId(paths);
+
+  createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle);
+  opts.workers.forEach((w) => addParticipant(sessionId, w.projectId, 'worker', null));
+  prepareIterationDir(iterationId, participantAgentNames, paths);
+
+  const { handle, router, deliver } = wireOrchestratorSession({
+    sessionId,
+    iterationId,
+    lifecycle,
+    paths,
+    workers: opts.workers,
+    onEvent: opts.onEvent,
+    onEnded: opts.onEnded,
+  });
+
   // Roster prompt + initial user prompt → UI/DB parity, then delivered as
   // the orchestrator's first turn (was: two inbox messages drained by the
   // Stop hook; now concatenated into one prompt).
@@ -598,8 +669,11 @@ export async function startOrchestratorSession(
 
 /**
  * Re-attach to a still-live orchestrator session (browser reconnect, same
- * process). Returns null when not live — i.e. after a Cebab server restart
- * (decision R-A). Pure re-attach: never respawns agents.
+ * process). Returns null when not live — e.g. after a Cebab server restart.
+ * That is NOT the end of the story for orchestrated runs: the resume
+ * dispatcher (`resume.ts`) then rebuilds the session from persisted state
+ * via `reconstruct.ts` (R-B) and re-attaches it READ-ONLY. This function
+ * itself is the pure same-process re-attach; it never respawns agents.
  */
 export async function resumeOrchestratorSession(
   opts: ResumeOrchestratorOpts,

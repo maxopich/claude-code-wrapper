@@ -46,6 +46,20 @@ export type MultiAgentSessionRow = {
   /** 'persistent' or 'temp' — see `MultiAgentLifecycle`. Defaults
    *  to 'persistent' at the SQL layer for pre-007 rows. */
   lifecycle: string;
+  /** 1 iff this session was reconstructed after a Cebab server restart and
+   *  is re-attached READ-ONLY, waiting for the operator to explicitly
+   *  continue (R-B conservative recovery). 0 for normal/pre-009 rows.
+   *  Narrowed to boolean at the boundary; SQLite has no bool. */
+  awaiting_continue: number;
+};
+
+export type MultiAgentAgentSessionRow = {
+  session_id: string;
+  /** Bus slug (or 'orchestrator') — NOT a project id. */
+  agent_name: string;
+  /** Last completed claude CLI session id for `--resume` on reconstruction. */
+  cli_session_id: string;
+  updated_at: number;
 };
 
 export type MultiAgentParticipantRow = {
@@ -116,6 +130,19 @@ export function setMultiAgentSessionLifecycle(id: string, lifecycle: MultiAgentL
   getDb().prepare(`UPDATE multi_agent_sessions SET lifecycle = ? WHERE id = ?`).run(lifecycle, id);
 }
 
+/**
+ * Flip the conservative post-restart recovery flag. Set true when a session
+ * is reconstructed after a Cebab server restart (R-B): the run is re-attached
+ * read-only and stays paused until the operator continues. Set false the
+ * moment the operator continues (or whenever a fresh turn is delivered), so
+ * the iterations UI / a second reconnect see it as a normal live session.
+ */
+export function setAwaitingContinue(id: string, awaiting: boolean): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET awaiting_continue = ? WHERE id = ?`)
+    .run(awaiting ? 1 : 0, id);
+}
+
 export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefined {
   return getDb()
     .prepare<[string], MultiAgentSessionRow>('SELECT * FROM multi_agent_sessions WHERE id = ?')
@@ -171,11 +198,12 @@ export function listMultiAgentSessionsWithIteration(): MultiAgentSessionRow[] {
  * — the active session (if any) is preserved so a click on "Clear" can't
  * orphan a live run.
  *
- * The three deletes run inside a single SQLite transaction so we don't
- * end up with dangling events/participants on a partial failure. SQLite
- * has no FK ON DELETE CASCADE here (the original schema doesn't declare
- * foreign keys on these tables), so the deletes have to be explicit and
- * the order matters only insofar as we delete children before parents.
+ * The four deletes run inside a single SQLite transaction so we don't
+ * end up with dangling events/participants/agent-sessions on a partial
+ * failure. The original tables (005) declare no foreign keys, so their
+ * deletes must be explicit; `multi_agent_agent_sessions` (009) does declare
+ * ON DELETE CASCADE, but it's deleted explicitly too for symmetry. Order
+ * matters only insofar as we delete children before parents.
  *
  * Does NOT touch on-disk artifacts (`~/.cebab/bus/iterations/`, per-session
  * folders). Those are useful for post-mortem inspection and recreating them
@@ -192,6 +220,12 @@ export function clearFinishedMultiAgentSessions(): number {
     ).run();
     db.prepare(
       `DELETE FROM multi_agent_participants
+        WHERE session_id IN (
+          SELECT id FROM multi_agent_sessions WHERE status != 'running'
+        )`,
+    ).run();
+    db.prepare(
+      `DELETE FROM multi_agent_agent_sessions
         WHERE session_id IN (
           SELECT id FROM multi_agent_sessions WHERE status != 'running'
         )`,
@@ -298,6 +332,43 @@ export function listMultiAgentEvents(sessionId: string, sinceId = 0): MultiAgent
       MultiAgentEventRow
     >('SELECT * FROM multi_agent_events WHERE session_id = ? AND id > ? ORDER BY id ASC')
     .all(sessionId, sinceId);
+}
+
+// ---- per-agent CLI sessions (R-B reconstruction) ----
+
+/**
+ * Record an agent's latest completed claude CLI session id. Upsert on the
+ * composite PK so each agent has exactly one row per bus session, always the
+ * most recent. Called from `AgentRunner` (via the injected `onSessionId`
+ * dep) the instant the in-memory map is mutated, so the persisted value is
+ * always the checkpoint a post-restart `--resume` would rewind to.
+ */
+export function upsertAgentSession(
+  sessionId: string,
+  agentName: string,
+  cliSessionId: string,
+): void {
+  getDb()
+    .prepare(
+      `INSERT INTO multi_agent_agent_sessions
+         (session_id, agent_name, cli_session_id, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (session_id, agent_name)
+       DO UPDATE SET cli_session_id = excluded.cli_session_id,
+                     updated_at     = excluded.updated_at`,
+    )
+    .run(sessionId, agentName, cliSessionId, Date.now());
+}
+
+/** Every persisted (agent_name → cli_session_id) for a session, used to
+ *  seed `AgentRunner.sessions` on reconstruction. */
+export function listAgentSessions(sessionId: string): MultiAgentAgentSessionRow[] {
+  return getDb()
+    .prepare<
+      [string],
+      MultiAgentAgentSessionRow
+    >('SELECT * FROM multi_agent_agent_sessions WHERE session_id = ?')
+    .all(sessionId);
 }
 
 // ---- project-level bus state ----

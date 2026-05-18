@@ -131,6 +131,13 @@ export type AgentRunnerDeps = {
   onEvent: (ev: BusEvent) => void;
   /** Per-message hook for transcript persistence + WS live forwarding. */
   onMessage?: (agentName: string, msg: SDKMessage) => void;
+  /**
+   * Called the instant an agent's last-completed CLI session id changes
+   * (a turn's `result`). chain.ts / orchestrator.ts wire this to a DB
+   * upsert so the per-agent `--resume` checkpoint survives a Cebab restart
+   * (R-B). Optional: unit tests and the single-agent path don't set it.
+   */
+  onSessionId?: (agentName: string, cliSessionId: string) => void;
   /** Injectable for tests; defaults to the real `pickRunner` (mock-aware). */
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
   /** Shared cancellation for the whole session's turns. */
@@ -168,6 +175,17 @@ export class AgentRunner {
     return [...this.specs.keys()];
   }
 
+  /**
+   * Pre-load an agent's last-completed CLI session id so the NEXT
+   * `deliverTurn` resumes its real transcript instead of starting fresh.
+   * Used by R-B reconstruction to rehydrate the in-memory map from the
+   * persisted `multi_agent_agent_sessions` rows after a Cebab restart.
+   * No-op semantics match `deliverTurn`'s read at `this.sessions.get`.
+   */
+  seedSession(agentName: string, cliSessionId: string): void {
+    this.sessions.set(agentName, cliSessionId);
+  }
+
   /** Run one turn for `agentName` with `promptText` as its input. Resolves
    *  when the turn's message stream ends. Throws if the agent is unknown. */
   async deliverTurn(agentName: string, promptText: string): Promise<void> {
@@ -195,6 +213,13 @@ export class AgentRunner {
         const m = msg as { type?: string; session_id?: string };
         if (m.type === 'result' && typeof m.session_id === 'string') {
           this.sessions.set(agentName, m.session_id);
+          // Persist the checkpoint. A DB hiccup must never abort a turn —
+          // same try/catch-and-log posture as the routers' persistence.
+          try {
+            this.deps.onSessionId?.(agentName, m.session_id);
+          } catch (err) {
+            console.error(`[runner] onSessionId(${agentName}) failed`, err);
+          }
         }
       }
     } finally {

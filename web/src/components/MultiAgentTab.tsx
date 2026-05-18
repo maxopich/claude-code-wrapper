@@ -46,6 +46,7 @@ export function MultiAgentTab(props: {
   /** Monotonic; bumps on every wrapper_error so pending spinners clear on failure. */
   wrapperErrorSeq: number;
   onSendUserPrompt: (sessionId: string, text: string) => void;
+  onContinueMultiAgent: (sessionId: string) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
   onDismissActive: () => void;
@@ -66,6 +67,7 @@ export function MultiAgentTab(props: {
         projects={projects}
         onStop={props.onStopMultiAgent}
         onSendUserPrompt={props.onSendUserPrompt}
+        onContinue={props.onContinueMultiAgent}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
         onDismiss={props.onDismissActive}
@@ -1406,6 +1408,7 @@ function ActiveRunView(props: {
   projects: Project[];
   onStop: (sessionId: string) => void;
   onSendUserPrompt: (sessionId: string, text: string) => void;
+  onContinue: (sessionId: string) => void;
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (sessionId: string, projectId: number) => void;
   onDismiss: () => void;
@@ -1527,7 +1530,25 @@ function ActiveRunView(props: {
         )}
       </section>
 
-      {isOrchestrator && isRunning && (
+      {isOrchestrator && isRunning && run.awaitingContinue && (
+        <div className="multi-agent-warning" role="status">
+          <p>
+            <strong>Recovered after a Cebab restart.</strong> This run is re-attached read-only —
+            nothing is running. The agent that was mid-turn will pick up from its last completed
+            step; file writes or commands from that interrupted step are <em>not</em> rolled back.
+            Review the scrollback above (see the recovery note), then continue when ready.
+          </p>
+          <button
+            className="primary-btn"
+            onClick={() => props.onContinue(run.sessionId)}
+            title="Deliver a 'continue where you left off' nudge to the orchestrator (it resumes its real CLI session). This is the only action that re-runs agents after a restart."
+          >
+            Continue session
+          </button>
+        </div>
+      )}
+
+      {isOrchestrator && isRunning && !run.awaitingContinue && (
         <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
       )}
     </div>

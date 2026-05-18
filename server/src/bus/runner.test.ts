@@ -125,6 +125,49 @@ describe('AgentRunner', () => {
     expect(calls[1]!.resume).toBe('sess-7');
   });
 
+  test('[R-B] onSessionId fires with the captured session id on result', async () => {
+    const captured: { agent: string; cli: string }[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onSessionId: (agent, cli) => captured.push({ agent, cli }),
+      runnerFactory: () => fakeRunner([resultMsg('sess-42')]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await runner.deliverTurn('alpha', 'go');
+    expect(captured).toEqual([{ agent: 'alpha', cli: 'sess-42' }]);
+  });
+
+  test('[R-B] a thrown onSessionId never aborts the turn', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onSessionId: () => {
+        throw new Error('db down');
+      },
+      runnerFactory: () => fakeRunner([resultMsg('s1')]),
+    });
+    runner.register({ name: 'a', cwd: '/tmp/a' });
+    await expect(runner.deliverTurn('a', 'go')).resolves.toBeUndefined();
+    errSpy.mockRestore();
+  });
+
+  test('[R-B] seedSession makes the next turn --resume the seeded id', async () => {
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('new-sess')]);
+      },
+    });
+    runner.register({ name: 'orchestrator', cwd: '/tmp/o' });
+    // Reconstruction rehydrates the in-memory map from the persisted row…
+    runner.seedSession('orchestrator', 'pre-restart-sess');
+    await runner.deliverTurn('orchestrator', 'continue');
+    // …so the very first post-restart turn resumes the real transcript.
+    expect(calls[0]!.resume).toBe('pre-restart-sess');
+  });
+
   test('onMessage receives every message tagged with the agent name', async () => {
     const seen: { agent: string; type: string }[] = [];
     const runner = new AgentRunner({

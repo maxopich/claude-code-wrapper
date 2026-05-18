@@ -9,9 +9,11 @@
  *     and a reconnect re-attaches by swapping the WS sink (`rebind`). No
  *     respawn, no DB rebuild — the live objects are right here.
  *   - Cebab server restart                      → this map is empty (process
- *     died). Nothing to re-attach to → the session is marked `crashed`
- *     (decision R-A: bus runs do not survive a server restart; single-agent
- *     resume is unaffected).
+ *     died). Nothing to re-attach to here. An *orchestrated* run is then
+ *     rebuilt from persisted state by `reconstruct.ts` and re-registered
+ *     READ-ONLY (R-B); a chain run (reconstruction deferred) is marked
+ *     `crashed` (the old R-A behavior). Single-agent resume is a different
+ *     path and is unaffected either way.
  *
  * This is the in-process analogue of `tmux has-session`.
  */
