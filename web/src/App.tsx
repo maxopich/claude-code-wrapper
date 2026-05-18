@@ -521,7 +521,11 @@ export function App() {
                     onChange={setPermissionMode}
                   />
                 )}
-                <ChatView session={session} onPermissionDecide={decidePermission} />
+                <ChatView
+                  session={session}
+                  isLive={sessionIsLive}
+                  onPermissionDecide={decidePermission}
+                />
                 <InputBox disabled={inputDisabled} onSend={sendMessage} />
               </>
             ) : (

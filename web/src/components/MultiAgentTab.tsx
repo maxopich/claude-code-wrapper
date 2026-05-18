@@ -6,6 +6,8 @@ import type {
   Project,
 } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
+import { activeAgent } from '../store';
+import { ThinkingIndicator } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
 import { useModalKeys } from '../useModalKeys';
@@ -1508,6 +1510,9 @@ function ActiveRunView(props: {
         run={run}
         projects={props.projects}
         canEdit={isRunning && isOrchestrator}
+        // An R-B read-only recovered run isn't actually executing — show no
+        // fake activity until the operator continues it.
+        activeAgent={run.awaitingContinue ? null : activeAgent(run)}
         onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
         onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
       />
@@ -1573,11 +1578,16 @@ function SessionSettingsPanel(props: {
   run: MultiAgentRun;
   projects: Project[];
   canEdit: boolean;
+  /** Slug of the participant currently computing, or null if none. */
+  activeAgent: string | null;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
 }) {
   const { run } = props;
   const isOrchestrator = run.mode === 'orchestrator';
+  // The active agent was delivered its turn at the last event's timestamp —
+  // the closest proxy for "how long has it been working" (sub-second slack).
+  const turnStartedAt = run.events.length ? run.events[run.events.length - 1].ts : null;
   const orchestratorSlug = isOrchestrator ? (run.participantAgentNames[0] ?? 'orchestrator') : null;
   const workerSlugs = isOrchestrator
     ? run.participantAgentNames.slice(1)
@@ -1655,11 +1665,27 @@ function SessionSettingsPanel(props: {
             {isOrchestrator && orchestratorSlug && (
               <li className="settings-participant settings-participant-hub">
                 <code>{orchestratorSlug}</code> <span className="hint">(hub)</span>
+                {props.activeAgent === orchestratorSlug && (
+                  <ThinkingIndicator
+                    variant="inline"
+                    phase="thinking"
+                    startedAt={turnStartedAt}
+                    label={orchestratorSlug}
+                  />
+                )}
               </li>
             )}
             {workerSlugs.map((slug, i) => (
               <li key={slug} className="settings-participant">
                 <code>{slug}</code>
+                {props.activeAgent === slug && (
+                  <ThinkingIndicator
+                    variant="inline"
+                    phase="thinking"
+                    startedAt={turnStartedAt}
+                    label={slug}
+                  />
+                )}
                 {!isOrchestrator && i < workerSlugs.length - 1 && (
                   <span className="settings-arrow">→</span>
                 )}

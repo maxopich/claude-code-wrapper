@@ -44,6 +44,10 @@ export type SessionView = {
   messages: MessageView[];
   // Single rolling buffer for in-flight text deltas; cleared on assistant_message.
   streamingText: string;
+  // Epoch ms when the current turn started (the instant the user feels the
+  // wait begin), or null when no turn is in flight. Anchors the thinking
+  // indicator's elapsed timer. Set on send, cleared on result/error/replay.
+  runStartedAt: number | null;
 };
 
 /**
@@ -322,12 +326,16 @@ export function reduce(state: AppState, action: Action): AppState {
           status: 'running',
           messages: [],
           streamingText: '',
+          runStartedAt: Date.now(),
         };
       }
 
       const next: SessionView = {
         ...session,
         status: 'running',
+        // New turn begins now — anchor the elapsed timer at send time so it
+        // counts the full wait, including the pre-first-token gap.
+        runStartedAt: Date.now(),
         messages: [...session.messages, { kind: 'user', id: nextId(), text: action.text }],
       };
 
@@ -711,6 +719,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         status: 'running',
         messages: [],
         streamingText: '',
+        // Replay is not a live wait — no elapsed timer for historical turns.
+        runStartedAt: null,
       };
       return {
         ...state,
@@ -765,6 +775,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           status: 'running',
           messages: [],
           streamingText: '',
+          // Server announced a running session with no optimistic pending to
+          // migrate (resume/attach) — anchor the timer now.
+          runStartedAt: Date.now(),
         };
       }
 
@@ -905,6 +918,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       return putSession(state, projectId, msg.sessionId, {
         ...session,
         status: msg.subtype === 'success' ? 'done' : 'error',
+        // Turn over — stop the elapsed timer.
+        runStartedAt: null,
         messages: [
           ...session.messages,
           {
@@ -932,11 +947,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         status: 'error',
         messages: [],
         streamingText: '',
+        runStartedAt: null,
       };
       return {
         ...putSession(state, projectId, sessionId, {
           ...session,
           status: 'error',
+          // Turn aborted — stop the elapsed timer.
+          runStartedAt: null,
           messages: [
             ...session.messages,
             {
@@ -974,4 +992,104 @@ export function activeSession(state: AppState): SessionView | null {
 
 export function isSessionPending(sessionId: string): boolean {
   return sessionId.startsWith(PENDING_PREFIX);
+}
+
+/**
+ * Coarse activity phase of a single-agent session, derived purely from
+ * existing store state (no extra server signal — the SDK emits none for
+ * "thinking"). Drives the animated thinking indicator. First match wins.
+ *
+ * `isLive` is the server-confirmed liveness (`state.liveSessions[id]`); it
+ * backstops the optimistic `status:'running'` set in `user_send`.
+ */
+export type SessionPhase =
+  | 'idle'
+  | 'thinking'
+  | 'tool-running'
+  | 'streaming'
+  | 'awaiting-permission'
+  | 'done'
+  | 'error';
+
+export function sessionPhase(s: SessionView, isLive: boolean): SessionPhase {
+  if (s.status === 'error') return 'error';
+  if (s.status === 'done') return 'done';
+  if (s.status !== 'running' && !isLive) return 'idle';
+
+  // Last interactive (non-system) message: an undecided permission card means
+  // the agent is blocked on the user, not computing — the card is the
+  // feedback, so the indicator stays out of the way.
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i];
+    if (m.kind === 'system') continue;
+    if (m.kind === 'permission_request' && !m.decided) return 'awaiting-permission';
+    break;
+  }
+
+  if (s.streamingText.length > 0) return 'streaming';
+
+  // Between an assistant `tool_use` block and its `tool_result` (a
+  // `kind:'system', subtype:'tool_result'` message) the tool is executing.
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i];
+    if (m.kind !== 'assistant') continue;
+    const last = m.blocks[m.blocks.length - 1];
+    if (last?.type === 'tool_use') {
+      const resolved = s.messages
+        .slice(i + 1)
+        .some((x) => x.kind === 'system' && x.subtype === 'tool_result');
+      if (!resolved) return 'tool-running';
+    }
+    break;
+  }
+
+  return 'thinking';
+}
+
+/**
+ * Name of the tool currently executing (the trailing `tool_use` of the last
+ * assistant message), for the indicator's "running <tool>…" label. Returns
+ * undefined unless the session is in the `tool-running` shape.
+ */
+export function pendingToolName(s: SessionView): string | undefined {
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i];
+    if (m.kind !== 'assistant') continue;
+    const last = m.blocks[m.blocks.length - 1];
+    if (last?.type === 'tool_use') {
+      const resolved = s.messages
+        .slice(i + 1)
+        .some((x) => x.kind === 'system' && x.subtype === 'tool_result');
+      return resolved ? undefined : last.name;
+    }
+    break;
+  }
+  return undefined;
+}
+
+/**
+ * Routing sentinels that are never a real participant: a `destination` of
+ * `_sink`/`user` is a terminal hop (nobody is computing next) and `cebab` is
+ * the injector source, never a destination.
+ */
+export const MA_SENTINELS: ReadonlySet<string> = new Set(['_sink', 'user', 'cebab']);
+
+/**
+ * Which bus participant is currently computing, inferred from the event tail.
+ * Bus routing is strictly turn-based and serialized: each `bus_send` triggers
+ * exactly one delivery, so the last event's `destination` (when a real agent)
+ * is the agent now running. Correct for chain (linear handoff) and
+ * orchestrator (re-activation is free — stateless over the tail).
+ *
+ * Callers must additionally gate on `!run.awaitingContinue` (an R-B
+ * read-only recovered run is not actually executing).
+ */
+export function activeAgent(run: MultiAgentRun): string | null {
+  if (run.status !== 'running') return null;
+  const evs = run.events;
+  if (evs.length === 0) return null;
+  const last = evs[evs.length - 1];
+  if (last.kind === 'error') return null;
+  if (MA_SENTINELS.has(last.destination)) return null;
+  return last.destination;
 }
