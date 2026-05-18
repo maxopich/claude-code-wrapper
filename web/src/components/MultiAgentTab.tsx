@@ -528,7 +528,14 @@ function TemplatesPanel(props: {
         items={items}
         projects={props.projects}
         selectedId={selected.id}
-        onSelect={setSelectedId}
+        onSelect={(id) => {
+          // Clicking a template both opens its preview (for role edits)
+          // and applies it — fills participants/lifecycle so the operator
+          // can just type a prompt and press Enter to start.
+          setSelectedId(id);
+          const t = items.find((x) => x.id === id);
+          if (t) props.onApply(t);
+        }}
         onDelete={props.onDelete}
       />
       <TemplatePreview
@@ -692,10 +699,12 @@ function AgentDiagram(props: {
   participants: Project[];
   roles: Record<string, string>;
   onRoleChange: (projectId: number, text: string) => void;
-  /** Called only when a cell is committed via the Enter key, so the parent
-   *  can return focus to the pane (next Enter → Save roles / Apply). Not
-   *  called on blur/scroll close — grabbing focus back then is intrusive. */
-  onAfterCommit?: () => void;
+  /** Called only when a cell is committed via the Enter key, with the
+   *  committed (projectId, text), so the parent can persist roles right
+   *  away (no separate "Save roles" click) and return focus to the pane.
+   *  NOT called on blur/scroll close — those stay in-memory only, and
+   *  grabbing focus back then is intrusive. */
+  onCommitRole?: (projectId: number, text: string) => void;
 }) {
   const { participants, mode, roles, onRoleChange } = props;
   const n = participants.length;
@@ -803,8 +812,10 @@ function AgentDiagram(props: {
             cancelEditing();
           } else if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
+            const pid = editingId;
+            const text = draft;
             commitIfEditing();
-            props.onAfterCommit?.();
+            if (pid != null) props.onCommitRole?.(pid, text);
           }
           // Shift+Enter falls through → newline (multi-line role)
         }}
@@ -1170,7 +1181,14 @@ function TemplatePreview(props: {
         participants={resolved}
         roles={roles}
         onRoleChange={(id, text) => setRoles((r) => ({ ...r, [String(id)]: text }))}
-        onAfterCommit={() => requestAnimationFrame(focusPane)}
+        onCommitRole={(id, text) => {
+          // Enter in a cell persists straight away — no "Save roles" click.
+          // Build the next map from the committed cell (local `roles` may
+          // not have it yet) so the saved value is never a step behind.
+          const next = { ...roles, [String(id)]: text };
+          props.onUpdateRoles(template, normalizeRoles(next));
+          requestAnimationFrame(focusPane);
+        }}
       />
 
       <div className="tpl-actions">
