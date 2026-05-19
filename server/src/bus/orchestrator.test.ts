@@ -5,18 +5,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import {
-  DEFAULT_HOP_BUDGET,
   ORCHESTRATOR_AGENT_NAME,
   createOrchestratorRouter,
   ensureOrchestratorWorkspace,
 } from './orchestrator.js';
-import {
-  computeSessionPaths,
-  orchestratorWorkspaceDir,
-  PROJECT_COMM_MD_REL,
-  projectCebabDir,
-  projectCommMdPath,
-} from './paths.js';
+import { computeSessionPaths, orchestratorWorkspaceDir } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT, type MultiAgentEndedReason } from './runtime.js';
 import {
   createMultiAgentSession,
@@ -49,138 +42,28 @@ afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-describe('ensureOrchestratorWorkspace — first run', () => {
-  test('creates workspace dir, CLAUDE.md, comm.md, and the .cebab dir', () => {
-    const result = ensureOrchestratorWorkspace();
-
-    // Both rendered files report 'created' on first run. No settings.json
-    // is generated anymore — the orchestrator runs settingSources:['user'],
-    // so a workspace settings.json would never be read.
-    expect(result.claudeMd).toBe('created');
-    expect(result.commMd).toBe('created');
-
-    // Workspace dir exists at the canonical path.
+describe('ensureOrchestratorWorkspace', () => {
+  test('creates the workspace dir and writes NO files (settingSources:[user])', () => {
+    ensureOrchestratorWorkspace();
     const wsDir = orchestratorWorkspaceDir();
-    expect(result.workspaceDir).toBe(wsDir);
     expect(fs.existsSync(wsDir)).toBe(true);
-
-    // The workspace files exist. comm.md lives INSIDE the workspace's
-    // `.cebab/` so the @import line in CLAUDE.md is workspace-relative
-    // (no external-import trust modal at agent start).
-    expect(fs.existsSync(path.join(wsDir, 'CLAUDE.md'))).toBe(true);
-    expect(fs.existsSync(projectCommMdPath(wsDir))).toBe(true);
-    expect(fs.existsSync(projectCebabDir(wsDir))).toBe(true);
+    // The orchestrator runs settingSources:['user'], so a workspace
+    // CLAUDE.md / comm.md / settings.json would never be loaded by the
+    // SDK — Cebab generates none. The bus protocol reaches the
+    // orchestrator solely via renderRosterPrompt (the only prompt it sees).
+    expect(fs.existsSync(path.join(wsDir, 'CLAUDE.md'))).toBe(false);
+    expect(fs.existsSync(path.join(wsDir, '.cebab', 'comm.md'))).toBe(false);
+    expect(fs.existsSync(path.join(wsDir, '.claude', 'settings.json'))).toBe(false);
   });
 
-  test('CLAUDE.md substitutes the comm.md path placeholder as a project-relative path', () => {
-    ensureOrchestratorWorkspace();
-
-    const claudeMd = fs.readFileSync(path.join(orchestratorWorkspaceDir(), 'CLAUDE.md'), 'utf8');
-    // Placeholder must be gone.
-    expect(claudeMd).not.toContain('{{BUS_COMM_PATH}}');
-    // The @import line is workspace-relative (`.cebab/comm.md`), NOT an
-    // absolute external path — that's what avoids claude-code's
-    // external-import trust modal at TUI startup.
-    expect(claudeMd).toContain(`@${PROJECT_COMM_MD_REL}`);
-    expect(claudeMd).not.toMatch(/@\/.*\.cebab\/bus\/agents\//);
-  });
-
-  test('CLAUDE.md keeps the static prose (identity + lifecycle + budget)', () => {
-    ensureOrchestratorWorkspace();
-    const claudeMd = fs.readFileSync(path.join(orchestratorWorkspaceDir(), 'CLAUDE.md'), 'utf8');
-    // Cheap canaries that the template wasn't accidentally truncated by the
-    // placeholder substitution.
-    expect(claudeMd).toContain('# Orchestrator');
-    expect(claudeMd).toContain('Your bus agent name is `orchestrator`');
-    expect(claudeMd).toContain('Intro phase');
-    // The hop budget is exposed as a constant — keep the doc consistent.
-    expect(claudeMd).toContain(`${DEFAULT_HOP_BUDGET} hops`);
-  });
-
-  test('comm.md is rendered for agent name `orchestrator`', () => {
-    ensureOrchestratorWorkspace();
-    const comm = fs.readFileSync(projectCommMdPath(orchestratorWorkspaceDir()), 'utf8');
-    // renderCommMd embeds the agent name into a fenced heading.
-    expect(comm).toContain('agent: `orchestrator`');
-    // The protocol is the in-process bus_send tool — no scripts, no inbox.
-    expect(comm).toContain('bus_send');
-    expect(comm).not.toContain('bus-send-msg.sh');
-  });
-
-  test('no .claude/settings.json is generated (orchestrator uses settingSources:[user])', () => {
-    ensureOrchestratorWorkspace();
-    expect(fs.existsSync(path.join(orchestratorWorkspaceDir(), '.claude', 'settings.json'))).toBe(
-      false,
-    );
-  });
-});
-
-describe('ensureOrchestratorWorkspace — per-session targetDir', () => {
-  test('writes the orchestrator workspace inside a custom target dir', () => {
-    // Post-007 callers pass a per-session orchestrator workspace path
-    // (typically `<sessionFolder>/orchestrator/`). Verify the function
-    // honors it instead of using the global default.
+  test('honors a per-session target dir and is idempotent', () => {
+    // Post-007 callers pass `<sessionFolder>/orchestrator/`. The legacy
+    // global default must NOT be created when a target dir is given.
     const customDir = path.join(tmpRoot, 'session-folder', 'orchestrator');
-    const result = ensureOrchestratorWorkspace(customDir);
-    expect(result.workspaceDir).toBe(customDir);
-    expect(fs.existsSync(path.join(customDir, 'CLAUDE.md'))).toBe(true);
-    expect(fs.existsSync(projectCommMdPath(customDir))).toBe(true);
-    // The legacy global workspace was NOT created — only `customDir`.
-    expect(fs.existsSync(path.join(orchestratorWorkspaceDir(), 'CLAUDE.md'))).toBe(false);
-  });
-
-  test('comm.md lives INSIDE the per-session target dir (project-relative import)', () => {
-    // comm.md is `@import`ed from CLAUDE.md via a workspace-relative
-    // path (`.cebab/comm.md`) to avoid claude-code's external-import
-    // trust modal. Confirm the per-session call writes it inside
-    // `<customDir>/.cebab/comm.md`, NOT at the stable global path.
-    const customDir = path.join(tmpRoot, 'session-X', 'orchestrator');
     ensureOrchestratorWorkspace(customDir);
-    expect(fs.existsSync(projectCommMdPath(customDir))).toBe(true);
-    // The legacy global agents/orchestrator/comm.md is NOT created —
-    // each session owns its own workspace-local copy.
-    expect(
-      fs.existsSync(path.join(tmpRoot, '.cebab', 'bus', 'agents', 'orchestrator', 'comm.md')),
-    ).toBe(false);
-  });
-});
-
-describe('ensureOrchestratorWorkspace — idempotency and refresh', () => {
-  test('second call returns "unchanged" for all rendered files', () => {
-    ensureOrchestratorWorkspace();
-    const second = ensureOrchestratorWorkspace();
-    expect(second.claudeMd).toBe('unchanged');
-    expect(second.commMd).toBe('unchanged');
-  });
-
-  test('overwrites stale CLAUDE.md content on next call', () => {
-    ensureOrchestratorWorkspace();
-    const claudeMdPath = path.join(orchestratorWorkspaceDir(), 'CLAUDE.md');
-
-    // Simulate a stale or operator-tampered CLAUDE.md. Cebab owns this
-    // workspace, so the canonical content wins on the next call.
-    fs.writeFileSync(claudeMdPath, 'old garbage content\n');
-
-    const result = ensureOrchestratorWorkspace();
-    expect(result.claudeMd).toBe('updated');
-
-    const after = fs.readFileSync(claudeMdPath, 'utf8');
-    expect(after).not.toBe('old garbage content\n');
-    expect(after).toContain('# Orchestrator');
-    expect(after).toContain(`@${PROJECT_COMM_MD_REL}`);
-  });
-
-  test('overwrites stale comm.md content on next call', () => {
-    ensureOrchestratorWorkspace();
-    const commPath = projectCommMdPath(orchestratorWorkspaceDir());
-
-    fs.writeFileSync(commPath, 'stale comm content\n');
-
-    const result = ensureOrchestratorWorkspace();
-    expect(result.commMd).toBe('updated');
-
-    const after = fs.readFileSync(commPath, 'utf8');
-    expect(after).toContain('agent: `orchestrator`');
+    ensureOrchestratorWorkspace(customDir); // second call: no throw
+    expect(fs.existsSync(customDir)).toBe(true);
+    expect(fs.existsSync(orchestratorWorkspaceDir())).toBe(false);
   });
 });
 
