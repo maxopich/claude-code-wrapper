@@ -200,3 +200,115 @@ describe('AgentRunner', () => {
     expect(ac.signal.aborted).toBe(true);
   });
 });
+
+describe('AgentRunner — per-agent turn serialization', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  test('same-agent turns serialize; the 2nd resumes the 1st checkpoint (orchestrator-race regression)', async () => {
+    const order: string[] = [];
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((res) => {
+      releaseFirst = res;
+    });
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        const idx = calls.length;
+        order.push(`start${idx}`);
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          if (idx === 1) await firstGate; // hold turn 1 open
+          yield resultMsg(`sess-${idx}`);
+          order.push(`end${idx}`);
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      },
+    });
+    runner.register({ name: 'orchestrator', cwd: '/tmp/o' });
+
+    // Two near-simultaneous deliveries — the "5 workers reply to the intro
+    // broadcast at once" case. Not awaited between calls.
+    const p1 = runner.deliverTurn('orchestrator', 'reply-1');
+    const p2 = runner.deliverTurn('orchestrator', 'reply-2');
+
+    await flush();
+    // Turn 2 must not have started while turn 1 is still open. (Pre-fix this
+    // would be calls.length === 2, both with resume === undefined.)
+    expect(calls).toHaveLength(1);
+    expect(order).toEqual(['start1']);
+
+    releaseFirst();
+    await Promise.all([p1, p2]);
+
+    expect(order).toEqual(['start1', 'end1', 'start2', 'end2']);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.resume).toBeUndefined();
+    expect(calls[1]!.resume).toBe('sess-1'); // resumed the lineage turn 1 wrote
+  });
+
+  test('different agents are NOT serialized against each other', async () => {
+    const started: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((res) => {
+      release = res;
+    });
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        started.push(opts.prompt!);
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          await gate;
+          yield resultMsg('s');
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      },
+    });
+    runner.register({ name: 'a', cwd: '/tmp/a' });
+    runner.register({ name: 'b', cwd: '/tmp/b' });
+
+    const pa = runner.deliverTurn('a', 'A');
+    const pb = runner.deliverTurn('b', 'B');
+    await flush();
+    // Both started even though neither finished — cross-agent parallelism is
+    // preserved (only same-agent turns queue).
+    expect([...started].sort()).toEqual(['A', 'B']);
+
+    release();
+    await Promise.all([pa, pb]);
+  });
+
+  test('a failed turn does not wedge the agent queue', async () => {
+    let n = 0;
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: () => {
+        n++;
+        if (n === 1) {
+          async function* bad(): AsyncGenerator<SDKMessage> {
+            // Stream one message, then fail mid-turn (closer to a real
+            // deliverTurn rejection than a synchronous factory throw).
+            yield { type: 'system', subtype: 'init' } as unknown as SDKMessage;
+            throw new Error('turn 1 boom');
+          }
+          const it = bad();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        }
+        return fakeRunner([resultMsg('s2')]);
+      },
+    });
+    runner.register({ name: 'orchestrator', cwd: '/tmp/o' });
+
+    const p1 = runner.deliverTurn('orchestrator', 'one');
+    const p2 = runner.deliverTurn('orchestrator', 'two');
+    await expect(p1).rejects.toThrow(/turn 1 boom/);
+    await expect(p2).resolves.toBeUndefined(); // queue advanced past the failure
+  });
+
+  test('unknown agent still fast-fails (not queued behind prior turns)', async () => {
+    const runner = new AgentRunner({ onEvent: () => {}, runnerFactory: () => fakeRunner([]) });
+    await expect(runner.deliverTurn('ghost', 'x')).rejects.toThrow(/unknown agent/);
+  });
+});
