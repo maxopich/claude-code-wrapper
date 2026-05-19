@@ -1,28 +1,24 @@
 /**
- * Canonical orchestrator workspace generator.
+ * Canonical orchestrator workspace directory.
  *
  * The orchestrator is Cebab's own bus agent — used in orchestrator-routed
  * mode to receive user prompts, route them to participant workers, and
  * reply back to the user. Its bus name is always `orchestrator`.
  *
  * Unlike worker projects (operator-owned), the orchestrator workspace is
- * Cebab-owned end-to-end: we ship a static CLAUDE.md template and generate
- * comm.md from code, overwriting them on every call so a Cebab upgrade can
- * roll out new behaviour without manual intervention by the operator. No
- * settings.json is written — the orchestrator runs with
- * `settingSources: ['user']`, so a workspace settings.json would never be
- * read (its old Stop hook / bus-script perms are dead under pure-SDK).
- *
- * Layout produced by `ensureOrchestratorWorkspace()`:
- *
- *   <workspaceDir>/
- *     CLAUDE.md              # static template + path substitution
- *     .cebab/comm.md         # rendered protocol doc (imported via @.cebab/comm.md)
+ * Cebab-owned — but it is just an (empty) directory used as the orchestrator
+ * SDK `query()`'s `cwd`. Cebab writes NO files into it: the orchestrator runs
+ * with `settingSources: ['user']`, so a workspace `CLAUDE.md` / `comm.md` /
+ * `settings.json` would never be loaded by the SDK. The orchestrator learns
+ * the bus protocol entirely from the per-turn roster prompt
+ * (`renderRosterPrompt` in runtime.ts) — the only prompt it actually sees.
+ * (A static CLAUDE.md template + generated comm.md used to live here; both
+ * were dead under `settingSources: ['user']` and have been removed.)
  *
  * The legacy global `~/.cebab/orchestrator/` path is the default `targetDir`
  * for callers that don't pass one (pre-007 backwards compat + unit tests).
  * Post-007 sessions pass `<sessionFolder>/orchestrator/` so each session has
- * its own orchestrator workspace.
+ * its own orchestrator workspace directory.
  *
  * The runtime half (below the generator) is the pure-SDK orchestrator: each
  * participant — and the orchestrator itself — is an in-process SDK `query()`
@@ -34,7 +30,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   appendMultiAgentEvent,
   addParticipant,
@@ -46,15 +41,7 @@ import {
   type EventKind,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
-import {
-  computeSessionPaths,
-  orchestratorWorkspaceDir,
-  PROJECT_COMM_MD_REL,
-  projectCebabDir,
-  projectCommMdPath,
-  type SessionPaths,
-} from './paths.js';
-import { renderCommMd } from './comm.js';
+import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
   CEBAB_SOURCE,
@@ -90,77 +77,21 @@ export const ORCHESTRATOR_AGENT_NAME = 'orchestrator';
  */
 export const DEFAULT_HOP_BUDGET = 8;
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const COMM_PATH_PLACEHOLDER = '{{BUS_COMM_PATH}}';
-
 /**
- * Find the orchestrator template directory. Mirrors `scriptsSourceDir` in
- * install.ts: `tsx` runs from src/, so `__dirname/orchestrator-template`
- * works; for a built dist/ runtime the fallback path points back at the
- * source tree (we don't currently copy data files into dist/).
- */
-function templateSourceDir(): string {
-  const candidates = [
-    path.join(__dirname, 'orchestrator-template'),
-    path.join(__dirname, '..', '..', 'src', 'bus', 'orchestrator-template'),
-  ];
-  for (const d of candidates) {
-    if (fs.existsSync(path.join(d, 'CLAUDE.md'))) return d;
-  }
-  throw new Error(`orchestrator template dir not found; tried: ${candidates.join(', ')}`);
-}
-
-export type EnsureOrchestratorResult = {
-  workspaceDir: string;
-  claudeMd: 'created' | 'updated' | 'unchanged';
-  commMd: 'created' | 'updated' | 'unchanged';
-};
-
-/**
- * Generate (or refresh) the orchestrator workspace. Idempotent; compares
- * rendered content against the existing file and only writes on
- * difference, so a stable call leaves mtimes alone. Always overwrites
- * stale content — Cebab owns this workspace, so an upgrade that changes
- * the template wins.
+ * Ensure the orchestrator workspace directory exists.
  *
- * Both modes write comm.md INSIDE the workspace (`<wsDir>/.cebab/comm.md`)
- * so the `@import` line in CLAUDE.md is workspace-relative.
+ * It is only a `cwd` for the orchestrator's SDK `query()` — Cebab writes
+ * nothing into it. The orchestrator runs with `settingSources: ['user']`,
+ * so a workspace `CLAUDE.md` / `comm.md` / `settings.json` would never be
+ * loaded; the bus protocol reaches it solely via the per-turn roster prompt
+ * (`renderRosterPrompt`). Idempotent (`recursive: true`).
+ *
+ * `targetDir` is the per-session `<sessionFolder>/orchestrator/`; callers
+ * that omit it (pre-007 / unit tests) get the legacy global path.
  */
-export function ensureOrchestratorWorkspace(targetDir?: string): EnsureOrchestratorResult {
+export function ensureOrchestratorWorkspace(targetDir?: string): void {
   const wsDir = targetDir ?? orchestratorWorkspaceDir();
   fs.mkdirSync(wsDir, { recursive: true });
-  fs.mkdirSync(projectCebabDir(wsDir), { recursive: true });
-
-  const templateDir = templateSourceDir();
-  const rawTemplate = fs.readFileSync(path.join(templateDir, 'CLAUDE.md'), 'utf8');
-  const claudeMdContent = renderClaudeMd(rawTemplate);
-  const claudeMd = writeIfChanged(path.join(wsDir, 'CLAUDE.md'), claudeMdContent);
-
-  const commMd = writeIfChanged(projectCommMdPath(wsDir), renderCommMd(ORCHESTRATOR_AGENT_NAME));
-
-  return { workspaceDir: wsDir, claudeMd, commMd };
-}
-
-/**
- * Substitute the `{{BUS_COMM_PATH}}` placeholder with the workspace-
- * relative path to comm.md (`.cebab/comm.md`).
- */
-function renderClaudeMd(template: string): string {
-  return template.split(COMM_PATH_PLACEHOLDER).join(PROJECT_COMM_MD_REL);
-}
-
-function writeIfChanged(filePath: string, content: string): 'created' | 'updated' | 'unchanged' {
-  let existing: string | null = null;
-  try {
-    existing = fs.readFileSync(filePath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
-  }
-  if (existing === content) return 'unchanged';
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, content, 'utf8');
-  return existing === null ? 'created' : 'updated';
 }
 
 // ============================================================================
@@ -518,11 +449,13 @@ export function wireOrchestratorSession(p: {
 
   // Worker briefing, prepended once to each worker's first turn (mirrors
   // chain.ts). The orchestrator is NEVER prefixed — it learns the protocol
-  // from its Cebab-generated workspace CLAUDE.md + the roster prompt. Without
-  // this, orchestrator-mode workers have the bus_send tool but no
-  // instruction to use it, so their replies are emitted as plain turn text
-  // and lost (the install collapse removed the per-project comm.md that
-  // used to carry this).
+  // from the roster prompt (`renderRosterPrompt`), the only prompt it sees
+  // (its workspace is just an empty cwd; `settingSources: ['user']` means a
+  // workspace CLAUDE.md would never load). Without this briefing,
+  // orchestrator-mode workers have the bus_send tool but no instruction to
+  // use it, so their replies are emitted as plain turn text and lost (the
+  // install collapse removed the per-project comm.md that used to carry
+  // this).
   //
   // R-B: a worker that already spoke in the prior process consumed this
   // briefing (its resumed transcript still has it), so it is pre-marked

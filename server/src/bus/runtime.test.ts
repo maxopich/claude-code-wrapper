@@ -177,6 +177,19 @@ describe('renderRosterPrompt', () => {
     // initial roster.
     expect(text).toMatch(/before routing/i);
   });
+
+  test('embeds the consultant-mode guardrail and the relay obligation', () => {
+    // Bus workers run headless with bypassPermissions (no approval card),
+    // so the orchestrator must (a) act as a consultant itself and (b) carry
+    // the no-unsolicited-changes constraint into every task it routes.
+    const text = renderRosterPrompt({
+      workers: [{ agentName: 'reviewer', projectName: 'Reviewer' }],
+      hopBudget: 8,
+    });
+    expect(text).toContain('Consultant mode');
+    expect(text).toMatch(/MUST carry this constraint/);
+    expect(text).toMatch(/do NOT modify, create, or delete files in any other directory/);
+  });
 });
 
 describe('renderWorkerBriefing', () => {
@@ -192,6 +205,12 @@ describe('renderWorkerBriefing', () => {
     // Workers may only address the orchestrator.
     expect(text).toContain('orchestrator');
     expect(text).not.toContain('bus-send-msg.sh');
+  });
+
+  test('imposes consultant mode — own-folder scratch ok, no other-directory changes', () => {
+    const text = renderWorkerBriefing({ selfAgent: 'reviewer' });
+    expect(text).toContain('Consultant mode');
+    expect(text).toContain('outside your own project folder');
   });
 });
 
