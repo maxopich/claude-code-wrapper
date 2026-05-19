@@ -160,6 +160,19 @@ export class AgentRunner {
   private readonly specs = new Map<string, AgentSpec>();
   /** agentName → last claude session id, for `--resume` on the next hop. */
   private readonly sessions = new Map<string, string>();
+  /**
+   * agentName → tail of that agent's turn queue. `deliverTurn` is
+   * fire-and-forget from the routers (a `bus_send` must never block the
+   * sending agent's turn), so when several workers reply to a broadcast
+   * within the same instant the orchestrator gets several near-simultaneous
+   * `deliverTurn` calls. Without this they would run as parallel
+   * `claude --resume <same-id>` subprocesses, each forking the SAME prior
+   * checkpoint and seeing only its own delivery — the orchestrator never
+   * gets one turn that observes all replies, so it waits forever. Chaining
+   * per agent serializes turns so each one resumes the lineage the previous
+   * turn just checkpointed. Different agents stay fully parallel.
+   */
+  private readonly turnTails = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: AgentRunnerDeps) {}
 
@@ -186,13 +199,47 @@ export class AgentRunner {
     this.sessions.set(agentName, cliSessionId);
   }
 
-  /** Run one turn for `agentName` with `promptText` as its input. Resolves
-   *  when the turn's message stream ends. Throws if the agent is unknown. */
-  async deliverTurn(agentName: string, promptText: string): Promise<void> {
+  /**
+   * Run one turn for `agentName` with `promptText` as its input. Resolves
+   * when the turn's message stream ends; rejects if the agent is unknown or
+   * the turn throws.
+   *
+   * Turns for the SAME agent are serialized (see `turnTails`): a call waits
+   * for that agent's previous turn to settle before starting, so it resumes
+   * the CLI session the previous turn checkpointed instead of forking a
+   * stale one. Calls for DIFFERENT agents are unaffected (still parallel).
+   */
+  deliverTurn(agentName: string, promptText: string): Promise<void> {
+    // Fast-fail an unknown agent without queuing it (programming error, and
+    // it must not sit behind a possibly-long prior turn). Preserves the
+    // original rejected-promise contract callers `.catch`.
+    if (!this.specs.has(agentName)) {
+      return Promise.reject(
+        new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`),
+      );
+    }
+    const tail = this.turnTails.get(agentName) ?? Promise.resolve();
+    const result = tail.then(() => this.runOneTurn(agentName, promptText));
+    // Advance the tail regardless of this turn's outcome so one failed or
+    // aborted turn never wedges the agent's queue; the real result (incl.
+    // rejection) still propagates to this call's own caller via `result`.
+    this.turnTails.set(
+      agentName,
+      result.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return result;
+  }
+
+  private async runOneTurn(agentName: string, promptText: string): Promise<void> {
     const spec = this.specs.get(agentName);
     if (!spec) throw new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`);
 
     const factory = this.deps.runnerFactory ?? pickRunner;
+    // Read INSIDE the serialized turn (not when `deliverTurn` was called) so
+    // this resumes the checkpoint the previous queued turn just wrote.
     const prior = this.sessions.get(agentName);
 
     const runner = factory({
