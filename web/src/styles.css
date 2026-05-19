@@ -1,4 +1,7 @@
-/* ── Design tokens — Linear-inspired, ported from cebab-redesign.html.
+/* ── Design tokens — VARIANT T: teal action accent on a neutral-slate
+ * charcoal ramp. Coral (--coral) is the BRAND MARK ONLY — never an
+ * interactive/action color (decisive criterion: zero collision of the
+ * action color with --warn/--err in permission/run states).
  * Two :root blocks on purpose: this first one is the full new palette;
  * the second (legacy 12-token set) is re-pointed at it so the ~254
  * existing var() refs adopt the new look in one move. --bg-2/--bg-3 are
@@ -6,25 +9,25 @@
  * (different surface layers); the legacy block owns them with legacy
  * semantics (--bg-2 = panel, --bg-3 = card). New CSS uses these tokens. */
 :root {
-  /* Surface ramp (–0 page · –1 panel · –4 hover · –5 pressed) */
-  --bg-0: #08090b;
-  --bg-1: #0d0e11;
-  --bg-4: #1f2127;
-  --bg-5: #272a32;
-  /* Foreground */
-  --fg-0: #f5f6f8;
-  --fg-1: #c6c9d1;
-  --fg-2: #8b8f99;
-  --fg-3: #5b5f6a;
+  /* Surface ramp — neutral slate (–0 page · –1 panel · –4 hover · –5 pressed) */
+  --bg-0: #0c0d10;
+  --bg-1: #121419;
+  --bg-4: #20232b;
+  --bg-5: #282c35;
+  /* Foreground — cool-neutral on slate */
+  --fg-0: #f4f5f7;
+  --fg-1: #c4c7cf;
+  --fg-2: #888d99;
+  --fg-3: #585d68;
   /* Borders — soft, layered */
-  --line-1: rgba(255, 255, 255, 0.04);
-  --line-2: rgba(255, 255, 255, 0.07);
-  --line-3: rgba(255, 255, 255, 0.12);
-  /* Brand — electric violet */
-  --accent: #8b5cf6;
-  --accent-soft: #6e3bff;
-  --accent-glow: rgba(139, 92, 246, 0.22);
-  --accent-ink: #c4b5fd;
+  --line-1: rgba(255, 255, 255, 0.045);
+  --line-2: rgba(255, 255, 255, 0.075);
+  --line-3: rgba(255, 255, 255, 0.13);
+  /* Action accent — teal (NOT coral; coral is brand-mark only) */
+  --accent: #2fb6c4;
+  --accent-soft: #1f8e9b;
+  --accent-glow: rgba(47, 182, 196, 0.13);
+  --accent-ink: #8adfe7;
   /* Semantic */
   --ok: #34d399;
   --ok-soft: rgba(52, 211, 153, 0.12);
@@ -34,8 +37,23 @@
   --err-soft: rgba(248, 113, 113, 0.12);
   --info: #60a5fa;
   --info-soft: rgba(96, 165, 250, 0.1);
-  /* Claude coral — agent/brand mark */
+  /* Claude coral — BRAND MARK / LOGO ONLY (never interactive) */
   --coral: #cc785c;
+  /* Per-agent identity ring — STRICT4 (locked). Exactly 4 hues, hash %4.
+   * NO gold/amber, NO violet/lilac/purple-adjacent hue (the whole point of
+   * this project is to move away from AI purple — not even on identity).
+   * None is the teal action accent. Color is a redundant 4th channel;
+   * label + initials + lane are authoritative. Slot 0 = hub/orchestrator
+   * (fixed coral, keeps the HUB structural treatment). 5+ agents recycle
+   * via the dashed-border + ·N disambiguator. *-soft = avatar/legend tint. */
+  --agent-0: #cc785c;
+  --agent-0-soft: rgba(204, 120, 92, 0.14);
+  --agent-1: #6ea8ff;
+  --agent-1-soft: rgba(110, 168, 255, 0.14);
+  --agent-2: #3ecf8e;
+  --agent-2-soft: rgba(62, 207, 142, 0.14);
+  --agent-3: #d97aa6;
+  --agent-3-soft: rgba(217, 122, 166, 0.14);
   /* Type scale */
   --t-xs: 11px;
   --t-sm: 12px;
@@ -53,14 +71,14 @@
   --s-8: 32px;
   --s-10: 40px;
   /* Radii */
-  --r-sm: 6px;
-  --r-md: 8px;
-  --r-lg: 12px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
   --r-pill: 999px;
-  /* Elevation */
+  /* Elevation — damped (old depths read AI-generic) */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.32);
-  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.55);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.26);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.4);
   /* Motion */
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   --dur-1: 120ms;
@@ -75,14 +93,14 @@
  * solid-fill accent (primary buttons, active rows, focus borders); --accent
  * is the brighter hover. --bg-2 = panel, --bg-3 = card. */
 :root {
-  --bg: #08090b;
-  --bg-2: #0d0e11;
-  --bg-3: #181a1f;
-  --fg: #f5f6f8;
-  --fg-2: #8b8f99;
-  --fg-3: #5b5f6a;
-  --accent: #8b5cf6;
-  --accent-2: #6e3bff;
+  --bg: #0c0d10;
+  --bg-2: #121419;
+  --bg-3: #1a1d24;
+  --fg: #f4f5f7;
+  --fg-2: #888d99;
+  --fg-3: #585d68;
+  --accent: #2fb6c4;
+  --accent-2: #1f8e9b;
   --ok: #34d399;
   --err: #f87171;
   --warn: #fbbf24;
@@ -2053,19 +2071,24 @@ pre {
 .event-row {
   background: var(--bg-2);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--r-md);
   padding: 8px 12px;
 }
+/* Per-agent identity: hue set inline by UX from --agent-0..3 (hash %4);
+ * redundant 4th channel (label + initials + lane carry identity). */
+.event-row[data-agent-hue] {
+  box-shadow: inset 3px 0 0 var(--agent-hue);
+}
 .event-row.event-kind-intro {
-  border-color: rgba(139, 143, 153, 0.3);
-  background: rgba(139, 143, 153, 0.05);
+  border-color: var(--line-3);
+  background: var(--bg-1);
 }
 .event-row.event-kind-final {
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
 }
 .event-row.event-kind-error {
-  border-color: rgba(248, 113, 113, 0.35);
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
   background: var(--err-soft);
 }
 .event-head {
@@ -2250,10 +2273,19 @@ pre {
   .input-box button:hover:not(:disabled) {
     transform: none;
   }
+  .jump-latest-pill,
+  .conn-banner,
+  .agent-avatar,
+  .copy-btn {
+    transition: none;
+  }
   .btn-spinner,
   .session-marker.live,
   .caret,
+  .collapsible-caret,
   .project-live-dot.on,
+  .session-status-glyph.is-running,
+  .copy-btn.is-copied,
   .modal,
   .modal-backdrop,
   .tpl-flow-dot {
