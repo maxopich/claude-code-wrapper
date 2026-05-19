@@ -292,4 +292,51 @@ describe('startChainSession — project CLAUDE.md injection', () => {
 
     unregisterLiveSession(handle.sessionId);
   });
+
+  // Symmetric to orchestrator.wiring's onActivity test: chain uses the same
+  // observer + onMessage-wrap + deliver `.finally`, so guard the chain path
+  // explicitly (regression: a missing `.finally` would never emit `idle`).
+  test('onActivity fires working then idle for the chain head turn', async () => {
+    const workspace = path.join(tmpRoot, 'ws-act');
+    fs.mkdirSync(workspace, { recursive: true });
+    function actFactory() {
+      return (): Runner => {
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'tool_use', name: 'Read' }] },
+          } as unknown as SDKMessage;
+          yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      };
+    }
+    const onActivity = vi.fn();
+    const handle = await startChainSession({
+      participants: [participant('alpha', null), participant('bravo', null)],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      onActivity,
+      runnerFactory: actFactory(),
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const calls = onActivity.mock.calls.map(
+      (c) => [c[0], c[1] as { agentName: string; phase: string; currentTool?: string }] as const,
+    );
+    expect(calls.every(([sid]) => sid === handle.sessionId)).toBe(true);
+    const seq = calls.map(([, s]) => s.phase);
+    expect(seq[0]).toBe('working');
+    expect(seq.at(-1)).toBe('idle');
+    expect(calls.find(([, s]) => s.phase === 'working')![1]).toMatchObject({
+      agentName: 'alpha',
+      currentTool: 'Read',
+    });
+
+    unregisterLiveSession(handle.sessionId);
+  });
 });

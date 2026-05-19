@@ -59,6 +59,7 @@ import {
   type ResolvedAgent,
 } from './runtime.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
+import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import {
   getLiveSession,
   NOOP_SINK,
@@ -117,6 +118,11 @@ export type StartOrchestratorOpts = {
   lifecycle?: MultiAgentLifecycle;
   onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
+  /** Ephemeral per-turn liveness tick → `agent_activity` ServerMsg.
+   *  `sessionId` explicit (same convention as `onEvent`). Optional: the
+   *  resume/reconstruct paths don't pass it (heartbeat resumes on the next
+   *  fresh start; see the `agent_activity` protocol JSDoc). */
+  onActivity?: (sessionId: string, snap: ActivitySnapshot) => void;
 };
 
 export type ResumeOrchestratorOpts = {
@@ -173,9 +179,13 @@ export function createOrchestratorRouter(params: {
   onEvent: StartOrchestratorOpts['onEvent'];
   onEnded: StartOrchestratorOpts['onEnded'];
   onTeardown?: (reason: MultiAgentEndedReason) => Promise<void>;
+  /** Always-run finalizer (stop/crash/completion), independent of
+   *  `onTeardown`'s temp/crashed gating and of sink detach/rebind. Disposes
+   *  the liveness observer. */
+  onFinalize?: () => void;
   deliver?: (agentName: string, text: string) => void;
 }): OrchestratorRouter {
-  const { sessionId, iterationId, workerNames, onTeardown, deliver } = params;
+  const { sessionId, iterationId, workerNames, onTeardown, onFinalize, deliver } = params;
   const workerNamesMut: string[] = [...workerNames];
   const workerSet = new Set(workerNamesMut);
   let lifecycleRef: MultiAgentLifecycle = params.lifecycle;
@@ -186,6 +196,13 @@ export function createOrchestratorRouter(params: {
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
     ended = true;
+    // First: kill any pending liveness timer so it can't fire a spurious
+    // `stalled` mid-teardown. Always runs, exactly once (ended-guarded).
+    try {
+      onFinalize?.();
+    } catch (err) {
+      console.error('[orchestrator] onFinalize failed', err);
+    }
     try {
       endMultiAgentSession(sessionId, reason === 'completed' ? 'completed' : reason);
     } catch (err) {
@@ -365,6 +382,7 @@ export function wireOrchestratorSession(p: {
   workers: ResolvedAgent[];
   onEvent: StartOrchestratorOpts['onEvent'];
   onEnded: StartOrchestratorOpts['onEnded'];
+  onActivity?: StartOrchestratorOpts['onActivity'];
   seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
   briefedAgents?: ReadonlyArray<string>;
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
@@ -409,6 +427,10 @@ export function wireOrchestratorSession(p: {
 
   const abortController = new AbortController();
 
+  // Passive liveness tap on the existing per-turn SDKMessage stream (same
+  // observer chain.ts uses). Pure Cebab-side; no agent/prompt/DB change.
+  const activity = createAgentActivityObserver((snap) => p.onActivity?.(sessionId, snap));
+
   // Forward-declared: router ↔ deliver ↔ runner construction cycle (same
   // shape as chain.ts). Reassigned exactly once below.
   // eslint-disable-next-line prefer-const
@@ -416,7 +438,10 @@ export function wireOrchestratorSession(p: {
 
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
-    onMessage: (agent, msg) => writeTranscript(paths, iterationId, agent, msg),
+    onMessage: (agent, msg) => {
+      writeTranscript(paths, iterationId, agent, msg);
+      activity.onMessage(agent, msg);
+    },
     onSessionId: (agent, cli) => {
       // Persist each agent's `--resume` checkpoint so this session can be
       // reconstructed after a Cebab server restart (R-B). Covers the
@@ -483,10 +508,13 @@ export function wireOrchestratorSession(p: {
         });
       }
     }
-    void runner.deliverTurn(agentName, prompt).catch((err) => {
-      console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
-      void router.teardown('crashed');
-    });
+    void runner
+      .deliverTurn(agentName, prompt)
+      .catch((err) => {
+        console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
+        void router.teardown('crashed');
+      })
+      .finally(() => activity.onTurnEnd(agentName));
   };
 
   router = createOrchestratorRouter({
@@ -498,6 +526,7 @@ export function wireOrchestratorSession(p: {
     onEvent: p.onEvent,
     onEnded: p.onEnded,
     onTeardown,
+    onFinalize: () => activity.dispose(),
     deliver,
   });
 
@@ -607,6 +636,7 @@ export async function startOrchestratorSession(
     workers: opts.workers,
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
+    onActivity: opts.onActivity,
   });
 
   // Roster prompt + initial user prompt → UI/DB parity, then delivered as

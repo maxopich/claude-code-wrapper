@@ -436,6 +436,34 @@ export type ServerMsg =
     }
   | {
       /**
+       * EPHEMERAL liveness tick for one bus participant's in-flight turn.
+       * Synthesized server-side by an observer on the existing per-turn
+       * SDKMessage stream (no agent-side change). It is NOT persisted (the
+       * `multi_agent_event` hop timeline is the durable record) and is NOT
+       * replayed on resume. It is also NOT delivered across a live
+       * re-attach — the original observer's emitter still points at the
+       * closed socket; the activity bar degrades to the inferred active
+       * agent and the next real hop re-syncs the spine.
+       *
+       *  - `working`: an SDKMessage arrived within the stall window.
+       *  - `stalled`: no SDKMessage for the stall window (hung vs. slow).
+       *  - `idle`:    the turn ended; clears the agent's live row.
+       *
+       * `currentTool` is the trailing `tool_use` block's name when the
+       * agent is mid tool call (undefined for plain thinking/text).
+       * `turnStartedAt` anchors elapsed; `lastActivityTs` is the most
+       * recent SDKMessage's wall-clock ms.
+       */
+      type: 'agent_activity';
+      sessionId: string;
+      agentName: string;
+      phase: AgentActivityPhase;
+      currentTool?: string;
+      lastActivityTs: number;
+      turnStartedAt: number;
+    }
+  | {
+      /**
        * Multi-agent session ended. `iterationId` is non-null on successful
        * chain completion (points at the iteration store directory).
        */
@@ -524,6 +552,12 @@ export type IterationSummary = {
 };
 
 export type MultiAgentEventKind = 'intro' | 'prompt' | 'reply' | 'final' | 'error';
+
+/**
+ * Phase of the ephemeral `agent_activity` liveness tick. Not persisted;
+ * see the `agent_activity` ServerMsg variant for the full contract.
+ */
+export type AgentActivityPhase = 'working' | 'stalled' | 'idle';
 
 /**
  * Session lifecycle: 'persistent' sessions survive End and can be

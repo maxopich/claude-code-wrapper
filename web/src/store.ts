@@ -1,4 +1,5 @@
 import type {
+  AgentActivityPhase,
   ContentBlock,
   IterationSummary,
   MultiAgentEventKind,
@@ -67,6 +68,21 @@ export type MultiAgentEventView = {
 export type MultiAgentRunStatus = 'running' | 'completed' | 'stopped' | 'crashed';
 
 /**
+ * Latest ephemeral liveness tick for the run's in-flight turn. Mirrors the
+ * `agent_activity` ServerMsg sans `sessionId`. NOT persisted and NOT
+ * replayed: cleared to null on `idle`, on `multi_agent_ended`, and never
+ * survives a reload (the spine re-syncs from the durable hop timeline).
+ */
+export type MultiAgentActivity = {
+  agentName: string;
+  /** 'working' | 'stalled' — `idle` is represented as `activity: null`. */
+  phase: Exclude<AgentActivityPhase, 'idle'>;
+  currentTool?: string;
+  lastActivityTs: number;
+  turnStartedAt: number;
+};
+
+/**
  * Live state for an in-progress (or just-finished) multi-agent session.
  * Cleared by the operator via `ma_dismiss_active` once they're done
  * reviewing — returns the tab to its draft view.
@@ -92,6 +108,10 @@ export type MultiAgentRun = {
    *  instead of the prompt input until the operator continues; cleared
    *  optimistically on click (`ma_clear_awaiting`). */
   awaitingContinue: boolean;
+  /** Ephemeral liveness of the in-flight turn (current tool, working vs.
+   *  stalled). null = no turn computing / turn just ended. Drives the
+   *  activity bar only; never persisted, reset on reload. */
+  activity: MultiAgentActivity | null;
 };
 
 /**
@@ -540,6 +560,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             lifecycle: msg.lifecycle,
             sessionFolder: msg.sessionFolder,
             awaitingContinue: msg.awaitingContinue ?? false,
+            activity: null,
           },
         },
       };
@@ -576,6 +597,28 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
+    case 'agent_activity': {
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      // Ephemeral: 'idle' (turn ended) clears the live row; 'working' /
+      // 'stalled' replace it wholesale. Never appended to `events` — the
+      // durable timeline is the persisted hops, this is just the pulse.
+      const activity: MultiAgentActivity | null =
+        msg.phase === 'idle'
+          ? null
+          : {
+              agentName: msg.agentName,
+              phase: msg.phase,
+              currentTool: msg.currentTool,
+              lastActivityTs: msg.lastActivityTs,
+              turnStartedAt: msg.turnStartedAt,
+            };
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, active: { ...active, activity } },
+      };
+    }
+
     case 'multi_agent_ended': {
       const active = state.multiAgent.active;
       if (!active || active.sessionId !== msg.sessionId) return state;
@@ -583,7 +626,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: { ...active, status: msg.reason, iterationId: msg.iterationId },
+          active: {
+            ...active,
+            status: msg.reason,
+            iterationId: msg.iterationId,
+            activity: null,
+          },
         },
       };
     }
@@ -1095,15 +1143,27 @@ export function activeAgent(run: MultiAgentRun): string | null {
 }
 
 /**
- * Whether a scrollback event renders metadata-only by default. Orchestrator
- * mode only — chain runs have no orchestrator and are never auto-hidden. The
- * only events worth defaulting open are the orchestrator's final answers to
- * the operator (`destination === 'user'`; the bus guarantees only the
- * orchestrator can target `user`). Errors are always shown — burying them
- * behind a collapsed header would hide failures.
+ * Whether a scrollback event renders BODY-collapsed by default. The row's
+ * metadata header (source→dest, kind, ts, verified badge) is ALWAYS shown —
+ * `EventRow` only gates `.event-text` on this — so "collapsed" means the
+ * always-visible routing spine without the message body buried in between.
+ *
+ * Kind-driven (not mode-driven) so it applies to chain AND orchestrator: a
+ * chain run previously returned `false` unconditionally, which left every
+ * verbose intermediate hop body open and buried the routing spine. Now only
+ * the events worth reading inline default open:
+ *   - `final` — the answer, framed (1-second squint test);
+ *   - `error` — never bury a failure;
+ *   - `destination === 'user'` — the orchestrator's reply to the operator
+ *     (the bus guarantees only the orchestrator can target `user`).
+ * Everything else (intro/prompt/reply hops) is spine + collapsed body; the
+ * operator expands a row to read it.
+ *
+ * `run` is kept in the signature (callers pass it; future per-mode tuning
+ * may need it) though the rule is now mode-agnostic.
  */
 export function eventDefaultCollapsed(run: MultiAgentRun, ev: MultiAgentEventView): boolean {
-  if (run.mode !== 'orchestrator') return false;
-  if (ev.kind === 'error') return false;
-  return ev.destination !== 'user';
+  if (ev.kind === 'final' || ev.kind === 'error') return false;
+  if (ev.destination === 'user') return false;
+  return true;
 }

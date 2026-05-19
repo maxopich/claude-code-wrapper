@@ -1,13 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type {
   IterationSummary,
+  MultiAgentEventKind,
   MultiAgentLifecycle,
   MultiAgentTemplate,
   Project,
 } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
 import { activeAgent, eventDefaultCollapsed } from '../store';
-import { ThinkingIndicator } from './ThinkingIndicator';
+import { agentIdentity } from '../agentIdentity';
+import { formatElapsed } from '../format';
+import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
 import { useModalKeys } from '../useModalKeys';
@@ -1424,6 +1428,23 @@ function ActiveRunView(props: {
   // multi_agent_ended — or the synthetic 'crashed' if stop threw), at which
   // point this whole button is replaced by Dismiss, so no clearing needed.
   const [stopPending, setStopPending] = useState(false);
+  // Transient highlight target for spine→scrollback jumps. Cleared after a
+  // short pulse so it reads as "this is the row I just jumped to".
+  const [highlightedEventId, setHighlightedEventId] = useState<number | null>(null);
+
+  function jumpToEvent(eventId: number) {
+    setHighlightedEventId(eventId);
+    // The row's metadata header is always rendered (collapsed only hides the
+    // body), so the anchor exists; defer one frame so a just-mounted row is
+    // laid out before we scroll.
+    requestAnimationFrame(() => {
+      const el = document.getElementById(`ev-${eventId}`);
+      if (!el) return;
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+      el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' });
+    });
+    window.setTimeout(() => setHighlightedEventId((cur) => (cur === eventId ? null : cur)), 1800);
+  }
 
   function handleStop() {
     if (!isTemp) {
@@ -1515,6 +1536,8 @@ function ActiveRunView(props: {
         activeAgent={run.awaitingContinue ? null : activeAgent(run)}
         onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
         onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
+        highlightedEventId={highlightedEventId}
+        onJump={jumpToEvent}
       />
 
       <section className="multi-agent-section">
@@ -1533,6 +1556,7 @@ function ActiveRunView(props: {
                 key={ev.eventId}
                 event={ev}
                 defaultCollapsed={eventDefaultCollapsed(run, ev)}
+                highlighted={highlightedEventId === ev.eventId}
               />
             ))}
           </ol>
@@ -1586,6 +1610,11 @@ function SessionSettingsPanel(props: {
   activeAgent: string | null;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
+  /** Drives the (collapsed-by-default) routing-trail disclosure: the
+   *  spine→scrollback jump highlight lives in ActiveRunView and is passed
+   *  through so the trail can stay tucked inside this panel. */
+  highlightedEventId: number | null;
+  onJump: (eventId: number) => void;
 }) {
   const { run } = props;
   const isOrchestrator = run.mode === 'orchestrator';
@@ -1597,6 +1626,9 @@ function SessionSettingsPanel(props: {
     ? run.participantAgentNames.slice(1)
     : run.participantAgentNames;
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Routing trail is tucked away here, collapsed by default — it's a
+  // deep-inspect affordance, not something the operator needs every run.
+  const [routingOpen, setRoutingOpen] = useState(false);
   // Project id currently in flight for addWorker, cleared once the
   // server's `multi_agent_participant_added` echo lands (signaled by
   // the agent name appearing in participantAgentNames). Used to gate
@@ -1731,6 +1763,31 @@ function SessionSettingsPanel(props: {
             </dd>
           </>
         )}
+
+        {run.events.length > 0 && (
+          <>
+            <dt>Routing trail</dt>
+            <dd>
+              <button
+                type="button"
+                className="ghost-btn"
+                aria-expanded={routingOpen}
+                onClick={() => setRoutingOpen((open) => !open)}
+                title="The full ordered hop trail (who routed to whom, verified-by-construction). Collapsed by default — expand to inspect or jump to a hop in the scrollback."
+              >
+                {routingOpen ? '▾' : '▸'} Routing trail · {run.events.length}{' '}
+                {run.events.length === 1 ? 'hop' : 'hops'}
+              </button>
+              {routingOpen && (
+                <RoutingSpine
+                  run={run}
+                  highlightedEventId={props.highlightedEventId}
+                  onJump={props.onJump}
+                />
+              )}
+            </dd>
+          </>
+        )}
       </dl>
     </section>
   );
@@ -1848,28 +1905,164 @@ function UserPromptInput(props: { onSend: (text: string) => void }) {
  */
 export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
   const run = props.run;
+  // Prefer the ephemeral heartbeat; fall back to the inferred active agent
+  // (e.g. a live re-attach where `agent_activity` didn't reach this socket —
+  // see the protocol JSDoc). One of the two is set by the time we render.
+  const act = run?.activity ?? null;
+  const fallbackAgent = run ? activeAgent(run) : null;
+  const startedAt =
+    act?.turnStartedAt ??
+    (run && fallbackAgent && run.events.length ? run.events[run.events.length - 1].ts : null);
+  // Hook called unconditionally (before any early return) to keep hook order
+  // stable across renders.
+  const elapsedMs = useElapsed(startedAt);
+
   if (!run || run.status !== 'running' || run.awaitingContinue) return null;
-  const agent = activeAgent(run);
-  if (!agent) return null;
-  // Last event's ts is the closest proxy for "when this turn started"
-  // (same approximation SessionSettingsPanel uses for the inline orb).
-  const turnStartedAt = run.events.length ? run.events[run.events.length - 1].ts : null;
+  if (!act && !fallbackAgent) return null;
+
+  const agentName = act?.agentName ?? fallbackAgent ?? '';
+  const stalled = act?.phase === 'stalled';
+  const tool = act?.currentTool;
+
   return (
-    <div className="ma-activity-bar" role="status">
-      <ThinkingIndicator
-        variant="inline"
-        phase="thinking"
-        startedAt={turnStartedAt}
-        label={agent}
-      />
+    <div
+      className={`ma-activity-bar${stalled ? ' is-stalled' : ''}`}
+      role={stalled ? 'alert' : 'status'}
+    >
+      {stalled ? (
+        // A hung worker must NOT look like a working one: static glyph,
+        // never the breathing orb (no-color-only / no-motion-only).
+        <span className="ma-stall-glyph" aria-hidden="true">
+          ▢
+        </span>
+      ) : (
+        <ThinkingIndicator
+          variant="inline"
+          phase={tool ? 'tool-running' : 'thinking'}
+          startedAt={startedAt}
+          toolName={tool}
+          label={agentName}
+        />
+      )}
       <span className="ma-activity-text">
-        <code>{agent}</code> working…
+        <code>{agentName}</code>{' '}
+        {stalled ? (
+          <>
+            <strong className="ma-stall-word">stalled</strong>
+            {tool ? (
+              <>
+                {' · '}
+                <code>{tool}</code>
+              </>
+            ) : null}
+            {' · no output for '}
+            {formatElapsed(elapsedMs)}
+          </>
+        ) : (
+          <>
+            <strong>working</strong>
+            {tool ? (
+              <>
+                {' · running '}
+                <code>{tool}</code>
+              </>
+            ) : null}
+          </>
+        )}
       </span>
     </div>
   );
 }
 
-function EventRow(props: { event: MultiAgentEventView; defaultCollapsed: boolean }) {
+/** No-color-only: every hop kind carries an icon AND its word. */
+const KIND_MARK: Record<MultiAgentEventKind, string> = {
+  intro: '↪',
+  prompt: '›',
+  reply: '↩',
+  final: '◼',
+  error: '✕',
+};
+
+/**
+ * One participant's identity chip: hue swatch (peers only) + stable glyph +
+ * fixed-width slug label. Identity survives loss of any single channel
+ * (color / glyph / text). Chrome participants (orchestrator + sentinels)
+ * render neutral — structural, not a colored peer.
+ */
+function AgentTag(props: { slug: string }) {
+  const id = agentIdentity(props.slug);
+  return (
+    <span
+      className={`agent-tag${id.neutral ? ' is-chrome' : ''}`}
+      style={id.hueVar ? ({ '--agent-hue': id.hueVar } as CSSProperties) : undefined}
+    >
+      {!id.neutral && <span className="agent-swatch" aria-hidden="true" />}
+      <span className="agent-glyph" aria-hidden="true">
+        {id.glyph}
+      </span>
+      <span className="agent-label">{id.label}</span>
+    </span>
+  );
+}
+
+/**
+ * Always-visible routing trail: one chip per persisted hop, in order. This
+ * is the spine the operator reads instead of expanding N collapsed rows —
+ * who routed to whom, what kind, when, all verified-by-construction (the
+ * `bus_send` source is Cebab-pinned, unspoofable). Clicking a chip jumps to
+ * (and briefly highlights) that hop's full row in the scrollback.
+ */
+function RoutingSpine(props: {
+  run: MultiAgentRun;
+  highlightedEventId: number | null;
+  onJump: (eventId: number) => void;
+}) {
+  const { run } = props;
+  if (run.events.length === 0) return null;
+  return (
+    <nav className="routing-spine" aria-label="Routing trail">
+      <ol className="spine-list">
+        {run.events.map((ev) => (
+          <li key={ev.eventId}>
+            <button
+              type="button"
+              className={`spine-chip event-kind-${ev.kind}${
+                props.highlightedEventId === ev.eventId ? ' is-active' : ''
+              }`}
+              onClick={() => props.onJump(ev.eventId)}
+              title={`Jump to this hop in the scrollback (${ev.source} → ${ev.destination}, ${ev.kind})`}
+            >
+              <AgentTag slug={ev.source} />
+              <span className="spine-arrow" aria-hidden="true">
+                →
+              </span>
+              <AgentTag slug={ev.destination} />
+              <span className="spine-kind">
+                <span className="spine-kind-mark" aria-hidden="true">
+                  {KIND_MARK[ev.kind]}
+                </span>
+                {ev.kind}
+              </span>
+              <span
+                className="spine-verified"
+                title="Source is Cebab-pinned and unspoofable — every hop's sender is stamped server-side in the bus_send closure, not set by the agent."
+              >
+                <span aria-hidden="true">✔</span> verified
+              </span>
+              <span className="spine-ts">{formatTs(ev.ts)}</span>
+            </button>
+          </li>
+        ))}
+      </ol>
+    </nav>
+  );
+}
+
+function EventRow(props: {
+  event: MultiAgentEventView;
+  defaultCollapsed: boolean;
+  highlighted?: boolean;
+}) {
   const { event } = props;
   // Initializer runs once per mount. Rows are keyed by eventId, so a
   // newly-streamed event mounts at its computed default while any row the
@@ -1888,8 +2081,16 @@ function EventRow(props: { event: MultiAgentEventView; defaultCollapsed: boolean
       // expand the message and select the text manually.
     }
   }
+  const srcId = agentIdentity(event.source);
   return (
-    <li className={`event-row event-kind-${event.kind}`}>
+    <li
+      id={`ev-${event.eventId}`}
+      className={`event-row event-kind-${event.kind}${props.highlighted ? ' is-highlighted' : ''}`}
+      // Left identity stripe (the existing .event-row[data-agent-hue] rule),
+      // keyed off the source agent — present only for peers, never chrome.
+      data-agent-hue={srcId.hueVar ? '' : undefined}
+      style={srcId.hueVar ? ({ '--agent-hue': srcId.hueVar } as CSSProperties) : undefined}
+    >
       <div className="event-head">
         <button
           className={`icon-btn event-toggle${collapsed ? ' is-collapsed' : ''}`}
@@ -1899,10 +2100,17 @@ function EventRow(props: { event: MultiAgentEventView; defaultCollapsed: boolean
         >
           {collapsed ? '▸' : '▾'}
         </button>
-        <span className="event-source">{event.source}</span>
-        <span className="event-arrow">→</span>
-        <span className="event-destination">{event.destination}</span>
-        <span className="event-kind">{event.kind}</span>
+        <AgentTag slug={event.source} />
+        <span className="event-arrow" aria-hidden="true">
+          →
+        </span>
+        <AgentTag slug={event.destination} />
+        <span className="event-kind">
+          <span className="spine-kind-mark" aria-hidden="true">
+            {KIND_MARK[event.kind]}
+          </span>
+          {event.kind}
+        </span>
         <span className="event-ts">{formatTs(event.ts)}</span>
         <button
           className="icon-btn event-copy"

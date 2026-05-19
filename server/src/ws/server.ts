@@ -47,6 +47,7 @@ import {
   startOrchestratorSession,
   type OrchestratorSessionHandle,
 } from '../bus/orchestrator.js';
+import type { ActivitySnapshot } from '../bus/activity.js';
 import { ResolveAgentError } from '../bus/runtime.js';
 import {
   attemptResumeMultiAgent,
@@ -745,6 +746,22 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           conn.multiAgent = null;
         }
       };
+      // Ephemeral liveness pulse for the active run's in-flight turn. Not
+      // persisted and not replayed: it is only meaningful to the connection
+      // that started the run (see the `agent_activity` protocol JSDoc — a
+      // live re-attach intentionally won't receive it; the spine re-syncs on
+      // the next real hop).
+      const onActivity = (sessionId: string, snap: ActivitySnapshot) => {
+        send(conn.ws, {
+          type: 'agent_activity',
+          sessionId,
+          agentName: snap.agentName,
+          phase: snap.phase,
+          currentTool: snap.currentTool,
+          lastActivityTs: snap.lastActivityTs,
+          turnStartedAt: snap.turnStartedAt,
+        });
+      };
 
       // Per-session folders live under the workspace root, so it must be
       // a valid existing directory. The Settings modal validates on save,
@@ -787,6 +804,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             lifecycle,
             onEvent,
             onEnded,
+            onActivity,
           });
           conn.multiAgent = handle;
           send(conn.ws, {
@@ -827,6 +845,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           lifecycle,
           onEvent,
           onEnded,
+          onActivity,
         });
         conn.multiAgent = handle;
         send(conn.ws, {

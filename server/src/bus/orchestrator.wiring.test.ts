@@ -357,3 +357,75 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
     unregisterLiveSession(SESSION_ID);
   });
 });
+
+describe('wireOrchestratorSession — agent_activity liveness wiring', () => {
+  // Yields one assistant-with-tool message then a result, so a delivered
+  // turn produces a `working` tick (from onMessage) and an `idle` tick
+  // (from deliver's .finally → activity.onTurnEnd).
+  function activityFactory() {
+    return (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'text', text: 'go' },
+              { type: 'tool_use', name: 'Bash' },
+            ],
+          },
+        } as unknown as SDKMessage;
+        yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  test('onActivity fires working then idle for a delivered worker turn', async () => {
+    const dir = path.join(tmpRoot, 'coder');
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject('coder', dir);
+    const coder: ResolvedAgent = {
+      projectId: proj.id,
+      agentName: 'coder',
+      cwd: dir,
+      projectName: 'coder',
+    };
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const onActivity = vi.fn();
+
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers: [coder],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      onActivity,
+      runnerFactory: activityFactory(),
+    });
+
+    deliver('coder', 'do the thing');
+    await flush();
+    await flush();
+
+    // Parity with the onEvent convention: sessionId is the first arg.
+    const phases = onActivity.mock.calls.map(
+      (c) => [c[0], (c[1] as { agentName: string; phase: string }).phase] as const,
+    );
+    expect(phases.every(([sid]) => sid === SESSION_ID)).toBe(true);
+    const seq = phases.map(([, p]) => p);
+    expect(seq[0]).toBe('working');
+    expect(seq.at(-1)).toBe('idle');
+    const working = onActivity.mock.calls
+      .map((c) => c[1] as { agentName: string; phase: string; currentTool?: string })
+      .find((s) => s.phase === 'working');
+    expect(working).toMatchObject({ agentName: 'coder', currentTool: 'Bash' });
+
+    unregisterLiveSession(SESSION_ID);
+  });
+});
