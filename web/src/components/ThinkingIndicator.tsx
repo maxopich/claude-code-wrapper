@@ -30,8 +30,10 @@ function tierFor(elapsedMs: number): Tier {
 }
 
 /** Ticks once a second while a turn is in flight. A changing number is not a
- *  CSS animation, so it stays informative even under prefers-reduced-motion. */
-function useElapsed(startedAt: number | null): number {
+ *  CSS animation, so it stays informative even under prefers-reduced-motion.
+ *  Exported for the multi-agent activity bar, which reuses this tick for the
+ *  working/stalled elapsed readout. */
+export function useElapsed(startedAt: number | null): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (startedAt == null) return;

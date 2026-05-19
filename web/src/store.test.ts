@@ -594,6 +594,7 @@ describe('store / eventDefaultCollapsed', () => {
       lifecycle: 'persistent',
       sessionFolder: '/ws/.cebab/s1',
       awaitingContinue: false,
+      activity: null,
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
@@ -648,13 +649,120 @@ describe('store / eventDefaultCollapsed', () => {
     ).toBe(false);
   });
 
-  test('chain mode: nothing is auto-hidden, even non-user destinations', () => {
+  test('chain mode: plain hop bodies now collapse (kind-driven, not mode-driven)', () => {
+    // Regression guard for the un-bury change: chain used to return false
+    // unconditionally, leaving every verbose hop body open and burying the
+    // spine. Plain hops now collapse the BODY (header/spine still shown).
     const run = makeRun('chain');
     expect(
       eventDefaultCollapsed(run, ev({ source: 'alpha', destination: 'beta', kind: 'reply' })),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       eventDefaultCollapsed(run, ev({ source: 'cebab', destination: 'alpha', kind: 'intro' })),
-    ).toBe(false);
+    ).toBe(true);
+  });
+
+  test('final / error / →user stay expanded in BOTH modes', () => {
+    for (const mode of ['chain', 'orchestrator'] as const) {
+      const run = makeRun(mode);
+      expect(eventDefaultCollapsed(run, ev({ kind: 'final' }))).toBe(false);
+      expect(eventDefaultCollapsed(run, ev({ kind: 'error' }))).toBe(false);
+      expect(eventDefaultCollapsed(run, ev({ destination: 'user', kind: 'reply' }))).toBe(false);
+      // …and an ordinary intermediate hop collapses in both modes.
+      expect(eventDefaultCollapsed(run, ev({ destination: 'beta', kind: 'prompt' }))).toBe(true);
+    }
+  });
+});
+
+describe('store / agent_activity (ephemeral liveness)', () => {
+  function started() {
+    return reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_started',
+        sessionId: 'sess-A',
+        mode: 'orchestrator',
+        participants: [1, 2],
+        participantAgentNames: ['orchestrator', 'coder'],
+        lifecycle: 'persistent',
+        sessionFolder: '/ws/.cebab/sess-A',
+      },
+    });
+  }
+  function activity(
+    over: Partial<{
+      sessionId: string;
+      agentName: string;
+      phase: 'working' | 'stalled' | 'idle';
+      currentTool?: string;
+      lastActivityTs: number;
+      turnStartedAt: number;
+    }> = {},
+  ) {
+    return {
+      type: 'agent_activity' as const,
+      sessionId: 'sess-A',
+      agentName: 'coder',
+      phase: 'working' as 'working' | 'stalled' | 'idle',
+      currentTool: 'Bash',
+      lastActivityTs: 1000,
+      turnStartedAt: 900,
+      ...over,
+    };
+  }
+
+  test('working sets active.activity; stalled replaces it', () => {
+    let s = started();
+    s = reduce(s, { type: 'server', msg: activity() });
+    expect(s.multiAgent.active!.activity).toEqual({
+      agentName: 'coder',
+      phase: 'working',
+      currentTool: 'Bash',
+      lastActivityTs: 1000,
+      turnStartedAt: 900,
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: activity({ phase: 'stalled', currentTool: 'Bash', lastActivityTs: 1000 }),
+    });
+    expect(s.multiAgent.active!.activity!.phase).toBe('stalled');
+  });
+
+  test('idle clears the activity to null', () => {
+    let s = started();
+    s = reduce(s, { type: 'server', msg: activity() });
+    expect(s.multiAgent.active!.activity).not.toBeNull();
+    s = reduce(s, { type: 'server', msg: activity({ phase: 'idle' }) });
+    expect(s.multiAgent.active!.activity).toBeNull();
+  });
+
+  test('a mismatched sessionId is a no-op (stale tick from a prior run)', () => {
+    let s = started();
+    s = reduce(s, { type: 'server', msg: activity() });
+    const before = s;
+    s = reduce(s, { type: 'server', msg: activity({ sessionId: 'sess-OTHER', phase: 'idle' }) });
+    expect(s).toBe(before); // same reference — short-circuited
+    expect(s.multiAgent.active!.activity!.phase).toBe('working');
+  });
+
+  test('multi_agent_ended clears activity along with setting status', () => {
+    let s = started();
+    s = reduce(s, { type: 'server', msg: activity({ phase: 'stalled' }) });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_ended',
+        sessionId: 'sess-A',
+        reason: 'completed',
+        iterationId: 'i1',
+      },
+    });
+    expect(s.multiAgent.active!.status).toBe('completed');
+    expect(s.multiAgent.active!.activity).toBeNull();
+  });
+
+  test('agent_activity with no active run is a no-op', () => {
+    const s = reduce(initialState, { type: 'server', msg: activity() });
+    expect(s.multiAgent.active).toBeNull();
   });
 });

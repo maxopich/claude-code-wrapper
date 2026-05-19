@@ -141,6 +141,7 @@ function run(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
     lifecycle: 'persistent',
     sessionFolder: '/tmp/m1',
     awaitingContinue: false,
+    activity: null,
     ...over,
   };
 }

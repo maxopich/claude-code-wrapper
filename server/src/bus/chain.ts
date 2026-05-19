@@ -62,6 +62,7 @@ import {
   type ResolvedAgent,
 } from './runtime.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
+import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import { uninstallBusForProject } from './install.js';
 import { computeSessionPaths, type SessionPaths } from './paths.js';
 import {
@@ -86,6 +87,11 @@ export type StartChainOpts = {
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
    *  real (mock-aware) `pickRunner` when omitted. */
   runnerFactory?: AgentRunnerDeps['runnerFactory'];
+  /** Ephemeral per-turn liveness tick → `agent_activity` ServerMsg.
+   *  `sessionId` is explicit (same convention as `onEvent`) so ticks
+   *  emitted during the awaited first turn still address the right
+   *  session. Optional: unit tests omit it. */
+  onActivity?: (sessionId: string, snap: ActivitySnapshot) => void;
 };
 
 export type ResumeChainOpts = {
@@ -130,10 +136,14 @@ export function createChainRouter(params: {
   onEvent: StartChainOpts['onEvent'];
   onEnded: StartChainOpts['onEnded'];
   onTeardown?: (reason: MultiAgentEndedReason) => Promise<void>;
+  /** Always-run finalizer (every terminal path: stop, crash, completion),
+   *  independent of `onTeardown`'s temp/crashed gating and of the sink's
+   *  detach/rebind state. Used to dispose the liveness observer. */
+  onFinalize?: () => void;
   /** Wake the destination agent with `text` as its next turn. */
   deliver?: (agentName: string, text: string) => void;
 }): ChainRouter {
-  const { sessionId, iterationId, agentNames, paths, onTeardown, deliver } = params;
+  const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver } = params;
   const participantSet = new Set(agentNames);
   const lastPromptForAgent = new Map<string, string>();
 
@@ -146,6 +156,13 @@ export function createChainRouter(params: {
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
     ended = true;
+    // First: kill any pending liveness timer so it can't fire a spurious
+    // `stalled` mid-teardown. Always runs, exactly once (ended-guarded).
+    try {
+      onFinalize?.();
+    } catch (err) {
+      console.error('[chain] onFinalize failed', err);
+    }
     try {
       endMultiAgentSession(sessionId, reason === 'completed' ? 'completed' : reason);
     } catch (err) {
@@ -351,6 +368,11 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   const abortController = new AbortController();
   const briefed = new Set<string>();
 
+  // Passive liveness tap on the existing per-turn SDKMessage stream. Pure
+  // Cebab-side; no agent/prompt/DB change. `sessionId` is closed over so the
+  // WS layer's `onActivity` addresses the right session even mid-first-turn.
+  const activity = createAgentActivityObserver((snap) => opts.onActivity?.(sessionId, snap));
+
   // Forward-declared: router ↔ deliver ↔ runner form a construction cycle
   // (router needs `deliver`; deliver needs `runner`; runner.onEvent needs
   // `router`). Reassigned exactly once, just below.
@@ -359,7 +381,10 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
 
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
-    onMessage: (agent, msg) => writeTranscript(paths, iterationId, agent, msg),
+    onMessage: (agent, msg) => {
+      writeTranscript(paths, iterationId, agent, msg);
+      activity.onMessage(agent, msg);
+    },
     abortController,
     runnerFactory: opts.runnerFactory,
   });
@@ -378,10 +403,13 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       const pr = projectRules.get(agentName);
       prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${text}` : `${briefing}\n\n${text}`;
     }
-    void runner.deliverTurn(agentName, prompt).catch((err) => {
-      console.error(`[chain] deliverTurn(${agentName}) failed`, err);
-      void router.teardown('crashed');
-    });
+    void runner
+      .deliverTurn(agentName, prompt)
+      .catch((err) => {
+        console.error(`[chain] deliverTurn(${agentName}) failed`, err);
+        void router.teardown('crashed');
+      })
+      .finally(() => activity.onTurnEnd(agentName));
   };
 
   router = createChainRouter({
@@ -392,6 +420,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onTeardown,
+    onFinalize: () => activity.dispose(),
     deliver,
   });
 
