@@ -236,6 +236,14 @@ export function renderRosterPrompt(opts: {
     ``,
     `Step 2: wait for each worker's \`reply\` with their self-description before routing the first user prompt. The user's first prompt arrives as your next turn after this one — but route it only after you've collected capability replies from every participant. Use those descriptions to inform routing.`,
     ``,
+    `Consultant mode (default for this session):`,
+    ``,
+    `This is a multi-agent consultation. Unless the user's prompt explicitly directs a specific change, every participant — including you — acts as a CONSULTANT: read, analyze, advise. You do not edit code or create deliverables yourself; you consolidate advice for the user.`,
+    ``,
+    `When you route a task to a worker, your \`bus_send\` text MUST carry this constraint, e.g. append: "Consultant mode: analysis and recommendations only. You may write scratch/notes inside your own project folder, but do NOT modify, create, or delete files in any other directory, and do NOT produce deliverable changes, unless this message explicitly tells you the user asked for that change. Follow your own expertise for the analysis."`,
+    ``,
+    `If a worker reports it changed files outside its own folder without an explicit user-directed instruction, surface that plainly in your final answer to the user rather than hiding it.`,
+    ``,
     `Hop budget: ${hopBudget} hops per user prompt (soft cap — do a progress self-check at hop 5). Intro replies don't count toward the budget.`,
     ``,
     `When you have a complete answer for the user, call \`bus_send\` with kind=final to recipient \`user\` — Cebab forwards that to the operator's chat UI.`,
@@ -271,6 +279,8 @@ export function renderRosterUpdate(opts: {
     `Call \`bus_send\` with kind=intro to the new participant and collect their capability self-description, same as Step 1 of the original roster. Example:`,
     ``,
     `    bus_send(recipient="${newAgentSafe}", kind="intro", text="You are joining a multi-agent conversation already in progress. Reply only to me (orchestrator). Please send a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at.")`,
+    ``,
+    `Consultant mode still applies — keep relaying the "analysis only unless the user explicitly directed a change" constraint when you route to the new participant.`,
     ``,
     `Once they reply, route to them just like any existing worker. Hop budget for the current user prompt remains ${hopBudget}.`,
   ].join('\n');
@@ -312,8 +322,11 @@ export function renderWorkerBriefing(opts: { selfAgent: string }): string {
     `only a \`bus_send\` call is delivered. Always finish a turn by sending`,
     `exactly one \`reply\` to \`orchestrator\`. Do not message other workers`,
     `or \`user\` (those are dropped). Each later turn is a follow-up from the`,
-    `orchestrator — answer it the same way. The orchestrator's message`,
-    `follows below.`,
+    `orchestrator — answer it the same way.`,
+    ``,
+    `Consultant mode: in this multi-agent session you act as a consultant. Keep using your own role and instructions for the analysis, but unless the orchestrator's message explicitly relays a user request to make a specific change, do NOT modify, create, or delete files outside your own project folder, and do NOT produce deliverable changes. Writing scratch/notes inside your own folder is fine. Default to findings and recommendations.`,
+    ``,
+    `The orchestrator's message follows below.`,
   ].join('\n');
 }
 
