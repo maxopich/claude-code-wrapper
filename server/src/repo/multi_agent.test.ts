@@ -9,6 +9,7 @@ import {
   addParticipant,
   appendMultiAgentEvent,
   clearFinishedMultiAgentSessions,
+  computeRecoveryContext,
   createMultiAgentSession,
   endMultiAgentSession,
   listMultiAgentEvents,
@@ -237,5 +238,138 @@ describe('clearFinishedMultiAgentSessions', () => {
     expect(listMultiAgentSessions().map((r) => r.id)).toEqual(['alive']);
     expect(listParticipants('alive')).toHaveLength(1);
     expect(listMultiAgentEvents('alive')).toHaveLength(1);
+  });
+});
+
+describe('computeRecoveryContext (Item #7)', () => {
+  // `appendMultiAgentEvent` and `upsertAgentSession` both stamp Date.now()
+  // internally, so for precise ordering we INSERT directly via getDb(). The
+  // production heuristic only reads `ts` (event) and `updated_at` (agent
+  // session) — both of which we can set explicitly here.
+  function insertEventAt(sessionId: string, source: string, ts: number): void {
+    getDb()
+      .prepare(
+        `INSERT INTO multi_agent_events (session_id, ts, source, destination, kind, text)
+         VALUES (?, ?, ?, 'cebab', 'reply', '')`,
+      )
+      .run(sessionId, ts, source);
+  }
+  function upsertAgentAt(sessionId: string, agentName: string, updatedAt: number): void {
+    getDb()
+      .prepare(
+        `INSERT INTO multi_agent_agent_sessions (session_id, agent_name, cli_session_id, updated_at)
+         VALUES (?, ?, 'sdk-${agentName}', ?)
+         ON CONFLICT (session_id, agent_name)
+         DO UPDATE SET cli_session_id = excluded.cli_session_id,
+                       updated_at     = excluded.updated_at`,
+      )
+      .run(sessionId, agentName, updatedAt);
+  }
+
+  test('returns null when no events exist', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    expect(computeRecoveryContext('s1')).toBeNull();
+  });
+
+  test('flags agent as interrupted when lastEventTs > lastCheckpointTs', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    upsertAgentAt('s1', 'workerA', 150);
+    insertEventAt('s1', 'workerA', 200);
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.interruptedAgents).toEqual([
+      { agentName: 'workerA', lastEventTs: 200, lastCheckpointTs: 150 },
+    ]);
+  });
+
+  test('flags agent as interrupted when lastCheckpointTs is null (never checkpointed)', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    // No upsertAgentAt — agent never checkpointed (e.g. crashed during intro).
+    insertEventAt('s1', 'workerB', 300);
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.interruptedAgents).toEqual([
+      { agentName: 'workerB', lastEventTs: 300, lastCheckpointTs: null },
+    ]);
+  });
+
+  test('does NOT flag clean-completed agent (lastCheckpointTs >= lastEventTs)', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    insertEventAt('s1', 'workerC', 100);
+    upsertAgentAt('s1', 'workerC', 150);
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.interruptedAgents).toEqual([]);
+  });
+
+  test('excludes synthetic sources cebab and _sink from per-agent join', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    // Synthetic sources have no agent_sessions row by design — they would be
+    // flagged interrupted if not excluded. Real workerD checkpoints cleanly.
+    insertEventAt('s1', 'cebab', 400);
+    insertEventAt('s1', '_sink', 500);
+    insertEventAt('s1', 'workerD', 150);
+    upsertAgentAt('s1', 'workerD', 200);
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.interruptedAgents).toEqual([]);
+    // But the synthetic event's ts still anchors staleSinceTs — the wall-clock
+    // anchor reflects the most recent activity of any kind.
+    expect(ctx!.staleSinceTs).toBe(500);
+  });
+
+  test('sorts interruptedAgents by lastEventTs descending (most recent first)', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    // Three never-checkpointed agents, varying lastEventTs.
+    insertEventAt('s1', 'alpha', 100);
+    insertEventAt('s1', 'beta', 200);
+    insertEventAt('s1', 'gamma', 150);
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx!.interruptedAgents.map((a) => a.agentName)).toEqual(['beta', 'gamma', 'alpha']);
+  });
+
+  test('staleSinceTs reflects the highest event ts overall, even when synthetic', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    insertEventAt('s1', 'workerE', 100);
+    upsertAgentAt('s1', 'workerE', 150); // clean
+    // A later cebab error event happens after workerE checkpointed cleanly.
+    insertEventAt('s1', 'cebab', 600);
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx!.staleSinceTs).toBe(600);
+    expect(ctx!.interruptedAgents).toEqual([]);
+  });
+
+  test('uses MAX(ts) per agent (multiple events from one agent)', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    // workerF emits three events in order; checkpoint lands between #2 and #3.
+    insertEventAt('s1', 'workerF', 100);
+    insertEventAt('s1', 'workerF', 200);
+    upsertAgentAt('s1', 'workerF', 250);
+    insertEventAt('s1', 'workerF', 300);
+
+    const ctx = computeRecoveryContext('s1');
+    // workerF's MAX(ts)=300 > checkpoint=250 → flagged.
+    expect(ctx!.interruptedAgents).toEqual([
+      { agentName: 'workerF', lastEventTs: 300, lastCheckpointTs: 250 },
+    ]);
+  });
+
+  test('mixes interrupted + clean agents in one session', () => {
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    insertEventAt('s1', 'clean', 100);
+    upsertAgentAt('s1', 'clean', 200);
+    insertEventAt('s1', 'dirty', 300);
+    upsertAgentAt('s1', 'dirty', 250);
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx!.interruptedAgents).toEqual([
+      { agentName: 'dirty', lastEventTs: 300, lastCheckpointTs: 250 },
+    ]);
   });
 });

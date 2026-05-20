@@ -59,6 +59,7 @@ import {
 } from '../bus/resume.js';
 import {
   clearFinishedMultiAgentSessions,
+  computeRecoveryContext,
   getMultiAgentSession,
   getPendingMutation,
   getPendingRetry,
@@ -338,6 +339,13 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   const pendingMutationView = pendingMutationRow
     ? mutationRecordToView(pendingMutationRow)
     : undefined;
+  // Item #7: surface the per-agent recovery snapshot ONLY when the session
+  // is in awaiting_continue state (R-B reconstruct or a pause-on-mutation
+  // banner that survived a Cebab restart). When awaiting_continue is false
+  // the recovery context is irrelevant — the banner isn't shown.
+  const recoveryContext = awaitingContinue
+    ? computeRecoveryContext(resumed.handle.sessionId)
+    : null;
   send(conn.ws, {
     type: 'multi_agent_started',
     sessionId: resumed.handle.sessionId,
@@ -358,6 +366,7 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     mutationsAcknowledged,
     mutations,
     ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
+    ...(recoveryContext ? { recoveryContext } : {}),
   });
   for (const ev of resumed.replayEvents) {
     const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';

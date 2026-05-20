@@ -8,6 +8,7 @@ import type {
   MultiAgentTemplate,
   PendingRetryDescriptor,
   Project,
+  RecoveryContextView,
   ServerMsg,
   SessionPermissionMode,
   SessionSummary,
@@ -158,6 +159,12 @@ export type MultiAgentRun = {
    *  on Continue click and authoritatively by
    *  `multi_agent_pending_mutation { pending: null }`. */
   pendingMutation: MultiAgentMutationView | null;
+  /** Item #7: server-derived recovery snapshot, populated ONLY while
+   *  `awaitingContinue` is true (R-B reconstruct, or a pause-on-mutation
+   *  banner that survived a Cebab restart). Drives the "▾ Recovery details"
+   *  disclosure inside the awaiting-continue banner. Cleared optimistically
+   *  on Continue click via `ma_clear_awaiting` — banner-bound lifetime. */
+  recoveryContext: RecoveryContextView | null;
 };
 
 /**
@@ -527,13 +534,17 @@ export function reduce(state: AppState, action: Action): AppState {
       // Optimistic: the operator clicked Continue. Drop the read-only gate
       // immediately so the prompt input returns; the server clears the DB
       // flag and streams the orchestrator's resumed turn.
+      //
+      // Item #7: also zero `recoveryContext` (banner-bound lifetime — the
+      // disclosure lives inside the awaiting-continue banner and is no longer
+      // relevant once the operator has acknowledged the recovery).
       const active = state.multiAgent.active;
       if (!active || !active.awaitingContinue) return state;
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: { ...active, awaitingContinue: false },
+          active: { ...active, awaitingContinue: false, recoveryContext: null },
         },
       };
     }
@@ -671,6 +682,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             mutationsAcknowledged: msg.mutationsAcknowledged,
             mutations: msg.mutations,
             pendingMutation: msg.pendingMutation ?? null,
+            // Item #7: server includes `recoveryContext` only when
+            // `awaitingContinue=true` (R-B reconstruct or a pause-on-mutation
+            // banner that survived a restart). Null in every other case;
+            // banner-bound lifetime.
+            recoveryContext: msg.recoveryContext ?? null,
           },
         },
       };
@@ -749,6 +765,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // Item #5: same reasoning for pending-mutation; the row's pause
             // slot is no longer actionable once the session has ended.
             pendingMutation: null,
+            // Item #7: a stopped/crashed session can't be continued, so the
+            // recovery disclosure (banner-bound) is moot. Drop it for the
+            // same reason.
+            recoveryContext: null,
           },
         },
       };
@@ -1228,10 +1248,7 @@ export function isSessionPending(sessionId: string): boolean {
  */
 export type TrustChipState = 'trusted-all' | 'untrusted-edits' | 'untrusted-ask';
 
-export function trustChipState(
-  trusted: boolean,
-  mode: SessionPermissionMode,
-): TrustChipState {
+export function trustChipState(trusted: boolean, mode: SessionPermissionMode): TrustChipState {
   if (trusted) return 'trusted-all';
   if (mode === 'acceptEdits') return 'untrusted-edits';
   return 'untrusted-ask';
