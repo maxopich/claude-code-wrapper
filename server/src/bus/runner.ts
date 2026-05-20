@@ -162,6 +162,13 @@ export type AgentRunnerDeps = {
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
   /** Shared cancellation for the whole session's turns. */
   abortController?: AbortController;
+  /**
+   * Override the transient-overload backoff schedule. Each entry is the ms
+   * to sleep BEFORE the next retry attempt; length defines `MAX_RETRIES`.
+   * Production default: `DEFAULT_OVERLOAD_BACKOFF_MS` (1 s / 3 s / 10 s).
+   * Tests pass `[0, 0, 0]` to keep the retry path testable in fake time.
+   */
+  overloadBackoffMs?: readonly number[];
 };
 
 /**
@@ -255,9 +262,54 @@ export class AgentRunner {
     const spec = this.specs.get(agentName);
     if (!spec) throw new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`);
 
+    // Retry-with-backoff for transient API overloads ("API Error: 529",
+    // "Overloaded"). The interactive CLI absorbs these internally; the SDK
+    // propagates them raw to our iterator. Without this layer, Item #4's
+    // worker-failure banner fires on every transient blip, and once the
+    // bus starts seeing them at a few-percent rate, every orchestrator
+    // turn looks broken even though the underlying account is healthy.
+    //
+    // `prior` is RE-READ inside the loop because a prior attempt may have
+    // persisted a checkpoint via `m.type === 'result'` BEFORE throwing
+    // (this happens when the SDK delivers a result with a non-success
+    // subtype). The next attempt then `--resume`s the same boundary.
+    //
+    // Errors that are NOT transient overloads (mutation pause sentinel,
+    // unknown CLI failures, abort) propagate immediately — no retries.
+    const backoffMs = this.deps.overloadBackoffMs ?? DEFAULT_OVERLOAD_BACKOFF_MS;
+    const maxAttempts = backoffMs.length + 1;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        await this.runOneAttempt(agentName, promptText, spec);
+        return; // success
+      } catch (err) {
+        lastErr = err;
+        const aborted = this.deps.abortController?.signal.aborted === true;
+        if (aborted || !isTransientOverload(err) || attempt >= backoffMs.length) {
+          throw err;
+        }
+        const delay = backoffMs[attempt]!;
+        console.warn(
+          `[runner] ${agentName} hit transient overload (attempt ${attempt + 1}/${maxAttempts}): ${(err as Error).message}. Backing off ${delay}ms before retry.`,
+        );
+        await sleep(delay);
+      }
+    }
+    // Unreachable: loop body either returns or throws on the final attempt.
+    throw lastErr;
+  }
+
+  private async runOneAttempt(
+    agentName: string,
+    promptText: string,
+    spec: AgentSpec,
+  ): Promise<void> {
     const factory = this.deps.runnerFactory ?? pickRunner;
     // Read INSIDE the serialized turn (not when `deliverTurn` was called) so
-    // this resumes the checkpoint the previous queued turn just wrote.
+    // this resumes the checkpoint the previous queued turn just wrote, AND so
+    // a transient-overload retry picks up the latest checkpoint written by the
+    // failed attempt's pre-throw `m.session_id` capture.
     const prior = this.sessions.get(agentName);
 
     const runner = factory({
@@ -328,6 +380,19 @@ export class AgentRunner {
         }
       }
     } finally {
+      // Close the per-attempt SDK Query / claude subprocess BEFORE the next
+      // attempt spawns its own. Matches the single-agent pattern at
+      // ws/server.ts:1547. The prior bus runner only called `unregister()`,
+      // which left the subprocess to be GC'd whenever the SDK happened to
+      // tear it down — a window that could overlap with a retry's spawn or
+      // a sibling agent's spawn. Wrap the close in try/catch so a runner
+      // implementation that doesn't expose close() (or that throws on
+      // close) can't leak past unregister.
+      try {
+        runner.close?.();
+      } catch (closeErr) {
+        console.error(`[runner] close(${agentName}) failed`, closeErr);
+      }
       unregister();
     }
   }
@@ -336,4 +401,42 @@ export class AgentRunner {
   stop(): void {
     this.deps.abortController?.abort();
   }
+}
+
+/**
+ * Default exponential-ish backoff for transient API overloads. Three retries
+ * = up to 14 s of cumulative absorb time before surfacing the failure as a
+ * worker-failure banner. Length of the array also defines MAX_RETRIES.
+ *
+ * The values are tuned for "absorb a few-percent 529 rate without making the
+ * user think the session is hung". 1 s feels instant; 10 s is the longest a
+ * single absorb step can take before the operator suspects something is off.
+ */
+export const DEFAULT_OVERLOAD_BACKOFF_MS: readonly number[] = [1000, 3000, 10000];
+
+/**
+ * True when `err` looks like a transient Anthropic API overload (5xx-class).
+ * Matches both the raw SDK iterator throw form ("Claude Code returned an
+ * error result: API Error: 529 Overloaded...") and the synthetic Item #4
+ * wrapper ("SDK result subtype=error_during_execution") — both of which the
+ * bus has been seeing during the regression.
+ *
+ * Permissive matching: a false positive retries a non-transient error
+ * `MAX_RETRIES` times before giving up (annoying log noise, no correctness
+ * impact). False negatives surface immediately as before.
+ *
+ * Exported for unit tests.
+ */
+export function isTransientOverload(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const m = err.message;
+  return (
+    m.includes('API Error: 529') ||
+    m.includes('Overloaded') ||
+    m.includes('SDK result subtype=error_during_execution')
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
