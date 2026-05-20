@@ -5,6 +5,7 @@ import {
   initialState,
   isSessionPending,
   reduce,
+  trustChipState,
 } from './store';
 import type { MultiAgentEventView, MultiAgentRun } from './store';
 
@@ -1133,5 +1134,33 @@ describe('store / pause-on-mutation + mutations', () => {
     expect(s.multiAgent.draftPauseOnMutation).toBe(true);
     s = reduce(s, { type: 'ma_set_draft_pause_on_mutation', value: false });
     expect(s.multiAgent.draftPauseOnMutation).toBe(false);
+  });
+});
+
+describe('store / trustChipState (Item #6)', () => {
+  test('trusted=true → trusted-all regardless of mode', () => {
+    expect(trustChipState(true, 'default')).toBe('trusted-all');
+    expect(trustChipState(true, 'acceptEdits')).toBe('trusted-all');
+  });
+  test('trusted=false + acceptEdits → untrusted-edits', () => {
+    expect(trustChipState(false, 'acceptEdits')).toBe('untrusted-edits');
+  });
+  test('trusted=false + default → untrusted-ask', () => {
+    expect(trustChipState(false, 'default')).toBe('untrusted-ask');
+  });
+  test('mirrors shouldAutoAllow truth table on the boundary cases', () => {
+    // Operator-visible projection of permission.ts:26-33:
+    //   trusted always auto-allows EVERYTHING → 'trusted-all'.
+    //   untrusted + acceptEdits auto-allows ONLY file-edit tools → 'untrusted-edits'.
+    //   untrusted + default auto-allows NOTHING → 'untrusted-ask'.
+    const cases = [
+      [true, 'default' as const, 'trusted-all'],
+      [true, 'acceptEdits' as const, 'trusted-all'],
+      [false, 'acceptEdits' as const, 'untrusted-edits'],
+      [false, 'default' as const, 'untrusted-ask'],
+    ] as const;
+    for (const [trusted, mode, expected] of cases) {
+      expect(trustChipState(trusted, mode)).toBe(expected);
+    }
   });
 });

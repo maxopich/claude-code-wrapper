@@ -1216,6 +1216,28 @@ export function isSessionPending(sessionId: string): boolean {
 }
 
 /**
+ * Item #6: derive the chat-header chip's effective auto-allow scope from the
+ * trust toggle and the session's permission mode. Mirrors the server-side
+ * `shouldAutoAllow` decision (server/src/ws/permission.ts:26-33), but viewed
+ * from the operator's vantage: WHAT auto-allows under the current pair of
+ * gates, not whether a given tool call does.
+ *
+ *   trusted=true                       → 'trusted-all'     (auto-allow ALL)
+ *   trusted=false, mode='acceptEdits'  → 'untrusted-edits' (auto-allow Edit/Write/NotebookEdit)
+ *   trusted=false, mode='default'      → 'untrusted-ask'   (ask every tool)
+ */
+export type TrustChipState = 'trusted-all' | 'untrusted-edits' | 'untrusted-ask';
+
+export function trustChipState(
+  trusted: boolean,
+  mode: SessionPermissionMode,
+): TrustChipState {
+  if (trusted) return 'trusted-all';
+  if (mode === 'acceptEdits') return 'untrusted-edits';
+  return 'untrusted-ask';
+}
+
+/**
  * Coarse activity phase of a single-agent session, derived purely from
  * existing store state (no extra server signal — the SDK emits none for
  * "thinking"). Drives the animated thinking indicator. First match wins.
