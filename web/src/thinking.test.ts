@@ -142,6 +142,7 @@ function run(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
     sessionFolder: '/tmp/m1',
     awaitingContinue: false,
     activity: null,
+    hopBudget: 30,
     ...over,
   };
 }

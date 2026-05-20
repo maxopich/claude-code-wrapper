@@ -64,7 +64,7 @@ function seedReconstructable(opts?: { mode?: 'orchestrator' | 'chain' }): {
   return { sessionFolder };
 }
 
-const cbs = () => ({ onEvent: vi.fn(), onEnded: vi.fn() });
+const cbs = () => ({ onEvent: vi.fn(), onEnded: vi.fn(), hopBudget: 1000 });
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-reconstruct-'));
@@ -206,6 +206,7 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       onResumeFailed,
+      hopBudget: 1000,
     });
 
     expect(resumed).not.toBeNull();
@@ -228,6 +229,7 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       onResumeFailed,
+      hopBudget: 1000,
     });
 
     expect(resumed).toBeNull();

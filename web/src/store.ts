@@ -112,6 +112,11 @@ export type MultiAgentRun = {
    *  stalled). null = no turn computing / turn just ended. Drives the
    *  activity bar only; never persisted, reset on reload. */
   activity: MultiAgentActivity | null;
+  /** Hard cap on persisted hops for this session (resolved server-side at
+   *  start/reconstruct). Drives the activity-bar chip `events.length /
+   *  hopBudget` and the "Hop budget" row in Session info; the actual
+   *  enforcement happens in the router. */
+  hopBudget: number;
 };
 
 /**
@@ -204,6 +209,10 @@ export type SettingsView = {
   workspaceRoot: string | null;
   workspaceRootValid: boolean;
   defaultWorkspaceRoot: string;
+  /** Resolved default hop budget (DB > env > built-in). The Settings modal's
+   *  input is seeded from this and shows the operator the current effective
+   *  value regardless of which precedence step won. */
+  defaultHopBudget: number;
 };
 
 export const initialState: AppState = {
@@ -561,6 +570,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             sessionFolder: msg.sessionFolder,
             awaitingContinue: msg.awaitingContinue ?? false,
             activity: null,
+            hopBudget: msg.hopBudget,
           },
         },
       };
@@ -697,6 +707,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           workspaceRoot: msg.workspaceRoot,
           workspaceRootValid: msg.workspaceRootValid,
           defaultWorkspaceRoot: msg.defaultWorkspaceRoot,
+          defaultHopBudget: msg.defaultHopBudget,
         },
       };
 

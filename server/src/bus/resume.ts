@@ -63,6 +63,11 @@ export type ResumeCallbacks = {
   onEvent: ResumeChainOpts['onEvent'];
   onEnded: ResumeChainOpts['onEnded'];
   onResumeFailed?: (sessionId: string, reason: ResumeFailureReason) => void;
+  /** Re-resolved hop budget for any reconstructed (R-B) session. The WS
+   *  layer reads the value fresh on every reconnect, so a budget change
+   *  between runs takes effect immediately. The router seeds its in-memory
+   *  `hopsCount` from the DB so enforcement carries over the restart. */
+  hopBudget: number;
 };
 
 export type ResumedSession = {
@@ -110,6 +115,7 @@ export async function attemptResumeMultiAgent(
       reconstructOrchestratorSession(candidate, {
         onEvent: callbacks.onEvent,
         onEnded: callbacks.onEnded,
+        hopBudget: callbacks.hopBudget,
       })
     ) {
       live = getLiveSession(candidate.id);
@@ -147,7 +153,7 @@ export type TargetResumeResult =
  */
 export async function resumeMultiAgentTarget(
   sessionId: string,
-  callbacks: Pick<ResumeCallbacks, 'onEvent' | 'onEnded'>,
+  callbacks: Pick<ResumeCallbacks, 'onEvent' | 'onEnded' | 'hopBudget'>,
 ): Promise<TargetResumeResult> {
   const row = getMultiAgentSession(sessionId);
   if (!row) return { ok: false, reason: 'not-found' };
@@ -163,6 +169,7 @@ export async function resumeMultiAgentTarget(
       reconstructOrchestratorSession(row, {
         onEvent: callbacks.onEvent,
         onEnded: callbacks.onEnded,
+        hopBudget: callbacks.hopBudget,
       })
     ) {
       live = getLiveSession(sessionId);

@@ -2,19 +2,40 @@ import { useState } from 'react';
 import type { SettingsView } from '../store';
 import { useModalKeys } from '../useModalKeys';
 
+export type SettingsSavePayload = {
+  workspaceRoot: string;
+  defaultHopBudget: number;
+};
+
 export function SettingsModal(props: {
   settings: SettingsView;
   onClose: () => void;
-  onSave: (path: string) => void;
+  /** Caller decides which fields actually changed and fires the matching
+   *  ClientMsg(s). Both values are always provided. */
+  onSave: (payload: SettingsSavePayload) => void;
 }) {
   const [value, setValue] = useState(
     props.settings.workspaceRoot ?? props.settings.defaultWorkspaceRoot,
   );
+  // Number input bound to a string so the user can type/clear without us
+  // clobbering the field on every keystroke. Parsed at save time; an
+  // unparseable value blocks save (canSave checks).
+  const [hopBudgetInput, setHopBudgetInput] = useState(String(props.settings.defaultHopBudget));
   const trimmed = value.trim();
-  const canSave = trimmed.length > 0 && trimmed !== props.settings.workspaceRoot;
+  const workspaceChanged = trimmed.length > 0 && trimmed !== props.settings.workspaceRoot;
+  const parsedHopBudget = Number.parseInt(hopBudgetInput, 10);
+  const hopBudgetValid = Number.isFinite(parsedHopBudget) && parsedHopBudget >= 1;
+  const hopBudgetChanged = hopBudgetValid && parsedHopBudget !== props.settings.defaultHopBudget;
+  const canSave = trimmed.length > 0 && hopBudgetValid && (workspaceChanged || hopBudgetChanged);
+
+  const save = () => {
+    if (!canSave) return;
+    props.onSave({ workspaceRoot: trimmed, defaultHopBudget: parsedHopBudget });
+  };
+
   useModalKeys({
     onClose: props.onClose,
-    onConfirm: () => props.onSave(trimmed),
+    onConfirm: save,
     canConfirm: canSave,
   });
 
@@ -55,11 +76,29 @@ export function SettingsModal(props: {
             </p>
           )}
         </section>
+        <section>
+          <label>
+            <div className="label">Default hop budget</div>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={hopBudgetInput}
+              onChange={(e) => setHopBudgetInput(e.target.value)}
+            />
+          </label>
+          <p className="hint">
+            Hard cap on multi-agent hops per session. Cebab stops a run when this is reached and
+            appends a <code>cebab → _sink</code> error event explaining the stop. Per-launch
+            override: <code>CEBAB_HOP_BUDGET</code>. Takes effect on the next session start.
+          </p>
+          {!hopBudgetValid && <p className="hint warn">Hop budget must be a positive integer.</p>}
+        </section>
         <footer>
           <button className="ghost-btn" onClick={props.onClose}>
             Cancel
           </button>
-          <button className="primary-btn" disabled={!canSave} onClick={() => props.onSave(trimmed)}>
+          <button className="primary-btn" disabled={!canSave} onClick={save}>
             Save
           </button>
         </footer>

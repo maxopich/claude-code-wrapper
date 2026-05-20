@@ -595,6 +595,7 @@ describe('store / eventDefaultCollapsed', () => {
       sessionFolder: '/ws/.cebab/s1',
       awaitingContinue: false,
       activity: null,
+      hopBudget: 30,
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
@@ -686,6 +687,7 @@ describe('store / agent_activity (ephemeral liveness)', () => {
         participantAgentNames: ['orchestrator', 'coder'],
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/sess-A',
+        hopBudget: 30,
       },
     });
   }
@@ -764,5 +766,43 @@ describe('store / agent_activity (ephemeral liveness)', () => {
   test('agent_activity with no active run is a no-op', () => {
     const s = reduce(initialState, { type: 'server', msg: activity() });
     expect(s.multiAgent.active).toBeNull();
+  });
+});
+
+describe('store / hop budget', () => {
+  test('multi_agent_started copies hopBudget into the active run', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_started',
+        sessionId: 's-budget',
+        mode: 'orchestrator',
+        participants: [1],
+        participantAgentNames: ['orchestrator', 'coder'],
+        lifecycle: 'persistent',
+        sessionFolder: '/ws/.cebab/s-budget',
+        hopBudget: 42,
+      },
+    });
+    expect(s.multiAgent.active!.hopBudget).toBe(42);
+  });
+
+  test('settings reducer copies defaultHopBudget into SettingsView', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: '/ws',
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/user/agents',
+        defaultHopBudget: 50,
+      },
+    });
+    expect(s.settings).toEqual({
+      workspaceRoot: '/ws',
+      workspaceRootValid: true,
+      defaultWorkspaceRoot: '/home/user/agents',
+      defaultHopBudget: 50,
+    });
   });
 });

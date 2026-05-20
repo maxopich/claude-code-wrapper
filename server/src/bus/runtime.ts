@@ -244,7 +244,7 @@ export function renderRosterPrompt(opts: {
     ``,
     `If a worker reports it changed files outside its own folder without an explicit user-directed instruction, surface that plainly in your final answer to the user rather than hiding it.`,
     ``,
-    `Hop budget: ${hopBudget} hops per user prompt (soft cap — do a progress self-check at hop 5). Intro replies don't count toward the budget.`,
+    `Hop budget: ${hopBudget} hops total for this session (Cebab will hard-stop when reached — do a periodic progress self-check; the intro handshake counts toward the total).`,
     ``,
     `When you have a complete answer for the user, call \`bus_send\` with kind=final to recipient \`user\` — Cebab forwards that to the operator's chat UI.`,
   ].join('\n');
@@ -282,7 +282,7 @@ export function renderRosterUpdate(opts: {
     ``,
     `Consultant mode still applies — keep relaying the "analysis only unless the user explicitly directed a change" constraint when you route to the new participant.`,
     ``,
-    `Once they reply, route to them just like any existing worker. Hop budget for the current user prompt remains ${hopBudget}.`,
+    `Once they reply, route to them just like any existing worker. Hop budget for this session remains ${hopBudget} total (cumulative across user prompts).`,
   ].join('\n');
 }
 

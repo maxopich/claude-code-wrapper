@@ -1194,6 +1194,39 @@ pre {
 .ma-stall-word {
   color: var(--warn);
 }
+/* Hop-budget chip: small uppercase pill at the right of the activity bar,
+ * mirroring `.lifecycle-pill` typography. The `.is-warn` variant kicks in
+ * at ≥80% utilization so the operator notices the cap approaching well
+ * before the synthetic exhaustion event lands. */
+.ma-hop-budget-chip {
+  font-size: 10px;
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg-2);
+  background: var(--bg-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  margin-left: 4px;
+}
+.ma-hop-budget-chip.is-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+  background: var(--warn-soft);
+}
+/* Inline warn qualifier inside the Session-info "Hop budget" row. Sized to
+ * sit next to the count without dominating it. */
+.settings-grid-warn {
+  color: var(--warn);
+  font-size: var(--t-sm);
+  margin-left: 2px;
+}
 
 /* ---------- Multi-agent tab ---------- */
 .multi-agent {

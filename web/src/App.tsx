@@ -219,8 +219,16 @@ export function App() {
     });
   }
 
-  function saveWorkspaceRoot(path: string) {
-    wsRef.current?.send({ type: 'set_workspace_root', path });
+  function saveSettings(payload: { workspaceRoot: string; defaultHopBudget: number }) {
+    // Fire only the messages whose field actually changed so unrelated
+    // settings stay untouched (e.g. saving a hop-budget tweak doesn't
+    // re-trigger the workspace-root sync which re-scans the filesystem).
+    if (state.settings && payload.workspaceRoot !== state.settings.workspaceRoot) {
+      wsRef.current?.send({ type: 'set_workspace_root', path: payload.workspaceRoot });
+    }
+    if (state.settings && payload.defaultHopBudget !== state.settings.defaultHopBudget) {
+      wsRef.current?.send({ type: 'set_default_hop_budget', value: payload.defaultHopBudget });
+    }
     setSettingsOpen(false);
   }
 
@@ -566,7 +574,7 @@ export function App() {
         <SettingsModal
           settings={state.settings}
           onClose={() => setSettingsOpen(false)}
-          onSave={saveWorkspaceRoot}
+          onSave={saveSettings}
         />
       )}
     </div>
