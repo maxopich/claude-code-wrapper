@@ -53,6 +53,8 @@ export function MultiAgentTab(props: {
   wrapperErrorSeq: number;
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onContinueMultiAgent: (sessionId: string) => void;
+  onRetryWorker: (sessionId: string) => void;
+  onAbandonSession: (sessionId: string) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
   onDismissActive: () => void;
@@ -74,6 +76,8 @@ export function MultiAgentTab(props: {
         onStop={props.onStopMultiAgent}
         onSendUserPrompt={props.onSendUserPrompt}
         onContinue={props.onContinueMultiAgent}
+        onRetryWorker={props.onRetryWorker}
+        onAbandonSession={props.onAbandonSession}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
         onDismiss={props.onDismissActive}
@@ -1418,6 +1422,13 @@ function ActiveRunView(props: {
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (sessionId: string, projectId: number) => void;
   onDismiss: () => void;
+  /** Item #4: Retry the worker named in this session's pending-retry slot.
+   *  The slot is server-authoritative — no agentName/prompt args. */
+  onRetryWorker: (sessionId: string) => void;
+  /** Item #4: Give up on the pending-retry slot and end the session as
+   *  `'stopped'`. Same teardown as Stop, distinct verb so analytics can
+   *  differentiate "stopped a healthy run" from "abandoned after failure". */
+  onAbandonSession: (sessionId: string) => void;
 }) {
   const { run } = props;
   const crossTab = run.mode !== props.tabMode;
@@ -1531,9 +1542,10 @@ function ActiveRunView(props: {
         run={run}
         projects={props.projects}
         canEdit={isRunning && isOrchestrator}
-        // An R-B read-only recovered run isn't actually executing — show no
-        // fake activity until the operator continues it.
-        activeAgent={run.awaitingContinue ? null : activeAgent(run)}
+        // A paused run (R-B awaiting Continue, or a worker-failure pending
+        // retry) isn't actually executing — show no fake activity until the
+        // operator resolves the banner.
+        activeAgent={run.awaitingContinue || run.pendingRetry ? null : activeAgent(run)}
         onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
         onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
         highlightedEventId={highlightedEventId}
@@ -1581,7 +1593,44 @@ function ActiveRunView(props: {
         </div>
       )}
 
-      {isOrchestrator && isRunning && !run.awaitingContinue && (
+      {isRunning && run.pendingRetry && (
+        <div className="multi-agent-warning" role="status">
+          <p>
+            <strong>
+              <code>{run.pendingRetry.agentName}</code>'s last turn failed.
+            </strong>{' '}
+            {run.pendingRetry.reason}
+          </p>
+          <p>
+            Retry replays the same prompt; the worker resumes its CLI session, so full prior context
+            is intact. Any partial file writes from the failed turn are <em>not</em> rolled back.
+          </p>
+          <div className="multi-agent-warning-actions">
+            <button
+              className="primary-btn"
+              onClick={() => props.onRetryWorker(run.sessionId)}
+              title="Re-deliver the captured prompt to this worker. The agent's --resume brings back full prior context."
+            >
+              Retry {run.pendingRetry.agentName}
+            </button>
+            <button
+              onClick={() => props.onAbandonSession(run.sessionId)}
+              title="End the session as Stopped. The session folder and trail are preserved for post-mortem."
+            >
+              Abandon session
+            </button>
+            <button
+              className="ghost-btn"
+              onClick={() => jumpToEvent(run.pendingRetry!.errorEventId)}
+              title="Scroll to the error event in the scrollback"
+            >
+              Jump to error
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isOrchestrator && isRunning && !run.awaitingContinue && !run.pendingRetry && (
         <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
       )}
     </div>
@@ -1925,7 +1974,7 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
   // stable across renders.
   const elapsedMs = useElapsed(startedAt);
 
-  if (!run || run.status !== 'running' || run.awaitingContinue) return null;
+  if (!run || run.status !== 'running' || run.awaitingContinue || run.pendingRetry) return null;
   if (!act && !fallbackAgent) return null;
 
   const agentName = act?.agentName ?? fallbackAgent ?? '';

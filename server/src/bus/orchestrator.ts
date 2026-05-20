@@ -35,12 +35,15 @@ import {
   addParticipant,
   createMultiAgentSession,
   endMultiAgentSession,
+  getPendingRetry,
   getProjectBusState,
   setMultiAgentSessionLifecycle,
+  setPendingRetry,
   upsertAgentSession,
   type EventKind,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
+import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
@@ -139,6 +142,11 @@ export type StartOrchestratorOpts = {
    *  `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`); omit to use the
    *  default. */
   hopBudget?: number;
+  /** Per-session pending-retry slot change → `multi_agent_pending_retry`
+   *  ServerMsg. Fires when a worker's deliverTurn fails (set) and after a
+   *  successful retry or abandon (clear). Optional; the router null-checks
+   *  before invoking. */
+  onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
 };
 
 export type ResumeOrchestratorOpts = {
@@ -169,6 +177,10 @@ export type OrchestratorSessionHandle = {
   setLifecycle: (lifecycle: MultiAgentLifecycle) => Promise<void>;
   getCurrentWorkerNames: () => readonly string[];
   getCurrentLifecycle: () => MultiAgentLifecycle;
+  /** Re-deliver the captured prompt of the worker named in this session's
+   *  pending-retry slot. No-op when the slot is empty (idempotent). The
+   *  slot is cleared BEFORE re-delivery so a racing second click no-ops. */
+  retry: () => Promise<void>;
 };
 
 type OrchestratorRouter = {
@@ -182,6 +194,12 @@ type OrchestratorRouter = {
   getWorkerNames: () => readonly string[];
   setLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   getLifecycle: () => MultiAgentLifecycle;
+  /** Called by `deliver`'s .catch when a worker's `deliverTurn` rejects
+   *  (iterator throw OR non-success `result.subtype` — the runner unifies
+   *  both). Persists a synthetic `cebab → user kind=error` event, writes
+   *  the pending-retry slot, and emits `onPendingRetry`. Does NOT teardown
+   *  — the session stays `running` waiting for Retry or Abandon. */
+  onWorkerFailed: (agentName: string, prompt: string, err: unknown) => void;
 };
 
 /**
@@ -213,6 +231,9 @@ export function createOrchestratorRouter(params: {
    *  table so the budget check accounts for hops that landed in the prior
    *  process. */
   initialHopsCount?: number;
+  /** Optional pending-retry set/clear sink (Item #4). Threaded onto
+   *  `BusSink.onPendingRetry` so rebind/detach honor the plumbing. */
+  onPendingRetry?: StartOrchestratorOpts['onPendingRetry'];
 }): OrchestratorRouter {
   const {
     sessionId,
@@ -228,7 +249,11 @@ export function createOrchestratorRouter(params: {
   const workerSet = new Set(workerNamesMut);
   let lifecycleRef: MultiAgentLifecycle = params.lifecycle;
 
-  let sink: BusSink = { onEvent: params.onEvent, onEnded: params.onEnded };
+  let sink: BusSink = {
+    onEvent: params.onEvent,
+    onEnded: params.onEnded,
+    onPendingRetry: params.onPendingRetry,
+  };
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Bumped on every successful append (both `handleEvent` and
@@ -434,6 +459,81 @@ export function createOrchestratorRouter(params: {
   };
   const getLifecycle = (): MultiAgentLifecycle => lifecycleRef;
 
+  // Worker failure handler (Item #4). The deliver() .catch in
+  // wireOrchestratorSession calls this when a worker's deliverTurn rejects
+  // (iterator throw OR non-success result.subtype). Persist a synthetic
+  // `cebab → user kind=error` event so the trail explains the stop, write
+  // the pending-retry slot so the operator (and a post-restart R-B
+  // reconstruction) can resume from it, and stay live. Bypasses
+  // `forwardCebabEvent` so the error event does NOT bump hopsCount —
+  // consistent with the budget-exhaust pattern at `checkBudgetExhausted`.
+  // If no last prompt is known (the agent failed before `deliver` was ever
+  // called), fall back to crashed teardown — there's nothing to retry.
+  const onWorkerFailed = (agentName: string, prompt: string, err: unknown) => {
+    if (ended) return;
+    const errMessage =
+      err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
+    const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
+    let errorEventId = 0;
+    let eventTs = Date.now();
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        USER_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      errorEventId = row.id;
+      eventTs = row.ts;
+      try {
+        sink.onEvent(
+          sessionId,
+          {
+            ts: eventTs,
+            source: CEBAB_SOURCE,
+            destination: USER_RECIPIENT,
+            kind: 'error',
+            text: reasonText,
+          },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[orchestrator] worker-failed onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      console.error('[orchestrator] persist worker-failed event failed', persistErr);
+    }
+    if (!prompt) {
+      console.warn(`[orchestrator] worker ${agentName} failed pre-deliver; ending crashed`);
+      void teardown('crashed');
+      return;
+    }
+    const descriptor: PendingRetryDescriptor = {
+      agentName,
+      reason: reasonText,
+      lastPrompt: prompt,
+      ts: eventTs,
+      errorEventId,
+    };
+    try {
+      setPendingRetry(sessionId, {
+        agentName,
+        prompt,
+        reason: reasonText,
+        ts: eventTs,
+        errorEventId,
+      });
+    } catch (dbErr) {
+      console.error('[orchestrator] persist pending-retry failed', dbErr);
+    }
+    try {
+      sink.onPendingRetry?.(sessionId, descriptor);
+    } catch (sinkErr) {
+      console.error('[orchestrator] onPendingRetry callback threw', sinkErr);
+    }
+  };
+
   return {
     teardown,
     handleEvent,
@@ -445,6 +545,7 @@ export function createOrchestratorRouter(params: {
     getWorkerNames,
     setLifecycle,
     getLifecycle,
+    onWorkerFailed,
   };
 }
 
@@ -484,6 +585,7 @@ export function wireOrchestratorSession(p: {
   onEvent: StartOrchestratorOpts['onEvent'];
   onEnded: StartOrchestratorOpts['onEnded'];
   onActivity?: StartOrchestratorOpts['onActivity'];
+  onPendingRetry?: StartOrchestratorOpts['onPendingRetry'];
   seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
   briefedAgents?: ReadonlyArray<string>;
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
@@ -618,11 +720,18 @@ export function wireOrchestratorSession(p: {
         });
       }
     }
+    // Capture the post-briefing-and-rules bytes so the .catch can hand them
+    // to onWorkerFailed for the pending-retry slot. The `briefed` Set above
+    // is already populated, so a retry that reuses these exact bytes won't
+    // double-prefix the briefing. Applies to the orchestrator itself too —
+    // its briefing comes via `renderRosterPrompt` upstream of this call, so
+    // `prompt` here IS the wire bytes regardless of who the agent is.
+    const deliveredPrompt = prompt;
     void runner
       .deliverTurn(agentName, prompt)
       .catch((err) => {
         console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
-        void router.teardown('crashed');
+        router.onWorkerFailed(agentName, deliveredPrompt, err);
       })
       .finally(() => activity.onTurnEnd(agentName));
   };
@@ -640,6 +749,7 @@ export function wireOrchestratorSession(p: {
     deliver,
     hopBudget,
     initialHopsCount: p.initialHopsCount,
+    onPendingRetry: p.onPendingRetry,
   });
 
   async function addWorker(projectId: number): Promise<AddWorkerResult> {
@@ -694,6 +804,14 @@ export function wireOrchestratorSession(p: {
     sessionFolder: paths.folder,
     hopBudget,
     async stop(reason) {
+      // Clear any pending-retry slot so the teardown leaves a clean row —
+      // a crashed-but-with-non-null-pending row is dead data that R-B
+      // reconstruction can't usefully act on.
+      try {
+        setPendingRetry(sessionId, null);
+      } catch (err) {
+        console.error('[orchestrator] clear pending-retry on stop failed', err);
+      }
       runner.stop();
       await router.teardown(reason);
     },
@@ -705,6 +823,33 @@ export function wireOrchestratorSession(p: {
     setLifecycle: setLifecycleHandle,
     getCurrentWorkerNames: () => router.getWorkerNames(),
     getCurrentLifecycle: () => router.getLifecycle(),
+    async retry() {
+      const pending = getPendingRetry(sessionId);
+      if (!pending) return;
+      // Clear the slot BEFORE re-delivery so a racing second click sees the
+      // empty slot. A re-fail re-enters `onWorkerFailed`, which re-asserts
+      // a fresh descriptor and re-emits the `multi_agent_pending_retry`
+      // ServerMsg.
+      try {
+        setPendingRetry(sessionId, null);
+      } catch (err) {
+        console.error('[orchestrator] clear pending-retry on retry failed', err);
+      }
+      try {
+        p.onPendingRetry?.(sessionId, null);
+      } catch (err) {
+        console.error('[orchestrator] retry onPendingRetry-null callback threw', err);
+      }
+      // Re-call `deliver` so the activity observer / liveness ticks see
+      // the new turn. The agent's `briefed` Set is already populated by
+      // the failed delivery (or, on R-B reconstruct, by `briefedAgents`
+      // seeding), so re-feeding `pending.prompt` (which IS the
+      // post-briefing bytes) does not double-prepend the briefing. For
+      // the orchestrator itself, briefed never applied — the captured
+      // prompt is the rendered roster/user-prompt text, replay is just
+      // re-delivering the same wire bytes.
+      deliver(pending.agentName, pending.prompt);
+    },
   };
 
   registerLiveSession({
@@ -750,6 +895,7 @@ export async function startOrchestratorSession(
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onActivity: opts.onActivity,
+    onPendingRetry: opts.onPendingRetry,
     hopBudget: opts.hopBudget,
   });
 

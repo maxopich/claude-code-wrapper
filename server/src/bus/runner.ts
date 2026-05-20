@@ -214,9 +214,7 @@ export class AgentRunner {
     // it must not sit behind a possibly-long prior turn). Preserves the
     // original rejected-promise contract callers `.catch`.
     if (!this.specs.has(agentName)) {
-      return Promise.reject(
-        new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`),
-      );
+      return Promise.reject(new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`));
     }
     const tail = this.turnTails.get(agentName) ?? Promise.resolve();
     const result = tail.then(() => this.runOneTurn(agentName, promptText));
@@ -257,7 +255,7 @@ export class AgentRunner {
     try {
       for await (const msg of runner) {
         this.deps.onMessage?.(agentName, msg);
-        const m = msg as { type?: string; session_id?: string };
+        const m = msg as { type?: string; session_id?: string; subtype?: string };
         if (m.type === 'result' && typeof m.session_id === 'string') {
           this.sessions.set(agentName, m.session_id);
           // Persist the checkpoint. A DB hiccup must never abort a turn —
@@ -266,6 +264,16 @@ export class AgentRunner {
             this.deps.onSessionId?.(agentName, m.session_id);
           } catch (err) {
             console.error(`[runner] onSessionId(${agentName}) failed`, err);
+          }
+          // SDK signals a turn-level failure via a non-success `result.subtype`
+          // (`error_during_execution`, `error_max_turns`, `error_max_budget_usd`,
+          // `error_max_structured_output_retries`). The bus layer used to
+          // silently move on; now we unify with the iterator-throw path so
+          // both router .catch handlers see the same shape. The checkpoint
+          // write above is intentionally BEFORE the throw — retry resumes
+          // from the same SDK boundary the failed turn saw, not the prior one.
+          if (typeof m.subtype === 'string' && m.subtype !== 'success') {
+            throw new Error(`SDK result subtype=${m.subtype}`);
           }
         }
       }

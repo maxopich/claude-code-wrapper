@@ -246,6 +246,126 @@ describe('createChainRouter — hop-budget enforcement', () => {
   });
 });
 
+// --- Item #4: worker failure surfacing + pending-retry slot --------------
+//
+// onWorkerFailed is the router-side callback the `deliver` .catch fires
+// when a worker's `deliverTurn` rejects (iterator throw OR non-success
+// `result.subtype`). The change: don't teardown; instead persist a
+// synthetic `cebab → user kind=error` event + write the pending-retry
+// columns + emit `onPendingRetry`. The hop counter MUST NOT bump for the
+// error event (matches the budget-exhaust precedent — the displayed
+// ratio stays accurate).
+describe('createChainRouter — onWorkerFailed (Item #4)', () => {
+  function setupFail() {
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+    fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
+    const onEvent = vi.fn();
+    const onEnded = vi.fn();
+    const onPendingRetry = vi.fn();
+    const deliver = vi.fn();
+    const router = createChainRouter({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      agentNames: AGENTS,
+      paths,
+      onEvent,
+      onEnded,
+      deliver,
+      hopBudget: 1000,
+      onPendingRetry,
+    });
+    return { router, onEvent, onEnded, onPendingRetry, deliver };
+  }
+
+  test('persists a cebab→user kind=error event, writes the slot, leaves session live', () => {
+    const { router, onEvent, onEnded, onPendingRetry } = setupFail();
+    router.onWorkerFailed('coder', 'do your work', new Error('SDK result subtype=error_max_turns'));
+
+    const persisted = listMultiAgentEvents(SESSION_ID);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!).toMatchObject({
+      source: CEBAB_SOURCE,
+      destination: 'user',
+      kind: 'error',
+    });
+    expect(persisted[0]!.text).toContain('`coder`');
+    expect(persisted[0]!.text).toContain('SDK result subtype=error_max_turns');
+
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    // Critical: the router does NOT tear down. The session stays running
+    // until the operator retries or abandons.
+    expect(onEnded).not.toHaveBeenCalled();
+    expect(getMultiAgentSession(SESSION_ID)!.status).toBe('running');
+
+    // The pending-retry callback fired with the descriptor matching the
+    // persisted row (so the live wire and the post-restart DB hydrate to
+    // the same banner).
+    expect(onPendingRetry).toHaveBeenCalledTimes(1);
+    const [sid, pending] = onPendingRetry.mock.calls[0]!;
+    expect(sid).toBe(SESSION_ID);
+    expect(pending).toMatchObject({
+      agentName: 'coder',
+      lastPrompt: 'do your work',
+      errorEventId: persisted[0]!.id,
+    });
+    expect(pending!.reason).toContain('error_max_turns');
+
+    // And the DB row reflects the same.
+    const row = getMultiAgentSession(SESSION_ID)!;
+    expect(row.pending_retry_agent).toBe('coder');
+    expect(row.pending_retry_prompt).toBe('do your work');
+    expect(row.pending_retry_error_event_id).toBe(persisted[0]!.id);
+  });
+
+  test('with an empty `prompt` (failed pre-deliver), falls back to teardown crashed', () => {
+    // No bytes captured = nothing to retry. Collapse to the legacy crashed
+    // teardown so the session ends with a legible status rather than
+    // hanging in pending-retry forever.
+    const { router, onEnded, onPendingRetry } = setupFail();
+    router.onWorkerFailed('coder', '', new Error('boot failure'));
+
+    expect(onEnded).toHaveBeenCalledTimes(1);
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'crashed', null);
+    expect(onPendingRetry).not.toHaveBeenCalled();
+    // The error event still persisted (operator sees the cause in the trail).
+    const persisted = listMultiAgentEvents(SESSION_ID);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!.kind).toBe('error');
+  });
+
+  test('does NOT bump the hop counter (budget-exhaust pattern parity)', () => {
+    // Use a tight budget so a buggy increment would trip enforcement
+    // immediately on a re-fail. Process one normal hop (hopsCount=1), then
+    // a failure: budget=3 should still allow 2 more normal hops after.
+    const workspace = path.join(tmpRoot, 'workspace2');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+    fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
+    const onEnded = vi.fn();
+    const deliver = vi.fn();
+    const router = createChainRouter({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      agentNames: AGENTS,
+      paths,
+      onEvent: vi.fn(),
+      onEnded,
+      deliver,
+      hopBudget: 3,
+    });
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' })); // hopsCount=1
+    router.onWorkerFailed('reviewer', 'work', new Error('boom')); // counter UNCHANGED
+    router.handleEvent(ev({ source: 'reviewer', destination: 'coder' })); // hopsCount=2
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' })); // hopsCount=3 → next deliver refused
+    // The 3rd hop persisted but its deliver was refused — budget would
+    // have refused FOUR hops if the error event bumped the counter.
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', null);
+    expect(deliver).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('resumeChainSession (registry-based, R-A)', () => {
   test('returns null when the session is not live in this process', async () => {
     const handle = await resumeChainSession({
@@ -266,6 +386,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
       sessionFolder: tmpRoot,
       stop: vi.fn(),
       detach: vi.fn(),
+      retry: vi.fn(),
     };
     registerLiveSession({
       sessionId: SESSION_ID,
@@ -300,6 +421,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
         sessionFolder: tmpRoot,
         stop: vi.fn(),
         detach: vi.fn(),
+        retry: vi.fn(),
       },
       rebind: vi.fn(),
     });

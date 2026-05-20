@@ -143,6 +143,7 @@ function run(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
     awaitingContinue: false,
     activity: null,
     hopBudget: 30,
+    pendingRetry: null,
     ...over,
   };
 }

@@ -5,6 +5,7 @@ import type {
   MultiAgentEventKind,
   MultiAgentLifecycle,
   MultiAgentTemplate,
+  PendingRetryDescriptor,
   Project,
   ServerMsg,
   SessionPermissionMode,
@@ -117,6 +118,14 @@ export type MultiAgentRun = {
    *  hopBudget` and the "Hop budget" row in Session info; the actual
    *  enforcement happens in the router. */
   hopBudget: number;
+  /** Item #4 pending-retry slot. Populated when a worker's deliverTurn
+   *  failed and the operator hasn't yet retried or abandoned. Drives the
+   *  Retry/Abandon banner above the prompt input and gates the
+   *  UserPromptInput render (one decision at a time, mirroring how
+   *  `awaitingContinue` does the same). Cleared optimistically on Retry
+   *  click via `ma_clear_pending_retry` and authoritatively by
+   *  `multi_agent_pending_retry { pending: null }` on success/abandon. */
+  pendingRetry: PendingRetryDescriptor | null;
 };
 
 /**
@@ -301,7 +310,8 @@ export type Action =
   | { type: 'ma_set_draft_prompt'; text: string }
   | { type: 'ma_apply_template'; template: MultiAgentTemplate }
   | { type: 'ma_dismiss_active' }
-  | { type: 'ma_clear_awaiting' };
+  | { type: 'ma_clear_awaiting' }
+  | { type: 'ma_clear_pending_retry' };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -483,6 +493,23 @@ export function reduce(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'ma_clear_pending_retry': {
+      // Optimistic: the operator clicked Retry. Drop the banner immediately
+      // so the UI doesn't double-render between click and server echo. The
+      // server clears the DB slot and replays the captured prompt; if the
+      // retried turn fails again, the next `multi_agent_pending_retry`
+      // ServerMsg re-asserts a new descriptor.
+      const active = state.multiAgent.active;
+      if (!active || !active.pendingRetry) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, pendingRetry: null },
+        },
+      };
+    }
+
     case 'server':
       return reduceServer(state, action.msg);
   }
@@ -571,6 +598,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             awaitingContinue: msg.awaitingContinue ?? false,
             activity: null,
             hopBudget: msg.hopBudget,
+            pendingRetry: msg.pendingRetry ?? null,
           },
         },
       };
@@ -641,7 +669,29 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             status: msg.reason,
             iterationId: msg.iterationId,
             activity: null,
+            // Once the session ends, the pending-retry slot is moot — the
+            // server clears its DB column as part of teardown, but the
+            // client also drops the descriptor so the banner doesn't
+            // linger on a stopped/crashed row.
+            pendingRetry: null,
           },
+        },
+      };
+    }
+
+    case 'multi_agent_pending_retry': {
+      // Item #4: set/clear the banner descriptor. `pending: null` is the
+      // explicit clear (after a successful retry or abandon); a populated
+      // value sets/replaces (a re-fail overwrites with the new reason).
+      // The reducer replaces wholesale — never merge — so a stale field
+      // can't survive a successful retry.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, pendingRetry: msg.pending },
         },
       };
     }

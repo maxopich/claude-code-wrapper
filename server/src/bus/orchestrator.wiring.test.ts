@@ -162,6 +162,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
       sessionFolder: tmpRoot,
       stop: vi.fn(),
       detach: vi.fn(),
+      retry: vi.fn(),
     };
     let bound = false;
     registerLiveSession({
@@ -192,6 +193,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
         lifecycle: 'persistent',
         sessionFolder: tmpRoot,
         stop: vi.fn(),
+        retry: vi.fn(),
         detach: vi.fn(),
       },
       rebind: vi.fn(),
