@@ -387,6 +387,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
       stop: vi.fn(),
       detach: vi.fn(),
       retry: vi.fn(),
+      continueThroughMutation: vi.fn(),
     };
     registerLiveSession({
       sessionId: SESSION_ID,
@@ -422,6 +423,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
         stop: vi.fn(),
         detach: vi.fn(),
         retry: vi.fn(),
+        continueThroughMutation: vi.fn(),
       },
       rebind: vi.fn(),
     });

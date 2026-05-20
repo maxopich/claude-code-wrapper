@@ -4,6 +4,7 @@ import type {
   IterationSummary,
   MultiAgentEventKind,
   MultiAgentLifecycle,
+  MultiAgentMutationView,
   MultiAgentTemplate,
   PendingRetryDescriptor,
   Project,
@@ -12,6 +13,7 @@ import type {
   SessionSummary,
   WrapperErrorKind,
 } from '@cebab/shared/protocol';
+import type { MutationCategory } from '@cebab/shared';
 
 export type MessageView =
   | { kind: 'user'; id: string; text: string }
@@ -37,6 +39,16 @@ export type MessageView =
       toolName: string;
       input: unknown;
       decided?: 'allow' | 'deny';
+      /** Item #5: server-classified category from `classifyToolCall`. Optional
+       *  so a replay of a pre-Item-5 permission_request still renders via the
+       *  JSON-fallback subcomponent. */
+      category?: MutationCategory;
+      /** Item #5: server-classified one-line summary. */
+      summary?: string;
+      /** Item #5: absolute cwd the tool will run in (the project's `path`). */
+      cwd?: string;
+      /** Item #5: human-readable project name. */
+      projectName?: string;
     };
 
 export type SessionView = {
@@ -126,6 +138,26 @@ export type MultiAgentRun = {
    *  click via `ma_clear_pending_retry` and authoritatively by
    *  `multi_agent_pending_retry { pending: null }` on success/abandon. */
   pendingRetry: PendingRetryDescriptor | null;
+  /** Item #5: opt-in pause-on-first-mutation flag for this session. Reflects
+   *  the operator's choice at session start. UI surfaces it as a read-only
+   *  row in Session info (the toggle itself lives in setup). */
+  pauseOnMutation: boolean;
+  /** Item #5: true once the operator has clicked Continue at least once.
+   *  When true, subsequent mutations auto-allow. Mirrored from server. */
+  mutationsAcknowledged: boolean;
+  /** Item #5: all classified non-'read' tool calls observed during this
+   *  session, ordered by ts ascending. Drives the Session-info "Mutations"
+   *  disclosure + activity-bar counter chip. Deduped by `mutation.id` so
+   *  the live `multi_agent_mutation` ServerMsg + the initial replay on
+   *  attach can both populate it without doubling rows. */
+  mutations: MultiAgentMutationView[];
+  /** Item #5: pause-on-first-mutation slot. Populated when a worker is
+   *  about to mutate AND `pauseOnMutation && !mutationsAcknowledged`. Drives
+   *  the pause banner; gates `UserPromptInput` (same one-decision-at-a-time
+   *  pattern as `awaitingContinue` / `pendingRetry`). Cleared optimistically
+   *  on Continue click and authoritatively by
+   *  `multi_agent_pending_mutation { pending: null }`. */
+  pendingMutation: MultiAgentMutationView | null;
 };
 
 /**
@@ -150,6 +182,10 @@ export type MultiAgentState = {
   /** The seed input the operator types before clicking Start. In chain
    *  mode it rides the first participant's opening turn. */
   draftPrompt: string;
+  /** Item #5: setup-screen opt-in for pause-on-first-mutation. Persists
+   *  during the session draft; sent on `start_multi_agent` as
+   *  `pauseOnMutation`. Default false; the operator opts in explicitly. */
+  draftPauseOnMutation: boolean;
   /** Non-null while a chain (or future orchestrator session) is running, and
    *  until the operator dismisses it. */
   active: MultiAgentRun | null;
@@ -242,6 +278,7 @@ export const initialState: AppState = {
     draftLifecycle: 'persistent',
     draftParticipants: [],
     draftPrompt: '',
+    draftPauseOnMutation: false,
     active: null,
     iterations: null,
     templates: null,
@@ -308,10 +345,12 @@ export type Action =
   | { type: 'ma_remove_participant'; projectId: number }
   | { type: 'ma_reorder_participant'; projectId: number; direction: 'up' | 'down' }
   | { type: 'ma_set_draft_prompt'; text: string }
+  | { type: 'ma_set_draft_pause_on_mutation'; value: boolean }
   | { type: 'ma_apply_template'; template: MultiAgentTemplate }
   | { type: 'ma_dismiss_active' }
   | { type: 'ma_clear_awaiting' }
-  | { type: 'ma_clear_pending_retry' };
+  | { type: 'ma_clear_pending_retry' }
+  | { type: 'ma_clear_pending_mutation' };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -452,6 +491,12 @@ export function reduce(state: AppState, action: Action): AppState {
     case 'ma_set_draft_prompt':
       return { ...state, multiAgent: { ...state.multiAgent, draftPrompt: action.text } };
 
+    case 'ma_set_draft_pause_on_mutation':
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, draftPauseOnMutation: action.value },
+      };
+
     case 'ma_apply_template': {
       // Atomic fill: lifecycle + participants in one transition. Mode is NOT
       // applied — the active tab is the mode, and template lists are filtered
@@ -506,6 +551,26 @@ export function reduce(state: AppState, action: Action): AppState {
         multiAgent: {
           ...state.multiAgent,
           active: { ...active, pendingRetry: null },
+        },
+      };
+    }
+
+    case 'ma_clear_pending_mutation': {
+      // Item #5: optimistic clear on Continue click. Also sets
+      // `mutationsAcknowledged: true` locally so subsequent mutations don't
+      // re-pause the UI in the brief window before the server's
+      // `multi_agent_pending_mutation { pending: null }` echo arrives.
+      const active = state.multiAgent.active;
+      if (!active || !active.pendingMutation) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: {
+            ...active,
+            pendingMutation: null,
+            mutationsAcknowledged: true,
+          },
         },
       };
     }
@@ -599,6 +664,13 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             activity: null,
             hopBudget: msg.hopBudget,
             pendingRetry: msg.pendingRetry ?? null,
+            // Item #5: hydrate pause-on-mutation overlay state from
+            // `multi_agent_started`. Always populated (server resolves and
+            // sends `false` + `[]` for fresh starts; reads DB for R-A/R-B).
+            pauseOnMutation: msg.pauseOnMutation,
+            mutationsAcknowledged: msg.mutationsAcknowledged,
+            mutations: msg.mutations,
+            pendingMutation: msg.pendingMutation ?? null,
           },
         },
       };
@@ -674,6 +746,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // client also drops the descriptor so the banner doesn't
             // linger on a stopped/crashed row.
             pendingRetry: null,
+            // Item #5: same reasoning for pending-mutation; the row's pause
+            // slot is no longer actionable once the session has ended.
+            pendingMutation: null,
           },
         },
       };
@@ -692,6 +767,37 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         multiAgent: {
           ...state.multiAgent,
           active: { ...active, pendingRetry: msg.pending },
+        },
+      };
+    }
+
+    case 'multi_agent_mutation': {
+      // Item #5: live mutation row arrived. Append to the session's list,
+      // deduped by id. Server may resend on R-A reconnect (the initial batch
+      // travels on `multi_agent_started.mutations`), so the dedupe matters.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      if (active.mutations.some((m) => m.id === msg.mutation.id)) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, mutations: [...active.mutations, msg.mutation] },
+        },
+      };
+    }
+
+    case 'multi_agent_pending_mutation': {
+      // Item #5: pause slot set/clear. `pending: null` = operator-Continue;
+      // a populated value = worker is paused awaiting Continue. Replaces
+      // wholesale (never merge) for the same reason as pending_retry.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, pendingMutation: msg.pending },
         },
       };
     }
@@ -988,6 +1094,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         requestId: msg.requestId,
         toolName: msg.toolName,
         input: msg.input,
+        // Item #5: copy server-classified enrichment when present. Absent on
+        // pre-Item-5 replays — the React card falls back to GenericPermissionCard.
+        ...(msg.category !== undefined ? { category: msg.category } : {}),
+        ...(msg.summary !== undefined ? { summary: msg.summary } : {}),
+        ...(msg.cwd !== undefined ? { cwd: msg.cwd } : {}),
+        ...(msg.projectName !== undefined ? { projectName: msg.projectName } : {}),
       });
     }
 
@@ -1191,10 +1303,12 @@ export const MA_SENTINELS: ReadonlySet<string> = new Set(['_sink', 'user', 'ceba
  * orchestrator (re-activation is free — stateless over the tail).
  *
  * Callers must additionally gate on `!run.awaitingContinue` (an R-B
- * read-only recovered run is not actually executing).
+ * read-only recovered run is not actually executing) and `!run.pendingMutation`
+ * (the pause-on-first-mutation gate has held the worker mid-turn).
  */
 export function activeAgent(run: MultiAgentRun): string | null {
   if (run.status !== 'running') return null;
+  if (run.awaitingContinue || run.pendingRetry || run.pendingMutation) return null;
   const evs = run.events;
   if (evs.length === 0) return null;
   const last = evs[evs.length - 1];

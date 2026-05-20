@@ -75,6 +75,12 @@ export type ResumeCallbacks = {
    *  transitions (a Continue+turn that re-fails, or an explicit Retry
    *  that re-fails). Optional — chain-mode reconstruct stays absent. */
   onPendingRetry?: BusSink['onPendingRetry'];
+  /** Item #5: per-mutation forwarding for AFTER-reconstruct transitions.
+   *  Initial mutations array ships on `multi_agent_started.mutations`. */
+  onMutation?: BusSink['onMutation'];
+  /** Item #5: pause-on-mutation slot set/clear for AFTER-reconstruct.
+   *  Initial pending value ships on `multi_agent_started.pendingMutation`. */
+  onPendingMutation?: BusSink['onPendingMutation'];
 };
 
 export type ResumedSession = {
@@ -124,6 +130,8 @@ export async function attemptResumeMultiAgent(
         onEnded: callbacks.onEnded,
         hopBudget: callbacks.hopBudget,
         onPendingRetry: callbacks.onPendingRetry,
+        onMutation: callbacks.onMutation,
+        onPendingMutation: callbacks.onPendingMutation,
       })
     ) {
       live = getLiveSession(candidate.id);
@@ -139,6 +147,8 @@ export async function attemptResumeMultiAgent(
     onEvent: callbacks.onEvent,
     onEnded: callbacks.onEnded,
     onPendingRetry: callbacks.onPendingRetry,
+    onMutation: callbacks.onMutation,
+    onPendingMutation: callbacks.onPendingMutation,
   };
   live.rebind(sink);
 
@@ -165,7 +175,10 @@ export type TargetResumeResult =
  */
 export async function resumeMultiAgentTarget(
   sessionId: string,
-  callbacks: Pick<ResumeCallbacks, 'onEvent' | 'onEnded' | 'hopBudget' | 'onPendingRetry'>,
+  callbacks: Pick<
+    ResumeCallbacks,
+    'onEvent' | 'onEnded' | 'hopBudget' | 'onPendingRetry' | 'onMutation' | 'onPendingMutation'
+  >,
 ): Promise<TargetResumeResult> {
   const row = getMultiAgentSession(sessionId);
   if (!row) return { ok: false, reason: 'not-found' };
@@ -183,6 +196,8 @@ export async function resumeMultiAgentTarget(
         onEnded: callbacks.onEnded,
         hopBudget: callbacks.hopBudget,
         onPendingRetry: callbacks.onPendingRetry,
+        onMutation: callbacks.onMutation,
+        onPendingMutation: callbacks.onPendingMutation,
       })
     ) {
       live = getLiveSession(sessionId);
@@ -197,6 +212,8 @@ export async function resumeMultiAgentTarget(
       onEvent: callbacks.onEvent,
       onEnded: callbacks.onEnded,
       onPendingRetry: callbacks.onPendingRetry,
+      onMutation: callbacks.onMutation,
+      onPendingMutation: callbacks.onPendingMutation,
     });
   } catch (err) {
     console.error(`[resume] targeted resume threw for ${sessionId}`, err);

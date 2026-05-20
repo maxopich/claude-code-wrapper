@@ -20,6 +20,7 @@
  */
 import { createSdkMcpServer, tool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { classifyToolCall } from '@cebab/shared';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
@@ -138,6 +139,25 @@ export type AgentRunnerDeps = {
    * (R-B). Optional: unit tests and the single-agent path don't set it.
    */
   onSessionId?: (agentName: string, cliSessionId: string) => void;
+  /**
+   * Item #5: called for every classified non-`read` `tool_use` block observed
+   * on an `assistant` SDKMessage, BEFORE the SDK dispatches the tool. Hooks:
+   *   - persists a row into `multi_agent_mutations`,
+   *   - emits a `multi_agent_mutation` ServerMsg via `sink.onMutation`,
+   *   - when `pause_on_mutation=1` AND `mutations_acknowledged=0`, persists
+   *     a pending-mutation slot, emits `multi_agent_pending_mutation`, and
+   *     throws `PausedForMutationError` to abort the turn (best-effort —
+   *     see the race-window risk in the plan).
+   *
+   * Throwing PROPAGATES out of `deliverTurn`; the router's `.catch`
+   * recognises `PausedForMutationError` and does NOT teardown. Any other
+   * throw is treated as a normal turn failure (worker-failed path).
+   */
+  onMutation?: (
+    agentName: string,
+    toolName: string,
+    classification: { category: 'mutate' | 'dangerous'; summary: string },
+  ) => Promise<void> | void;
   /** Injectable for tests; defaults to the real `pickRunner` (mock-aware). */
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
   /** Shared cancellation for the whole session's turns. */
@@ -255,6 +275,36 @@ export class AgentRunner {
     try {
       for await (const msg of runner) {
         this.deps.onMessage?.(agentName, msg);
+
+        // Item #5 mutation tap: every `tool_use` block on an `assistant`
+        // SDKMessage represents a tool the SDK is about to dispatch.
+        // Classify each; for non-`read` calls, fire `onMutation` BEFORE the
+        // SDK runs the tool. The hook can throw `PausedForMutationError` to
+        // abort the turn (pause-on-first-mutation gate). The cwd-side race
+        // window — SDK may dispatch the tool before the throw lands — is
+        // documented as a best-effort caveat in the plan.
+        if (this.deps.onMutation) {
+          const am = msg as {
+            type?: string;
+            message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
+          };
+          if (am.type === 'assistant' && Array.isArray(am.message?.content)) {
+            for (const block of am.message.content) {
+              if (block?.type !== 'tool_use') continue;
+              const toolName = typeof block.name === 'string' ? block.name : '';
+              if (!toolName) continue;
+              const cls = classifyToolCall(toolName, block.input);
+              if (cls.category === 'read') continue;
+              // Awaited so the gate can persist + emit + throw before the
+              // loop yields back to the SDK. A throw propagates.
+              await this.deps.onMutation(agentName, toolName, {
+                category: cls.category,
+                summary: cls.summary,
+              });
+            }
+          }
+        }
+
         const m = msg as { type?: string; session_id?: string; subtype?: string };
         if (m.type === 'result' && typeof m.session_id === 'string') {
           this.sessions.set(agentName, m.session_id);

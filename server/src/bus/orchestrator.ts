@@ -32,18 +32,27 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   appendMultiAgentEvent,
+  appendMultiAgentMutation,
   addParticipant,
   createMultiAgentSession,
   endMultiAgentSession,
+  getMultiAgentSession,
+  getPendingMutation,
   getPendingRetry,
   getProjectBusState,
+  setAwaitingContinue,
   setMultiAgentSessionLifecycle,
+  setMutationsAcknowledged,
+  setPauseOnMutation,
+  setPendingMutation,
   setPendingRetry,
   upsertAgentSession,
   type EventKind,
   type MultiAgentLifecycle,
+  type MutationRecord,
 } from '../repo/multi_agent.js';
 import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
+import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
@@ -147,6 +156,29 @@ export type StartOrchestratorOpts = {
    *  successful retry or abandon (clear). Optional; the router null-checks
    *  before invoking. */
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
+  /**
+   * Item #5: opt-in pause-on-first-mutation. When `true`, the bus runner's
+   * mutation tap fires `awaiting_continue` + a banner before the first
+   * non-`read` tool call from any worker. Persisted into
+   * `multi_agent_sessions.pause_on_mutation` at session start; survives R-B.
+   * Default `false` (resolved at `start_multi_agent` handler from
+   * `msg.pauseOnMutation`).
+   */
+  pauseOnMutation?: boolean;
+  /**
+   * Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. Fires for
+   * every non-`read` tool call observed on the bus, AFTER the row is
+   * persisted into `multi_agent_mutations`. Optional; the wire layer
+   * null-checks before invoking.
+   */
+  onMutation?: (sessionId: string, mutation: MutationRecord) => void;
+  /**
+   * Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`
+   * ServerMsg. Fires when a worker is paused (set, with the offending
+   * mutation row) and when the operator clicks Continue (cleared,
+   * `pending: null`). Optional; the wire layer null-checks.
+   */
+  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
 };
 
 export type ResumeOrchestratorOpts = {
@@ -170,6 +202,8 @@ export type OrchestratorSessionHandle = {
    *  it on the wire in `multi_agent_started`; UI reads `events.length /
    *  hopBudget` for the activity-bar chip. */
   hopBudget: number;
+  /** Item #5: resolved pause-on-first-mutation flag for this session. */
+  pauseOnMutation: boolean;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   sendUserPrompt: (text: string) => Promise<void>;
   detach: () => void;
@@ -181,6 +215,13 @@ export type OrchestratorSessionHandle = {
    *  pending-retry slot. No-op when the slot is empty (idempotent). The
    *  slot is cleared BEFORE re-delivery so a racing second click no-ops. */
   retry: () => Promise<void>;
+  /**
+   * Item #5: operator clicked Continue on the pause-on-first-mutation
+   * banner. Clears the pending-mutation slot, sets
+   * `mutations_acknowledged=1`, clears `awaiting_continue`, re-delivers the
+   * paused worker's last captured prompt. No-op when no pause is active.
+   */
+  continueThroughMutation: () => Promise<void>;
 };
 
 type OrchestratorRouter = {
@@ -586,6 +627,8 @@ export function wireOrchestratorSession(p: {
   onEnded: StartOrchestratorOpts['onEnded'];
   onActivity?: StartOrchestratorOpts['onActivity'];
   onPendingRetry?: StartOrchestratorOpts['onPendingRetry'];
+  onMutation?: StartOrchestratorOpts['onMutation'];
+  onPendingMutation?: StartOrchestratorOpts['onPendingMutation'];
   seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
   briefedAgents?: ReadonlyArray<string>;
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
@@ -599,6 +642,9 @@ export function wireOrchestratorSession(p: {
    *  starts from this value so enforcement carries over a server restart.
    *  Defaults to 0 (fresh start). */
   initialHopsCount?: number;
+  /** Item #5: opt-in pause-on-first-mutation. Surfaced on the handle; read
+   *  inside the `onMutation` hook to decide whether to gate. Default false. */
+  pauseOnMutation?: boolean;
 }): {
   handle: OrchestratorSessionHandle;
   router: OrchestratorRouter;
@@ -643,10 +689,59 @@ export function wireOrchestratorSession(p: {
   // observer chain.ts uses). Pure Cebab-side; no agent/prompt/DB change.
   const activity = createAgentActivityObserver((snap) => p.onActivity?.(sessionId, snap));
 
+  // Item #5: per-agent last delivered prompt — captured by `deliver` AFTER
+  // the briefing/rules prefix is applied, so the pause-resume path replays
+  // the exact wire bytes without double-prepending the briefing. Parallel to
+  // PR #71's pending-retry capture for chain mode.
+  const lastPrompt = new Map<string, string>();
+
   // Forward-declared: router ↔ deliver ↔ runner construction cycle (same
   // shape as chain.ts). Reassigned exactly once below.
   // eslint-disable-next-line prefer-const
   let router: OrchestratorRouter;
+
+  // Item #5: mutation tap closure. Fired by the runner's stream tap for every
+  // classified non-`read` `tool_use` block, BEFORE the SDK dispatches the
+  // tool. Persists the row, fires the live `multi_agent_mutation` sink, and
+  // — when pause-on-first-mutation is armed and not yet acknowledged — sets
+  // the pending slot, emits `multi_agent_pending_mutation`, and throws
+  // `PausedForMutationError` to abort the turn cleanly.
+  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cls) => {
+    let row: MutationRecord;
+    try {
+      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary);
+    } catch (err) {
+      console.error('[orchestrator] persist mutation failed', err);
+      return;
+    }
+    try {
+      p.onMutation?.(sessionId, row);
+    } catch (err) {
+      console.error('[orchestrator] onMutation sink threw', err);
+    }
+    // Pause gate. Fresh DB read each time — handles the operator flipping
+    // `mutations_acknowledged` mid-turn via Continue, and R-B reconstructed
+    // sessions where the in-memory closure has no value to read.
+    const session = getMultiAgentSession(sessionId);
+    if (
+      session?.pause_on_mutation === 1 &&
+      session.mutations_acknowledged === 0 &&
+      session.pending_mutation_id === null
+    ) {
+      try {
+        setPendingMutation(sessionId, row.id);
+        setAwaitingContinue(sessionId, true);
+      } catch (err) {
+        console.error('[orchestrator] persist pending-mutation failed', err);
+      }
+      try {
+        p.onPendingMutation?.(sessionId, row);
+      } catch (err) {
+        console.error('[orchestrator] onPendingMutation sink threw', err);
+      }
+      throw new PausedForMutationError(`paused before ${cls.summary}`);
+    }
+  };
 
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
@@ -664,6 +759,7 @@ export function wireOrchestratorSession(p: {
         console.error('[orchestrator] persist agent session failed', err);
       }
     },
+    onMutation: onMutationHook,
     abortController,
     runnerFactory: p.runnerFactory,
   });
@@ -721,15 +817,24 @@ export function wireOrchestratorSession(p: {
       }
     }
     // Capture the post-briefing-and-rules bytes so the .catch can hand them
-    // to onWorkerFailed for the pending-retry slot. The `briefed` Set above
-    // is already populated, so a retry that reuses these exact bytes won't
-    // double-prefix the briefing. Applies to the orchestrator itself too —
-    // its briefing comes via `renderRosterPrompt` upstream of this call, so
-    // `prompt` here IS the wire bytes regardless of who the agent is.
+    // to onWorkerFailed for the pending-retry slot, AND so the pause-on-
+    // mutation `continueThroughMutation` resume can replay the same exact
+    // wire bytes (no double briefing). The `briefed` Set above is already
+    // populated, so a re-use never re-prefixes. Applies to the orchestrator
+    // itself too — its briefing comes via `renderRosterPrompt` upstream of
+    // this call, so `prompt` here IS the wire bytes regardless of who the
+    // agent is.
     const deliveredPrompt = prompt;
+    lastPrompt.set(agentName, deliveredPrompt);
     void runner
       .deliverTurn(agentName, prompt)
       .catch((err) => {
+        // Item #5: PausedForMutationError is a sentinel from the mutation
+        // tap; it is NOT a worker failure. The pause state (DB + wire) is
+        // already persisted inside `onMutationHook` before the throw; do
+        // nothing further so the session stays `running` waiting for
+        // Continue.
+        if (isPausedForMutation(err)) return;
         console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
         router.onWorkerFailed(agentName, deliveredPrompt, err);
       })
@@ -803,14 +908,20 @@ export function wireOrchestratorSession(p: {
     lifecycle,
     sessionFolder: paths.folder,
     hopBudget,
+    pauseOnMutation: p.pauseOnMutation ?? false,
     async stop(reason) {
-      // Clear any pending-retry slot so the teardown leaves a clean row —
-      // a crashed-but-with-non-null-pending row is dead data that R-B
-      // reconstruction can't usefully act on.
+      // Clear any pending-retry / pause-on-mutation slot so the teardown
+      // leaves a clean row — a crashed-but-with-non-null-pending row is
+      // dead data that R-B reconstruction can't usefully act on.
       try {
         setPendingRetry(sessionId, null);
       } catch (err) {
         console.error('[orchestrator] clear pending-retry on stop failed', err);
+      }
+      try {
+        setPendingMutation(sessionId, null);
+      } catch (err) {
+        console.error('[orchestrator] clear pending-mutation on stop failed', err);
       }
       runner.stop();
       await router.teardown(reason);
@@ -850,6 +961,36 @@ export function wireOrchestratorSession(p: {
       // re-delivering the same wire bytes.
       deliver(pending.agentName, pending.prompt);
     },
+    async continueThroughMutation() {
+      // Item #5: idempotent operator-Continue path. Slot is read by id so a
+      // racing second click returns null and no-ops.
+      const pending = getPendingMutation(sessionId);
+      if (!pending) return;
+      try {
+        setPendingMutation(sessionId, null);
+        setMutationsAcknowledged(sessionId, true);
+        setAwaitingContinue(sessionId, false);
+      } catch (err) {
+        console.error('[orchestrator] persist continue-through-mutation failed', err);
+      }
+      try {
+        p.onPendingMutation?.(sessionId, null);
+      } catch (err) {
+        console.error('[orchestrator] continue onPendingMutation-null callback threw', err);
+      }
+      const replayPrompt = lastPrompt.get(pending.agentName);
+      if (!replayPrompt) {
+        console.warn(
+          `[orchestrator] continue-through-mutation: no captured prompt for ${pending.agentName}`,
+        );
+        return;
+      }
+      // Same idempotency rules as `retry()`: re-deliver the captured
+      // post-briefing bytes. A second mutation in the same session does NOT
+      // re-pause because `mutations_acknowledged=1` is read inside
+      // `onMutationHook`.
+      deliver(pending.agentName, replayPrompt);
+    },
   };
 
   registerLiveSession({
@@ -886,6 +1027,16 @@ export async function startOrchestratorSession(
   opts.workers.forEach((w) => addParticipant(sessionId, w.projectId, 'worker', null));
   prepareIterationDir(iterationId, participantAgentNames, paths);
 
+  // Item #5: persist the opt-in pause-on-mutation flag at session start so
+  // the bus runner's mutation tap can read it from DB on every gate check.
+  if (opts.pauseOnMutation) {
+    try {
+      setPauseOnMutation(sessionId, true);
+    } catch (err) {
+      console.error('[orchestrator] persist pause_on_mutation failed', err);
+    }
+  }
+
   const { handle, router, deliver } = wireOrchestratorSession({
     sessionId,
     iterationId,
@@ -896,7 +1047,10 @@ export async function startOrchestratorSession(
     onEnded: opts.onEnded,
     onActivity: opts.onActivity,
     onPendingRetry: opts.onPendingRetry,
+    onMutation: opts.onMutation,
+    onPendingMutation: opts.onPendingMutation,
     hopBudget: opts.hopBudget,
+    pauseOnMutation: opts.pauseOnMutation,
   });
 
   // Roster prompt + initial user prompt → UI/DB parity, then delivered as

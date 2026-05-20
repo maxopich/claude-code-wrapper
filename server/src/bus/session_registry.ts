@@ -19,19 +19,26 @@
  */
 import type { BusEvent } from './runner.js';
 import type { MultiAgentEndedReason } from './runtime.js';
-import type { MultiAgentLifecycle } from '../repo/multi_agent.js';
+import type { MultiAgentLifecycle, MutationRecord } from '../repo/multi_agent.js';
 import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 
 /** The WS-facing sink. Swapped on reconnect, silenced on detach. Identical
  *  shape to the old `StartChainOpts.onEvent/onEnded` so the WS layer and the
  *  resume dispatcher need no signature changes.
  *
- *  `onPendingRetry` is optional so test sinks (and pre-Item-#4 callers) stay
- *  slim — the routers always null-check before invoking. */
+ *  Optional callbacks (`onPendingRetry`, `onMutation`, `onPendingMutation`)
+ *  let test sinks and pre-feature callers stay slim — the routers always
+ *  null-check before invoking. */
 export type BusSink = {
   onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
+  /** Item #5: a new mutation row appended to `multi_agent_mutations`. Live
+   *  forwarding for the Session-info disclosure + activity-bar counter. */
+  onMutation?: (sessionId: string, mutation: MutationRecord) => void;
+  /** Item #5: pause-on-first-mutation slot set (with the offending row) or
+   *  cleared (`pending: null`). Mirrors `onPendingRetry`'s shape. */
+  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
 };
 
 /** A sink that drops everything — installed by `detach()` so a still-running
@@ -40,6 +47,8 @@ export const NOOP_SINK: BusSink = {
   onEvent: () => {},
   onEnded: () => {},
   onPendingRetry: () => {},
+  onMutation: () => {},
+  onPendingMutation: () => {},
 };
 
 /**
@@ -65,6 +74,14 @@ export type BusSessionHandle = {
    * a fresh descriptor.
    */
   retry: () => Promise<void>;
+  /**
+   * Item #5: operator clicked Continue on the pause-on-first-mutation
+   * banner. Clears the pending-mutation slot, sets
+   * `mutations_acknowledged=1`, clears `awaiting_continue`, and re-delivers
+   * the paused worker's last captured prompt. Subsequent mutations in this
+   * session auto-allow. No-op when no pause is active (idempotent).
+   */
+  continueThroughMutation: () => Promise<void>;
 };
 
 export type LiveBusSession = {

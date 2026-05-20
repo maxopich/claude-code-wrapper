@@ -3,6 +3,7 @@ import type { ContentBlock } from '@cebab/shared/protocol';
 import type { MessageView } from '../store';
 import { Markdown } from './Markdown';
 import { ClaudeMark } from './ClaudeMark';
+import { badgeTooltip, renderPermissionBody } from './PermissionCards';
 
 export function MessageBlock(props: {
   message: MessageView;
@@ -75,14 +76,44 @@ export function MessageBlock(props: {
   }
 
   if (m.kind === 'permission_request') {
+    // Item #5: per-tool dispatch. Server enrichment lets us pick the right
+    // subcomponent + badge color; pre-Item-5 messages without `category`
+    // render via the JSON-blob fallback in `renderPermissionBody`.
+    const category = m.category;
+    const body = renderPermissionBody({
+      toolName: m.toolName,
+      input: m.input,
+      summary: m.summary,
+      cwd: m.cwd,
+      projectName: m.projectName,
+    });
     return (
-      <div className="msg permission msg-group">
+      <div
+        className={`msg permission msg-group${category === 'dangerous' ? ' permission-dangerous' : ''}`}
+      >
         <div className="avatar tool" aria-hidden="true">
           ?
         </div>
         <div className="msg-body">
-          <div className="role">permission · {m.toolName}</div>
-          <pre>{JSON.stringify(m.input, null, 2)}</pre>
+          <div className="role">
+            <span>permission · {m.toolName}</span>
+            {category && (
+              <span
+                className={`permission-badge permission-badge-${category}`}
+                title={badgeTooltip(category)}
+              >
+                {category.toUpperCase()}
+              </span>
+            )}
+          </div>
+          {(m.projectName || m.cwd) && (
+            <div className="permission-context">
+              {m.projectName && <code>{m.projectName}</code>}
+              {m.projectName && m.cwd && ' · '}
+              {m.cwd && <code className="permission-cwd">{m.cwd}</code>}
+            </div>
+          )}
+          {body}
           {m.decided ? (
             <div className="decided">decided: {m.decided}</div>
           ) : (

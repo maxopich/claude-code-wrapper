@@ -255,7 +255,8 @@ export function App() {
   }
   function startChain() {
     // Mode is enforced by the mounted tab (Chained Chat) — no mode guard.
-    const { draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
+    const { draftParticipants, draftPrompt, draftLifecycle, draftPauseOnMutation } =
+      state.multiAgent;
     if (draftPrompt.trim().length === 0) return;
     if (draftParticipants.length < 2) return;
     wsRef.current?.send({
@@ -264,11 +265,13 @@ export function App() {
       participants: draftParticipants,
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
+      pauseOnMutation: draftPauseOnMutation,
     });
   }
   function startOrchestrator() {
     // Mode is enforced by the mounted tab (Multi-Agent) — no mode guard.
-    const { draftParticipants, draftPrompt, draftLifecycle } = state.multiAgent;
+    const { draftParticipants, draftPrompt, draftLifecycle, draftPauseOnMutation } =
+      state.multiAgent;
     if (draftPrompt.trim().length === 0) return;
     // Orchestrator mode is hub-and-spoke; even one worker is functional
     // (degenerate, but useful for smoke testing the routing path).
@@ -279,6 +282,7 @@ export function App() {
       participants: draftParticipants,
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
+      pauseOnMutation: draftPauseOnMutation,
     });
   }
   function stopMultiAgent(sessionId: string) {
@@ -321,6 +325,22 @@ export function App() {
     // `multi_agent_ended` arrives (which the reducer uses to flip status
     // and also clears `pendingRetry` so the banner disappears).
     wsRef.current?.send({ type: 'abandon_session', sessionId });
+  }
+  function continueThroughMutation(sessionId: string) {
+    // Item #5: operator clicked Continue on the pause-on-first-mutation
+    // banner. Optimistically clear the slot + flip ack so the UI doesn't
+    // double-render or re-pause mid-flight; server echoes
+    // `multi_agent_pending_mutation { pending: null }` and re-delivers the
+    // captured prompt. A re-fail mid-replay would re-pause via the runner's
+    // mutation tap (gated on `mutations_acknowledged=0`, which is now 1 —
+    // subsequent mutations auto-allow, per the original review's intent).
+    dispatch({ type: 'ma_clear_pending_mutation' });
+    wsRef.current?.send({ type: 'continue_through_mutation', sessionId });
+  }
+  function setDraftPauseOnMutation(value: boolean) {
+    // Item #5: setup-screen toggle. Persists only in client state until
+    // `start_multi_agent` sends it as `pauseOnMutation`.
+    dispatch({ type: 'ma_set_draft_pause_on_mutation', value });
   }
   function setActiveLifecycle(sessionId: string, lifecycle: MultiAgentLifecycle) {
     // Server validates: orchestrator-mode only, sessionId must match the
@@ -574,6 +594,8 @@ export function App() {
                 onContinueMultiAgent={continueMultiAgent}
                 onRetryWorker={retryWorker}
                 onAbandonSession={abandonSession}
+                onContinueThroughMutation={continueThroughMutation}
+                onSetDraftPauseOnMutation={setDraftPauseOnMutation}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}
                 onDismissActive={dismissActiveRun}

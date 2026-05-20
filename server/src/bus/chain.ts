@@ -41,15 +41,24 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import {
   appendMultiAgentEvent,
+  appendMultiAgentMutation,
   addParticipant,
   createMultiAgentSession,
   endMultiAgentSession,
+  getMultiAgentSession,
+  getPendingMutation,
   getPendingRetry,
+  setAwaitingContinue,
+  setMutationsAcknowledged,
+  setPauseOnMutation,
+  setPendingMutation,
   setPendingRetry,
   type EventKind,
   type MultiAgentLifecycle,
+  type MutationRecord,
 } from '../repo/multi_agent.js';
 import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
+import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import {
   archiveAgentHop,
   CEBAB_SOURCE,
@@ -108,6 +117,13 @@ export type StartChainOpts = {
    *  abandon); a descriptor sets/replaces. Optional so tests can skip it;
    *  the router null-checks before invoking. */
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
+  /** Item #5: opt-in pause-on-first-mutation (see orchestrator.ts for the
+   *  full docstring; same semantics in chain mode). Default false. */
+  pauseOnMutation?: boolean;
+  /** Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. */
+  onMutation?: (sessionId: string, mutation: MutationRecord) => void;
+  /** Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`. */
+  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
 };
 
 export type ResumeChainOpts = {
@@ -127,6 +143,8 @@ export type ChainSessionHandle = {
    *  `multi_agent_started`; the UI reads `events.length / hopBudget` for
    *  the activity-bar chip. */
   hopBudget: number;
+  /** Item #5: resolved pause-on-first-mutation flag for this session. */
+  pauseOnMutation: boolean;
   /** Stop the session and tear it down. Idempotent. */
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   /** Detach the WS sink without tearing down — agents keep running
@@ -137,6 +155,10 @@ export type ChainSessionHandle = {
    *  slot is cleared BEFORE re-delivery so a racing second click sees the
    *  cleared slot. A re-fail re-asserts the slot with a fresh reason. */
   retry: () => Promise<void>;
+  /** Item #5: operator clicked Continue on the pause-on-first-mutation
+   *  banner. Clears the slot, sets `mutations_acknowledged=1`, re-delivers
+   *  the paused worker's last captured prompt. No-op when no pause active. */
+  continueThroughMutation: () => Promise<void>;
 };
 
 type ChainRouter = {
@@ -492,6 +514,16 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   opts.participants.forEach((p, i) => addParticipant(sessionId, p.projectId, 'worker', i));
   prepareIterationDir(iterationId, agentNames, paths);
 
+  // Item #5: persist the opt-in pause-on-mutation flag at session start so
+  // the bus runner's mutation tap can read it from DB on every gate check.
+  if (opts.pauseOnMutation) {
+    try {
+      setPauseOnMutation(sessionId, true);
+    } catch (err) {
+      console.error('[chain] persist pause_on_mutation failed', err);
+    }
+  }
+
   const onTeardown: ((reason: MultiAgentEndedReason) => Promise<void>) | undefined =
     lifecycle === 'temp'
       ? async () => {
@@ -542,11 +574,51 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   // WS layer's `onActivity` addresses the right session even mid-first-turn.
   const activity = createAgentActivityObserver((snap) => opts.onActivity?.(sessionId, snap));
 
+  // Item #5: per-agent last delivered prompt — captured by `deliver` AFTER
+  // briefing/rules prefix, used by `continueThroughMutation` to replay the
+  // exact wire bytes (no double briefing). Mirrors orchestrator.ts.
+  const lastPromptOut = new Map<string, string>();
+
   // Forward-declared: router ↔ deliver ↔ runner form a construction cycle
   // (router needs `deliver`; deliver needs `runner`; runner.onEvent needs
   // `router`). Reassigned exactly once, just below.
   // eslint-disable-next-line prefer-const
   let router: ChainRouter;
+
+  // Item #5: mutation tap closure (mirrors orchestrator.ts's `onMutationHook`).
+  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cls) => {
+    let row: MutationRecord;
+    try {
+      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary);
+    } catch (err) {
+      console.error('[chain] persist mutation failed', err);
+      return;
+    }
+    try {
+      opts.onMutation?.(sessionId, row);
+    } catch (err) {
+      console.error('[chain] onMutation sink threw', err);
+    }
+    const session = getMultiAgentSession(sessionId);
+    if (
+      session?.pause_on_mutation === 1 &&
+      session.mutations_acknowledged === 0 &&
+      session.pending_mutation_id === null
+    ) {
+      try {
+        setPendingMutation(sessionId, row.id);
+        setAwaitingContinue(sessionId, true);
+      } catch (err) {
+        console.error('[chain] persist pending-mutation failed', err);
+      }
+      try {
+        opts.onPendingMutation?.(sessionId, row);
+      } catch (err) {
+        console.error('[chain] onPendingMutation sink threw', err);
+      }
+      throw new PausedForMutationError(`paused before ${cls.summary}`);
+    }
+  };
 
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
@@ -554,6 +626,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       writeTranscript(paths, iterationId, agent, msg);
       activity.onMessage(agent, msg);
     },
+    onMutation: onMutationHook,
     abortController,
     runnerFactory: opts.runnerFactory,
   });
@@ -572,14 +645,17 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       const pr = projectRules.get(agentName);
       prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${text}` : `${briefing}\n\n${text}`;
     }
-    // Capture the post-briefing-and-rules bytes in closure so the .catch
-    // can hand them to onWorkerFailed for the pending-retry slot. (The
-    // briefed Set is already populated above, so a retry that re-uses
-    // these exact bytes won't double-brief.)
+    // Capture the post-briefing-and-rules bytes so the .catch can hand them
+    // to onWorkerFailed for the pending-retry slot, AND so
+    // `continueThroughMutation` can replay the same exact wire bytes after a
+    // pause. (The briefed Set is already populated above, so a retry that
+    // re-uses these exact bytes won't double-brief.)
     const deliveredPrompt = prompt;
+    lastPromptOut.set(agentName, deliveredPrompt);
     void runner
       .deliverTurn(agentName, prompt)
       .catch((err) => {
+        if (isPausedForMutation(err)) return; // controlled pause, not a failure
         console.error(`[chain] deliverTurn(${agentName}) failed`, err);
         router.onWorkerFailed(agentName, deliveredPrompt, err);
       })
@@ -607,14 +683,21 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     lifecycle,
     sessionFolder: paths.folder,
     hopBudget,
+    pauseOnMutation: opts.pauseOnMutation ?? false,
     async stop(reason) {
-      // Clear any pending-retry slot first so the teardown leaves a clean
-      // row — otherwise a crashed-but-with-non-null-pending row would be
-      // dead data that R-B reconstruction can't usefully act on.
+      // Clear any pending-retry / pause-on-mutation slot first so the
+      // teardown leaves a clean row — otherwise a crashed-but-with-non-null-
+      // pending row would be dead data that R-B reconstruction can't
+      // usefully act on.
       try {
         setPendingRetry(sessionId, null);
       } catch (err) {
         console.error('[chain] clear pending-retry on stop failed', err);
+      }
+      try {
+        setPendingMutation(sessionId, null);
+      } catch (err) {
+        console.error('[chain] clear pending-mutation on stop failed', err);
       }
       runner.stop();
       await router.teardown(reason);
@@ -645,6 +728,30 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       // post-briefing bytes captured in the previous turn) does not
       // double-prepend the briefing.
       deliver(pending.agentName, pending.prompt);
+    },
+    async continueThroughMutation() {
+      const pending = getPendingMutation(sessionId);
+      if (!pending) return;
+      try {
+        setPendingMutation(sessionId, null);
+        setMutationsAcknowledged(sessionId, true);
+        setAwaitingContinue(sessionId, false);
+      } catch (err) {
+        console.error('[chain] persist continue-through-mutation failed', err);
+      }
+      try {
+        opts.onPendingMutation?.(sessionId, null);
+      } catch (err) {
+        console.error('[chain] continue onPendingMutation-null callback threw', err);
+      }
+      const replayPrompt = lastPromptOut.get(pending.agentName);
+      if (!replayPrompt) {
+        console.warn(
+          `[chain] continue-through-mutation: no captured prompt for ${pending.agentName}`,
+        );
+        return;
+      }
+      deliver(pending.agentName, replayPrompt);
     },
   };
 
