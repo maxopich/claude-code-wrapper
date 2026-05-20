@@ -1476,6 +1476,85 @@ pre {
   font-size: 12px;
 }
 
+/* ---------- Item #6: trust + auto-allow chip ---------- */
+
+/* Header band wrapping the trust chip and the ModeToggle on a single
+ * baseline. Inherits the ModeToggle's old bottom-border so the two
+ * together form one visual band — the toggle's own padding/background
+ * is dropped via descendant selectors below. */
+.chat-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: var(--s-2) var(--s-6);
+  border-bottom: 1px solid var(--line-1);
+  background: var(--bg-2);
+}
+.chat-header .mode-toggle {
+  padding: 0;
+  border-bottom: 0;
+  background: transparent;
+  margin-left: auto; /* push toggle to the right; trust chip sits on the left */
+}
+
+/* Chat-header chip. Pill geometry mirrors .ma-hop-budget-chip — same font,
+ * uppercase, 999px radius — so hop budget, mutations, trust all read as
+ * one chip family. */
+.trust-chip {
+  font-size: 10px;
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trust-chip-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+}
+.trust-chip-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+
+/* Per-participant trust tag (bus active-run rows). Geometry mirrors
+ * .participant-bus-tag — same monospace, 10.5px, 3px×8px — so trust and
+ * bus-install signals sit at the same weight in the active-run list.
+ *
+ * .untrusted is neutral grey, NOT --ok. On the bus surface "untrusted"
+ * has no security relevance (workers always bypassPermissions), so
+ * coloring it green would falsely imply it's the safer setting *here*. */
+.trust-tag {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.trust-tag.trusted {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+.trust-tag.untrusted {
+  color: var(--fg-2);
+  background: var(--bg-3);
+  border-color: var(--border);
+}
+
 /* ---------- Multi-agent tab ---------- */
 .multi-agent {
   flex: 1;

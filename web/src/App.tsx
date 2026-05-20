@@ -10,6 +10,7 @@ import { ProjectList } from './components/ProjectList';
 import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
+import { ChatHeaderChip } from './components/ChatHeaderChip';
 import { SettingsModal } from './components/SettingsModal';
 import { MultiAgentTab, MultiAgentActivityBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
@@ -176,6 +177,12 @@ export function App() {
     ? (state.permissionModeBySession[session.id] ?? 'default')
     : 'default';
   const sessionIsLive = session ? state.liveSessions[session.id] === true : false;
+  // Item #6: trust chip joins live `project.trusted` with `permissionMode`. The
+  // active project is the project whose session is currently rendering — pulled
+  // from `state.projects` because the SessionView only carries `projectId`.
+  const activeProject = session
+    ? (state.projects.find((p) => p.id === session.projectId) ?? null)
+    : null;
 
   function sendMessage(text: string) {
     if (!state.activeProjectId) return;
@@ -561,11 +568,19 @@ export function App() {
             {view === 'chat' ? (
               <>
                 {session && !isSessionPending(session.id) && (
-                  <ModeToggle
-                    mode={permissionMode}
-                    disabled={!sessionIsLive}
-                    onChange={setPermissionMode}
-                  />
+                  <div className="chat-header">
+                    {activeProject && (
+                      <ChatHeaderChip
+                        trusted={activeProject.trusted}
+                        mode={permissionMode}
+                      />
+                    )}
+                    <ModeToggle
+                      mode={permissionMode}
+                      disabled={!sessionIsLive}
+                      onChange={setPermissionMode}
+                    />
+                  </div>
                 )}
                 <ChatView
                   session={session}

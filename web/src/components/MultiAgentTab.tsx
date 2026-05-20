@@ -1701,6 +1701,33 @@ function ActiveRunView(props: {
 }
 
 /**
+ * Item #6: trust signal per bus participant, joined render-time from the
+ * project's `trusted` flag. Bus workers always run with bypassPermissions, so
+ * trust is not a runtime gate here — the chip exposes which projects the
+ * operator has vouched for, which is otherwise invisible from this surface.
+ *
+ * Returns null when no project matches the slug (degenerate case: the project
+ * was uninstalled/deleted mid-run). Caller renders nothing in that case.
+ */
+function ParticipantTrustChip(props: { slug: string; projects: Project[] }) {
+  const project = props.projects.find((p) => p.busAgentName === props.slug);
+  if (!project) return null;
+  const trusted = project.trusted;
+  const title = trusted
+    ? `${project.name}: trusted. In a single-agent chat this project auto-allows every tool. Bus workers always run with bypassPermissions, so this trust signal is informational here — the worker's tool calls bypass the gate regardless.`
+    : `${project.name}: untrusted. In a single-agent chat this project would prompt for non-edit tools. Bus workers always run with bypassPermissions, so this trust signal is informational here — the worker's tool calls bypass the gate regardless.`;
+  return (
+    <span
+      className={`trust-tag ${trusted ? 'trusted' : 'untrusted'}`}
+      title={title}
+      aria-label={`${project.name} ${trusted ? 'trusted' : 'untrusted'}`}
+    >
+      {trusted ? 'trusted' : 'untrusted'}
+    </span>
+  );
+}
+
+/**
  * Active-session info + the one editable runtime knob (lifecycle).
  *
  * The lifecycle toggle is only editable while the session is running AND
@@ -1826,6 +1853,7 @@ function SessionSettingsPanel(props: {
             {workerSlugs.map((slug, i) => (
               <li key={slug} className="settings-participant">
                 <code>{slug}</code>
+                <ParticipantTrustChip slug={slug} projects={props.projects} />
                 {props.activeAgent === slug && (
                   <ThinkingIndicator
                     variant="inline"
