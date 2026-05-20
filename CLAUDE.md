@@ -84,6 +84,8 @@ npm --workspace server exec tsx src/ci_smoke.ts          # cross-platform: spawn
 PROJECT=Cebab npm --workspace server exec tsx src/live_smoke.ts   # live: permission + resume
 ```
 
+**Stale dev:server orphans.** `tsx watch` is a supervisor that doesn't exit when its child Node crashes — it polls for file changes forever, intending to respawn on edit. When a Claude Code session calls `Bash(run_in_background: true)` to spawn `dev:server`, the `npm → npm → tsx watch → node` subtree gets reparented to launchd once the launching session exits and lives indefinitely; across sessions and worktrees these accumulate and silently squat on port 4319. Cleanup is automatic on the next launch: both `npm run dev:server` (`server.predev`) and `npm run dev` (inline in `scripts/dev.mjs`) invoke [`scripts/predev-server.mjs`](scripts/predev-server.mjs), which kills any prior `tsx watch ... --env-file-if-exists=../.env src/index.ts` before starting. Agents that spawn `dev:server` in the background should still `kill` it explicitly before ending — the predev hook only fires at the next _start_, not at session teardown.
+
 ## v1 scope (don't expand without asking)
 
 In: project sidebar, send a message, see streamed text + tool calls + approvals, persist, follow-up message resumes correctly, per-project Trust toggle, mock mode, multi-agent bus (chain + orchestrator, pure-SDK) with a Templates browser and server-restart resume (R-B), the design-token-based web UI, native macOS/Linux/Windows.
