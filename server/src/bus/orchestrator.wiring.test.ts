@@ -69,6 +69,7 @@ function setup() {
     onEvent,
     onEnded,
     deliver,
+    hopBudget: 1000,
   });
   return { router, onEvent, onEnded, deliver };
 }

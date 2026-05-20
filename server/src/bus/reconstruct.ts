@@ -109,7 +109,14 @@ export function canReconstruct(row: MultiAgentSessionRow): boolean {
  */
 export function reconstructOrchestratorSession(
   row: MultiAgentSessionRow,
-  callbacks: { onEvent: BusSink['onEvent']; onEnded: BusSink['onEnded'] },
+  callbacks: {
+    onEvent: BusSink['onEvent'];
+    onEnded: BusSink['onEnded'];
+    /** Re-resolved hop budget for this session (the WS layer reads from
+     *  current settings + env on every reconstruct so a budget change
+     *  between runs takes effect on Continue). */
+    hopBudget: number;
+  },
 ): boolean {
   if (!isReconstructable(row).ok) return false;
 
@@ -149,14 +156,16 @@ export function reconstructOrchestratorSession(
   // to have spoken it must have completed its briefed first turn, so its
   // resumed transcript already contains the briefing. The orchestrator is
   // never briefed (it learns the protocol from its workspace CLAUDE.md).
+  const allEvents = listMultiAgentEvents(row.id);
   const workerNameSet = new Set(workers.map((w) => w.agentName));
   const briefedAgents = [
-    ...new Set(
-      listMultiAgentEvents(row.id)
-        .map((e) => e.source)
-        .filter((s) => workerNameSet.has(s)),
-    ),
+    ...new Set(allEvents.map((e) => e.source).filter((s) => workerNameSet.has(s))),
   ];
+  // Seed the router's hop counter from the persisted event count so
+  // budget enforcement carries across the restart. Without this, a
+  // session that was at 29/30 hops pre-restart would silently re-open
+  // the gate to 30 more hops.
+  const initialHopsCount = allEvents.length;
 
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...workers.map((w) => w.agentName)];
   try {
@@ -176,6 +185,8 @@ export function reconstructOrchestratorSession(
       onEnded: callbacks.onEnded,
       seededSessions,
       briefedAgents,
+      hopBudget: callbacks.hopBudget,
+      initialHopsCount,
     });
   } catch (err) {
     console.error(`[reconstruct] wireOrchestratorSession failed for ${row.id}`, err);

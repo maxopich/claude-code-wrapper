@@ -1750,6 +1750,14 @@ function SessionSettingsPanel(props: {
           )}
         </dd>
 
+        <dt>Hop budget</dt>
+        <dd>
+          {run.events.length} / {run.hopBudget} hops
+          {run.hopBudget > 0 && run.events.length / run.hopBudget >= 0.8 && (
+            <span className="settings-grid-warn"> · ≥80% of cap</span>
+          )}
+        </dd>
+
         <dt>Session folder</dt>
         <dd>
           <code>{run.sessionFolder}</code>
@@ -1923,6 +1931,12 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
   const agentName = act?.agentName ?? fallbackAgent ?? '';
   const stalled = act?.phase === 'stalled';
   const tool = act?.currentTool;
+  // Hop-budget chip: shows cumulative `events.length / hopBudget` with a
+  // warn tint at ≥80% so the operator sees the cap approaching well before
+  // the synthetic `cebab → _sink error` event lands.
+  const hops = run.events.length;
+  const budget = run.hopBudget;
+  const budgetWarn = budget > 0 && hops / budget >= 0.8;
 
   return (
     <div
@@ -1969,6 +1983,17 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
             ) : null}
           </>
         )}
+      </span>
+      <span
+        className={`ma-hop-budget-chip${budgetWarn ? ' is-warn' : ''}`}
+        aria-label={`hop budget: ${hops} of ${budget}`}
+        title={
+          budgetWarn
+            ? `${hops} / ${budget} hops used — at or above 80% of the cap. The session stops when the cap is reached.`
+            : `${hops} / ${budget} hops used. The session stops when the cap is reached; adjust the default in Settings or via CEBAB_HOP_BUDGET.`
+        }
+      >
+        {hops} / {budget} hops
       </span>
     </div>
   );

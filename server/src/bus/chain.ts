@@ -63,6 +63,7 @@ import {
 } from './runtime.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
+import { DEFAULT_HOP_BUDGET } from './orchestrator.js';
 import { uninstallBusForProject } from './install.js';
 import { computeSessionPaths, type SessionPaths } from './paths.js';
 import {
@@ -92,6 +93,13 @@ export type StartChainOpts = {
    *  emitted during the awaited first turn still address the right
    *  session. Optional: unit tests omit it. */
   onActivity?: (sessionId: string, snap: ActivitySnapshot) => void;
+  /** Hard cap on total persisted hops (cumulative `multi_agent_events`
+   *  rows) for this session. When reached, the router persists a synthetic
+   *  `cebab → _sink kind=error` event explaining the stop and tears down
+   *  with `reason='stopped'`. Caller resolves precedence (DB setting >
+   *  `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`); omit to use the
+   *  default. */
+  hopBudget?: number;
 };
 
 export type ResumeChainOpts = {
@@ -106,6 +114,11 @@ export type ChainSessionHandle = {
   participantAgentNames: string[];
   lifecycle: MultiAgentLifecycle;
   sessionFolder: string;
+  /** Resolved hop budget for this session (caller-provided or default).
+   *  Surfaced on the handle so the WS layer can put it on the wire in
+   *  `multi_agent_started`; the UI reads `events.length / hopBudget` for
+   *  the activity-bar chip. */
+  hopBudget: number;
   /** Stop the session and tear it down. Idempotent. */
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   /** Detach the WS sink without tearing down — agents keep running
@@ -142,8 +155,12 @@ export function createChainRouter(params: {
   onFinalize?: () => void;
   /** Wake the destination agent with `text` as its next turn. */
   deliver?: (agentName: string, text: string) => void;
+  /** Hard cap on persisted hops. Required so the router enforces the
+   *  ceiling; the caller resolves precedence. */
+  hopBudget: number;
 }): ChainRouter {
-  const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver } = params;
+  const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
+    params;
   const participantSet = new Set(agentNames);
   const lastPromptForAgent = new Map<string, string>();
 
@@ -152,6 +169,13 @@ export function createChainRouter(params: {
   // events still reach the DB for replay on reconnect.
   let sink: BusSink = { onEvent: params.onEvent, onEnded: params.onEnded };
   let ended = false;
+  // Cumulative count of persisted `multi_agent_events` rows for this session.
+  // Incremented on every successful append (handleEvent + forwardCebabEvent)
+  // so it stays in lockstep with what the UI sees as `run.events.length`.
+  // The synthetic budget-exhausted event is persisted directly inline below
+  // and intentionally does NOT bump this counter (it lives in DB/wire as
+  // event N+1 but the displayed ratio matches the cap when it fires).
+  let hopsCount = 0;
 
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
@@ -209,6 +233,7 @@ export function createChainRouter(params: {
         ev.text,
       );
       dbId = row.id;
+      hopsCount += 1;
     } catch (err) {
       console.error('[chain] persist event failed', err);
     }
@@ -249,6 +274,41 @@ export function createChainRouter(params: {
       console.warn(`[chain] event for non-participant: ${ev.destination}`);
       return;
     }
+    // Hop-budget enforcement: the hop we just persisted is in the trail; if
+    // it pushed us to the cap, refuse to wake the next agent and surface a
+    // synthetic `cebab → _sink kind=error` event so the trail explains the
+    // stop. Persist+wire directly (NOT via `forwardCebabEvent`) so the count
+    // does not also bump for the error itself — the displayed ratio reads
+    // exactly `hopBudget/hopBudget` at the moment of refusal. F3 normally
+    // drops `source=cebab` in `handleEvent`; bypassing here mirrors the same
+    // pattern `forwardCebabEvent` uses for legitimate Cebab traffic.
+    if (hopsCount >= hopBudget) {
+      const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
+      try {
+        const row = appendMultiAgentEvent(
+          sessionId,
+          CEBAB_SOURCE,
+          SINK_RECIPIENT,
+          'error',
+          reasonText,
+        );
+        sink.onEvent(
+          sessionId,
+          {
+            ts: Date.now(),
+            source: CEBAB_SOURCE,
+            destination: SINK_RECIPIENT,
+            kind: 'error',
+            text: reasonText,
+          },
+          row.id,
+        );
+      } catch (err) {
+        console.error('[chain] persist budget-exhausted event failed', err);
+      }
+      void teardown('stopped');
+      return;
+    }
     // Fire-and-forget: must NOT block the sending agent's in-flight turn
     // (this runs inside its bus_send tool call). Mirrors the old
     // `sendKeys(...).catch(...)`.
@@ -258,6 +318,8 @@ export function createChainRouter(params: {
   // Cebab-originated events (briefings, initial prompt): persist + forward so
   // the operator's scrollback + DB transcript include them. No routing — the
   // briefing/prompt is delivered as the agent's actual turn separately.
+  // Bumps `hopsCount` on a successful persist so the counter stays in
+  // lockstep with `run.events.length` as the UI sees it.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -270,6 +332,7 @@ export function createChainRouter(params: {
         ev.text,
       );
       dbId = row.id;
+      hopsCount += 1;
     } catch (err) {
       console.error('[chain] persist cebab event failed', err);
     }
@@ -313,6 +376,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   const lifecycle: MultiAgentLifecycle = opts.lifecycle ?? 'persistent';
   const agentNames = opts.participants.map((p) => p.agentName);
   const projectIds = opts.participants.map((p) => p.projectId);
+  // Precedence is resolved by the caller (WS layer reads settings + env);
+  // this fallback only applies when the caller didn't specify.
+  const hopBudget = opts.hopBudget ?? DEFAULT_HOP_BUDGET;
 
   const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
   fs.mkdirSync(paths.folder, { recursive: true });
@@ -422,6 +488,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onTeardown,
     onFinalize: () => activity.dispose(),
     deliver,
+    hopBudget,
   });
 
   const handle: ChainSessionHandle = {
@@ -430,6 +497,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     participantAgentNames: agentNames,
     lifecycle,
     sessionFolder: paths.folder,
+    hopBudget,
     async stop(reason) {
       runner.stop();
       await router.teardown(reason);

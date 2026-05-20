@@ -73,10 +73,19 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 export const ORCHESTRATOR_AGENT_NAME = 'orchestrator';
 
 /**
- * Soft cap on `prompt` → `reply` hops per user prompt. Surfaced here so
- * PR 5's intro message and any future UI display can pull from one source.
+ * Hard cap on total persisted hops (`multi_agent_events` rows) per session,
+ * cumulative across user prompts. When `events.length` reaches the budget
+ * inside `createOrchestratorRouter` / `createChainRouter`, the router
+ * appends a synthetic `cebab → _sink kind=error` event explaining the
+ * stop and tears down with `reason='stopped'`. The orchestrator's roster
+ * prompt also surfaces this number so the LLM can self-pace.
+ *
+ * Default 30 is sized for a typical 2-3 worker orchestrator session
+ * (5-worker handshakes need ~10 hops just to collect capability replies,
+ * so 8 — the original value — was too tight in practice). Operators with
+ * larger rosters bump via Settings or the `CEBAB_HOP_BUDGET` env var.
  */
-export const DEFAULT_HOP_BUDGET = 8;
+export const DEFAULT_HOP_BUDGET = 30;
 
 /**
  * Ensure the orchestrator workspace directory exists.
@@ -123,6 +132,13 @@ export type StartOrchestratorOpts = {
    *  resume/reconstruct paths don't pass it (heartbeat resumes on the next
    *  fresh start; see the `agent_activity` protocol JSDoc). */
   onActivity?: (sessionId: string, snap: ActivitySnapshot) => void;
+  /** Hard cap on total persisted hops (cumulative `multi_agent_events`
+   *  rows) for this session. When reached, the router persists a synthetic
+   *  `cebab → _sink kind=error` event explaining the stop and tears down
+   *  with `reason='stopped'`. Caller resolves precedence (DB setting >
+   *  `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`); omit to use the
+   *  default. */
+  hopBudget?: number;
 };
 
 export type ResumeOrchestratorOpts = {
@@ -142,6 +158,10 @@ export type OrchestratorSessionHandle = {
   participantAgentNames: string[];
   lifecycle: MultiAgentLifecycle;
   sessionFolder: string;
+  /** Resolved hop budget for this session. Surfaced so the WS layer can put
+   *  it on the wire in `multi_agent_started`; UI reads `events.length /
+   *  hopBudget` for the activity-bar chip. */
+  hopBudget: number;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   sendUserPrompt: (text: string) => Promise<void>;
   detach: () => void;
@@ -184,14 +204,43 @@ export function createOrchestratorRouter(params: {
    *  the liveness observer. */
   onFinalize?: () => void;
   deliver?: (agentName: string, text: string) => void;
+  /** Hard cap on persisted hops. Required so the router enforces the
+   *  ceiling; the caller resolves precedence. */
+  hopBudget: number;
+  /** R-B reconstruction seed: the number of persisted hops already in the
+   *  DB for this session before this router started. Defaults to 0 (fresh
+   *  start). `wireOrchestratorSession` reads it from the persisted events
+   *  table so the budget check accounts for hops that landed in the prior
+   *  process. */
+  initialHopsCount?: number;
 }): OrchestratorRouter {
-  const { sessionId, iterationId, workerNames, onTeardown, onFinalize, deliver } = params;
+  const {
+    sessionId,
+    iterationId,
+    workerNames,
+    onTeardown,
+    onFinalize,
+    deliver,
+    hopBudget,
+    initialHopsCount,
+  } = params;
   const workerNamesMut: string[] = [...workerNames];
   const workerSet = new Set(workerNamesMut);
   let lifecycleRef: MultiAgentLifecycle = params.lifecycle;
 
   let sink: BusSink = { onEvent: params.onEvent, onEnded: params.onEnded };
   let ended = false;
+  // Cumulative count of persisted `multi_agent_events` rows for this session.
+  // Bumped on every successful append (both `handleEvent` and
+  // `forwardCebabEvent`) so it stays in lockstep with `run.events.length` as
+  // the UI sees it. The synthetic budget-exhausted event is written inline
+  // below and intentionally does NOT bump this counter (it lives in DB/wire
+  // as event N+1 while the displayed ratio reads `hopBudget/hopBudget` at
+  // the moment of refusal). On R-B reconstruction this is seeded from the
+  // DB so the budget check carries over from the prior process — without
+  // that, a near-cap session resumed after a server restart would silently
+  // re-open the floodgates.
+  let hopsCount = initialHopsCount ?? 0;
 
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
@@ -217,6 +266,45 @@ export function createOrchestratorRouter(params: {
     }
     unregisterLiveSession(sessionId);
     sink.onEnded(sessionId, reason, iterationId);
+  };
+
+  // Hop-budget enforcement: returns true iff we have hit (or are past) the
+  // cap and the caller should refuse to wake the next agent. Side effect on
+  // first true: appends a synthetic `cebab → _sink kind=error` event so the
+  // trail explains the stop, then calls `teardown('stopped')`. Persist+wire
+  // inline (NOT via `forwardCebabEvent`) so the count doesn't also bump for
+  // the error itself — the displayed ratio reads exactly
+  // `hopBudget/hopBudget` at the moment of refusal. F3 normally drops
+  // `source=cebab` in `handleEvent`; bypassing here mirrors the same
+  // pattern `forwardCebabEvent` uses for legitimate Cebab traffic.
+  const checkBudgetExhausted = (): boolean => {
+    if (hopsCount < hopBudget) return false;
+    if (ended) return true; // already torn down by a previous trip; just block
+    const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        SINK_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      sink.onEvent(
+        sessionId,
+        {
+          ts: Date.now(),
+          source: CEBAB_SOURCE,
+          destination: SINK_RECIPIENT,
+          kind: 'error',
+          text: reasonText,
+        },
+        row.id,
+      );
+    } catch (err) {
+      console.error('[orchestrator] persist budget-exhausted event failed', err);
+    }
+    void teardown('stopped');
+    return true;
   };
 
   const handleEvent = (ev: BusEvent) => {
@@ -255,6 +343,7 @@ export function createOrchestratorRouter(params: {
         ev.text,
       );
       dbId = row.id;
+      hopsCount += 1;
     } catch (err) {
       console.error('[orchestrator] persist event failed', err);
     }
@@ -265,12 +354,17 @@ export function createOrchestratorRouter(params: {
     }
 
     if (ev.destination === USER_RECIPIENT) {
-      return; // forwarded to the operator via sink.onEvent already
+      // The orchestrator's final-to-user happens without waking another
+      // agent. Don't trip the budget here — the session keeps going (the
+      // operator may send a follow-up). The next deliver path (user prompt
+      // or worker reply) is where enforcement kicks in.
+      return;
     }
     if (ev.destination === SINK_RECIPIENT) {
       console.warn(`[orchestrator] unexpected destination=_sink from ${ev.source}`);
       return;
     }
+    if (checkBudgetExhausted()) return;
     if (ev.destination === ORCHESTRATOR_AGENT_NAME) {
       deliver?.(ORCHESTRATOR_AGENT_NAME, ev.text);
       return;
@@ -282,6 +376,9 @@ export function createOrchestratorRouter(params: {
     console.warn(`[orchestrator] event for unknown destination: ${ev.destination}`);
   };
 
+  // Cebab-originated events (briefings, roster prompts, user prompts):
+  // persist + forward. Bumps `hopsCount` on successful persist so the
+  // counter stays in lockstep with `run.events.length`.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -294,6 +391,7 @@ export function createOrchestratorRouter(params: {
         ev.text,
       );
       dbId = row.id;
+      hopsCount += 1;
     } catch (err) {
       console.error('[orchestrator] persist cebab event failed', err);
     }
@@ -313,6 +411,9 @@ export function createOrchestratorRouter(params: {
       kind: 'prompt',
       text,
     });
+    // The user's prompt just landed as a persisted hop; check the cap
+    // before waking the orchestrator for it.
+    if (checkBudgetExhausted()) return;
     deliver?.(ORCHESTRATOR_AGENT_NAME, text);
   };
 
@@ -388,12 +489,21 @@ export function wireOrchestratorSession(p: {
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
    *  real (mock-aware) `pickRunner` when omitted. */
   runnerFactory?: AgentRunnerDeps['runnerFactory'];
+  /** Hop budget for this session (caller resolves precedence; omit to use
+   *  `DEFAULT_HOP_BUDGET`). */
+  hopBudget?: number;
+  /** R-B seed: number of persisted hops already in the DB for this
+   *  session before this wiring call. The router's in-memory `hopsCount`
+   *  starts from this value so enforcement carries over a server restart.
+   *  Defaults to 0 (fresh start). */
+  initialHopsCount?: number;
 }): {
   handle: OrchestratorSessionHandle;
   router: OrchestratorRouter;
   deliver: (agentName: string, text: string) => void;
 } {
   const { sessionId, iterationId, lifecycle, paths } = p;
+  const hopBudget = p.hopBudget ?? DEFAULT_HOP_BUDGET;
   const workerNames = p.workers.map((w) => w.agentName);
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...workerNames];
   const workerProjectIds = p.workers.map((w) => w.projectId);
@@ -528,6 +638,8 @@ export function wireOrchestratorSession(p: {
     onTeardown,
     onFinalize: () => activity.dispose(),
     deliver,
+    hopBudget,
+    initialHopsCount: p.initialHopsCount,
   });
 
   async function addWorker(projectId: number): Promise<AddWorkerResult> {
@@ -556,7 +668,7 @@ export function wireOrchestratorSession(p: {
     const rosterText = renderRosterUpdate({
       newWorker: { agentName: newAgent.agentName, projectName: newAgent.projectName },
       currentWorkers,
-      hopBudget: DEFAULT_HOP_BUDGET,
+      hopBudget,
     });
     router.forwardCebabEvent({
       ts: Date.now(),
@@ -580,6 +692,7 @@ export function wireOrchestratorSession(p: {
     participantAgentNames,
     lifecycle,
     sessionFolder: paths.folder,
+    hopBudget,
     async stop(reason) {
       runner.stop();
       await router.teardown(reason);
@@ -637,14 +750,17 @@ export async function startOrchestratorSession(
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onActivity: opts.onActivity,
+    hopBudget: opts.hopBudget,
   });
 
   // Roster prompt + initial user prompt → UI/DB parity, then delivered as
   // the orchestrator's first turn (was: two inbox messages drained by the
-  // Stop hook; now concatenated into one prompt).
+  // Stop hook; now concatenated into one prompt). Prompt's hop-budget
+  // framing must match what the router actually enforces — use the
+  // resolved value from the handle, not the literal `DEFAULT_HOP_BUDGET`.
   const rosterText = renderRosterPrompt({
     workers: opts.workers.map((w) => ({ agentName: w.agentName, projectName: w.projectName })),
-    hopBudget: DEFAULT_HOP_BUDGET,
+    hopBudget: handle.hopBudget,
   });
   router.forwardCebabEvent({
     ts: Date.now(),

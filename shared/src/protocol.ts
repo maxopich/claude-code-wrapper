@@ -107,6 +107,17 @@ export type ClientMsg =
   | { type: 'load_session'; projectId: number; sessionId: string }
   | { type: 'get_settings' }
   | { type: 'set_workspace_root'; path: string }
+  | {
+      /**
+       * Persist a new default hop budget (cap on `multi_agent_events` rows
+       * per session). Stored in `settings` keyed by `hop_budget`. The
+       * server clamps to `value >= 1` and silently ignores non-finite
+       * input. Takes effect on the next multi-agent session start (and on
+       * R-B reconstruction); active sessions keep their resolved value.
+       */
+      type: 'set_default_hop_budget';
+      value: number;
+    }
   | { type: 'set_permission_mode'; sessionId: string; mode: SessionPermissionMode }
   | {
       /**
@@ -370,6 +381,10 @@ export type ServerMsg =
       /** True iff the *resolved* workspace root (stored OR default fallback) exists. */
       workspaceRootValid: boolean;
       defaultWorkspaceRoot: string;
+      /** Resolved default hop budget (DB setting > `CEBAB_HOP_BUDGET` env >
+       *  built-in `DEFAULT_HOP_BUDGET`). Always present; the Settings modal
+       *  seeds its input from this value. */
+      defaultHopBudget: number;
     }
   | {
       /**
@@ -405,6 +420,17 @@ export type ServerMsg =
       participantAgentNames: string[];
       lifecycle: MultiAgentLifecycle;
       sessionFolder: string;
+      /**
+       * Hard cap on persisted hops for this session (cumulative
+       * `multi_agent_events` rows). Server-resolved at start time from DB
+       * setting > `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`; R-B
+       * reconstruction re-resolves the same precedence on reconnect. The
+       * UI reads `events.length / hopBudget` for the activity-bar chip
+       * and the "Hop budget" row in Session info; the router emits a
+       * synthetic `cebab → _sink kind=error` event when it trips and
+       * tears down with `reason='stopped'`.
+       */
+      hopBudget: number;
       /**
        * True iff this session was reconstructed after a Cebab server
        * restart (R-B) and is re-attached READ-ONLY: nothing runs until the

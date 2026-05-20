@@ -97,6 +97,9 @@ function buildRouter(
     onEvent,
     onEnded,
     onTeardown: opts.onTeardown,
+    // Generous cap so unrelated tests don't accidentally trip on the
+    // budget enforcement; the budget-specific tests below override.
+    hopBudget: 1000,
   });
   return { router, sessionId, onEvent, onEnded };
 }
@@ -257,5 +260,145 @@ describe('createOrchestratorRouter — setLifecycle (mid-run lifecycle flip)', (
     const { router } = buildRouter({ lifecycle: 'temp', onTeardown });
     await router.teardown('crashed');
     expect(onTeardown).not.toHaveBeenCalled();
+  });
+});
+
+describe('createOrchestratorRouter — hop-budget enforcement', () => {
+  function buildBudgetRouter(hopBudget: number, initialHopsCount?: number) {
+    const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
+    const iterationId = '001';
+    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, 'persistent');
+    const onEvent = vi.fn();
+    const onEnded = vi.fn();
+    const deliver = vi.fn();
+    const router = createOrchestratorRouter({
+      sessionId,
+      iterationId,
+      workerNames: ['reviewer', 'editor'],
+      paths,
+      lifecycle: 'persistent',
+      onEvent,
+      onEnded,
+      deliver,
+      hopBudget,
+      initialHopsCount,
+    });
+    return { router, sessionId, onEvent, onEnded, deliver };
+  }
+
+  test('budget=3: the 3rd persisted hop trips a synthetic error + tears down stopped', () => {
+    const { router, sessionId, onEvent, onEnded, deliver } = buildBudgetRouter(3);
+
+    // 3 worker→orchestrator hops persist; the 3rd's would-be deliver fires
+    // because the check sits AFTER persist+sink — wait, re-check…
+    // Actually `checkBudgetExhausted()` runs BEFORE deliver. After hop 3
+    // persists, `hopsCount === 3 === budget` → refuse the next deliver.
+    // The 3rd hop's deliver (which would wake the orchestrator) is the
+    // one that gets refused, NOT the 3rd hop's persist.
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'r1' }),
+    );
+    router.handleEvent(
+      makeEvent({ source: 'editor', destination: ORCHESTRATOR_AGENT_NAME, text: 'e1' }),
+    );
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'r2' }),
+    );
+    // 4th attempt is dropped at the `ended` guard.
+    router.handleEvent(
+      makeEvent({ source: 'editor', destination: ORCHESTRATOR_AGENT_NAME, text: 'e2 refused' }),
+    );
+
+    const persisted = listMultiAgentEvents(sessionId);
+    // 3 worker hops + 1 synthetic cebab→_sink error = 4 events.
+    expect(persisted).toHaveLength(4);
+    expect(persisted.at(-1)).toMatchObject({
+      source: CEBAB_SOURCE,
+      kind: 'error',
+    });
+    expect(persisted.at(-1)!.text).toContain('Hop budget exhausted (3/3)');
+
+    expect(onEvent).toHaveBeenCalledTimes(4);
+    // Only the first 2 hops fired deliver; hop 3 was the boundary trip and
+    // its deliver call was refused by `checkBudgetExhausted()`.
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenNthCalledWith(1, ORCHESTRATOR_AGENT_NAME, 'r1');
+    expect(deliver).toHaveBeenNthCalledWith(2, ORCHESTRATOR_AGENT_NAME, 'e1');
+
+    expect(onEnded).toHaveBeenCalledTimes(1);
+    expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');
+  });
+
+  test('orchestrator → user is exempt from triggering the budget refusal', () => {
+    // `orchestrator → user` does not wake another agent (the operator is
+    // not a participant), so the post-persist budget check is skipped on
+    // that path — a final-to-user right at the boundary should NOT emit a
+    // synthetic error.
+    const { router, sessionId, onEnded, deliver } = buildBudgetRouter(2);
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'r1' }),
+    );
+    router.handleEvent(
+      makeEvent({
+        source: ORCHESTRATOR_AGENT_NAME,
+        destination: USER_RECIPIENT,
+        kind: 'final',
+        text: 'final answer',
+      }),
+    );
+    const persisted = listMultiAgentEvents(sessionId);
+    // 2 legitimate events, no synthetic error appended.
+    expect(persisted).toHaveLength(2);
+    expect(persisted.every((p) => p.kind !== 'error' || p.source !== CEBAB_SOURCE)).toBe(true);
+    expect(onEnded).not.toHaveBeenCalled();
+    // Only the 1st hop's deliver fires (waking orchestrator); the final →
+    // user does not call deliver.
+    expect(deliver).toHaveBeenCalledTimes(1);
+  });
+
+  test('sendUserPrompt enforces budget after exhaustion (no orchestrator wake)', async () => {
+    // After the cap trips, a follow-up user prompt must NOT wake the
+    // orchestrator; the router is `ended` so even the persist short-
+    // circuits inside `forwardCebabEvent`.
+    const { router, deliver } = buildBudgetRouter(1);
+
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'h1' }),
+    );
+    expect(deliver).toHaveBeenCalledTimes(0); // 1st hop already tripped the cap
+
+    await router.sendUserPrompt('follow-up after exhaustion');
+    expect(deliver).toHaveBeenCalledTimes(0); // never woke orchestrator
+  });
+
+  test('initialHopsCount seeds the counter (R-B reconstruction parity)', () => {
+    // R-B path: reconstruct.ts reads `listMultiAgentEvents(...).length` and
+    // passes it as `initialHopsCount` so a session at 29/30 resumed after a
+    // restart trips on the next hop, not 30 hops later.
+    const { router, sessionId, onEnded, deliver } = buildBudgetRouter(3, 2);
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'post-resume' }),
+    );
+    // Initial 2 + this hop's 1 = 3 → at-cap, refuse deliver, emit synthetic.
+    expect(deliver).not.toHaveBeenCalled();
+    const persisted = listMultiAgentEvents(sessionId);
+    expect(persisted.at(-1)).toMatchObject({ source: CEBAB_SOURCE, kind: 'error' });
+    expect(persisted.at(-1)!.text).toContain('Hop budget exhausted (3/3)');
+    expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');
+  });
+
+  test('budget=1000 never trips on a short session', () => {
+    const { router, onEnded, deliver } = buildBudgetRouter(1000);
+    for (let i = 0; i < 10; i++) {
+      router.handleEvent(
+        makeEvent({
+          source: i % 2 ? 'reviewer' : ORCHESTRATOR_AGENT_NAME,
+          destination: i % 2 ? ORCHESTRATOR_AGENT_NAME : 'reviewer',
+        }),
+      );
+    }
+    expect(deliver).toHaveBeenCalledTimes(10);
+    expect(onEnded).not.toHaveBeenCalled();
   });
 });

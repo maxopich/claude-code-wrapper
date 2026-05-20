@@ -23,7 +23,7 @@ import { persistMessage } from '../runner/orchestrator.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { registerQuery } from '../runner/lifecycle.js';
-import { getSetting } from '../repo/settings.js';
+import { getSetting, setSetting } from '../repo/settings.js';
 import { listTemplates, saveTemplate, deleteTemplate } from '../repo/templates.js';
 import {
   resolveWorkspaceRoot,
@@ -43,6 +43,7 @@ import {
   type ChainSessionHandle,
 } from '../bus/chain.js';
 import {
+  DEFAULT_HOP_BUDGET,
   resolveOrchestratorWorkers,
   startOrchestratorSession,
   type OrchestratorSessionHandle,
@@ -272,6 +273,10 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     participantAgentNames: resumed.handle.participantAgentNames,
     lifecycle: resumed.handle.lifecycle,
     sessionFolder: resumed.handle.sessionFolder,
+    // R-A: re-attaches a live handle → use the original session's budget.
+    // R-B: the resume path re-resolved the budget at reconstruct time and
+    // the rebuilt handle carries it; both paths land here on the same field.
+    hopBudget: resumed.handle.hopBudget,
     awaitingContinue,
   });
   for (const ev of resumed.replayEvents) {
@@ -299,6 +304,7 @@ async function resumeOnConnect(conn: Conn): Promise<void> {
   try {
     const resumed = await attemptResumeMultiAgent({
       ...resumeCallbacks(conn),
+      hopBudget: resolveHopBudget(),
       onResumeFailed: (sessionId) => {
         // Surface auto-resume failures as a wrapper_error toast so the
         // operator notices instead of "Cebab silently lost my session".
@@ -317,6 +323,28 @@ async function resumeOnConnect(conn: Conn): Promise<void> {
   }
 }
 
+/**
+ * Resolved hop budget for a new multi-agent session start (and for R-B
+ * reconstruction). Precedence:
+ *
+ *   1. DB setting `hop_budget` (a positive integer) — what the operator set
+ *      via the Settings modal.
+ *   2. `CEBAB_HOP_BUDGET` env var — the operator's per-launch override.
+ *   3. `DEFAULT_HOP_BUDGET` from `bus/orchestrator.ts` — the built-in floor.
+ *
+ * Always returns a finite integer ≥ 1. Re-read on every start/resume so a
+ * Settings-modal change between runs takes effect immediately.
+ */
+function resolveHopBudget(): number {
+  const stored = getSetting<number>('hop_budget');
+  if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 1) {
+    return Math.floor(stored);
+  }
+  const env = parseInt(process.env.CEBAB_HOP_BUDGET ?? '', 10);
+  if (Number.isFinite(env) && env >= 1) return env;
+  return DEFAULT_HOP_BUDGET;
+}
+
 function emitSettings(conn: Conn): void {
   // Return the *raw* setting so the client can distinguish "user hasn't set
   // anything yet" (null) from "set, but pointing at a missing folder" (string
@@ -328,6 +356,7 @@ function emitSettings(conn: Conn): void {
     workspaceRoot: typeof stored === 'string' && stored.length > 0 ? stored : null,
     workspaceRootValid: workspaceRootValid(),
     defaultWorkspaceRoot: config.workspaceRootDefault,
+    defaultHopBudget: resolveHopBudget(),
   });
 }
 
@@ -486,6 +515,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       const rows = await syncWorkspaceProjects();
       emitSettings(conn);
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      return;
+    }
+    case 'set_default_hop_budget': {
+      // Silently clamp invalid/non-finite/below-1 values to a no-op; the
+      // client's number input is the validation surface for typo recovery.
+      // Mirrors `set_workspace_root`'s "emit settings even on rejection so
+      // the UI re-syncs" contract.
+      if (Number.isFinite(msg.value) && msg.value >= 1) {
+        setSetting('hop_budget', Math.floor(msg.value));
+      }
+      emitSettings(conn);
       return;
     }
     case 'open_project': {
@@ -782,6 +822,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // resumable behavior.
       const lifecycle: MultiAgentLifecycle = msg.lifecycle ?? 'persistent';
 
+      // Resolve once per start so the wire's `hopBudget` matches what the
+      // router was constructed with (Settings-modal saves between fetch and
+      // start would otherwise risk a brief mismatch).
+      const hopBudget = resolveHopBudget();
+
       if (msg.mode === 'orchestrator') {
         let workers;
         try {
@@ -805,6 +850,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             onEvent,
             onEnded,
             onActivity,
+            hopBudget,
           });
           conn.multiAgent = handle;
           send(conn.ws, {
@@ -815,6 +861,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             participantAgentNames: handle.participantAgentNames,
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
+            hopBudget: handle.hopBudget,
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -846,6 +893,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           onEvent,
           onEnded,
           onActivity,
+          hopBudget,
         });
         conn.multiAgent = handle;
         send(conn.ws, {
@@ -856,6 +904,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           participantAgentNames: handle.participantAgentNames,
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
+          hopBudget: handle.hopBudget,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -924,7 +973,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         return;
       }
       try {
-        const result = await resumeMultiAgentTarget(msg.sessionId, resumeCallbacks(conn));
+        const result = await resumeMultiAgentTarget(msg.sessionId, {
+          ...resumeCallbacks(conn),
+          hopBudget: resolveHopBudget(),
+        });
         if (!result.ok) {
           const message =
             result.reason === 'not-found'

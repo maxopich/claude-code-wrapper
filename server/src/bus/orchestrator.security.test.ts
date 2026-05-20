@@ -66,6 +66,7 @@ function makeRouter() {
     lifecycle: 'persistent',
     onEvent,
     onEnded,
+    hopBudget: 1000,
   });
   return { router, onEvent, onEnded };
 }

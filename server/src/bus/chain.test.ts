@@ -66,6 +66,10 @@ function setup() {
     onEvent,
     onEnded,
     deliver,
+    // Generous cap so routing tests below don't accidentally trip on the
+    // budget enforcement; the budget-specific test below overrides with a
+    // tight value.
+    hopBudget: 1000,
   });
   return { router, onEvent, onEnded, deliver, paths };
 }
@@ -136,6 +140,109 @@ describe('createChainRouter routing', () => {
     router.rebind({ onEvent: onEvent2, onEnded: vi.fn() });
     router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'after rebind' }));
     expect(onEvent2).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('createChainRouter — hop-budget enforcement', () => {
+  function setupBudget(hopBudget: number) {
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+    fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
+    const onEvent = vi.fn();
+    const onEnded = vi.fn();
+    const deliver = vi.fn();
+    const router = createChainRouter({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      agentNames: AGENTS,
+      paths,
+      onEvent,
+      onEnded,
+      deliver,
+      hopBudget,
+    });
+    return { router, onEvent, onEnded, deliver };
+  }
+
+  test('the Nth hop persists then refuses to wake the next agent (synthetic error appended)', () => {
+    // Budget 3: hops 1 and 2 persist + deliver. Hop 3 persists (visible in
+    // the trail) but its `deliver` is refused — the post-persist check
+    // sees hopsCount=3 === budget and emits the synthetic error instead.
+    const { router, onEvent, onEnded, deliver } = setupBudget(3);
+
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'h1' }));
+    router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'h2' }));
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'h3' }));
+    // Would be hop 4 — must not run; `ended` guard short-circuits handleEvent.
+    router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'h4 (refused)' }));
+
+    // 3 legitimate hops + 1 synthetic cebab→_sink error = 4 events on wire/DB.
+    const persisted = listMultiAgentEvents(SESSION_ID);
+    expect(persisted).toHaveLength(4);
+    expect(persisted.at(-1)).toMatchObject({
+      source: CEBAB_SOURCE,
+      destination: SINK_RECIPIENT,
+      kind: 'error',
+    });
+    expect(persisted.at(-1)!.text).toContain('Hop budget exhausted (3/3)');
+
+    // sink.onEvent received the 3 hops + the synthetic error.
+    expect(onEvent).toHaveBeenCalledTimes(4);
+
+    // Hops 1 and 2 fired deliver; hop 3 was the boundary trip (its deliver
+    // call was refused by the budget check), hop 4 was dropped by `ended`.
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(deliver).toHaveBeenNthCalledWith(1, 'reviewer', 'h1');
+    expect(deliver).toHaveBeenNthCalledWith(2, 'coder', 'h2');
+
+    // Teardown ran exactly once with reason='stopped'.
+    expect(onEnded).toHaveBeenCalledTimes(1);
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', null);
+    expect(getMultiAgentSession(SESSION_ID)!.status).toBe('stopped');
+  });
+
+  test('forwardCebabEvent rows count toward the budget', () => {
+    // Briefings persisted before any agent hop should still count — the UI
+    // shows `events.length / hopBudget` and the math has to match.
+    const { router, onEnded, deliver } = setupBudget(2);
+    router.forwardCebabEvent({
+      ts: 1,
+      source: CEBAB_SOURCE,
+      destination: 'coder',
+      kind: 'intro',
+      text: 'briefing-1',
+    });
+    router.forwardCebabEvent({
+      ts: 2,
+      source: CEBAB_SOURCE,
+      destination: 'reviewer',
+      kind: 'intro',
+      text: 'briefing-2',
+    });
+    // First agent hop would push count to 3 (over the cap) and trip the
+    // synthetic error. Deliver to reviewer must not fire.
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'first work' }));
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', null);
+    const persisted = listMultiAgentEvents(SESSION_ID);
+    expect(persisted.at(-1)!.kind).toBe('error');
+    expect(persisted.at(-1)!.text).toContain('Hop budget exhausted');
+  });
+
+  test('budget=Infinity-ish (1000) never trips on a short session', () => {
+    const { router, onEnded, deliver } = setupBudget(1000);
+    for (let i = 0; i < 10; i++) {
+      router.handleEvent(
+        ev({ source: i % 2 ? 'reviewer' : 'coder', destination: i % 2 ? 'coder' : 'reviewer' }),
+      );
+    }
+    expect(deliver).toHaveBeenCalledTimes(10);
+    expect(onEnded).not.toHaveBeenCalled();
+    // No synthetic error event was emitted.
+    const persisted = listMultiAgentEvents(SESSION_ID);
+    expect(persisted.every((p) => p.kind !== 'error' || p.source !== CEBAB_SOURCE)).toBe(true);
   });
 });
 

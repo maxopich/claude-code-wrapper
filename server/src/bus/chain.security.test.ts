@@ -60,6 +60,7 @@ function makeRouter() {
     paths,
     onEvent,
     onEnded,
+    hopBudget: 1000,
   });
   return { router, onEvent, onEnded };
 }
