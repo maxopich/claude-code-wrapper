@@ -116,6 +116,14 @@ export function reconstructOrchestratorSession(
      *  current settings + env on every reconstruct so a budget change
      *  between runs takes effect on Continue). */
     hopBudget: number;
+    /** Item #4: forwarded into the rebuilt router so a failure that
+     *  happens AFTER the reconstruct (e.g. on the operator's Continue or
+     *  on a subsequent retry) emits the pending-retry ServerMsg to the
+     *  re-attached browser. The persisted row's `pending_retry_*` columns
+     *  already survived the restart and are hydrated by the WS layer on
+     *  `multi_agent_started`, so the initial banner restore does not need
+     *  this callback. */
+    onPendingRetry?: BusSink['onPendingRetry'];
   },
 ): boolean {
   if (!isReconstructable(row).ok) return false;
@@ -183,6 +191,7 @@ export function reconstructOrchestratorSession(
       workers,
       onEvent: callbacks.onEvent,
       onEnded: callbacks.onEnded,
+      onPendingRetry: callbacks.onPendingRetry,
       seededSessions,
       briefedAgents,
       hopBudget: callbacks.hopBudget,

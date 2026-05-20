@@ -68,6 +68,13 @@ export type ResumeCallbacks = {
    *  between runs takes effect immediately. The router seeds its in-memory
    *  `hopsCount` from the DB so enforcement carries over the restart. */
   hopBudget: number;
+  /** Item #4: pending-retry set/clear callback for a reconstructed router.
+   *  Forwarded into `wireOrchestratorSession`; the initial banner restore
+   *  travels on `multi_agent_started.pendingRetry` (hydrated from the
+   *  persisted columns), so this fires only on AFTER-reconstruct
+   *  transitions (a Continue+turn that re-fails, or an explicit Retry
+   *  that re-fails). Optional — chain-mode reconstruct stays absent. */
+  onPendingRetry?: BusSink['onPendingRetry'];
 };
 
 export type ResumedSession = {
@@ -116,6 +123,7 @@ export async function attemptResumeMultiAgent(
         onEvent: callbacks.onEvent,
         onEnded: callbacks.onEnded,
         hopBudget: callbacks.hopBudget,
+        onPendingRetry: callbacks.onPendingRetry,
       })
     ) {
       live = getLiveSession(candidate.id);
@@ -127,7 +135,11 @@ export async function attemptResumeMultiAgent(
     return null;
   }
 
-  const sink: BusSink = { onEvent: callbacks.onEvent, onEnded: callbacks.onEnded };
+  const sink: BusSink = {
+    onEvent: callbacks.onEvent,
+    onEnded: callbacks.onEnded,
+    onPendingRetry: callbacks.onPendingRetry,
+  };
   live.rebind(sink);
 
   return {
@@ -153,7 +165,7 @@ export type TargetResumeResult =
  */
 export async function resumeMultiAgentTarget(
   sessionId: string,
-  callbacks: Pick<ResumeCallbacks, 'onEvent' | 'onEnded' | 'hopBudget'>,
+  callbacks: Pick<ResumeCallbacks, 'onEvent' | 'onEnded' | 'hopBudget' | 'onPendingRetry'>,
 ): Promise<TargetResumeResult> {
   const row = getMultiAgentSession(sessionId);
   if (!row) return { ok: false, reason: 'not-found' };
@@ -170,6 +182,7 @@ export async function resumeMultiAgentTarget(
         onEvent: callbacks.onEvent,
         onEnded: callbacks.onEnded,
         hopBudget: callbacks.hopBudget,
+        onPendingRetry: callbacks.onPendingRetry,
       })
     ) {
       live = getLiveSession(sessionId);
@@ -180,7 +193,11 @@ export async function resumeMultiAgentTarget(
   const prevStatus = row.status as MultiAgentStatus;
   reactivateMultiAgentSession(sessionId);
   try {
-    live.rebind({ onEvent: callbacks.onEvent, onEnded: callbacks.onEnded });
+    live.rebind({
+      onEvent: callbacks.onEvent,
+      onEnded: callbacks.onEnded,
+      onPendingRetry: callbacks.onPendingRetry,
+    });
   } catch (err) {
     console.error(`[resume] targeted resume threw for ${sessionId}`, err);
     endMultiAgentSession(sessionId, prevStatus);

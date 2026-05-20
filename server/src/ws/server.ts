@@ -59,6 +59,7 @@ import {
 import {
   clearFinishedMultiAgentSessions,
   getMultiAgentSession,
+  getPendingRetry,
   listMultiAgentEvents,
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
@@ -68,7 +69,7 @@ import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { hasLiveSession } from '../bus/session_registry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
-import type { IterationSummary } from '@cebab/shared/protocol';
+import type { IterationSummary, PendingRetryDescriptor } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
 import { buildAllowedOrigins, isAllowedHost } from '../origin.js';
 import { verifyToken } from '../auth.js';
@@ -227,7 +228,9 @@ function onConnection(ws: WebSocket): void {
  * and the manual `resume_multi_agent` handler feed into the bus runtime:
  * stream events to this WS and drop the active handle when it ends.
  */
-function resumeCallbacks(conn: Conn): Pick<ResumeCallbacks, 'onEvent' | 'onEnded'> {
+function resumeCallbacks(
+  conn: Conn,
+): Pick<ResumeCallbacks, 'onEvent' | 'onEnded' | 'onPendingRetry'> {
   return {
     onEvent: (sessionId, ev, dbEventId) => {
       const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
@@ -248,6 +251,9 @@ function resumeCallbacks(conn: Conn): Pick<ResumeCallbacks, 'onEvent' | 'onEnded
         conn.multiAgent = null;
       }
     },
+    onPendingRetry: (sessionId, pending) => {
+      send(conn.ws, { type: 'multi_agent_pending_retry', sessionId, pending });
+    },
   };
 }
 
@@ -263,6 +269,23 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   // resume sweep snapshots its `candidate` row, so `resumed.row` can be
   // stale. The DB is authoritative.
   const awaitingContinue = getMultiAgentSession(resumed.handle.sessionId)?.awaiting_continue === 1;
+  // Item #4: hydrate the pending-retry banner descriptor from the persisted
+  // columns. Survives both R-A (live re-attach — slot was set by an
+  // onWorkerFailed in this process and lives in the DB) and R-B
+  // (server restart — slot persisted in the prior process). Translate from
+  // the DB `prompt` field to the wire `lastPrompt` field; both carry the
+  // same bytes, just different names. The router's onPendingRetry callback
+  // handles AFTER-attach transitions (a Continue+turn that re-fails, etc.).
+  const pendingRow = getPendingRetry(resumed.handle.sessionId);
+  const pendingRetry: PendingRetryDescriptor | undefined = pendingRow
+    ? {
+        agentName: pendingRow.agentName,
+        reason: pendingRow.reason,
+        lastPrompt: pendingRow.prompt,
+        ts: pendingRow.ts,
+        errorEventId: pendingRow.errorEventId,
+      }
+    : undefined;
   send(conn.ws, {
     type: 'multi_agent_started',
     sessionId: resumed.handle.sessionId,
@@ -278,6 +301,7 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // the rebuilt handle carries it; both paths land here on the same field.
     hopBudget: resumed.handle.hopBudget,
     awaitingContinue,
+    ...(pendingRetry ? { pendingRetry } : {}),
   });
   for (const ev of resumed.replayEvents) {
     const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
@@ -802,6 +826,13 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           turnStartedAt: snap.turnStartedAt,
         });
       };
+      // Item #4: pending-retry set/clear → wire. Fresh starts never carry a
+      // pending-retry slot on `multi_agent_started`; this callback is the
+      // delta for transitions that happen later (a worker fails, the
+      // operator retries, etc.).
+      const onPendingRetry = (sessionId: string, pending: PendingRetryDescriptor | null) => {
+        send(conn.ws, { type: 'multi_agent_pending_retry', sessionId, pending });
+      };
 
       // Per-session folders live under the workspace root, so it must be
       // a valid existing directory. The Settings modal validates on save,
@@ -850,6 +881,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             onEvent,
             onEnded,
             onActivity,
+            onPendingRetry,
             hopBudget,
           });
           conn.multiAgent = handle;
@@ -893,6 +925,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           onEvent,
           onEnded,
           onActivity,
+          onPendingRetry,
           hopBudget,
         });
         conn.multiAgent = handle;
@@ -1036,6 +1069,71 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+      }
+      return;
+    }
+    case 'retry_worker': {
+      // Item #4: re-deliver the captured prompt of the worker named in the
+      // session's persisted pending-retry slot. Stateless — the server reads
+      // the agent name + bytes from the DB, never from the client. The
+      // router clears the slot BEFORE re-delivery so a racing second click
+      // sees the empty slot and no-ops.
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        // Not the active session — drop. Idempotent.
+        return;
+      }
+      const pending = getPendingRetry(msg.sessionId);
+      if (!pending) {
+        // No slot to retry; either never set or a racing second click won.
+        return;
+      }
+      // If this session is also awaiting Continue (R-B reconstruct + a
+      // failure that survived the restart), retrying implies acknowledging
+      // the recovery context — clear awaiting_continue too so the banner
+      // doesn't linger after the retried turn lands.
+      try {
+        const row = getMultiAgentSession(msg.sessionId);
+        if (row?.awaiting_continue === 1) {
+          setAwaitingContinue(msg.sessionId, false);
+        }
+      } catch (err) {
+        console.error('[ws] clear awaiting_continue on retry failed', err);
+      }
+      try {
+        await active.retry();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message,
+        });
+      }
+      return;
+    }
+    case 'abandon_session': {
+      // Item #4: give up on the pending-retry slot and end the session as
+      // `'stopped'`. Same teardown as `stop_multi_agent`, distinct verb so
+      // we can later differentiate post-hoc (analytics, iteration browser
+      // labels) "operator stopped a healthy run" from "abandoned after a
+      // failure". Handle.stop already clears pending-retry as part of its
+      // teardown.
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        return;
+      }
+      try {
+        await active.stop('stopped');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message,
+        });
       }
       return;
     }

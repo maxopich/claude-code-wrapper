@@ -596,6 +596,7 @@ describe('store / eventDefaultCollapsed', () => {
       awaitingContinue: false,
       activity: null,
       hopBudget: 30,
+      pendingRetry: null,
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
@@ -804,5 +805,155 @@ describe('store / hop budget', () => {
       defaultWorkspaceRoot: '/home/user/agents',
       defaultHopBudget: 50,
     });
+  });
+});
+
+// Item #4: pending-retry slot wiring. The reducer must (a) hydrate from
+// `multi_agent_started.pendingRetry` on R-A/R-B attach, (b) set or clear via
+// the `multi_agent_pending_retry` ServerMsg, (c) clear on session end so the
+// banner doesn't linger on a stopped/crashed row, and (d) honor the
+// optimistic `ma_clear_pending_retry` action with idempotent re-asserts.
+describe('store / pending retry', () => {
+  const baseStarted = {
+    type: 'multi_agent_started' as const,
+    sessionId: 's-pr',
+    mode: 'orchestrator' as const,
+    participants: [1],
+    participantAgentNames: ['orchestrator', 'coder'],
+    lifecycle: 'persistent' as const,
+    sessionFolder: '/ws/.cebab/s-pr',
+    hopBudget: 30,
+  };
+
+  test('multi_agent_started without pendingRetry → null (fresh start)', () => {
+    const s = reduce(initialState, { type: 'server', msg: baseStarted });
+    expect(s.multiAgent.active!.pendingRetry).toBeNull();
+  });
+
+  test('multi_agent_started with pendingRetry → hydrates the banner (R-A/R-B restore)', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        pendingRetry: {
+          agentName: 'coder',
+          reason: "`coder`'s last turn failed: SDK result subtype=error_during_execution",
+          lastPrompt: 'do the thing',
+          ts: 1700000000000,
+          errorEventId: 17,
+        },
+      },
+    });
+    expect(s.multiAgent.active!.pendingRetry).toMatchObject({
+      agentName: 'coder',
+      lastPrompt: 'do the thing',
+      errorEventId: 17,
+    });
+  });
+
+  test('multi_agent_pending_retry replaces the slot wholesale (set, then re-fail overwrites)', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_pending_retry',
+        sessionId: 's-pr',
+        pending: {
+          agentName: 'coder',
+          reason: 'first failure',
+          lastPrompt: 'p1',
+          ts: 1,
+          errorEventId: 1,
+        },
+      },
+    });
+    expect(s.multiAgent.active!.pendingRetry!.reason).toBe('first failure');
+    // Re-fail overwrites — never merges.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_pending_retry',
+        sessionId: 's-pr',
+        pending: {
+          agentName: 'coder',
+          reason: 'retry failed too',
+          lastPrompt: 'p1',
+          ts: 2,
+          errorEventId: 2,
+        },
+      },
+    });
+    expect(s.multiAgent.active!.pendingRetry!.reason).toBe('retry failed too');
+    expect(s.multiAgent.active!.pendingRetry!.errorEventId).toBe(2);
+  });
+
+  test('multi_agent_pending_retry with pending=null clears the slot', () => {
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        pendingRetry: {
+          agentName: 'coder',
+          reason: 'first',
+          lastPrompt: 'p',
+          ts: 1,
+          errorEventId: 1,
+        },
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_pending_retry', sessionId: 's-pr', pending: null },
+    });
+    expect(s.multiAgent.active!.pendingRetry).toBeNull();
+  });
+
+  test('multi_agent_ended also clears pendingRetry (no lingering banner on stopped/crashed)', () => {
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        pendingRetry: {
+          agentName: 'coder',
+          reason: 'fail',
+          lastPrompt: 'p',
+          ts: 1,
+          errorEventId: 1,
+        },
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_ended',
+        sessionId: 's-pr',
+        reason: 'stopped',
+        iterationId: null,
+      },
+    });
+    expect(s.multiAgent.active!.pendingRetry).toBeNull();
+    expect(s.multiAgent.active!.status).toBe('stopped');
+  });
+
+  test('ma_clear_pending_retry optimistically clears; missing slot is a no-op', () => {
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        pendingRetry: {
+          agentName: 'coder',
+          reason: 'fail',
+          lastPrompt: 'p',
+          ts: 1,
+          errorEventId: 1,
+        },
+      },
+    });
+    s = reduce(s, { type: 'ma_clear_pending_retry' });
+    expect(s.multiAgent.active!.pendingRetry).toBeNull();
+    // Idempotent: a second clear on an already-empty slot returns the same
+    // state (no spurious renders / no thrown).
+    const s2 = reduce(s, { type: 'ma_clear_pending_retry' });
+    expect(s2).toBe(s);
   });
 });

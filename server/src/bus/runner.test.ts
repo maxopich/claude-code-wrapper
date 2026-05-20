@@ -199,6 +199,65 @@ describe('AgentRunner', () => {
     runner.stop();
     expect(ac.signal.aborted).toBe(true);
   });
+
+  // --- Item #4: non-success SDK `result.subtype` becomes a throw ---------
+  //
+  // Before Item #4, the bus runner silently swallowed `result.subtype !=
+  // 'success'` — the session_id checkpoint was persisted and the loop just
+  // ended, so the router never saw a failure. The single-agent path
+  // (`translate.ts`) handled these subtypes; the bus path was blind. The
+  // change converts the non-success result into a throw INSIDE the loop so
+  // the router's existing `.catch` (now `onWorkerFailed`) sees the same
+  // shape it gets from an iterator throw. The session-id write happens
+  // BEFORE the throw — retry resumes from the boundary the failed turn saw.
+  describe('non-success result.subtype', () => {
+    function resultWithSubtype(sessionId: string, subtype: string): SDKMessage {
+      return { type: 'result', subtype, session_id: sessionId } as unknown as SDKMessage;
+    }
+
+    test.each([
+      ['error_during_execution'],
+      ['error_max_turns'],
+      ['error_max_budget_usd'],
+      ['error_max_structured_output_retries'],
+    ])('throws for subtype=%s', async (subtype) => {
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        runnerFactory: () => fakeRunner([resultWithSubtype('sess-x', subtype)]),
+      });
+      runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+      await expect(runner.deliverTurn('alpha', 'go')).rejects.toThrow(
+        `SDK result subtype=${subtype}`,
+      );
+    });
+
+    test('the session-id checkpoint is persisted BEFORE the throw', async () => {
+      // Without this ordering, a retry of the failed turn would start a
+      // fresh CLI session (no --resume) and lose the agent's prior context.
+      const onSessionId = vi.fn();
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onSessionId,
+        runnerFactory: () => fakeRunner([resultWithSubtype('sess-9', 'error_during_execution')]),
+      });
+      runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+      await expect(runner.deliverTurn('alpha', 'go')).rejects.toThrow();
+      expect(onSessionId).toHaveBeenCalledWith('alpha', 'sess-9');
+    });
+
+    test('a result without `subtype` is unaffected (back-compat)', async () => {
+      // Some SDK paths emit a `result` with only `session_id` (no
+      // `subtype`). Don't throw — only the explicit non-success subtypes
+      // are failures.
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        runnerFactory: () =>
+          fakeRunner([{ type: 'result', session_id: 'sess-untyped' } as unknown as SDKMessage]),
+      });
+      runner.register({ name: 'a', cwd: '/tmp/a' });
+      await expect(runner.deliverTurn('a', 'go')).resolves.toBeUndefined();
+    });
+  });
 });
 
 describe('AgentRunner — per-agent turn serialization', () => {

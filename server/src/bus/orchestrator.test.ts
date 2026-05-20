@@ -13,6 +13,7 @@ import { computeSessionPaths, orchestratorWorkspaceDir } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT, type MultiAgentEndedReason } from './runtime.js';
 import {
   createMultiAgentSession,
+  getMultiAgentSession,
   listMultiAgentEvents,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
@@ -400,5 +401,111 @@ describe('createOrchestratorRouter — hop-budget enforcement', () => {
     }
     expect(deliver).toHaveBeenCalledTimes(10);
     expect(onEnded).not.toHaveBeenCalled();
+  });
+});
+
+// --- Item #4: worker failure surfacing + pending-retry slot --------------
+//
+// Symmetric to the chain.test.ts coverage. `onWorkerFailed` is the
+// router-level entry the orchestrator deliver() .catch fires on a
+// failed deliverTurn. Same invariants: persist a synthetic `cebab → user
+// kind=error` event, write the pending-retry columns, emit
+// `onPendingRetry`, do NOT teardown, do NOT bump the hop counter.
+describe('createOrchestratorRouter — onWorkerFailed (Item #4)', () => {
+  function buildFailRouter() {
+    const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
+    const iterationId = '001';
+    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, 'persistent');
+    const onEvent = vi.fn();
+    const onEnded = vi.fn();
+    const onPendingRetry = vi.fn();
+    const deliver = vi.fn();
+    const router = createOrchestratorRouter({
+      sessionId,
+      iterationId,
+      workerNames: ['reviewer', 'editor'],
+      paths,
+      lifecycle: 'persistent',
+      onEvent,
+      onEnded,
+      deliver,
+      hopBudget: 1000,
+      onPendingRetry,
+    });
+    return { router, sessionId, onEvent, onEnded, onPendingRetry, deliver };
+  }
+
+  test('persists a cebab→user kind=error event, writes the slot, leaves session live', () => {
+    const { router, sessionId, onEvent, onEnded, onPendingRetry } = buildFailRouter();
+    router.onWorkerFailed(
+      'reviewer',
+      'review this draft',
+      new Error('SDK result subtype=error_during_execution'),
+    );
+
+    const persisted = listMultiAgentEvents(sessionId);
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!).toMatchObject({
+      source: CEBAB_SOURCE,
+      destination: USER_RECIPIENT,
+      kind: 'error',
+    });
+    expect(persisted[0]!.text).toContain('`reviewer`');
+    expect(persisted[0]!.text).toContain('SDK result subtype=error_during_execution');
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEnded).not.toHaveBeenCalled();
+
+    expect(onPendingRetry).toHaveBeenCalledTimes(1);
+    const [sid, pending] = onPendingRetry.mock.calls[0]!;
+    expect(sid).toBe(sessionId);
+    expect(pending).toMatchObject({
+      agentName: 'reviewer',
+      lastPrompt: 'review this draft',
+      errorEventId: persisted[0]!.id,
+    });
+
+    const row = getMultiAgentSession(sessionId)!;
+    expect(row.pending_retry_agent).toBe('reviewer');
+    expect(row.pending_retry_prompt).toBe('review this draft');
+  });
+
+  test('with empty prompt (failed pre-deliver), falls back to teardown crashed', () => {
+    const { router, sessionId, onEnded, onPendingRetry } = buildFailRouter();
+    router.onWorkerFailed('reviewer', '', new Error('boot failed'));
+    expect(onEnded).toHaveBeenCalledTimes(1);
+    expect(onEnded).toHaveBeenCalledWith(sessionId, 'crashed', '001');
+    expect(onPendingRetry).not.toHaveBeenCalled();
+  });
+
+  test('does NOT bump the hop counter (budget pattern parity)', () => {
+    // budget=2: one hop + one failure + one more hop should still allow
+    // the second hop's deliver. A buggy increment would refuse it.
+    const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
+    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    createMultiAgentSession(sessionId, 'orchestrator', '001', paths.folder, 'persistent');
+    const deliver = vi.fn();
+    const onEnded = vi.fn();
+    const router = createOrchestratorRouter({
+      sessionId,
+      iterationId: '001',
+      workerNames: ['reviewer', 'editor'],
+      paths,
+      lifecycle: 'persistent',
+      onEvent: vi.fn(),
+      onEnded,
+      deliver,
+      hopBudget: 2,
+      onPendingRetry: vi.fn(),
+    });
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'r1' }),
+    ); // hopsCount=1
+    router.onWorkerFailed(ORCHESTRATOR_AGENT_NAME, 'do', new Error('boom')); // unchanged
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'r2' }),
+    ); // hopsCount=2 → next deliver refused
+    expect(deliver).toHaveBeenCalledTimes(1); // hop 1 only; hop 2 was boundary trip
+    expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');
   });
 });

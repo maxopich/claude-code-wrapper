@@ -51,6 +51,30 @@ export type MultiAgentSessionRow = {
    *  continue (R-B conservative recovery). 0 for normal/pre-009 rows.
    *  Narrowed to boolean at the boundary; SQLite has no bool. */
   awaiting_continue: number;
+  /** Pending-retry slot (Item #4, migration 010). All five are NULL together
+   *  when no pending retry, all non-NULL together when a worker turn failed
+   *  and the operator hasn't yet retried or abandoned. Narrowed to a
+   *  `PendingRetry` value at the boundary via `getPendingRetry`. */
+  pending_retry_agent: string | null;
+  pending_retry_prompt: string | null;
+  pending_retry_reason: string | null;
+  pending_retry_ts: number | null;
+  pending_retry_error_event_id: number | null;
+};
+
+/**
+ * Pending-retry descriptor: which worker's last turn failed, the bytes we
+ * last delivered to it (post-briefing), the operator-facing reason, and a
+ * pointer to the synthetic error event in the trail. See migration 010 for
+ * column-level docs. Single slot per session — newest failure overwrites
+ * the prior one if multiple workers fail in quick succession.
+ */
+export type PendingRetry = {
+  agentName: string;
+  prompt: string;
+  reason: string;
+  ts: number;
+  errorEventId: number;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -141,6 +165,91 @@ export function setAwaitingContinue(id: string, awaiting: boolean): void {
   getDb()
     .prepare(`UPDATE multi_agent_sessions SET awaiting_continue = ? WHERE id = ?`)
     .run(awaiting ? 1 : 0, id);
+}
+
+/**
+ * Write (or clear) the pending-retry slot for a session in a single statement
+ * — the five columns always move together. Pass `null` to clear. Used by:
+ *   - `router.onWorkerFailed` when a worker's deliverTurn rejects, to persist
+ *     enough state that the operator can come back later (even after a Cebab
+ *     restart) and click Retry.
+ *   - `handle.retry()` BEFORE re-delivering, so a racing second click sees
+ *     the empty slot and no-ops.
+ *   - `handle.stop` / `abandon_session` to keep the row clean on teardown.
+ */
+export function setPendingRetry(id: string, p: PendingRetry | null): void {
+  if (p === null) {
+    getDb()
+      .prepare(
+        `UPDATE multi_agent_sessions
+            SET pending_retry_agent          = NULL,
+                pending_retry_prompt         = NULL,
+                pending_retry_reason         = NULL,
+                pending_retry_ts             = NULL,
+                pending_retry_error_event_id = NULL
+          WHERE id = ?`,
+      )
+      .run(id);
+    return;
+  }
+  getDb()
+    .prepare(
+      `UPDATE multi_agent_sessions
+          SET pending_retry_agent          = ?,
+              pending_retry_prompt         = ?,
+              pending_retry_reason         = ?,
+              pending_retry_ts             = ?,
+              pending_retry_error_event_id = ?
+        WHERE id = ?`,
+    )
+    .run(p.agentName, p.prompt, p.reason, p.ts, p.errorEventId, id);
+}
+
+/**
+ * Read the pending-retry slot. Returns `null` when no failure is pending,
+ * or a fully-populated `PendingRetry` when one is. Used by the WS
+ * `retry_worker` handler (single source of truth — the client never sends
+ * the agent name, the server reads it here) and by `emitResumedSession` to
+ * hydrate the banner on R-A re-attach / R-B reconstruct.
+ *
+ * The five-columns invariant (all NULL or all non-NULL) is asserted in
+ * principle by `setPendingRetry`; this getter treats any NULL as "no slot"
+ * to be defensive about pre-010 rows that lack the columns entirely.
+ */
+export function getPendingRetry(id: string): PendingRetry | null {
+  const row = getDb()
+    .prepare<
+      [string],
+      {
+        pending_retry_agent: string | null;
+        pending_retry_prompt: string | null;
+        pending_retry_reason: string | null;
+        pending_retry_ts: number | null;
+        pending_retry_error_event_id: number | null;
+      }
+    >(
+      `SELECT pending_retry_agent, pending_retry_prompt, pending_retry_reason,
+              pending_retry_ts, pending_retry_error_event_id
+         FROM multi_agent_sessions WHERE id = ?`,
+    )
+    .get(id);
+  if (!row) return null;
+  if (
+    row.pending_retry_agent === null ||
+    row.pending_retry_prompt === null ||
+    row.pending_retry_reason === null ||
+    row.pending_retry_ts === null ||
+    row.pending_retry_error_event_id === null
+  ) {
+    return null;
+  }
+  return {
+    agentName: row.pending_retry_agent,
+    prompt: row.pending_retry_prompt,
+    reason: row.pending_retry_reason,
+    ts: row.pending_retry_ts,
+    errorEventId: row.pending_retry_error_event_id,
+  };
 }
 
 export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefined {

@@ -305,6 +305,23 @@ export function App() {
     dispatch({ type: 'ma_clear_awaiting' });
     wsRef.current?.send({ type: 'continue_multi_agent', sessionId });
   }
+  function retryWorker(sessionId: string) {
+    // Item #4: re-deliver the captured prompt of the worker named in this
+    // session's pending-retry slot. Optimistically drop the banner so the
+    // UI doesn't double-render between click and server echo. The server
+    // clears the DB slot and replays; if the retried turn fails again,
+    // the next `multi_agent_pending_retry` ServerMsg re-asserts a new
+    // descriptor and the banner re-appears.
+    dispatch({ type: 'ma_clear_pending_retry' });
+    wsRef.current?.send({ type: 'retry_worker', sessionId });
+  }
+  function abandonSession(sessionId: string) {
+    // Item #4: give up on the pending-retry slot and end the session as
+    // 'stopped'. No optimistic update — the banner stays visible until
+    // `multi_agent_ended` arrives (which the reducer uses to flip status
+    // and also clears `pendingRetry` so the banner disappears).
+    wsRef.current?.send({ type: 'abandon_session', sessionId });
+  }
   function setActiveLifecycle(sessionId: string, lifecycle: MultiAgentLifecycle) {
     // Server validates: orchestrator-mode only, sessionId must match the
     // active session. On success, server echoes `multi_agent_lifecycle_changed`
@@ -555,6 +572,8 @@ export function App() {
                 wrapperErrorSeq={state.wrapperErrorSeq}
                 onSendUserPrompt={sendMultiAgentUserPrompt}
                 onContinueMultiAgent={continueMultiAgent}
+                onRetryWorker={retryWorker}
+                onAbandonSession={abandonSession}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}
                 onDismissActive={dismissActiveRun}

@@ -44,9 +44,12 @@ import {
   addParticipant,
   createMultiAgentSession,
   endMultiAgentSession,
+  getPendingRetry,
+  setPendingRetry,
   type EventKind,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
+import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 import {
   archiveAgentHop,
   CEBAB_SOURCE,
@@ -100,6 +103,11 @@ export type StartChainOpts = {
    *  `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`); omit to use the
    *  default. */
   hopBudget?: number;
+  /** Per-session pending-retry slot change → `multi_agent_pending_retry`
+   *  ServerMsg. `pending: null` clears (after a successful retry or an
+   *  abandon); a descriptor sets/replaces. Optional so tests can skip it;
+   *  the router null-checks before invoking. */
+  onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
 };
 
 export type ResumeChainOpts = {
@@ -124,6 +132,11 @@ export type ChainSessionHandle = {
   /** Detach the WS sink without tearing down — agents keep running
    *  in-process; a reconnect re-attaches via the session registry. */
   detach: () => void;
+  /** Re-deliver the captured prompt of the worker named in this session's
+   *  pending-retry slot. No-op when the slot is empty (idempotent). The
+   *  slot is cleared BEFORE re-delivery so a racing second click sees the
+   *  cleared slot. A re-fail re-asserts the slot with a fresh reason. */
+  retry: () => Promise<void>;
 };
 
 type ChainRouter = {
@@ -132,6 +145,13 @@ type ChainRouter = {
   forwardCebabEvent: (ev: BusEvent) => void;
   detach: () => void;
   rebind: (sink: BusSink) => void;
+  /** Called from the `deliver` .catch handler when a worker's `deliverTurn`
+   *  rejects (iterator throw OR non-success `result.subtype` — the runner
+   *  unifies both into a thrown error). Persists a synthetic
+   *  `cebab → user kind=error` event, writes the pending-retry slot, and
+   *  emits `onPendingRetry`. Does NOT teardown — the session stays
+   *  `running` waiting for the operator's Retry or Abandon click. */
+  onWorkerFailed: (agentName: string, prompt: string, err: unknown) => void;
 };
 
 /**
@@ -158,6 +178,9 @@ export function createChainRouter(params: {
   /** Hard cap on persisted hops. Required so the router enforces the
    *  ceiling; the caller resolves precedence. */
   hopBudget: number;
+  /** Optional pending-retry set/clear sink (Item #4). Threaded onto
+   *  `BusSink.onPendingRetry` so rebind/detach honor the same plumbing. */
+  onPendingRetry?: StartChainOpts['onPendingRetry'];
 }): ChainRouter {
   const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
     params;
@@ -167,7 +190,11 @@ export function createChainRouter(params: {
   // Mutable WS sink: swapped on reconnect (`rebind`), silenced on `detach`.
   // Persistence + routing keep running regardless so a detached session's
   // events still reach the DB for replay on reconnect.
-  let sink: BusSink = { onEvent: params.onEvent, onEnded: params.onEnded };
+  let sink: BusSink = {
+    onEvent: params.onEvent,
+    onEnded: params.onEnded,
+    onPendingRetry: params.onPendingRetry,
+  };
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Incremented on every successful append (handleEvent + forwardCebabEvent)
@@ -351,7 +378,83 @@ export function createChainRouter(params: {
     sink = next;
   };
 
-  return { teardown, handleEvent, forwardCebabEvent, detach, rebind };
+  // Worker failure handler — same shape in both routers (Item #4). The
+  // deliver() .catch in startChainSession calls this when a worker's
+  // deliverTurn rejects (iterator throw OR non-success result.subtype).
+  // We emit a synthetic `cebab → user kind=error` event so the trail
+  // explains the stop, persist the pending-retry slot so the operator
+  // (and a post-restart R-B reconstruction) can resume from it, and stay
+  // live. Critical: this bypasses `forwardCebabEvent` so the error event
+  // does NOT bump hopsCount (consistent with the budget-exhaust pattern).
+  // If no last prompt is known (the agent failed before `deliver` was
+  // ever called, e.g. an unknown-agent error), we fall back to crashed
+  // teardown — there's nothing to retry.
+  const onWorkerFailed = (agentName: string, prompt: string, err: unknown) => {
+    if (ended) return;
+    const errMessage =
+      err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
+    const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
+    let errorEventId = 0;
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        USER_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      errorEventId = row.id;
+      try {
+        sink.onEvent(
+          sessionId,
+          {
+            ts: Date.now(),
+            source: CEBAB_SOURCE,
+            destination: USER_RECIPIENT,
+            kind: 'error',
+            text: reasonText,
+          },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[chain] worker-failed onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      console.error('[chain] persist worker-failed event failed', persistErr);
+    }
+    if (!prompt) {
+      // No bytes to retry — collapse to the legacy crashed teardown so the
+      // session ends with a legible status pill rather than dangling live.
+      console.warn(`[chain] worker ${agentName} failed pre-deliver; ending crashed`);
+      void teardown('crashed');
+      return;
+    }
+    const descriptor: PendingRetryDescriptor = {
+      agentName,
+      reason: reasonText,
+      lastPrompt: prompt,
+      ts: Date.now(),
+      errorEventId,
+    };
+    try {
+      setPendingRetry(sessionId, {
+        agentName,
+        prompt,
+        reason: reasonText,
+        ts: descriptor.ts,
+        errorEventId,
+      });
+    } catch (dbErr) {
+      console.error('[chain] persist pending-retry failed', dbErr);
+    }
+    try {
+      sink.onPendingRetry?.(sessionId, descriptor);
+    } catch (sinkErr) {
+      console.error('[chain] onPendingRetry callback threw', sinkErr);
+    }
+  };
+
+  return { teardown, handleEvent, forwardCebabEvent, detach, rebind, onWorkerFailed };
 }
 
 function writeTranscript(paths: SessionPaths, iterationId: string, agent: string, msg: SDKMessage) {
@@ -469,11 +572,16 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       const pr = projectRules.get(agentName);
       prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${text}` : `${briefing}\n\n${text}`;
     }
+    // Capture the post-briefing-and-rules bytes in closure so the .catch
+    // can hand them to onWorkerFailed for the pending-retry slot. (The
+    // briefed Set is already populated above, so a retry that re-uses
+    // these exact bytes won't double-brief.)
+    const deliveredPrompt = prompt;
     void runner
       .deliverTurn(agentName, prompt)
       .catch((err) => {
         console.error(`[chain] deliverTurn(${agentName}) failed`, err);
-        void router.teardown('crashed');
+        router.onWorkerFailed(agentName, deliveredPrompt, err);
       })
       .finally(() => activity.onTurnEnd(agentName));
   };
@@ -489,6 +597,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onFinalize: () => activity.dispose(),
     deliver,
     hopBudget,
+    onPendingRetry: opts.onPendingRetry,
   });
 
   const handle: ChainSessionHandle = {
@@ -499,11 +608,43 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     sessionFolder: paths.folder,
     hopBudget,
     async stop(reason) {
+      // Clear any pending-retry slot first so the teardown leaves a clean
+      // row — otherwise a crashed-but-with-non-null-pending row would be
+      // dead data that R-B reconstruction can't usefully act on.
+      try {
+        setPendingRetry(sessionId, null);
+      } catch (err) {
+        console.error('[chain] clear pending-retry on stop failed', err);
+      }
       runner.stop();
       await router.teardown(reason);
     },
     detach() {
       router.detach();
+    },
+    async retry() {
+      const pending = getPendingRetry(sessionId);
+      if (!pending) return;
+      // Clear the slot BEFORE re-delivery so a racing second click sees
+      // the empty slot and no-ops. If the retried turn fails again, the
+      // onWorkerFailed callback re-asserts the slot with a fresh reason
+      // and re-emits the pending-retry ServerMsg.
+      try {
+        setPendingRetry(sessionId, null);
+      } catch (err) {
+        console.error('[chain] clear pending-retry on retry failed', err);
+      }
+      try {
+        opts.onPendingRetry?.(sessionId, null);
+      } catch (err) {
+        console.error('[chain] retry onPendingRetry-null callback threw', err);
+      }
+      // Re-call `deliver` so the activity observer / liveness ticks see
+      // the new turn. The agent's `briefed` Set is already populated by
+      // the failed delivery, so re-feeding `pending.prompt` (which IS the
+      // post-briefing bytes captured in the previous turn) does not
+      // double-prepend the briefing.
+      deliver(pending.agentName, pending.prompt);
     },
   };
 

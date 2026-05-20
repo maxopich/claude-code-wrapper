@@ -1466,6 +1466,16 @@ pre {
   color: var(--warn);
   font-size: 12px;
 }
+/* Item #4: Retry/Abandon/Jump button row inside the worker-failure banner.
+ * Flexbox so buttons wrap on narrow widths; `align-items: center` keeps
+ * the .ghost-btn (smaller font) vertically aligned with .primary-btn. */
+.multi-agent-warning-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+}
 
 /* Iterations browser */
 .iterations-header {

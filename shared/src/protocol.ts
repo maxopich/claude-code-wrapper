@@ -212,6 +212,36 @@ export type ClientMsg =
     }
   | {
       /**
+       * Re-deliver the captured prompt of the worker named in this
+       * session's pending-retry slot. Stateless: the server reads the
+       * agent name + bytes from the persisted slot (avoids stale or
+       * spoofed retry targets from the client). Idempotent — a second
+       * click while the slot is already cleared is a no-op.
+       *
+       * The slot is cleared BEFORE re-delivery so a racing second click
+       * sees the empty slot. If the retried turn fails again, the router
+       * re-asserts the slot with a fresh reason and the banner re-emits.
+       *
+       * Also clears `awaiting_continue` (if both flags were set on a
+       * reconstructed session): retrying implies acknowledging the
+       * recovery context.
+       */
+      type: 'retry_worker';
+      sessionId: string;
+    }
+  | {
+      /**
+       * Give up on the pending-retry slot and end the session as
+       * `'stopped'`. Same teardown effect as `stop_multi_agent`, but a
+       * distinct verb so post-hoc analytics can differentiate "operator
+       * stopped a healthy run" from "operator abandoned after a failure"
+       * if we want that later. Idempotent.
+       */
+      type: 'abandon_session';
+      sessionId: string;
+    }
+  | {
+      /**
        * Forward a user prompt to the active orchestrator-routed session.
        * Cebab delivers it as the orchestrator's next turn (`kind=prompt`,
        * `source=cebab`); the orchestrator then routes it to whichever
@@ -440,6 +470,17 @@ export type ServerMsg =
        * one caveat (an interrupted turn's side effects are not rolled back).
        */
       awaitingContinue?: boolean;
+      /**
+       * Populated when a worker's deliverTurn failed and the operator
+       * hasn't yet retried or abandoned. Restored from the persisted
+       * `pending_retry_*` columns on R-A re-attach + R-B reconstruct so
+       * the Retry/Abandon banner survives reconnects and Cebab restarts.
+       * Absent on fresh starts and after a successful retry. Co-exists
+       * with `awaitingContinue` — the UI stacks both banners; clicking
+       * Retry clears both flags. See `multi_agent_pending_retry` for the
+       * standalone set/clear ServerMsg.
+       */
+      pendingRetry?: PendingRetryDescriptor;
     }
   | {
       /**
@@ -497,6 +538,22 @@ export type ServerMsg =
       sessionId: string;
       reason: 'completed' | 'stopped' | 'crashed';
       iterationId: string | null;
+    }
+  | {
+      /**
+       * Live set/clear of the pending-retry slot. Emitted when a worker's
+       * `deliverTurn` fails (set, with a descriptor) and again when the
+       * operator clicks Retry or Abandon (cleared, `pending: null`). The
+       * initial value on session attach travels on `multi_agent_started`;
+       * this message is for in-session transitions only.
+       *
+       * `pending: null` is the explicit-clear signal — the reducer must
+       * replace, not merge, so a stale descriptor never lingers after a
+       * successful retry.
+       */
+      type: 'multi_agent_pending_retry';
+      sessionId: string;
+      pending: PendingRetryDescriptor | null;
     }
   | {
       /**
@@ -592,6 +649,28 @@ export type AgentActivityPhase = 'working' | 'stalled' | 'idle';
  * absent `lifecycle` field in `start_multi_agent` resolves safely.
  */
 export type MultiAgentLifecycle = 'persistent' | 'temp';
+
+/**
+ * Pending-retry slot for a multi-agent session: which worker's last turn
+ * failed, the exact bytes we last delivered to it (replayed verbatim on
+ * Retry so the briefing isn't double-prepended), the operator-facing
+ * failure reason, and the DB id of the synthetic `cebab → user kind=error`
+ * event so the banner's "Jump to error" button can scroll to it.
+ *
+ * Carried on the `multi_agent_started` ServerMsg (R-A re-attach + R-B
+ * reconstruction restore the banner from the persisted row) and on the
+ * standalone `multi_agent_pending_retry` ServerMsg for live emission. The
+ * client's `retry_worker` ClientMsg is stateless — the server reads the
+ * agent name from the persisted slot, not from the client, to avoid stale
+ * or spoofed retry targets.
+ */
+export type PendingRetryDescriptor = {
+  agentName: string;
+  reason: string;
+  lastPrompt: string;
+  ts: number;
+  errorEventId: number;
+};
 
 /**
  * A saved multi-agent draft preset. Stores everything needed to refill the

@@ -20,13 +20,18 @@
 import type { BusEvent } from './runner.js';
 import type { MultiAgentEndedReason } from './runtime.js';
 import type { MultiAgentLifecycle } from '../repo/multi_agent.js';
+import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 
 /** The WS-facing sink. Swapped on reconnect, silenced on detach. Identical
  *  shape to the old `StartChainOpts.onEvent/onEnded` so the WS layer and the
- *  resume dispatcher need no signature changes. */
+ *  resume dispatcher need no signature changes.
+ *
+ *  `onPendingRetry` is optional so test sinks (and pre-Item-#4 callers) stay
+ *  slim — the routers always null-check before invoking. */
 export type BusSink = {
   onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
+  onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
 };
 
 /** A sink that drops everything — installed by `detach()` so a still-running
@@ -34,6 +39,7 @@ export type BusSink = {
 export const NOOP_SINK: BusSink = {
   onEvent: () => {},
   onEnded: () => {},
+  onPendingRetry: () => {},
 };
 
 /**
@@ -50,6 +56,15 @@ export type BusSessionHandle = {
   sessionFolder: string;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   detach: () => void;
+  /**
+   * Re-deliver the captured prompt of the worker named in this session's
+   * persisted pending-retry slot. No-op when the slot is empty (idempotent
+   * — a racing second click sees the cleared slot). Implemented by both
+   * chain and orchestrator handles via the shared `setPendingRetry(null)
+   * → deliver` flow; the slot is cleared FIRST so a re-fail can re-assert
+   * a fresh descriptor.
+   */
+  retry: () => Promise<void>;
 };
 
 export type LiveBusSession = {
