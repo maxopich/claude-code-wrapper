@@ -13,7 +13,7 @@
  * `--env-file-if-exists=../.env` that `npm run dev:server` uses, and Vite
  * reads the same file via `envDir: '..'`.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -84,6 +84,18 @@ async function shutdown(code) {
   await Promise.all(children.map((c) => killAndWait(c)));
   process.exit(code);
 }
+
+// Sweep stale tsx-watch orphans from prior sessions before spawning ours.
+// `tsx watch` is a supervisor that doesn't exit when its child crashes —
+// across worktrees and Claude-Code background spawns these accumulate and
+// silently squat on port 4319. This is the same cleanup `npm run dev:server`
+// runs as its `predev` hook; we do it inline because `dev.mjs` spawns `tsx`
+// directly (no `npm run server.dev` between us and tsx), so the predev hook
+// never gets a chance to fire on this path. Inherits stdio so the user sees
+// what got killed in the same terminal stream.
+spawnSync(process.execPath, [path.join(root, 'scripts', 'predev-server.mjs')], {
+  stdio: 'inherit',
+});
 
 for (const t of targets) {
   const child = spawn(process.execPath, t.args, {
