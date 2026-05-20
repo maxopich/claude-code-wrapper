@@ -1,10 +1,17 @@
+/* eslint-disable require-yield --
+ * Several test fixtures here use `async function*` generators that immediately
+ * throw (simulating an SDK iterator that fails before yielding any messages).
+ * That's intentional — the runner's retry / failure paths are what we're
+ * exercising. require-yield otherwise flags every throw-only generator. */
 import { describe, expect, test, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { MockOptions, RunOptions, Runner } from '../runner/index.js';
 import {
   AgentRunner,
   BUS_KINDS,
+  DEFAULT_OVERLOAD_BACKOFF_MS,
   handleBusSend,
+  isTransientOverload,
   makeBusToolServer,
   type BusEvent,
 } from './runner.js';
@@ -221,23 +228,31 @@ describe('AgentRunner', () => {
       ['error_max_budget_usd'],
       ['error_max_structured_output_retries'],
     ])('throws for subtype=%s', async (subtype) => {
+      // Disable the transient-overload retry for this Item #4 unit test —
+      // `error_during_execution` is on the retry heuristic so we'd otherwise
+      // loop. The retry path has its own coverage in the "529 absorb" suite.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
       const runner = new AgentRunner({
         onEvent: () => {},
+        overloadBackoffMs: [],
         runnerFactory: () => fakeRunner([resultWithSubtype('sess-x', subtype)]),
       });
       runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
       await expect(runner.deliverTurn('alpha', 'go')).rejects.toThrow(
         `SDK result subtype=${subtype}`,
       );
+      warnSpy.mockRestore();
     });
 
     test('the session-id checkpoint is persisted BEFORE the throw', async () => {
       // Without this ordering, a retry of the failed turn would start a
       // fresh CLI session (no --resume) and lose the agent's prior context.
+      // Retry disabled here for the same reason as above.
       const onSessionId = vi.fn();
       const runner = new AgentRunner({
         onEvent: () => {},
         onSessionId,
+        overloadBackoffMs: [],
         runnerFactory: () => fakeRunner([resultWithSubtype('sess-9', 'error_during_execution')]),
       });
       runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
@@ -463,5 +478,267 @@ describe('AgentRunner — per-agent turn serialization', () => {
   test('unknown agent still fast-fails (not queued behind prior turns)', async () => {
     const runner = new AgentRunner({ onEvent: () => {}, runnerFactory: () => fakeRunner([]) });
     await expect(runner.deliverTurn('ghost', 'x')).rejects.toThrow(/unknown agent/);
+  });
+
+  // --- Transient overload retry-with-backoff ----------------------------
+  //
+  // Multi-agent bus turns hit "API Error: 529 Overloaded" from Anthropic
+  // periodically. Without an absorb layer, each transient blip surfaces as
+  // Item #4's worker-failure banner and the operator sees the run as
+  // "every worker fails". The retry path catches the throw inside the
+  // for-await loop, re-spawns a fresh runner (so the SDK's CLI subprocess
+  // is also fresh), and re-runs the turn. The session_id checkpoint is
+  // persisted BEFORE the throw on non-success result.subtype, so retries
+  // resume from the same boundary.
+  describe('transient overload retry (529 absorb)', () => {
+    test('retries on 529 then succeeds on the next attempt', async () => {
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0], // skip real backoff in tests
+        runnerFactory: () => {
+          n++;
+          if (n === 1) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              yield { type: 'system', subtype: 'init' } as unknown as SDKMessage;
+              throw new Error('Claude Code returned an error result: API Error: 529 Overloaded');
+            }
+            const it = boom();
+            return { [Symbol.asyncIterator]: () => it, close: () => {} };
+          }
+          return fakeRunner([resultMsg('sess-success')]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await expect(runner.deliverTurn('coder', 'go')).resolves.toBeUndefined();
+      expect(n).toBe(2); // spawned twice: one fail + one success
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]![0]).toMatch(/coder hit transient overload/);
+      warnSpy.mockRestore();
+    });
+
+    test('surfaces failure after MAX_RETRIES (backoffMs.length) exhausted', async () => {
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        runnerFactory: () => {
+          n++;
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            throw new Error('API Error: 529 Overloaded');
+          }
+          const it = boom();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await expect(runner.deliverTurn('coder', 'go')).rejects.toThrow(/529 Overloaded/);
+      expect(n).toBe(4); // initial + 3 retries
+      warnSpy.mockRestore();
+    });
+
+    test('does NOT retry non-transient errors (e.g. ENOENT, unknown CLI failure)', async () => {
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        runnerFactory: () => {
+          n++;
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            throw new Error('ENOENT: claude binary not found');
+          }
+          const it = boom();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      await expect(runner.deliverTurn('coder', 'go')).rejects.toThrow(/ENOENT/);
+      expect(n).toBe(1); // no retries
+    });
+
+    test('retries on non-success result.subtype too (Item #4 synthetic Error path)', async () => {
+      // The runner converts `m.subtype !== 'success'` to a thrown
+      // `Error('SDK result subtype=error_during_execution')`. That string
+      // ALSO matches the transient-overload heuristic, so the retry path
+      // covers both raw SDK throws and the Item #4 synthetic shape.
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        runnerFactory: () => {
+          n++;
+          if (n <= 2) {
+            return fakeRunner([
+              {
+                type: 'result',
+                subtype: 'error_during_execution',
+                session_id: `sess-attempt-${n}`,
+              } as unknown as SDKMessage,
+            ]);
+          }
+          return fakeRunner([resultMsg('sess-finalized')]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await expect(runner.deliverTurn('coder', 'go')).resolves.toBeUndefined();
+      expect(n).toBe(3); // 2 transient failures + 1 success
+      warnSpy.mockRestore();
+    });
+
+    test('subsequent attempts resume from the prior attempts checkpoint', async () => {
+      // When the SDK delivers result(subtype=error_during_execution,
+      // session_id=...), the runner persists the session_id BEFORE throwing
+      // so a retry can --resume the same boundary instead of forking a
+      // fresh CLI session.
+      const calls: (RunOptions & Partial<MockOptions>)[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        runnerFactory: (opts) => {
+          calls.push(opts);
+          n++;
+          if (n === 1) {
+            return fakeRunner([
+              {
+                type: 'result',
+                subtype: 'error_during_execution',
+                session_id: 'checkpoint-from-failed-attempt',
+              } as unknown as SDKMessage,
+            ]);
+          }
+          return fakeRunner([resultMsg('sess-success')]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('coder', 'go');
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.resume).toBeUndefined(); // first attempt: no prior
+      expect(calls[1]!.resume).toBe('checkpoint-from-failed-attempt'); // retry resumes
+      warnSpy.mockRestore();
+    });
+
+    test('aborted signal short-circuits the retry loop', async () => {
+      const ac = new AbortController();
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        abortController: ac,
+        overloadBackoffMs: [0, 0, 0],
+        runnerFactory: () => {
+          n++;
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            // Abort before throwing — emulates an operator Stop click landing
+            // mid-turn.
+            ac.abort();
+            throw new Error('API Error: 529 Overloaded');
+          }
+          const it = boom();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      await expect(runner.deliverTurn('coder', 'go')).rejects.toThrow(/529 Overloaded/);
+      expect(n).toBe(1); // aborted → no retries
+    });
+
+    test('runner.close() is called for every attempt (per-attempt subprocess hygiene)', async () => {
+      const closes: number[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0],
+        runnerFactory: () => {
+          n++;
+          const attemptId = n;
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            if (attemptId <= 2) throw new Error('Overloaded');
+            yield resultMsg('sess-ok');
+          }
+          const it = boom();
+          return {
+            [Symbol.asyncIterator]: () => it,
+            close: () => closes.push(attemptId),
+          };
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('coder', 'go');
+      // Three attempts → three close() calls, one per attempt.
+      expect(closes).toEqual([1, 2, 3]);
+      warnSpy.mockRestore();
+    });
+
+    test('runner.close throwing does not mask the underlying error', async () => {
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [],
+        runnerFactory: () => {
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            throw new Error('genuine failure');
+          }
+          const it = boom();
+          return {
+            [Symbol.asyncIterator]: () => it,
+            close: () => {
+              throw new Error('close fails');
+            },
+          };
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await expect(runner.deliverTurn('coder', 'go')).rejects.toThrow(/genuine failure/);
+      errSpy.mockRestore();
+    });
+  });
+});
+
+describe('isTransientOverload (Item: 529 absorb)', () => {
+  test('matches "API Error: 529" exactly', () => {
+    expect(
+      isTransientOverload(
+        new Error('Claude Code returned an error result: API Error: 529 Overloaded'),
+      ),
+    ).toBe(true);
+  });
+  test('matches the bare "Overloaded" substring', () => {
+    expect(isTransientOverload(new Error('Overloaded'))).toBe(true);
+  });
+  test('matches the Item #4 synthetic "SDK result subtype=error_during_execution"', () => {
+    expect(isTransientOverload(new Error('SDK result subtype=error_during_execution'))).toBe(true);
+  });
+  test('does NOT match other non-success subtypes', () => {
+    expect(isTransientOverload(new Error('SDK result subtype=error_max_turns'))).toBe(false);
+    expect(isTransientOverload(new Error('SDK result subtype=error_max_budget_usd'))).toBe(false);
+  });
+  test('does NOT match unrelated errors', () => {
+    expect(isTransientOverload(new Error('ENOENT'))).toBe(false);
+    expect(isTransientOverload(new Error('unknown agent ghost'))).toBe(false);
+    expect(isTransientOverload(new Error(''))).toBe(false);
+  });
+  test('handles non-Error values without throwing', () => {
+    expect(isTransientOverload(null)).toBe(false);
+    expect(isTransientOverload(undefined)).toBe(false);
+    expect(isTransientOverload('Overloaded')).toBe(false); // string, not Error
+    expect(isTransientOverload({ message: 'Overloaded' })).toBe(false); // plain object
+  });
+});
+
+describe('DEFAULT_OVERLOAD_BACKOFF_MS', () => {
+  test('matches the production tuning (1s/3s/10s = ~14s cumulative absorb)', () => {
+    expect(DEFAULT_OVERLOAD_BACKOFF_MS).toEqual([1000, 3000, 10000]);
   });
 });
