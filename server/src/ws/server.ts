@@ -3,11 +3,12 @@ import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
+  classifyToolCall,
   isSessionPermissionMode,
   type ClientMsg,
   type ServerMsg,
   type SessionPermissionMode,
-} from '@cebab/shared/protocol';
+} from '@cebab/shared';
 import { config } from '../config.js';
 import { getProject, setProjectTrusted, touchProject } from '../repo/projects.js';
 import {
@@ -59,17 +60,24 @@ import {
 import {
   clearFinishedMultiAgentSessions,
   getMultiAgentSession,
+  getPendingMutation,
   getPendingRetry,
   listMultiAgentEvents,
+  listMultiAgentMutations,
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
   setAwaitingContinue,
+  type MutationRecord,
 } from '../repo/multi_agent.js';
 import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { hasLiveSession } from '../bus/session_registry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
-import type { IterationSummary, PendingRetryDescriptor } from '@cebab/shared/protocol';
+import type {
+  IterationSummary,
+  MultiAgentMutationView,
+  PendingRetryDescriptor,
+} from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
 import { buildAllowedOrigins, isAllowedHost } from '../origin.js';
 import { verifyToken } from '../auth.js';
@@ -110,6 +118,19 @@ type InFlight = {
   runner: Runner;
   permissionMode: SessionPermissionMode;
 };
+
+/** Item #5: shape-equivalent translation from the DB row to the wire view. */
+function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
+  return {
+    id: m.id,
+    sessionId: m.sessionId,
+    ts: m.ts,
+    agentName: m.agentName,
+    toolName: m.toolName,
+    category: m.category,
+    summary: m.summary,
+  };
+}
 
 type Conn = {
   ws: WebSocket;
@@ -230,7 +251,10 @@ function onConnection(ws: WebSocket): void {
  */
 function resumeCallbacks(
   conn: Conn,
-): Pick<ResumeCallbacks, 'onEvent' | 'onEnded' | 'onPendingRetry'> {
+): Pick<
+  ResumeCallbacks,
+  'onEvent' | 'onEnded' | 'onPendingRetry' | 'onMutation' | 'onPendingMutation'
+> {
   return {
     onEvent: (sessionId, ev, dbEventId) => {
       const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
@@ -253,6 +277,20 @@ function resumeCallbacks(
     },
     onPendingRetry: (sessionId, pending) => {
       send(conn.ws, { type: 'multi_agent_pending_retry', sessionId, pending });
+    },
+    onMutation: (sessionId, mutation) => {
+      send(conn.ws, {
+        type: 'multi_agent_mutation',
+        sessionId,
+        mutation: mutationRecordToView(mutation),
+      });
+    },
+    onPendingMutation: (sessionId, pending) => {
+      send(conn.ws, {
+        type: 'multi_agent_pending_mutation',
+        sessionId,
+        pending: pending ? mutationRecordToView(pending) : null,
+      });
     },
   };
 }
@@ -286,6 +324,20 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
         errorEventId: pendingRow.errorEventId,
       }
     : undefined;
+  // Item #5: hydrate the pause-on-mutation overlay from the DB so the banner
+  // restores after R-A re-attach (live registry still wired) and R-B
+  // reconstruct (rebuilt session). All three reads (row, mutations list,
+  // pending slot) are fast indexed reads — same posture as the awaiting /
+  // pending-retry hydration above.
+  const sessionRow = getMultiAgentSession(resumed.handle.sessionId);
+  const pauseOnMutation = sessionRow?.pause_on_mutation === 1;
+  const mutationsAcknowledged = sessionRow?.mutations_acknowledged === 1;
+  const mutationsList = listMultiAgentMutations(resumed.handle.sessionId);
+  const pendingMutationRow = getPendingMutation(resumed.handle.sessionId);
+  const mutations: MultiAgentMutationView[] = mutationsList.map(mutationRecordToView);
+  const pendingMutationView = pendingMutationRow
+    ? mutationRecordToView(pendingMutationRow)
+    : undefined;
   send(conn.ws, {
     type: 'multi_agent_started',
     sessionId: resumed.handle.sessionId,
@@ -302,6 +354,10 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     hopBudget: resumed.handle.hopBudget,
     awaitingContinue,
     ...(pendingRetry ? { pendingRetry } : {}),
+    pauseOnMutation,
+    mutationsAcknowledged,
+    mutations,
+    ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
   });
   for (const ev of resumed.replayEvents) {
     const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
@@ -833,6 +889,25 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       const onPendingRetry = (sessionId: string, pending: PendingRetryDescriptor | null) => {
         send(conn.ws, { type: 'multi_agent_pending_retry', sessionId, pending });
       };
+      // Item #5: per-mutation live forwarding → `multi_agent_mutation`. Fires
+      // for every classified non-'read' tool call observed during this
+      // session. The initial batch on attach ships on `multi_agent_started`.
+      const onMutation = (sessionId: string, mutation: MutationRecord) => {
+        send(conn.ws, {
+          type: 'multi_agent_mutation',
+          sessionId,
+          mutation: mutationRecordToView(mutation),
+        });
+      };
+      // Item #5: pause-on-mutation slot set/clear → wire. Fresh starts never
+      // carry a pending slot on `multi_agent_started`; this is the delta.
+      const onPendingMutation = (sessionId: string, pending: MutationRecord | null) => {
+        send(conn.ws, {
+          type: 'multi_agent_pending_mutation',
+          sessionId,
+          pending: pending ? mutationRecordToView(pending) : null,
+        });
+      };
 
       // Per-session folders live under the workspace root, so it must be
       // a valid existing directory. The Settings modal validates on save,
@@ -882,7 +957,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             onEnded,
             onActivity,
             onPendingRetry,
+            onMutation,
+            onPendingMutation,
             hopBudget,
+            pauseOnMutation: msg.pauseOnMutation === true,
           });
           conn.multiAgent = handle;
           send(conn.ws, {
@@ -894,6 +972,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
             hopBudget: handle.hopBudget,
+            // Item #5: fresh start — no mutations recorded yet, no pending,
+            // ack flag false. `pauseOnMutation` echoes the operator's choice
+            // so the UI mirrors its own setup checkbox.
+            pauseOnMutation: handle.pauseOnMutation,
+            mutationsAcknowledged: false,
+            mutations: [],
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -926,7 +1010,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           onEnded,
           onActivity,
           onPendingRetry,
+          onMutation,
+          onPendingMutation,
           hopBudget,
+          pauseOnMutation: msg.pauseOnMutation === true,
         });
         conn.multiAgent = handle;
         send(conn.ws, {
@@ -938,6 +1025,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
           hopBudget: handle.hopBudget,
+          pauseOnMutation: handle.pauseOnMutation,
+          mutationsAcknowledged: false,
+          mutations: [],
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1126,6 +1216,28 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       try {
         await active.stop('stopped');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message,
+        });
+      }
+      return;
+    }
+    case 'continue_through_mutation': {
+      // Item #5: operator clicked Continue on the pause-on-first-mutation
+      // banner. Idempotent — the handle reads its own pending slot and no-ops
+      // if cleared. Clearing `awaiting_continue` happens inside the handle's
+      // `continueThroughMutation` (it set it on pause; clears it on resume).
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        return;
+      }
+      try {
+        await active.continueThroughMutation();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, {
@@ -1339,12 +1451,22 @@ async function runOneTurn(
       return { behavior: 'allow', updatedInput: input };
     }
     const requestId = randomUUID();
+    // Item #5: classify server-side so the React card can pick the right
+    // subcomponent (Bash / Edit / Write / …) + badge color without
+    // re-running the classifier client-side. `category` / `summary` / `cwd`
+    // / `projectName` are optional on the wire so pre-Item-5 replays still
+    // render via the JSON-fallback subcomponent.
+    const classification = classifyToolCall(toolName, input);
     send(conn.ws, {
       type: 'permission_request',
       requestId,
       sessionId,
       toolName,
       input,
+      category: classification.category,
+      summary: classification.summary,
+      cwd: project.path,
+      projectName: project.name,
     });
     await persistMessage(sessionId, {
       type: 'wrapper',
@@ -1354,6 +1476,10 @@ async function runOneTurn(
       requestId,
       toolName,
       input,
+      category: classification.category,
+      summary: classification.summary,
+      cwd: project.path,
+      projectName: project.name,
     } as never);
     return new Promise((resolve) => {
       conn.pendingPermissions.set(requestId, { sessionId, resolve, toolInput: input });

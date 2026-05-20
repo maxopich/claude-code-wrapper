@@ -4,6 +4,7 @@ import type {
   IterationSummary,
   MultiAgentEventKind,
   MultiAgentLifecycle,
+  MultiAgentMutationView,
   MultiAgentTemplate,
   Project,
 } from '@cebab/shared/protocol';
@@ -55,6 +56,10 @@ export function MultiAgentTab(props: {
   onContinueMultiAgent: (sessionId: string) => void;
   onRetryWorker: (sessionId: string) => void;
   onAbandonSession: (sessionId: string) => void;
+  /** Item #5: operator clicked Continue on the pause-on-first-mutation banner. */
+  onContinueThroughMutation: (sessionId: string) => void;
+  /** Item #5: setup-screen toggle for pause-on-first-mutation. */
+  onSetDraftPauseOnMutation: (value: boolean) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
   onDismissActive: () => void;
@@ -78,6 +83,7 @@ export function MultiAgentTab(props: {
         onContinue={props.onContinueMultiAgent}
         onRetryWorker={props.onRetryWorker}
         onAbandonSession={props.onAbandonSession}
+        onContinueThroughMutation={props.onContinueThroughMutation}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
         onDismiss={props.onDismissActive}
@@ -98,6 +104,8 @@ function DraftView(props: {
   onInstallBus: (projectId: number) => void;
   onUninstallBus: (projectId: number) => void;
   onSetDraftPrompt: (text: string) => void;
+  /** Item #5: setup-screen toggle for pause-on-first-mutation. */
+  onSetDraftPauseOnMutation: (value: boolean) => void;
   onStart: () => void;
   onResumeSession: (sessionId: string) => void;
   wrapperErrorSeq: number;
@@ -340,6 +348,19 @@ function DraftView(props: {
               </button>
             </div>
           </div>
+          {/* Item #5: pause-on-first-mutation opt-in. Off by default; the
+              operator opts in explicitly per session. Survives R-B once set. */}
+          <label
+            className="ma-pause-mutation-checkbox"
+            title="When enabled, the session pauses before the first non-read tool call from any worker and asks for your approval. Subsequent mutations auto-allow once you click Continue. Survives a Cebab server restart."
+          >
+            <input
+              type="checkbox"
+              checked={multiAgent.draftPauseOnMutation}
+              onChange={(e) => props.onSetDraftPauseOnMutation(e.target.checked)}
+            />
+            Pause before any worker mutates the filesystem
+          </label>
         </section>
 
         <section className="multi-agent-section">
@@ -1429,6 +1450,9 @@ function ActiveRunView(props: {
    *  `'stopped'`. Same teardown as Stop, distinct verb so analytics can
    *  differentiate "stopped a healthy run" from "abandoned after failure". */
   onAbandonSession: (sessionId: string) => void;
+  /** Item #5: operator clicked Continue on the pause-on-first-mutation
+   *  banner. Stateless from the client's POV — server reads the slot. */
+  onContinueThroughMutation: (sessionId: string) => void;
 }) {
   const { run } = props;
   const crossTab = run.mode !== props.tabMode;
@@ -1542,10 +1566,12 @@ function ActiveRunView(props: {
         run={run}
         projects={props.projects}
         canEdit={isRunning && isOrchestrator}
-        // A paused run (R-B awaiting Continue, or a worker-failure pending
-        // retry) isn't actually executing — show no fake activity until the
-        // operator resolves the banner.
-        activeAgent={run.awaitingContinue || run.pendingRetry ? null : activeAgent(run)}
+        // A paused run (R-B awaiting Continue, a worker-failure pending
+        // retry, or a pause-on-first-mutation gate) isn't actually executing —
+        // show no fake activity until the operator resolves the banner.
+        activeAgent={
+          run.awaitingContinue || run.pendingRetry || run.pendingMutation ? null : activeAgent(run)
+        }
         onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
         onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
         highlightedEventId={highlightedEventId}
@@ -1630,9 +1656,46 @@ function ActiveRunView(props: {
         </div>
       )}
 
-      {isOrchestrator && isRunning && !run.awaitingContinue && !run.pendingRetry && (
-        <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
+      {isRunning && run.pendingMutation && (
+        <div className="multi-agent-warning" role="status">
+          <p>
+            <strong>
+              <code>{run.pendingMutation.agentName}</code> is about to{' '}
+              <span className={`mutation-summary mutation-${run.pendingMutation.category}`}>
+                {run.pendingMutation.summary}
+              </span>
+              .
+            </strong>
+          </p>
+          <p>
+            You enabled "Pause before any worker mutates the filesystem" for this session. This is
+            the first mutation. Continue to allow this call and let subsequent mutations auto-allow.
+          </p>
+          <div className="multi-agent-warning-actions">
+            <button
+              className="primary-btn"
+              onClick={() => props.onContinueThroughMutation(run.sessionId)}
+              title="Allow this tool call and any subsequent mutations in this session."
+            >
+              Continue with this mutation
+            </button>
+            <button
+              onClick={() => props.onAbandonSession(run.sessionId)}
+              title="End the session as Stopped. The session folder and trail are preserved."
+            >
+              Stop session
+            </button>
+          </div>
+        </div>
       )}
+
+      {isOrchestrator &&
+        isRunning &&
+        !run.awaitingContinue &&
+        !run.pendingRetry &&
+        !run.pendingMutation && (
+          <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
+        )}
     </div>
   );
 }
@@ -1806,6 +1869,26 @@ function SessionSettingsPanel(props: {
             <span className="settings-grid-warn"> · ≥80% of cap</span>
           )}
         </dd>
+
+        {run.mutations.length > 0 && (
+          <>
+            <dt>Mutations</dt>
+            <dd>
+              <MutationsDisclosure run={run} />
+            </dd>
+          </>
+        )}
+
+        {run.pauseOnMutation && (
+          <>
+            <dt>Pause on mutation</dt>
+            <dd>
+              {run.mutationsAcknowledged
+                ? 'On · acknowledged (subsequent mutations auto-allow)'
+                : 'On · pending first mutation'}
+            </dd>
+          </>
+        )}
 
         <dt>Session folder</dt>
         <dd>
@@ -2044,7 +2127,32 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
       >
         {hops} / {budget} hops
       </span>
+      {run.mutations.length > 0 && <MutationsCounterChip mutations={run.mutations} />}
     </div>
+  );
+}
+
+/**
+ * Item #5: counter chip in the activity bar showing the cumulative mutation
+ * count for this session. Amber by default; red when any mutation is
+ * `dangerous`. Same render seam as the hop-budget chip. Click is not wired
+ * in v1 (the disclosure is in Session info); the chip is read-only signal.
+ */
+function MutationsCounterChip(props: { mutations: MultiAgentMutationView[] }) {
+  const n = props.mutations.length;
+  const hasDangerous = props.mutations.some((m) => m.category === 'dangerous');
+  return (
+    <span
+      className={`ma-mutations-chip${hasDangerous ? ' has-dangerous' : ''}`}
+      aria-label={`${n} mutations${hasDangerous ? ' (some dangerous)' : ''}`}
+      title={
+        hasDangerous
+          ? `${n} mutation${n === 1 ? '' : 's'} this session — at least one is classified dangerous. Open Session info to inspect.`
+          : `${n} mutation${n === 1 ? '' : 's'} this session. Open Session info to inspect.`
+      }
+    >
+      ⚠ {n}
+    </span>
   );
 }
 
@@ -2259,4 +2367,63 @@ function validateDraft(participants: Project[], mode: 'chain' | 'orchestrator'):
     return `Install bus integration for: ${missing.join(', ')}.`;
   }
   return null;
+}
+
+/**
+ * Item #5: Mutations disclosure in Session info. Collapsed by default with a
+ * `▸ N · contains dangerous` summary row; expanding lists every mutation
+ * grouped by agent, in chronological order. Read-only tool calls are NOT in
+ * this list — `multi_agent_mutations` only logs non-`read` rows.
+ */
+function MutationsDisclosure(props: { run: MultiAgentRun }) {
+  const [open, setOpen] = useState(false);
+  const { mutations } = props.run;
+  const hasDangerous = mutations.some((m) => m.category === 'dangerous');
+  // Group by agentName, preserving ts order within each group.
+  const grouped = new Map<string, typeof mutations>();
+  for (const m of mutations) {
+    const list = grouped.get(m.agentName) ?? [];
+    list.push(m);
+    grouped.set(m.agentName, list);
+  }
+  return (
+    <>
+      <button
+        type="button"
+        className="ghost-btn ma-mutations-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        title="Files written, edits, and Bash commands that mutated the filesystem during this session. Read-only tool calls are not listed."
+      >
+        {open ? '▾' : '▸'} {mutations.length} mutation{mutations.length === 1 ? '' : 's'}
+        {hasDangerous && <span className="mutations-danger-marker"> · contains dangerous</span>}
+      </button>
+      {open && (
+        <ol className="mutation-list">
+          {[...grouped.entries()].map(([agent, list]) => (
+            <li key={agent} className="mutation-group">
+              <div className="mutation-agent">
+                <code>{agent}</code> · {list.length}
+              </div>
+              <ul>
+                {list.map((m) => (
+                  <li key={m.id} className={`mutation-row mutation-${m.category}`}>
+                    <span className="mutation-icon" aria-hidden="true">
+                      {m.category === 'dangerous' ? '⚠' : '✎'}
+                    </span>
+                    <span className={`mutation-badge mutation-badge-${m.category}`}>
+                      {m.category.toUpperCase()}
+                    </span>
+                    <span className="mutation-tool">{m.toolName}</span>
+                    <span className="mutation-summary">{m.summary}</span>
+                    <span className="mutation-ts">{formatTs(m.ts)}</span>
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ol>
+      )}
+    </>
+  );
 }

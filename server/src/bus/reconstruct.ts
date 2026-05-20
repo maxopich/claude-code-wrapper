@@ -124,6 +124,14 @@ export function reconstructOrchestratorSession(
      *  `multi_agent_started`, so the initial banner restore does not need
      *  this callback. */
     onPendingRetry?: BusSink['onPendingRetry'];
+    /** Item #5: mutation + pending-mutation callbacks forwarded into the
+     *  rebuilt router so a mutation observed AFTER the reconstruct (e.g.
+     *  the operator's first Continue) emits to the re-attached browser.
+     *  Initial state (existing mutations, an already-set pending slot)
+     *  hydrates from the DB via the WS layer's `multi_agent_started`
+     *  payload. */
+    onMutation?: BusSink['onMutation'];
+    onPendingMutation?: BusSink['onPendingMutation'];
   },
 ): boolean {
   if (!isReconstructable(row).ok) return false;
@@ -192,10 +200,17 @@ export function reconstructOrchestratorSession(
       onEvent: callbacks.onEvent,
       onEnded: callbacks.onEnded,
       onPendingRetry: callbacks.onPendingRetry,
+      onMutation: callbacks.onMutation,
+      onPendingMutation: callbacks.onPendingMutation,
       seededSessions,
       briefedAgents,
       hopBudget: callbacks.hopBudget,
       initialHopsCount,
+      // Item #5: surface the persisted opt-in onto the rebuilt handle so the
+      // UI re-attaches with the correct toggle state. The runtime read is
+      // always DB-fresh inside `onMutationHook`; this is purely the handle's
+      // self-report.
+      pauseOnMutation: row.pause_on_mutation === 1,
     });
   } catch (err) {
     console.error(`[reconstruct] wireOrchestratorSession failed for ${row.id}`, err);

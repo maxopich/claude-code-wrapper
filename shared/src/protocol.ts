@@ -1,6 +1,8 @@
 // WebSocket protocol shared between server and web.
 // Filled out incrementally as features land — start small.
 
+import type { MutationCategory } from './mutation.js';
+
 export type Project = {
   id: number;
   name: string;
@@ -172,6 +174,15 @@ export type ClientMsg =
       participants: number[];
       initialPrompt: string;
       lifecycle?: MultiAgentLifecycle;
+      /**
+       * Opt-in to "pause-on-first-mutation": the first non-`read` tool call
+       * from any worker (anywhere in the session) is gated by an
+       * `awaiting_continue`-style banner before the SDK dispatches the tool.
+       * Subsequent mutations auto-allow once the operator clicks Continue.
+       * Default `false` (server-side resolution; absent on pre-Item-5 clients).
+       * Persists in `multi_agent_sessions.pause_on_mutation`; survives R-B.
+       */
+      pauseOnMutation?: boolean;
     }
   | {
       /**
@@ -238,6 +249,19 @@ export type ClientMsg =
        * if we want that later. Idempotent.
        */
       type: 'abandon_session';
+      sessionId: string;
+    }
+  | {
+      /**
+       * Operator clicked Continue on the pause-on-first-mutation banner.
+       * Server clears the `pending_mutation_id` slot, sets
+       * `mutations_acknowledged=1` (so subsequent mutations in this session
+       * auto-allow), clears `awaiting_continue`, and re-delivers the paused
+       * worker's last captured prompt (briefing-and-rules preserved — same
+       * bytes as PR #71's retry path). Idempotent: a second click with the
+       * slot empty is a no-op.
+       */
+      type: 'continue_through_mutation';
       sessionId: string;
     }
   | {
@@ -375,6 +399,18 @@ export type ServerMsg =
       sessionId: string;
       toolName: string;
       input: unknown;
+      /**
+       * Server-classified mutation category from `classifyToolCall`. Optional
+       * so a replay of pre-Item-5 `permission_request` rows still renders via
+       * the React JSON-fallback subcomponent.
+       */
+      category?: MutationCategory;
+      /** Server-classified one-line operator-readable summary. */
+      summary?: string;
+      /** Absolute cwd the tool will run in (the project's `path`). Optional. */
+      cwd?: string;
+      /** Human-readable project name. Optional. */
+      projectName?: string;
     }
   | {
       type: 'permission_decided';
@@ -481,6 +517,38 @@ export type ServerMsg =
        * standalone set/clear ServerMsg.
        */
       pendingRetry?: PendingRetryDescriptor;
+      /**
+       * Item #5: opt-in pause-on-first-mutation flag for this session
+       * (`multi_agent_sessions.pause_on_mutation`). Set by the operator at
+       * session start via the setup-screen checkbox. Survives R-B; the
+       * banner reappears on reconstruct if a pause was pending.
+       */
+      pauseOnMutation: boolean;
+      /**
+       * True once the operator has clicked Continue on a pause-on-mutation
+       * banner at least once during this session (or set explicitly on
+       * subsequent sessions). When true, subsequent mutations auto-allow
+       * without further pauses. Mirrors `multi_agent_sessions.mutations_acknowledged`.
+       */
+      mutationsAcknowledged: boolean;
+      /**
+       * Initial batch of recorded mutations for this session, ordered by `ts`
+       * ascending. Empty on fresh starts; populated on R-A re-attach and R-B
+       * reconstruct so the Session-info "Mutations" disclosure and the
+       * activity-bar counter chip light up immediately. Subsequent mutations
+       * arrive via the live `multi_agent_mutation` ServerMsg.
+       */
+      mutations: MultiAgentMutationView[];
+      /**
+       * Populated when a worker has been paused mid-turn by the
+       * pause-on-first-mutation gate. Cleared once the operator clicks
+       * Continue. Restored from the persisted `pending_mutation_id` slot on
+       * R-A re-attach + R-B reconstruct so the banner survives reconnects
+       * and Cebab restarts. Absent on fresh starts and after a successful
+       * Continue. Co-exists with `awaitingContinue` and `pendingRetry`; the
+       * UI stacks all three banners.
+       */
+      pendingMutation?: MultiAgentMutationView;
     }
   | {
       /**
@@ -554,6 +622,32 @@ export type ServerMsg =
       type: 'multi_agent_pending_retry';
       sessionId: string;
       pending: PendingRetryDescriptor | null;
+    }
+  | {
+      /**
+       * Item #5: one mutation observed on the bus, appended live to the
+       * session's mutation log. Persisted into `multi_agent_mutations`; the
+       * initial batch ships on `multi_agent_started.mutations` for R-A/R-B
+       * replay. The reducer dedupes by `mutation.id` because the server may
+       * resend on re-attach.
+       */
+      type: 'multi_agent_mutation';
+      sessionId: string;
+      mutation: MultiAgentMutationView;
+    }
+  | {
+      /**
+       * Item #5: live set/clear of the pause-on-first-mutation slot. Emitted
+       * when a worker is about to mutate AND `pause_on_mutation=1` AND
+       * `mutations_acknowledged=0` (set, with the offending mutation row),
+       * and again when the operator clicks Continue (cleared,
+       * `pending: null`). Initial value on attach travels on
+       * `multi_agent_started.pendingMutation`; this is for in-session
+       * transitions.
+       */
+      type: 'multi_agent_pending_mutation';
+      sessionId: string;
+      pending: MultiAgentMutationView | null;
     }
   | {
       /**
@@ -670,6 +764,27 @@ export type PendingRetryDescriptor = {
   lastPrompt: string;
   ts: number;
   errorEventId: number;
+};
+
+/**
+ * Item #5: one classified mutation observed on the bus, as surfaced to the
+ * client. Rows live in `multi_agent_mutations`; the wire shape is denormalized
+ * for direct rendering (no JOINs on the client). The `category` field is
+ * always `'mutate'` or `'dangerous'` — read-only tool calls are not logged.
+ */
+export type MultiAgentMutationView = {
+  /** DB row id; the dedupe key for live + replay reconciliation. */
+  id: number;
+  sessionId: string;
+  /** Wall-clock ms when the `tool_use` block was observed. */
+  ts: number;
+  /** Bus slug of the agent whose turn produced this mutation. */
+  agentName: string;
+  /** SDK tool name (`'Write'`, `'Edit'`, `'Bash'`, …). */
+  toolName: string;
+  category: 'mutate' | 'dangerous';
+  /** Operator-readable one-line summary from `classifyToolCall`. */
+  summary: string;
 };
 
 /**

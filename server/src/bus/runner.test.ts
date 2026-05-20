@@ -258,6 +258,100 @@ describe('AgentRunner', () => {
       await expect(runner.deliverTurn('a', 'go')).resolves.toBeUndefined();
     });
   });
+
+  // --- Item #5: mutation tap on assistant `tool_use` blocks -------------
+  //
+  // The runner classifies every `tool_use` block via `classifyToolCall` and
+  // fires `onMutation` for non-`read` results BEFORE the SDK would dispatch
+  // the tool. A throw from `onMutation` (PausedForMutationError, in
+  // production) propagates out of `deliverTurn`; the router's `.catch`
+  // recognises the sentinel as a controlled pause.
+  describe('mutation tap', () => {
+    function assistantWithTool(name: string, input: unknown): SDKMessage {
+      return {
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'x', name, input }] },
+      } as unknown as SDKMessage;
+    }
+
+    test('fires onMutation for non-read tool calls (Write, Bash mutate, Bash dangerous)', async () => {
+      const seen: { agent: string; tool: string; category: string; summary: string }[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (agent, toolName, cls) => {
+          seen.push({ agent, tool: toolName, category: cls.category, summary: cls.summary });
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }),
+            assistantWithTool('Bash', { command: 'git commit -m m' }),
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }),
+            resultMsg('sess-1'),
+          ]),
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await runner.deliverTurn('coder', 'go');
+      expect(seen).toHaveLength(3);
+      expect(seen[0]!.tool).toBe('Write');
+      expect(seen[0]!.category).toBe('mutate');
+      expect(seen[1]!.category).toBe('mutate');
+      expect(seen[2]!.category).toBe('dangerous');
+      expect(seen[2]!.summary).toContain('rm -rf');
+    });
+
+    test('does NOT fire for read-only tool calls (Read, Grep, git status)', async () => {
+      const seen: unknown[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: () => {
+          seen.push(null);
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Read', { file_path: '/foo' }),
+            assistantWithTool('Grep', { pattern: 'TODO' }),
+            assistantWithTool('Bash', { command: 'git status' }),
+            resultMsg('sess-1'),
+          ]),
+      });
+      runner.register({ name: 'reviewer', cwd: '/tmp/r' });
+      await runner.deliverTurn('reviewer', 'go');
+      expect(seen).toEqual([]);
+    });
+
+    test('onMutation throwing propagates out of deliverTurn (pause gate path)', async () => {
+      class PauseError extends Error {}
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: () => {
+          throw new PauseError('paused');
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }),
+            // The result that would follow never gets observed — the throw aborts the loop.
+            resultMsg('sess-1'),
+          ]),
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(PauseError);
+    });
+
+    test('onMutation absent = no-op (back-compat with pre-Item-5 tests)', async () => {
+      // Existing tests don't set `onMutation`; assistant messages with
+      // tool_use blocks should not break them.
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }),
+            resultMsg('sess-1'),
+          ]),
+      });
+      runner.register({ name: 'a', cwd: '/tmp/a' });
+      await expect(runner.deliverTurn('a', 'go')).resolves.toBeUndefined();
+    });
+  });
 });
 
 describe('AgentRunner — per-agent turn serialization', () => {

@@ -1228,6 +1228,254 @@ pre {
   margin-left: 2px;
 }
 
+/* ---------- Item #5: mutation visibility ---------- */
+/* Activity-bar counter chip. Same render seam as `.ma-hop-budget-chip`;
+ * amber by default, red when any logged mutation is dangerous. */
+.ma-mutations-chip {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+  color: var(--warn);
+  background: var(--warn-soft);
+  margin-left: 12px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.ma-mutations-chip.has-dangerous {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 45%, var(--border));
+}
+
+/* Session-info "Mutations" disclosure. Reuses `.ghost-btn` for the toggle,
+ * adds spacing to keep it aligned with the routing-trail disclosure. */
+.ma-mutations-toggle {
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.mutations-danger-marker {
+  color: var(--err);
+  font-weight: 600;
+  margin-left: 6px;
+}
+
+/* Expanded mutation list inside Session info. Grouped by agent. */
+.mutation-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.mutation-group + .mutation-group {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-2);
+}
+.mutation-agent {
+  font-size: 11px;
+  color: var(--fg-3);
+  margin-bottom: 4px;
+}
+.mutation-group > ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.mutation-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+}
+.mutation-row.mutation-dangerous {
+  background: color-mix(in srgb, var(--err-soft) 60%, transparent);
+}
+.mutation-icon {
+  font-size: 12px;
+}
+.mutation-badge {
+  display: inline-flex;
+  padding: 1px 5px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  border-radius: var(--r-sm);
+  border: 1px solid;
+  font-weight: 600;
+}
+.mutation-badge-mutate {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+  background: var(--warn-soft);
+}
+.mutation-badge-dangerous {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  background: var(--err-soft);
+  font-weight: 700;
+}
+.mutation-tool {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.mutation-summary {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  flex: 1;
+  word-break: break-all;
+}
+.mutation-row .mutation-summary.mutation-dangerous {
+  color: var(--err);
+}
+.mutation-ts {
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* Setup-screen pause-on-first-mutation checkbox. Sits below the lifecycle
+ * picker, same row width. */
+.ma-pause-mutation-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-2);
+  margin-top: 10px;
+  cursor: pointer;
+}
+.ma-pause-mutation-checkbox input[type='checkbox'] {
+  cursor: pointer;
+}
+
+/* Single-agent permission-card per-tool body styling (Item #5). The card
+ * frame (`.msg.permission`) is unchanged; these style the inner subcomponents. */
+.msg.permission .role {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.permission-badge {
+  display: inline-flex;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  border-radius: var(--r-sm);
+  border: 1px solid;
+}
+.permission-badge-read {
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+}
+.permission-badge-mutate {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+.permission-badge-dangerous {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  font-weight: 700;
+}
+.msg.permission.permission-dangerous {
+  border-color: color-mix(in srgb, var(--err) 45%, var(--border));
+  background: color-mix(in srgb, var(--err-soft) 80%, var(--bg-2));
+}
+.permission-context {
+  font-size: 11px;
+  color: var(--fg-3);
+  margin-bottom: 6px;
+}
+.permission-context code {
+  font-family: var(--font-mono);
+}
+.permission-cwd {
+  color: var(--fg-2);
+}
+.permission-bash-command {
+  display: block;
+  font-family: var(--font-mono);
+  background: var(--bg-3);
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12.5px;
+}
+.permission-bash-description {
+  color: var(--fg-3);
+  font-size: 11px;
+  margin-top: 4px;
+}
+.permission-file-path {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.permission-file-size {
+  color: var(--fg-3);
+  font-size: 10px;
+  margin-left: 6px;
+}
+.permission-replace-all,
+.permission-cell-id {
+  color: var(--fg-3);
+  font-size: 11px;
+}
+.permission-content-preview {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--bg-3);
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.permission-diff {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--bg-3);
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-2);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.permission-diff del {
+  background: color-mix(in srgb, var(--err) 18%, transparent);
+  text-decoration: line-through;
+  color: var(--fg);
+}
+.permission-diff ins {
+  background: color-mix(in srgb, var(--ok) 18%, transparent);
+  text-decoration: none;
+  color: var(--fg);
+}
+.permission-summary-line {
+  font-family: var(--font-mono);
+  color: var(--fg-2);
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
 /* ---------- Multi-agent tab ---------- */
 .multi-agent {
   flex: 1;

@@ -60,6 +60,18 @@ export type MultiAgentSessionRow = {
   pending_retry_reason: string | null;
   pending_retry_ts: number | null;
   pending_retry_error_event_id: number | null;
+  /** Item #5 (migration 011): opt-in pause-on-first-mutation flag. 1 if the
+   *  operator enabled the setup-screen checkbox at session start. Narrowed
+   *  to boolean at the boundary. */
+  pause_on_mutation: number;
+  /** Item #5: 1 once the operator has clicked Continue on a pause-on-mutation
+   *  banner at least once during this session. Subsequent mutations
+   *  auto-allow when this is 1. */
+  mutations_acknowledged: number;
+  /** Item #5: soft FK to `multi_agent_mutations.id` — the mutation row that
+   *  caused the current pause. NULL when no pause active. Read by the WS
+   *  `continue_through_mutation` handler to find which agent to re-deliver. */
+  pending_mutation_id: number | null;
 };
 
 /**
@@ -75,6 +87,33 @@ export type PendingRetry = {
   reason: string;
   ts: number;
   errorEventId: number;
+};
+
+/**
+ * One classified mutation observed on the bus (Item #5, migration 011). Rows
+ * are appended by the bus runner's stream tap whenever it sees a `tool_use`
+ * block on an assistant message whose classification is `'mutate'` or
+ * `'dangerous'`. Read-only tool calls are NOT recorded — the table is
+ * specifically the mutation inventory the operator asks for.
+ */
+export type MutationRecord = {
+  id: number;
+  sessionId: string;
+  ts: number;
+  agentName: string;
+  toolName: string;
+  category: 'mutate' | 'dangerous';
+  summary: string;
+};
+
+export type MultiAgentMutationRow = {
+  id: number;
+  session_id: string;
+  ts: number;
+  agent_name: string;
+  tool_name: string;
+  category: string; // narrowed to 'mutate'|'dangerous' at the boundary
+  summary: string;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -252,6 +291,115 @@ export function getPendingRetry(id: string): PendingRetry | null {
   };
 }
 
+// ---- Item #5: pause-on-mutation + mutation log helpers ----
+
+function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    ts: row.ts,
+    agentName: row.agent_name,
+    toolName: row.tool_name,
+    category: row.category === 'dangerous' ? 'dangerous' : 'mutate',
+    summary: row.summary,
+  };
+}
+
+/**
+ * Append a classified non-`read` tool call to `multi_agent_mutations`. Called
+ * from the bus runner's stream tap (every assistant `tool_use` block whose
+ * classifier output is `'mutate'` or `'dangerous'`). Returns the persisted
+ * row so callers can wire `sink.onMutation` with the same shape they'd see
+ * on R-A/R-B replay.
+ */
+export function appendMultiAgentMutation(
+  sessionId: string,
+  agentName: string,
+  toolName: string,
+  category: 'mutate' | 'dangerous',
+  summary: string,
+): MutationRecord {
+  const ts = Date.now();
+  const info = getDb()
+    .prepare(
+      `INSERT INTO multi_agent_mutations (session_id, ts, agent_name, tool_name, category, summary)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(sessionId, ts, agentName, toolName, category, summary);
+  const row = getDb()
+    .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')
+    .get(Number(info.lastInsertRowid))!;
+  return rowToMutation(row);
+}
+
+/**
+ * List every mutation for a session, ordered by `ts` ascending. Used by:
+ *   - `emitResumedSession` to populate `multi_agent_started.mutations` on
+ *     R-A re-attach and R-B reconstruct.
+ *   - The WS handler for clients that need a one-shot fetch.
+ */
+export function listMultiAgentMutations(sessionId: string): MutationRecord[] {
+  return getDb()
+    .prepare<
+      [string],
+      MultiAgentMutationRow
+    >(`SELECT * FROM multi_agent_mutations WHERE session_id = ? ORDER BY ts ASC, id ASC`)
+    .all(sessionId)
+    .map(rowToMutation);
+}
+
+/** Resolve a single mutation row by id; returns `null` if missing. */
+export function getMultiAgentMutation(id: number): MutationRecord | null {
+  const row = getDb()
+    .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')
+    .get(id);
+  return row ? rowToMutation(row) : null;
+}
+
+/** Persist the operator's setup-screen pause-on-mutation choice. Idempotent. */
+export function setPauseOnMutation(sessionId: string, value: boolean): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET pause_on_mutation = ? WHERE id = ?`)
+    .run(value ? 1 : 0, sessionId);
+}
+
+/** Flip `mutations_acknowledged`. Idempotent. Called from the WS
+ *  `continue_through_mutation` handler when the operator clicks Continue. */
+export function setMutationsAcknowledged(sessionId: string, value: boolean): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET mutations_acknowledged = ? WHERE id = ?`)
+    .run(value ? 1 : 0, sessionId);
+}
+
+/**
+ * Set or clear the pending-mutation slot. Pass `null` to clear. Mirrors
+ * `setPendingRetry`'s API (PR #71). The mutation row referenced by `id`
+ * must already be persisted (the bus tap calls `appendMultiAgentMutation`
+ * first, then this) so the soft FK always resolves.
+ */
+export function setPendingMutation(sessionId: string, mutationId: number | null): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET pending_mutation_id = ? WHERE id = ?`)
+    .run(mutationId, sessionId);
+}
+
+/**
+ * Read the pending-mutation slot, resolving the soft FK to a full
+ * `MutationRecord`. Returns `null` when no pause is active OR when the
+ * referenced row is missing (defensive — e.g. after a manual `clear_iterations`
+ * race; treat as "no pause" rather than throwing).
+ */
+export function getPendingMutation(sessionId: string): MutationRecord | null {
+  const row = getDb()
+    .prepare<
+      [string],
+      { pending_mutation_id: number | null }
+    >('SELECT pending_mutation_id FROM multi_agent_sessions WHERE id = ?')
+    .get(sessionId);
+  if (!row || row.pending_mutation_id === null) return null;
+  return getMultiAgentMutation(row.pending_mutation_id);
+}
+
 export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefined {
   return getDb()
     .prepare<[string], MultiAgentSessionRow>('SELECT * FROM multi_agent_sessions WHERE id = ?')
@@ -335,6 +483,12 @@ export function clearFinishedMultiAgentSessions(): number {
     ).run();
     db.prepare(
       `DELETE FROM multi_agent_agent_sessions
+        WHERE session_id IN (
+          SELECT id FROM multi_agent_sessions WHERE status != 'running'
+        )`,
+    ).run();
+    db.prepare(
+      `DELETE FROM multi_agent_mutations
         WHERE session_id IN (
           SELECT id FROM multi_agent_sessions WHERE status != 'running'
         )`,

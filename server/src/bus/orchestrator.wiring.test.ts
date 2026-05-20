@@ -163,6 +163,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
       stop: vi.fn(),
       detach: vi.fn(),
       retry: vi.fn(),
+      continueThroughMutation: vi.fn(),
     };
     let bound = false;
     registerLiveSession({
@@ -195,6 +196,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
         stop: vi.fn(),
         retry: vi.fn(),
         detach: vi.fn(),
+        continueThroughMutation: vi.fn(),
       },
       rebind: vi.fn(),
     });

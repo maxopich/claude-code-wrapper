@@ -597,6 +597,10 @@ describe('store / eventDefaultCollapsed', () => {
       activity: null,
       hopBudget: 30,
       pendingRetry: null,
+      pauseOnMutation: false,
+      mutationsAcknowledged: false,
+      mutations: [],
+      pendingMutation: null,
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
@@ -689,6 +693,9 @@ describe('store / agent_activity (ephemeral liveness)', () => {
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/sess-A',
         hopBudget: 30,
+        pauseOnMutation: false,
+        mutationsAcknowledged: false,
+        mutations: [],
       },
     });
   }
@@ -783,6 +790,9 @@ describe('store / hop budget', () => {
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/s-budget',
         hopBudget: 42,
+        pauseOnMutation: false,
+        mutationsAcknowledged: false,
+        mutations: [],
       },
     });
     expect(s.multiAgent.active!.hopBudget).toBe(42);
@@ -823,6 +833,9 @@ describe('store / pending retry', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-pr',
     hopBudget: 30,
+    pauseOnMutation: false,
+    mutationsAcknowledged: false,
+    mutations: [],
   };
 
   test('multi_agent_started without pendingRetry → null (fresh start)', () => {
@@ -955,5 +968,170 @@ describe('store / pending retry', () => {
     // state (no spurious renders / no thrown).
     const s2 = reduce(s, { type: 'ma_clear_pending_retry' });
     expect(s2).toBe(s);
+  });
+});
+
+// Item #5: mutation visibility + pause-on-first-mutation reducer wiring.
+// The protocol additions are:
+//   - `multi_agent_started.{pauseOnMutation, mutationsAcknowledged, mutations,
+//     pendingMutation?}` — initial state hydration on R-A/R-B attach.
+//   - `multi_agent_mutation` — append-with-dedupe per session.
+//   - `multi_agent_pending_mutation` — set/clear the pause slot wholesale.
+//   - `ma_set_draft_pause_on_mutation` — setup-screen toggle.
+//   - `ma_clear_pending_mutation` — optimistic Continue.
+describe('store / pause-on-mutation + mutations', () => {
+  const baseStarted = {
+    type: 'multi_agent_started' as const,
+    sessionId: 's-pom',
+    mode: 'orchestrator' as const,
+    participants: [1],
+    participantAgentNames: ['orchestrator', 'coder'],
+    lifecycle: 'persistent' as const,
+    sessionFolder: '/ws/.cebab/s-pom',
+    hopBudget: 30,
+    pauseOnMutation: false,
+    mutationsAcknowledged: false,
+    mutations: [],
+  };
+
+  test('multi_agent_started hydrates pauseOnMutation + mutations array', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        pauseOnMutation: true,
+        mutationsAcknowledged: false,
+        mutations: [
+          {
+            id: 1,
+            sessionId: 's-pom',
+            ts: 100,
+            agentName: 'coder',
+            toolName: 'Write',
+            category: 'mutate' as const,
+            summary: 'create /foo (1 B)',
+          },
+        ],
+      },
+    });
+    expect(s.multiAgent.active!.pauseOnMutation).toBe(true);
+    expect(s.multiAgent.active!.mutations.length).toBe(1);
+    expect(s.multiAgent.active!.pendingMutation).toBeNull();
+  });
+
+  test('multi_agent_started with pendingMutation hydrates the banner (R-A/R-B)', () => {
+    const pending = {
+      id: 7,
+      sessionId: 's-pom',
+      ts: 200,
+      agentName: 'coder',
+      toolName: 'Bash',
+      category: 'dangerous' as const,
+      summary: 'rm -rf node_modules',
+    };
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, pauseOnMutation: true, pendingMutation: pending },
+    });
+    expect(s.multiAgent.active!.pendingMutation).toEqual(pending);
+  });
+
+  test('multi_agent_mutation appends to the list, deduped by id', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    const m1 = {
+      id: 1,
+      sessionId: 's-pom',
+      ts: 100,
+      agentName: 'coder',
+      toolName: 'Edit',
+      category: 'mutate' as const,
+      summary: 'replace 5 chars in /foo',
+    };
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_mutation', sessionId: 's-pom', mutation: m1 },
+    });
+    expect(s.multiAgent.active!.mutations).toEqual([m1]);
+    // Re-send the same id — dedupe (a re-attach may replay the live + the
+    // initial-batch ServerMsg, the reducer must not duplicate).
+    const s2 = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_mutation', sessionId: 's-pom', mutation: m1 },
+    });
+    expect(s2.multiAgent.active!.mutations.length).toBe(1);
+  });
+
+  test('multi_agent_pending_mutation sets and clears the slot wholesale', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    const pending = {
+      id: 7,
+      sessionId: 's-pom',
+      ts: 200,
+      agentName: 'coder',
+      toolName: 'Write',
+      category: 'mutate' as const,
+      summary: 'create /foo',
+    };
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_pending_mutation', sessionId: 's-pom', pending },
+    });
+    expect(s.multiAgent.active!.pendingMutation).toEqual(pending);
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_pending_mutation', sessionId: 's-pom', pending: null },
+    });
+    expect(s.multiAgent.active!.pendingMutation).toBeNull();
+  });
+
+  test('ma_clear_pending_mutation optimistically clears + flips ack flag; idempotent', () => {
+    const pending = {
+      id: 7,
+      sessionId: 's-pom',
+      ts: 200,
+      agentName: 'coder',
+      toolName: 'Bash',
+      category: 'dangerous' as const,
+      summary: 'rm x',
+    };
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, pauseOnMutation: true, pendingMutation: pending },
+    });
+    expect(s.multiAgent.active!.pendingMutation).not.toBeNull();
+    s = reduce(s, { type: 'ma_clear_pending_mutation' });
+    expect(s.multiAgent.active!.pendingMutation).toBeNull();
+    expect(s.multiAgent.active!.mutationsAcknowledged).toBe(true);
+    // Idempotent: a second click with the slot already empty no-ops.
+    const s2 = reduce(s, { type: 'ma_clear_pending_mutation' });
+    expect(s2).toBe(s);
+  });
+
+  test('multi_agent_ended clears pendingMutation too (no lingering banner on stopped/crashed)', () => {
+    const pending = {
+      id: 7,
+      sessionId: 's-pom',
+      ts: 200,
+      agentName: 'coder',
+      toolName: 'Bash',
+      category: 'dangerous' as const,
+      summary: 'rm x',
+    };
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, pauseOnMutation: true, pendingMutation: pending },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_ended', sessionId: 's-pom', reason: 'stopped', iterationId: null },
+    });
+    expect(s.multiAgent.active!.pendingMutation).toBeNull();
+  });
+
+  test('ma_set_draft_pause_on_mutation toggles setup-screen state', () => {
+    let s = reduce(initialState, { type: 'ma_set_draft_pause_on_mutation', value: true });
+    expect(s.multiAgent.draftPauseOnMutation).toBe(true);
+    s = reduce(s, { type: 'ma_set_draft_pause_on_mutation', value: false });
+    expect(s.multiAgent.draftPauseOnMutation).toBe(false);
   });
 });
