@@ -549,6 +549,16 @@ export type ServerMsg =
        * UI stacks all three banners.
        */
       pendingMutation?: MultiAgentMutationView;
+      /**
+       * Item #7: server-derived recovery snapshot surfaced ONLY when the
+       * session is in `awaiting_continue` state (R-B reconstruct, or a
+       * pause-on-mutation banner that survived a Cebab restart). Powers the
+       * "▾ Recovery details" disclosure inside the awaiting-continue banner.
+       * Pure render-time derivation from `multi_agent_events` +
+       * `multi_agent_agent_sessions`; not persisted. Absent on fresh starts
+       * and on resumes that don't need the disclosure.
+       */
+      recoveryContext?: RecoveryContextView;
     }
   | {
       /**
@@ -785,6 +795,42 @@ export type MultiAgentMutationView = {
   category: 'mutate' | 'dangerous';
   /** Operator-readable one-line summary from `classifyToolCall`. */
   summary: string;
+};
+
+/**
+ * Item #7: per-agent recovery-time state. An agent is flagged as possibly
+ * "interrupted" iff it emitted bus activity (a `multi_agent_events` row with
+ * `source=agentName`) that wasn't followed by a successful SDK `result`
+ * checkpoint write (`multi_agent_agent_sessions.updated_at`). False positives
+ * are tolerable by design — the heuristic favors caution. False negatives are
+ * not possible by construction: an interrupted turn's checkpoint never lands.
+ */
+export type RecoveryAgentEntry = {
+  agentName: string;
+  /** Wall-clock of the most recent `multi_agent_events` row where source=agentName. */
+  lastEventTs: number;
+  /** `updated_at` from `multi_agent_agent_sessions` for this agent, or null if
+   *  the agent never reached a successful `result` (e.g. crashed during intro). */
+  lastCheckpointTs: number | null;
+};
+
+/**
+ * Item #7: snapshot computed at `emitResumedSession` time, surfaced ONLY when
+ * the session is in `awaiting_continue` state. Carries the operator-facing
+ * "what was happening when Cebab died?" answer for the awaiting-continue
+ * banner's read-only Recovery details disclosure.
+ */
+export type RecoveryContextView = {
+  /** Wall-clock of the most recent event of ANY source in this session.
+   *  Anchors "last persisted activity" in the disclosure. */
+  staleSinceTs: number;
+  /** Server "now" at emit time. Reserved for future "stale for N seconds"
+   *  hints; v1 clients may ignore. */
+  reconstructedAtTs: number;
+  /** Agents flagged as possibly interrupted (`lastEventTs > lastCheckpointTs`).
+   *  Empty when all agents checkpointed cleanly. Sorted by `lastEventTs`
+   *  descending (most-recently-active first). */
+  interruptedAgents: RecoveryAgentEntry[];
 };
 
 /**

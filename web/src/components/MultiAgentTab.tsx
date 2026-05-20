@@ -15,6 +15,7 @@ import { formatElapsed } from '../format';
 import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
+import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalKeys } from '../useModalKeys';
 
 /**
@@ -1616,6 +1617,7 @@ function ActiveRunView(props: {
           >
             Continue session
           </button>
+          {run.recoveryContext && <RecoveryDisclosure recovery={run.recoveryContext} />}
         </div>
       )}
 

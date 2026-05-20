@@ -9,6 +9,7 @@
  * Project-level bus state (`bus_installed`, `bus_agent_name`) also lives here
  * to keep all multi-agent-runtime concerns in one repo module.
  */
+import type { RecoveryAgentEntry, RecoveryContextView } from '@cebab/shared/protocol';
 import { getDb } from '../db.js';
 
 export type MultiAgentMode = 'chain' | 'orchestrator';
@@ -632,6 +633,59 @@ export function listAgentSessions(sessionId: string): MultiAgentAgentSessionRow[
       MultiAgentAgentSessionRow
     >('SELECT * FROM multi_agent_agent_sessions WHERE session_id = ?')
     .all(sessionId);
+}
+
+/**
+ * Item #7: compute per-agent recovery state from existing rows. Returns null
+ * when the session has no persisted events (degenerate; should not occur on a
+ * real awaiting-continue session).
+ *
+ * Heuristic: an agent X is "possibly interrupted" iff
+ *   max(multi_agent_events.ts WHERE source=X) > (multi_agent_agent_sessions.updated_at WHERE agent_name=X ?? 0)
+ * Because `upsertAgentSession` is called the instant the SDK emits a successful
+ * `result` (server/src/bus/runner.ts), any post-checkpoint event by definition
+ * belongs to a turn that hadn't yet reached `result` when Cebab died. False
+ * negatives are not possible by construction; rare false positives (a clean
+ * turn whose checkpoint write lost the race) are tolerable — the disclosure's
+ * "may have unfinished turns" framing carries the uncertainty.
+ *
+ * Excludes synthetic sources 'cebab' (Foundation's `forwardCebabEvent` +
+ * bypassed F3 writes from the routers) and '_sink' (chain terminal). They
+ * are not SDK-driven agents and have no checkpoint row. If a future synthetic
+ * source is added, it must be appended to SYNTHETIC.
+ */
+const RECOVERY_SYNTHETIC_SOURCES: ReadonlySet<string> = new Set(['cebab', '_sink']);
+
+export function computeRecoveryContext(sessionId: string): RecoveryContextView | null {
+  const events = listMultiAgentEvents(sessionId);
+  if (events.length === 0) return null;
+  const checkpoints = listAgentSessions(sessionId);
+  const checkpointBy = new Map<string, number>(
+    checkpoints.map((c) => [c.agent_name, c.updated_at]),
+  );
+  const lastEventBy = new Map<string, number>();
+  // `staleSinceTs` is max(ts) across ALL events (including synthetic) — it
+  // anchors "last persisted activity" in the disclosure regardless of who
+  // emitted it. `listMultiAgentEvents` returns rows in id-ascending order
+  // (insertion order), which equals ts order in production but not in tests
+  // where rows can be back-dated, so we compute the max explicitly.
+  let staleSinceTs = 0;
+  for (const ev of events) {
+    if (ev.ts > staleSinceTs) staleSinceTs = ev.ts;
+    if (RECOVERY_SYNTHETIC_SOURCES.has(ev.source)) continue;
+    const prev = lastEventBy.get(ev.source);
+    if (prev === undefined || ev.ts > prev) lastEventBy.set(ev.source, ev.ts);
+  }
+  const reconstructedAtTs = Date.now();
+  const interruptedAgents: RecoveryAgentEntry[] = [];
+  for (const [agentName, lastEventTs] of lastEventBy) {
+    const lastCheckpointTs = checkpointBy.get(agentName) ?? null;
+    if (lastEventTs > (lastCheckpointTs ?? 0)) {
+      interruptedAgents.push({ agentName, lastEventTs, lastCheckpointTs });
+    }
+  }
+  interruptedAgents.sort((a, b) => b.lastEventTs - a.lastEventTs);
+  return { staleSinceTs, reconstructedAtTs, interruptedAgents };
 }
 
 // ---- project-level bus state ----

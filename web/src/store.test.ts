@@ -602,6 +602,7 @@ describe('store / eventDefaultCollapsed', () => {
       mutationsAcknowledged: false,
       mutations: [],
       pendingMutation: null,
+      recoveryContext: null,
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
@@ -1162,5 +1163,98 @@ describe('store / trustChipState (Item #6)', () => {
     for (const [trusted, mode, expected] of cases) {
       expect(trustChipState(trusted, mode)).toBe(expected);
     }
+  });
+});
+
+// Item #7: recovery context wiring. The reducer must (a) hydrate from
+// `multi_agent_started.recoveryContext` on R-A/R-B attach when present,
+// (b) leave it null when the server doesn't send it (fresh start, or any
+// non-awaiting-continue resume), (c) clear on `ma_clear_awaiting` (the
+// optimistic Continue click — banner-bound lifetime), and (d) clear on
+// session end.
+describe('store / recoveryContext (Item #7)', () => {
+  const baseStarted = {
+    type: 'multi_agent_started' as const,
+    sessionId: 's-rec',
+    mode: 'orchestrator' as const,
+    participants: [1],
+    participantAgentNames: ['orchestrator', 'coder'],
+    lifecycle: 'persistent' as const,
+    sessionFolder: '/ws/.cebab/s-rec',
+    hopBudget: 30,
+    pauseOnMutation: false,
+    mutationsAcknowledged: false,
+    mutations: [],
+  };
+
+  test('multi_agent_started without recoveryContext → null', () => {
+    const s = reduce(initialState, { type: 'server', msg: baseStarted });
+    expect(s.multiAgent.active!.recoveryContext).toBeNull();
+  });
+
+  test('multi_agent_started with recoveryContext → hydrates the disclosure', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        awaitingContinue: true,
+        recoveryContext: {
+          staleSinceTs: 1700000000500,
+          reconstructedAtTs: 1700000001000,
+          interruptedAgents: [
+            { agentName: 'coder', lastEventTs: 1700000000500, lastCheckpointTs: 1700000000300 },
+          ],
+        },
+      },
+    });
+    expect(s.multiAgent.active!.recoveryContext).toEqual({
+      staleSinceTs: 1700000000500,
+      reconstructedAtTs: 1700000001000,
+      interruptedAgents: [
+        { agentName: 'coder', lastEventTs: 1700000000500, lastCheckpointTs: 1700000000300 },
+      ],
+    });
+  });
+
+  test('ma_clear_awaiting zeroes recoveryContext alongside awaitingContinue', () => {
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        awaitingContinue: true,
+        recoveryContext: {
+          staleSinceTs: 100,
+          reconstructedAtTs: 200,
+          interruptedAgents: [],
+        },
+      },
+    });
+    expect(s.multiAgent.active!.awaitingContinue).toBe(true);
+    expect(s.multiAgent.active!.recoveryContext).not.toBeNull();
+
+    s = reduce(s, { type: 'ma_clear_awaiting' });
+    expect(s.multiAgent.active!.awaitingContinue).toBe(false);
+    expect(s.multiAgent.active!.recoveryContext).toBeNull();
+  });
+
+  test('multi_agent_ended drops recoveryContext (stopped/crashed banners dont resurface)', () => {
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        awaitingContinue: true,
+        recoveryContext: {
+          staleSinceTs: 100,
+          reconstructedAtTs: 200,
+          interruptedAgents: [{ agentName: 'coder', lastEventTs: 100, lastCheckpointTs: null }],
+        },
+      },
+    });
+    expect(s.multiAgent.active!.recoveryContext).not.toBeNull();
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_ended', sessionId: 's-rec', reason: 'stopped', iterationId: null },
+    });
+    expect(s.multiAgent.active!.recoveryContext).toBeNull();
   });
 });
