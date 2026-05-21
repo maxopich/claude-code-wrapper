@@ -74,7 +74,14 @@ function relativize(filePath: string, cwd: string | null): string | null {
     return fp.replace(/^\.\//, '');
   }
   if (!cwd) return fp;
-  const norm = cwd.replace(/\\/g, '/').replace(/\/+$/, '');
+  // Normalize separators, then strip trailing `/` runs with a loop rather
+  // than `/\/+$/` — that regex is polynomial-backtracking under CodeQL
+  // (`js/polynomial-redos`) on inputs like `/a///` and `cwd` is library
+  // input we don't control.
+  let norm = cwd.replace(/\\/g, '/');
+  while (norm.length > 0 && norm.charCodeAt(norm.length - 1) === 0x2f /* '/' */) {
+    norm = norm.slice(0, -1);
+  }
   if (fp === norm) return '';
   const prefix = `${norm}/`;
   if (fp.startsWith(prefix)) return fp.slice(prefix.length);
