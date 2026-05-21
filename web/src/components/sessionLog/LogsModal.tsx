@@ -43,6 +43,7 @@ export function LogsModal(props: {
 
   const filtered = useMemo(() => applyLogFilters(stream.rows, filters), [stream.rows, filters]);
   const agents = useMemo(() => uniqueAgents(stream.rows), [stream.rows]);
+  const dangerousAnnouncement = useDangerousArrivalAnnouncements(stream.rows, stream.loading);
 
   // Focus the close button on mount so screen readers announce the modal.
   // Tab key cycles through interactive elements naturally; the modal-keys
@@ -136,9 +137,82 @@ export function LogsModal(props: {
           hasMore={stream.hasMore}
           onLoadMore={stream.loadMore}
         />
+
+        {/* Polite live region — coalesced "N dangerous mutations logged"
+         *  announcement whenever the row set grows to include dangerous
+         *  entries we haven't yet seen. Suppressed during initial seeding so
+         *  reopening the modal doesn't re-announce every prior row. */}
+        <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+          {dangerousAnnouncement}
+        </div>
       </div>
     </div>
   );
+}
+
+/**
+ * Diff successive `stream.rows` snapshots to surface NEW dangerous-severity
+ * rows via a coalesced polite announcement. Seeds silently on the first
+ * non-empty snapshot (so reopening the modal isn't a flood) and throttles
+ * subsequent announcements to ≤1 per 3 s, coalescing intervening arrivals
+ * into a single "N dangerous mutations logged" string.
+ */
+function useDangerousArrivalAnnouncements(rows: readonly LogRow[], loading: boolean): string {
+  const seenIds = useRef<Set<string> | null>(null);
+  const pendingCount = useRef(0);
+  const lastAnnouncedAt = useRef(0);
+  const flushTimer = useRef<number | null>(null);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    if (loading) return;
+    if (seenIds.current === null) {
+      // First settled snapshot — seed silently. Anything already present is
+      // not "new" from the operator's perspective.
+      seenIds.current = new Set(rows.filter((r) => r.severity === 'dangerous').map((r) => r.id));
+      return;
+    }
+    let newCount = 0;
+    for (const r of rows) {
+      if (r.severity !== 'dangerous') continue;
+      if (seenIds.current.has(r.id)) continue;
+      seenIds.current.add(r.id);
+      newCount += 1;
+    }
+    if (newCount === 0) return;
+    pendingCount.current += newCount;
+
+    const now = Date.now();
+    const sinceLast = now - lastAnnouncedAt.current;
+    const THROTTLE_MS = 3000;
+
+    function flush() {
+      const n = pendingCount.current;
+      if (n === 0) return;
+      pendingCount.current = 0;
+      lastAnnouncedAt.current = Date.now();
+      flushTimer.current = null;
+      // Toggle through empty so screen readers re-announce identical messages.
+      setMessage('');
+      requestAnimationFrame(() =>
+        setMessage(`${n} dangerous mutation${n === 1 ? '' : 's'} logged`),
+      );
+    }
+
+    if (sinceLast >= THROTTLE_MS) {
+      flush();
+    } else if (flushTimer.current === null) {
+      flushTimer.current = window.setTimeout(flush, THROTTLE_MS - sinceLast);
+    }
+  }, [rows, loading]);
+
+  useEffect(() => {
+    return () => {
+      if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
+    };
+  }, []);
+
+  return message;
 }
 
 function uniqueAgents(rows: readonly LogRow[]): string[] {

@@ -125,6 +125,37 @@ describe('buildSessionLogChunk — projection', () => {
     expect(chunk.rows[0]?.kind).toBe('artifact');
   });
 
+  test('surfaces mutation severity as a top-level field on tool/artifact rows', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentEvent('s1', 'reviewer', 'planner', 'prompt', 'please review');
+    appendMultiAgentMutation('s1', 'worker', 'Write', 'mutate', 'create config.ts', {
+      filePath: '/p/config.ts',
+      cwd: '/p',
+      toolUseId: 'tu-mutate',
+    });
+    confirmMutationByToolUseId('s1', 'tu-mutate');
+    appendMultiAgentMutation('s1', 'worker', 'Write', 'dangerous', 'edit .env', {
+      filePath: '/p/.env',
+      cwd: '/p',
+      toolUseId: 'tu-danger',
+    });
+    confirmMutationByToolUseId('s1', 'tu-danger');
+
+    const chunk = buildSessionLogChunk({
+      sessionId: 's1',
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    const mutateRow = chunk.rows.find((r) => r.summary === 'create config.ts');
+    const dangerousRow = chunk.rows.find((r) => r.summary === 'edit .env');
+    const busRow = chunk.rows.find((r) => r.kind === 'bus');
+    expect(mutateRow?.severity).toBe('mutate');
+    expect(dangerousRow?.severity).toBe('dangerous');
+    // Bus rows must not carry severity (it's mutation-only).
+    expect(busRow?.severity).toBeUndefined();
+  });
+
   test('merges events and mutations by ts ASC', () => {
     createMultiAgentSession('s1', 'orchestrator');
     // Insert in non-chronological order; reorder by ts at projection time.
