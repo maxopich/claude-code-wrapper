@@ -42,7 +42,7 @@ export function AgentActivityTabs(props: { run: MultiAgentRun }) {
   const artifactCount = useMemo(() => {
     const seen = new Set<string>();
     for (const m of run.mutations) {
-      if (m.filePath !== null && m.confirmedAt !== null) seen.add(m.filePath);
+      if (m.filePath !== null && m.confirmedAt !== null && m.promoted) seen.add(m.filePath);
     }
     return seen.size;
   }, [run.mutations]);

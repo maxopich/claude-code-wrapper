@@ -10,6 +10,7 @@
 import { AgentLaneHeader } from './AgentLaneHeader';
 import { ActivityRow } from './ActivityRow';
 import { useLaneScroll } from './useLaneScroll';
+import { WorkingFiles } from './WorkingFiles';
 import type { Lane } from './laneDerivation';
 import type { MultiAgentRun } from '../../store';
 
@@ -44,6 +45,7 @@ export function AgentLane(props: { lane: Lane; run: MultiAgentRun }) {
               read scrollHeight ourselves. */}
           <div ref={bottomSentinelRef} aria-hidden="true" />
         </div>
+        <WorkingFiles run={run} agentName={lane.agentName} />
         {paused && newCount > 0 && (
           <button
             type="button"

@@ -3691,3 +3691,75 @@ pre {
   font-size: var(--t-xs);
   font-style: italic;
 }
+
+/* Working files (lane-bottom scratch disclosure, Phase E) ------------- */
+.working-files {
+  border-top: 1px solid var(--line-2);
+  padding: var(--s-2) var(--s-3);
+  background: var(--bg-1);
+  font-size: var(--t-xs);
+}
+
+.working-files-summary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--fg-2);
+}
+.working-files-summary::-webkit-details-marker {
+  display: none;
+}
+.working-files-summary::before {
+  content: '▸';
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+}
+.working-files[open] .working-files-summary::before {
+  content: '▾';
+  color: var(--accent-ink);
+}
+
+.working-files-label {
+  color: var(--fg-1);
+  font-weight: 500;
+}
+
+.working-files-count {
+  background: var(--bg-4);
+  color: var(--fg-2);
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: var(--t-xs);
+}
+
+.working-files-list {
+  list-style: none;
+  margin: var(--s-2) 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.working-files-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  color: var(--fg-2);
+}
+
+.working-files-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.working-files-edits {
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+}

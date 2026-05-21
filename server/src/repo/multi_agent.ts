@@ -425,6 +425,20 @@ export function confirmMutationByToolUseId(
 }
 
 /**
+ * Phase E: flip a row's `promoted` flag. Returns the updated row, or null
+ * when the id doesn't exist. Idempotent — re-promoting an already-promoted
+ * row is a no-op SQL-wise. The orchestrator/chain hook runs the artifact
+ * classifier after confirmation and calls this when the row passes the
+ * promotion globs.
+ */
+export function setMutationPromoted(id: number, value: boolean): MutationRecord | null {
+  getDb()
+    .prepare(`UPDATE multi_agent_mutations SET promoted = ? WHERE id = ?`)
+    .run(value ? 1 : 0, id);
+  return getMultiAgentMutation(id);
+}
+
+/**
  * List every mutation for a session, ordered by `ts` ascending. Used by:
  *   - `emitResumedSession` to populate `multi_agent_started.mutations` on
  *     R-A re-attach and R-B reconstruct.

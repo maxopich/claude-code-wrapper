@@ -44,6 +44,7 @@ import {
   setAwaitingContinue,
   setMultiAgentSessionLifecycle,
   setMutationsAcknowledged,
+  setMutationPromoted,
   setPauseOnMutation,
   setPendingMutation,
   setPendingRetry,
@@ -52,6 +53,7 @@ import {
   type MultiAgentLifecycle,
   type MutationRecord,
 } from '../repo/multi_agent.js';
+import { classifyArtifact } from '@cebab/shared';
 import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
@@ -754,17 +756,36 @@ export function wireOrchestratorSession(p: {
   // (dedupe-by-id, replace) surfaces the confirmation to the lane / artifact
   // UI. Failures here are logged and swallowed — a missed confirmation just
   // leaves the row as provisional, which is the safe-default render.
+  //
+  // Phase E: after confirmation we also run the artifact classifier. If the
+  // file passes the locked promotion globs, flip `promoted=1` and re-emit
+  // again with the promotion flag set — the reducer dedupes by id so this
+  // looks like a single state transition to the client.
   const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
-    let updated: MutationRecord | null;
+    let confirmed: MutationRecord | null;
     try {
-      updated = confirmMutationByToolUseId(sessionId, toolUseId);
+      confirmed = confirmMutationByToolUseId(sessionId, toolUseId);
     } catch (err) {
       console.error('[orchestrator] confirm mutation failed', err);
       return;
     }
-    if (!updated) return;
+    if (!confirmed) return;
+
+    let finalRow = confirmed;
+    if (confirmed.filePath) {
+      try {
+        const kind = classifyArtifact(confirmed.filePath, confirmed.cwd);
+        if (kind === 'promoted' && !confirmed.promoted) {
+          const promoted = setMutationPromoted(confirmed.id, true);
+          if (promoted) finalRow = promoted;
+        }
+      } catch (err) {
+        console.error('[orchestrator] classify/promote mutation failed', err);
+      }
+    }
+
     try {
-      p.onMutation?.(sessionId, updated);
+      p.onMutation?.(sessionId, finalRow);
     } catch (err) {
       console.error('[orchestrator] onMutation sink (confirm re-emit) threw', err);
     }

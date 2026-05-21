@@ -51,6 +51,7 @@ import {
   getPendingRetry,
   setAwaitingContinue,
   setMutationsAcknowledged,
+  setMutationPromoted,
   setPauseOnMutation,
   setPendingMutation,
   setPendingRetry,
@@ -58,6 +59,7 @@ import {
   type MultiAgentLifecycle,
   type MutationRecord,
 } from '../repo/multi_agent.js';
+import { classifyArtifact } from '@cebab/shared';
 import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import {
@@ -625,20 +627,34 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
   };
 
-  // Migration 012: tool-result tap (mirrors orchestrator.ts's `onToolResultHook`).
-  // Flips `confirmed_at` on the matching mutation row, re-emits
-  // `multi_agent_mutation` for the wire-reducer dedupe-by-id.
+  // Migration 012 + Phase E: tool-result tap (mirrors orchestrator.ts's
+  // `onToolResultHook`). Flips `confirmed_at`, runs the artifact classifier,
+  // and re-emits `multi_agent_mutation` (the wire reducer dedupes by id).
   const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
-    let updated: MutationRecord | null;
+    let confirmed: MutationRecord | null;
     try {
-      updated = confirmMutationByToolUseId(sessionId, toolUseId);
+      confirmed = confirmMutationByToolUseId(sessionId, toolUseId);
     } catch (err) {
       console.error('[chain] confirm mutation failed', err);
       return;
     }
-    if (!updated) return;
+    if (!confirmed) return;
+
+    let finalRow = confirmed;
+    if (confirmed.filePath) {
+      try {
+        const kind = classifyArtifact(confirmed.filePath, confirmed.cwd);
+        if (kind === 'promoted' && !confirmed.promoted) {
+          const promoted = setMutationPromoted(confirmed.id, true);
+          if (promoted) finalRow = promoted;
+        }
+      } catch (err) {
+        console.error('[chain] classify/promote mutation failed', err);
+      }
+    }
+
     try {
-      opts.onMutation?.(sessionId, updated);
+      opts.onMutation?.(sessionId, finalRow);
     } catch (err) {
       console.error('[chain] onMutation sink (confirm re-emit) threw', err);
     }

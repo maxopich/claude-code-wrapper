@@ -1,19 +1,23 @@
 /**
- * The Artifacts-tab content. v1 surface: list every confirmed mutation
- * with a `filePath`, grouped by file (one row per unique file path —
- * subsequent edits collapse into a single "updated N times" row). The
- * Phase E `classifyArtifact` + promotion-globs work narrows this to just
- * the locked deliverable patterns; this initial cut shows all confirmed
- * file writes so the operator immediately sees what's happening on disk.
+ * The Artifacts-tab content. Lists every PROMOTED file mutation, grouped
+ * by file (one row per unique file path — subsequent edits collapse into
+ * a single "edits: N" row).
  *
- * Provisional rows (no `confirmedAt`) are excluded from this list — they
- * surface inside the producing agent's expanded ActivityRow (Phase E's
- * "Working files" subsection). The split is privacy-by-default: a Write
- * that the SDK aborted before dispatching shouldn't appear here as a real
- * artifact.
+ * Three gates a mutation must pass to appear here:
+ *   1. `filePath` is non-null (Bash and friends don't surface).
+ *   2. `confirmedAt` is non-null (provisional rows hide — the tool
+ *      may have failed / been paused mid-flight).
+ *   3. `promoted === true` — server-side `classifyArtifact` matched
+ *      the locked promotion globs (plans/, PLAN*.md, etc.).
  *
- * Preview pane is intentionally metadata-only for v1: we DO NOT load file
- * contents into the browser without an explicit click. Screenshots leak.
+ * Confirmed-but-not-promoted writes (scratch) surface inside the
+ * producing agent's lane via `WorkingFiles`. The split is privacy-by-
+ * default: an `.env` write or a node_modules touch shouldn't bubble up
+ * as a deliverable.
+ *
+ * Preview pane is intentionally metadata-only for v1: we DO NOT load
+ * file contents into the browser without an explicit click. Screenshots
+ * leak.
  */
 import { useMemo, useState } from 'react';
 import { agentIdentity } from '../../agentIdentity';
@@ -31,7 +35,7 @@ type ArtifactGroup = {
 function groupArtifacts(mutations: readonly MultiAgentMutationView[]): ArtifactGroup[] {
   const byFile = new Map<string, ArtifactGroup>();
   for (const m of mutations) {
-    if (m.filePath === null || m.confirmedAt === null) continue;
+    if (m.filePath === null || m.confirmedAt === null || !m.promoted) continue;
     const existing = byFile.get(m.filePath);
     if (!existing) {
       byFile.set(m.filePath, {
