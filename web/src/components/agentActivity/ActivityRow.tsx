@@ -24,6 +24,7 @@ import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react';
 import type { MultiAgentEventKind } from '@cebab/shared/protocol';
 import { agentIdentity } from '../../agentIdentity';
 import { Markdown } from '../Markdown';
+import { logsHashFor } from '../sessionLog/logsHash';
 import type { LaneRow } from './laneDerivation';
 
 /** No-color-only: every hop kind carries an icon AND its word. Mirrors
@@ -60,8 +61,14 @@ function firstLine(text: string, max = 140): string {
   return `${line.slice(0, max - 1)}…`;
 }
 
-export function ActivityRow(props: { row: LaneRow; laneAgentName: string }) {
-  const { row, laneAgentName } = props;
+export function ActivityRow(props: {
+  row: LaneRow;
+  laneAgentName: string;
+  /** Phase H bidirectional link: powers "Open in Logs at this event" so a
+   *  lane row can deep-link into the Logs modal at the matching LogRow. */
+  sessionId: string;
+}) {
+  const { row, laneAgentName, sessionId } = props;
   const { event, direction } = row;
   const [expanded, setExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -186,6 +193,13 @@ export function ActivityRow(props: { row: LaneRow; laneAgentName: string }) {
             >
               {copied ? '✓ copied' : '⧉ copy'}
             </button>
+            <a
+              className="ghost-btn activity-open-logs"
+              href={logsHashFor(sessionId, `event:${event.eventId}`)}
+              title="Open this hop in the Logs surface"
+            >
+              ↗ logs
+            </a>
           </div>
           <div className="activity-row-detail-body">
             <Markdown text={event.text} />

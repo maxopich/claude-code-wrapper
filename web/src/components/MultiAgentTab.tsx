@@ -7,6 +7,7 @@ import type {
   MultiAgentMutationView,
   MultiAgentTemplate,
   Project,
+  ServerMsg,
 } from '@cebab/shared/protocol';
 import type { MultiAgentRun, MultiAgentState } from '../store';
 import { activeAgent } from '../store';
@@ -17,6 +18,7 @@ import { GrowTextarea } from './GrowTextarea';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalKeys } from '../useModalKeys';
 import { AgentActivityTabs } from './agentActivity';
+import { LogsButton } from './sessionLog';
 
 /**
  * Multi-Agent tab.
@@ -71,6 +73,21 @@ export function MultiAgentTab(props: {
   onUpdateTemplateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
   onDeleteTemplate: (id: string) => void;
   onApplyTemplate: (t: MultiAgentTemplate) => void;
+  /**
+   * Phase H: open the Logs surface for the active run. Pure WS round-trip;
+   * the matching `session_log_chunk` arrives via `subscribeServerMsg`.
+   */
+  onLoadSessionLog: (
+    sessionId: string,
+    offset: number,
+    limit: number,
+    revealSensitive: boolean,
+  ) => void;
+  /**
+   * Phase H side-channel subscription for surfaces (Logs modal) whose state
+   * doesn't belong in Redux. Returns the unsubscribe fn.
+   */
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const { multiAgent, projects } = props;
   if (multiAgent.active) {
@@ -88,6 +105,8 @@ export function MultiAgentTab(props: {
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
         onDismiss={props.onDismissActive}
+        onLoadSessionLog={props.onLoadSessionLog}
+        subscribeServerMsg={props.subscribeServerMsg}
       />
     );
   }
@@ -1454,6 +1473,17 @@ function ActiveRunView(props: {
   /** Item #5: operator clicked Continue on the pause-on-first-mutation
    *  banner. Stateless from the client's POV — server reads the slot. */
   onContinueThroughMutation: (sessionId: string) => void;
+  /**
+   * Phase H: request a paginated chunk of the merged session log. The
+   * matching `session_log_chunk` is delivered via `subscribeServerMsg`.
+   */
+  onLoadSessionLog: (
+    sessionId: string,
+    offset: number,
+    limit: number,
+    revealSensitive: boolean,
+  ) => void;
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const { run } = props;
   const crossTab = run.mode !== props.tabMode;
@@ -1522,6 +1552,11 @@ function ActiveRunView(props: {
           </h2>
         </div>
         <div className="multi-agent-active-actions">
+          <LogsButton
+            sessionId={run.sessionId}
+            onLoadSessionLog={props.onLoadSessionLog}
+            subscribeServerMsg={props.subscribeServerMsg}
+          />
           {isRunning ? (
             <button
               className="primary-btn"

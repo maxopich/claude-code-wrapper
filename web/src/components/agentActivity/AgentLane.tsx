@@ -36,6 +36,7 @@ export function AgentLane(props: { lane: Lane; run: MultiAgentRun }) {
                   key={`${row.event.eventId}-${row.direction}-${i}`}
                   row={row}
                   laneAgentName={lane.agentName}
+                  sessionId={run.sessionId}
                 />
               ))}
             </ol>

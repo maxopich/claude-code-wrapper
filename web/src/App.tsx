@@ -2,6 +2,7 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import type {
   MultiAgentLifecycle,
   MultiAgentTemplate,
+  ServerMsg,
   SessionPermissionMode,
 } from '@cebab/shared/protocol';
 import { connectWs, type WsHandle } from './ws';
@@ -50,6 +51,15 @@ function writeStored(key: string, value: string): void {
 export function App() {
   const [state, dispatch] = useReducer(reduce, initialState);
   const wsRef = useRef<WsHandle | null>(null);
+  /**
+   * Phase H side channel: ServerMsg subscribers for surfaces whose state
+   * doesn't belong in Redux. The Logs modal subscribes here for
+   * `session_log_chunk` deliveries — keeping the chunk rows out of AppState
+   * (they're transient and big) while still funneling through the single WS
+   * connection. The reducer dispatch fires FIRST, then subscribers; mutual
+   * dependencies (Redux update + side effect) flow in a predictable order.
+   */
+  const msgSubscribersRef = useRef<Set<(msg: ServerMsg) => void>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
@@ -117,7 +127,20 @@ export function App() {
           ws?.send({ type: 'list_projects' });
         },
         onClose: () => dispatch({ type: 'ws_close' }),
-        onMessage: (msg) => dispatch({ type: 'server', msg }),
+        onMessage: (msg) => {
+          dispatch({ type: 'server', msg });
+          // Phase H side channel: after the reducer settles, fan out to any
+          // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
+          // try/catch per-subscriber so a broken listener can't stop the
+          // WS connection from processing further messages.
+          for (const fn of msgSubscribersRef.current) {
+            try {
+              fn(msg);
+            } catch (err) {
+              console.error('[ws] subscriber threw', err);
+            }
+          }
+        },
       });
       wsRef.current = ws;
     })();
@@ -419,6 +442,31 @@ export function App() {
     // operator types a fresh prompt and presses the existing Start button.
     dispatch({ type: 'ma_apply_template', template: t });
   }
+  function loadSessionLog(
+    sessionId: string,
+    offset: number,
+    limit: number,
+    revealSensitive: boolean,
+  ) {
+    // Phase H: pure WS round-trip. The matching `session_log_chunk` reply
+    // is consumed by the LogsModal via its `subscribeServerMsg` subscriber
+    // (the reducer no-ops on the chunk because the rows live outside Redux).
+    wsRef.current?.send({
+      type: 'load_session_log',
+      sessionId,
+      offset,
+      limit,
+      revealSensitive,
+    });
+  }
+  function subscribeServerMsg(cb: (msg: ServerMsg) => void): () => void {
+    // Phase H side-channel subscription. Returns the unsubscribe fn so
+    // useEffect cleanups can remove their listener on unmount.
+    msgSubscribersRef.current.add(cb);
+    return () => {
+      msgSubscribersRef.current.delete(cb);
+    };
+  }
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
   // refresh after each `multi_agent_ended` so a just-finished run appears
@@ -570,10 +618,7 @@ export function App() {
                 {session && !isSessionPending(session.id) && (
                   <div className="chat-header">
                     {activeProject && (
-                      <ChatHeaderChip
-                        trusted={activeProject.trusted}
-                        mode={permissionMode}
-                      />
+                      <ChatHeaderChip trusted={activeProject.trusted} mode={permissionMode} />
                     )}
                     <ModeToggle
                       mode={permissionMode}
@@ -621,6 +666,8 @@ export function App() {
                 onUpdateTemplateRoles={updateTemplateRoles}
                 onDeleteTemplate={deleteTemplate}
                 onApplyTemplate={applyTemplate}
+                onLoadSessionLog={loadSessionLog}
+                subscribeServerMsg={subscribeServerMsg}
               />
             )}
           </>
