@@ -37,6 +37,7 @@ import type { MultiAgentLifecycle } from '@cebab/shared/protocol';
 import { translate } from './translate.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
+import { buildSessionLogChunk } from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
 import {
   resolveChainParticipants,
@@ -1386,6 +1387,41 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     }
     case 'delete_template': {
       send(conn.ws, { type: 'templates', items: deleteTemplate(msg.id) });
+      return;
+    }
+    case 'load_session_log': {
+      // Phase H: paginated merged log for a multi-agent session. Pure read
+      // — no DB mutation, no side effects, no permission check beyond
+      // session existence. `revealSensitive=true` requires the operator's
+      // explicit confirm client-side (the WS message is enough server-side
+      // because the connection is already bound to 127.0.0.1).
+      const meta = getMultiAgentSession(msg.sessionId);
+      if (!meta) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `load_session_log: no such multi-agent session ${msg.sessionId}`,
+        });
+        return;
+      }
+      const offset = Number.isFinite(msg.offset) ? Math.max(0, Math.floor(msg.offset)) : 0;
+      const limit = Number.isFinite(msg.limit) ? Math.max(1, Math.floor(msg.limit)) : 200;
+      const chunk = buildSessionLogChunk({
+        sessionId: msg.sessionId,
+        offset,
+        limit,
+        revealSensitive: msg.revealSensitive === true,
+      });
+      send(conn.ws, {
+        type: 'session_log_chunk',
+        sessionId: msg.sessionId,
+        offset,
+        rows: chunk.rows,
+        total: chunk.total,
+        hasMore: chunk.hasMore,
+        revealedSensitive: chunk.revealedSensitive,
+      });
       return;
     }
     case 'send_message': {

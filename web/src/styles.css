@@ -3763,3 +3763,441 @@ pre {
   color: var(--fg-3);
   font-size: var(--t-xs);
 }
+
+/* ---------- Phase H: Logs surface ---------- */
+
+.logs-button {
+  /* Lives in the active-run header next to Stop. The base ghost-btn handles
+   * the silhouette; this override gives it the warning-aware tooltip color. */
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+}
+
+.logs-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  z-index: 100;
+  padding: var(--s-4);
+}
+
+.logs-modal {
+  background: var(--bg-2);
+  border: 1px solid var(--bg-4);
+  border-radius: var(--r-lg);
+  width: min(1200px, 100%);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+
+.logs-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--bg-4);
+}
+
+.logs-modal-title {
+  margin: 0;
+  font-size: var(--t-lg);
+  color: var(--fg-0);
+}
+
+.logs-modal-subtitle {
+  margin: var(--s-1) 0 0 0;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+
+.logs-modal-subtitle code {
+  font-family: var(--font-mono);
+  background: var(--bg-3);
+  padding: 0 6px;
+  border-radius: var(--r-sm);
+}
+
+.logs-modal-count {
+  color: var(--fg-1);
+}
+
+.logs-modal-more {
+  color: var(--accent);
+}
+
+.logs-modal-error {
+  margin: 0;
+  padding: var(--s-2) var(--s-4);
+  background: rgba(217, 122, 122, 0.16);
+  color: var(--fg-0);
+  border-bottom: 1px solid var(--bg-4);
+  font-size: var(--t-sm);
+}
+
+/* Toolbar */
+
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--bg-4);
+  flex-wrap: wrap;
+}
+
+.logs-search {
+  flex: 1 1 240px;
+  min-width: 200px;
+  background: var(--bg-3);
+  border: 1px solid var(--bg-4);
+  border-radius: var(--r-md);
+  color: var(--fg-0);
+  padding: var(--s-1) var(--s-2);
+  font-size: var(--t-sm);
+  font-family: var(--font-mono);
+}
+
+.logs-search:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.logs-filter-dropdown {
+  position: relative;
+}
+
+.logs-filter-summary {
+  list-style: none;
+  cursor: pointer;
+  background: var(--bg-3);
+  border: 1px solid var(--bg-4);
+  border-radius: var(--r-md);
+  padding: var(--s-1) var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.logs-filter-summary::-webkit-details-marker {
+  display: none;
+}
+
+.logs-filter-count {
+  background: var(--accent);
+  color: var(--bg-0);
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  font-size: var(--t-xs);
+  font-family: var(--font-mono);
+}
+
+.logs-filter-panel {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: var(--s-1);
+  background: var(--bg-3);
+  border: 1px solid var(--bg-4);
+  border-radius: var(--r-md);
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 180px;
+  z-index: 1;
+  box-shadow: var(--shadow-md);
+}
+
+.logs-filter-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+  cursor: pointer;
+}
+
+.logs-filter-empty {
+  margin: 0;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+
+.logs-clear-filters {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+
+.logs-toolbar-spacer {
+  flex: 1 0 auto;
+}
+
+.logs-reveal-btn {
+  color: #d97aa6;
+  border-color: rgba(217, 122, 166, 0.4);
+}
+
+.logs-reveal-btn.is-revealed {
+  background: rgba(217, 122, 166, 0.16);
+}
+
+/* Table */
+
+.logs-table-wrap {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 200px;
+}
+
+.logs-table {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.logs-row {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.logs-row-summary {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: var(--s-1) var(--s-3);
+  display: grid;
+  grid-template-columns: 110px 64px 120px 1fr auto;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--fg-1);
+  cursor: pointer;
+  font-size: var(--t-sm);
+}
+
+.logs-row-summary:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.logs-row-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.logs-row-ts {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  position: sticky;
+  left: 0;
+  background: var(--bg-2);
+  padding: 2px 4px;
+}
+
+.logs-row-kind {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  text-align: center;
+}
+
+.logs-row-kind-tool {
+  background: rgba(47, 182, 196, 0.16);
+  color: var(--accent-ink);
+}
+
+.logs-row-kind-bus {
+  background: rgba(138, 159, 240, 0.16);
+  color: #b0c2f7;
+}
+
+.logs-row-kind-llm {
+  background: rgba(176, 176, 176, 0.12);
+  color: var(--fg-1);
+}
+
+.logs-row-kind-error {
+  background: rgba(217, 122, 122, 0.2);
+  color: #f0a8a8;
+}
+
+.logs-row-kind-artifact {
+  background: rgba(115, 200, 138, 0.18);
+  color: #a5e3b6;
+}
+
+.logs-row-agent {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.logs-row-summary-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+}
+
+.logs-row-redacted-badge {
+  background: rgba(217, 165, 122, 0.18);
+  color: #f0c8a8;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  text-transform: uppercase;
+  font-family: var(--font-mono);
+}
+
+.logs-table-empty {
+  padding: var(--s-6);
+  text-align: center;
+  color: var(--fg-2);
+}
+
+.logs-table-load-more {
+  padding: var(--s-3);
+  text-align: center;
+  border-top: 1px solid var(--bg-4);
+}
+
+/* Row detail drawer */
+
+.logs-row-detail {
+  background: var(--bg-3);
+  padding: var(--s-3) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  border-top: 1px solid var(--bg-4);
+}
+
+.logs-row-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.logs-row-detail-label {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  color: var(--fg-3);
+  letter-spacing: 0.06em;
+}
+
+.logs-row-detail-actions {
+  display: flex;
+  gap: var(--s-2);
+}
+
+.logs-row-detail-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: var(--s-3);
+  row-gap: 2px;
+  margin: 0;
+  font-size: var(--t-xs);
+}
+
+.logs-row-detail-meta dt {
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.logs-row-detail-meta dd {
+  margin: 0;
+  color: var(--fg-1);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+.logs-row-detail-meta dd a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.logs-row-detail-meta dd a:hover {
+  text-decoration: underline;
+}
+
+.logs-row-detail-redacted {
+  margin: 0;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  background: rgba(217, 165, 122, 0.08);
+  border-left: 3px solid rgba(217, 165, 122, 0.6);
+  padding: var(--s-2);
+  border-radius: var(--r-sm);
+}
+
+.logs-row-detail-redacted code {
+  font-family: var(--font-mono);
+  color: #f0c8a8;
+}
+
+.logs-row-detail-raw {
+  background: var(--bg-0);
+  border: 1px solid var(--bg-4);
+  border-radius: var(--r-md);
+  padding: var(--s-2);
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+  overflow: auto;
+  max-height: 360px;
+}
+
+.logs-row-detail-raw:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .logs-modal-overlay,
+  .logs-modal {
+    transition: none;
+  }
+  .logs-row.is-anchor-highlight {
+    animation: none;
+    background: rgba(47, 182, 196, 0.2);
+  }
+}
+
+/* Bidirectional-link affordance shared by the activity row + artifact row. */
+.activity-open-logs {
+  text-decoration: none;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+}
+
+@keyframes logsRowFlash {
+  0% {
+    background: rgba(47, 182, 196, 0.32);
+  }
+  100% {
+    background: transparent;
+  }
+}
+
+.logs-row.is-anchor-highlight {
+  animation: logsRowFlash 1.6s ease-out;
+}

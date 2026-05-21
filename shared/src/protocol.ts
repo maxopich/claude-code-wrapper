@@ -369,6 +369,34 @@ export type ClientMsg =
       /** Delete a template by id. Reply: a fresh `templates` ServerMsg. */
       type: 'delete_template';
       id: string;
+    }
+  | {
+      /**
+       * Phase H: request a paginated chunk of the merged session log for a
+       * multi-agent run. The server projects rows from `multi_agent_events`
+       * (bus hops), `multi_agent_mutations` (classified writes), and the
+       * per-agent SDK `events` table (joined via `multi_agent_agent_sessions`)
+       * into a unified `LogRow[]` ordered by `ts ASC`. Reply: one or more
+       * `session_log_chunk` ServerMsg messages.
+       *
+       * Pagination contract:
+       *   - `offset`: skip the first N rows in the merged stream (after
+       *     filtering, before chunk-cap slicing).
+       *   - `limit`: hard cap on rows to return in this chunk. The server may
+       *     return fewer when a ~2 MB byte budget trips first.
+       *   - `revealSensitive`: when true, the dangerous-field redaction is
+       *     loosened. Default false — even "Show raw" client-side keeps
+       *     dangerous fields masked unless this flag explicitly fires.
+       *
+       * No filters travel on the wire — the client receives the unfiltered
+       * stream and applies search + agent + kind filters in-memory. Volume
+       * is bounded by the chunk cap; deeper filtering is purely a UX overlay.
+       */
+      type: 'load_session_log';
+      sessionId: string;
+      offset: number;
+      limit: number;
+      revealSensitive?: boolean;
     };
 
 // ---- Server → Browser ----
@@ -706,6 +734,28 @@ export type ServerMsg =
       agentName: string;
       busWasAlreadyInstalled: boolean;
     }
+  | {
+      /**
+       * Phase H: paginated reply to `load_session_log`. The same multi-agent
+       * session may produce multiple chunk messages for one request when the
+       * server's ~2 MB byte budget trips before `limit` rows. The client
+       * concatenates by `(sessionId, offset)` and stops requesting more when
+       * `hasMore` is false.
+       *
+       * `total` is the unfiltered row count across the entire merged stream
+       * — surfaced so the toolbar can show "1,234 entries" without scanning.
+       * `revealedSensitive` echoes the request flag so a stale chunk can't
+       * silently un-redact rows the client didn't ask to reveal.
+       */
+      type: 'session_log_chunk';
+      sessionId: string;
+      /** First row index this chunk covers (matches the request `offset`). */
+      offset: number;
+      rows: LogRow[];
+      total: number;
+      hasMore: boolean;
+      revealedSensitive: boolean;
+    }
   | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string };
 
 /**
@@ -736,6 +786,80 @@ export type IterationSummary = {
    * resumable while still live (reconstruction is orchestrator-only for now).
    */
   resumable: boolean;
+};
+
+/**
+ * Phase H: discriminator for `LogRow.kind`. Each row in the merged session
+ * log is one of these atomic spans:
+ *   - `bus`      — an inter-agent hop (multi_agent_events row)
+ *   - `tool`     — a `tool_use` block from an agent's SDK stream
+ *   - `llm`      — an assistant text/turn boundary OR a `result` SDK message
+ *   - `error`    — a synthetic `multi_agent_events` row with kind=error, or
+ *                  a `tool_result` with `is_error=true`, or a wrapper error
+ *   - `artifact` — a confirmed mutation (matches the Artifacts surface)
+ *
+ * Kept narrow on purpose — the UI's chip-color palette is finite, and any
+ * stream-json oddity not covered above projects as `llm` (the catch-all).
+ */
+export type LogRowKind = 'tool' | 'bus' | 'llm' | 'error' | 'artifact';
+
+export const LOG_ROW_KINDS: ReadonlySet<LogRowKind> = new Set([
+  'tool',
+  'bus',
+  'llm',
+  'error',
+  'artifact',
+]);
+
+/**
+ * Phase H: one projected, atomic entry in the merged session log. Produced
+ * server-side by `buildLogRows` from `multi_agent_events`, `events` (per
+ * per-agent CLI session), and `multi_agent_mutations`. Sent over the wire
+ * inside `session_log_chunk`.
+ *
+ * Bidirectional links:
+ *   - `laneRowId` matches a `multi_agent_events.id` so a "Open in Logs at
+ *     this event" affordance on a lane row can scroll to / highlight the
+ *     corresponding log row, and a log row can render a "Open lane row" link
+ *     back to its bus hop.
+ *   - `artifactId` matches a `multi_agent_mutations.id` so an artifact-table
+ *     row can deep-link into the log at its production event.
+ *
+ * Redaction:
+ *   - `summary` is always safe to render (server-classified; no raw input).
+ *   - `raw` is the projected JSON payload for `Show raw`. Sensitive fields
+ *     (paths matching `.env`, `credentials`, `secret`, etc.) are masked to
+ *     the literal `'<redacted>'` UNLESS the request set `revealSensitive`.
+ *   - `redactedFields` lists the field paths the server masked, so the UI
+ *     can offer a per-row "Reveal sensitive" confirm with concrete labels.
+ */
+export type LogRow = {
+  /** Stable composite id: `${source}:${tableRowId}`. Anchor for URL deep-links. */
+  id: string;
+  ts: number;
+  /** Bus slug of the producing agent, or 'user'/'cebab'/'orchestrator'/'_sink'. */
+  agent: string;
+  kind: LogRowKind;
+  /** One-line operator-readable summary (safe to render at any time). */
+  summary: string;
+  /** Optional wall-clock duration of the span, when known (tool calls, turns). */
+  durationMs?: number;
+  /** Optional discriminator for the kind chip — e.g. tool name, event kind. */
+  status?: string;
+  laneRowId?: number;
+  artifactId?: number;
+  /**
+   * Server-projected detail JSON for the row drawer. Sensitive fields are
+   * already masked at this layer; absent when there is nothing useful to
+   * show (e.g. a bus hop whose `summary` already says everything).
+   */
+  raw?: unknown;
+  /**
+   * Dot-paths into `raw` that the server masked. Empty when nothing was
+   * redacted. The Reveal-sensitive confirm uses these to tell the operator
+   * *what* they're about to un-mask.
+   */
+  redactedFields?: string[];
 };
 
 export type MultiAgentEventKind = 'intro' | 'prompt' | 'reply' | 'final' | 'error';

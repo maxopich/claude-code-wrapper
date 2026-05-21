@@ -21,6 +21,7 @@
  */
 import { useMemo, useState } from 'react';
 import { agentIdentity } from '../../agentIdentity';
+import { logsHashFor } from '../sessionLog/logsHash';
 import type { MultiAgentRun } from '../../store';
 import type { MultiAgentMutationView } from '@cebab/shared/protocol';
 
@@ -182,6 +183,13 @@ export function ArtifactsView(props: { run: MultiAgentRun }) {
               >
                 Copy path
               </button>
+              <a
+                className="ghost-btn"
+                href={logsHashFor(props.run.sessionId, `mutation:${selectedGroup.latest.id}`)}
+                title="Open this artifact's production event in the Logs surface"
+              >
+                ↗ open in logs
+              </a>
             </div>
           </header>
           <div className="artifacts-preview-body">

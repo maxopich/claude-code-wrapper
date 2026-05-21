@@ -1175,6 +1175,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       });
     }
 
+    case 'session_log_chunk': {
+      // Phase H: the logs modal manages its own ephemeral chunk state via a
+      // side-channel subscription on the WS layer. The reducer doesn't store
+      // log rows — they'd bloat AppState for a transient modal — so this is
+      // a deliberate no-op. The narrowing exists so the switch stays
+      // exhaustive; if a future change wants to project last-N tail rows
+      // into AppState for an out-of-modal "new entries" badge, this is
+      // where it'd live.
+      return state;
+    }
+
     case 'wrapper_error': {
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
