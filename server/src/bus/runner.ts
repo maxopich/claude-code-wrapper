@@ -152,11 +152,38 @@ export type AgentRunnerDeps = {
    * Throwing PROPAGATES out of `deliverTurn`; the router's `.catch`
    * recognises `PausedForMutationError` and does NOT teardown. Any other
    * throw is treated as a normal turn failure (worker-failed path).
+   *
+   * Migration 012 widened the `classification` carrier: `filePath` is the
+   * target file the tool will mutate (Write/Edit/MultiEdit/NotebookEdit;
+   * undefined for everything else); `toolUseId` is the SDK's `tool_use.id`
+   * so the matching `tool_result` can flip `confirmed_at` later. `cwd` is
+   * the agent's working directory at mutation time (denormalized onto the
+   * row so the artifact classifier can resolve `filePath` relative to the
+   * worktree root without a JOIN).
    */
   onMutation?: (
     agentName: string,
     toolName: string,
-    classification: { category: 'mutate' | 'dangerous'; summary: string },
+    cwd: string,
+    classification: {
+      category: 'mutate' | 'dangerous';
+      summary: string;
+      filePath?: string;
+      toolUseId?: string;
+    },
+  ) => Promise<void> | void;
+  /**
+   * Migration 012: called for every `tool_result` block on a `user`
+   * SDKMessage. Hook flips `confirmed_at` on the matching mutation row
+   * (keyed by `tool_use_id`) so the artifact view can distinguish a
+   * provisional Write (tool fired but never reported back — paused,
+   * aborted, errored mid-flight) from a confirmed one. Best-effort: failure
+   * is logged but never aborts the turn.
+   */
+  onToolResult?: (
+    agentName: string,
+    toolUseId: string,
+    meta: { isError: boolean },
   ) => Promise<void> | void;
   /** Injectable for tests; defaults to the real `pickRunner` (mock-aware). */
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
@@ -338,7 +365,9 @@ export class AgentRunner {
         if (this.deps.onMutation) {
           const am = msg as {
             type?: string;
-            message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
+            message?: {
+              content?: Array<{ type?: string; name?: string; id?: string; input?: unknown }>;
+            };
           };
           if (am.type === 'assistant' && Array.isArray(am.message?.content)) {
             for (const block of am.message.content) {
@@ -347,12 +376,42 @@ export class AgentRunner {
               if (!toolName) continue;
               const cls = classifyToolCall(toolName, block.input);
               if (cls.category === 'read') continue;
+              const toolUseId = typeof block.id === 'string' ? block.id : undefined;
               // Awaited so the gate can persist + emit + throw before the
               // loop yields back to the SDK. A throw propagates.
-              await this.deps.onMutation(agentName, toolName, {
+              await this.deps.onMutation(agentName, toolName, spec.cwd, {
                 category: cls.category,
                 summary: cls.summary,
+                ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
+                ...(toolUseId !== undefined ? { toolUseId } : {}),
               });
+            }
+          }
+        }
+
+        // Migration 012 tool-result tap: every `tool_result` block on a
+        // `user` SDKMessage flips the matching `multi_agent_mutations` row
+        // from provisional to confirmed (keyed by `tool_use_id`). Best-effort:
+        // the hook itself is wrapped in try/catch downstream — failure here
+        // never aborts the turn.
+        if (this.deps.onToolResult) {
+          const um = msg as {
+            type?: string;
+            message?: {
+              content?: Array<{ type?: string; tool_use_id?: string; is_error?: boolean }>;
+            };
+          };
+          if (um.type === 'user' && Array.isArray(um.message?.content)) {
+            for (const block of um.message.content) {
+              if (block?.type !== 'tool_result') continue;
+              if (typeof block.tool_use_id !== 'string') continue;
+              try {
+                await this.deps.onToolResult(agentName, block.tool_use_id, {
+                  isError: block.is_error === true,
+                });
+              } catch (err) {
+                console.error(`[runner] onToolResult(${agentName}) failed`, err);
+              }
             }
           }
         }

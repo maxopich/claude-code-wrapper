@@ -120,7 +120,10 @@ type InFlight = {
   permissionMode: SessionPermissionMode;
 };
 
-/** Item #5: shape-equivalent translation from the DB row to the wire view. */
+/** Item #5: shape-equivalent translation from the DB row to the wire view.
+ *  Migration 012 adds filePath / cwd / confirmedAt / promoted; `toolUseId`
+ *  is server-internal (correlation key only) and is intentionally NOT
+ *  surfaced on the wire. */
 function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
   return {
     id: m.id,
@@ -130,6 +133,10 @@ function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
     toolName: m.toolName,
     category: m.category,
     summary: m.summary,
+    filePath: m.filePath,
+    cwd: m.cwd,
+    confirmedAt: m.confirmedAt,
+    promoted: m.promoted,
   };
 }
 

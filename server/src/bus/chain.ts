@@ -43,6 +43,7 @@ import {
   appendMultiAgentEvent,
   appendMultiAgentMutation,
   addParticipant,
+  confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
   getMultiAgentSession,
@@ -50,6 +51,7 @@ import {
   getPendingRetry,
   setAwaitingContinue,
   setMutationsAcknowledged,
+  setMutationPromoted,
   setPauseOnMutation,
   setPendingMutation,
   setPendingRetry,
@@ -57,6 +59,7 @@ import {
   type MultiAgentLifecycle,
   type MutationRecord,
 } from '../repo/multi_agent.js';
+import { classifyArtifact } from '@cebab/shared';
 import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import {
@@ -586,10 +589,14 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   let router: ChainRouter;
 
   // Item #5: mutation tap closure (mirrors orchestrator.ts's `onMutationHook`).
-  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cls) => {
+  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cwd, cls) => {
     let row: MutationRecord;
     try {
-      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary);
+      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary, {
+        filePath: cls.filePath ?? null,
+        cwd,
+        toolUseId: cls.toolUseId ?? null,
+      });
     } catch (err) {
       console.error('[chain] persist mutation failed', err);
       return;
@@ -620,6 +627,39 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
   };
 
+  // Migration 012 + Phase E: tool-result tap (mirrors orchestrator.ts's
+  // `onToolResultHook`). Flips `confirmed_at`, runs the artifact classifier,
+  // and re-emits `multi_agent_mutation` (the wire reducer dedupes by id).
+  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
+    let confirmed: MutationRecord | null;
+    try {
+      confirmed = confirmMutationByToolUseId(sessionId, toolUseId);
+    } catch (err) {
+      console.error('[chain] confirm mutation failed', err);
+      return;
+    }
+    if (!confirmed) return;
+
+    let finalRow = confirmed;
+    if (confirmed.filePath) {
+      try {
+        const kind = classifyArtifact(confirmed.filePath, confirmed.cwd);
+        if (kind === 'promoted' && !confirmed.promoted) {
+          const promoted = setMutationPromoted(confirmed.id, true);
+          if (promoted) finalRow = promoted;
+        }
+      } catch (err) {
+        console.error('[chain] classify/promote mutation failed', err);
+      }
+    }
+
+    try {
+      opts.onMutation?.(sessionId, finalRow);
+    } catch (err) {
+      console.error('[chain] onMutation sink (confirm re-emit) threw', err);
+    }
+  };
+
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
@@ -627,6 +667,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       activity.onMessage(agent, msg);
     },
     onMutation: onMutationHook,
+    onToolResult: onToolResultHook,
     abortController,
     runnerFactory: opts.runnerFactory,
   });

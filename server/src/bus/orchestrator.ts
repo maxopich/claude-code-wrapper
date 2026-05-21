@@ -34,6 +34,7 @@ import {
   appendMultiAgentEvent,
   appendMultiAgentMutation,
   addParticipant,
+  confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
   getMultiAgentSession,
@@ -43,6 +44,7 @@ import {
   setAwaitingContinue,
   setMultiAgentSessionLifecycle,
   setMutationsAcknowledged,
+  setMutationPromoted,
   setPauseOnMutation,
   setPendingMutation,
   setPendingRetry,
@@ -51,6 +53,7 @@ import {
   type MultiAgentLifecycle,
   type MutationRecord,
 } from '../repo/multi_agent.js';
+import { classifyArtifact } from '@cebab/shared';
 import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
@@ -706,10 +709,14 @@ export function wireOrchestratorSession(p: {
   // — when pause-on-first-mutation is armed and not yet acknowledged — sets
   // the pending slot, emits `multi_agent_pending_mutation`, and throws
   // `PausedForMutationError` to abort the turn cleanly.
-  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cls) => {
+  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cwd, cls) => {
     let row: MutationRecord;
     try {
-      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary);
+      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary, {
+        filePath: cls.filePath ?? null,
+        cwd,
+        toolUseId: cls.toolUseId ?? null,
+      });
     } catch (err) {
       console.error('[orchestrator] persist mutation failed', err);
       return;
@@ -743,6 +750,47 @@ export function wireOrchestratorSession(p: {
     }
   };
 
+  // Migration 012: tool-result tap. Flips `confirmed_at` on the matching
+  // mutation row when the SDK delivers the result, then re-emits
+  // `multi_agent_mutation` with the same `id` so the wire-reducer
+  // (dedupe-by-id, replace) surfaces the confirmation to the lane / artifact
+  // UI. Failures here are logged and swallowed — a missed confirmation just
+  // leaves the row as provisional, which is the safe-default render.
+  //
+  // Phase E: after confirmation we also run the artifact classifier. If the
+  // file passes the locked promotion globs, flip `promoted=1` and re-emit
+  // again with the promotion flag set — the reducer dedupes by id so this
+  // looks like a single state transition to the client.
+  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
+    let confirmed: MutationRecord | null;
+    try {
+      confirmed = confirmMutationByToolUseId(sessionId, toolUseId);
+    } catch (err) {
+      console.error('[orchestrator] confirm mutation failed', err);
+      return;
+    }
+    if (!confirmed) return;
+
+    let finalRow = confirmed;
+    if (confirmed.filePath) {
+      try {
+        const kind = classifyArtifact(confirmed.filePath, confirmed.cwd);
+        if (kind === 'promoted' && !confirmed.promoted) {
+          const promoted = setMutationPromoted(confirmed.id, true);
+          if (promoted) finalRow = promoted;
+        }
+      } catch (err) {
+        console.error('[orchestrator] classify/promote mutation failed', err);
+      }
+    }
+
+    try {
+      p.onMutation?.(sessionId, finalRow);
+    } catch (err) {
+      console.error('[orchestrator] onMutation sink (confirm re-emit) threw', err);
+    }
+  };
+
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
@@ -760,6 +808,7 @@ export function wireOrchestratorSession(p: {
       }
     },
     onMutation: onMutationHook,
+    onToolResult: onToolResultHook,
     abortController,
     runnerFactory: p.runnerFactory,
   });

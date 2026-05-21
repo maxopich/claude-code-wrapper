@@ -795,6 +795,36 @@ export type MultiAgentMutationView = {
   category: 'mutate' | 'dangerous';
   /** Operator-readable one-line summary from `classifyToolCall`. */
   summary: string;
+  /**
+   * Target file path for tools that write/edit a single file
+   * (`Write` / `Edit` / `MultiEdit` / `NotebookEdit`). NULL for everything
+   * else and for rows from pre-012 sessions. Surfaced so the lane and
+   * artifact views can group writes by file without re-parsing inputs.
+   */
+  filePath: string | null;
+  /**
+   * Agent's working directory at the moment the tool fired (denormalized
+   * from the participant row). NULL for pre-012 rows. Used by the artifact
+   * promotion classifier to resolve `filePath` relative to the worktree
+   * root before glob-matching.
+   */
+  cwd: string | null;
+  /**
+   * Wall-clock ms when the matching `tool_result` arrived. NULL until then
+   * — a write whose result never lands (paused, aborted, errored
+   * mid-flight) stays NULL forever and the UI badges it as provisional so
+   * the operator isn't misled by a row that may not actually exist on disk.
+   * The server re-emits `multi_agent_mutation` for the same `id` with
+   * `confirmedAt` populated when the result arrives; the reducer dedupes
+   * by `id` and replaces.
+   */
+  confirmedAt: number | null;
+  /**
+   * Phase E: set by `classifyArtifact` when the file passes the locked
+   * promotion globs (plans/**, PLAN*.md, etc.). The artifacts query is a
+   * flat `WHERE promoted = 1`; pre-012 / non-promoted rows stay `false`.
+   */
+  promoted: boolean;
 };
 
 /**

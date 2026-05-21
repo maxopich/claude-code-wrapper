@@ -105,6 +105,22 @@ export type MutationRecord = {
   toolName: string;
   category: 'mutate' | 'dangerous';
   summary: string;
+  /** Migration 012: target file for Write/Edit/MultiEdit/NotebookEdit. NULL
+   *  for everything else and for pre-012 rows. */
+  filePath: string | null;
+  /** Migration 012: agent cwd at mutation time, denormalized so the artifact
+   *  classifier resolves filePath without a JOIN. NULL for pre-012 rows. */
+  cwd: string | null;
+  /** Migration 012: SDK `tool_use.id` of the originating block, so the
+   *  matching `tool_result` can flip `confirmedAt`. Internal to the repo
+   *  layer — not surfaced on the wire view. */
+  toolUseId: string | null;
+  /** Migration 012: wall-clock ms when the matching `tool_result` arrived,
+   *  or NULL until then. NULL → provisional (UI badge). */
+  confirmedAt: number | null;
+  /** Phase E (migration 012): flipped by `classifyArtifact` when the file
+   *  passes promotion globs. */
+  promoted: boolean;
 };
 
 export type MultiAgentMutationRow = {
@@ -115,6 +131,13 @@ export type MultiAgentMutationRow = {
   tool_name: string;
   category: string; // narrowed to 'mutate'|'dangerous' at the boundary
   summary: string;
+  // Migration 012 — nullable so rows from 011 still project. SQLite has no
+  // boolean; `promoted` is INTEGER DEFAULT 0 in the schema and narrowed here.
+  file_path: string | null;
+  cwd: string | null;
+  tool_use_id: string | null;
+  confirmed_at: number | null;
+  promoted: number;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -303,6 +326,11 @@ function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
     toolName: row.tool_name,
     category: row.category === 'dangerous' ? 'dangerous' : 'mutate',
     summary: row.summary,
+    filePath: row.file_path,
+    cwd: row.cwd,
+    toolUseId: row.tool_use_id,
+    confirmedAt: row.confirmed_at,
+    promoted: row.promoted === 1,
   };
 }
 
@@ -312,6 +340,13 @@ function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
  * classifier output is `'mutate'` or `'dangerous'`). Returns the persisted
  * row so callers can wire `sink.onMutation` with the same shape they'd see
  * on R-A/R-B replay.
+ *
+ * `extra` carries the migration-012 fields. `filePath` is the target the
+ * tool will write/edit (NULL for tools without one); `cwd` is the agent's
+ * working directory at mutation time (so the artifact classifier in Phase E
+ * can resolve `filePath` relative to the worktree root); `toolUseId` is the
+ * SDK's `tool_use.id` so the matching `tool_result` can flip `confirmed_at`
+ * later via `confirmMutationByToolUseId`.
  */
 export function appendMultiAgentMutation(
   sessionId: string,
@@ -319,18 +354,88 @@ export function appendMultiAgentMutation(
   toolName: string,
   category: 'mutate' | 'dangerous',
   summary: string,
+  extra: { filePath: string | null; cwd: string | null; toolUseId: string | null },
 ): MutationRecord {
   const ts = Date.now();
   const info = getDb()
     .prepare(
-      `INSERT INTO multi_agent_mutations (session_id, ts, agent_name, tool_name, category, summary)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO multi_agent_mutations
+         (session_id, ts, agent_name, tool_name, category, summary,
+          file_path, cwd, tool_use_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(sessionId, ts, agentName, toolName, category, summary);
+    .run(
+      sessionId,
+      ts,
+      agentName,
+      toolName,
+      category,
+      summary,
+      extra.filePath,
+      extra.cwd,
+      extra.toolUseId,
+    );
   const row = getDb()
     .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')
     .get(Number(info.lastInsertRowid))!;
   return rowToMutation(row);
+}
+
+/**
+ * Flip a provisional mutation to confirmed: sets `confirmed_at = now()` on
+ * the row whose `tool_use_id` matches the just-arrived `tool_result.tool_use_id`.
+ * Returns the updated row (so the bus hook can re-emit `multi_agent_mutation`
+ * — the wire reducer dedupes by `id` and the client sees the confirmation),
+ * or NULL if no matching row exists (the result is for a tool we didn't
+ * classify as a mutation, e.g. a `Read`, or for a pre-012 mutation that has
+ * no `tool_use_id`). Idempotent: re-confirming an already-confirmed row
+ * leaves `confirmed_at` unchanged (UPDATE WHERE confirmed_at IS NULL).
+ */
+export function confirmMutationByToolUseId(
+  sessionId: string,
+  toolUseId: string,
+): MutationRecord | null {
+  const now = Date.now();
+  const info = getDb()
+    .prepare(
+      `UPDATE multi_agent_mutations
+          SET confirmed_at = ?
+        WHERE session_id = ? AND tool_use_id = ? AND confirmed_at IS NULL`,
+    )
+    .run(now, sessionId, toolUseId);
+  if (info.changes === 0) {
+    // Either no row (not a classified mutation, or pre-012) or already
+    // confirmed. Fetch any matching row so an already-confirmed row still
+    // round-trips its current state to the caller for a sanity re-emit.
+    const row = getDb()
+      .prepare<
+        [string, string],
+        MultiAgentMutationRow
+      >('SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?')
+      .get(sessionId, toolUseId);
+    return row ? rowToMutation(row) : null;
+  }
+  const row = getDb()
+    .prepare<
+      [string, string],
+      MultiAgentMutationRow
+    >('SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?')
+    .get(sessionId, toolUseId);
+  return row ? rowToMutation(row) : null;
+}
+
+/**
+ * Phase E: flip a row's `promoted` flag. Returns the updated row, or null
+ * when the id doesn't exist. Idempotent — re-promoting an already-promoted
+ * row is a no-op SQL-wise. The orchestrator/chain hook runs the artifact
+ * classifier after confirmation and calls this when the row passes the
+ * promotion globs.
+ */
+export function setMutationPromoted(id: number, value: boolean): MutationRecord | null {
+  getDb()
+    .prepare(`UPDATE multi_agent_mutations SET promoted = ? WHERE id = ?`)
+    .run(value ? 1 : 0, id);
+  return getMultiAgentMutation(id);
 }
 
 /**

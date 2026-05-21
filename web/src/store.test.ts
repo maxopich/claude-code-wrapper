@@ -1012,6 +1012,10 @@ describe('store / pause-on-mutation + mutations', () => {
             toolName: 'Write',
             category: 'mutate' as const,
             summary: 'create /foo (1 B)',
+            filePath: '/foo',
+            cwd: '/tmp/coder',
+            confirmedAt: null,
+            promoted: false,
           },
         ],
       },
@@ -1030,6 +1034,10 @@ describe('store / pause-on-mutation + mutations', () => {
       toolName: 'Bash',
       category: 'dangerous' as const,
       summary: 'rm -rf node_modules',
+      filePath: null,
+      cwd: '/tmp/coder',
+      confirmedAt: null,
+      promoted: false,
     };
     const s = reduce(initialState, {
       type: 'server',
@@ -1048,6 +1056,10 @@ describe('store / pause-on-mutation + mutations', () => {
       toolName: 'Edit',
       category: 'mutate' as const,
       summary: 'replace 5 chars in /foo',
+      filePath: '/foo',
+      cwd: '/tmp/coder',
+      confirmedAt: null,
+      promoted: false,
     };
     s = reduce(s, {
       type: 'server',
@@ -1073,6 +1085,10 @@ describe('store / pause-on-mutation + mutations', () => {
       toolName: 'Write',
       category: 'mutate' as const,
       summary: 'create /foo',
+      filePath: '/foo',
+      cwd: '/tmp/coder',
+      confirmedAt: null,
+      promoted: false,
     };
     s = reduce(s, {
       type: 'server',
@@ -1095,6 +1111,10 @@ describe('store / pause-on-mutation + mutations', () => {
       toolName: 'Bash',
       category: 'dangerous' as const,
       summary: 'rm x',
+      filePath: null,
+      cwd: '/tmp/coder',
+      confirmedAt: null,
+      promoted: false,
     };
     let s = reduce(initialState, {
       type: 'server',
@@ -1118,6 +1138,10 @@ describe('store / pause-on-mutation + mutations', () => {
       toolName: 'Bash',
       category: 'dangerous' as const,
       summary: 'rm x',
+      filePath: null,
+      cwd: '/tmp/coder',
+      confirmedAt: null,
+      promoted: false,
     };
     let s = reduce(initialState, {
       type: 'server',
