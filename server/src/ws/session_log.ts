@@ -153,6 +153,7 @@ function mutationToLogRow(m: MutationRecord, revealSensitive: boolean): LogRow {
     summary: m.summary,
     status: m.toolName,
     artifactId: m.id,
+    severity: m.category,
     raw: redacted,
   };
   if (fields.length > 0) row.redactedFields = fields;

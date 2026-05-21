@@ -17,6 +17,10 @@ import { hashIsLogsFor, logsHashFor } from './logsHash';
 
 export function LogsButton(props: {
   sessionId: string;
+  /** Count of confirmed dangerous mutations on the current run. When > 0
+   *  the button label becomes `Logs · ⚠ N` and the tooltip carries the
+   *  review-before-granting prompt. */
+  dangerousCount?: number;
   onLoadSessionLog: (
     sessionId: string,
     offset: number,
@@ -25,7 +29,7 @@ export function LogsButton(props: {
   ) => void;
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
-  const { sessionId } = props;
+  const { sessionId, dangerousCount = 0 } = props;
   const buttonRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
 
@@ -73,13 +77,29 @@ export function LogsButton(props: {
       <button
         ref={buttonRef}
         type="button"
-        className="ghost-btn logs-button"
+        className={`ghost-btn logs-button${dangerousCount > 0 ? ' has-dangerous' : ''}`}
         aria-haspopup="dialog"
         aria-expanded={open}
+        aria-label={
+          dangerousCount > 0
+            ? `Open session logs. ${dangerousCount} dangerous mutation${dangerousCount === 1 ? '' : 's'} recorded.`
+            : undefined
+        }
         onClick={openModal}
-        title="Open the raw session log. Contains raw tool inputs and outputs (sensitive fields redacted by default)."
+        title={
+          dangerousCount > 0
+            ? `${dangerousCount} dangerous mutation${dangerousCount === 1 ? '' : 's'} recorded — review before granting further permissions.`
+            : 'Open the raw session log. Contains raw tool inputs and outputs (sensitive fields redacted by default).'
+        }
       >
         Logs
+        {dangerousCount > 0 && (
+          <span className="logs-button-dangerous-chip" aria-hidden="true">
+            <span className="logs-button-dangerous-sep">·</span>
+            <span className="logs-button-dangerous-glyph">⚠</span>
+            <span className="logs-button-dangerous-count">{dangerousCount}</span>
+          </span>
+        )}
       </button>
       {open && (
         <LogsModal

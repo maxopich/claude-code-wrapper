@@ -66,14 +66,25 @@ export function LogTable(props: {
                 <span className="logs-row-summary-text" title={row.summary}>
                   {row.summary}
                 </span>
-                {row.redactedFields && row.redactedFields.length > 0 && (
-                  <span
-                    className="logs-row-redacted-badge"
-                    title={`${row.redactedFields.length} field(s) masked: ${row.redactedFields.join(', ')}`}
-                  >
-                    redacted
-                  </span>
-                )}
+                <span className="logs-row-badges">
+                  {row.severity === 'dangerous' && (
+                    <span
+                      className="mutation-badge mutation-badge-dangerous"
+                      aria-label="dangerous mutation"
+                      title="This row writes to a path the artifact classifier flagged as dangerous (e.g. .env, secrets)."
+                    >
+                      ⚠ DANGEROUS
+                    </span>
+                  )}
+                  {row.redactedFields && row.redactedFields.length > 0 && (
+                    <span
+                      className="logs-row-redacted-badge"
+                      title={`${row.redactedFields.length} field(s) masked: ${row.redactedFields.join(', ')}`}
+                    >
+                      redacted
+                    </span>
+                  )}
+                </span>
               </button>
               {isOpen && <LogRowDetail row={row} />}
             </li>

@@ -1554,6 +1554,10 @@ function ActiveRunView(props: {
         <div className="multi-agent-active-actions">
           <LogsButton
             sessionId={run.sessionId}
+            dangerousCount={
+              run.mutations.filter((m) => m.category === 'dangerous' && m.confirmedAt !== null)
+                .length
+            }
             onLoadSessionLog={props.onLoadSessionLog}
             subscribeServerMsg={props.subscribeServerMsg}
           />

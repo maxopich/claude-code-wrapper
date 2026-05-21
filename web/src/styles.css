@@ -18,7 +18,7 @@
   --fg-0: #f4f5f7;
   --fg-1: #c4c7cf;
   --fg-2: #888d99;
-  --fg-3: #585d68;
+  --fg-3: #7a818e;
   /* Borders — soft, layered */
   --line-1: rgba(255, 255, 255, 0.045);
   --line-2: rgba(255, 255, 255, 0.075);
@@ -98,7 +98,7 @@
   --bg-3: #1a1d24;
   --fg: #f4f5f7;
   --fg-2: #888d99;
-  --fg-3: #585d68;
+  --fg-3: #7a818e;
   --accent: #2fb6c4;
   --accent-2: #1f8e9b;
   --ok: #34d399;
@@ -579,8 +579,7 @@ pre {
   flex: 1;
   min-height: 0;
   background:
-    radial-gradient(1200px 600px at 50% -10%, rgba(139, 92, 246, 0.05), transparent 60%),
-    var(--bg);
+    radial-gradient(1200px 600px at 50% -10%, rgba(139, 92, 246, 0.05), transparent 60%), var(--bg);
 }
 .chat.empty {
   align-items: center;
@@ -2082,7 +2081,10 @@ pre {
     radial-gradient(circle at center, rgba(139, 92, 246, 0.04), transparent 60%),
     linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
-  background-size: auto, 24px 24px, 24px 24px;
+  background-size:
+    auto,
+    24px 24px,
+    24px 24px;
 }
 .tpl-svg {
   width: 100%;
@@ -3104,10 +3106,18 @@ pre {
   min-height: 0;
   grid-template-columns: repeat(var(--lane-cols, 4), minmax(280px, 1fr));
 }
-.lanes.lanes-count-1 { --lane-cols: 1; }
-.lanes.lanes-count-2 { --lane-cols: 2; }
-.lanes.lanes-count-3 { --lane-cols: 3; }
-.lanes.lanes-count-4 { --lane-cols: 4; }
+.lanes.lanes-count-1 {
+  --lane-cols: 1;
+}
+.lanes.lanes-count-2 {
+  --lane-cols: 2;
+}
+.lanes.lanes-count-3 {
+  --lane-cols: 3;
+}
+.lanes.lanes-count-4 {
+  --lane-cols: 4;
+}
 .lanes.has-overflow {
   grid-template-columns: repeat(var(--lane-cols, 4), minmax(280px, 1fr)) auto;
 }
@@ -3213,23 +3223,55 @@ pre {
   border-radius: 50%;
   background: var(--fg-3);
 }
-.lane-status.status-idle .lane-status-dot { background: var(--fg-3); }
-.lane-status.status-working { background: var(--accent-glow); color: var(--accent-ink); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
-.lane-status.status-working .lane-status-dot { background: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
-.lane-status.status-stalled { background: var(--warn-soft); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 25%, transparent); }
-.lane-status.status-stalled .lane-status-dot { background: var(--warn); }
-.lane-status.status-done { background: var(--ok-soft); color: var(--ok); border-color: color-mix(in srgb, var(--ok) 25%, transparent); }
-.lane-status.status-done .lane-status-dot { background: var(--ok); }
-.lane-status.status-error { background: var(--err-soft); color: var(--err); border-color: color-mix(in srgb, var(--err) 25%, transparent); }
-.lane-status.status-error .lane-status-dot { background: var(--err); }
+.lane-status.status-idle .lane-status-dot {
+  background: var(--fg-3);
+}
+.lane-status.status-working {
+  background: var(--accent-glow);
+  color: var(--accent-ink);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.lane-status.status-working .lane-status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.lane-status.status-stalled {
+  background: var(--warn-soft);
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 25%, transparent);
+}
+.lane-status.status-stalled .lane-status-dot {
+  background: var(--warn);
+}
+.lane-status.status-done {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 25%, transparent);
+}
+.lane-status.status-done .lane-status-dot {
+  background: var(--ok);
+}
+.lane-status.status-error {
+  background: var(--err-soft);
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 25%, transparent);
+}
+.lane-status.status-error .lane-status-dot {
+  background: var(--err);
+}
 
 @media (prefers-reduced-motion: no-preference) {
   .lane-status.status-working .lane-status-dot {
     animation: lane-pulse 1.6s ease-in-out infinite;
   }
   @keyframes lane-pulse {
-    0%, 100% { box-shadow: 0 0 0 2px var(--accent-glow); }
-    50%      { box-shadow: 0 0 0 5px var(--accent-glow); }
+    0%,
+    100% {
+      box-shadow: 0 0 0 2px var(--accent-glow);
+    }
+    50% {
+      box-shadow: 0 0 0 5px var(--accent-glow);
+    }
   }
 }
 
@@ -3287,7 +3329,9 @@ pre {
   padding: 4px 12px;
   border-radius: var(--r-pill);
   cursor: pointer;
-  box-shadow: 0 4px 12px var(--accent-glow), 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+  box-shadow:
+    0 4px 12px var(--accent-glow),
+    0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -3352,11 +3396,21 @@ pre {
   text-align: right;
   color: var(--fg-1);
 }
-.activity-kind.kind-error { color: var(--err); }
-.activity-kind.kind-final { color: var(--accent-ink); }
-.activity-kind.kind-reply { color: var(--fg-1); }
-.activity-kind.kind-intro { color: var(--info); }
-.activity-kind.kind-prompt { color: var(--accent-ink); }
+.activity-kind.kind-error {
+  color: var(--err);
+}
+.activity-kind.kind-final {
+  color: var(--accent-ink);
+}
+.activity-kind.kind-reply {
+  color: var(--fg-1);
+}
+.activity-kind.kind-intro {
+  color: var(--info);
+}
+.activity-kind.kind-prompt {
+  color: var(--accent-ink);
+}
 
 .activity-kind-mark {
   margin-right: 4px;
@@ -3408,8 +3462,14 @@ pre {
     animation: activity-detail-in var(--dur-2) var(--ease);
   }
   @keyframes activity-detail-in {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 }
 
@@ -3773,6 +3833,51 @@ pre {
   font-size: var(--t-xs);
 }
 
+/* Screen-reader-only utility. Standard "visually hidden but still in the
+ * accessibility tree" recipe — used by the Logs modal's polite live region
+ * to announce dangerous-mutation arrivals without visible chrome. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Logs-button dangerous rollup — `Logs · ⚠ N` adornment. Uses --err so the
+ * count carries semantic load (it's the same token the DANGEROUS pill uses
+ * inside the modal); the separator + glyph match font-weight/size with the
+ * button label so the chip reads as part of the button, not a sticker. */
+.logs-button-dangerous-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  color: var(--err);
+  font-weight: 600;
+}
+
+.logs-button-dangerous-sep {
+  color: var(--fg-3);
+  font-weight: 400;
+}
+
+.logs-button-dangerous-glyph {
+  font-size: var(--t-sm);
+}
+
+.logs-button-dangerous-count {
+  font-family: var(--font-mono);
+}
+
+.logs-button.has-dangerous {
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
+}
+
 .logs-modal-overlay {
   position: fixed;
   inset: 0;
@@ -3786,7 +3891,7 @@ pre {
 
 .logs-modal {
   background: var(--bg-2);
-  border: 1px solid var(--bg-4);
+  border: 1px solid var(--line-3);
   border-radius: var(--r-lg);
   width: min(1200px, 100%);
   display: flex;
@@ -3801,7 +3906,7 @@ pre {
   justify-content: space-between;
   gap: var(--s-4);
   padding: var(--s-3) var(--s-4);
-  border-bottom: 1px solid var(--bg-4);
+  border-bottom: 1px solid var(--line-2);
 }
 
 .logs-modal-title {
@@ -3834,9 +3939,9 @@ pre {
 .logs-modal-error {
   margin: 0;
   padding: var(--s-2) var(--s-4);
-  background: rgba(217, 122, 122, 0.16);
+  background: var(--err-soft);
   color: var(--fg-0);
-  border-bottom: 1px solid var(--bg-4);
+  border-bottom: 1px solid var(--line-2);
   font-size: var(--t-sm);
 }
 
@@ -3847,7 +3952,7 @@ pre {
   align-items: center;
   gap: var(--s-2);
   padding: var(--s-2) var(--s-4);
-  border-bottom: 1px solid var(--bg-4);
+  border-bottom: 1px solid var(--line-2);
   flex-wrap: wrap;
 }
 
@@ -3855,7 +3960,7 @@ pre {
   flex: 1 1 240px;
   min-width: 200px;
   background: var(--bg-3);
-  border: 1px solid var(--bg-4);
+  border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   color: var(--fg-0);
   padding: var(--s-1) var(--s-2);
@@ -3876,7 +3981,7 @@ pre {
   list-style: none;
   cursor: pointer;
   background: var(--bg-3);
-  border: 1px solid var(--bg-4);
+  border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   padding: var(--s-1) var(--s-2);
   font-size: var(--t-sm);
@@ -3905,7 +4010,7 @@ pre {
   left: 0;
   margin-top: var(--s-1);
   background: var(--bg-3);
-  border: 1px solid var(--bg-4);
+  border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   padding: var(--s-2);
   display: flex;
@@ -3941,12 +4046,12 @@ pre {
 }
 
 .logs-reveal-btn {
-  color: #d97aa6;
-  border-color: rgba(217, 122, 166, 0.4);
+  color: var(--agent-3);
+  border-color: color-mix(in srgb, var(--agent-3) 40%, transparent);
 }
 
 .logs-reveal-btn.is-revealed {
-  background: rgba(217, 122, 166, 0.16);
+  background: var(--agent-3-soft);
 }
 
 /* Table */
@@ -3966,7 +4071,7 @@ pre {
 }
 
 .logs-row {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid var(--line-1);
 }
 
 .logs-row-summary {
@@ -4012,29 +4117,33 @@ pre {
   text-align: center;
 }
 
+/* Per-kind chip tokens — neutral for bus/llm (high-volume, deliberately quiet),
+ * tinted for tool/error/artifact so the things an operator scans for catch the
+ * eye. Color is not load-bearing: each chip also carries its uppercase kind
+ * word; sighted-user redundancy + screen-reader equivalence. */
 .logs-row-kind-tool {
-  background: rgba(47, 182, 196, 0.16);
+  background: var(--accent-glow);
   color: var(--accent-ink);
 }
 
 .logs-row-kind-bus {
-  background: rgba(138, 159, 240, 0.16);
-  color: #b0c2f7;
+  background: var(--bg-3);
+  color: var(--fg-2);
 }
 
 .logs-row-kind-llm {
-  background: rgba(176, 176, 176, 0.12);
-  color: var(--fg-1);
+  background: var(--bg-3);
+  color: var(--fg-3);
 }
 
 .logs-row-kind-error {
-  background: rgba(217, 122, 122, 0.2);
-  color: #f0a8a8;
+  background: var(--err-soft);
+  color: var(--err);
 }
 
 .logs-row-kind-artifact {
-  background: rgba(115, 200, 138, 0.18);
-  color: #a5e3b6;
+  background: var(--ok-soft);
+  color: var(--ok);
 }
 
 .logs-row-agent {
@@ -4055,13 +4164,22 @@ pre {
 }
 
 .logs-row-redacted-badge {
-  background: rgba(217, 165, 122, 0.18);
-  color: #f0c8a8;
+  background: var(--warn-soft);
+  color: var(--warn);
   font-size: 10px;
   padding: 1px 5px;
   border-radius: var(--r-sm);
   text-transform: uppercase;
   font-family: var(--font-mono);
+}
+
+/* Trailing-badges cell: dangerous pill + redacted pill share the `auto`
+ * grid column. Both are short (under 14ch) so the inline-flex never wraps;
+ * keeping them in one cell preserves the 5-column row template. */
+.logs-row-badges {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
 }
 
 .logs-table-empty {
@@ -4073,7 +4191,7 @@ pre {
 .logs-table-load-more {
   padding: var(--s-3);
   text-align: center;
-  border-top: 1px solid var(--bg-4);
+  border-top: 1px solid var(--line-2);
 }
 
 /* Row detail drawer */
@@ -4084,7 +4202,7 @@ pre {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
-  border-top: 1px solid var(--bg-4);
+  border-top: 1px solid var(--line-2);
 }
 
 .logs-row-detail-header {
@@ -4142,20 +4260,20 @@ pre {
   margin: 0;
   font-size: var(--t-xs);
   color: var(--fg-2);
-  background: rgba(217, 165, 122, 0.08);
-  border-left: 3px solid rgba(217, 165, 122, 0.6);
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
   padding: var(--s-2);
   border-radius: var(--r-sm);
 }
 
 .logs-row-detail-redacted code {
   font-family: var(--font-mono);
-  color: #f0c8a8;
+  color: var(--warn);
 }
 
 .logs-row-detail-raw {
   background: var(--bg-0);
-  border: 1px solid var(--bg-4);
+  border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   padding: var(--s-2);
   margin: 0;
@@ -4178,7 +4296,7 @@ pre {
   }
   .logs-row.is-anchor-highlight {
     animation: none;
-    background: rgba(47, 182, 196, 0.2);
+    background: var(--accent-glow);
   }
 }
 
@@ -4191,7 +4309,7 @@ pre {
 
 @keyframes logsRowFlash {
   0% {
-    background: rgba(47, 182, 196, 0.32);
+    background: color-mix(in srgb, var(--accent) 32%, transparent);
   }
   100% {
     background: transparent;

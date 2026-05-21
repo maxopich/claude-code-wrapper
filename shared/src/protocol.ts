@@ -849,6 +849,17 @@ export type LogRow = {
   laneRowId?: number;
   artifactId?: number;
   /**
+   * Mutation severity, surfaced as a top-level field (not nested in `raw`)
+   * so it cannot be hidden behind the Show-raw toggle and is structurally
+   * incapable of colliding with the redaction key list. Populated only for
+   * mutation-derived rows (kinds `tool` / `artifact`); `'mutate'` for normal
+   * writes, `'dangerous'` for `.env`/secrets/`.git/config`-class paths that
+   * the artifact classifier flagged. The browser renders this as a `⚠
+   * DANGEROUS` pill identical to the Mutations panel's badge, and as a
+   * `Logs · ⚠ N` rollup on the Logs button.
+   */
+  severity?: 'mutate' | 'dangerous';
+  /**
    * Server-projected detail JSON for the row drawer. Sensitive fields are
    * already masked at this layer; absent when there is nothing useful to
    * show (e.g. a bus hop whose `summary` already says everything).
