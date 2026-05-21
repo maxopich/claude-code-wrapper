@@ -290,11 +290,27 @@ describe('AgentRunner', () => {
     }
 
     test('fires onMutation for non-read tool calls (Write, Bash mutate, Bash dangerous)', async () => {
-      const seen: { agent: string; tool: string; category: string; summary: string }[] = [];
+      const seen: {
+        agent: string;
+        tool: string;
+        cwd: string;
+        category: string;
+        summary: string;
+        filePath?: string;
+        toolUseId?: string;
+      }[] = [];
       const runner = new AgentRunner({
         onEvent: () => {},
-        onMutation: (agent, toolName, cls) => {
-          seen.push({ agent, tool: toolName, category: cls.category, summary: cls.summary });
+        onMutation: (agent, toolName, cwd, cls) => {
+          seen.push({
+            agent,
+            tool: toolName,
+            cwd,
+            category: cls.category,
+            summary: cls.summary,
+            ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
+            ...(cls.toolUseId !== undefined ? { toolUseId: cls.toolUseId } : {}),
+          });
         },
         runnerFactory: () =>
           fakeRunner([
@@ -309,7 +325,14 @@ describe('AgentRunner', () => {
       expect(seen).toHaveLength(3);
       expect(seen[0]!.tool).toBe('Write');
       expect(seen[0]!.category).toBe('mutate');
+      // Migration 012: Write surfaces filePath; cwd is the agent's spec.cwd;
+      // toolUseId is the SDK block's `id` field.
+      expect(seen[0]!.cwd).toBe('/tmp/coder');
+      expect(seen[0]!.filePath).toBe('/foo');
+      expect(seen[0]!.toolUseId).toBe('x');
       expect(seen[1]!.category).toBe('mutate');
+      // Bash has no single file_path → filePath is absent.
+      expect(seen[1]!.filePath).toBeUndefined();
       expect(seen[2]!.category).toBe('dangerous');
       expect(seen[2]!.summary).toContain('rm -rf');
     });
@@ -350,6 +373,41 @@ describe('AgentRunner', () => {
       });
       runner.register({ name: 'coder', cwd: '/tmp/coder' });
       await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(PauseError);
+    });
+
+    // Migration 012: tool_result tap fires onToolResult for every `tool_result`
+    // block on a `user` SDKMessage, regardless of whether the originating
+    // tool_use was classified as a mutation. The orchestrator/chain hook
+    // narrows by tool_use_id when flipping `confirmed_at`.
+    test('fires onToolResult for tool_result blocks on user messages', async () => {
+      const seen: { agent: string; toolUseId: string; isError: boolean }[] = [];
+      const userWithResult = (id: string, isError = false): SDKMessage =>
+        ({
+          type: 'user',
+          message: {
+            content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content: 'ok' }],
+          },
+        }) as unknown as SDKMessage;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onToolResult: (agent, toolUseId, meta) => {
+          seen.push({ agent, toolUseId, isError: meta.isError });
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }),
+            userWithResult('x'),
+            assistantWithTool('Bash', { command: 'false' }),
+            userWithResult('y', true),
+            resultMsg('sess-1'),
+          ]),
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await runner.deliverTurn('coder', 'go');
+      expect(seen).toEqual([
+        { agent: 'coder', toolUseId: 'x', isError: false },
+        { agent: 'coder', toolUseId: 'y', isError: true },
+      ]);
     });
 
     test('onMutation absent = no-op (back-compat with pre-Item-5 tests)', async () => {

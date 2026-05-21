@@ -32,6 +32,16 @@ export type MutationCategory = 'read' | 'mutate' | 'dangerous';
 export type ToolClassification = {
   category: MutationCategory;
   summary: string;
+  /**
+   * Target file path for tools that write/edit a single file
+   * (`Write`, `Edit`, `MultiEdit`, `NotebookEdit`). Undefined for everything
+   * else — including `Bash` (which may write to many files indirectly) and
+   * `Read`-class tools (which target a file but don't mutate it). Surfaced
+   * so the bus runner can persist it on the mutation row without re-parsing
+   * the tool input, and so the artifact promotion classifier (Phase E) has
+   * a single canonical field to glob against.
+   */
+  filePath?: string;
 };
 
 const CATEGORY_RANK: Record<MutationCategory, number> = {
@@ -108,7 +118,11 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       const path = stringField(inp, 'file_path') ?? '';
       const content = stringField(inp, 'content') ?? '';
       const size = formatBytes(byteLength(content));
-      return { category: 'mutate', summary: `create/overwrite ${path} (${size})` };
+      return {
+        category: 'mutate',
+        summary: `create/overwrite ${path} (${size})`,
+        ...(path ? { filePath: path } : {}),
+      };
     }
 
     case 'Edit': {
@@ -119,7 +133,22 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       const verb = replaceAll
         ? `replace all "${snippet}"`
         : `replace ${oldStr.length} char${oldStr.length === 1 ? '' : 's'}`;
-      return { category: 'mutate', summary: `${verb} in ${path}` };
+      return {
+        category: 'mutate',
+        summary: `${verb} in ${path}`,
+        ...(path ? { filePath: path } : {}),
+      };
+    }
+
+    case 'MultiEdit': {
+      const path = stringField(inp, 'file_path') ?? '';
+      const edits = inp['edits'];
+      const n = Array.isArray(edits) ? edits.length : 0;
+      return {
+        category: 'mutate',
+        summary: `apply ${n} edit${n === 1 ? '' : 's'} to ${path}`,
+        ...(path ? { filePath: path } : {}),
+      };
     }
 
     case 'NotebookEdit': {
@@ -129,6 +158,7 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       return {
         category: 'mutate',
         summary: `edit ${cell ? `cell ${cell} in ` : ''}${path} (${mode})`,
+        ...(path ? { filePath: path } : {}),
       };
     }
 

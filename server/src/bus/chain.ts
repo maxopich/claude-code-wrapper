@@ -43,6 +43,7 @@ import {
   appendMultiAgentEvent,
   appendMultiAgentMutation,
   addParticipant,
+  confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
   getMultiAgentSession,
@@ -586,10 +587,14 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   let router: ChainRouter;
 
   // Item #5: mutation tap closure (mirrors orchestrator.ts's `onMutationHook`).
-  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cls) => {
+  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cwd, cls) => {
     let row: MutationRecord;
     try {
-      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary);
+      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary, {
+        filePath: cls.filePath ?? null,
+        cwd,
+        toolUseId: cls.toolUseId ?? null,
+      });
     } catch (err) {
       console.error('[chain] persist mutation failed', err);
       return;
@@ -620,6 +625,25 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
   };
 
+  // Migration 012: tool-result tap (mirrors orchestrator.ts's `onToolResultHook`).
+  // Flips `confirmed_at` on the matching mutation row, re-emits
+  // `multi_agent_mutation` for the wire-reducer dedupe-by-id.
+  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
+    let updated: MutationRecord | null;
+    try {
+      updated = confirmMutationByToolUseId(sessionId, toolUseId);
+    } catch (err) {
+      console.error('[chain] confirm mutation failed', err);
+      return;
+    }
+    if (!updated) return;
+    try {
+      opts.onMutation?.(sessionId, updated);
+    } catch (err) {
+      console.error('[chain] onMutation sink (confirm re-emit) threw', err);
+    }
+  };
+
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
@@ -627,6 +651,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       activity.onMessage(agent, msg);
     },
     onMutation: onMutationHook,
+    onToolResult: onToolResultHook,
     abortController,
     runnerFactory: opts.runnerFactory,
   });

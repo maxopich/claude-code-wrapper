@@ -34,6 +34,7 @@ import {
   appendMultiAgentEvent,
   appendMultiAgentMutation,
   addParticipant,
+  confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
   getMultiAgentSession,
@@ -706,10 +707,14 @@ export function wireOrchestratorSession(p: {
   // — when pause-on-first-mutation is armed and not yet acknowledged — sets
   // the pending slot, emits `multi_agent_pending_mutation`, and throws
   // `PausedForMutationError` to abort the turn cleanly.
-  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cls) => {
+  const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cwd, cls) => {
     let row: MutationRecord;
     try {
-      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary);
+      row = appendMultiAgentMutation(sessionId, agentName, toolName, cls.category, cls.summary, {
+        filePath: cls.filePath ?? null,
+        cwd,
+        toolUseId: cls.toolUseId ?? null,
+      });
     } catch (err) {
       console.error('[orchestrator] persist mutation failed', err);
       return;
@@ -743,6 +748,28 @@ export function wireOrchestratorSession(p: {
     }
   };
 
+  // Migration 012: tool-result tap. Flips `confirmed_at` on the matching
+  // mutation row when the SDK delivers the result, then re-emits
+  // `multi_agent_mutation` with the same `id` so the wire-reducer
+  // (dedupe-by-id, replace) surfaces the confirmation to the lane / artifact
+  // UI. Failures here are logged and swallowed — a missed confirmation just
+  // leaves the row as provisional, which is the safe-default render.
+  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
+    let updated: MutationRecord | null;
+    try {
+      updated = confirmMutationByToolUseId(sessionId, toolUseId);
+    } catch (err) {
+      console.error('[orchestrator] confirm mutation failed', err);
+      return;
+    }
+    if (!updated) return;
+    try {
+      p.onMutation?.(sessionId, updated);
+    } catch (err) {
+      console.error('[orchestrator] onMutation sink (confirm re-emit) threw', err);
+    }
+  };
+
   const runner = new AgentRunner({
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
@@ -760,6 +787,7 @@ export function wireOrchestratorSession(p: {
       }
     },
     onMutation: onMutationHook,
+    onToolResult: onToolResultHook,
     abortController,
     runnerFactory: p.runnerFactory,
   });
