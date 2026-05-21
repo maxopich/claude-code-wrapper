@@ -8,15 +8,15 @@ import type {
   MultiAgentTemplate,
   Project,
 } from '@cebab/shared/protocol';
-import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
-import { activeAgent, eventDefaultCollapsed } from '../store';
+import type { MultiAgentRun, MultiAgentState } from '../store';
+import { activeAgent } from '../store';
 import { agentIdentity } from '../agentIdentity';
 import { formatElapsed } from '../format';
 import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
-import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalKeys } from '../useModalKeys';
+import { AgentActivityTabs } from './agentActivity';
 
 /**
  * Multi-Agent tab.
@@ -1579,8 +1579,7 @@ function ActiveRunView(props: {
         onJump={jumpToEvent}
       />
 
-      <section className="multi-agent-section">
-        <h3>Scrollback</h3>
+      <section className="multi-agent-section multi-agent-activity-section">
         {run.events.length === 0 ? (
           <p className="iterations-empty">
             Waiting for the first event.{' '}
@@ -1589,16 +1588,7 @@ function ActiveRunView(props: {
               : 'The first participant agent is starting up.'}
           </p>
         ) : (
-          <ol className="event-list">
-            {run.events.map((ev) => (
-              <EventRow
-                key={ev.eventId}
-                event={ev}
-                defaultCollapsed={eventDefaultCollapsed(run, ev)}
-                highlighted={highlightedEventId === ev.eventId}
-              />
-            ))}
-          </ol>
+          <AgentActivityTabs run={run} />
         )}
       </section>
 
@@ -2267,106 +2257,6 @@ function RoutingSpine(props: {
         ))}
       </ol>
     </nav>
-  );
-}
-
-function EventRow(props: {
-  event: MultiAgentEventView;
-  defaultCollapsed: boolean;
-  highlighted?: boolean;
-}) {
-  const { event } = props;
-  // Initializer runs once per mount. Rows are keyed by eventId, so a
-  // newly-streamed event mounts at its computed default while any row the
-  // operator already toggled keeps its state as later events arrive.
-  const [collapsed, setCollapsed] = useState(props.defaultCollapsed);
-  const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
-  async function copyText() {
-    try {
-      await navigator.clipboard.writeText(event.text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Clipboard API can fail under non-secure-context or denied
-      // permissions. Leave the affordance idle; the operator can still
-      // expand the message and select the text manually.
-    }
-  }
-  const srcId = agentIdentity(event.source);
-  return (
-    <li
-      id={`ev-${event.eventId}`}
-      className={`event-row event-kind-${event.kind}${props.highlighted ? ' is-highlighted' : ''}`}
-      // Left identity stripe (the existing .event-row[data-agent-hue] rule),
-      // keyed off the source agent — present only for peers, never chrome.
-      data-agent-hue={srcId.hueVar ? '' : undefined}
-      style={srcId.hueVar ? ({ '--agent-hue': srcId.hueVar } as CSSProperties) : undefined}
-    >
-      <div className="event-head">
-        <button
-          className={`icon-btn event-toggle${collapsed ? ' is-collapsed' : ''}`}
-          onClick={() => setCollapsed((c) => !c)}
-          title={collapsed ? 'Show message' : 'Hide message (metadata only)'}
-          aria-expanded={!collapsed}
-        >
-          {collapsed ? '▸' : '▾'}
-        </button>
-        <AgentTag slug={event.source} />
-        <span className="event-arrow" aria-hidden="true">
-          →
-        </span>
-        <AgentTag slug={event.destination} />
-        <span className="event-kind">
-          <span className="spine-kind-mark" aria-hidden="true">
-            {KIND_MARK[event.kind]}
-          </span>
-          {event.kind}
-        </span>
-        <span className="event-ts">{formatTs(event.ts)}</span>
-        <button
-          className="icon-btn event-copy"
-          onClick={copyText}
-          title={copied ? 'Copied' : 'Copy message text'}
-        >
-          {copied ? '✓' : '⧉'}
-        </button>
-        <button
-          className="icon-btn event-expand"
-          onClick={() => setExpanded(true)}
-          title="Open in larger window"
-        >
-          ⤢
-        </button>
-      </div>
-      {!collapsed && (
-        <div className="event-text">
-          <Markdown text={event.text} />
-        </div>
-      )}
-      {expanded && <EventModal event={event} onClose={() => setExpanded(false)} />}
-    </li>
-  );
-}
-
-function EventModal(props: { event: MultiAgentEventView; onClose: () => void }) {
-  const { event } = props;
-  return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <div className="modal event-modal" onClick={(e) => e.stopPropagation()}>
-        <header>
-          <h2>
-            {event.source} → {event.destination} · {event.kind} · {formatTs(event.ts)}
-          </h2>
-          <button className="icon-btn" onClick={props.onClose} title="Close">
-            ✕
-          </button>
-        </header>
-        <section>
-          <Markdown text={event.text} />
-        </section>
-      </div>
-    </div>
   );
 }
 
