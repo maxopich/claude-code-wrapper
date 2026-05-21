@@ -62,20 +62,19 @@ export function LogRowDetail(props: { row: LogRow }) {
         )}
         {row.laneRowId !== undefined && (
           <>
-            <dt>lane row</dt>
+            <dt>scrollback</dt>
             <dd>
-              <a href={`#lane-row-${row.laneRowId}`}>#{row.laneRowId}</a>
+              <a href={`#ev-${row.laneRowId}`} title="Jump to this hop in the scrollback">
+                ↗ event #{row.laneRowId}
+              </a>
             </dd>
           </>
         )}
-        {row.artifactId !== undefined && (
-          <>
-            <dt>artifact</dt>
-            <dd>
-              <a href={`#artifact-${row.artifactId}`}>#{row.artifactId}</a>
-            </dd>
-          </>
-        )}
+        {/* TODO(artifacts-anchor): re-add an artifact link when ArtifactsView
+            exposes stable per-mutation anchors. The projection carries
+            artifactId (= mutation id) but the artifacts list keys by
+            filePath, so a #artifact-N href has nothing to resolve against.
+            Dropping the link is better than rendering a dead one. */}
       </dl>
 
       {row.redactedFields && row.redactedFields.length > 0 && (

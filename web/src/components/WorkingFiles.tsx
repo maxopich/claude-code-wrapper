@@ -1,32 +1,27 @@
 /**
- * "Working files (N)" disclosure pinned at the bottom of each lane.
+ * "Working files (N)" disclosure, surfaced in the Session info panel.
  *
- * Lists confirmed mutations by this lane's agent whose file path did NOT
+ * Aggregates confirmed mutations across every agent whose file path did NOT
  * pass the artifact promotion globs — i.e. scratch working files (source
- * edits, configs, ephemera). Promoted files go to the Artifacts tab;
+ * edits, configs, ephemera). Promoted files go to the Artifacts surface;
  * provisional rows (no `confirmedAt`) are hidden everywhere until the
- * matching `tool_result` lands.
- *
- * Lane-level placement (not per-row): the plan called for "inside an
- * agent's expanded row" but that's ambiguous in the v1 data model
- * (activity rows are bus hops, not per-tool entries). Surfacing once at
- * the lane bottom keeps the per-event detail clean and still gives the
- * operator a single place to glance at "what's this agent touching."
+ * matching `tool_result` lands. Each row carries an `<AgentTag>` so cross-
+ * agent attribution survives the aggregation.
  */
 import { useState } from 'react';
 import type { MultiAgentMutationView } from '@cebab/shared/protocol';
-import type { MultiAgentRun } from '../../store';
+import type { MultiAgentRun } from '../store';
+import { AgentTag } from './AgentTag';
 
-function scratchFor(
-  run: MultiAgentRun,
-  agentName: string,
-): { filePath: string; latest: MultiAgentMutationView; editCount: number }[] {
-  const byFile = new Map<
-    string,
-    { filePath: string; latest: MultiAgentMutationView; editCount: number }
-  >();
+type ScratchFile = {
+  filePath: string;
+  latest: MultiAgentMutationView;
+  editCount: number;
+};
+
+function scratchFiles(run: MultiAgentRun): ScratchFile[] {
+  const byFile = new Map<string, ScratchFile>();
   for (const m of run.mutations) {
-    if (m.agentName !== agentName) continue;
     if (m.filePath === null || m.confirmedAt === null) continue;
     if (m.promoted) continue;
     const existing = byFile.get(m.filePath);
@@ -45,10 +40,12 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
-export function WorkingFiles(props: { run: MultiAgentRun; agentName: string }) {
+export function WorkingFiles(props: { run: MultiAgentRun }) {
   const [open, setOpen] = useState(false);
-  const files = scratchFor(props.run, props.agentName);
-  if (files.length === 0) return null;
+  const files = scratchFiles(props.run);
+  if (files.length === 0) {
+    return <span className="settings-grid-muted">—</span>;
+  }
   return (
     <details
       className="working-files"
@@ -56,12 +53,14 @@ export function WorkingFiles(props: { run: MultiAgentRun; agentName: string }) {
       onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
     >
       <summary className="working-files-summary">
-        <span className="working-files-label">Working files</span>
-        <span className="working-files-count">{files.length}</span>
+        <span className="working-files-label">
+          {open ? '▾' : '▸'} {files.length} {files.length === 1 ? 'file' : 'files'}
+        </span>
       </summary>
       <ul className="working-files-list">
         {files.map((f) => (
           <li key={f.filePath} className="working-files-item">
+            <AgentTag slug={f.latest.agentName} />
             <span className="working-files-name" title={f.filePath}>
               {basename(f.filePath)}
             </span>

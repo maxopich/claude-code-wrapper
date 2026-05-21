@@ -1,7 +1,7 @@
 /**
- * The Artifacts-tab content. Lists every PROMOTED file mutation, grouped
- * by file (one row per unique file path — subsequent edits collapse into
- * a single "edits: N" row).
+ * The Artifacts surface for an active multi-agent run. Lists every PROMOTED
+ * file mutation, grouped by file (one row per unique file path — subsequent
+ * edits collapse into a single "edits: N" row).
  *
  * Three gates a mutation must pass to appear here:
  *   1. `filePath` is non-null (Bash and friends don't surface).
@@ -10,19 +10,18 @@
  *   3. `promoted === true` — server-side `classifyArtifact` matched
  *      the locked promotion globs (plans/, PLAN*.md, etc.).
  *
- * Confirmed-but-not-promoted writes (scratch) surface inside the
- * producing agent's lane via `WorkingFiles`. The split is privacy-by-
- * default: an `.env` write or a node_modules touch shouldn't bubble up
- * as a deliverable.
+ * Confirmed-but-not-promoted writes (scratch) surface in the Session info
+ * panel via `WorkingFiles`. The split is privacy-by-default: an `.env`
+ * write or a node_modules touch shouldn't bubble up as a deliverable.
  *
  * Preview pane is intentionally metadata-only for v1: we DO NOT load
  * file contents into the browser without an explicit click. Screenshots
  * leak.
  */
 import { useMemo, useState } from 'react';
-import { agentIdentity } from '../../agentIdentity';
-import { logsHashFor } from '../sessionLog/logsHash';
-import type { MultiAgentRun } from '../../store';
+import { logsHashFor } from './sessionLog/logsHash';
+import { AgentTag } from './AgentTag';
+import type { MultiAgentRun } from '../store';
 import type { MultiAgentMutationView } from '@cebab/shared/protocol';
 
 type ArtifactGroup = {
@@ -115,7 +114,6 @@ export function ArtifactsView(props: { run: MultiAgentRun }) {
           </thead>
           <tbody>
             {groups.map((g) => {
-              const id = agentIdentity(g.authoringAgent);
               const isSelected = g.filePath === selectedGroup?.filePath;
               return (
                 <tr
@@ -142,18 +140,7 @@ export function ArtifactsView(props: { run: MultiAgentRun }) {
                   </td>
                   <td className="artifacts-col-type">{fileType(g.filePath)}</td>
                   <td className="artifacts-col-author">
-                    <span
-                      className={`lane-monogram is-mini${id.neutral ? ' is-chrome' : ''}`}
-                      style={
-                        id.hueVar
-                          ? ({ '--agent-hue': id.hueVar } as React.CSSProperties)
-                          : undefined
-                      }
-                      aria-hidden="true"
-                    >
-                      {id.glyph}
-                    </span>
-                    {id.label}
+                    <AgentTag slug={g.authoringAgent} />
                   </td>
                   <td className="artifacts-col-updated" title={formatTs(g.latest.ts)}>
                     {formatTs(g.latest.ts)}
