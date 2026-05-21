@@ -12,13 +12,14 @@ export function MessageBlock(props: {
   const { message: m, onPermissionDecide } = props;
 
   if (m.kind === 'user') {
+    const isCommand = m.text.trimStart().startsWith('/');
     return (
-      <div className="msg user msg-group">
+      <div className={`msg user msg-group${isCommand ? ' user-command' : ''}`}>
         <div className="avatar user" aria-hidden="true">
-          U
+          {isCommand ? '/' : 'U'}
         </div>
         <div className="msg-body">
-          <div className="role">you</div>
+          <div className="role">{isCommand ? 'command' : 'you'}</div>
           <pre>{m.text}</pre>
         </div>
       </div>
@@ -43,6 +44,20 @@ export function MessageBlock(props: {
 
   if (m.kind === 'system') {
     return null;
+  }
+
+  if (m.kind === 'command_output') {
+    return (
+      <div className="msg command-output msg-group">
+        <div className="avatar tool" aria-hidden="true">
+          /
+        </div>
+        <div className="msg-body">
+          <div className="role">command output</div>
+          <Markdown text={m.text} />
+        </div>
+      </div>
+    );
   }
 
   if (m.kind === 'result') {

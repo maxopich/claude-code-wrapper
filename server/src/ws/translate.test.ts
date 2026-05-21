@@ -95,6 +95,63 @@ describe('translate', () => {
     expect(out).toMatchObject({ type: 'system_event', subtype: 'unknown:something_new' });
   });
 
+  test('synthetic assistant (slash command output) becomes a command_output ServerMsg', () => {
+    const out = translate(
+      fake({
+        type: 'assistant',
+        uuid: 'u',
+        message: {
+          model: '<synthetic>',
+          role: 'assistant',
+          content: [{ type: 'text', text: '## Context Usage\n\nFree space: 95%' }],
+        },
+      }),
+      PID,
+    );
+    expect(out).toEqual({
+      type: 'command_output',
+      sessionId: SID,
+      uuid: 'u',
+      text: '## Context Usage\n\nFree space: 95%',
+    });
+  });
+
+  test('real assistant (non-synthetic model) still becomes an assistant_message', () => {
+    const out = translate(
+      fake({
+        type: 'assistant',
+        uuid: 'u',
+        message: {
+          model: 'claude-opus-4-7',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      }),
+      PID,
+    );
+    expect(out).toMatchObject({
+      type: 'assistant_message',
+      sessionId: SID,
+      uuid: 'u',
+      blocks: [{ type: 'text', text: 'Hello' }],
+    });
+  });
+
+  test('result with num_turns: 0 is dropped (slash-command no-op)', () => {
+    const out = translate(
+      fake({
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 5,
+        total_cost_usd: 0,
+        num_turns: 0,
+        result: '',
+      }),
+      PID,
+    );
+    expect(out).toBeNull();
+  });
+
   test('text_delta stream events become text StreamDeltas', () => {
     const out = translate(
       fake({

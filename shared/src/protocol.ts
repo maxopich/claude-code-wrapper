@@ -422,6 +422,21 @@ export type ServerMsg =
   | { type: 'user_message'; sessionId: string; uuid: string; blocks: ContentBlock[] }
   | { type: 'stream_delta'; sessionId: string; uuid: string; delta: StreamDelta }
   | {
+      /**
+       * Output from a slash command the CLI handled locally (e.g. `/context`,
+       * `/compact`, `/skills`). Detected server-side by the synthetic-model
+       * marker the SDK emits (`assistant.message.model === "<synthetic>"`).
+       *
+       * Rendered as a system-style card in the chat, not a regular Claude
+       * reply — there was no model turn (cost $0, num_turns 0), and the
+       * markdown is command output, not a conversation message.
+       */
+      type: 'command_output';
+      sessionId: string;
+      uuid: string;
+      text: string;
+    }
+  | {
       type: 'permission_request';
       requestId: string;
       sessionId: string;

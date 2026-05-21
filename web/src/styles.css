@@ -664,6 +664,44 @@ pre {
   border-radius: var(--r-md);
   padding: 12px 14px;
 }
+
+/* User message that's a slash command. Tones down vs. a regular chat
+ * message so the operator can tell at a glance "I ran a command" vs
+ * "I asked a question". */
+.msg.user-command pre {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--t-sm);
+  color: var(--info);
+}
+.msg.user-command .role {
+  color: var(--info);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.msg.user-command .avatar.user {
+  background: var(--bg-4);
+  color: var(--info);
+}
+
+/* Slash-command output card (e.g. /context, /compact). Visually separated
+ * from regular Claude replies — there was no model turn, this is local CLI
+ * output. */
+.msg.command-output {
+  border-left: 0;
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+}
+.msg.command-output .role {
+  color: var(--info);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
 .msg.permission .actions {
   margin-top: 6px;
   display: flex;
@@ -1501,6 +1539,33 @@ pre {
   border-bottom: 0;
   background: transparent;
   margin-left: auto; /* push toggle to the right; trust chip sits on the left */
+}
+
+/* Slash command quick-access buttons in the chat header. Sit between the
+ * trust chip (left) and the mode toggle (right, mode-toggle owns ml:auto). */
+.slash-commands {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.slash-command-btn {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--t-xs);
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.slash-command-btn:hover:not(:disabled) {
+  background: var(--bg-4);
+  color: var(--fg);
+  border-color: var(--line-3);
+}
+.slash-command-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Chat-header chip. Pill geometry mirrors .ma-hop-budget-chip — same font,
