@@ -168,6 +168,14 @@ export type LaidRectTile = {
   roleY1: number | null;
   /** Baseline y for role line 2 (only used if roleY1 is non-null). */
   roleY2: number | null;
+  /** PR-4 identity: the agent's deterministic glyph (●▲■◆…) shown in
+   *  the agent's hue inside the tile. Identity carriers are
+   *  hue + glyph + name + position; any one alone is enough. */
+  glyph: string;
+  /** `var(--agent-N)` for the agent — null only for sentinel/chrome
+   *  slugs (agentIdentity returns null there). Drives the swatch fill
+   *  and glyph color in the renderer. */
+  hueVar: string | null;
 };
 
 export type LaidBadgeTile = {
@@ -310,8 +318,10 @@ function layoutOrchestratorRow(
   const WORKER_Y = 88;
   const WORKER_H = 56;
   const HEIGHT = 150;
-  // N=1 reads slightly bigger (per plan table); N=2..4 settles to 12/11.
-  const FS_NAME = tier === 'center' ? 13 : 12;
+  // PR-4 typography: 12px name on every ≤4 tier (plan: "Compact ≤4 =
+  // 12/600"). PR-3 had center=13 to read slightly larger at N=1; the
+  // PR-4 table tightens the scale so 1..4 are uniform.
+  const FS_NAME = 12;
   const FS_ROLE = 10;
   const MIN_W = 110;
   const MAX_W = 168;
@@ -325,6 +335,7 @@ function layoutOrchestratorRow(
     const tw = tileWidth(p.name, role, fsizes, MIN_W, MAX_W);
     const cx = acc + tw / 2;
     const cy = WORKER_Y + WORKER_H / 2;
+    const ident = agentIdentity(p.name);
     const tile: LaidRectTile = {
       pid: p.id,
       name: p.name,
@@ -340,6 +351,8 @@ function layoutOrchestratorRow(
       nameY: WORKER_Y + 16,
       roleY1: ROLE_Y1,
       roleY2: ROLE_Y2,
+      glyph: ident.glyph,
+      hueVar: ident.hueVar,
     };
     acc += tw + GAP;
     return tile;
@@ -349,7 +362,9 @@ function layoutOrchestratorRow(
   const rowW = n === 0 ? 0 : acc - GAP - SIDE_PAD;
   const width = Math.max(rowW + 2 * SIDE_PAD, 2 * SIDE_PAD);
   const HX = SIDE_PAD + rowW / 2;
-  const HUB_W = Math.round(Math.max(96, estTextW('orchestrator', 11, FACTOR_BOLD) + 24));
+  // PR-4: hub label is 12/600 in compact (was 11). Padding adjusted so
+  // the chip still reads as a chip and not a label.
+  const HUB_W = Math.round(Math.max(100, estTextW('orchestrator', 12, FACTOR_BOLD) + 24));
 
   const edgePath = (cx: number): string =>
     Math.abs(cx - HX) < 0.5
@@ -422,7 +437,9 @@ function layoutOrchestratorArc(
   const VBOX_H = 220;
   const HUB_Y = 14;
   const HUB_H = 26;
-  const HUB_W = 100;
+  // PR-4: chip widened to fit the 12 px "orchestrator" label + the
+  // (i) icon together without the icon clipping the label.
+  const HUB_W = 116;
   const HX = VBOX_W / 2; // 140
   const HUB_BOT = HUB_Y + HUB_H; // 40
   // Arc center sits BELOW the hub (not at hub center) so the endpoint
@@ -444,6 +461,7 @@ function layoutOrchestratorArc(
     const angle = Math.PI * t; // 0..π
     const cx = HX - R * Math.cos(angle);
     const cy = ARC_CY + R * Math.sin(angle);
+    const ident = agentIdentity(p.name);
     return {
       pid: p.id,
       name: p.name,
@@ -460,6 +478,8 @@ function layoutOrchestratorArc(
       nameY: cy + 4,
       roleY1: null,
       roleY2: null,
+      glyph: ident.glyph,
+      hueVar: ident.hueVar,
     };
   });
 
@@ -519,7 +539,11 @@ function layoutOrchestratorArc(
       hubW: HUB_W,
       hubH: HUB_H,
       hubLabel: 'orchestrator',
-      hubSlug: 'cebab',
+      // PR-4: per plan "Hub: collapse to 'orchestrator' only at N≥6 in
+      // compact". N=5 still shows the slug; N≥6 drops it so the hub
+      // reads as chrome (the chip alone) rather than a labelled
+      // participant. Stays null at ring+ tiers (already enforced there).
+      hubSlug: n <= 5 ? 'cebab' : null,
       workers,
     },
   };
@@ -537,7 +561,9 @@ function layoutOrchestratorRing(
   // only (no slug at this density — plan: chrome chip).
   const VBOX_W = 240;
   const VBOX_H = 240;
-  const HUB_W = 90;
+  // PR-4: hub label bumped to 12 px → chip widened so "orchestrator"
+  // and the (i) info icon both fit without the icon clipping the label.
+  const HUB_W = 110;
   const HUB_H = 22;
   const HCX = VBOX_W / 2; // 120
   const HCY = VBOX_H / 2; // 120
@@ -636,7 +662,8 @@ function layoutOrchestratorTwoRing(
 ): Layout {
   const VBOX_W = 280;
   const VBOX_H = 280;
-  const HUB_W = 90;
+  // PR-4: chip widened to fit the 12 px "orchestrator" label + icon.
+  const HUB_W = 110;
   const HUB_H = 22;
   const HCX = VBOX_W / 2; // 140
   const HCY = VBOX_H / 2; // 140
@@ -746,8 +773,9 @@ function layoutOrchestratorConcentric(
 ): Layout {
   const VBOX_W = 320;
   const VBOX_H = 320;
-  const HUB_W = 80;
-  const HUB_H = 20;
+  // PR-4: chip widened to fit the 12 px "orchestrator" label + icon.
+  const HUB_W = 110;
+  const HUB_H = 22;
   const HCX = VBOX_W / 2; // 160
   const HCY = VBOX_H / 2; // 160
   const HUB_Y = HCY - HUB_H / 2;
@@ -878,6 +906,7 @@ function layoutChainRow(
     const role = roleOf(roles, p.id);
     const tw = tileWidth(p.name, role, fsizes, MIN_W, MAX_W);
     const tCx = acc + tw / 2;
+    const ident = agentIdentity(p.name);
     const tile: LaidRectTile = {
       pid: p.id,
       name: p.name,
@@ -893,6 +922,8 @@ function layoutChainRow(
       nameY: NODE_Y + 18,
       roleY1: ROLE_Y1,
       roleY2: ROLE_Y2,
+      glyph: ident.glyph,
+      hueVar: ident.hueVar,
     };
     acc += tw + GAP;
     return tile;
@@ -991,6 +1022,7 @@ function layoutChainWrap(
       const cx = x + TILE_W / 2;
       const cy = y + TILE_H / 2;
       const p = participants[pIdx]!;
+      const ident = agentIdentity(p.name);
       tiles.push({
         pid: p.id,
         name: p.name,
@@ -1007,6 +1039,8 @@ function layoutChainWrap(
         // Hide role at wrap densities — names alone read cleaner.
         roleY1: null,
         roleY2: null,
+        glyph: ident.glyph,
+        hueVar: ident.hueVar,
       });
       pIdx++;
     }

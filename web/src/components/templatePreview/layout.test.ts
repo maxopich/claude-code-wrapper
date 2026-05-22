@@ -115,20 +115,75 @@ describe('layoutFor — tile kind by tier', () => {
   });
 });
 
-describe('layoutFor — hub slug visibility per tier', () => {
-  test('hubSlug is set for tiers ≤ arc', () => {
-    for (const n of [1, 4, 5, 8]) {
+describe('layoutFor — hub slug visibility per N (PR-4)', () => {
+  // PR-4 rule: "Hub: collapse to 'orchestrator' only at N≥6 in compact"
+  // — so N=1..5 show the slug, N≥6 drop it. This spans the arc-tier
+  // boundary (arc=5..8): N=5 keeps slug, N=6..8 hide it.
+  test('N=1..5 (center / row / arc lo) keep the slug', () => {
+    for (const n of [1, 2, 4, 5]) {
       const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
       if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
       expect(layout.geometry.hubSlug).toBe('cebab');
     }
   });
 
-  test('hubSlug is null for tiers ≥ ring (compact chrome chip)', () => {
-    for (const n of [9, 14, 15, 25]) {
+  test('N≥6 (arc hi / ring / twoRing / concentric) drop the slug', () => {
+    for (const n of [6, 8, 9, 14, 15, 25]) {
       const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
       if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
       expect(layout.geometry.hubSlug).toBeNull();
+    }
+  });
+});
+
+describe('layoutFor — rect tile identity (PR-4)', () => {
+  test('rect tiles carry glyph + hueVar from agentIdentity', () => {
+    // Cover every tier that produces rect tiles (center / row / arc /
+    // chain-row / chain-wrap).
+    const cases: Array<{ mode: 'orchestrator' | 'chain'; n: number }> = [
+      { mode: 'orchestrator', n: 1 },
+      { mode: 'orchestrator', n: 3 },
+      { mode: 'orchestrator', n: 5 },
+      { mode: 'orchestrator', n: 8 },
+      { mode: 'chain', n: 5 },
+      { mode: 'chain', n: 13 },
+    ];
+    for (const { mode, n } of cases) {
+      const layout = layoutFor({ mode }, mkProjects(n));
+      const tiles =
+        layout.geometry.mode === 'orchestrator' ? layout.geometry.workers : layout.geometry.tiles;
+      for (const tile of tiles) {
+        if (tile.kind !== 'rect') throw new Error(`expected rect tile for ${mode} N=${n}`);
+        expect(tile.glyph).toBeTruthy();
+        expect(tile.glyph.length).toBeGreaterThanOrEqual(1);
+        // agentIdentity returns var(--agent-N) for non-sentinel slugs.
+        expect(tile.hueVar).toMatch(/^var\(--agent-\d\)$/);
+      }
+    }
+  });
+});
+
+describe('layoutFor — typography floors (AC-7, PR-4)', () => {
+  // Plan: "Names ≥12px compact / ≥14px fullscreen; roles ≥11/≥12".
+  // PR-4 ships compact only; AC-7 fullscreen leg lands with PR-5.
+  test('orchestrator name fontSize ≥ floor per tier', () => {
+    // ≤4 (center/row): name 12; 5..8 (arc): name 11; 9+ (badge tiers
+    // render glyph only, fontSizes.name is just a typing carrier and
+    // not displayed — exclude from the floor check).
+    for (const n of [1, 2, 3, 4]) {
+      expect(layoutFor({ mode: 'orchestrator' }, mkProjects(n)).fontSizes.name).toBe(12);
+    }
+    for (const n of [5, 6, 7, 8]) {
+      expect(layoutFor({ mode: 'orchestrator' }, mkProjects(n)).fontSizes.name).toBe(11);
+    }
+  });
+
+  test('orchestrator role fontSize ≥ 10 where role is shown', () => {
+    // Roles render only at the row tier (≤4); arc+ hide them via
+    // roleY1=null. The font carrier remains 10 so PR-5 fullscreen can
+    // bump it without re-plumbing.
+    for (const n of [1, 2, 4]) {
+      expect(layoutFor({ mode: 'orchestrator' }, mkProjects(n)).fontSizes.role).toBe(10);
     }
   });
 });
@@ -313,7 +368,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
           "hubH": 30,
           "hubLabel": "orchestrator",
           "hubSlug": "cebab",
-          "hubW": 106,
+          "hubW": 113,
           "hubX": 189,
           "hubY": 20,
           "mode": "orchestrator",
@@ -322,7 +377,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 69,
               "cy": 116,
+              "glyph": "■",
               "h": 56,
+              "hueVar": "var(--agent-2)",
               "innerW": 90,
               "kind": "rect",
               "name": "agent-1",
@@ -338,7 +395,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 189,
               "cy": 116,
+              "glyph": "◆",
               "h": 56,
+              "hueVar": "var(--agent-3)",
               "innerW": 90,
               "kind": "rect",
               "name": "agent-2",
@@ -354,7 +413,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 309,
               "cy": 116,
+              "glyph": "▼",
               "h": 56,
+              "hueVar": "var(--agent-0)",
               "innerW": 90,
               "kind": "rect",
               "name": "agent-3",
@@ -374,8 +435,8 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
           "h": 30,
           "kind": "hub",
           "pid": -1,
-          "w": 106,
-          "x": 136,
+          "w": 113,
+          "x": 132.5,
           "y": 20,
         },
         "nodes": [
@@ -479,7 +540,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
           "hubH": 26,
           "hubLabel": "orchestrator",
           "hubSlug": "cebab",
-          "hubW": 100,
+          "hubW": 116,
           "hubX": 140,
           "hubY": 14,
           "mode": "orchestrator",
@@ -488,7 +549,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 48,
               "cy": 70,
+              "glyph": "■",
               "h": 26,
+              "hueVar": "var(--agent-2)",
               "innerW": 50,
               "kind": "rect",
               "name": "agent-1",
@@ -504,7 +567,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 74.94617613083763,
               "cy": 135.0538238691624,
+              "glyph": "◆",
               "h": 26,
+              "hueVar": "var(--agent-3)",
               "innerW": 50,
               "kind": "rect",
               "name": "agent-2",
@@ -520,7 +585,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 140,
               "cy": 162,
+              "glyph": "▼",
               "h": 26,
+              "hueVar": "var(--agent-0)",
               "innerW": 50,
               "kind": "rect",
               "name": "agent-3",
@@ -536,7 +603,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 205.0538238691624,
               "cy": 135.0538238691624,
+              "glyph": "★",
               "h": 26,
+              "hueVar": "var(--agent-1)",
               "innerW": 50,
               "kind": "rect",
               "name": "agent-4",
@@ -552,7 +621,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 232,
               "cy": 70.00000000000001,
+              "glyph": "⬟",
               "h": 26,
+              "hueVar": "var(--agent-2)",
               "innerW": 50,
               "kind": "rect",
               "name": "agent-5",
@@ -572,8 +643,8 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
           "h": 26,
           "kind": "hub",
           "pid": -1,
-          "w": 100,
-          "x": 90,
+          "w": 116,
+          "x": 82,
           "y": 14,
         },
         "nodes": [
@@ -698,7 +769,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 80,
               "cy": 42,
+              "glyph": "■",
               "h": 56,
+              "hueVar": "var(--agent-2)",
               "innerW": 112,
               "kind": "rect",
               "name": "agent-1",
@@ -714,7 +787,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 244,
               "cy": 42,
+              "glyph": "◆",
               "h": 56,
+              "hueVar": "var(--agent-3)",
               "innerW": 112,
               "kind": "rect",
               "name": "agent-2",
@@ -730,7 +805,9 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             {
               "cx": 408,
               "cy": 42,
+              "glyph": "▼",
               "h": 56,
+              "hueVar": "var(--agent-0)",
               "innerW": 112,
               "kind": "rect",
               "name": "agent-3",
