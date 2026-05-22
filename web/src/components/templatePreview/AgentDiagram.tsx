@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { Project } from '@cebab/shared/protocol';
 import {
   FACTOR_BOLD,
@@ -80,9 +80,43 @@ export function AgentDiagram(props: {
    *  NOT called on blur/scroll close — those stay in-memory only, and
    *  grabbing focus back then is intrusive. */
   onCommitRole?: (projectId: number, text: string) => void;
+  /** PR-5: when true, halts trip animation and commits-and-closes any
+   *  active overlay editor. Used by the compact diagram when the
+   *  fullscreen modal is open — the modal's own AgentDiagram runs
+   *  independently and stays interactive. */
+  paused?: boolean;
+  /** PR-5: when true, tile clicks fire `onSelect` instead of opening
+   *  the floating overlay editor. Used by the modal's AgentDiagram
+   *  when the split-view side panel is visible — role editing happens
+   *  in the panel's textareas, not in the floating overlay. */
+  disableOverlayEditor?: boolean;
+  /** PR-5 bidi sync: tile with this pid gets `.is-selected` outline.
+   *  Set by the split-view panel when a row is focused. */
+  selectedPid?: number | null;
+  /** PR-5 bidi sync: fired on tile click/Enter/Space so the panel
+   *  can scroll the matching row into view + focus its textarea. */
+  onSelect?: (projectId: number) => void;
+  /** PR-5: when set, renders the `⛶` expand button overlay at the
+   *  top-right of `.tpl-stage`. Caller is responsible for opening the
+   *  fullscreen modal and capturing the originating button's bounding
+   *  rect for the open-animation `transform-origin`. */
+  onExpand?: (origin: { x: number; y: number }) => void;
+  /** PR-5: shows the non-color-only nudge dot on the expand button —
+   *  caller sets this at N≥9, where split-view is auto-on in fullscreen
+   *  and the modal is a meaningful upgrade over the compact card. */
+  expandNudge?: boolean;
+  /** PR-5: when true, stretch the stage to fill its container width
+   *  (the modal body). Drops the squarePx-driven width and the
+   *  `aspect-ratio: 1/1` square shape so the SVG meet-scales into the
+   *  available rectangle. The CSS `.tpl-stage--full` modifier carries
+   *  the layout changes. */
+  fullWidth?: boolean;
 }) {
   const { participants, mode, roles, onRoleChange } = props;
   const n = participants.length;
+  const paused = !!props.paused;
+  const disableOverlayEditor = !!props.disableOverlayEditor;
+  const fullWidth = !!props.fullWidth;
 
   // Click-to-edit overlay. Hooks must precede the n===0 early return
   // (Rules of Hooks). The editor is one absolutely-positioned <textarea>
@@ -123,6 +157,9 @@ export function AgentDiagram(props: {
     // Commit-and-close on scroll/resize: the responsive SVG re-lays-out
     // and .tpl-stage scrolls, so the cached box would drift. Text is
     // never lost (committed); the user re-clicks to keep editing.
+    // PR-5: ResizeObserver on the stage covers the fullscreen modal
+    // case — there the stage isn't bound to window resize, so the
+    // window listener wouldn't fire. (Risk #3.)
     const close = () => {
       const id = editingIdRef.current;
       if (id != null) {
@@ -133,11 +170,28 @@ export function AgentDiagram(props: {
     };
     stage?.addEventListener('scroll', close, { passive: true });
     window.addEventListener('resize', close);
+    const ro = stage && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(close) : null;
+    if (ro && stage) ro.observe(stage);
     return () => {
       stage?.removeEventListener('scroll', close);
       window.removeEventListener('resize', close);
+      ro?.disconnect();
     };
   }, [editingId]);
+
+  // PR-5: when the modal opens (paused→true) or split-view turns on
+  // (disableOverlayEditor→true), commit-and-close the floating overlay
+  // editor. The text persists into `roles` via the same path as
+  // scroll/resize, so AC-19 (data survives toggle) holds.
+  useEffect(() => {
+    if (!paused && !disableOverlayEditor) return;
+    const id = editingIdRef.current;
+    if (id != null) {
+      onRoleChangeRef.current(id, draftRef.current);
+      setEditingId(null);
+      setBox(null);
+    }
+  }, [paused, disableOverlayEditor]);
 
   const reduce =
     typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -145,14 +199,15 @@ export function AgentDiagram(props: {
   const { squarePx, width, height, geometry, edges } = layout;
 
   // Stable shape key for the trip-animation effect: re-init when the
-  // cycle's "shape" changes (mode, worker set, reduce-motion, or the
-  // edit-pause). `participants`/`roles` references churn on parent
-  // re-renders without content change, so we hash to a string.
+  // cycle's "shape" changes (mode, worker set, reduce-motion, the
+  // edit-pause, or PR-5's pause-while-modal-open). `participants`/`roles`
+  // references churn on parent re-renders without content change, so we
+  // hash to a string.
   const orchPids =
     geometry.mode === 'orchestrator' ? geometry.workers.map((w) => w.pid).join(',') : '';
   const orchNames =
     geometry.mode === 'orchestrator' ? geometry.workers.map((w) => w.name).join('|') : '';
-  const animKey = `${geometry.mode}|${orchPids}|${orchNames}|${reduce ? 1 : 0}|${editingId ?? 'idle'}`;
+  const animKey = `${geometry.mode}|${orchPids}|${orchNames}|${reduce ? 1 : 0}|${editingId ?? 'idle'}|${paused ? 'p' : 'r'}`;
 
   // Effect captures `geometry.workers` and `layout.flowPaths` at run
   // time. They're stable when `animKey` doesn't change (same content
@@ -164,7 +219,8 @@ export function AgentDiagram(props: {
       geometry.mode !== 'orchestrator' ||
       workersForTrip.length === 0 ||
       reduce ||
-      editingId != null
+      editingId != null ||
+      paused
     ) {
       setTrip(null);
       setArrivalPid(null);
@@ -276,6 +332,17 @@ export function AgentDiagram(props: {
     setDraft(roles[String(pid)] ?? '');
     setEditingId(pid);
   }
+
+  // PR-5: tile click/key handler. Two responsibilities split by mode:
+  //   - bidi sync (always): call `onSelect` so split-view scrolls the
+  //     matching row into view + focuses its textarea.
+  //   - floating overlay (compact / modal-without-split-view): call
+  //     `openEditor`. Suppressed when `disableOverlayEditor` is true —
+  //     in that case editing happens in the panel's textarea.
+  function onTileActivate(pid: number, gEl: SVGGElement) {
+    props.onSelect?.(pid);
+    if (!disableOverlayEditor) openEditor(pid, gEl);
+  }
   const editor =
     editingId != null && box ? (
       <textarea
@@ -319,6 +386,7 @@ export function AgentDiagram(props: {
   // 4-channel (hue + glyph + name + position); any one alone is enough.
   const renderRectTile = (t: LaidRectTile, fsNames: { name: number; role: number }) => {
     const isArrival = arrivalPid === t.pid;
+    const isSelected = props.selectedPid === t.pid;
     const arrivalHueVar = isArrival ? t.hueVar : null;
     const rectStyle: CSSProperties | undefined = isArrival
       ? ({
@@ -335,24 +403,26 @@ export function AgentDiagram(props: {
     const identityStyle: CSSProperties = {
       ['--identity-hue']: t.hueVar ?? 'var(--fg-3)',
     } as CSSProperties;
+    const ariaLabel = disableOverlayEditor ? `Select ${t.name}` : `Edit role for ${t.name}`;
     return (
       <g
         key={`w${t.pid}`}
         data-pid={t.pid}
         role="button"
         tabIndex={0}
-        aria-label={`Edit role for ${t.name}`}
-        onClick={(ev) => openEditor(t.pid, ev.currentTarget)}
+        aria-label={ariaLabel}
+        aria-pressed={isSelected || undefined}
+        onClick={(ev) => onTileActivate(t.pid, ev.currentTarget)}
         onKeyDown={(ev) => {
           if (ev.key === 'Enter' || ev.key === ' ') {
             ev.preventDefault();
-            openEditor(t.pid, ev.currentTarget);
+            onTileActivate(t.pid, ev.currentTarget);
           }
         }}
       >
         <title>{t.role ? `${t.name} — ${t.role}` : t.name}</title>
         <rect
-          className={`tpl-node-rect${isArrival ? ' is-trip-arrived' : ''}`}
+          className={`tpl-node-rect${isArrival ? ' is-trip-arrived' : ''}${isSelected ? ' is-selected' : ''}`}
           x={t.x}
           y={t.y}
           width={t.w}
@@ -410,27 +480,30 @@ export function AgentDiagram(props: {
 
   const renderBadgeTile = (t: LaidBadgeTile) => {
     const isArrival = arrivalPid === t.pid;
+    const isSelected = props.selectedPid === t.pid;
     const badgeStyle: CSSProperties = {
       ['--badge-hue']: t.hueVar ?? 'var(--line-3)',
     } as CSSProperties;
+    const ariaLabel = disableOverlayEditor ? `Select ${t.name}` : `Edit role for ${t.name}`;
     return (
       <g
         key={`w${t.pid}`}
         data-pid={t.pid}
         role="button"
         tabIndex={0}
-        aria-label={`Edit role for ${t.name}`}
-        onClick={(ev) => openEditor(t.pid, ev.currentTarget)}
+        aria-label={ariaLabel}
+        aria-pressed={isSelected || undefined}
+        onClick={(ev) => onTileActivate(t.pid, ev.currentTarget)}
         onKeyDown={(ev) => {
           if (ev.key === 'Enter' || ev.key === ' ') {
             ev.preventDefault();
-            openEditor(t.pid, ev.currentTarget);
+            onTileActivate(t.pid, ev.currentTarget);
           }
         }}
       >
         <title>{t.role ? `${t.name} — ${t.role}` : t.name}</title>
         <circle
-          className={`tpl-node-badge${isArrival ? ' is-trip-arrived' : ''}`}
+          className={`tpl-node-badge${isArrival ? ' is-trip-arrived' : ''}${isSelected ? ' is-selected' : ''}`}
           cx={t.cx}
           cy={t.cy}
           r={t.r}
@@ -457,6 +530,51 @@ export function AgentDiagram(props: {
   const renderTile = (t: LaidTile, fsizes: { name: number; role: number }) =>
     t.kind === 'rect' ? renderRectTile(t, fsizes) : renderBadgeTile(t);
 
+  // PR-5: shared stage shell (style + keydown + expand overlay) used by
+  // both orchestrator and chain branches so the modal-related affordances
+  // don't have to be duplicated. `fullWidth` drops the squarePx-driven
+  // width AND the `aspect-ratio: 1/1` square (via .tpl-stage--full) so
+  // the SVG meet-scales into whatever rectangle the modal body offers.
+  const stageStyle: CSSProperties = fullWidth ? {} : { width: squarePx };
+  const stageClass = fullWidth ? 'tpl-stage tpl-stage--full' : 'tpl-stage';
+  function onStageKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    // PR-5 AC-17: `E` opens the modal when the stage has focus. Ignored
+    // in textareas (the role-editor) and inputs, and when a modifier
+    // key is held (so cmd+E / ctrl+E browser shortcuts aren't stolen).
+    if (!props.onExpand) return;
+    if (e.key !== 'e' && e.key !== 'E') return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const tag = (e.target as HTMLElement | null)?.tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+    e.preventDefault();
+    const stage = stageRef.current;
+    if (!stage) return;
+    const r = stage.getBoundingClientRect();
+    props.onExpand({ x: r.right - 20, y: r.top + 20 });
+  }
+  const expandBtn = props.onExpand ? (
+    <button
+      type="button"
+      className={`tpl-expand-btn${props.expandNudge ? ' has-nudge' : ''}`}
+      aria-haspopup="dialog"
+      aria-label={
+        props.expandNudge
+          ? `Expand template preview (${n} agents, split view available)`
+          : `Expand template preview`
+      }
+      title="Expand to full screen (E)"
+      onClick={(ev) => {
+        const rect = ev.currentTarget.getBoundingClientRect();
+        props.onExpand?.({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+      }}
+    >
+      <span className="tpl-expand-glyph" aria-hidden="true">
+        ⛶
+      </span>
+      {props.expandNudge && <span className="tpl-expand-nudge" aria-hidden="true" />}
+    </button>
+  ) : null;
+
   if (geometry.mode === 'orchestrator') {
     const { hubX, hubY, hubW, hubH, workers, hubLabel, hubSlug } = geometry;
     const fsizes = layout.fontSizes;
@@ -470,7 +588,7 @@ export function AgentDiagram(props: {
     // without-slug centers the label vertically.
     const hubLabelY = hubSlug ? hubY + 14 : hubY + hubH / 2 + 4;
     return (
-      <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
+      <div className={stageClass} ref={stageRef} style={stageStyle} onKeyDown={onStageKeyDown}>
         <svg
           className="tpl-svg"
           viewBox={`0 0 ${width} ${height}`}
@@ -537,6 +655,7 @@ export function AgentDiagram(props: {
           )}
         </svg>
         {editor}
+        {expandBtn}
       </div>
     );
   }
@@ -552,7 +671,7 @@ export function AgentDiagram(props: {
   const ariaLabel =
     `Chain of ${n} agent${n === 1 ? '' : 's'}` + (ariaSuffix ? `: ${ariaSuffix}` : '');
   return (
-    <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
+    <div className={stageClass} ref={stageRef} style={stageStyle} onKeyDown={onStageKeyDown}>
       <svg
         className="tpl-svg"
         viewBox={`0 0 ${width} ${height}`}
@@ -578,7 +697,7 @@ export function AgentDiagram(props: {
           <path key={`l${String(e.to)}`} className="tpl-edge" d={e.d} markerEnd="url(#tpl-arrow)" />
         ))}
         {tiles.map((t) => renderTile(t, fsizes))}
-        {!reduce && n >= 2 && chainFlow && (
+        {!reduce && !paused && n >= 2 && chainFlow && (
           <circle
             className="tpl-flow-dot tpl-flow-dot--chain"
             r={3.5}
@@ -587,6 +706,7 @@ export function AgentDiagram(props: {
         )}
       </svg>
       {editor}
+      {expandBtn}
     </div>
   );
 }

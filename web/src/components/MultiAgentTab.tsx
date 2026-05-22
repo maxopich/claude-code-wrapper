@@ -23,6 +23,8 @@ import { ArtifactsView } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
+import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
+import type { ModalOrigin } from './templatePreview/TemplatePreviewModal';
 
 /**
  * Multi-Agent tab.
@@ -707,6 +709,14 @@ function TemplatePreview(props: {
   const rolesDirty =
     JSON.stringify(normalizeRoles(roles)) !== JSON.stringify(normalizeRoles(template.roles ?? {}));
 
+  // PR-5: fullscreen modal state. `modalOpen` toggles the dialog;
+  // `modalOrigin` is the viewport-px center of the originating expand
+  // button so the dialog can scale-from-button (transform-origin). Auto-
+  // closes when the template changes (parent already remounts us via
+  // key={template.id}, so the state resets naturally).
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalOrigin, setModalOrigin] = useState<ModalOrigin | null>(null);
+
   // The pane is the keyboard target for Save roles / Apply. tabIndex={-1}:
   // focusable via .focus() / click, but not an awkward Tab stop on a huge
   // panel. Parent remounts us via key={template.id}, so this focuses the
@@ -756,7 +766,37 @@ function TemplatePreview(props: {
           props.onUpdateRoles(template, normalizeRoles(next));
           requestAnimationFrame(focusPane);
         }}
+        paused={modalOpen}
+        onExpand={(origin) => {
+          setModalOrigin(origin);
+          setModalOpen(true);
+        }}
+        expandNudge={resolved.length >= 9}
       />
+
+      {modalOpen && (
+        <TemplatePreviewModal
+          template={template}
+          participants={resolved}
+          roles={roles}
+          onRoleChange={(id, text) => setRoles((r) => ({ ...r, [String(id)]: text }))}
+          onCommitRole={(id, text) => {
+            const next = { ...roles, [String(id)]: text };
+            props.onUpdateRoles(template, normalizeRoles(next));
+          }}
+          origin={modalOrigin ?? undefined}
+          onClose={() => {
+            setModalOpen(false);
+            // Focus restore — the expand button lives inside the compact
+            // AgentDiagram and is unique in this preview pane. Defer one
+            // frame so the modal has actually unmounted (inert removed).
+            requestAnimationFrame(() => {
+              const btn = paneRef.current?.querySelector<HTMLButtonElement>('.tpl-expand-btn');
+              btn?.focus();
+            });
+          }}
+        />
+      )}
 
       <div className="tpl-actions">
         {resolved.length > 0 && (
