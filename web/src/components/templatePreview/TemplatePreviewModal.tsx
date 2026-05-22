@@ -117,9 +117,13 @@ export function TemplatePreviewModal(props: {
     const overlay = overlayRef.current;
     if (!overlay) return;
     const inerted: HTMLElement[] = [];
-    let node: HTMLElement | null = overlay;
-    while (node && node !== document.body) {
-      const parent: HTMLElement | null = node.parentElement;
+    // `node` is non-null throughout: it starts at `overlay` (just
+    // guarded above) and only ever gets reassigned to `parent` after
+    // the !parent break below — so the loop only needs the body-stop
+    // check, not a redundant truthiness test (CodeQL js/trivial-conditional).
+    let node: HTMLElement = overlay;
+    while (node !== document.body) {
+      const parent = node.parentElement;
       if (!parent) break;
       for (const sib of Array.from(parent.children)) {
         if (sib === node) continue;
