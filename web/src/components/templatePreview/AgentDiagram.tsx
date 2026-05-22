@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { Project } from '@cebab/shared/protocol';
-import { agentIdentity } from '../../agentIdentity';
 import {
   FACTOR_BOLD,
   FACTOR_SANS,
@@ -189,10 +188,9 @@ export function AgentDiagram(props: {
       const dest = workersForTrip[destIdx]!;
       const flow = flowPaths.find((f) => f.pid === dest.pid);
       if (!flow) return;
-      // Badge tiles already carry their hueVar (always-on identity);
-      // rect tiles look it up at trip time so the arrival pulse colors
-      // the rect's stroke with the same hue as the dot during transit.
-      const hueVar = dest.kind === 'badge' ? dest.hueVar : agentIdentity(dest.name).hueVar;
+      // PR-4: both tile kinds carry hueVar (rect tiles got it for the
+      // identity chip), so the trip animation reads from one source.
+      const hueVar = dest.hueVar;
 
       tripKey++;
       setTrip({
@@ -314,9 +312,14 @@ export function AgentDiagram(props: {
   // Tile renderers. Both branches return a <g data-pid={pid}> with a
   // <title> for screen readers / hover, a clickable shape, and label
   // text (or just a glyph for badges).
+  //
+  // PR-4: rect tiles carry a top-left identity chip (8×8 hue swatch +
+  // glyph in agent hue) on tiles tall enough to afford it (h≥30 — i.e.,
+  // row/chain-row/chain-wrap, not the 26px arc tile). Identity remains
+  // 4-channel (hue + glyph + name + position); any one alone is enough.
   const renderRectTile = (t: LaidRectTile, fsNames: { name: number; role: number }) => {
     const isArrival = arrivalPid === t.pid;
-    const arrivalHueVar = isArrival ? agentIdentity(t.name).hueVar : null;
+    const arrivalHueVar = isArrival ? t.hueVar : null;
     const rectStyle: CSSProperties | undefined = isArrival
       ? ({
           ['--tpl-trip-hue']: arrivalHueVar ?? 'var(--accent)',
@@ -326,6 +329,12 @@ export function AgentDiagram(props: {
     const lines = wrap2(roleText, fitChars(t.innerW, fsNames.role, FACTOR_SANS));
     const cls = t.role ? 'tpl-node-role' : 'tpl-node-role empty';
     const showRole = t.roleY1 != null;
+    // Identity chip: only on tiles tall enough to host an 8×8 swatch
+    // without crowding the centered name. Arc tier (h=26) skips it.
+    const showIdentity = t.h >= 30 && t.hueVar != null;
+    const identityStyle: CSSProperties = {
+      ['--identity-hue']: t.hueVar ?? 'var(--fg-3)',
+    } as CSSProperties;
     return (
       <g
         key={`w${t.pid}`}
@@ -351,6 +360,26 @@ export function AgentDiagram(props: {
           rx={8}
           style={rectStyle}
         />
+        {showIdentity && (
+          // PR-4 rect identity: an 8×8 hue swatch at top-left (6 px
+          // inset) per plan. Small enough that even with a long
+          // centered name reaching toward the left edge, the
+          // letterform sits over a tiny color block, not a full chip
+          // — overlap is visually negligible at 8 px. A standalone
+          // glyph (the plan's other carrier) lands in PR-5's
+          // fullscreen view where there's room without truncating
+          // names further. Hue + name + position still gives a
+          // 3-channel identity here.
+          <rect
+            className="tpl-node-swatch"
+            x={t.x + 6}
+            y={t.y + 6}
+            width={8}
+            height={8}
+            rx={2}
+            style={identityStyle}
+          />
+        )}
         <text
           className="tpl-node-name"
           x={t.cx}
@@ -412,7 +441,10 @@ export function AgentDiagram(props: {
           x={t.cx}
           y={t.cy + 4}
           textAnchor="middle"
-          fontSize={Math.max(10, Math.round(t.r * 0.85))}
+          // PR-4: 0.8× radius lands 12px at ring tier (r=15) per plan;
+          // smaller for twoRing (r=13 → 10) and concentric (r=11 → 9).
+          // Floor at 8 so concentric stays legible.
+          fontSize={Math.max(8, Math.round(t.r * 0.8))}
           fontWeight={600}
           style={badgeStyle}
         >
@@ -463,19 +495,13 @@ export function AgentDiagram(props: {
             x={hubX}
             y={hubLabelY}
             textAnchor="middle"
-            fontSize={11}
+            fontSize={12}
             fontWeight={600}
           >
             {hubLabel}
           </text>
           {hubSlug != null && (
-            <text
-              className="tpl-node-slug"
-              x={hubX}
-              y={hubY + 24}
-              textAnchor="middle"
-              fontSize={8.5}
-            >
+            <text className="tpl-node-slug" x={hubX} y={hubY + 25} textAnchor="middle" fontSize={9}>
               {hubSlug}
             </text>
           )}

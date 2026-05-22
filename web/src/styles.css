@@ -2171,6 +2171,13 @@ pre {
   stroke: var(--line-3);
   stroke-width: 1;
   fill: none;
+  /* PR-4: keep stroke 1 CSS pixel regardless of viewBox→pixel scale.
+   * Without this the line thickens at the small/compact stage size
+   * (~280×220 viewBox into 280px box ≈ 1:1, but 240 viewBox into
+   * 460-cap squarePx scales ~1.9× → 1.9px stroke). non-scaling-stroke
+   * decouples stroke from the viewport transform so edges always
+   * read as the same hairline. */
+  vector-effect: non-scaling-stroke;
 }
 .tpl-arrowhead {
   fill: var(--accent);
@@ -2228,7 +2235,12 @@ pre {
 .tpl-node-badge {
   fill: var(--bg-3);
   stroke: var(--badge-hue, var(--line-3));
-  stroke-width: 2;
+  /* PR-4: 3px outer ring per plan — badges are the sole identity
+   * carrier at ring+ tiers, so the hue ring needs more presence than
+   * the 2px PR-3 default. Also non-scaling so the ring weight stays
+   * visually 3px regardless of stage scaling. */
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
   cursor: pointer;
 }
 .tpl-node-badge:hover {
@@ -2237,6 +2249,24 @@ pre {
 .tpl-node-badge-glyph {
   fill: var(--badge-hue, var(--fg-2));
   font-family: var(--font-sans);
+  pointer-events: none;
+}
+/* Rect-tile identity swatch (PR-4): an 8×8 hue chip at the tile's
+ * top-left (6 px inset). Carries the agent's stable djb2 →
+ * var(--agent-N) hue from agentIdentity. Layout decides when to
+ * surface it (tiles with h≥30 — i.e., row / chain-row / chain-wrap;
+ * the 26 px arc tile skips it). CSS colors via the inline
+ * --identity-hue custom prop so theme tokens stay the source of
+ * truth. pointer-events:none so clicks fall through to the parent
+ * <g> (the click-to-edit affordance covers the whole tile).
+ *
+ * The matching standalone glyph (plan: 11/13 px in agent hue) is
+ * deferred to PR-5's fullscreen view, where there's room without
+ * collapsing the centered name's width budget. Compact rect tiles
+ * stay readable with hue + name + position as the three identity
+ * channels here. */
+.tpl-node-swatch {
+  fill: var(--identity-hue, var(--fg-3));
   pointer-events: none;
 }
 /* Hub info-icon: small (i) chip inside the hub rect's top-right corner
