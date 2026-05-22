@@ -15,5 +15,14 @@ export default defineConfig({
     // literal text — needed by cssGate.test.ts to scan the stylesheet
     // for stray .tpl-* animations outside the no-preference media block.
     css: true,
+    environmentOptions: {
+      // jsdom-env tests need a real origin for localStorage (and other
+      // origin-keyed Web APIs) to be initialised. Without a `url`, jsdom
+      // defaults to `about:blank` and exposes localStorage as `null`,
+      // which breaks the PR-5 modal tests' pref-persistence checks.
+      jsdom: {
+        url: 'http://localhost/',
+      },
+    },
   },
 });
