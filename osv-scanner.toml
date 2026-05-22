@@ -12,6 +12,7 @@
 #   hono              4.12.17 → 4.12.18
 #   ip-address        10.1.0 → 10.1.1
 #   brace-expansion   5.0.5  → 5.0.6   (added 2026-05-18, newly disclosed)
+#   qs                6.14.2 → 6.15.2  (added 2026-05-22, newly disclosed)
 # All transitives; no direct package.json change required.
 
 [[IgnoredVulns]]
@@ -43,3 +44,8 @@ reason = "ip-address 10.1.0 (transitive). Medium (CVSS 5.3). Fix in 10.1.1."
 id = "GHSA-jxxr-4gwj-5jf2"
 ignoreUntil = "2026-08-14T00:00:00Z"
 reason = "brace-expansion 5.0.5 (dev, transitive). Medium (CVSS 6.5, ReDoS). Fix in 5.0.6. Disclosed 2026-05-18; awaiting Dependabot bump."
+
+[[IgnoredVulns]]
+id = "GHSA-q8mj-m7cp-5q26"
+ignoreUntil = "2026-08-22T00:00:00Z"
+reason = "qs 6.14.2 (transitive of express 5.2.1 → body-parser 2.2.2). Medium (CVSS 6.3). Fix in 6.15.2. Disclosed 2026-05-22; awaiting express upstream bump."
