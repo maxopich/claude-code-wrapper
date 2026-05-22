@@ -2218,6 +2218,32 @@ pre {
   fill: var(--accent);
   offset-distance: 0%;
 }
+/* Hub info-icon: small (i) chip inside the hub rect's top-right corner
+ * carrying a native SVG <title> tooltip. The tooltip text (in
+ * AgentDiagram.tsx as HUB_TOOLTIP) clarifies that the animated routing
+ * order is illustrative — actual routing is capability + prompt driven.
+ * No transition/animation → no reduced-motion entry needed. */
+.tpl-hub-info {
+  cursor: help;
+}
+.tpl-hub-info-bg {
+  fill: var(--bg-3);
+  stroke: var(--fg-3);
+  stroke-width: 1;
+}
+.tpl-hub-info:hover .tpl-hub-info-bg,
+.tpl-hub-info:focus-visible .tpl-hub-info-bg {
+  stroke: var(--accent-ink);
+}
+.tpl-hub-info-glyph {
+  fill: var(--fg-3);
+  font-family: var(--font-sans);
+  pointer-events: none;
+}
+.tpl-hub-info:hover .tpl-hub-info-glyph,
+.tpl-hub-info:focus-visible .tpl-hub-info-glyph {
+  fill: var(--accent-ink);
+}
 /* Click-to-edit overlay: one absolutely-positioned textarea over the
  * clicked node, inside the (position:relative) .tpl-stage, stacked above
  * the SVG + flow dot. No transition/animation → no reduced-motion entry
@@ -2265,13 +2291,31 @@ pre {
 }
 
 /* ---- Templates: motion ----
- * The "message" dot drifts one representative connector path on a calm
- * 2.2s loop (the cadence of the old topo-edge pulse it replaces). Path
- * geometry is dynamic, so it's supplied inline as `offset-path`; the
- * keyframe + duration live here so reduced-motion users (who never match
- * this block, and are also covered by the reduce block below) never
- * animate. The component additionally omits the dot element entirely
- * under reduced motion, belt-and-braces. */
+ * The "message" dot is animated DIFFERENTLY per mode:
+ *
+ * - Chain mode keeps the original 2.2s linear loop along a single path
+ *   from the first to the last tile (`.tpl-flow-dot--chain`).
+ *
+ * - Orchestrator mode (PR-2): one trip at a time, hub → agent → hub,
+ *   with the destination chosen by an anti-repeat random scheduler in
+ *   `AgentDiagram.tsx`. Each leg gets its own keyframes
+ *   (`.tpl-flow-dot--forward` / `--return`) and a per-trip CSS variable
+ *   pair (`--tpl-trip-hue`, `--tpl-trip-dur`) is set inline on the dot.
+ *   The component remounts the <circle> per leg via React `key=`, so
+ *   the CSS animation restarts cleanly (avoids Firefox's spotty
+ *   offset-path keyframe chaining). On arrival, the destination node
+ *   gets a 200ms stroke pulse (`.tpl-node-rect.is-trip-arrived`).
+ *
+ * Path geometry is dynamic, so it's supplied inline as `offset-path`;
+ * keyframes live here so reduced-motion users (who never match this
+ * block, and are also covered by the reduce block below) never animate.
+ * The component additionally omits the dot element entirely under
+ * reduced motion, belt-and-braces.
+ *
+ * INVARIANT: every `.tpl-*` `animation:` declaration must live inside
+ * this no-preference block (asserted by cssGate.test.ts). New keyframes
+ * may live outside (they only fire when referenced by an animation),
+ * but it's clearer to keep them grouped here. */
 @media (prefers-reduced-motion: no-preference) {
   .tpl-item {
     transition:
@@ -2292,8 +2336,69 @@ pre {
       offset-distance: 100%;
     }
   }
-  .tpl-flow-dot {
+  .tpl-flow-dot--chain {
     animation: tpl-flow 2.2s linear infinite;
+  }
+  /* Orchestrator forward leg: hub (offset 0%, --accent) → agent (offset
+   * 100%, --tpl-trip-hue). Color hand-off at 50% so the dot reads as
+   * the destination's hue for most of the trip — "the message is FOR
+   * this agent" rather than "from the orchestrator". */
+  @keyframes tpl-flow-forward {
+    0% {
+      offset-distance: 0%;
+      fill: var(--accent);
+    }
+    50% {
+      offset-distance: 50%;
+      fill: var(--tpl-trip-hue, var(--accent));
+    }
+    100% {
+      offset-distance: 100%;
+      fill: var(--tpl-trip-hue, var(--accent));
+    }
+  }
+  /* Orchestrator return leg: agent (offset 100%, --tpl-trip-hue) → hub
+   * (offset 0%, --accent). Same path traversed in reverse via the
+   * keyframe — no separate return-path string needed. Hue stays with
+   * the destination through 70% of the return, then resolves to
+   * --accent as the dot reaches the hub. */
+  @keyframes tpl-flow-return {
+    0% {
+      offset-distance: 100%;
+      fill: var(--tpl-trip-hue, var(--accent));
+    }
+    70% {
+      offset-distance: 30%;
+      fill: var(--tpl-trip-hue, var(--accent));
+    }
+    100% {
+      offset-distance: 0%;
+      fill: var(--accent);
+    }
+  }
+  .tpl-flow-dot--forward {
+    animation: tpl-flow-forward var(--tpl-trip-dur, 700ms) cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+  .tpl-flow-dot--return {
+    animation: tpl-flow-return var(--tpl-trip-dur, 700ms) cubic-bezier(0.2, 0.6, 0.3, 1) forwards;
+  }
+  /* Arrival pulse on the destination node: a brief stroke-width bump
+   * that draws the eye without flashing color. The dot's hue is already
+   * the destination's; the pulse is the receipt confirmation. */
+  @keyframes tpl-node-arrival {
+    0% {
+      stroke-width: 1;
+    }
+    50% {
+      stroke-width: 1.6;
+    }
+    100% {
+      stroke-width: 1;
+    }
+  }
+  .tpl-node-rect.is-trip-arrived {
+    animation: tpl-node-arrival 200ms var(--ease) forwards;
+    stroke: var(--tpl-trip-hue, var(--accent));
   }
 }
 .iteration-path {

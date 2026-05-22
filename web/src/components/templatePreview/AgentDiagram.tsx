@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import type { Project } from '@cebab/shared/protocol';
+import { agentIdentity } from '../../agentIdentity';
 import {
   FACTOR_BOLD,
   FACTOR_SANS,
@@ -9,17 +11,50 @@ import {
   truncLabel,
   wrap2,
 } from './layout';
+import { chooseNextTrip } from './scheduler';
+
+/** Per-trip animation phases (PR-2). The dot makes one hub→agent→hub
+ *  trip at a time (mirrors the orchestrator's single sequential
+ *  `deliver()` wake). The state carries the SVG offset-path, the leg
+ *  direction, the destination's hue var, and a key bumped per trip so
+ *  React remounts the <circle> and the CSS animation restarts cleanly
+ *  (avoids Firefox's spotty offset-path keyframe chaining). */
+type TripState = {
+  key: number;
+  pid: number;
+  pathD: string;
+  leg: 'forward' | 'return';
+  hueVar: string | null;
+  durationMs: number;
+};
+
+const TRIP_FORWARD_MS = 700;
+const TRIP_PULSE_MS = 200;
+const TRIP_RETURN_MS = 700;
+const TRIP_DWELL_BASE_MS = 420;
+const TRIP_DWELL_JITTER_MS = 60;
+
+const HUB_TOOLTIP =
+  'Illustrative order — actual routing is decided by agent capabilities and prompt content.';
+const SVG_DESC =
+  'Animation shows one message in flight at a time between the orchestrator and each agent. Order is illustrative; at runtime the orchestrator picks recipients based on their capabilities and the prompt.';
 
 /**
  * SVG architecture diagram for a template preview: orchestrator
- * hub-and-spoke or a left→right chain, with one calm "message" dot
- * flowing a representative connector path. Geometry is computed in
+ * hub-and-spoke or a left→right chain. Geometry is computed in
  * `layoutFor` (a strategy module shared with future fullscreen + custom
- * modes); this file handles rendering and the click-to-edit role overlay.
- * The dot is a CSS Motion Path animation (not SMIL) so it lives in the
- * same prefers-reduced-motion blocks as every other animation; a JS
+ * modes); this file handles rendering, the click-to-edit role overlay,
+ * and the per-trip animation state machine. The dot is a CSS Motion
+ * Path animation (not SMIL) so it lives in the same
+ * prefers-reduced-motion blocks as every other animation; a JS
  * reduced-motion guard also drops the dot element belt-and-braces.
  * No diagram library — crisp, scalable, dependency-free.
+ *
+ * PR-2 (orchestrator only): one dot per trip. Each trip = forward
+ * (hub → agent_k), arrival pulse on agent_k, return (agent_k → hub),
+ * hub dwell ~420ms ± 60ms, then the scheduler picks the next agent
+ * with anti-repeat random (`chooseNextTrip`). Chain mode keeps the
+ * existing single drift loop (AC-5: chain shape unchanged).
  */
 export function AgentDiagram(props: {
   mode: 'chain' | 'orchestrator';
@@ -58,6 +93,11 @@ export function AgentDiagram(props: {
   editingIdRef.current = editingId;
   draftRef.current = draft;
   onRoleChangeRef.current = onRoleChange;
+  // Trip animation state (orchestrator only). `trip` is the active leg
+  // currently being drawn; `arrivalPid` is set during the 200ms pulse on
+  // the destination node between forward and return.
+  const [trip, setTrip] = useState<TripState | null>(null);
+  const [arrivalPid, setArrivalPid] = useState<number | null>(null);
   useLayoutEffect(() => {
     if (editingId != null && taRef.current) {
       taRef.current.focus();
@@ -86,16 +126,113 @@ export function AgentDiagram(props: {
     };
   }, [editingId]);
 
+  const reduce =
+    typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const layout = layoutFor({ mode, roles }, participants);
+  const { squarePx, width, height, geometry, edges } = layout;
+
+  // Stable shape key for the trip-animation effect: re-init when the
+  // cycle's "shape" changes (mode, worker set, reduce-motion, or the
+  // edit-pause). `participants`/`roles` references churn on parent
+  // re-renders without content change, so we hash to a string.
+  const orchPids =
+    geometry.mode === 'orchestrator' ? geometry.workers.map((w) => w.pid).join(',') : '';
+  const orchNames =
+    geometry.mode === 'orchestrator' ? geometry.workers.map((w) => w.name).join('|') : '';
+  const animKey = `${geometry.mode}|${orchPids}|${orchNames}|${reduce ? 1 : 0}|${editingId ?? 'idle'}`;
+
+  // Effect captures `geometry.workers` and `layout.flowPaths` at run
+  // time. They're stable when `animKey` doesn't change (same content
+  // even if new array references), so closure capture is safe.
+  const workersForTrip = geometry.mode === 'orchestrator' ? geometry.workers : [];
+  const flowPaths = layout.flowPaths;
+  useEffect(() => {
+    if (
+      geometry.mode !== 'orchestrator' ||
+      workersForTrip.length === 0 ||
+      reduce ||
+      editingId != null
+    ) {
+      setTrip(null);
+      setArrivalPid(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    let prevDests: number[] = [];
+    let tripKey = 0;
+    const sched = (fn: () => void, ms: number) => {
+      const t = setTimeout(fn, ms);
+      timers.push(t);
+    };
+
+    const startTrip = () => {
+      if (cancelled) return;
+      const destIdx = chooseNextTrip(prevDests, workersForTrip.length);
+      prevDests = [...prevDests, destIdx].slice(-3);
+
+      const dest = workersForTrip[destIdx]!;
+      const flow = flowPaths.find((f) => f.pid === dest.pid);
+      if (!flow) return;
+      const hueVar = agentIdentity(dest.name).hueVar;
+
+      tripKey++;
+      setTrip({
+        key: tripKey,
+        pid: dest.pid,
+        pathD: flow.d,
+        leg: 'forward',
+        hueVar,
+        durationMs: TRIP_FORWARD_MS,
+      });
+
+      sched(() => {
+        if (cancelled) return;
+        // Arrival pulse on the destination node. Overlaps with the start
+        // of the return leg — that's intentional: pulse feedback should
+        // land at arrival, not 200ms after.
+        setArrivalPid(dest.pid);
+        sched(() => {
+          if (!cancelled) setArrivalPid(null);
+        }, TRIP_PULSE_MS);
+
+        tripKey++;
+        setTrip({
+          key: tripKey,
+          pid: dest.pid,
+          pathD: flow.d,
+          leg: 'return',
+          hueVar,
+          durationMs: TRIP_RETURN_MS,
+        });
+
+        sched(() => {
+          if (cancelled) return;
+          // Hub dwell, then next trip. Jitter avoids a metronome look
+          // that would imply pipelined real-time RPC.
+          const dwell = TRIP_DWELL_BASE_MS + (Math.random() - 0.5) * 2 * TRIP_DWELL_JITTER_MS;
+          sched(startTrip, dwell);
+        }, TRIP_RETURN_MS);
+      }, TRIP_FORWARD_MS);
+    };
+
+    startTrip();
+
+    return () => {
+      cancelled = true;
+      for (const t of timers) clearTimeout(t);
+    };
+    // Deps intentionally limited to animKey: workersForTrip + flowPaths
+    // are captured at effect-run time and stay content-stable when
+    // animKey is stable (it covers pids, names, mode, reduce, editing).
+    // Adding the array refs to deps would cause spurious re-runs on
+    // every parent render and reset the cycle.
+  }, [animKey]);
+
   if (n === 0) {
     return <div className="tpl-diagram-empty">(no resolvable participants)</div>;
   }
-
-  const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const layout = layoutFor({ mode, roles }, participants);
-  const { squarePx, width, height, geometry, edges } = layout;
-  // PR-1 keeps current behavior: the dot animates the FIRST flow path.
-  // PR-2 will round-robin (random anti-repeat) across all of them.
-  const firstFlow = layout.flowPaths[0]?.d ?? null;
 
   function commitIfEditing() {
     if (editingId != null) {
@@ -162,6 +299,8 @@ export function AgentDiagram(props: {
       geometry;
     const FS_NAME = layout.fontSizes.name;
     const FS_ROLE = layout.fontSizes.role;
+    const infoCx = hubX + hubW / 2 - 8;
+    const infoCy = hubY + 8;
     return (
       <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
         <svg
@@ -171,6 +310,7 @@ export function AgentDiagram(props: {
           role="img"
           aria-label={`Orchestrator routing to ${n} worker${n === 1 ? '' : 's'}`}
         >
+          <desc>{SVG_DESC}</desc>
           {edges.map((e) => (
             <path key={`e${String(e.to)}`} className="tpl-edge" d={e.d} />
           ))}
@@ -195,8 +335,30 @@ export function AgentDiagram(props: {
           <text className="tpl-node-slug" x={hubX} y={hubY + 24} textAnchor="middle" fontSize={8.5}>
             {hubSlug}
           </text>
+          {/* Hub info tooltip: a small (i) inside the hub rect's top-right.
+             Uses native SVG <title> so the tooltip works without JS. */}
+          <g className="tpl-hub-info" transform={`translate(${infoCx}, ${infoCy})`}>
+            <title>{HUB_TOOLTIP}</title>
+            <circle r={5} className="tpl-hub-info-bg" />
+            <text
+              className="tpl-hub-info-glyph"
+              textAnchor="middle"
+              y={3}
+              fontSize={8.5}
+              fontWeight={600}
+            >
+              i
+            </text>
+          </g>
           {workers.map((w) => {
             const roleText = w.role || ROLE_PLACEHOLDER;
+            const isArrival = arrivalPid === w.pid;
+            const arrivalHueVar = isArrival ? agentIdentity(w.name).hueVar : null;
+            const rectStyle: CSSProperties | undefined = isArrival
+              ? ({
+                  ['--tpl-trip-hue']: arrivalHueVar ?? 'var(--accent)',
+                } as CSSProperties)
+              : undefined;
             return (
               <g
                 key={`w${w.pid}`}
@@ -214,12 +376,13 @@ export function AgentDiagram(props: {
               >
                 <title>{w.role ? `${w.name} — ${w.role}` : w.name}</title>
                 <rect
-                  className="tpl-node-rect"
+                  className={`tpl-node-rect${isArrival ? ' is-trip-arrived' : ''}`}
                   x={w.x}
                   y={workerY}
                   width={w.w}
                   height={workerH}
                   rx={8}
+                  style={rectStyle}
                 />
                 <text
                   className="tpl-node-name"
@@ -270,11 +433,18 @@ export function AgentDiagram(props: {
               </g>
             );
           })}
-          {!reduce && firstFlow && (
+          {!reduce && trip && (
             <circle
-              className="tpl-flow-dot"
+              key={trip.key}
+              className={`tpl-flow-dot tpl-flow-dot--${trip.leg}`}
               r={3.5}
-              style={{ offsetPath: `path('${firstFlow}')` }}
+              style={
+                {
+                  offsetPath: `path('${trip.pathD}')`,
+                  ['--tpl-trip-hue']: trip.hueVar ?? 'var(--accent)',
+                  ['--tpl-trip-dur']: `${trip.durationMs}ms`,
+                } as CSSProperties
+              }
             />
           )}
         </svg>
@@ -283,10 +453,14 @@ export function AgentDiagram(props: {
     );
   }
 
-  // Chain — a left→right sequence with arrowed links.
+  // Chain — a left→right sequence with arrowed links. AC-5: shape
+  // unchanged; the dot keeps the prior 2.2s linear loop (via the
+  // `--chain` modifier so the new orchestrator-only animation classes
+  // don't accidentally apply here).
   const { nodeY, nodeH, cy, roleY1, roleY2, tiles } = geometry;
   const FS_NAME = layout.fontSizes.name;
   const FS_ROLE = layout.fontSizes.role;
+  const chainFlow = layout.flowPaths[0]?.d ?? null;
   return (
     <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
       <svg
@@ -296,6 +470,7 @@ export function AgentDiagram(props: {
         role="img"
         aria-label={`Chain of ${n} agent${n === 1 ? '' : 's'}`}
       >
+        <desc>{SVG_DESC}</desc>
         <defs>
           <marker
             id="tpl-arrow"
@@ -386,8 +561,12 @@ export function AgentDiagram(props: {
             </g>
           );
         })}
-        {!reduce && n >= 2 && firstFlow && (
-          <circle className="tpl-flow-dot" r={3.5} style={{ offsetPath: `path('${firstFlow}')` }} />
+        {!reduce && n >= 2 && chainFlow && (
+          <circle
+            className="tpl-flow-dot tpl-flow-dot--chain"
+            r={3.5}
+            style={{ offsetPath: `path('${chainFlow}')` }}
+          />
         )}
       </svg>
       {editor}
