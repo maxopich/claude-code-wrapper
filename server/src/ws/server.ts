@@ -1381,6 +1381,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         lifecycle: msg.lifecycle,
         participants: msg.participants,
         roles: msg.roles,
+        // PR-6: passthrough only — repo persists as-is, future editor
+        // validates via shared/topology.ts before sending.
+        layout: msg.layout,
       });
       send(conn.ws, { type: 'templates', items });
       return;

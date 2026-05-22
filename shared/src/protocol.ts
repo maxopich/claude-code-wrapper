@@ -356,7 +356,9 @@ export type ClientMsg =
        */
       type: 'save_template';
       name: string;
-      mode: 'chain' | 'orchestrator';
+      /** PR-6: widened to include 'custom' for presentation-only freeform
+       *  layouts. Bus routing for 'custom' follows orchestrator semantics. */
+      mode: 'chain' | 'orchestrator' | 'custom';
       lifecycle: MultiAgentLifecycle;
       participants: number[];
       /**
@@ -364,6 +366,10 @@ export type ClientMsg =
        * Absent on pre-roles clients; unknown/stale keys are ignored.
        */
       roles?: Record<string, string>;
+      /** PR-6: optional hand-authored layout (presentation only). The
+       *  server persists it as-is; the future editor enforces topology
+       *  constraints before sending. Absent on chain/orchestrator saves. */
+      layout?: CustomLayout;
     }
   | {
       /** Delete a template by id. Reply: a fresh `templates` ServerMsg. */
@@ -1014,16 +1020,54 @@ export type RecoveryContextView = {
 };
 
 /**
+ * PR-6 seam: hand-authored topology, stored alongside the template so the
+ * future custom-mode editor (NOT shipped here) can save freeform positions
+ * + edges. Coordinates are **viewBox units**, not pixels — the renderer
+ * meet-scales the SVG to the stage. Keys in `positions` are
+ * `String(projectId)`; stale keys (project since removed) are filtered at
+ * render time, not at save time, so the operator can re-add the project
+ * without losing the layout. `edges` is explicit so adding the field later
+ * never requires a migration — orchestrator/chain modes ignore it.
+ *
+ * Topology constraints (enforced by the future editor, NOT by this type):
+ *  - No worker→worker edges (F2 drops them in `orchestrator.ts`)
+ *  - No worker→user edges (F2)
+ *  - No self-loops
+ *  - No edges to/from non-participants (F2)
+ *  - No disconnected components
+ *  - No "broadcast" edge type (broadcast is policy, not topology)
+ *
+ * See `validateCustomTopology` in `shared/src/topology.ts` for the runtime check.
+ */
+export type CustomLayout = {
+  kind: 'custom';
+  /** Per-participant position in viewBox units. Key = `String(projectId)`. */
+  positions: Record<string, { x: number; y: number }>;
+  /** Explicit edges so the schema is stable across future "edge kinds". */
+  edges?: Array<{ from: number; to: number }>;
+  /** Authoring canvas size in viewBox units (renderer meet-scales). */
+  canvas?: { w: number; h: number };
+};
+
+/**
  * A saved multi-agent draft preset. Stores everything needed to refill the
  * draft EXCEPT the prompt — the operator always types a fresh first prompt.
  * Persisted server-side as a single JSON array under one `settings` row
  * (no dedicated table), mirroring the iterations browser's architecture.
+ *
+ * PR-6 widens `mode` to include `'custom'` and adds an optional `layout`
+ * field. `'custom'` is presentation-only: the runtime still uses
+ * orchestrator routing (the bus has no "custom mode"; the editor will
+ * constrain freeform topologies to one of the runtime-valid presets).
+ * Older clients with no knowledge of `'custom'` should fall back to
+ * orchestrator rendering rather than treating the template as malformed.
  */
 export type MultiAgentTemplate = {
   /** Stable server-minted id; the delete key. Names are mutable, ids aren't. */
   id: string;
   name: string;
-  mode: 'chain' | 'orchestrator';
+  /** PR-6: 'custom' is presentation-only — bus routing follows orchestrator. */
+  mode: 'chain' | 'orchestrator' | 'custom';
   lifecycle: MultiAgentLifecycle;
   /** Ordered project ids — same semantics as `start_multi_agent.participants`. */
   participants: number[];
@@ -1034,6 +1078,14 @@ export type MultiAgentTemplate = {
    * Stale keys (project since removed) are harmless and ignored.
    */
   roles?: Record<string, string>;
+  /**
+   * PR-6: optional hand-authored layout. Absent on every template saved
+   * before PR-6 (and on every chain/orchestrator template — the layout
+   * comes from the geometry rules in those modes). Present only when
+   * `mode === 'custom'`; the future editor refuses to save `'custom'`
+   * without a layout.
+   */
+  layout?: CustomLayout;
 };
 
 export const MULTI_AGENT_EVENT_KINDS: ReadonlySet<MultiAgentEventKind> = new Set([
