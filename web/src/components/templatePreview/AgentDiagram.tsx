@@ -70,7 +70,11 @@ function nameRollupForAria(participants: Project[]): string {
  * bump on the destination's rect or circle.
  */
 export function AgentDiagram(props: {
-  mode: 'chain' | 'orchestrator';
+  /** PR-6: widened to include 'custom' for hand-authored topologies.
+   *  Today the layout module's `layoutCustomGrid` stub still produces an
+   *  orchestrator-shaped fallback — when the editor lands, that one
+   *  function gets the new implementation, no prop changes needed. */
+  mode: 'chain' | 'orchestrator' | 'custom';
   participants: Project[];
   roles: Record<string, string>;
   onRoleChange: (projectId: number, text: string) => void;

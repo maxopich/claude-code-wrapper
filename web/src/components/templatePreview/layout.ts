@@ -1,4 +1,4 @@
-import type { Project } from '@cebab/shared/protocol';
+import type { CustomLayout, Project } from '@cebab/shared/protocol';
 import { agentIdentity } from '../../agentIdentity';
 
 /**
@@ -250,8 +250,14 @@ export type Layout = {
 export type LayoutInput = {
   mode: 'chain' | 'orchestrator' | 'custom';
   roles?: Record<string, string>;
-  // Future (PR-6): layout?: CustomLayout — overrides node positions and
-  // edges when present, falling back to mode rules otherwise.
+  /**
+   * PR-6 seam: hand-authored positions + edges (custom mode). The renderer
+   * does NOT yet use this for tile placement — PR-6 ships the schema and
+   * routing seam only. When the editor lands, `layoutCustomGrid` will
+   * project `positions` into tile coordinates and edges into `edges`.
+   * Today: present but unused — orchestrator fallback still drives layout.
+   */
+  layout?: CustomLayout;
 };
 
 // === Tier classifiers ===
@@ -276,12 +282,15 @@ export function layoutFor(input: LayoutInput, participants: Project[]): Layout {
   const n = participants.length;
   const squarePx = Math.min(SQ_CAP, SQ_BASE + Math.max(0, n - 1) * SQ_STEP);
 
-  // 'custom' is a stub in PR-1/3; PR-6 will read input.layout. For now it
-  // falls back to orchestrator (the safer default — chain demands a
-  // strict left→right order that custom does not).
-  const mode = input.mode === 'custom' ? 'orchestrator' : input.mode;
+  // PR-6: 'custom' is now a separate seam. `layoutCustomGrid` may
+  // delegate back to orchestrator until the editor lands — the
+  // separation makes the future swap a one-function change and gives
+  // the seam a real test surface today.
+  if (input.mode === 'custom') {
+    return layoutCustomGrid(participants, roles, squarePx, input.layout);
+  }
 
-  if (mode === 'orchestrator') {
+  if (input.mode === 'orchestrator') {
     const tier = tierForOrchestrator(n);
     if (tier === 'center' || tier === 'row') {
       return layoutOrchestratorRow(participants, roles, squarePx, tier);
@@ -296,6 +305,42 @@ export function layoutFor(input: LayoutInput, participants: Project[]): Layout {
   if (tier === 'row') return layoutChainRow(participants, roles, squarePx);
   if (tier === 'wrap2') return layoutChainWrap(participants, roles, squarePx, 2);
   return layoutChainWrap(participants, roles, squarePx, 3);
+}
+
+/**
+ * PR-6 stub: 'custom' mode renderer. Today this delegates back to the
+ * orchestrator layout — the schema (positions + edges) is persisted via
+ * `CustomLayout` and round-trips through `save_template` / `templates`,
+ * but the renderer doesn't yet project hand-authored positions onto the
+ * stage. When the editor lands it will compute tiles from
+ * `layout.positions` (viewBox units), edges from `layout.edges`, and
+ * derive `flowPaths` per hub-anchored edge.
+ *
+ * Keeping this as a real function (not an inline ternary) gives the
+ * seam a public name — tests can import it and confirm the fallback
+ * behavior, and future work can swap it out without re-shaping
+ * `layoutFor`.
+ *
+ * `layout` is the saved `CustomLayout`. It's accepted but unused today —
+ * the `void` discard tells the type-checker AND the linter that this is
+ * deliberate, and a future reader sees the seam without grepping.
+ */
+export function layoutCustomGrid(
+  participants: Project[],
+  roles: Record<string, string>,
+  squarePx: number,
+  layout?: CustomLayout,
+): Layout {
+  void layout; // PR-6: seam accepts the layout; renderer projection lands later.
+  const n = participants.length;
+  const tier = tierForOrchestrator(n);
+  if (tier === 'center' || tier === 'row') {
+    return layoutOrchestratorRow(participants, roles, squarePx, tier);
+  }
+  if (tier === 'arc') return layoutOrchestratorArc(participants, roles, squarePx);
+  if (tier === 'ring') return layoutOrchestratorRing(participants, roles, squarePx);
+  if (tier === 'twoRing') return layoutOrchestratorTwoRing(participants, roles, squarePx);
+  return layoutOrchestratorConcentric(participants, roles, squarePx);
 }
 
 // =====================================================================

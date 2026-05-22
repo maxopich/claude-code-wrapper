@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
-import type { Project } from '@cebab/shared/protocol';
+import type { CustomLayout, Project } from '@cebab/shared/protocol';
 import {
+  layoutCustomGrid,
   layoutFor,
   tierForChain,
   tierForOrchestrator,
@@ -950,5 +951,44 @@ describe('layoutFor — twoRing N=15 inner/outer split', () => {
     expect(innerR).toBeLessThan(outerR);
     for (let i = 0; i < 8; i++) expect(radii[i]).toBe(innerR);
     for (let i = 8; i < 15; i++) expect(radii[i]).toBe(outerR);
+  });
+});
+
+describe('layoutCustomGrid — PR-6 stub fallback to orchestrator', () => {
+  test("mode:'custom' via layoutFor returns the same shape as orchestrator at same N", () => {
+    const ps = mkProjects(4);
+    const custom = layoutFor({ mode: 'custom' }, ps);
+    const orch = layoutFor({ mode: 'orchestrator' }, ps);
+    // Geometry is identical at the structural level — stub delegates.
+    expect(custom.geometry.mode).toBe('orchestrator');
+    expect(custom.height).toBe(orch.height);
+    expect(custom.nodes.length).toBe(orch.nodes.length);
+    expect(custom.edges.length).toBe(orch.edges.length);
+    expect(custom.flowPaths.length).toBe(orch.flowPaths.length);
+  });
+
+  test('layoutCustomGrid accepts a CustomLayout but does not yet use it (forward-compat seam)', () => {
+    const ps = mkProjects(3);
+    const layout: CustomLayout = {
+      kind: 'custom',
+      positions: { '1': { x: 999, y: 999 } },
+      edges: [],
+    };
+    const out = layoutCustomGrid(ps, {}, 320, layout);
+    // PR-6 stub: positions are ignored — tiles come from the orchestrator
+    // fallback. When the editor lands, the test gets stricter; until then
+    // this pins the seam without asserting un-shipped behavior.
+    expect(out.geometry.mode).toBe('orchestrator');
+    expect(out.nodes.length).toBe(3);
+    // Sanity: the stub didn't try to honor the bogus position (999, 999
+    // would put a tile way outside any reasonable viewBox).
+    expect(out.nodes[0]!.x).toBeLessThan(out.width);
+    expect(out.nodes[0]!.y).toBeLessThan(out.height);
+  });
+
+  test("layoutFor without a layout still works for mode:'custom' (layout is optional)", () => {
+    const ps = mkProjects(2);
+    const out = layoutFor({ mode: 'custom' }, ps);
+    expect(out.nodes.length).toBe(2);
   });
 });
