@@ -11,6 +11,7 @@ import {
   truncLabel,
   wrap2,
 } from './layout';
+import type { LaidBadgeTile, LaidRectTile, LaidTile } from './layout';
 import { chooseNextTrip } from './scheduler';
 
 /** Per-trip animation phases (PR-2). The dot makes one hub→agent→hub
@@ -39,9 +40,22 @@ const HUB_TOOLTIP =
 const SVG_DESC =
   'Animation shows one message in flight at a time between the orchestrator and each agent. Order is illustrative; at runtime the orchestrator picks recipients based on their capabilities and the prompt.';
 
+/** AC-10: aria-label caps at 5 names + "and N more" in compact view.
+ *  Fullscreen (PR-5) will list all. */
+function nameRollupForAria(participants: Project[]): string {
+  const n = participants.length;
+  if (n === 0) return '';
+  const prefix = participants
+    .slice(0, 5)
+    .map((p) => p.name)
+    .join(', ');
+  return n > 5 ? `${prefix} and ${n - 5} more` : prefix;
+}
+
 /**
  * SVG architecture diagram for a template preview: orchestrator
- * hub-and-spoke or a left→right chain. Geometry is computed in
+ * hub-and-spoke (six tiers by N — row, arc, ring, twoRing, concentric)
+ * or a left→right chain (row, wrap2, wrap3). Geometry is computed in
  * `layoutFor` (a strategy module shared with future fullscreen + custom
  * modes); this file handles rendering, the click-to-edit role overlay,
  * and the per-trip animation state machine. The dot is a CSS Motion
@@ -50,11 +64,11 @@ const SVG_DESC =
  * reduced-motion guard also drops the dot element belt-and-braces.
  * No diagram library — crisp, scalable, dependency-free.
  *
- * PR-2 (orchestrator only): one dot per trip. Each trip = forward
- * (hub → agent_k), arrival pulse on agent_k, return (agent_k → hub),
- * hub dwell ~420ms ± 60ms, then the scheduler picks the next agent
- * with anti-repeat random (`chooseNextTrip`). Chain mode keeps the
- * existing single drift loop (AC-5: chain shape unchanged).
+ * Tile kinds: PR-3 adds `'badge'` (a circle with a stable per-agent
+ * hue ring + glyph) for ring/twoRing/concentric tiers — names/roles
+ * live in <title> only at those densities. The trip animation works
+ * identically for either tile kind: arrival pulse is a stroke-width
+ * bump on the destination's rect or circle.
  */
 export function AgentDiagram(props: {
   mode: 'chain' | 'orchestrator';
@@ -175,7 +189,10 @@ export function AgentDiagram(props: {
       const dest = workersForTrip[destIdx]!;
       const flow = flowPaths.find((f) => f.pid === dest.pid);
       if (!flow) return;
-      const hueVar = agentIdentity(dest.name).hueVar;
+      // Badge tiles already carry their hueVar (always-on identity);
+      // rect tiles look it up at trip time so the arrival pulse colors
+      // the rect's stroke with the same hue as the dot during transit.
+      const hueVar = dest.kind === 'badge' ? dest.hueVar : agentIdentity(dest.name).hueVar;
 
       tripKey++;
       setTrip({
@@ -294,13 +311,132 @@ export function AgentDiagram(props: {
       />
     ) : null;
 
+  // Tile renderers. Both branches return a <g data-pid={pid}> with a
+  // <title> for screen readers / hover, a clickable shape, and label
+  // text (or just a glyph for badges).
+  const renderRectTile = (t: LaidRectTile, fsNames: { name: number; role: number }) => {
+    const isArrival = arrivalPid === t.pid;
+    const arrivalHueVar = isArrival ? agentIdentity(t.name).hueVar : null;
+    const rectStyle: CSSProperties | undefined = isArrival
+      ? ({
+          ['--tpl-trip-hue']: arrivalHueVar ?? 'var(--accent)',
+        } as CSSProperties)
+      : undefined;
+    const roleText = t.role || ROLE_PLACEHOLDER;
+    const lines = wrap2(roleText, fitChars(t.innerW, fsNames.role, FACTOR_SANS));
+    const cls = t.role ? 'tpl-node-role' : 'tpl-node-role empty';
+    const showRole = t.roleY1 != null;
+    return (
+      <g
+        key={`w${t.pid}`}
+        data-pid={t.pid}
+        role="button"
+        tabIndex={0}
+        aria-label={`Edit role for ${t.name}`}
+        onClick={(ev) => openEditor(t.pid, ev.currentTarget)}
+        onKeyDown={(ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            openEditor(t.pid, ev.currentTarget);
+          }
+        }}
+      >
+        <title>{t.role ? `${t.name} — ${t.role}` : t.name}</title>
+        <rect
+          className={`tpl-node-rect${isArrival ? ' is-trip-arrived' : ''}`}
+          x={t.x}
+          y={t.y}
+          width={t.w}
+          height={t.h}
+          rx={8}
+          style={rectStyle}
+        />
+        <text
+          className="tpl-node-name"
+          x={t.cx}
+          y={t.nameY}
+          textAnchor="middle"
+          fontSize={fsNames.name}
+          fontWeight={600}
+        >
+          {truncLabel(t.name, fitChars(t.innerW, fsNames.name, FACTOR_BOLD))}
+        </text>
+        {showRole && t.roleY1 != null && lines.length === 2 && t.roleY2 != null ? (
+          <>
+            <text className={cls} x={t.cx} y={t.roleY1} textAnchor="middle" fontSize={fsNames.role}>
+              {lines[0]}
+            </text>
+            <text className={cls} x={t.cx} y={t.roleY2} textAnchor="middle" fontSize={fsNames.role}>
+              {lines[1]}
+            </text>
+          </>
+        ) : showRole && t.roleY1 != null ? (
+          <text className={cls} x={t.cx} y={t.roleY1} textAnchor="middle" fontSize={fsNames.role}>
+            {lines[0]}
+          </text>
+        ) : null}
+      </g>
+    );
+  };
+
+  const renderBadgeTile = (t: LaidBadgeTile) => {
+    const isArrival = arrivalPid === t.pid;
+    const badgeStyle: CSSProperties = {
+      ['--badge-hue']: t.hueVar ?? 'var(--line-3)',
+    } as CSSProperties;
+    return (
+      <g
+        key={`w${t.pid}`}
+        data-pid={t.pid}
+        role="button"
+        tabIndex={0}
+        aria-label={`Edit role for ${t.name}`}
+        onClick={(ev) => openEditor(t.pid, ev.currentTarget)}
+        onKeyDown={(ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            openEditor(t.pid, ev.currentTarget);
+          }
+        }}
+      >
+        <title>{t.role ? `${t.name} — ${t.role}` : t.name}</title>
+        <circle
+          className={`tpl-node-badge${isArrival ? ' is-trip-arrived' : ''}`}
+          cx={t.cx}
+          cy={t.cy}
+          r={t.r}
+          style={badgeStyle}
+        />
+        <text
+          className="tpl-node-badge-glyph"
+          x={t.cx}
+          y={t.cy + 4}
+          textAnchor="middle"
+          fontSize={Math.max(10, Math.round(t.r * 0.85))}
+          fontWeight={600}
+          style={badgeStyle}
+        >
+          {t.glyph}
+        </text>
+      </g>
+    );
+  };
+
+  const renderTile = (t: LaidTile, fsizes: { name: number; role: number }) =>
+    t.kind === 'rect' ? renderRectTile(t, fsizes) : renderBadgeTile(t);
+
   if (geometry.mode === 'orchestrator') {
-    const { workerY, workerH, roleY1, roleY2, hubX, hubY, hubW, hubH, workers, hubLabel, hubSlug } =
-      geometry;
-    const FS_NAME = layout.fontSizes.name;
-    const FS_ROLE = layout.fontSizes.role;
+    const { hubX, hubY, hubW, hubH, workers, hubLabel, hubSlug } = geometry;
+    const fsizes = layout.fontSizes;
+    const ariaSuffix = nameRollupForAria(participants);
+    const ariaLabel =
+      `Orchestrator routing to ${n} worker${n === 1 ? '' : 's'}` +
+      (ariaSuffix ? `: ${ariaSuffix}` : '');
     const infoCx = hubX + hubW / 2 - 8;
     const infoCy = hubY + 8;
+    // Hub label baseline: with-slug pushes label up so slug fits below;
+    // without-slug centers the label vertically.
+    const hubLabelY = hubSlug ? hubY + 14 : hubY + hubH / 2 + 4;
     return (
       <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
         <svg
@@ -308,7 +444,7 @@ export function AgentDiagram(props: {
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="xMidYMid meet"
           role="img"
-          aria-label={`Orchestrator routing to ${n} worker${n === 1 ? '' : 's'}`}
+          aria-label={ariaLabel}
         >
           <desc>{SVG_DESC}</desc>
           {edges.map((e) => (
@@ -325,16 +461,24 @@ export function AgentDiagram(props: {
           <text
             className="tpl-hub-text"
             x={hubX}
-            y={hubY + 14}
+            y={hubLabelY}
             textAnchor="middle"
             fontSize={11}
             fontWeight={600}
           >
             {hubLabel}
           </text>
-          <text className="tpl-node-slug" x={hubX} y={hubY + 24} textAnchor="middle" fontSize={8.5}>
-            {hubSlug}
-          </text>
+          {hubSlug != null && (
+            <text
+              className="tpl-node-slug"
+              x={hubX}
+              y={hubY + 24}
+              textAnchor="middle"
+              fontSize={8.5}
+            >
+              {hubSlug}
+            </text>
+          )}
           {/* Hub info tooltip: a small (i) inside the hub rect's top-right.
              Uses native SVG <title> so the tooltip works without JS. */}
           <g className="tpl-hub-info" transform={`translate(${infoCx}, ${infoCy})`}>
@@ -350,89 +494,7 @@ export function AgentDiagram(props: {
               i
             </text>
           </g>
-          {workers.map((w) => {
-            const roleText = w.role || ROLE_PLACEHOLDER;
-            const isArrival = arrivalPid === w.pid;
-            const arrivalHueVar = isArrival ? agentIdentity(w.name).hueVar : null;
-            const rectStyle: CSSProperties | undefined = isArrival
-              ? ({
-                  ['--tpl-trip-hue']: arrivalHueVar ?? 'var(--accent)',
-                } as CSSProperties)
-              : undefined;
-            return (
-              <g
-                key={`w${w.pid}`}
-                data-pid={w.pid}
-                role="button"
-                tabIndex={0}
-                aria-label={`Edit role for ${w.name}`}
-                onClick={(ev) => openEditor(w.pid, ev.currentTarget)}
-                onKeyDown={(ev) => {
-                  if (ev.key === 'Enter' || ev.key === ' ') {
-                    ev.preventDefault();
-                    openEditor(w.pid, ev.currentTarget);
-                  }
-                }}
-              >
-                <title>{w.role ? `${w.name} — ${w.role}` : w.name}</title>
-                <rect
-                  className={`tpl-node-rect${isArrival ? ' is-trip-arrived' : ''}`}
-                  x={w.x}
-                  y={workerY}
-                  width={w.w}
-                  height={workerH}
-                  rx={8}
-                  style={rectStyle}
-                />
-                <text
-                  className="tpl-node-name"
-                  x={w.cx}
-                  y={workerY + 16}
-                  textAnchor="middle"
-                  fontSize={FS_NAME}
-                  fontWeight={600}
-                >
-                  {truncLabel(w.name, fitChars(w.innerW, FS_NAME, FACTOR_BOLD))}
-                </text>
-                {(() => {
-                  const lines = wrap2(roleText, fitChars(w.innerW, FS_ROLE, FACTOR_SANS));
-                  const cls = w.role ? 'tpl-node-role' : 'tpl-node-role empty';
-                  return lines.length === 2 ? (
-                    <>
-                      <text
-                        className={cls}
-                        x={w.cx}
-                        y={roleY1}
-                        textAnchor="middle"
-                        fontSize={FS_ROLE}
-                      >
-                        {lines[0]}
-                      </text>
-                      <text
-                        className={cls}
-                        x={w.cx}
-                        y={roleY2}
-                        textAnchor="middle"
-                        fontSize={FS_ROLE}
-                      >
-                        {lines[1]}
-                      </text>
-                    </>
-                  ) : (
-                    <text
-                      className={cls}
-                      x={w.cx}
-                      y={roleY1}
-                      textAnchor="middle"
-                      fontSize={FS_ROLE}
-                    >
-                      {lines[0]}
-                    </text>
-                  );
-                })()}
-              </g>
-            );
-          })}
+          {workers.map((t) => renderTile(t, fsizes))}
           {!reduce && trip && (
             <circle
               key={trip.key}
@@ -453,14 +515,16 @@ export function AgentDiagram(props: {
     );
   }
 
-  // Chain — a left→right sequence with arrowed links. AC-5: shape
-  // unchanged; the dot keeps the prior 2.2s linear loop (via the
+  // Chain — a left→right sequence (or snake-wrapped at N≥11) with
+  // arrowed links. AC-5: the dot keeps the prior linear loop (via the
   // `--chain` modifier so the new orchestrator-only animation classes
   // don't accidentally apply here).
-  const { nodeY, nodeH, cy, roleY1, roleY2, tiles } = geometry;
-  const FS_NAME = layout.fontSizes.name;
-  const FS_ROLE = layout.fontSizes.role;
+  const { tiles } = geometry;
+  const fsizes = layout.fontSizes;
   const chainFlow = layout.flowPaths[0]?.d ?? null;
+  const ariaSuffix = nameRollupForAria(participants);
+  const ariaLabel =
+    `Chain of ${n} agent${n === 1 ? '' : 's'}` + (ariaSuffix ? `: ${ariaSuffix}` : '');
   return (
     <div className="tpl-stage" ref={stageRef} style={{ width: squarePx }}>
       <svg
@@ -468,7 +532,7 @@ export function AgentDiagram(props: {
         viewBox={`0 0 ${width} ${height}`}
         preserveAspectRatio="xMidYMid meet"
         role="img"
-        aria-label={`Chain of ${n} agent${n === 1 ? '' : 's'}`}
+        aria-label={ariaLabel}
       >
         <desc>{SVG_DESC}</desc>
         <defs>
@@ -484,83 +548,10 @@ export function AgentDiagram(props: {
             <path className="tpl-arrowhead" d="M0 0 L10 5 L0 10 z" />
           </marker>
         </defs>
-        {tiles.slice(1).map((t, idx) => {
-          const prev = tiles[idx];
-          if (!prev) return null;
-          return (
-            <line
-              key={`l${t.pid}`}
-              className="tpl-edge"
-              x1={prev.x + prev.w}
-              y1={cy}
-              x2={t.x}
-              y2={cy}
-              markerEnd="url(#tpl-arrow)"
-            />
-          );
-        })}
-        {tiles.map((t) => {
-          const roleText = t.role || ROLE_PLACEHOLDER;
-          return (
-            <g
-              key={`n${t.pid}`}
-              data-pid={t.pid}
-              role="button"
-              tabIndex={0}
-              aria-label={`Edit role for ${t.name}`}
-              onClick={(ev) => openEditor(t.pid, ev.currentTarget)}
-              onKeyDown={(ev) => {
-                if (ev.key === 'Enter' || ev.key === ' ') {
-                  ev.preventDefault();
-                  openEditor(t.pid, ev.currentTarget);
-                }
-              }}
-            >
-              <title>{t.role ? `${t.name} — ${t.role}` : t.name}</title>
-              <rect className="tpl-node-rect" x={t.x} y={nodeY} width={t.w} height={nodeH} rx={8} />
-              <text
-                className="tpl-node-name"
-                x={t.cx}
-                y={nodeY + 18}
-                textAnchor="middle"
-                fontSize={FS_NAME}
-                fontWeight={600}
-              >
-                {truncLabel(t.name, fitChars(t.innerW, FS_NAME, FACTOR_BOLD))}
-              </text>
-              {(() => {
-                const lines = wrap2(roleText, fitChars(t.innerW, FS_ROLE, FACTOR_SANS));
-                const cls = t.role ? 'tpl-node-role' : 'tpl-node-role empty';
-                return lines.length === 2 ? (
-                  <>
-                    <text
-                      className={cls}
-                      x={t.cx}
-                      y={roleY1}
-                      textAnchor="middle"
-                      fontSize={FS_ROLE}
-                    >
-                      {lines[0]}
-                    </text>
-                    <text
-                      className={cls}
-                      x={t.cx}
-                      y={roleY2}
-                      textAnchor="middle"
-                      fontSize={FS_ROLE}
-                    >
-                      {lines[1]}
-                    </text>
-                  </>
-                ) : (
-                  <text className={cls} x={t.cx} y={roleY1} textAnchor="middle" fontSize={FS_ROLE}>
-                    {lines[0]}
-                  </text>
-                );
-              })()}
-            </g>
-          );
-        })}
+        {edges.map((e) => (
+          <path key={`l${String(e.to)}`} className="tpl-edge" d={e.d} markerEnd="url(#tpl-arrow)" />
+        ))}
+        {tiles.map((t) => renderTile(t, fsizes))}
         {!reduce && n >= 2 && chainFlow && (
           <circle
             className="tpl-flow-dot tpl-flow-dot--chain"

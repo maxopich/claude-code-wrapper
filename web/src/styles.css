@@ -2218,6 +2218,27 @@ pre {
   fill: var(--accent);
   offset-distance: 0%;
 }
+/* Badge tile (PR-3): a small circular node used in ring / twoRing /
+ * concentric orchestrator tiers. The agent's deterministic hue is the
+ * ring stroke (always-on identity carrier, mirrors agentIdentity.ts);
+ * the glyph inside repeats the identity for grayscale / no-color-only.
+ * Hover lifts the fill slightly so the click affordance survives at
+ * small sizes. The arrival pulse (`.is-trip-arrived`) is a stroke-width
+ * bump shared with .tpl-node-rect — same `tpl-node-arrival` keyframes. */
+.tpl-node-badge {
+  fill: var(--bg-3);
+  stroke: var(--badge-hue, var(--line-3));
+  stroke-width: 2;
+  cursor: pointer;
+}
+.tpl-node-badge:hover {
+  fill: var(--bg-4);
+}
+.tpl-node-badge-glyph {
+  fill: var(--badge-hue, var(--fg-2));
+  font-family: var(--font-sans);
+  pointer-events: none;
+}
 /* Hub info-icon: small (i) chip inside the hub rect's top-right corner
  * carrying a native SVG <title> tooltip. The tooltip text (in
  * AgentDiagram.tsx as HUB_TOOLTIP) clarifies that the animated routing
@@ -2396,8 +2417,14 @@ pre {
       stroke-width: 1;
     }
   }
-  .tpl-node-rect.is-trip-arrived {
+  .tpl-node-rect.is-trip-arrived,
+  .tpl-node-badge.is-trip-arrived {
     animation: tpl-node-arrival 200ms var(--ease) forwards;
+  }
+  /* Rect tiles are neutral by default; arrival borrows the destination's
+   * hue as a transient stroke. Badge tiles already carry the hue
+   * (always-on identity), so the pulse only bumps stroke-width. */
+  .tpl-node-rect.is-trip-arrived {
     stroke: var(--tpl-trip-hue, var(--accent));
   }
 }
