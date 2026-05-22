@@ -1,0 +1,89 @@
+import { describe, expect, test } from 'vitest';
+// Vite's ?raw suffix returns the file contents as a string at build
+// time (vite-env.d.ts declares the module). No Node fs dependency, so
+// the test runs cleanly in the web workspace's jsdom env.
+import stylesCss from '../../styles.css?raw';
+
+/**
+ * Risk #1 CI guard (PR-2): every `.tpl-*` `animation:` declaration that
+ * sets a non-`none` value MUST live inside the
+ * `@media (prefers-reduced-motion: no-preference) { … }` block.
+ *
+ * Why: a stray `animation:` outside that block would fire even for
+ * users with `prefers-reduced-motion: reduce`. The component's JS guard
+ * (omit the <circle>) is belt-and-braces — the CSS gate is the
+ * primary protection. We've broken this once before; this test makes a
+ * re-break visible at commit time.
+ *
+ * Tolerated:
+ *   - `animation: none` anywhere (e.g., the reduce-block override).
+ *   - keyframes (`@keyframes tpl-*`) anywhere — they don't fire unless
+ *     a selector references them via `animation:`.
+ */
+
+const NO_PREF_OPEN = '@media (prefers-reduced-motion: no-preference) {';
+
+/** Strip the body of every `@media (prefers-reduced-motion: no-preference)`
+ *  block from `css`, leaving the surrounding text intact. Uses balanced
+ *  brace matching from the opener so nested rules inside the media
+ *  block are removed correctly. */
+function stripNoPreferenceBlocks(css: string): string {
+  let out = css;
+  for (;;) {
+    const open = out.indexOf(NO_PREF_OPEN);
+    if (open === -1) break;
+    let depth = 1;
+    let i = open + NO_PREF_OPEN.length;
+    while (i < out.length && depth > 0) {
+      const ch = out[i];
+      if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+      i++;
+    }
+    // Replace the entire media block (open..close inclusive) with empty.
+    out = out.slice(0, open) + out.slice(i);
+  }
+  return out;
+}
+
+/** Find rule blocks whose selector touches `.tpl-` and whose body sets
+ *  `animation:` to a non-none value. Returns the offending selectors. */
+function findTplAnimationRules(css: string): string[] {
+  const violations: string[] = [];
+  // Match a top-level CSS rule: `<selector> { <body> }`. Selectors can
+  // span multiple lines; bodies don't nest in our codebase outside
+  // @media, which we've already stripped, so a simple greedy body
+  // match works.
+  const ruleRe = /([^{}@][^{}]*?)\{([^{}]*?)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = ruleRe.exec(css)) !== null) {
+    const selector = m[1]!.trim();
+    const body = m[2]!;
+    if (!selector.includes('.tpl-')) continue;
+    // Allow `animation: none` (explicit cancellation, used in reduce blocks).
+    const animRe = /animation:\s*([^;]+)/g;
+    let am: RegExpExecArray | null;
+    while ((am = animRe.exec(body)) !== null) {
+      const value = am[1]!.trim();
+      if (value === 'none') continue;
+      violations.push(`${selector} { animation: ${value} }`);
+    }
+  }
+  return violations;
+}
+
+describe('CSS gate (Risk #1)', () => {
+  test('every .tpl-* animation: lives inside the no-preference block', () => {
+    const stripped = stripNoPreferenceBlocks(stylesCss);
+    const violations = findTplAnimationRules(stripped);
+    expect(violations).toEqual([]);
+  });
+
+  test('reduce-motion block still cancels .tpl-flow-dot animation', () => {
+    // Belt-and-braces: even though no .tpl-* animation can fire outside
+    // no-preference (above test), the reduce block also forces
+    // `.tpl-flow-dot { animation: none; display: none }` as a defense.
+    expect(stylesCss).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+    expect(stylesCss).toMatch(/\.tpl-flow-dot\s*\{\s*display:\s*none/);
+  });
+});
