@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'vitest';
 import type { Project } from '@cebab/shared/protocol';
-import { layoutFor } from './layout';
+import {
+  layoutFor,
+  tierForChain,
+  tierForOrchestrator,
+  type LaidBadgeTile,
+  type LaidRectTile,
+} from './layout';
 
 function mkProjects(n: number): Project[] {
   return Array.from({ length: n }, (_, i) => ({
@@ -15,9 +21,49 @@ function mkProjects(n: number): Project[] {
   }));
 }
 
-describe('layoutFor — invariants across N=1..8', () => {
-  for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) {
-    test(`orchestrator N=${n}: shape, counts, hub present`, () => {
+/** Per-tier expected viewBox height (orchestrator). */
+const ORCH_HEIGHT: Record<string, number> = {
+  center: 150,
+  row: 150,
+  arc: 220,
+  ring: 240,
+  twoRing: 280,
+  concentric: 320,
+};
+
+/** Per-tier expected viewBox height (chain). wrap tiers are computed
+ *  from the geometry; row is fixed. */
+const CHAIN_ROW_HEIGHT = 84;
+
+describe('tier classification', () => {
+  test('orchestrator tiers map by N', () => {
+    expect(tierForOrchestrator(1)).toBe('center');
+    expect(tierForOrchestrator(2)).toBe('row');
+    expect(tierForOrchestrator(4)).toBe('row');
+    expect(tierForOrchestrator(5)).toBe('arc');
+    expect(tierForOrchestrator(8)).toBe('arc');
+    expect(tierForOrchestrator(9)).toBe('ring');
+    expect(tierForOrchestrator(14)).toBe('ring');
+    expect(tierForOrchestrator(15)).toBe('twoRing');
+    expect(tierForOrchestrator(24)).toBe('twoRing');
+    expect(tierForOrchestrator(25)).toBe('concentric');
+    expect(tierForOrchestrator(100)).toBe('concentric');
+  });
+
+  test('chain tiers map by N', () => {
+    expect(tierForChain(1)).toBe('row');
+    expect(tierForChain(10)).toBe('row');
+    expect(tierForChain(11)).toBe('wrap2');
+    expect(tierForChain(20)).toBe('wrap2');
+    expect(tierForChain(21)).toBe('wrap3');
+    expect(tierForChain(50)).toBe('wrap3');
+  });
+});
+
+describe('layoutFor — invariants across orchestrator tiers', () => {
+  // One representative N per tier (center+row are covered together).
+  for (const n of [1, 2, 3, 4, 5, 6, 8, 9, 12, 14, 15, 20, 24, 25, 30]) {
+    test(`orchestrator N=${n}: shape, counts, hub, viewBox H per tier`, () => {
       const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
       expect(layout.nodes).toHaveLength(n);
       expect(layout.nodes.every((node) => node.kind === 'worker')).toBe(true);
@@ -27,32 +73,97 @@ describe('layoutFor — invariants across N=1..8', () => {
       expect(layout.edges.every((e) => e.from === 'hub')).toBe(true);
       expect(layout.flowPaths).toHaveLength(n);
       expect(layout.width).toBeGreaterThan(0);
-      expect(layout.height).toBe(150);
       expect(layout.geometry.mode).toBe('orchestrator');
-    });
-
-    test(`chain N=${n}: shape, counts, no hub, monotonic x`, () => {
-      const layout = layoutFor({ mode: 'chain' }, mkProjects(n));
-      expect(layout.nodes).toHaveLength(n);
-      expect(layout.nodes.every((node) => node.kind === 'worker')).toBe(true);
-      expect(layout.hub).toBeUndefined();
-      // Chain edges connect adjacent tiles (n-1 hops).
-      expect(layout.edges).toHaveLength(Math.max(0, n - 1));
-      // Chain ships one dot path (first→last); empty when no participants.
-      expect(layout.flowPaths).toHaveLength(n >= 1 ? 1 : 0);
-      expect(layout.width).toBeGreaterThan(0);
-      expect(layout.height).toBe(84);
-      expect(layout.geometry.mode).toBe('chain');
-      // x positions monotonically increase
-      for (let i = 1; i < layout.nodes.length; i++) {
-        expect(layout.nodes[i]!.x).toBeGreaterThan(layout.nodes[i - 1]!.x);
+      if (layout.geometry.mode === 'orchestrator') {
+        expect(layout.height).toBe(ORCH_HEIGHT[layout.geometry.tier]);
       }
     });
   }
 });
 
+describe('layoutFor — tile kind by tier', () => {
+  test('center+row+arc use rect tiles', () => {
+    for (const n of [1, 2, 4, 5, 8]) {
+      const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
+      if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+      for (const w of layout.geometry.workers) {
+        expect(w.kind).toBe('rect');
+      }
+    }
+  });
+
+  test('ring+twoRing+concentric use badge tiles', () => {
+    for (const n of [9, 14, 15, 24, 25, 40]) {
+      const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
+      if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+      for (const w of layout.geometry.workers) {
+        expect(w.kind).toBe('badge');
+      }
+    }
+  });
+
+  test('badge tiles carry glyph + hueVar from agentIdentity', () => {
+    const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(10));
+    if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    for (const w of layout.geometry.workers) {
+      if (w.kind !== 'badge') throw new Error('expected badge');
+      expect(w.glyph).toBeTruthy();
+      // agentIdentity never returns hueVar=null for non-sentinel slugs.
+      expect(w.hueVar).toMatch(/^var\(--agent-\d\)$/);
+      expect(w.r).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe('layoutFor — hub slug visibility per tier', () => {
+  test('hubSlug is set for tiers ≤ arc', () => {
+    for (const n of [1, 4, 5, 8]) {
+      const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
+      if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+      expect(layout.geometry.hubSlug).toBe('cebab');
+    }
+  });
+
+  test('hubSlug is null for tiers ≥ ring (compact chrome chip)', () => {
+    for (const n of [9, 14, 15, 25]) {
+      const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
+      if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+      expect(layout.geometry.hubSlug).toBeNull();
+    }
+  });
+});
+
+describe('layoutFor — chain invariants', () => {
+  // chain N coverage: row (≤10), wrap2 (11–20), wrap3 (21+)
+  for (const n of [1, 2, 3, 5, 10, 11, 15, 20, 21, 30]) {
+    test(`chain N=${n}: shape, counts, no hub`, () => {
+      const layout = layoutFor({ mode: 'chain' }, mkProjects(n));
+      expect(layout.nodes).toHaveLength(n);
+      expect(layout.nodes.every((node) => node.kind === 'worker')).toBe(true);
+      expect(layout.hub).toBeUndefined();
+      expect(layout.edges).toHaveLength(Math.max(0, n - 1));
+      // Chain ships one dot path (snake polyline covers every tile).
+      expect(layout.flowPaths).toHaveLength(n >= 1 ? 1 : 0);
+      expect(layout.width).toBeGreaterThan(0);
+      expect(layout.geometry.mode).toBe('chain');
+    });
+  }
+
+  test('chain row mode (N≤10): height=84', () => {
+    expect(layoutFor({ mode: 'chain' }, mkProjects(5)).height).toBe(CHAIN_ROW_HEIGHT);
+    expect(layoutFor({ mode: 'chain' }, mkProjects(10)).height).toBe(CHAIN_ROW_HEIGHT);
+  });
+
+  test('chain wrap mode (N≥11): height grows with row count', () => {
+    const wrap2 = layoutFor({ mode: 'chain' }, mkProjects(15));
+    const wrap3 = layoutFor({ mode: 'chain' }, mkProjects(25));
+    expect(wrap2.height).toBeGreaterThan(CHAIN_ROW_HEIGHT);
+    expect(wrap3.height).toBeGreaterThan(wrap2.height);
+  });
+});
+
 describe('layoutFor — edge structure', () => {
-  test('orchestrator: every edge is hub → worker', () => {
+  test('orchestrator: every edge is hub → worker, path starts with M', () => {
     const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(4));
     for (const edge of layout.edges) {
       expect(edge.from).toBe('hub');
@@ -62,7 +173,7 @@ describe('layoutFor — edge structure', () => {
     }
   });
 
-  test('chain: every hop is i → i+1 (strictly increasing participant index)', () => {
+  test('chain row: every hop is i → i+1 (strict chain order)', () => {
     const projects = mkProjects(5);
     const layout = layoutFor({ mode: 'chain' }, projects);
     for (let i = 0; i < layout.edges.length; i++) {
@@ -73,6 +184,17 @@ describe('layoutFor — edge structure', () => {
     }
   });
 
+  test('chain wrap: edges still follow strict participant order', () => {
+    const projects = mkProjects(13);
+    const layout = layoutFor({ mode: 'chain' }, projects);
+    expect(layout.edges).toHaveLength(12);
+    for (let i = 0; i < layout.edges.length; i++) {
+      const edge = layout.edges[i]!;
+      expect(edge.from).toBe(projects[i]!.id);
+      expect(edge.to).toBe(projects[i + 1]!.id);
+    }
+  });
+
   test('orchestrator: flowPaths cover every worker pid exactly once', () => {
     const projects = mkProjects(6);
     const layout = layoutFor({ mode: 'orchestrator' }, projects);
@@ -80,10 +202,40 @@ describe('layoutFor — edge structure', () => {
     const workerPids = new Set(projects.map((p) => p.id));
     expect(flowPids).toEqual(workerPids);
   });
+
+  test('orchestrator radial tiers: each flow path is "M x y L x y" (straight segment)', () => {
+    // Ring/twoRing/concentric edges are straight radial lines.
+    for (const n of [9, 15, 25]) {
+      const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
+      for (const fp of layout.flowPaths) {
+        expect(fp.d).toMatch(/^M[\d.\s-]+L[\d.\s-]+$/);
+      }
+    }
+  });
+
+  test('every worker tile is within the viewBox', () => {
+    for (const n of [1, 5, 9, 15, 25]) {
+      const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
+      if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+      for (const w of layout.geometry.workers) {
+        if (w.kind === 'rect') {
+          expect(w.x).toBeGreaterThanOrEqual(0);
+          expect(w.x + w.w).toBeLessThanOrEqual(layout.width + 0.5);
+          expect(w.y).toBeGreaterThanOrEqual(0);
+          expect(w.y + w.h).toBeLessThanOrEqual(layout.height + 0.5);
+        } else {
+          expect(w.cx - w.r).toBeGreaterThanOrEqual(0);
+          expect(w.cx + w.r).toBeLessThanOrEqual(layout.width + 0.5);
+          expect(w.cy - w.r).toBeGreaterThanOrEqual(0);
+          expect(w.cy + w.r).toBeLessThanOrEqual(layout.height + 0.5);
+        }
+      }
+    }
+  });
 });
 
 describe('layoutFor — degenerate cases', () => {
-  test('N=0 returns zero-width layout, no nodes, no flow', () => {
+  test('N=0 returns layout with no nodes, no edges, no flow', () => {
     const orch = layoutFor({ mode: 'orchestrator' }, []);
     expect(orch.nodes).toHaveLength(0);
     expect(orch.edges).toHaveLength(0);
@@ -95,7 +247,7 @@ describe('layoutFor — degenerate cases', () => {
     expect(chain.flowPaths).toHaveLength(0);
   });
 
-  test("'custom' mode falls back to orchestrator layout in PR-1 (stub)", () => {
+  test("'custom' mode falls back to orchestrator layout in PR-3 (stub)", () => {
     const layout = layoutFor({ mode: 'custom' }, mkProjects(3));
     expect(layout.geometry.mode).toBe('orchestrator');
     expect(layout.hub).toBeDefined();
@@ -113,28 +265,27 @@ describe('layoutFor — determinism', () => {
 });
 
 describe('layoutFor — snapshot of returned Layout JSON', () => {
-  // PR-1 AC: shapes computed by layoutFor must remain stable across the
-  // refactor. PR-3 will deliberately change these — bump the snapshots
-  // there with intent.
-  test('orchestrator N=3 snapshot', () => {
+  // PR-3: re-snapshotted from PR-1 baseline. Each snapshot covers one
+  // tier boundary; if a tier's geometry changes, bump just that one.
+  test('orchestrator N=3 (row tier)', () => {
     const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(3));
     expect(layout).toMatchInlineSnapshot(`
       {
         "edges": [
           {
-            "d": "M168 52 V70 H62 V88",
+            "d": "M189 52 V70 H69 V88",
             "from": "hub",
             "kind": "orch",
             "to": 1,
           },
           {
-            "d": "M168 52 V88",
+            "d": "M189 52 V88",
             "from": "hub",
             "kind": "orch",
             "to": 2,
           },
           {
-            "d": "M168 52 V70 H274 V88",
+            "d": "M189 52 V70 H309 V88",
             "from": "hub",
             "kind": "orch",
             "to": 3,
@@ -142,20 +293,20 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
         ],
         "flowPaths": [
           {
-            "d": "M168 52 V70 H62 V88",
+            "d": "M189 52 V70 H69 V88",
             "pid": 1,
           },
           {
-            "d": "M168 52 V88",
+            "d": "M189 52 V88",
             "pid": 2,
           },
           {
-            "d": "M168 52 V70 H274 V88",
+            "d": "M189 52 V70 H309 V88",
             "pid": 3,
           },
         ],
         "fontSizes": {
-          "name": 11,
+          "name": 12,
           "role": 10,
         },
         "geometry": {
@@ -163,40 +314,58 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
           "hubLabel": "orchestrator",
           "hubSlug": "cebab",
           "hubW": 106,
-          "hubX": 168,
+          "hubX": 189,
           "hubY": 20,
           "mode": "orchestrator",
-          "roleY1": 118,
-          "roleY2": 130,
-          "workerH": 56,
-          "workerY": 88,
+          "tier": "row",
           "workers": [
             {
-              "cx": 62,
-              "innerW": 76,
+              "cx": 69,
+              "cy": 116,
+              "h": 56,
+              "innerW": 90,
+              "kind": "rect",
               "name": "agent-1",
+              "nameY": 104,
               "pid": 1,
               "role": "",
-              "w": 96,
+              "roleY1": 118,
+              "roleY2": 130,
+              "w": 110,
               "x": 14,
+              "y": 88,
             },
             {
-              "cx": 168,
-              "innerW": 76,
+              "cx": 189,
+              "cy": 116,
+              "h": 56,
+              "innerW": 90,
+              "kind": "rect",
               "name": "agent-2",
+              "nameY": 104,
               "pid": 2,
               "role": "",
-              "w": 96,
-              "x": 120,
+              "roleY1": 118,
+              "roleY2": 130,
+              "w": 110,
+              "x": 134,
+              "y": 88,
             },
             {
-              "cx": 274,
-              "innerW": 76,
+              "cx": 309,
+              "cy": 116,
+              "h": 56,
+              "innerW": 90,
+              "kind": "rect",
               "name": "agent-3",
+              "nameY": 104,
               "pid": 3,
               "role": "",
-              "w": 96,
-              "x": 226,
+              "roleY1": 118,
+              "roleY2": 130,
+              "w": 110,
+              "x": 254,
+              "y": 88,
             },
           ],
         },
@@ -206,7 +375,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
           "kind": "hub",
           "pid": -1,
           "w": 106,
-          "x": 115,
+          "x": 136,
           "y": 20,
         },
         "nodes": [
@@ -214,7 +383,8 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             "h": 56,
             "kind": "worker",
             "pid": 1,
-            "w": 96,
+            "tileKind": "rect",
+            "w": 110,
             "x": 14,
             "y": 88,
           },
@@ -222,21 +392,273 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             "h": 56,
             "kind": "worker",
             "pid": 2,
-            "w": 96,
-            "x": 120,
+            "tileKind": "rect",
+            "w": 110,
+            "x": 134,
             "y": 88,
           },
           {
             "h": 56,
             "kind": "worker",
             "pid": 3,
-            "w": 96,
-            "x": 226,
+            "tileKind": "rect",
+            "w": 110,
+            "x": 254,
             "y": 88,
           },
         ],
         "squarePx": 372,
-        "width": 336,
+        "width": 378,
+      }
+    `);
+  });
+
+  test('orchestrator N=5 (arc tier)', () => {
+    const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(5));
+    expect(layout).toMatchInlineSnapshot(`
+      {
+        "edges": [
+          {
+            "d": "M140 40 L83.00 58.59",
+            "from": "hub",
+            "kind": "orch",
+            "to": 1,
+          },
+          {
+            "d": "M140 40 L83.84 122.05",
+            "from": "hub",
+            "kind": "orch",
+            "to": 2,
+          },
+          {
+            "d": "M140 40 L140.00 149.00",
+            "from": "hub",
+            "kind": "orch",
+            "to": 3,
+          },
+          {
+            "d": "M140 40 L196.16 122.05",
+            "from": "hub",
+            "kind": "orch",
+            "to": 4,
+          },
+          {
+            "d": "M140 40 L197.00 58.59",
+            "from": "hub",
+            "kind": "orch",
+            "to": 5,
+          },
+        ],
+        "flowPaths": [
+          {
+            "d": "M140 40 L83.00 58.59",
+            "pid": 1,
+          },
+          {
+            "d": "M140 40 L83.84 122.05",
+            "pid": 2,
+          },
+          {
+            "d": "M140 40 L140.00 149.00",
+            "pid": 3,
+          },
+          {
+            "d": "M140 40 L196.16 122.05",
+            "pid": 4,
+          },
+          {
+            "d": "M140 40 L197.00 58.59",
+            "pid": 5,
+          },
+        ],
+        "fontSizes": {
+          "name": 11,
+          "role": 10,
+        },
+        "geometry": {
+          "hubH": 26,
+          "hubLabel": "orchestrator",
+          "hubSlug": "cebab",
+          "hubW": 100,
+          "hubX": 140,
+          "hubY": 14,
+          "mode": "orchestrator",
+          "tier": "arc",
+          "workers": [
+            {
+              "cx": 48,
+              "cy": 70,
+              "h": 26,
+              "innerW": 50,
+              "kind": "rect",
+              "name": "agent-1",
+              "nameY": 74,
+              "pid": 1,
+              "role": "",
+              "roleY1": null,
+              "roleY2": null,
+              "w": 70,
+              "x": 13,
+              "y": 57,
+            },
+            {
+              "cx": 74.94617613083763,
+              "cy": 135.0538238691624,
+              "h": 26,
+              "innerW": 50,
+              "kind": "rect",
+              "name": "agent-2",
+              "nameY": 139.0538238691624,
+              "pid": 2,
+              "role": "",
+              "roleY1": null,
+              "roleY2": null,
+              "w": 70,
+              "x": 39.94617613083763,
+              "y": 122.05382386916239,
+            },
+            {
+              "cx": 140,
+              "cy": 162,
+              "h": 26,
+              "innerW": 50,
+              "kind": "rect",
+              "name": "agent-3",
+              "nameY": 166,
+              "pid": 3,
+              "role": "",
+              "roleY1": null,
+              "roleY2": null,
+              "w": 70,
+              "x": 105,
+              "y": 149,
+            },
+            {
+              "cx": 205.0538238691624,
+              "cy": 135.0538238691624,
+              "h": 26,
+              "innerW": 50,
+              "kind": "rect",
+              "name": "agent-4",
+              "nameY": 139.0538238691624,
+              "pid": 4,
+              "role": "",
+              "roleY1": null,
+              "roleY2": null,
+              "w": 70,
+              "x": 170.0538238691624,
+              "y": 122.05382386916239,
+            },
+            {
+              "cx": 232,
+              "cy": 70.00000000000001,
+              "h": 26,
+              "innerW": 50,
+              "kind": "rect",
+              "name": "agent-5",
+              "nameY": 74.00000000000001,
+              "pid": 5,
+              "role": "",
+              "roleY1": null,
+              "roleY2": null,
+              "w": 70,
+              "x": 197,
+              "y": 57.000000000000014,
+            },
+          ],
+        },
+        "height": 220,
+        "hub": {
+          "h": 26,
+          "kind": "hub",
+          "pid": -1,
+          "w": 100,
+          "x": 90,
+          "y": 14,
+        },
+        "nodes": [
+          {
+            "h": 26,
+            "kind": "worker",
+            "pid": 1,
+            "tileKind": "rect",
+            "w": 70,
+            "x": 13,
+            "y": 57,
+          },
+          {
+            "h": 26,
+            "kind": "worker",
+            "pid": 2,
+            "tileKind": "rect",
+            "w": 70,
+            "x": 39.94617613083763,
+            "y": 122.05382386916239,
+          },
+          {
+            "h": 26,
+            "kind": "worker",
+            "pid": 3,
+            "tileKind": "rect",
+            "w": 70,
+            "x": 105,
+            "y": 149,
+          },
+          {
+            "h": 26,
+            "kind": "worker",
+            "pid": 4,
+            "tileKind": "rect",
+            "w": 70,
+            "x": 170.0538238691624,
+            "y": 122.05382386916239,
+          },
+          {
+            "h": 26,
+            "kind": "worker",
+            "pid": 5,
+            "tileKind": "rect",
+            "w": 70,
+            "x": 197,
+            "y": 57.000000000000014,
+          },
+        ],
+        "squarePx": 424,
+        "width": 280,
+      }
+    `);
+  });
+
+  test('orchestrator N=9 (ring tier)', () => {
+    const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(9));
+    // Pin only the high-level shape to avoid massive snapshots with
+    // floating-point goo. Specific positions/glyphs are covered above.
+    expect({
+      tier: layout.geometry.mode === 'orchestrator' ? layout.geometry.tier : null,
+      hubSlug: layout.geometry.mode === 'orchestrator' ? layout.geometry.hubSlug : undefined,
+      width: layout.width,
+      height: layout.height,
+      tileKinds:
+        layout.geometry.mode === 'orchestrator' ? layout.geometry.workers.map((w) => w.kind) : [],
+      edgeCount: layout.edges.length,
+    }).toMatchInlineSnapshot(`
+      {
+        "edgeCount": 9,
+        "height": 240,
+        "hubSlug": null,
+        "tier": "ring",
+        "tileKinds": [
+          "badge",
+          "badge",
+          "badge",
+          "badge",
+          "badge",
+          "badge",
+          "badge",
+          "badge",
+          "badge",
+        ],
+        "width": 240,
       }
     `);
   });
@@ -270,39 +692,56 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
           "role": 10,
         },
         "geometry": {
-          "cy": 42,
           "mode": "chain",
-          "nodeH": 56,
-          "nodeY": 14,
-          "roleY1": 47,
-          "roleY2": 60,
+          "tier": "row",
           "tiles": [
             {
               "cx": 80,
+              "cy": 42,
+              "h": 56,
               "innerW": 112,
+              "kind": "rect",
               "name": "agent-1",
+              "nameY": 32,
               "pid": 1,
               "role": "",
+              "roleY1": 47,
+              "roleY2": 60,
               "w": 132,
               "x": 14,
+              "y": 14,
             },
             {
               "cx": 244,
+              "cy": 42,
+              "h": 56,
               "innerW": 112,
+              "kind": "rect",
               "name": "agent-2",
+              "nameY": 32,
               "pid": 2,
               "role": "",
+              "roleY1": 47,
+              "roleY2": 60,
               "w": 132,
               "x": 178,
+              "y": 14,
             },
             {
               "cx": 408,
+              "cy": 42,
+              "h": 56,
               "innerW": 112,
+              "kind": "rect",
               "name": "agent-3",
+              "nameY": 32,
               "pid": 3,
               "role": "",
+              "roleY1": 47,
+              "roleY2": 60,
               "w": 132,
               "x": 342,
+              "y": 14,
             },
           ],
         },
@@ -312,6 +751,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             "h": 56,
             "kind": "worker",
             "pid": 1,
+            "tileKind": "rect",
             "w": 132,
             "x": 14,
             "y": 14,
@@ -320,6 +760,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             "h": 56,
             "kind": "worker",
             "pid": 2,
+            "tileKind": "rect",
             "w": 132,
             "x": 178,
             "y": 14,
@@ -328,6 +769,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
             "h": 56,
             "kind": "worker",
             "pid": 3,
+            "tileKind": "rect",
             "w": 132,
             "x": 342,
             "y": 14,
@@ -337,5 +779,99 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
         "width": 488,
       }
     `);
+  });
+
+  test('chain N=11 (wrap2 tier): row counts + snake direction', () => {
+    const layout = layoutFor({ mode: 'chain' }, mkProjects(11));
+    if (layout.geometry.mode !== 'chain') throw new Error('expected chain');
+    const rows = new Map<number, LaidRectTile[]>();
+    for (const t of layout.geometry.tiles) {
+      if (t.kind !== 'rect') throw new Error('chain tiles should be rect');
+      const arr = rows.get(t.y) ?? [];
+      arr.push(t);
+      rows.set(t.y, arr);
+    }
+    const rowSizes = [...rows.values()].map((r) => r.length);
+    expect(rowSizes).toEqual([6, 5]);
+    // Row 0 ascending cx (L→R); row 1 descending cx (R→L) — snake pattern.
+    const rowKeys = [...rows.keys()].sort((a, b) => a - b);
+    const row0 = rows.get(rowKeys[0]!)!;
+    const row1 = rows.get(rowKeys[1]!)!;
+    for (let i = 1; i < row0.length; i++) {
+      expect(row0[i]!.cx).toBeGreaterThan(row0[i - 1]!.cx);
+    }
+    for (let i = 1; i < row1.length; i++) {
+      expect(row1[i]!.cx).toBeLessThan(row1[i - 1]!.cx);
+    }
+  });
+
+  test('chain N=21 (wrap3 tier): 3 balanced rows in snake order', () => {
+    const layout = layoutFor({ mode: 'chain' }, mkProjects(21));
+    if (layout.geometry.mode !== 'chain') throw new Error('expected chain');
+    expect(layout.geometry.tier).toBe('wrap3');
+    const rows = new Map<number, LaidRectTile[]>();
+    for (const t of layout.geometry.tiles) {
+      if (t.kind !== 'rect') throw new Error('chain tiles should be rect');
+      const arr = rows.get(t.y) ?? [];
+      arr.push(t);
+      rows.set(t.y, arr);
+    }
+    const rowSizes = [...rows.values()].map((r) => r.length);
+    expect(rowSizes).toEqual([7, 7, 7]);
+  });
+});
+
+describe('layoutFor — orchestrator N=1 (center)', () => {
+  test('single tile centered under hub', () => {
+    const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(1));
+    if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    expect(layout.geometry.tier).toBe('center');
+    expect(layout.geometry.workers).toHaveLength(1);
+    const t = layout.geometry.workers[0]!;
+    if (t.kind !== 'rect') throw new Error('center tile should be rect');
+    // Center tile cx aligns roughly with hub cx.
+    expect(Math.abs(t.cx - layout.geometry.hubX)).toBeLessThan(1);
+  });
+});
+
+describe('layoutFor — orchestrator N=25 (concentric)', () => {
+  test('rings hold up to 6+6k slots; tile count matches N', () => {
+    const n = 25;
+    const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(n));
+    if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    expect(layout.geometry.tier).toBe('concentric');
+    expect(layout.geometry.workers).toHaveLength(n);
+
+    // Ring assignment: ring 1 holds 12, ring 2 holds 13 (the remainder).
+    // Verify by counting distinct radii from hub.
+    const radiiRounded = new Set<number>();
+    const hcx = layout.width / 2;
+    const hcy = layout.height / 2;
+    for (const w of layout.geometry.workers) {
+      if (w.kind !== 'badge') throw new Error('concentric tiles should be badge');
+      const r = Math.round(Math.hypot(w.cx - hcx, w.cy - hcy));
+      radiiRounded.add(r);
+    }
+    // Expect 2 distinct radii (ring 1 = 12 slots filled, ring 2 = 13 slots).
+    expect(radiiRounded.size).toBe(2);
+  });
+});
+
+describe('layoutFor — twoRing N=15 inner/outer split', () => {
+  test('inner ring holds 8, outer holds 7 (rotated half-step)', () => {
+    const layout = layoutFor({ mode: 'orchestrator' }, mkProjects(15));
+    if (layout.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    const hcx = layout.width / 2;
+    const hcy = layout.height / 2;
+    const radii: number[] = [];
+    for (const w of layout.geometry.workers as LaidBadgeTile[]) {
+      radii.push(Math.round(Math.hypot(w.cx - hcx, w.cy - hcy)));
+    }
+    // First 8 share inner radius; next 7 share outer radius.
+    const innerR = radii[0];
+    const outerR = radii[8];
+    expect(innerR).toBeLessThan(outerR);
+    for (let i = 0; i < 8; i++) expect(radii[i]).toBe(innerR);
+    for (let i = 8; i < 15; i++) expect(radii[i]).toBe(outerR);
   });
 });
