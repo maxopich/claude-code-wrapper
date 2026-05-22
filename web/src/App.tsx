@@ -12,6 +12,7 @@ import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
 import { ChatHeaderChip } from './components/ChatHeaderChip';
+import { SlashCommandButtons } from './components/SlashCommandButtons';
 import { SettingsModal } from './components/SettingsModal';
 import { MultiAgentTab, MultiAgentActivityBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
@@ -625,6 +626,7 @@ export function App() {
                       disabled={!sessionIsLive}
                       onChange={setPermissionMode}
                     />
+                    <SlashCommandButtons disabled={inputDisabled} onSend={sendMessage} />
                   </div>
                 )}
                 <ChatView

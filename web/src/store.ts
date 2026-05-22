@@ -24,6 +24,7 @@ export type MessageView =
       blocks: ContentBlock[];
     }
   | { kind: 'system'; id: string; subtype: string; text: string }
+  | { kind: 'command_output'; id: string; text: string }
   | {
       kind: 'result';
       id: string;
@@ -1082,6 +1083,24 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         ...session,
         streamingText: '',
         messages: [...session.messages, { kind: 'assistant', id: msg.uuid, blocks: msg.blocks }],
+      });
+    }
+
+    case 'command_output': {
+      // Slash-command output (e.g. /context, /compact). Closes out the turn
+      // — clear the streaming buffer + drop the runStartedAt anchor so the
+      // thinking indicator stops. Result rows are suppressed server-side
+      // (num_turns: 0), so the command_output card is the turn's only echo.
+      const projectId = projectFor(state, msg.sessionId);
+      if (projectId === null) return state;
+      const session = state.sessionsByProject[projectId]?.[msg.sessionId];
+      if (!session) return state;
+      return putSession(state, projectId, msg.sessionId, {
+        ...session,
+        status: 'done',
+        runStartedAt: null,
+        streamingText: '',
+        messages: [...session.messages, { kind: 'command_output', id: msg.uuid, text: msg.text }],
       });
     }
 

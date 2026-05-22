@@ -62,7 +62,26 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
       };
 
     case 'assistant': {
-      const a = m as AnyMsg & { uuid: string; message: { content: ContentBlock[] } };
+      const a = m as AnyMsg & {
+        uuid: string;
+        message: { content: ContentBlock[]; model?: string };
+      };
+      // Slash commands the CLI handles locally (e.g. `/context`, `/compact`,
+      // `/skills`) come back as an assistant message with `model: "<synthetic>"`,
+      // zero usage, and the rendered command output as a single text block.
+      // Surface them as a distinct ServerMsg so the UI can render them as a
+      // command-output card instead of a regular Claude reply.
+      if (a.message?.model === '<synthetic>') {
+        const text = (a.message.content ?? [])
+          .map((b) => (b.type === 'text' ? b.text : ''))
+          .join('');
+        return {
+          type: 'command_output',
+          sessionId,
+          uuid: a.uuid,
+          text,
+        };
+      }
       return {
         type: 'assistant_message',
         sessionId,
@@ -146,7 +165,13 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         total_cost_usd: number;
         result?: string;
         errors?: string[];
+        num_turns?: number;
       };
+      // Slash commands close out with a `num_turns: 0`, `total_cost_usd: 0`
+      // result. The command_output card already shows the operator the
+      // command completed; an extra "success · $0.0000" chip below it is
+      // noise. Drop result rows for synthetic (zero-turn) commands.
+      if (r.num_turns === 0) return null;
       return {
         type: 'result',
         sessionId,
