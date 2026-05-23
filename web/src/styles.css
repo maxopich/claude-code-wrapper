@@ -2215,12 +2215,24 @@ pre {
   position: relative;
   max-width: 100%;
   aspect-ratio: 1 / 1;
+  /* PR-3: outer element is now <figure>. Reset the UA's block margin
+   * (`figure { margin: 1em 40px }`) while keeping horizontal centering
+   * via `margin-inline: auto`. Inline takes care of itself; only the
+   * block axis needs the explicit zero. */
+  margin-block: 0;
   margin-inline: auto;
   background: var(--bg-2);
   border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   padding: 10px;
   display: grid;
+  /* PR-3: two rows. SVG takes the elastic 1fr; figcaption is auto-sized
+   * prose below. Without explicit rows, both children compete for cell
+   * placement and the figcaption's small height would steal from the
+   * SVG inconsistently between Chrome/Firefox. The editor + expand
+   * button are absolutely positioned and don't participate in row
+   * sizing. */
+  grid-template-rows: 1fr auto;
   place-items: center;
   overflow: hidden;
   background-image:
@@ -2256,6 +2268,52 @@ pre {
 }
 .tpl-arrowhead {
   fill: var(--accent);
+}
+
+/* PR-3: orchestrator-mode directional markers. The arrowhead at the
+ * worker end uses --accent (the same hue as `.tpl-arrowhead` for chain),
+ * the tail dot at the hub end uses --fg-3 (a faint disc) — the
+ * visual delta is enough to read at-a-glance which end is the source.
+ *
+ * Custom mode renders no markers at all (gated in AgentDiagram by
+ * `props.mode !== 'custom'`), so these classes never fire in that case.
+ *
+ * The `.tpl-arrowhead` base above already sets fill; the `--out`
+ * modifier inherits and is here only for forced-colors targeting +
+ * future visual tweaks. */
+.tpl-arrowhead--out {
+  fill: var(--accent);
+}
+.tpl-arrowtail--in {
+  fill: var(--fg-3);
+}
+@media (forced-colors: active) {
+  /* Forced-colors (Windows High Contrast etc.) ignores author colors
+   * and substitutes system tokens. `ButtonText` is the canonical "this
+   * is foreground" token; using it for both edges and their markers
+   * guarantees the diagram still reads when --accent / --fg-3 fold to
+   * the same color. Explicit forced-color-adjust:auto would be a no-op
+   * here — the defaults already apply ButtonText. */
+  .tpl-edge {
+    stroke: ButtonText;
+  }
+  .tpl-arrowhead,
+  .tpl-arrowhead--out,
+  .tpl-arrowtail--in {
+    fill: ButtonText;
+  }
+}
+
+/* PR-3: protocol description rendered under each figure. The SVG <desc>
+ * carries the *animation* explainer; this caption carries the *static
+ * protocol* description (orchestrator vs chain vs custom). text-align:
+ * center centers under the diagram regardless of the figure's grid
+ * placement. */
+.tpl-figcaption {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  margin-top: var(--s-2);
+  text-align: center;
 }
 .tpl-node-rect {
   fill: var(--line-1);
