@@ -87,3 +87,38 @@ describe('CSS gate (Risk #1)', () => {
     expect(stylesCss).toMatch(/\.tpl-flow-dot\s*\{\s*display:\s*none/);
   });
 });
+
+describe('CSS gate — PR-3 directional markers', () => {
+  test('orchestrator arrowhead and tail both declare a fill', () => {
+    // The visual contract for PR-3: every orchestrator edge has BOTH a
+    // tail marker at the hub end AND an arrowhead at the worker end.
+    // Each marker references one of these two classes; if either lacks
+    // a fill, the marker renders invisibly and the directional
+    // affordance silently breaks.
+    expect(stylesCss).toMatch(/\.tpl-arrowhead--out\s*\{[^}]*fill\s*:/);
+    expect(stylesCss).toMatch(/\.tpl-arrowtail--in\s*\{[^}]*fill\s*:/);
+  });
+
+  test('forced-colors block remaps edges + markers to ButtonText', () => {
+    // Windows High Contrast (and other forced-colors environments) drop
+    // author colors and substitute system tokens. The figure stops
+    // being readable if edges/markers don't opt into ButtonText.
+    expect(stylesCss).toMatch(/@media\s*\(forced-colors:\s*active\)/);
+    // The selector list inside the forced-colors block must include
+    // both new orchestrator marker classes; the chain marker
+    // (`.tpl-arrowhead`) is also included so chain templates remap too.
+    const forcedColors = stylesCss.match(/@media\s*\(forced-colors:\s*active\)\s*\{[\s\S]*?\n\}/);
+    expect(forcedColors).not.toBeNull();
+    const block = forcedColors![0];
+    expect(block).toMatch(/\.tpl-edge\s*\{[^}]*stroke\s*:\s*ButtonText/);
+    expect(block).toMatch(/ButtonText/);
+    expect(block).toMatch(/\.tpl-arrowhead--out/);
+    expect(block).toMatch(/\.tpl-arrowtail--in/);
+  });
+
+  test('figcaption uses the --t-xs typography token', () => {
+    // The figcaption must NOT regress to a hard-coded font-size; the
+    // typography pass (PR-#86) standardized text via --t-* tokens.
+    expect(stylesCss).toMatch(/\.tpl-figcaption\s*\{[^}]*font-size\s*:\s*var\(--t-xs\)/);
+  });
+});

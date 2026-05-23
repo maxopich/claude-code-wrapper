@@ -51,6 +51,23 @@ function nameRollupForAria(participants: Project[]): string {
   return n > 5 ? `${prefix} and ${n - 5} more` : prefix;
 }
 
+/** PR-3: protocol description rendered under the diagram as
+ *  `<figcaption>`. Distinct from the SVG <desc>: the desc is the
+ *  *what's animating* explainer (read by SR via aria-label fallback);
+ *  the figcaption is the *static protocol* description (always visible
+ *  text under the figure). Both compact card AND modal show this. */
+function figcaptionTextFor(mode: 'chain' | 'orchestrator' | 'custom'): string {
+  if (mode === 'orchestrator') {
+    return 'Workers reply only to the orchestrator — no peer-to-peer messages.';
+  }
+  if (mode === 'chain') {
+    return 'Each agent receives from the prior and forwards to the next — no branching, no replies upstream.';
+  }
+  // custom — paired with the PR-1 banner + PR-2 notice on the card; the
+  // figcaption reinforces the disclaimer at the bottom of the figure.
+  return 'Routing is custom and not yet visualized — actual delivery may differ from this preview.';
+}
+
 /**
  * SVG architecture diagram for a template preview: orchestrator
  * hub-and-spoke (six tiers by N — row, arc, ring, twoRing, concentric)
@@ -591,8 +608,13 @@ export function AgentDiagram(props: {
     // Hub label baseline: with-slug pushes label up so slug fits below;
     // without-slug centers the label vertically.
     const hubLabelY = hubSlug ? hubY + 14 : hubY + hubH / 2 + 4;
+    // PR-3: gate arrowheads/tails on protocol mode, not geometry. Custom
+    // templates render via the orchestrator branch (layoutCustomGrid stub)
+    // but must NOT pretend to be honest orchestrator routing — banner +
+    // notice + naked-line edges all reinforce the disclaimer.
+    const showMarkers = mode !== 'custom';
     return (
-      <div className={stageClass} ref={stageRef} style={stageStyle} onKeyDown={onStageKeyDown}>
+      <figure className={stageClass} ref={stageRef} style={stageStyle} onKeyDown={onStageKeyDown}>
         <svg
           className="tpl-svg"
           viewBox={`0 0 ${width} ${height}`}
@@ -601,9 +623,59 @@ export function AgentDiagram(props: {
           aria-label={ariaLabel}
         >
           <desc>{SVG_DESC}</desc>
-          {edges.map((e) => (
-            <path key={`e${String(e.to)}`} className="tpl-edge" d={e.d} />
-          ))}
+          {showMarkers && (
+            // PR-3: two markers per edge — small dot at the hub side
+            // (`tpl-tail-in`) + arrowhead at the worker side
+            // (`tpl-arrow-out`). The combination communicates "hub
+            // delivers, worker replies only via the hub" without
+            // requiring color contrast (shape carries the meaning).
+            // `orient="auto-start-reverse"` so the arrowhead at refX=9
+            // points along the path direction; the tail marker is
+            // circular so orientation is moot.
+            <defs>
+              <marker
+                id="tpl-arrow-out"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto-start-reverse"
+              >
+                <path className="tpl-arrowhead tpl-arrowhead--out" d="M0 0 L10 5 L0 10 z" />
+              </marker>
+              <marker
+                id="tpl-tail-in"
+                viewBox="0 0 10 10"
+                refX="5"
+                refY="5"
+                markerWidth="5"
+                markerHeight="5"
+                orient="auto"
+              >
+                <circle className="tpl-arrowtail tpl-arrowtail--in" cx="5" cy="5" r="2.5" />
+              </marker>
+            </defs>
+          )}
+          {edges.map((e) => {
+            // PR-3: SR linearization. The figure's <desc> already says
+            // "orchestrator delivers", but per-edge titles let SR users
+            // read each routing pair on demand. workerName lookup tolerates
+            // the (impossible-in-practice) case of a stale edge ref.
+            const workerName =
+              typeof e.to === 'number' ? (workers.find((w) => w.pid === e.to)?.name ?? '') : '';
+            return (
+              <path
+                key={`e${String(e.to)}`}
+                className="tpl-edge"
+                d={e.d}
+                markerStart={showMarkers ? 'url(#tpl-tail-in)' : undefined}
+                markerEnd={showMarkers ? 'url(#tpl-arrow-out)' : undefined}
+              >
+                <title>orchestrator → {workerName || String(e.to)}</title>
+              </path>
+            );
+          })}
           <rect
             className="tpl-hub-rect"
             x={hubX - hubW / 2}
@@ -660,7 +732,8 @@ export function AgentDiagram(props: {
         </svg>
         {editor}
         {expandBtn}
-      </div>
+        <figcaption className="tpl-figcaption">{figcaptionTextFor(mode)}</figcaption>
+      </figure>
     );
   }
 
@@ -675,7 +748,7 @@ export function AgentDiagram(props: {
   const ariaLabel =
     `Chain of ${n} agent${n === 1 ? '' : 's'}` + (ariaSuffix ? `: ${ariaSuffix}` : '');
   return (
-    <div className={stageClass} ref={stageRef} style={stageStyle} onKeyDown={onStageKeyDown}>
+    <figure className={stageClass} ref={stageRef} style={stageStyle} onKeyDown={onStageKeyDown}>
       <svg
         className="tpl-svg"
         viewBox={`0 0 ${width} ${height}`}
@@ -685,8 +758,12 @@ export function AgentDiagram(props: {
       >
         <desc>{SVG_DESC}</desc>
         <defs>
+          {/* PR-3: chain marker renamed `tpl-arrow` → `tpl-arrow-chain`
+              so the orchestrator's two new markers (`tpl-arrow-out`,
+              `tpl-tail-in`) live in a non-colliding namespace. Visual
+              behavior unchanged. */}
           <marker
-            id="tpl-arrow"
+            id="tpl-arrow-chain"
             viewBox="0 0 10 10"
             refX="9"
             refY="5"
@@ -697,9 +774,27 @@ export function AgentDiagram(props: {
             <path className="tpl-arrowhead" d="M0 0 L10 5 L0 10 z" />
           </marker>
         </defs>
-        {edges.map((e) => (
-          <path key={`l${String(e.to)}`} className="tpl-edge" d={e.d} markerEnd="url(#tpl-arrow)" />
-        ))}
+        {edges.map((e) => {
+          // PR-3: per-edge <title> for SR linearization. `from` and `to`
+          // are both numbers in chain mode (they index tiles, never the
+          // 'hub' sentinel used by orchestrator).
+          const fromName =
+            typeof e.from === 'number' ? (tiles.find((t) => t.pid === e.from)?.name ?? '') : '';
+          const toName =
+            typeof e.to === 'number' ? (tiles.find((t) => t.pid === e.to)?.name ?? '') : '';
+          return (
+            <path
+              key={`l${String(e.to)}`}
+              className="tpl-edge"
+              d={e.d}
+              markerEnd="url(#tpl-arrow-chain)"
+            >
+              <title>
+                {fromName || String(e.from)} → {toName || String(e.to)}
+              </title>
+            </path>
+          );
+        })}
         {tiles.map((t) => renderTile(t, fsizes))}
         {!reduce && !paused && n >= 2 && chainFlow && (
           <circle
@@ -711,6 +806,7 @@ export function AgentDiagram(props: {
       </svg>
       {editor}
       {expandBtn}
-    </div>
+      <figcaption className="tpl-figcaption">{figcaptionTextFor(mode)}</figcaption>
+    </figure>
   );
 }
