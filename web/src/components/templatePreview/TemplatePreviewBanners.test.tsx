@@ -2,7 +2,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
-import { BypassPermissionsBanner, CustomModeBanner } from './TemplatePreviewBanners';
+import {
+  BypassPermissionsBanner,
+  CustomModeBanner,
+  CustomModeNotice,
+} from './TemplatePreviewBanners';
 
 // React 18+ requires this flag for `act` in non-RTL setups.
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -105,5 +109,43 @@ describe('CustomModeBanner', () => {
     act(() => root.render(<CustomModeBanner />));
     const body = container.querySelector('.tpl-banner-body');
     expect(body?.textContent).toMatch(/approximation/i);
+  });
+});
+
+describe('CustomModeNotice (PR-2)', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  test('renders prose under the .tpl-preview-note class', () => {
+    act(() => root.render(<CustomModeNotice />));
+    const el = container.querySelector('.tpl-preview-note');
+    expect(el).not.toBeNull();
+    // No role attribute: the sibling banner already owns the announcement,
+    // and a second role would compete with it in the accessibility tree.
+    expect(el!.getAttribute('role')).toBeNull();
+  });
+
+  test('names the protocol token `custom` in a <code> swatch', () => {
+    act(() => root.render(<CustomModeNotice />));
+    const code = container.querySelector('.tpl-preview-note code');
+    expect(code).not.toBeNull();
+    expect(code!.textContent).toBe('custom');
+  });
+
+  test('states the orchestrator-routing fallback in plain prose', () => {
+    act(() => root.render(<CustomModeNotice />));
+    const el = container.querySelector('.tpl-preview-note');
+    expect(el?.textContent).toMatch(/orchestrator routing/i);
   });
 });

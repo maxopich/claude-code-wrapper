@@ -2193,6 +2193,21 @@ pre {
   font-size: var(--t-sm);
   line-height: 1.4;
 }
+
+/* PR-2: custom-mode render-fallback notice on the template card. Sits
+ * between the meta strip and the approximation banner — short factual
+ * prose, not an announcement. The <code> swatch keeps `custom` visually
+ * tied to the protocol token. */
+.tpl-preview-note {
+  margin: 6px 0 0;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  line-height: 1.4;
+}
+.tpl-preview-note code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
 /* SVG stage — ported from the mockup's .topo-stage (grid-dot field +
  * faint accent wash), tokenized. Scrolls horizontally when a wide
  * topology (many agents) exceeds the pane rather than squashing labels. */

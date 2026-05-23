@@ -28,6 +28,7 @@ import type { ModalOrigin } from './templatePreview/TemplatePreviewModal';
 import {
   BypassPermissionsBanner,
   CustomModeBanner,
+  CustomModeNotice,
 } from './templatePreview/TemplatePreviewBanners';
 
 /**
@@ -770,10 +771,17 @@ function TemplatePreview(props: {
           {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
         </div>
       </div>
-      {/* PR-1: custom-mode honesty banner. Fires only when the stored
-          template carries mode='custom' (a presentation-only marker —
-          the renderer falls back to orchestrator layout). */}
-      {template.mode === 'custom' && <CustomModeBanner />}
+      {/* PR-1 + PR-2: custom-mode honesty surface. Fires only when the
+          stored template carries mode='custom'. The notice is the factual
+          statement ("rendered as orchestrator"); the banner is the
+          approximation warning. Pair, not duplication — see the comment
+          on `<CustomModeNotice />` for the audience split. */}
+      {template.mode === 'custom' && (
+        <>
+          <CustomModeNotice />
+          <CustomModeBanner />
+        </>
+      )}
 
       <AgentDiagram
         mode={template.mode}
