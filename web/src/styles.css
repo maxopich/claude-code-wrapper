@@ -89,6 +89,14 @@
   --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.4);
   /* Motion */
   --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* PR-5 (round 2): canonical Material-style easing tokens. Used by the
+   * trip-dot legs: forward decelerates (ease-out — settles at the worker),
+   * return accelerates (ease-in — leaves the worker promptly). ease-in-out
+   * is the symmetric default used by the arrival pulse and other paired
+   * enter/exit animations. */
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --dur-1: 120ms;
   --dur-2: 200ms;
   --dur-3: 320ms;
@@ -2233,6 +2241,12 @@ pre {
   border: 1px solid var(--line-2);
   border-radius: var(--r-md);
   padding: 10px;
+  /* PR-5 (round 2): scope layout/style invalidation to the stage so a
+   * single trip-dot re-render doesn't trigger ancestor layout passes.
+   * NOT `contain: size` — the figure still relies on its aspect-ratio
+   * + grid rows to size itself from its children, and `size` would
+   * break that contract. */
+  contain: layout style;
   display: grid;
   /* PR-3: two rows. SVG takes the elastic 1fr; figcaption is auto-sized
    * prose below. Without explicit rows, both children compete for cell
@@ -2365,6 +2379,13 @@ pre {
 .tpl-flow-dot {
   fill: var(--accent);
   offset-distance: 0%;
+  /* PR-5 (round 2): hint the compositor that `offset-distance` is the
+   * actively animating property. Without this, browsers fall back to
+   * the main-thread paint path on every frame for the SVG dot — visible
+   * as a mid-trip stutter on slower machines. `will-change` is removed
+   * once the animation ends (browsers GC the layer) so this isn't a
+   * permanent memory cost. */
+  will-change: offset-distance;
 }
 /* Badge tile (PR-3): a small circular node used in ring / twoRing /
  * concentric orchestrator tiers. The agent's deterministic hue is the
@@ -2862,66 +2883,78 @@ pre {
   .tpl-flow-dot--chain {
     animation: tpl-flow 2.2s linear infinite;
   }
-  /* Orchestrator forward leg: hub (offset 0%, --accent) → agent (offset
-   * 100%, --tpl-trip-hue). Color hand-off at 50% so the dot reads as
-   * the destination's hue for most of the trip — "the message is FOR
-   * this agent" rather than "from the orchestrator". */
+  /* PR-5 (round 2): fill-free keyframes. The pre-PR-5 keyframes
+   * interpolated `fill` across stops (accent → hue → accent), which
+   * caused a visible mid-trip color smudge AND a velocity kink at the
+   * 50% keyframe stop (the keyframe boundary forced a re-time of the
+   * cubic-bezier curve). Hue is now set once per leg via the React
+   * `<circle style>` inline attribute (see AgentDiagram.tsx) — no
+   * interpolation, no kink. */
   @keyframes tpl-flow-forward {
-    0% {
+    from {
       offset-distance: 0%;
-      fill: var(--accent);
     }
-    50% {
-      offset-distance: 50%;
-      fill: var(--tpl-trip-hue, var(--accent));
-    }
-    100% {
+    to {
       offset-distance: 100%;
-      fill: var(--tpl-trip-hue, var(--accent));
     }
   }
-  /* Orchestrator return leg: agent (offset 100%, --tpl-trip-hue) → hub
-   * (offset 0%, --accent). Same path traversed in reverse via the
-   * keyframe — no separate return-path string needed. Hue stays with
-   * the destination through 70% of the return, then resolves to
-   * --accent as the dot reaches the hub. */
   @keyframes tpl-flow-return {
-    0% {
+    from {
       offset-distance: 100%;
-      fill: var(--tpl-trip-hue, var(--accent));
     }
-    70% {
-      offset-distance: 30%;
-      fill: var(--tpl-trip-hue, var(--accent));
-    }
-    100% {
+    to {
       offset-distance: 0%;
-      fill: var(--accent);
     }
   }
   .tpl-flow-dot--forward {
-    animation: tpl-flow-forward var(--tpl-trip-dur, 700ms) cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    /* Forward leg decelerates into the worker (ease-out): "the message
+     * settles at the destination." */
+    animation: tpl-flow-forward var(--tpl-trip-dur, 700ms) var(--ease-out) forwards;
   }
   .tpl-flow-dot--return {
-    animation: tpl-flow-return var(--tpl-trip-dur, 700ms) cubic-bezier(0.2, 0.6, 0.3, 1) forwards;
+    /* Return leg accelerates out of the worker (ease-in): "the reply
+     * is on its way." */
+    animation: tpl-flow-return var(--tpl-trip-dur, 700ms) var(--ease-in) forwards;
   }
   /* Arrival pulse on the destination node: a brief stroke-width bump
    * that draws the eye without flashing color. The dot's hue is already
-   * the destination's; the pulse is the receipt confirmation. */
-  @keyframes tpl-node-arrival {
+   * the destination's; the pulse is the receipt confirmation.
+   *
+   * PR-5 (round 2): boosted from 1→1.6→1 / 200ms to 2.4× peak / 260ms
+   * with ease-in-out. The pre-PR-5 1.6× bump was below the perception
+   * floor on hi-DPI displays — the stroke went from "thin" to "slightly
+   * less thin" and the cue was easy to miss. Separate keyframes per tile
+   * kind so the badge tile (base stroke 3 from PR-4) pulses from its
+   * actual base instead of dipping below it; the rect tile (base 1)
+   * gets the 1→2.4 bump the plan called for. Same 260ms ease-in-out
+   * cadence for both — symmetric rise/fall reads as a single beat. */
+  @keyframes tpl-node-arrival-rect {
     0% {
       stroke-width: 1;
     }
     50% {
-      stroke-width: 1.6;
+      stroke-width: 2.4;
     }
     100% {
       stroke-width: 1;
     }
   }
-  .tpl-node-rect.is-trip-arrived,
+  @keyframes tpl-node-arrival-badge {
+    0% {
+      stroke-width: 3;
+    }
+    50% {
+      stroke-width: 6;
+    }
+    100% {
+      stroke-width: 3;
+    }
+  }
+  .tpl-node-rect.is-trip-arrived {
+    animation: tpl-node-arrival-rect 260ms var(--ease-in-out) forwards;
+  }
   .tpl-node-badge.is-trip-arrived {
-    animation: tpl-node-arrival 200ms var(--ease) forwards;
+    animation: tpl-node-arrival-badge 260ms var(--ease-in-out) forwards;
   }
   /* Rect tiles are neutral by default; arrival borrows the destination's
    * hue as a transient stroke. Badge tiles already carry the hue

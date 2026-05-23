@@ -28,9 +28,14 @@ type TripState = {
   durationMs: number;
 };
 
-const TRIP_FORWARD_MS = 700;
-const TRIP_PULSE_MS = 200;
-const TRIP_RETURN_MS = 700;
+// PR-5 (round 2): trip-leg durations tuned for the new ease-out /
+// ease-in pairing. Forward is slightly longer than return — the
+// "delivery" leg gets a hair more presence, while the return
+// accelerates away. Pulse is up 200 → 260ms to match the boosted
+// arrival keyframe so the pulse and the leg flip read as one event.
+const TRIP_FORWARD_MS = 620;
+const TRIP_PULSE_MS = 260;
+const TRIP_RETURN_MS = 560;
 const TRIP_DWELL_BASE_MS = 420;
 const TRIP_DWELL_JITTER_MS = 60;
 
@@ -771,7 +776,14 @@ export function AgentDiagram(props: {
               style={
                 {
                   offsetPath: `path('${trip.pathD}')`,
-                  ['--tpl-trip-hue']: trip.hueVar ?? 'var(--accent)',
+                  // PR-5 (round 2): hue is set ONCE per leg via the
+                  // inline `fill` (no keyframe interpolation), which
+                  // eliminates the mid-trip velocity kink that the
+                  // pre-PR-5 keyframe boundaries caused. The dot reads
+                  // as the destination's hue for the entire trip — "the
+                  // message is FOR this agent" — without any color
+                  // morph along the path.
+                  fill: trip.hueVar ?? 'var(--accent)',
                   ['--tpl-trip-dur']: `${trip.durationMs}ms`,
                 } as CSSProperties
               }
