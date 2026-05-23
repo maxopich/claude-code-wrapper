@@ -2133,6 +2133,66 @@ pre {
   font-size: 11.5px;
   color: var(--fg-3);
 }
+
+/* PR-1: honesty banners (bypassPermissions warning + custom-mode info).
+ * Shape-coded via ⚠/ⓘ glyphs — never relying on color alone. The third
+ * `auto` grid column is reserved for a future dismiss button; today
+ * banners are non-dismissible and the column stays empty. */
+.tpl-banner {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: var(--s-2);
+  align-items: start;
+  padding: 8px var(--s-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm);
+  line-height: 1.4;
+}
+.tpl-banner + .tpl-banner {
+  margin-top: var(--s-1);
+}
+.tpl-banner-glyph {
+  font-size: 14px;
+  line-height: 1;
+  margin-top: 1px;
+  /* Keep the glyph as text, not as a colorful platform emoji — the
+   * shape is the signal and forced-colors mode needs to read it. */
+  font-variant-emoji: text;
+}
+.tpl-banner-title {
+  font-weight: 600;
+}
+.tpl-banner-body {
+  color: var(--fg-2);
+}
+.tpl-banner.is-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+.tpl-banner.is-info {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--border));
+}
+
+/* PR-1: container for the bypass banner repeated inside the expanded modal.
+ * The header rule already owns 24px padding; mirror it so the banner aligns
+ * vertically with the title above and the diagram below. */
+.tpl-modal-banners {
+  padding: 0 24px var(--s-2);
+}
+
+/* PR-1: lifecycle=temp inline note. Plain prose, not a banner — appears
+ * directly under the toggle the operator just clicked, so the choice and
+ * its consequence are visually adjacent. */
+.ma-lifecycle-note {
+  margin: 6px 0 0;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  line-height: 1.4;
+}
 /* SVG stage — ported from the mockup's .topo-stage (grid-dot field +
  * faint accent wash), tokenized. Scrolls horizontally when a wide
  * topology (many agents) exceeds the pane rather than squashing labels. */
