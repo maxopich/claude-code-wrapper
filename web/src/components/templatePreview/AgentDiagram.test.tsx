@@ -176,6 +176,125 @@ describe('AgentDiagram — protocol <figcaption> (PR-3)', () => {
   });
 });
 
+describe('AgentDiagram — density=full multi-line names (PR-4)', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  test('arc tier (N=6) with fullWidth=true renders <tspan> rows for long names', () => {
+    // 6 agents puts orchestrator into the arc tier. Full density tile
+    // is 130×40 px → fitChars ≈ 16 at FS=11. Names longer than ~16
+    // chars force a 2-line wrap (`<tspan>`); shorter names stay
+    // single-line via truncLabel and emit zero tspans.
+    const participants = Array.from({ length: 6 }, (_, i) =>
+      mkProject(i + 1, `much-longer-agent-name-${i + 1}`),
+    );
+    act(() => {
+      root.render(
+        <AgentDiagram
+          mode="orchestrator"
+          participants={participants}
+          roles={{}}
+          onRoleChange={() => {}}
+          fullWidth
+        />,
+      );
+    });
+    const tspans = container.querySelectorAll('.tpl-node-name tspan');
+    // Six agents × 2 tspans each = 12 lines.
+    expect(tspans.length).toBe(12);
+  });
+
+  test('compact arc tier (no fullWidth) renders single-line names', () => {
+    const participants = Array.from({ length: 6 }, (_, i) =>
+      mkProject(i + 1, `agent-name-${i + 1}`),
+    );
+    act(() => {
+      root.render(
+        <AgentDiagram
+          mode="orchestrator"
+          participants={participants}
+          roles={{}}
+          onRoleChange={() => {}}
+        />,
+      );
+    });
+    // Compact: no tspans in .tpl-node-name (single-line text content).
+    const tspans = container.querySelectorAll('.tpl-node-name tspan');
+    expect(tspans.length).toBe(0);
+  });
+
+  test('ring tier (N=10) with fullWidth=true renders under-badge labels', () => {
+    const participants = Array.from({ length: 10 }, (_, i) =>
+      mkProject(i + 1, `agent-name-${i + 1}`),
+    );
+    act(() => {
+      root.render(
+        <AgentDiagram
+          mode="orchestrator"
+          participants={participants}
+          roles={{}}
+          onRoleChange={() => {}}
+          fullWidth
+        />,
+      );
+    });
+    const labels = container.querySelectorAll('.tpl-node-badge-label');
+    // One <text> per badge at full density at ring tier.
+    expect(labels.length).toBe(10);
+  });
+
+  test('ring tier compact: NO under-badge labels (glyph-only)', () => {
+    const participants = Array.from({ length: 10 }, (_, i) =>
+      mkProject(i + 1, `agent-name-${i + 1}`),
+    );
+    act(() => {
+      root.render(
+        <AgentDiagram
+          mode="orchestrator"
+          participants={participants}
+          roles={{}}
+          onRoleChange={() => {}}
+        />,
+      );
+    });
+    const labels = container.querySelectorAll('.tpl-node-badge-label');
+    expect(labels.length).toBe(0);
+  });
+
+  test('concentric (N=30) with fullWidth=true labels ONLY inner ring badges', () => {
+    const participants = Array.from({ length: 30 }, (_, i) =>
+      mkProject(i + 1, `agent-name-${i + 1}`),
+    );
+    act(() => {
+      root.render(
+        <AgentDiagram
+          mode="orchestrator"
+          participants={participants}
+          roles={{}}
+          onRoleChange={() => {}}
+          fullWidth
+        />,
+      );
+    });
+    // Inner ring at N=30 holds 6+6 = 12 slots; outer ring carries the
+    // remaining 18 unlabeled. The test asserts the EXACT 12 — proving
+    // the outer-ring suppression isn't accidental.
+    const labels = container.querySelectorAll('.tpl-node-badge-label');
+    expect(labels.length).toBe(12);
+  });
+});
+
 describe('AgentDiagram — per-edge <title> (PR-3 SR linearization)', () => {
   let container: HTMLDivElement;
   let root: Root;

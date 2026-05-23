@@ -5,6 +5,8 @@ import {
   layoutFor,
   tierForChain,
   tierForOrchestrator,
+  wrap2,
+  wrapN,
   type LaidBadgeTile,
   type LaidRectTile,
 } from './layout';
@@ -215,6 +217,205 @@ describe('layoutFor — chain invariants', () => {
     const wrap3 = layoutFor({ mode: 'chain' }, mkProjects(25));
     expect(wrap2.height).toBeGreaterThan(CHAIN_ROW_HEIGHT);
     expect(wrap3.height).toBeGreaterThan(wrap2.height);
+  });
+});
+
+describe('wrapN (PR-4)', () => {
+  test('returns single line when text fits in perLine', () => {
+    expect(wrapN('abc', 5, 2)).toEqual(['abc']);
+    expect(wrapN('exactly5', 8, 2)).toEqual(['exactly5']);
+  });
+
+  test('two-line wrap breaks at space when within BREAK_SLACK', () => {
+    // "alpha bravo charlie" with perLine=10: space at idx 5 is within
+    // last-8-chars of cut=10, so break there. Line 2 ellipsises.
+    const out = wrapN('alpha bravo charlie', 10, 2);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toBe('alpha');
+    // Line 2: "bravo charlie" → truncLabel(_, 10) = "bravo cha…"
+    expect(out[1]).toBe('bravo cha…');
+  });
+
+  test('falls back to char cut when no space inside the break-slack', () => {
+    // "abcdefghijklmnop" — no spaces; cut at perLine=8 exactly. Both
+    // 8-char halves fit cleanly, so the second line isn't ellipsised.
+    const out = wrapN('abcdefghijklmnop', 8, 2);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toBe('abcdefgh');
+    expect(out[1]).toBe('ijklmnop');
+  });
+
+  test('truncates the final line when remaining text still overflows', () => {
+    // "abcdefghijklmnopqrstuvwxyz" — 26 chars, perLine=8, maxLines=2.
+    // Line 1 takes 8, line 2 has 18 chars left → truncLabel to 8 → "abcdefg…".
+    const out = wrapN('abcdefghijklmnopqrstuvwxyz', 8, 2);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toBe('abcdefgh');
+    expect(out[1]).toBe('ijklmno…');
+  });
+
+  test('three-line wrap walks through the rest', () => {
+    // "first second third fourth" with perLine=8, maxLines=3:
+    //   line 1 break at space idx 5 ("first")
+    //   line 2 break at space idx 6 in remaining "second third fourth"
+    //     ("second")
+    //   line 3 = "third fo…" (truncLabel cap)
+    const out = wrapN('first second third fourth', 8, 3);
+    expect(out).toHaveLength(3);
+    expect(out[0]).toBe('first');
+    expect(out[1]).toBe('second');
+    expect(out[2]).toMatch(/^third/);
+  });
+
+  test('respects maxLines=2 boundary: never returns 3 lines', () => {
+    const out = wrapN('a b c d e f g h i j k', 4, 2);
+    expect(out.length).toBeLessThanOrEqual(2);
+  });
+
+  test('wrap2 alias matches wrapN(..., 2)', () => {
+    const cases = ['short', 'medium text', 'a very long agent name'];
+    for (const s of cases) {
+      expect(Array.from(wrap2(s, 8))).toEqual(wrapN(s, 8, 2));
+    }
+  });
+
+  test('handles empty + edge cases without throwing', () => {
+    // Empty input: the `length <= per` early-return falls through and
+    // returns a single empty line. The renderer's `length > 1` check
+    // treats that as "no wrap" and falls back to the truncLabel path
+    // (which renders nothing visible for an empty name).
+    expect(wrapN('', 10, 2)).toEqual(['']);
+    expect(wrapN('a', 0, 2)).toEqual(['a']); // per=1 floor
+  });
+});
+
+describe("layoutFor — density:'full' (PR-4)", () => {
+  // Plan dimensions:
+  //   orch row  — MIN_W/MAX_W 110/168 → 140/264; tile H 56 → 64
+  //   orch arc  — TILE_W/TILE_H 70/26 → 130/40; viewBox H 220 → 260
+  //   chain row — MIN_W/MAX_W 132/248 → 160/280; tile H 56 → 64
+  //   chain wrap2 — TILE_W/TILE_H 116/50 → 120/64
+  //   chain wrap3 — TILE_W/TILE_H 102/50 → 108/60
+  test('orch row: full bumps WORKER_H from 56 to 64', () => {
+    const compact = layoutFor({ mode: 'orchestrator', density: 'compact' }, mkProjects(3));
+    const full = layoutFor({ mode: 'orchestrator', density: 'full' }, mkProjects(3));
+    if (compact.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    if (full.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    const compactWorker = compact.geometry.workers[0]! as LaidRectTile;
+    const fullWorker = full.geometry.workers[0]! as LaidRectTile;
+    expect(compactWorker.h).toBe(56);
+    expect(fullWorker.h).toBe(64);
+  });
+
+  test('orch arc: full bumps viewBox H 220 → 260 and tile to 130×40', () => {
+    const compact = layoutFor({ mode: 'orchestrator', density: 'compact' }, mkProjects(6));
+    const full = layoutFor({ mode: 'orchestrator', density: 'full' }, mkProjects(6));
+    expect(compact.height).toBe(220);
+    expect(full.height).toBe(260);
+    if (full.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    const fullTile = full.geometry.workers[0]! as LaidRectTile;
+    expect(fullTile.w).toBe(130);
+    expect(fullTile.h).toBe(40);
+  });
+
+  test('orch arc: full pre-wraps name into 1-2 lines', () => {
+    const full = layoutFor({ mode: 'orchestrator', density: 'full' }, mkProjects(6));
+    if (full.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    for (const w of full.geometry.workers) {
+      if (w.kind !== 'rect') throw new Error('expected rect tile');
+      expect(w.nameLines).not.toBeNull();
+      expect(w.nameLines!.length).toBeGreaterThan(0);
+      expect(w.nameLines!.length).toBeLessThanOrEqual(2);
+    }
+  });
+
+  test('orch ring (N=10): full sets under-badge labels; compact leaves them null', () => {
+    const compact = layoutFor({ mode: 'orchestrator', density: 'compact' }, mkProjects(10));
+    const full = layoutFor({ mode: 'orchestrator', density: 'full' }, mkProjects(10));
+    if (compact.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    if (full.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    for (const w of compact.geometry.workers) {
+      if (w.kind !== 'badge') throw new Error('expected badge');
+      expect(w.underLabel ?? null).toBeNull();
+    }
+    for (const w of full.geometry.workers) {
+      if (w.kind !== 'badge') throw new Error('expected badge');
+      expect(w.underLabel).toBeTruthy();
+      expect(w.underLabel!.fontSize).toBe(11);
+      expect(w.underLabel!.lines.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('orch twoRing (N=18): full sets under-badge labels at FS=10', () => {
+    const full = layoutFor({ mode: 'orchestrator', density: 'full' }, mkProjects(18));
+    if (full.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    for (const w of full.geometry.workers) {
+      if (w.kind !== 'badge') throw new Error('expected badge');
+      expect(w.underLabel?.fontSize).toBe(10);
+    }
+  });
+
+  test('orch concentric (N=30): full labels ONLY inner ring; outer rings stay glyph-only', () => {
+    const full = layoutFor({ mode: 'orchestrator', density: 'full' }, mkProjects(30));
+    if (full.geometry.mode !== 'orchestrator') throw new Error('expected orchestrator');
+    // Inner ring holds 6+6·1 = 12 slots; outer ring holds the remaining 18.
+    // First 12 should be labeled, last 18 should not.
+    const workers = full.geometry.workers as LaidBadgeTile[];
+    const inner = workers.slice(0, 12);
+    const outer = workers.slice(12);
+    for (const w of inner) {
+      expect(w.underLabel).toBeTruthy();
+      expect(w.underLabel!.fontSize).toBe(9);
+    }
+    for (const w of outer) {
+      expect(w.underLabel ?? null).toBeNull();
+    }
+  });
+
+  test('chain row: full bumps NODE_H 56 → 64, MIN/MAX 132/248 → 160/280', () => {
+    const full = layoutFor({ mode: 'chain', density: 'full' }, mkProjects(3));
+    if (full.geometry.mode !== 'chain') throw new Error('expected chain');
+    const tile = full.geometry.tiles[0]! as LaidRectTile;
+    expect(tile.h).toBe(64);
+    expect(tile.w).toBeGreaterThanOrEqual(160);
+    expect(tile.w).toBeLessThanOrEqual(280);
+  });
+
+  test('chain wrap2 (N=15): full bumps TILE_W/H 116/50 → 120/64 + pre-wraps names', () => {
+    const full = layoutFor({ mode: 'chain', density: 'full' }, mkProjects(15));
+    if (full.geometry.mode !== 'chain') throw new Error('expected chain');
+    const tile = full.geometry.tiles[0]! as LaidRectTile;
+    expect(tile.w).toBe(120);
+    expect(tile.h).toBe(64);
+    expect(tile.nameLines).not.toBeNull();
+  });
+
+  test('chain wrap3 (N=22): full bumps TILE_W/H 102/50 → 108/60 + pre-wraps names', () => {
+    const full = layoutFor({ mode: 'chain', density: 'full' }, mkProjects(22));
+    if (full.geometry.mode !== 'chain') throw new Error('expected chain');
+    const tile = full.geometry.tiles[0]! as LaidRectTile;
+    expect(tile.w).toBe(108);
+    expect(tile.h).toBe(60);
+    expect(tile.nameLines).not.toBeNull();
+  });
+
+  test("density default ('compact' when unset) matches explicit compact", () => {
+    // The whole point of `density?: ...` is that callers who don't pass
+    // it get the today behavior. Snapshot equivalence on a key field per
+    // mode is enough to prove the default is wired through.
+    const cases: Array<{ mode: 'orchestrator' | 'chain'; n: number }> = [
+      { mode: 'orchestrator', n: 3 },
+      { mode: 'orchestrator', n: 6 },
+      { mode: 'orchestrator', n: 10 },
+      { mode: 'chain', n: 5 },
+      { mode: 'chain', n: 15 },
+    ];
+    for (const { mode, n } of cases) {
+      const defaulted = layoutFor({ mode }, mkProjects(n));
+      const explicit = layoutFor({ mode, density: 'compact' }, mkProjects(n));
+      expect(defaulted.width).toBe(explicit.width);
+      expect(defaulted.height).toBe(explicit.height);
+    }
   });
 });
 
@@ -556,6 +757,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
               "innerW": 50,
               "kind": "rect",
               "name": "agent-1",
+              "nameLines": null,
               "nameY": 74,
               "pid": 1,
               "role": "",
@@ -574,6 +776,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
               "innerW": 50,
               "kind": "rect",
               "name": "agent-2",
+              "nameLines": null,
               "nameY": 139.0538238691624,
               "pid": 2,
               "role": "",
@@ -592,6 +795,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
               "innerW": 50,
               "kind": "rect",
               "name": "agent-3",
+              "nameLines": null,
               "nameY": 166,
               "pid": 3,
               "role": "",
@@ -610,6 +814,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
               "innerW": 50,
               "kind": "rect",
               "name": "agent-4",
+              "nameLines": null,
               "nameY": 139.0538238691624,
               "pid": 4,
               "role": "",
@@ -628,6 +833,7 @@ describe('layoutFor — snapshot of returned Layout JSON', () => {
               "innerW": 50,
               "kind": "rect",
               "name": "agent-5",
+              "nameLines": null,
               "nameY": 74.00000000000001,
               "pid": 5,
               "role": "",
