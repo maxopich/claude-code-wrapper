@@ -1205,6 +1205,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       return state;
     }
 
+    case 'project_facts': {
+      // PR-6: the template-preview modal manages its own per-modal-open
+      // cache for facts replies via a side-channel subscription (same
+      // pattern as session_log_chunk above). The reducer doesn't store
+      // them in AppState because (a) the cache invalidates on modal
+      // close+reopen, and (b) facts are read-only static project metadata
+      // the operator already sees in the sidebar. Deliberate no-op.
+      return state;
+    }
+
     case 'wrapper_error': {
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)

@@ -99,6 +99,13 @@ export function MultiAgentTab(props: {
    * doesn't belong in Redux. Returns the unsubscribe fn.
    */
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+  /**
+   * PR-6: request a project's static facts (path + CLAUDE.md head) for the
+   * per-participant disclosure inside the template-preview modal. The matching
+   * `project_facts` reply arrives via `subscribeServerMsg` (not Redux —
+   * each modal-open owns its own cache).
+   */
+  onReadProjectFacts: (projectId: number) => void;
 }) {
   const { multiAgent, projects } = props;
   if (multiAgent.active) {
@@ -146,6 +153,12 @@ function DraftView(props: {
   onUpdateTemplateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
   onDeleteTemplate: (id: string) => void;
   onApplyTemplate: (t: MultiAgentTemplate) => void;
+  /** PR-6: request a project's static facts for the modal's per-participant
+   *  disclosure (path + CLAUDE.md head). Reply via `subscribeServerMsg`. */
+  onReadProjectFacts: (projectId: number) => void;
+  /** PR-6: same subscription seam Logs uses — the modal's cache lives here,
+   *  not in Redux, so it can invalidate per modal-open. */
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const { multiAgent, projects } = props;
   const participants = multiAgent.draftParticipants
@@ -249,6 +262,8 @@ function DraftView(props: {
             onApply={props.onApplyTemplate}
             onDelete={props.onDeleteTemplate}
             onUpdateRoles={props.onUpdateTemplateRoles}
+            onReadProjectFacts={props.onReadProjectFacts}
+            subscribeServerMsg={props.subscribeServerMsg}
           />
         </section>
 
@@ -580,6 +595,10 @@ function TemplatesPanel(props: {
   onApply: (t: MultiAgentTemplate) => void;
   onDelete: (id: string) => void;
   onUpdateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
+  /** PR-6: forwarded to the per-template preview's expanded modal. */
+  onReadProjectFacts: (projectId: number) => void;
+  /** PR-6: forwarded subscription seam for the modal's facts cache. */
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -622,6 +641,8 @@ function TemplatesPanel(props: {
         projects={props.projects}
         onApply={props.onApply}
         onUpdateRoles={props.onUpdateRoles}
+        onReadProjectFacts={props.onReadProjectFacts}
+        subscribeServerMsg={props.subscribeServerMsg}
       />
     </div>
   );
@@ -713,6 +734,10 @@ function TemplatePreview(props: {
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
   onUpdateRoles: (t: MultiAgentTemplate, roles: Record<string, string>) => void;
+  /** PR-6: forwarded to the fullscreen modal (per-participant disclosure). */
+  onReadProjectFacts: (projectId: number) => void;
+  /** PR-6: forwarded subscription seam for the modal's facts cache. */
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const { template, projects } = props;
   const resolved = template.participants
@@ -815,6 +840,8 @@ function TemplatePreview(props: {
             props.onUpdateRoles(template, normalizeRoles(next));
           }}
           origin={modalOrigin ?? undefined}
+          onReadProjectFacts={props.onReadProjectFacts}
+          subscribeServerMsg={props.subscribeServerMsg}
           onClose={() => {
             setModalOpen(false);
             // Focus restore — the expand button lives inside the compact

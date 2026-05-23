@@ -14,11 +14,25 @@
  *    `.is-selected` outline.
  *
  * No add/remove of agents here — template authoring is elsewhere.
+ *
+ * PR-6: per-row "About this project" disclosure surfaces the working
+ * directory and the head of the project's root CLAUDE.md (when present).
+ * Lazy-loaded — the RPC fires on first summary open, then a `useRef<Map>`
+ * caches the reply for the lifetime of this panel instance (a closed-then-
+ * reopened modal remounts this panel and re-fetches, so stale on-disk state
+ * is impossible to display).
  */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
-import type { Project } from '@cebab/shared/protocol';
+import type { Project, ProjectFacts, ServerMsg } from '@cebab/shared/protocol';
 import { agentIdentity } from '../../agentIdentity';
+
+/** Local cache entry per project. `'loading'` covers the gap between
+ *  the RPC firing and the reply landing; `null` is an explicit "we've
+ *  asked once, never got a reply" placeholder (currently unused — the
+ *  server always replies — but keeps the union honest if we later add
+ *  a timeout or wrapper_error path). */
+type FactsState = 'loading' | ProjectFacts;
 
 export function SplitViewPanel(props: {
   participants: Project[];
@@ -27,9 +41,41 @@ export function SplitViewPanel(props: {
   onCommitRole?: (projectId: number, text: string) => void;
   selectedPid: number | null;
   onSelect: (projectId: number | null) => void;
+  /** PR-6: request a project's static facts. Optional — when absent the
+   *  disclosure is still rendered but its summary toggle is inert (the
+   *  test harness doesn't need a WS round-trip for non-facts tests). */
+  onReadProjectFacts?: (projectId: number) => void;
+  /** PR-6: subscription seam. Paired with `onReadProjectFacts`. */
+  subscribeServerMsg?: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
-  const { participants, roles, selectedPid } = props;
+  const { participants, roles, selectedPid, onReadProjectFacts, subscribeServerMsg } = props;
   const taRefs = useRef(new Map<number, HTMLTextAreaElement>());
+
+  // PR-6: per-panel-instance cache for project_facts replies. The modal
+  // unmounts this panel when closed; reopening creates a fresh Map so
+  // closed-then-reopened modal sees fresh on-disk state (matches the plan's
+  // "(projectId, modalOpenedAt)" invalidation contract without an explicit ts).
+  const [facts, setFacts] = useState<Map<number, FactsState>>(() => new Map());
+
+  // Subscribe to project_facts ServerMsgs and merge into the local cache.
+  // The subscription's lifetime tracks this panel — no leaks across modal
+  // reopens (each new panel adds its own subscriber, the previous one was
+  // removed on unmount).
+  useEffect(() => {
+    if (!subscribeServerMsg) return;
+    const unsub = subscribeServerMsg((msg) => {
+      if (msg.type !== 'project_facts') return;
+      setFacts((prev) => {
+        // Only swap entries that exist in our cache (i.e. we asked for them);
+        // a stray reply from another surface won't poison this panel's state.
+        if (!prev.has(msg.projectId)) return prev;
+        const next = new Map(prev);
+        next.set(msg.projectId, msg.facts);
+        return next;
+      });
+    });
+    return unsub;
+  }, [subscribeServerMsg]);
 
   // Bidi sync: scroll + focus the matching textarea when the canvas
   // selects a tile. The previous-pid ref guards against re-focusing
@@ -53,6 +99,20 @@ export function SplitViewPanel(props: {
     });
   }, [selectedPid]);
 
+  /** First-open handler for the per-row "About this project" disclosure.
+   *  Fires the RPC at most once per panel instance per project — a second
+   *  open after a close reuses the cached reply (no extra round-trip). */
+  function onFactsToggle(projectId: number, open: boolean) {
+    if (!open || !onReadProjectFacts) return;
+    if (facts.has(projectId)) return; // cached (loading or resolved) — no refetch
+    setFacts((prev) => {
+      const next = new Map(prev);
+      next.set(projectId, 'loading');
+      return next;
+    });
+    onReadProjectFacts(projectId);
+  }
+
   return (
     <div className="tpl-panel-inner">
       <header className="tpl-panel-header">
@@ -71,6 +131,7 @@ export function SplitViewPanel(props: {
             ['--identity-hue']: ident.hueVar ?? 'var(--fg-3)',
           } as CSSProperties;
           const role = roles[String(p.id)] ?? '';
+          const cached = facts.get(p.id);
           return (
             <li
               key={p.id}
@@ -114,11 +175,76 @@ export function SplitViewPanel(props: {
                     // via onChange), so closing isn't data-lossy.
                   }}
                 />
+                {/* PR-6: per-row static facts disclosure. Closed by default;
+                 *  the first open fires the WS round-trip, subsequent opens
+                 *  reuse the cached reply for this panel instance. */}
+                <ProjectFactsDisclosure
+                  projectId={p.id}
+                  facts={cached}
+                  onToggle={(open) => onFactsToggle(p.id, open)}
+                />
               </div>
             </li>
           );
         })}
       </ul>
     </div>
+  );
+}
+
+/** PR-6: collapsed `<details>` block per panel row.
+ *
+ *  Rendered always (even when the parent supplied no `onReadProjectFacts` —
+ *  in that case the body shows nothing on open but the summary still
+ *  renders, which is what the test harness wants). The body only mounts
+ *  when open, so a closed disclosure is essentially free.
+ */
+function ProjectFactsDisclosure(props: {
+  projectId: number;
+  facts: FactsState | undefined;
+  onToggle: (open: boolean) => void;
+}) {
+  const bodyId = `tpl-panel-facts-${props.projectId}`;
+  return (
+    <details
+      className="tpl-panel-facts"
+      onToggle={(e) => props.onToggle((e.target as HTMLDetailsElement).open)}
+    >
+      <summary className="tpl-panel-facts-summary" aria-controls={bodyId}>
+        About this project
+      </summary>
+      <div id={bodyId} className="tpl-panel-facts-body">
+        <ProjectFactsBody facts={props.facts} />
+      </div>
+    </details>
+  );
+}
+
+/** Render the facts payload. Three states:
+ *  - undefined: the disclosure was opened, RPC not yet fired (or no
+ *    onReadProjectFacts was provided). Shows nothing — the body is empty.
+ *  - 'loading': RPC fired, no reply yet. Shows a low-noise placeholder.
+ *  - ProjectFacts: render only the fields that are present. */
+function ProjectFactsBody(props: { facts: FactsState | undefined }) {
+  const { facts } = props;
+  if (facts === undefined) return null;
+  if (facts === 'loading') {
+    return <p className="tpl-panel-facts-loading">Loading…</p>;
+  }
+  return (
+    <>
+      <div className="tpl-panel-facts-row">
+        <strong>Working directory:</strong> <code>{facts.path || '—'}</code>
+      </div>
+      {facts.claudeMdHead && (
+        <details className="tpl-panel-facts-claudemd">
+          <summary>
+            CLAUDE.md
+            {facts.claudeMdSizeLabel ? <> ({facts.claudeMdSizeLabel})</> : null}
+          </summary>
+          <pre className="tpl-panel-claudemd-head">{facts.claudeMdHead}</pre>
+        </details>
+      )}
+    </>
   );
 }

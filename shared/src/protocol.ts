@@ -403,6 +403,21 @@ export type ClientMsg =
       offset: number;
       limit: number;
       revealSensitive?: boolean;
+    }
+  | {
+      /**
+       * PR-6: ask the server for static facts about a project — its absolute
+       * working directory and a short head of its root `CLAUDE.md` (if any).
+       * Read-only and idempotent; safe to call without any active session.
+       *
+       * The handler reads CLAUDE.md fresh on each request (no server-side
+       * cache); the client caches per-(projectId, modal-open) so a closed-and-
+       * reopened modal always sees current on-disk state. Truncated to a small
+       * head (~12 lines / ~2048 bytes) — the disclosure is "what's at the top"
+       * not "the whole conventions file". Reply: `project_facts`.
+       */
+      type: 'read_project_facts';
+      projectId: number;
     };
 
 // ---- Server → Browser ----
@@ -777,7 +792,49 @@ export type ServerMsg =
       hasMore: boolean;
       revealedSensitive: boolean;
     }
+  | {
+      /**
+       * PR-6: reply to `read_project_facts`. Carries the project's static
+       * facts for the per-participant disclosure inside the template-preview
+       * modal. Always emitted (even when the project has no readable
+       * `CLAUDE.md`) so the client can resolve its pending request — the
+       * head/size fields are simply absent in that case.
+       *
+       * `name` and `path` echo from the `projects` row; the client could read
+       * those locally but echoing keeps the response self-contained for the
+       * Modal's per-`(projectId, modalOpenedAt)` cache.
+       */
+      type: 'project_facts';
+      projectId: number;
+      facts: ProjectFacts;
+    }
   | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string };
+
+/**
+ * PR-6: static facts about a project for the per-participant disclosure.
+ *
+ * Fields that aren't currently knowable on this codebase (model, MCP servers,
+ * tool count) are intentionally absent. The client renders only fields that
+ * are present — no placeholders, no "—" rows — so adding a new field later
+ * is a purely additive change.
+ */
+export type ProjectFacts = {
+  /** Project display name (echo of `projects.name`). */
+  name: string;
+  /** Absolute working directory (echo of `projects.path`). */
+  path: string;
+  /**
+   * Head of the project's root `CLAUDE.md` (up to ~12 lines / ~2048 bytes).
+   * Absent when the file doesn't exist, isn't a regular file, or fails to
+   * read. The server normalises line endings to `\n` and never throws.
+   */
+  claudeMdHead?: string;
+  /**
+   * Human label for the FULL on-disk file size (e.g. `1.2 KB`), not the
+   * truncated head. Present whenever `claudeMdHead` is present.
+   */
+  claudeMdSizeLabel?: string;
+};
 
 /**
  * One past multi-agent run, as surfaced to the Iterations browser UI.

@@ -468,6 +468,14 @@ export function App() {
       msgSubscribersRef.current.delete(cb);
     };
   }
+  function readProjectFacts(projectId: number) {
+    // PR-6: WS round-trip for the per-participant facts disclosure inside
+    // the template-preview modal. The matching `project_facts` reply lives
+    // outside Redux — consumers subscribe via `subscribeServerMsg` and own
+    // the per-modal-open cache (so closed-then-reopened modal sees fresh
+    // on-disk state).
+    wsRef.current?.send({ type: 'read_project_facts', projectId });
+  }
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
   // refresh after each `multi_agent_ended` so a just-finished run appears
@@ -670,6 +678,7 @@ export function App() {
                 onApplyTemplate={applyTemplate}
                 onLoadSessionLog={loadSessionLog}
                 subscribeServerMsg={subscribeServerMsg}
+                onReadProjectFacts={readProjectFacts}
               />
             )}
           </>

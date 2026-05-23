@@ -2818,6 +2818,104 @@ pre {
   border-color: var(--accent);
 }
 
+/* ---- PR-6: per-participant project facts disclosure ----
+ * Collapsed "About this project" disclosure under each panel row's
+ * role textarea. Lazy-loads via WS RPC on first open (cache lives in
+ * SplitViewPanel's useState, invalidated when the modal remounts). */
+.tpl-panel-facts {
+  margin-top: var(--s-2);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.tpl-panel-facts > summary {
+  /* `list-style: none` strips the native disclosure triangle in most
+   * browsers; ::-webkit-details-marker covers older WebKit/Safari builds.
+   * We re-supply a textual marker so the affordance is shape-coded, not
+   * color-only — important because the row is already busy. */
+  list-style: none;
+  cursor: pointer;
+  color: var(--fg-3);
+  padding: 4px 0;
+  user-select: none;
+}
+.tpl-panel-facts > summary::-webkit-details-marker {
+  display: none;
+}
+.tpl-panel-facts > summary::before {
+  content: '▸ ';
+  display: inline-block;
+  width: 1em;
+  /* No transition under prefers-reduced-motion (the disclosure flicker
+   * doesn't help anyone) — handled by the global reduce rule near the end
+   * of this file. */
+  transition: transform 120ms var(--ease-out, ease-out);
+}
+.tpl-panel-facts[open] > summary::before {
+  content: '▾ ';
+}
+.tpl-panel-facts > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.tpl-panel-facts-body {
+  padding: 4px 0 0 1em; /* indent under the textual marker */
+  display: grid;
+  gap: var(--s-1);
+}
+.tpl-panel-facts-row {
+  /* Path can be a long absolute string; let it wrap rather than ellipsise
+   * so the operator can read the whole working directory at a glance. */
+  word-break: break-all;
+  line-height: 1.4;
+}
+.tpl-panel-facts-row code {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 1px 4px;
+}
+.tpl-panel-facts-loading {
+  color: var(--fg-3);
+  font-style: italic;
+  margin: 0;
+}
+.tpl-panel-facts-claudemd > summary {
+  cursor: pointer;
+  color: var(--fg-3);
+  list-style: none;
+  padding: 2px 0;
+}
+.tpl-panel-facts-claudemd > summary::-webkit-details-marker {
+  display: none;
+}
+.tpl-panel-facts-claudemd > summary::before {
+  content: '▸ ';
+  display: inline-block;
+  width: 1em;
+}
+.tpl-panel-facts-claudemd[open] > summary::before {
+  content: '▾ ';
+}
+.tpl-panel-claudemd-head {
+  /* Monospaced head excerpt. Caps the height so a verbose CLAUDE.md head
+   * doesn't dominate the panel; overflow scrolls. */
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  margin: 4px 0 0 0;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Full-bleed on small screens (AC-20). 0 padding, 0 radius, full
  * viewport. Tiles inside are already ≥44×44 at typical N due to the
  * stage being big at min(100vw,1400px). */

@@ -26,7 +26,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
-import type { MultiAgentTemplate, Project } from '@cebab/shared/protocol';
+import type { MultiAgentTemplate, Project, ServerMsg } from '@cebab/shared/protocol';
 import { useModalKeys } from '../../useModalKeys';
 import { AgentDiagram } from './AgentDiagram';
 import { SplitViewPanel } from './SplitViewPanel';
@@ -57,6 +57,14 @@ export function TemplatePreviewModal(props: {
    *  `transform-origin`. Without it the dialog scales from its own
    *  center (still legible but loses the "from the button" feel). */
   origin?: ModalOrigin;
+  /** PR-6: request a participant project's static facts (path + CLAUDE.md
+   *  head). Optional so test harnesses that don't exercise the disclosure
+   *  can omit the WS plumbing; when absent, `SplitViewPanel` renders
+   *  the disclosure but its summary click is a no-op (closed state). */
+  onReadProjectFacts?: (projectId: number) => void;
+  /** PR-6: subscription seam for `project_facts` replies. Paired with
+   *  `onReadProjectFacts` — present together or absent together. */
+  subscribeServerMsg?: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const { template, participants, roles, onClose } = props;
   const n = participants.length;
@@ -236,6 +244,8 @@ export function TemplatePreviewModal(props: {
                 onCommitRole={props.onCommitRole}
                 selectedPid={selectedPid}
                 onSelect={setSelectedPid}
+                onReadProjectFacts={props.onReadProjectFacts}
+                subscribeServerMsg={props.subscribeServerMsg}
               />
             </aside>
           )}
