@@ -88,6 +88,52 @@ describe('CSS gate (Risk #1)', () => {
   });
 });
 
+describe('CSS gate — PR-5 motion polish', () => {
+  // PR-5 (round 2): the trip-dot's hue handoff was moved out of
+  // keyframes (inline `fill` set by AgentDiagram per leg). The
+  // keyframes must stay fill-free so the dot's color doesn't
+  // interpolate across the trip — that interpolation caused the
+  // mid-trip velocity kink the PR was written to eliminate.
+  test('tpl-flow keyframes contain no fill declaration', () => {
+    // Match either keyframe block; the body cannot mention `fill:`.
+    expect(stylesCss).not.toMatch(/@keyframes\s+tpl-flow-forward\s*\{[^}]*fill:/);
+    expect(stylesCss).not.toMatch(/@keyframes\s+tpl-flow-return\s*\{[^}]*fill:/);
+  });
+
+  test('.tpl-flow-dot opts into compositor with will-change', () => {
+    // Without will-change: offset-distance, browsers fall back to
+    // main-thread paint for the SVG dot, visible as a mid-trip stutter
+    // on slower machines.
+    expect(stylesCss).toMatch(/\.tpl-flow-dot\s*\{[^}]*will-change:\s*offset-distance/);
+  });
+
+  test('.tpl-stage uses contain: layout style (NOT size)', () => {
+    // `contain: layout style` scopes invalidations to the stage; adding
+    // `size` would break the figure's aspect-ratio sizing contract.
+    //
+    // The `.tpl-stage` block has CSS comments that mention `}` (e.g.
+    // `figure { margin: 1em 40px }` cited as an explanation). Strip
+    // comments first so the [^}] body match doesn't terminate inside
+    // the wrong rule.
+    const noComments = stylesCss.replace(/\/\*[\s\S]*?\*\//g, '');
+    const stageBlock = noComments.match(/\.tpl-stage\s*\{[^}]*\}/);
+    expect(stageBlock).not.toBeNull();
+    expect(stageBlock![0]).toMatch(/contain:\s*layout\s+style/);
+    // Belt: ensure we didn't accidentally add `contain: size` anywhere
+    // on .tpl-stage.
+    expect(stageBlock![0]).not.toMatch(/contain:\s*size/);
+  });
+
+  test('arrival keyframes split per tile kind (rect vs badge base widths)', () => {
+    // The badge tile has base stroke-width 3 (PR-4 hue ring); a single
+    // 1→2.4→1 keyframe would dip below base. Two keyframes — one
+    // anchored at 1, one at 3 — keep the pulse direction "out then in"
+    // for both tile kinds.
+    expect(stylesCss).toMatch(/@keyframes\s+tpl-node-arrival-rect/);
+    expect(stylesCss).toMatch(/@keyframes\s+tpl-node-arrival-badge/);
+  });
+});
+
 describe('CSS gate — PR-3 directional markers', () => {
   test('orchestrator arrowhead and tail both declare a fill', () => {
     // The visual contract for PR-3: every orchestrator edge has BOTH a
