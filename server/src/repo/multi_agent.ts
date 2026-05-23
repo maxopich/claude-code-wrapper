@@ -73,6 +73,24 @@ export type MultiAgentSessionRow = {
    *  caused the current pause. NULL when no pause active. Read by the WS
    *  `continue_through_mutation` handler to find which agent to re-deliver. */
   pending_mutation_id: number | null;
+  /** PR-7 (migration 013): soft FK to the saved template id this run was
+   *  started FROM. NULL for ad-hoc runs and for every pre-013 row (those
+   *  sessions never recorded which template they came from). Used by the
+   *  templates UI's "Last run" rail. */
+  template_id: string | null;
+  /** PR-7 (migration 013): the EFFECTIVE hop budget at session start
+   *  (post-resolution). The rail renders `hops_used / hop_budget`; the
+   *  router enforced this value during the run. NULL on pre-013 rows. */
+  hop_budget: number | null;
+  /** PR-7 (migration 013): final persisted hop count at teardown. NULL
+   *  while the session is still running AND on pre-013 rows. The rail
+   *  uses `hops_used === hop_budget` to derive the "at cap" yellow chip. */
+  hops_used: number | null;
+  /** PR-7 (migration 013): first operator-facing error text observed
+   *  during the run, truncated to ~200 chars at write time. NULL when the
+   *  run ended cleanly and on pre-013 rows. Surfaced as the
+   *  "failed · <excerpt>" tail in the rail's red chip. */
+  first_error: string | null;
 };
 
 /**
@@ -174,16 +192,80 @@ export function createMultiAgentSession(
   iterationId: string | null = null,
   sessionFolder: string | null = null,
   lifecycle: MultiAgentLifecycle = 'persistent',
+  /** PR-7: optional template provenance + effective hop budget at session
+   *  start. Both are nullable in the row so callers that don't pass them
+   *  (ad-hoc runs, the pre-PR-7 chain/orchestrator call sites that
+   *  haven't been updated yet) keep working — the rail simply doesn't
+   *  attribute those rows to any template. */
+  opts: { templateId?: string | null; hopBudget?: number | null } = {},
 ): MultiAgentSessionRow {
   const now = Date.now();
   getDb()
     .prepare(
       `INSERT INTO multi_agent_sessions
-         (id, mode, started_at, ended_at, status, iteration_id, session_folder, lifecycle)
-       VALUES (?, ?, ?, NULL, 'running', ?, ?, ?)`,
+         (id, mode, started_at, ended_at, status, iteration_id, session_folder, lifecycle,
+          template_id, hop_budget)
+       VALUES (?, ?, ?, NULL, 'running', ?, ?, ?, ?, ?)`,
     )
-    .run(id, mode, now, iterationId, sessionFolder, lifecycle);
+    .run(
+      id,
+      mode,
+      now,
+      iterationId,
+      sessionFolder,
+      lifecycle,
+      opts.templateId ?? null,
+      opts.hopBudget ?? null,
+    );
   return getMultiAgentSession(id)!;
+}
+
+/**
+ * PR-7: record final hops_used + (optional) first_error onto a row at
+ * teardown time. Idempotent: a second call (e.g. on a doubled teardown
+ * path) overwrites the prior values with the new ones, which is fine
+ * because the teardown sequence is once-per-session-guarded upstream.
+ *
+ * `firstError` is truncated to 200 chars defensively even though the
+ * caller is expected to truncate too — defence in depth keeps a
+ * pathological "first error" string from bloating the row.
+ */
+export function recordSessionTeardown(
+  id: string,
+  opts: { hopsUsed: number; firstError?: string | null },
+): void {
+  const trimmedError =
+    typeof opts.firstError === 'string' && opts.firstError.length > 0
+      ? opts.firstError.slice(0, 200)
+      : null;
+  getDb()
+    .prepare(
+      `UPDATE multi_agent_sessions
+          SET hops_used = ?, first_error = ?
+        WHERE id = ?`,
+    )
+    .run(opts.hopsUsed, trimmedError, id);
+}
+
+/**
+ * PR-7: SELECT the most-recent session row started from the given template
+ * id, or `undefined` when no such row exists. Used by the templates UI's
+ * "Last run" rail; the iteration directory + status enum are derived from
+ * the row at the WS handler boundary.
+ *
+ * Sort by `started_at DESC` — the rail is "most recent attempt for this
+ * template", not "most recent successful run". A failed run is still
+ * informative.
+ */
+export function getLastRunForTemplate(templateId: string): MultiAgentSessionRow | undefined {
+  return getDb()
+    .prepare<[string], MultiAgentSessionRow>(
+      `SELECT * FROM multi_agent_sessions
+        WHERE template_id = ?
+        ORDER BY started_at DESC
+        LIMIT 1`,
+    )
+    .get(templateId);
 }
 
 export function endMultiAgentSession(id: string, status: MultiAgentStatus): void {

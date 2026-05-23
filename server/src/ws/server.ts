@@ -61,6 +61,7 @@ import {
 import {
   clearFinishedMultiAgentSessions,
   computeRecoveryContext,
+  getLastRunForTemplate,
   getMultiAgentSession,
   getPendingMutation,
   getPendingRetry,
@@ -948,7 +949,16 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // Resolve once per start so the wire's `hopBudget` matches what the
       // router was constructed with (Settings-modal saves between fetch and
       // start would otherwise risk a brief mismatch).
-      const hopBudget = resolveHopBudget();
+      //
+      // PR-7 precedence: per-run override on the message > global default.
+      // Per-template hopBudget is mirrored onto `msg.hopBudget` client-side
+      // when the operator clicks Apply, so the server doesn't need to look
+      // up the template here. Clamped to >= 1 defensively.
+      const requestedHopBudget =
+        typeof msg.hopBudget === 'number' && Number.isFinite(msg.hopBudget) && msg.hopBudget >= 1
+          ? Math.floor(msg.hopBudget)
+          : null;
+      const hopBudget = requestedHopBudget ?? resolveHopBudget();
 
       if (msg.mode === 'orchestrator') {
         let workers;
@@ -978,6 +988,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             onPendingMutation,
             hopBudget,
             pauseOnMutation: msg.pauseOnMutation === true,
+            // PR-7: stamp template provenance onto the row so the rail can
+            // SELECT by template post-teardown. Absent on ad-hoc runs.
+            templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
           });
           conn.multiAgent = handle;
           send(conn.ws, {
@@ -1031,6 +1044,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           onPendingMutation,
           hopBudget,
           pauseOnMutation: msg.pauseOnMutation === true,
+          // PR-7: stamp template provenance onto the row.
+          templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
         });
         conn.multiAgent = handle;
         send(conn.ws, {
@@ -1384,6 +1399,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // PR-6: passthrough only — repo persists as-is, future editor
         // validates via shared/topology.ts before sending.
         layout: msg.layout,
+        // PR-7: optional per-template hop budget. The repo clamps + drops
+        // non-finite/sub-1 input; passing `undefined` keeps the template
+        // on the global default (no override).
+        hopBudget: msg.hopBudget,
       });
       send(conn.ws, { type: 'templates', items });
       return;
@@ -1429,6 +1448,52 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     }
     case 'send_message': {
       await runOneTurn(conn, msg);
+      return;
+    }
+    case 'get_last_run_for_template': {
+      // PR-7: read the most-recent persisted row for this template id, map
+      // to the wire shape, and reply. Always emits — `lastRun: null` when
+      // no row matches (template never used, or only used by pre-013 runs
+      // whose `template_id` was never recorded). Pure read; safe to call
+      // outside an active session.
+      if (typeof msg.templateId !== 'string' || msg.templateId.length === 0) {
+        send(conn.ws, {
+          type: 'last_run_for_template',
+          templateId: typeof msg.templateId === 'string' ? msg.templateId : '',
+          lastRun: null,
+        });
+        return;
+      }
+      const row = getLastRunForTemplate(msg.templateId);
+      if (!row) {
+        send(conn.ws, { type: 'last_run_for_template', templateId: msg.templateId, lastRun: null });
+        return;
+      }
+      // Resolve artifactsDir from the iteration id + session_folder, mirroring
+      // the pattern used by the iterations browser handler above. NULL on
+      // pre-006 rows with no iteration_id, omitted entirely on the wire then.
+      const artifactsDir = row.iteration_id
+        ? row.session_folder
+          ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id)
+          : busIterationDir(row.iteration_id)
+        : undefined;
+      send(conn.ws, {
+        type: 'last_run_for_template',
+        templateId: msg.templateId,
+        lastRun: {
+          sessionId: row.id,
+          startedAt: row.started_at,
+          endedAt: row.ended_at,
+          // SQLite has no enum — same `as` narrowing the iterations browser
+          // uses above. Invalid stored statuses are impossible in practice
+          // (the only writers are this server's typed code paths).
+          status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
+          hopsUsed: row.hops_used,
+          hopBudget: row.hop_budget,
+          ...(row.first_error ? { firstError: row.first_error } : {}),
+          ...(artifactsDir ? { artifactsDir } : {}),
+        },
+      });
       return;
     }
     case 'read_project_facts': {

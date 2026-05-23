@@ -44,10 +44,23 @@ export function saveTemplate(input: {
   participants: number[];
   roles?: Record<string, string>;
   layout?: CustomLayout;
+  /** PR-7: optional per-template hop budget override. Clamped server-side
+   *  to a positive integer; non-finite or sub-1 input is silently dropped
+   *  (the template then falls back to the global default at start). */
+  hopBudget?: number;
 }): MultiAgentTemplate[] {
   const name = input.name.trim();
   const list = listTemplates();
   const idx = list.findIndex((t) => t.name === name);
+  // PR-7: defensive clamp. We accept a fractional value gracefully (round
+  // down), reject NaN/Infinity/non-numbers, and require >= 1 — sub-1 is
+  // a "stop the session immediately" budget that the operator never wants
+  // to save accidentally. Absent → field stays undefined (template uses
+  // the global default).
+  const hopBudget =
+    typeof input.hopBudget === 'number' && Number.isFinite(input.hopBudget) && input.hopBudget >= 1
+      ? Math.floor(input.hopBudget)
+      : undefined;
   const next: MultiAgentTemplate = {
     id: idx >= 0 ? list[idx]!.id : randomUUID(),
     name,
@@ -56,6 +69,7 @@ export function saveTemplate(input: {
     participants: input.participants,
     roles: input.roles,
     layout: input.layout,
+    hopBudget,
   };
   const out = idx >= 0 ? list.map((t, i) => (i === idx ? next : t)) : [...list, next];
   setSetting(SETTING_KEY, out);

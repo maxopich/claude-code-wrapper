@@ -41,6 +41,7 @@ import {
   getPendingMutation,
   getPendingRetry,
   getProjectBusState,
+  recordSessionTeardown,
   setAwaitingContinue,
   setMultiAgentSessionLifecycle,
   setMutationsAcknowledged,
@@ -182,6 +183,10 @@ export type StartOrchestratorOpts = {
    * `pending: null`). Optional; the wire layer null-checks.
    */
   onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /** PR-7: the saved-template id this run was started from, if any. Stamped
+   *  onto the row so the templates UI's "Last run" rail can SELECT by
+   *  template later. Absent for ad-hoc runs. */
+  templateId?: string;
 };
 
 export type ResumeOrchestratorOpts = {
@@ -310,6 +315,18 @@ export function createOrchestratorRouter(params: {
   // that, a near-cap session resumed after a server restart would silently
   // re-open the floodgates.
   let hopsCount = initialHopsCount ?? 0;
+  // PR-7: first error captured during this session, surfaced post-teardown
+  // on the "Last run" rail (red chip + excerpt). Sources: (a) the synthetic
+  // budget-exhausted error appended in `checkBudgetExhausted`, (b) any
+  // kind='error' bus event observed in `handleEvent`, (c) a worker-failed
+  // path that takes the `crashed` branch. Truncated to 200 chars at capture
+  // time so an enormous stack trace doesn't bloat memory; the repo helper
+  // re-truncates defensively at write time too.
+  let firstError: string | null = null;
+  const captureError = (text: string) => {
+    if (firstError !== null) return; // only the FIRST error sticks
+    firstError = text.slice(0, 200);
+  };
 
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
@@ -325,6 +342,16 @@ export function createOrchestratorRouter(params: {
       endMultiAgentSession(sessionId, reason === 'completed' ? 'completed' : reason);
     } catch (err) {
       console.error('[orchestrator] endMultiAgentSession failed', err);
+    }
+    // PR-7: record final hops_used + first_error so the templates UI's
+    // "Last run" rail can render hops_used/hop_budget + the "at cap" /
+    // "failed · <excerpt>" chips. Wrapped in try/catch so a stale row id
+    // (e.g. session row was cleared mid-teardown by a racing migration)
+    // can't break the teardown sequence.
+    try {
+      recordSessionTeardown(sessionId, { hopsUsed: hopsCount, firstError });
+    } catch (err) {
+      console.error('[orchestrator] recordSessionTeardown failed', err);
     }
     if (onTeardown && reason !== 'crashed' && lifecycleRef === 'temp') {
       try {
@@ -350,6 +377,11 @@ export function createOrchestratorRouter(params: {
     if (hopsCount < hopBudget) return false;
     if (ended) return true; // already torn down by a previous trip; just block
     const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
+    // PR-7: the budget-exhausted text IS this session's first error.
+    // Capturing here (not inside teardown) makes the source explicit and
+    // covers the case where `firstError` is still null because no earlier
+    // worker-emitted error tripped.
+    captureError(reasonText);
     try {
       const row = appendMultiAgentEvent(
         sessionId,
@@ -415,6 +447,13 @@ export function createOrchestratorRouter(params: {
       hopsCount += 1;
     } catch (err) {
       console.error('[orchestrator] persist event failed', err);
+    }
+    // PR-7: capture kind='error' events as the run's first_error. F2/F3
+    // filters above have already dropped forged source=cebab and bad
+    // routing — anything reaching this point is a legitimate participant
+    // error worth surfacing on the rail.
+    if (ev.kind === 'error') {
+      captureError(ev.text);
     }
     try {
       sink.onEvent(sessionId, ev, dbId);
@@ -518,6 +557,10 @@ export function createOrchestratorRouter(params: {
     const errMessage =
       err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
     const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
+    // PR-7: a worker failure is a strong "first error" signal. Capture even
+    // if the persist below fails — the rail's purpose is to surface failure,
+    // and a DB write hiccup shouldn't hide it.
+    captureError(reasonText);
     let errorEventId = 0;
     let eventTs = Date.now();
     try {
@@ -1072,7 +1115,14 @@ export async function startOrchestratorSession(
 
   const iterationId = nextIterationId(paths);
 
-  createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle);
+  // PR-7: stamp template provenance + effective hop budget at session start.
+  // The rail relies on `template_id` to attribute the row and `hop_budget`
+  // to render `hops_used / hop_budget` after teardown.
+  const effectiveHopBudget = opts.hopBudget ?? DEFAULT_HOP_BUDGET;
+  createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle, {
+    templateId: opts.templateId ?? null,
+    hopBudget: effectiveHopBudget,
+  });
   opts.workers.forEach((w) => addParticipant(sessionId, w.projectId, 'worker', null));
   prepareIterationDir(iterationId, participantAgentNames, paths);
 

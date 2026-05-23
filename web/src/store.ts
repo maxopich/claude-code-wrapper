@@ -220,6 +220,26 @@ export type MultiAgentState = {
    * edit so a stale warning never lingers.
    */
   lastAppliedDropped: number;
+  /**
+   * PR-7: set by `ma_apply_template` to the applied template's id, cleared
+   * by any manual draft edit (participant add/remove/reorder, lifecycle
+   * flip, ma_dismiss_active). The Start button mirrors this onto the
+   * `start_multi_agent` payload's `templateId` so the persisted row knows
+   * which template produced it — feeds the "Last run" rail.
+   *
+   * `null` for ad-hoc runs (operator built the participants list by hand
+   * without applying a template).
+   */
+  draftTemplateId: string | null;
+  /**
+   * PR-7: set by `ma_apply_template` to the applied template's per-template
+   * hop budget (if any), cleared by the same manual-edit signals as
+   * `draftTemplateId`. Sent on `start_multi_agent` as `hopBudget` so the
+   * router enforces the template's override instead of the global default.
+   * `null` when the template doesn't have an override OR when the draft was
+   * built by hand.
+   */
+  draftHopBudget: number | null;
 };
 
 export type AppState = {
@@ -291,6 +311,8 @@ export const initialState: AppState = {
     iterations: null,
     templates: null,
     lastAppliedDropped: 0,
+    draftTemplateId: null,
+    draftHopBudget: null,
   },
 };
 
@@ -449,7 +471,15 @@ export function reduce(state: AppState, action: Action): AppState {
     case 'ma_set_lifecycle':
       return {
         ...state,
-        multiAgent: { ...state.multiAgent, draftLifecycle: action.lifecycle },
+        multiAgent: {
+          ...state.multiAgent,
+          draftLifecycle: action.lifecycle,
+          // PR-7: a manual lifecycle flip dissociates the draft from the
+          // template it was applied from — the next Start is now an ad-hoc
+          // run with the operator's settings, not the template's.
+          draftTemplateId: null,
+          draftHopBudget: null,
+        },
       };
 
     case 'ma_add_participant': {
@@ -466,6 +496,9 @@ export function reduce(state: AppState, action: Action): AppState {
           ...state.multiAgent,
           draftParticipants: [...cur, action.projectId],
           lastAppliedDropped: 0,
+          // PR-7: same dissociation rationale as ma_set_lifecycle above.
+          draftTemplateId: null,
+          draftHopBudget: null,
         },
       };
     }
@@ -479,6 +512,8 @@ export function reduce(state: AppState, action: Action): AppState {
             (id) => id !== action.projectId,
           ),
           lastAppliedDropped: 0,
+          draftTemplateId: null,
+          draftHopBudget: null,
         },
       };
 
@@ -492,7 +527,14 @@ export function reduce(state: AppState, action: Action): AppState {
       [next[idx], next[swap]] = [next[swap]!, next[idx]!];
       return {
         ...state,
-        multiAgent: { ...state.multiAgent, draftParticipants: next, lastAppliedDropped: 0 },
+        multiAgent: {
+          ...state.multiAgent,
+          draftParticipants: next,
+          lastAppliedDropped: 0,
+          // PR-7: a reorder is a manual edit → drop template provenance.
+          draftTemplateId: null,
+          draftHopBudget: null,
+        },
       };
     }
 
@@ -521,6 +563,17 @@ export function reduce(state: AppState, action: Action): AppState {
           draftLifecycle: action.template.lifecycle,
           draftParticipants: filtered,
           lastAppliedDropped: action.template.participants.length - filtered.length,
+          // PR-7: stash template provenance + hop budget override so the
+          // next Start sends them on the wire. Any manual edit (participant
+          // add/remove/reorder, lifecycle flip, ma_dismiss_active) clears
+          // these — see the corresponding cases below.
+          draftTemplateId: action.template.id,
+          draftHopBudget:
+            typeof action.template.hopBudget === 'number' &&
+            Number.isFinite(action.template.hopBudget) &&
+            action.template.hopBudget >= 1
+              ? Math.floor(action.template.hopBudget)
+              : null,
         },
       };
     }
@@ -1212,6 +1265,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // them in AppState because (a) the cache invalidates on modal
       // close+reopen, and (b) facts are read-only static project metadata
       // the operator already sees in the sidebar. Deliberate no-op.
+      return state;
+    }
+
+    case 'last_run_for_template': {
+      // PR-7: the templates rail manages its own per-template cache via a
+      // side-channel subscription (same pattern as project_facts above).
+      // The rail's freshness is driven by `multi_agent_ended` events
+      // (refresh affected templates after each end), so storing rail rows
+      // in AppState would just duplicate the invalidation logic. The
+      // exhaustiveness narrowing keeps the switch honest. Deliberate no-op.
       return state;
     }
 

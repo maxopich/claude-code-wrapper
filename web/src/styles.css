@@ -2150,6 +2150,85 @@ pre {
   color: var(--fg-3);
 }
 
+/* PR-7: per-template hop-budget badge + "Last run" rail.
+ *
+ * The badge surfaces a permanent fact about the template (it has its own
+ * hop_budget override); the rail surfaces a variable fact about the last
+ * persisted run. Both sit under the preview header.
+ *
+ * The rail's color-coding maps to derived labels (ok / at-cap /
+ * interrupted / failed). We use both color AND an explicit text label
+ * on the chip — shape-coded so forced-colors / colorblind operators
+ * still parse the status. */
+.tpl-preview-budget {
+  display: inline-block;
+  margin-top: var(--s-1);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 2px 6px;
+}
+.tpl-preview-rail {
+  margin-top: var(--s-1);
+  display: flex;
+  gap: var(--s-1);
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.tpl-preview-rail-label {
+  font-weight: 600;
+  color: var(--fg-2);
+}
+.tpl-preview-rail-hops {
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.tpl-preview-rail-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  /* Tabular numerals keep multi-row stacking aligned. */
+  font-variant-numeric: tabular-nums;
+}
+.tpl-preview-rail-chip--ok {
+  color: var(--ok, #1f7a3a);
+  background: color-mix(in srgb, var(--ok, #1f7a3a) 12%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--ok, #1f7a3a) 35%, var(--border));
+}
+.tpl-preview-rail-chip--at-cap {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+.tpl-preview-rail-chip--failed {
+  color: var(--danger, #c0392b);
+  background: color-mix(in srgb, var(--danger, #c0392b) 12%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--danger, #c0392b) 35%, var(--border));
+}
+.tpl-preview-rail-chip--interrupted {
+  color: var(--fg-3);
+  background: var(--bg-3);
+}
+.tpl-preview-rail-error {
+  /* Tail excerpt of the persisted first_error. The `<title>` on the
+   * span shows the full ~200 chars on hover; this just gives the
+   * operator a one-line at-a-glance hint. */
+  color: var(--fg-3);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  /* Don't push other rail bits off-screen if the error is long-ish: */
+  max-width: 60ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* PR-1: honesty banners (bypassPermissions warning + custom-mode info).
  * Shape-coded via ⚠/ⓘ glyphs — never relying on color alone. The third
  * `auto` grid column is reserved for a future dismiss button; today
@@ -2323,6 +2402,13 @@ pre {
   .tpl-arrowhead--out,
   .tpl-arrowtail--in {
     fill: ButtonText;
+  }
+  /* PR-7: forced-colors strips author colors; the rail's chip relies on
+   * shape AND text (the chip carries an explicit "ok"/"at cap"/"failed"
+   * label, not just color). Keep the border at ButtonText so the chip is
+   * visually distinct from neighbouring text in the rail. */
+  .tpl-preview-rail-chip {
+    border-color: ButtonText;
   }
 }
 
