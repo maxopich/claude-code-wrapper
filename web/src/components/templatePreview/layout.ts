@@ -52,21 +52,46 @@ export function truncLabel(s: string, max: number): string {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
 
-/** Wrap `text` into ≤2 lines of ~`perLine` chars for an SVG role label
- * (SVG <text> has no wrapping). Roles can be one long space-less token, so
- * this is char-based; if a space sits within the last BREAK_SLACK chars
- * before the cut we break there for a nicer wrap. Line 2 is ellipsised
- * (truncLabel) only when text still remains past the 2-line budget. Full
- * text always stays in the node <title> + the click-to-edit overlay. */
-export function wrap2(text: string, perLine: number): [string] | [string, string] {
+/** Wrap `text` into ≤`maxLines` lines of ~`perLine` chars for an SVG label
+ * (SVG <text> has no wrapping). Char-based by default; if a space sits
+ * within the last BREAK_SLACK chars of a line we break there for a nicer
+ * wrap. The final line is truncLabel-clipped only when text remains past
+ * the budget — earlier lines drop the trailing space (no visible
+ * indenting artifact at the line boundary).
+ *
+ * PR-4: generalized from `wrap2` so name labels at arc / chain-wrap /
+ * under-badge tiers can use 2-line wrap, with the same break-on-space
+ * preference. `wrap2` stays as a thin alias for the role-text callers. */
+export function wrapN(text: string, perLine: number, maxLines: 2 | 3): string[] {
   const per = Math.max(1, perLine);
   if (text.length <= per) return [text];
   const BREAK_SLACK = 8;
-  let cut = per;
-  const sp = text.lastIndexOf(' ', per);
-  if (sp >= per - BREAK_SLACK && sp > 0) cut = sp;
-  const rest = text.slice(cut === sp ? cut + 1 : cut);
-  return [text.slice(0, cut), truncLabel(rest, per)];
+  const lines: string[] = [];
+  let rest = text;
+  for (let i = 0; i < maxLines && rest.length > 0; i++) {
+    if (rest.length <= per) {
+      lines.push(rest);
+      break;
+    }
+    const isLast = i === maxLines - 1;
+    if (isLast) {
+      lines.push(truncLabel(rest, per));
+      break;
+    }
+    let cut = per;
+    const sp = rest.lastIndexOf(' ', per);
+    if (sp >= per - BREAK_SLACK && sp > 0) cut = sp;
+    lines.push(rest.slice(0, cut));
+    rest = rest.slice(cut === sp ? cut + 1 : cut);
+  }
+  return lines;
+}
+
+/** Wrap `text` into ≤2 lines of ~`perLine` chars. Thin alias preserved
+ *  for existing role-text callers; new sites should prefer `wrapN`. */
+export function wrap2(text: string, perLine: number): [string] | [string, string] {
+  const out = wrapN(text, perLine, 2);
+  return out.length === 1 ? ([out[0]!] as [string]) : ([out[0]!, out[1]!] as [string, string]);
 }
 
 /** The trimmed role text for an agent (whitespace-only ⇒ empty). */
@@ -176,6 +201,11 @@ export type LaidRectTile = {
    *  slugs (agentIdentity returns null there). Drives the swatch fill
    *  and glyph color in the renderer. */
   hueVar: string | null;
+  /** PR-4: pre-wrapped name lines for multi-line rendering via
+   *  `<tspan>` (full density at arc + chain-wrap tiers). When `null`
+   *  or 1 element, the renderer falls back to the single-line
+   *  truncLabel path — no behavioral change in compact density. */
+  nameLines?: string[] | null;
 };
 
 export type LaidBadgeTile = {
@@ -188,6 +218,21 @@ export type LaidBadgeTile = {
   r: number;
   glyph: string;
   hueVar: string | null;
+  /** PR-4: under-badge label for full-density ring tiers (compact
+   *  density leaves this `null`). When set, the renderer draws a
+   *  centered `<text>` below the badge with up to 2 lines via
+   *  `<tspan>`. Concentric tier only sets this on inner-ring badges
+   *  to avoid collisions on outer rings. */
+  underLabel?: {
+    /** Already wrapped via `wrapN(..., 2)` so the renderer doesn't
+     *  duplicate sizing logic. */
+    lines: string[];
+    /** Top y of the first line — the renderer adds `dy = fontSize + 2`
+     *  for the second line. Lives outside the badge circle. */
+    y: number;
+    /** Per-tier font size (ring=11, twoRing=10, concentric=9). */
+    fontSize: number;
+  } | null;
 };
 
 export type LaidTile = LaidRectTile | LaidBadgeTile;
@@ -247,6 +292,8 @@ export type Layout = {
   geometry: OrchestratorGeometry | ChainGeometry;
 };
 
+export type LayoutDensity = 'compact' | 'full';
+
 export type LayoutInput = {
   mode: 'chain' | 'orchestrator' | 'custom';
   roles?: Record<string, string>;
@@ -258,6 +305,16 @@ export type LayoutInput = {
    * Today: present but unused — orchestrator fallback still drives layout.
    */
   layout?: CustomLayout;
+  /**
+   * PR-4: tile sizes + label visibility. `'compact'` is the card view
+   * (today's behavior); `'full'` is the fullscreen modal — wider tiles,
+   * multi-line names at arc + chain-wrap tiers, under-badge labels at
+   * ring / twoRing / concentric. Defaulting to `'compact'` means
+   * existing callers and the layout test snapshots are unchanged
+   * without code edits. AgentDiagram passes `'full'` when its
+   * `fullWidth` prop is set.
+   */
+  density?: LayoutDensity;
 };
 
 // === Tier classifiers ===
@@ -279,6 +336,7 @@ export function tierForChain(n: number): ChainTier {
 // === Public API ===
 export function layoutFor(input: LayoutInput, participants: Project[]): Layout {
   const roles = input.roles ?? {};
+  const density: LayoutDensity = input.density ?? 'compact';
   const n = participants.length;
   const squarePx = Math.min(SQ_CAP, SQ_BASE + Math.max(0, n - 1) * SQ_STEP);
 
@@ -287,24 +345,25 @@ export function layoutFor(input: LayoutInput, participants: Project[]): Layout {
   // separation makes the future swap a one-function change and gives
   // the seam a real test surface today.
   if (input.mode === 'custom') {
-    return layoutCustomGrid(participants, roles, squarePx, input.layout);
+    return layoutCustomGrid(participants, roles, squarePx, input.layout, density);
   }
 
   if (input.mode === 'orchestrator') {
     const tier = tierForOrchestrator(n);
     if (tier === 'center' || tier === 'row') {
-      return layoutOrchestratorRow(participants, roles, squarePx, tier);
+      return layoutOrchestratorRow(participants, roles, squarePx, tier, density);
     }
-    if (tier === 'arc') return layoutOrchestratorArc(participants, roles, squarePx);
-    if (tier === 'ring') return layoutOrchestratorRing(participants, roles, squarePx);
-    if (tier === 'twoRing') return layoutOrchestratorTwoRing(participants, roles, squarePx);
-    return layoutOrchestratorConcentric(participants, roles, squarePx);
+    if (tier === 'arc') return layoutOrchestratorArc(participants, roles, squarePx, density);
+    if (tier === 'ring') return layoutOrchestratorRing(participants, roles, squarePx, density);
+    if (tier === 'twoRing')
+      return layoutOrchestratorTwoRing(participants, roles, squarePx, density);
+    return layoutOrchestratorConcentric(participants, roles, squarePx, density);
   }
 
   const tier = tierForChain(n);
-  if (tier === 'row') return layoutChainRow(participants, roles, squarePx);
-  if (tier === 'wrap2') return layoutChainWrap(participants, roles, squarePx, 2);
-  return layoutChainWrap(participants, roles, squarePx, 3);
+  if (tier === 'row') return layoutChainRow(participants, roles, squarePx, density);
+  if (tier === 'wrap2') return layoutChainWrap(participants, roles, squarePx, 2, density);
+  return layoutChainWrap(participants, roles, squarePx, 3, density);
 }
 
 /**
@@ -330,17 +389,18 @@ export function layoutCustomGrid(
   roles: Record<string, string>,
   squarePx: number,
   layout?: CustomLayout,
+  density: LayoutDensity = 'compact',
 ): Layout {
   void layout; // PR-6: seam accepts the layout; renderer projection lands later.
   const n = participants.length;
   const tier = tierForOrchestrator(n);
   if (tier === 'center' || tier === 'row') {
-    return layoutOrchestratorRow(participants, roles, squarePx, tier);
+    return layoutOrchestratorRow(participants, roles, squarePx, tier, density);
   }
-  if (tier === 'arc') return layoutOrchestratorArc(participants, roles, squarePx);
-  if (tier === 'ring') return layoutOrchestratorRing(participants, roles, squarePx);
-  if (tier === 'twoRing') return layoutOrchestratorTwoRing(participants, roles, squarePx);
-  return layoutOrchestratorConcentric(participants, roles, squarePx);
+  if (tier === 'arc') return layoutOrchestratorArc(participants, roles, squarePx, density);
+  if (tier === 'ring') return layoutOrchestratorRing(participants, roles, squarePx, density);
+  if (tier === 'twoRing') return layoutOrchestratorTwoRing(participants, roles, squarePx, density);
+  return layoutOrchestratorConcentric(participants, roles, squarePx, density);
 }
 
 // =====================================================================
@@ -351,6 +411,7 @@ function layoutOrchestratorRow(
   roles: Record<string, string>,
   squarePx: number,
   tier: OrchestratorTier,
+  density: LayoutDensity,
 ): Layout {
   // PR-3 bump: MIN_W 96 → 110 (per plan: tiles read fuller at low N).
   // At N=1 (center), share the row code path with a 1-tile row.
@@ -360,18 +421,24 @@ function layoutOrchestratorRow(
   const HUB_Y = 20;
   const HY = HUB_Y + HUB_H + 2; // edge start (hub bottom + 2px breathing)
   const midY = 70;
+  // PR-4 density: full bumps tile height + min/max widths per the
+  // plan's dimension table. Compact path stays at the pre-PR-4 numbers
+  // so the existing layout snapshots don't drift.
+  const isFull = density === 'full';
   const WORKER_Y = 88;
-  const WORKER_H = 56;
-  const HEIGHT = 150;
+  const WORKER_H = isFull ? 64 : 56;
+  const HEIGHT = WORKER_Y + WORKER_H + 6; // 150 (compact) or 158 (full)
   // PR-4 typography: 12px name on every ≤4 tier (plan: "Compact ≤4 =
   // 12/600"). PR-3 had center=13 to read slightly larger at N=1; the
   // PR-4 table tightens the scale so 1..4 are uniform.
   const FS_NAME = 12;
   const FS_ROLE = 10;
-  const MIN_W = 110;
-  const MAX_W = 168;
-  const ROLE_Y1 = WORKER_Y + 30;
-  const ROLE_Y2 = WORKER_Y + 42;
+  const MIN_W = isFull ? 140 : 110;
+  const MAX_W = isFull ? 264 : 168;
+  // Role baselines shift with WORKER_H so the two role lines stay
+  // centered in the lower half of the tile across both densities.
+  const ROLE_Y1 = WORKER_Y + (isFull ? 34 : 30);
+  const ROLE_Y2 = WORKER_Y + (isFull ? 48 : 42);
   const fsizes = { name: FS_NAME, role: FS_ROLE };
 
   let acc = SIDE_PAD;
@@ -474,12 +541,19 @@ function layoutOrchestratorArc(
   participants: Project[],
   roles: Record<string, string>,
   squarePx: number,
+  density: LayoutDensity,
 ): Layout {
   // Hub above; workers along the lower half of a circle centered on the
   // hub. Roles hidden — they live in <title> only (plan table: arc tier
   // hides role text). Names stay visible at FS=11.
+  //
+  // PR-4 density:full: tile dimensions roughly double (70×26 → 130×40),
+  // names wrap onto 2 lines via wrapN, viewBox H bumps 220 → 260 so the
+  // taller tiles don't crowd the hub. Compact stays at the pre-PR-4
+  // numbers — existing layout snapshots are pinned to those.
+  const isFull = density === 'full';
   const VBOX_W = 280;
-  const VBOX_H = 220;
+  const VBOX_H = isFull ? 260 : 220;
   const HUB_Y = 14;
   const HUB_H = 26;
   // PR-4: chip widened to fit the 12 px "orchestrator" label + the
@@ -491,9 +565,9 @@ function layoutOrchestratorArc(
   // workers at angle 0/π don't sit at the same vertical band as the hub.
   // All workers end up cleanly below the hub bottom edge.
   const ARC_CY = HUB_BOT + 30; // 70
-  const R = Math.round(VBOX_H * 0.42); // 92
-  const TILE_W = 70;
-  const TILE_H = 26;
+  const R = Math.round(VBOX_H * 0.42); // compact=92, full=109
+  const TILE_W = isFull ? 130 : 70;
+  const TILE_H = isFull ? 40 : 26;
   const FS_NAME = 11;
   const FS_ROLE = 10;
   const fsizes = { name: FS_NAME, role: FS_ROLE };
@@ -507,6 +581,14 @@ function layoutOrchestratorArc(
     const cx = HX - R * Math.cos(angle);
     const cy = ARC_CY + R * Math.sin(angle);
     const ident = agentIdentity(p.name);
+    // PR-4: at full density wrap the name onto 2 lines (per plan table:
+    // "orch arc / name wraps / yes (2 lines via wrapN)"). Compact stays
+    // single-line via truncLabel in the renderer.
+    const innerW = TILE_W - 2 * TILE_PAD_X;
+    const nameLines = isFull ? wrapN(p.name, fitChars(innerW, FS_NAME, FACTOR_BOLD), 2) : null;
+    // Two-line names need the first baseline pulled UP by half the line
+    // gap so the pair stays vertically centered in the (taller) tile.
+    const nameY = isFull && nameLines && nameLines.length === 2 ? cy - 2 : cy + 4;
     return {
       pid: p.id,
       name: p.name,
@@ -518,13 +600,13 @@ function layoutOrchestratorArc(
       h: TILE_H,
       cx,
       cy,
-      innerW: TILE_W - 2 * TILE_PAD_X,
-      // Centered name baseline (no role rendered).
-      nameY: cy + 4,
+      innerW,
+      nameY,
       roleY1: null,
       roleY2: null,
       glyph: ident.glyph,
       hueVar: ident.hueVar,
+      nameLines,
     };
   });
 
@@ -601,9 +683,15 @@ function layoutOrchestratorRing(
   participants: Project[],
   roles: Record<string, string>,
   squarePx: number,
+  density: LayoutDensity,
 ): Layout {
   // Workers as badges around a centered hub chip. Hub label "orchestrator"
   // only (no slug at this density — plan: chrome chip).
+  //
+  // PR-4 density:full: each badge carries an under-badge name label
+  // (2-line wrap, FS=11, max-w = 2.5·R). Compact density still hides
+  // these — names live in <title> + the panel row only.
+  const isFull = density === 'full';
   const VBOX_W = 240;
   const VBOX_H = 240;
   // PR-4: hub label bumped to 12 px → chip widened so "orchestrator"
@@ -620,6 +708,13 @@ function layoutOrchestratorRing(
   const FS_NAME = 10;
   const FS_ROLE = 10;
   const fsizes = { name: FS_NAME, role: FS_ROLE };
+  // PR-4 full: under-badge label budget. 2.5·BADGE_R = 37.5 px, which
+  // accommodates ~6 chars at FS=11. The wrap is generous enough that
+  // 2 lines cover most agent names; the second line ellipsises for
+  // longer ones.
+  const UNDER_FS = 11;
+  const UNDER_MAX_W = 2.5 * BADGE_R;
+  const UNDER_PER_LINE = fitChars(UNDER_MAX_W, UNDER_FS, FACTOR_BOLD);
 
   const n = participants.length;
   const workers: LaidBadgeTile[] = participants.map((p, i) => {
@@ -638,6 +733,16 @@ function layoutOrchestratorRing(
       r: BADGE_R,
       glyph: ident.glyph,
       hueVar: ident.hueVar,
+      // PR-4: under-badge label only in full density. Placed below
+      // the badge circle — y = cy + r + 2 + UNDER_FS gives the first
+      // text baseline. Renderer adds `dy` for the second line.
+      underLabel: isFull
+        ? {
+            lines: wrapN(p.name, UNDER_PER_LINE, 2),
+            y: cy + BADGE_R + 2 + UNDER_FS,
+            fontSize: UNDER_FS,
+          }
+        : null,
     };
   });
 
@@ -704,7 +809,11 @@ function layoutOrchestratorTwoRing(
   participants: Project[],
   roles: Record<string, string>,
   squarePx: number,
+  density: LayoutDensity,
 ): Layout {
+  // PR-4 density:full: both rings carry under-badge labels at FS=10,
+  // wrap2, max-w=65 px (per plan table). Compact stays glyph-only.
+  const isFull = density === 'full';
   const VBOX_W = 280;
   const VBOX_H = 280;
   // PR-4: chip widened to fit the 12 px "orchestrator" label + icon.
@@ -719,6 +828,9 @@ function layoutOrchestratorTwoRing(
   const FS_NAME = 10;
   const FS_ROLE = 10;
   const fsizes = { name: FS_NAME, role: FS_ROLE };
+  const UNDER_FS = 10;
+  const UNDER_MAX_W = 65;
+  const UNDER_PER_LINE = fitChars(UNDER_MAX_W, UNDER_FS, FACTOR_BOLD);
 
   const n = participants.length;
   const innerN = Math.min(8, n);
@@ -750,6 +862,13 @@ function layoutOrchestratorTwoRing(
       r: BADGE_R,
       glyph: ident.glyph,
       hueVar: ident.hueVar,
+      underLabel: isFull
+        ? {
+            lines: wrapN(p.name, UNDER_PER_LINE, 2),
+            y: cy + BADGE_R + 2 + UNDER_FS,
+            fontSize: UNDER_FS,
+          }
+        : null,
     };
   });
 
@@ -815,7 +934,14 @@ function layoutOrchestratorConcentric(
   participants: Project[],
   roles: Record<string, string>,
   squarePx: number,
+  density: LayoutDensity,
 ): Layout {
+  // PR-4 density:full: ONLY the inner ring (ring 1) carries under-badge
+  // labels. Outer rings stay glyph-only — labels would collide at the
+  // ring-to-ring boundary, and the inner ring's 6+ slots are enough
+  // to seed identity for the rest (via panel rows). FS=9 keeps the
+  // labels compact at this density.
+  const isFull = density === 'full';
   const VBOX_W = 320;
   const VBOX_H = 320;
   // PR-4: chip widened to fit the 12 px "orchestrator" label + icon.
@@ -833,6 +959,11 @@ function layoutOrchestratorConcentric(
   const FS_NAME = 10;
   const FS_ROLE = 10;
   const fsizes = { name: FS_NAME, role: FS_ROLE };
+  const UNDER_FS = 9;
+  // Inner ring labels: span half the ring radius — tight enough that
+  // labels don't collide with the next-ring badges above them.
+  const UNDER_MAX_W = RING_R_BASE * 0.5;
+  const UNDER_PER_LINE = fitChars(UNDER_MAX_W, UNDER_FS, FACTOR_BOLD);
 
   type RingAssignment = { ring: number; slotsInRing: number; slotIdx: number };
   const assignments: RingAssignment[] = [];
@@ -866,6 +997,14 @@ function layoutOrchestratorConcentric(
       r: BADGE_R,
       glyph: ident.glyph,
       hueVar: ident.hueVar,
+      underLabel:
+        isFull && a.ring === 1
+          ? {
+              lines: wrapN(p.name, UNDER_PER_LINE, 2),
+              y: cy + BADGE_R + 2 + UNDER_FS,
+              fontSize: UNDER_FS,
+            }
+          : null,
     };
   });
 
@@ -931,19 +1070,25 @@ function layoutChainRow(
   participants: Project[],
   roles: Record<string, string>,
   squarePx: number,
+  density: LayoutDensity,
 ): Layout {
+  // PR-4 density:full: tile height + min/max widths bump (per plan
+  // table: 56/132/248 → 64/160/280). Compact stays unchanged.
+  const isFull = density === 'full';
   const GAP = 32;
   const SIDE_PAD = 14;
-  const NODE_H = 56;
+  const NODE_H = isFull ? 64 : 56;
   const NODE_Y = 14;
-  const HEIGHT = 84;
+  const HEIGHT = NODE_Y + NODE_H + 14;
   const FS_NAME = 11.5;
   const FS_ROLE = 10;
-  const MIN_W = 132;
-  const MAX_W = 248;
+  const MIN_W = isFull ? 160 : 132;
+  const MAX_W = isFull ? 280 : 248;
   const cy = NODE_Y + NODE_H / 2;
-  const ROLE_Y1 = NODE_Y + 33;
-  const ROLE_Y2 = NODE_Y + 46;
+  // Role baselines shift with NODE_H so the two role lines stay
+  // centered in the lower half of the tile across both densities.
+  const ROLE_Y1 = NODE_Y + (isFull ? 37 : 33);
+  const ROLE_Y2 = NODE_Y + (isFull ? 50 : 46);
   const fsizes = { name: FS_NAME, role: FS_ROLE };
 
   let acc = SIDE_PAD;
@@ -1026,10 +1171,15 @@ function layoutChainWrap(
   roles: Record<string, string>,
   squarePx: number,
   rowsCount: 2 | 3,
+  density: LayoutDensity,
 ): Layout {
+  // PR-4 density:full: bump tile widths slightly (116→120 / 102→108)
+  // and tile heights more (50→64 / 50→60) so 2-line names fit. Compact
+  // stays single-line at the pre-PR-4 dimensions.
+  const isFull = density === 'full';
   const n = participants.length;
-  const TILE_W = rowsCount === 2 ? 116 : 102;
-  const TILE_H = 50;
+  const TILE_W = isFull ? (rowsCount === 2 ? 120 : 108) : rowsCount === 2 ? 116 : 102;
+  const TILE_H = isFull ? (rowsCount === 2 ? 64 : 60) : 50;
   const GAP_X = 24;
   const GAP_Y = 28;
   const SIDE_PAD = 14;
@@ -1068,6 +1218,14 @@ function layoutChainWrap(
       const cy = y + TILE_H / 2;
       const p = participants[pIdx]!;
       const ident = agentIdentity(p.name);
+      // PR-4: in full density wrap the name onto 2 lines (per plan
+      // table: chain wrap2/wrap3 add wrap2 names). Compact stays
+      // single-line.
+      const innerW = TILE_W - 2 * TILE_PAD_X;
+      const nameLines = isFull ? wrapN(p.name, fitChars(innerW, FS_NAME, FACTOR_BOLD), 2) : null;
+      // Two-line names need the first baseline pulled up so the pair
+      // is vertically centered in the (taller) tile.
+      const nameY = isFull && nameLines && nameLines.length === 2 ? y + 22 : y + 17;
       tiles.push({
         pid: p.id,
         name: p.name,
@@ -1079,13 +1237,14 @@ function layoutChainWrap(
         h: TILE_H,
         cx,
         cy,
-        innerW: TILE_W - 2 * TILE_PAD_X,
-        nameY: y + 17,
+        innerW,
+        nameY,
         // Hide role at wrap densities — names alone read cleaner.
         roleY1: null,
         roleY2: null,
         glyph: ident.glyph,
         hueVar: ident.hueVar,
+        nameLines,
       });
       pIdx++;
     }

@@ -61,6 +61,14 @@
   --t-lg: 14px;
   --t-xl: 16px;
   --t-2xl: 20px;
+  /* PR-4: template-preview typography mirror. Used by HTML elements
+   * around the SVG (panel rows, modal subtitle). SVG <text> reads
+   * numeric values from `templatePreview/tokens.ts` — kept in sync. */
+  --tpl-fs-name: var(--t-sm);
+  --tpl-fs-name-compact: var(--t-md);
+  --tpl-fs-role: var(--t-xs);
+  --tpl-fs-hub: var(--t-md);
+  --tpl-fs-slug: var(--t-xs);
   /* Spacing */
   --s-1: 4px;
   --s-2: 8px;
@@ -2384,6 +2392,14 @@ pre {
   font-family: var(--font-sans);
   pointer-events: none;
 }
+/* PR-4: under-badge name labels (full density only — layout decides
+ * which tier surfaces them). Color matches `.tpl-node-name` so the
+ * label reads as the name continuation of the badge above. */
+.tpl-node-badge-label {
+  fill: var(--fg);
+  font-family: var(--font-sans);
+  pointer-events: none;
+}
 /* Rect-tile identity swatch (PR-4): an 8×8 hue chip at the tile's
  * top-left (6 px inset). Carries the agent's stable djb2 →
  * var(--agent-N) hue from agentIdentity. Layout decides when to
@@ -2618,7 +2634,9 @@ pre {
 }
 .tpl-modal-subtitle {
   margin: var(--s-1) 0 0 0;
-  font-size: var(--t-xs);
+  /* PR-4: promote subtitle from xs (11) to sm (12) so the mode +
+   * lifecycle + count line stays readable at modal scale. */
+  font-size: var(--t-sm);
   color: var(--fg-2);
 }
 .tpl-modal-actions {
@@ -2675,7 +2693,9 @@ pre {
   .tpl-modal-panel {
     border-left: none;
     border-top: 1px solid var(--line-2);
-    max-height: 40vh;
+    /* PR-4: bump 40 → 50vh so the panel can show ≥4 rows at common
+     * mobile heights without inducing a second scroll target. */
+    max-height: 50vh;
   }
 }
 .tpl-panel-inner {
@@ -2706,6 +2726,10 @@ pre {
   overflow-y: auto;
   flex: 1;
   min-height: 0;
+  /* PR-4: reserve scrollbar gutter on both edges so the list doesn't
+   * jump horizontally when the scrollbar appears/disappears. `stable`
+   * keeps the gutter even when no scrollbar is showing. */
+  scrollbar-gutter: stable both-edges;
 }
 .tpl-panel-row {
   display: grid;
@@ -2745,14 +2769,18 @@ pre {
   gap: var(--s-1);
 }
 .tpl-panel-label {
-  font-size: var(--t-sm);
+  /* PR-4: promote sm (12) → md (13) so participant names in the panel
+   * read at parity with the diagram tile names at modal scale. */
+  font-size: var(--t-md);
   font-weight: 600;
   color: var(--fg);
   word-break: break-word;
 }
 .tpl-panel-textarea {
   font-family: var(--font-sans);
-  font-size: var(--t-sm);
+  /* PR-4: match `.tpl-panel-label` at md (13) so the editing surface
+   * isn't smaller than the label it edits. */
+  font-size: var(--t-md);
   color: var(--fg);
   background: var(--bg-3);
   border: 1px solid var(--line-2);

@@ -216,7 +216,9 @@ export function AgentDiagram(props: {
 
   const reduce =
     typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const layout = layoutFor({ mode, roles }, participants);
+  // PR-4: `fullWidth` (modal) flips density to 'full' so layoutFor
+  // picks the wider tiles + multi-line names + under-badge labels.
+  const layout = layoutFor({ mode, roles, density: fullWidth ? 'full' : 'compact' }, participants);
   const { squarePx, width, height, geometry, edges } = layout;
 
   // Stable shape key for the trip-animation effect: re-init when the
@@ -471,16 +473,40 @@ export function AgentDiagram(props: {
             style={identityStyle}
           />
         )}
-        <text
-          className="tpl-node-name"
-          x={t.cx}
-          y={t.nameY}
-          textAnchor="middle"
-          fontSize={fsNames.name}
-          fontWeight={600}
-        >
-          {truncLabel(t.name, fitChars(t.innerW, fsNames.name, FACTOR_BOLD))}
-        </text>
+        {/* PR-4: multi-line name when the layout pre-wrapped it
+            (`nameLines`). Compact density leaves `nameLines` null/empty
+            and falls back to the single-line truncLabel path so the
+            existing visual is unchanged. Tspan dy compounds across
+            siblings, so each subsequent line shifts down by font size +
+            2 px line gap. */}
+        {t.nameLines && t.nameLines.length > 1 ? (
+          <text
+            className="tpl-node-name"
+            x={t.cx}
+            y={t.nameY}
+            textAnchor="middle"
+            fontSize={fsNames.name}
+            fontWeight={600}
+            aria-hidden="true"
+          >
+            {t.nameLines.map((ln, i) => (
+              <tspan key={i} x={t.cx} dy={i === 0 ? 0 : fsNames.name + 2}>
+                {ln}
+              </tspan>
+            ))}
+          </text>
+        ) : (
+          <text
+            className="tpl-node-name"
+            x={t.cx}
+            y={t.nameY}
+            textAnchor="middle"
+            fontSize={fsNames.name}
+            fontWeight={600}
+          >
+            {truncLabel(t.name, fitChars(t.innerW, fsNames.name, FACTOR_BOLD))}
+          </text>
+        )}
         {showRole && t.roleY1 != null && lines.length === 2 && t.roleY2 != null ? (
           <>
             <text className={cls} x={t.cx} y={t.roleY1} textAnchor="middle" fontSize={fsNames.role}>
@@ -544,6 +570,28 @@ export function AgentDiagram(props: {
         >
           {t.glyph}
         </text>
+        {/* PR-4: under-badge label, full density only (layout sets
+            `underLabel` to null in compact). The badge title still
+            carries the full name + role for screen readers — this is
+            the visual label that lets sighted users name-match without
+            reaching for the panel row. */}
+        {t.underLabel && t.underLabel.lines.length > 0 && (
+          <text
+            className="tpl-node-badge-label"
+            x={t.cx}
+            y={t.underLabel.y}
+            textAnchor="middle"
+            fontSize={t.underLabel.fontSize}
+            fontWeight={600}
+            aria-hidden="true"
+          >
+            {t.underLabel.lines.map((ln, i) => (
+              <tspan key={i} x={t.cx} dy={i === 0 ? 0 : (t.underLabel?.fontSize ?? 0) + 2}>
+                {ln}
+              </tspan>
+            ))}
+          </text>
+        )}
       </g>
     );
   };
