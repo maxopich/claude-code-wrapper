@@ -30,6 +30,7 @@ import type { MultiAgentTemplate, Project } from '@cebab/shared/protocol';
 import { useModalKeys } from '../../useModalKeys';
 import { AgentDiagram } from './AgentDiagram';
 import { SplitViewPanel } from './SplitViewPanel';
+import { BypassPermissionsBanner } from './TemplatePreviewBanners';
 
 export const SPLIT_VIEW_PREF_KEY = 'cebab.tpl.splitView';
 /** N at which split-view defaults to ON when the user has no stored pref. */
@@ -203,6 +204,14 @@ export function TemplatePreviewModal(props: {
             </button>
           </div>
         </header>
+
+        {/* PR-1: repeated bypass banner. Sits between header and body so
+            it's the first thing the operator sees after the title — the
+            modal can outlive the multi-agent tab's banner in the operator's
+            focus, especially when launched directly from a saved template. */}
+        <div className="tpl-modal-banners">
+          <BypassPermissionsBanner />
+        </div>
 
         <div className={`tpl-modal-body${splitView ? ' tpl-modal-body--split' : ''}`}>
           <div className="tpl-modal-stage-wrap">

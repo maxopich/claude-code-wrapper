@@ -25,6 +25,10 @@ import { LogsButton } from './sessionLog';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
 import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
 import type { ModalOrigin } from './templatePreview/TemplatePreviewModal';
+import {
+  BypassPermissionsBanner,
+  CustomModeBanner,
+} from './templatePreview/TemplatePreviewBanners';
 
 /**
  * Multi-Agent tab.
@@ -212,6 +216,10 @@ function DraftView(props: {
   return (
     <div className="multi-agent multi-agent-draft">
       <div className="multi-agent-draft-body">
+        {/* PR-1: load-bearing safety banner. Surfaces the bypassPermissions
+            posture that's baked into server/src/bus/runner.ts but is
+            otherwise invisible in the UI. Non-dismissible. */}
+        <BypassPermissionsBanner />
         <header className="multi-agent-header">
           <h2>{isOrch ? 'Multi-Agent' : 'Chained Chat'}</h2>
           <p className="multi-agent-subtitle">
@@ -374,6 +382,16 @@ function DraftView(props: {
               </button>
             </div>
           </div>
+          {/* PR-1: lifecycle=temp inline note. Not a banner — the warning
+              is contextual to the choice the operator just made, and it
+              appears/disappears with the toggle (no sticky state). The
+              title attribute on the button alone is too easy to miss. */}
+          {multiAgent.draftLifecycle === 'temp' && (
+            <p className="ma-lifecycle-note">
+              On End, Cebab deletes this session's folder AND removes bus integration from each
+              participant. Project files are untouched.
+            </p>
+          )}
           {/* Item #5: pause-on-first-mutation opt-in. Off by default; the
               operator opts in explicitly per session. Survives R-B once set. */}
           <label
@@ -752,6 +770,10 @@ function TemplatePreview(props: {
           {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
         </div>
       </div>
+      {/* PR-1: custom-mode honesty banner. Fires only when the stored
+          template carries mode='custom' (a presentation-only marker —
+          the renderer falls back to orchestrator layout). */}
+      {template.mode === 'custom' && <CustomModeBanner />}
 
       <AgentDiagram
         mode={template.mode}
