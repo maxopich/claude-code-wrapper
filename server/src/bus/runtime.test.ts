@@ -7,7 +7,10 @@ import { closeDb, getDb } from '../db.js';
 import {
   MAX_PROJECT_CLAUDE_MD,
   nextIterationId,
+  PROJECT_CLAUDE_MD_HEAD_MAX_BYTES,
+  PROJECT_CLAUDE_MD_HEAD_MAX_LINES,
   readProjectClaudeMd,
+  readProjectClaudeMdHead,
   renderChainBriefing,
   renderRosterPrompt,
   renderWorkerBriefing,
@@ -294,6 +297,109 @@ describe('readProjectClaudeMd', () => {
     // the implementation appends. The file's own occurrence was defanged.
     expect(r!.framed.split('</project_claude_md>').length - 1).toBe(1);
     expect(r!.framed).toContain(`<${ZWSP}/project_claude_md>`);
+  });
+});
+
+// PR-6: per-participant facts disclosure backs onto a head-only reader.
+// Sibling of readProjectClaudeMd but with a different shape: plain head
+// (no framing), tight 12-line / 2 KiB caps, and a `…` marker on truncate.
+describe('readProjectClaudeMdHead', () => {
+  function projDir(): string {
+    const d = path.join(tmpRoot, 'facts-proj');
+    fs.mkdirSync(d, { recursive: true });
+    return d;
+  }
+
+  test('returns the first lines verbatim under the caps', () => {
+    const dir = projDir();
+    const md = '# Project\n\n- rule one\n- rule two\n';
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), md);
+    const r = readProjectClaudeMdHead(dir);
+    expect(r).not.toBeNull();
+    expect(r!.head).toContain('# Project');
+    expect(r!.head).toContain('- rule one');
+    expect(r!.head).toContain('- rule two');
+    // Below both caps → no truncate marker appended.
+    expect(r!.head.endsWith('…')).toBe(false);
+    expect(r!.sizeLabel).toMatch(/^\d+\.\d KB$/);
+  });
+
+  test('returns null when CLAUDE.md is missing (no throw)', () => {
+    expect(readProjectClaudeMdHead(projDir())).toBeNull();
+  });
+
+  test('returns null when CLAUDE.md is empty / whitespace', () => {
+    const dir = projDir();
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '  \n\t\n');
+    expect(readProjectClaudeMdHead(dir)).toBeNull();
+  });
+
+  test('returns null when CLAUDE.md is a directory', () => {
+    const dir = projDir();
+    fs.mkdirSync(path.join(dir, 'CLAUDE.md'));
+    expect(readProjectClaudeMdHead(dir)).toBeNull();
+  });
+
+  test('returns null when the project path itself does not exist', () => {
+    expect(readProjectClaudeMdHead(path.join(tmpRoot, 'no-such-dir'))).toBeNull();
+  });
+
+  test('truncates past the line cap and appends the … marker', () => {
+    const dir = projDir();
+    // 30 short lines → triggers the line-cap, not the byte-cap.
+    const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), lines.join('\n'));
+    const r = readProjectClaudeMdHead(dir);
+    expect(r).not.toBeNull();
+    // Head ends with the truncate marker on its own line.
+    expect(r!.head.endsWith('\n…')).toBe(true);
+    // Exactly MAX_LINES lines of content + the trailing marker.
+    const headLines = r!.head.split('\n');
+    expect(headLines.length).toBe(PROJECT_CLAUDE_MD_HEAD_MAX_LINES + 1);
+    expect(headLines[PROJECT_CLAUDE_MD_HEAD_MAX_LINES]).toBe('…');
+    // Body content is the FIRST N lines, not the last.
+    expect(headLines[0]).toBe('line 1');
+    expect(headLines[PROJECT_CLAUDE_MD_HEAD_MAX_LINES - 1]).toBe(
+      `line ${PROJECT_CLAUDE_MD_HEAD_MAX_LINES}`,
+    );
+  });
+
+  test('truncates past the byte cap when a single line is huge', () => {
+    const dir = projDir();
+    // One very long line → byte-cap hits first.
+    fs.writeFileSync(
+      path.join(dir, 'CLAUDE.md'),
+      'a'.repeat(PROJECT_CLAUDE_MD_HEAD_MAX_BYTES + 500),
+    );
+    const r = readProjectClaudeMdHead(dir);
+    expect(r).not.toBeNull();
+    // The head body (without the trailing "\n…") is at most MAX_BYTES.
+    const body = r!.head.replace(/\n…$/, '');
+    expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(PROJECT_CLAUDE_MD_HEAD_MAX_BYTES);
+    expect(r!.head.endsWith('\n…')).toBe(true);
+  });
+
+  test('CRLF / CR line endings are normalised to LF', () => {
+    const dir = projDir();
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# CRLF\r\nLine 2\r\nLine 3\r\n');
+    const r = readProjectClaudeMdHead(dir);
+    expect(r).not.toBeNull();
+    // No raw CRs survive — the body is pure LF-terminated lines.
+    expect(r!.head).not.toContain('\r');
+    expect(r!.head.split('\n').length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('sizeLabel reflects the FULL file size, not the truncated head', () => {
+    const dir = projDir();
+    // ~3 KiB → bigger than the 2 KiB head cap; ensure label is for the file.
+    const md = 'long\n'.repeat(800);
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), md);
+    const r = readProjectClaudeMdHead(dir);
+    expect(r).not.toBeNull();
+    // 800 × 5 = 4000 bytes ≈ 3.9 KB; head is much smaller.
+    expect(r!.sizeLabel).toMatch(/^[3-4]\.\d KB$/);
+    // Belt: ensure the head is materially smaller than the file.
+    expect(r!.head.length).toBeLessThan(md.length / 2);
   });
 });
 

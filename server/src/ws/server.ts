@@ -51,7 +51,7 @@ import {
   type OrchestratorSessionHandle,
 } from '../bus/orchestrator.js';
 import type { ActivitySnapshot } from '../bus/activity.js';
-import { ResolveAgentError } from '../bus/runtime.js';
+import { ResolveAgentError, readProjectClaudeMdHead } from '../bus/runtime.js';
 import {
   attemptResumeMultiAgent,
   resumeMultiAgentTarget,
@@ -1429,6 +1429,36 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     }
     case 'send_message': {
       await runOneTurn(conn, msg);
+      return;
+    }
+    case 'read_project_facts': {
+      // PR-6: pure-read RPC for the per-participant facts disclosure in the
+      // template-preview modal. Always replies (even when the project row is
+      // missing or there's no CLAUDE.md) so the client can resolve its
+      // pending request and render whatever data IS available.
+      const project = getProject(msg.projectId);
+      if (!project) {
+        // No matching project — emit a minimal stub so the disclosure shows
+        // "(project unavailable)" rather than spinning forever. A wrapper_error
+        // would be loud for what is, from the operator's POV, just stale
+        // template data (a deleted project still referenced by a saved template).
+        send(conn.ws, {
+          type: 'project_facts',
+          projectId: msg.projectId,
+          facts: { name: `(deleted #${msg.projectId})`, path: '' },
+        });
+        return;
+      }
+      const head = readProjectClaudeMdHead(project.path);
+      send(conn.ws, {
+        type: 'project_facts',
+        projectId: project.id,
+        facts: {
+          name: project.name,
+          path: project.path,
+          ...(head ? { claudeMdHead: head.head, claudeMdSizeLabel: head.sizeLabel } : {}),
+        },
+      });
       return;
     }
   }

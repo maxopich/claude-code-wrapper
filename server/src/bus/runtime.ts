@@ -137,6 +137,99 @@ export function readProjectClaudeMd(projectPath: string): ProjectRules | null {
   return { framed, sizeLabel };
 }
 
+/** PR-6: result of a head-only `CLAUDE.md` read for the per-project facts
+ *  disclosure. `head` is plain text (no framing wrapper); `sizeLabel` is the
+ *  FULL on-disk size (not the truncated head). */
+export type ProjectClaudeMdHead = { head: string; sizeLabel: string };
+
+/** PR-6: hard cap on lines included in the head. Twelve lines is "above the
+ *  fold" for a typical CLAUDE.md — enough to recognise the project's intent
+ *  without spilling into the rule body. */
+export const PROJECT_CLAUDE_MD_HEAD_MAX_LINES = 12;
+/** PR-6: hard cap on bytes included in the head. 2 KiB tracks the line cap
+ *  closely (a tight 12 lines is ~1 KB, a flabby one ~2 KB). Whichever cap
+ *  trips first wins; the result is plain text with a single trailing
+ *  `\n…` marker when truncated. */
+export const PROJECT_CLAUDE_MD_HEAD_MAX_BYTES = 2048;
+
+/**
+ * PR-6: read the FIRST few lines of a project's root `CLAUDE.md` for the
+ * per-participant facts disclosure in the template-preview modal.
+ *
+ * This is a sibling of `readProjectClaudeMd` above — same TOCTOU-safe read
+ * (open once, fstat the fd, read the fd; the inode is pinned across the
+ * window), same "never throws" contract, but a different post-processing
+ * shape: plain head text (not the framed prompt-injection block), much
+ * smaller caps (12 lines / 2 KiB), and no defanging of `</project_claude_md>`
+ * because we're not embedding the content in a fenced prompt block. Returns
+ * `null` when there is no readable, non-empty, regular `CLAUDE.md`.
+ */
+export function readProjectClaudeMdHead(projectPath: string): ProjectClaudeMdHead | null {
+  let raw: string;
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      path.join(projectPath, 'CLAUDE.md'),
+      fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
+    );
+  } catch {
+    return null;
+  }
+  let fileSize: number;
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) return null;
+    fileSize = st.size;
+    raw = fs.readFileSync(fd, 'utf8');
+  } catch {
+    return null;
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* fd already gone — nothing to release */
+    }
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+
+  // Normalise CRLF / CR → LF before line counting so a Windows-checked-in
+  // file isn't double-counted (or under-rendered in a pre-wrap block).
+  const normalised = trimmed.replace(/\r\n?/g, '\n');
+
+  // Byte-cap first (cheap; constrains worst-case allocation), then line-cap.
+  let body =
+    Buffer.byteLength(normalised, 'utf8') > PROJECT_CLAUDE_MD_HEAD_MAX_BYTES
+      ? truncateByBytes(normalised, PROJECT_CLAUDE_MD_HEAD_MAX_BYTES)
+      : normalised;
+  const lines = body.split('\n');
+  let truncated = body.length < normalised.length;
+  if (lines.length > PROJECT_CLAUDE_MD_HEAD_MAX_LINES) {
+    body = lines.slice(0, PROJECT_CLAUDE_MD_HEAD_MAX_LINES).join('\n');
+    truncated = true;
+  }
+  if (truncated) body = body + '\n…';
+
+  // `sizeLabel` reflects the FULL file (so operators see the real CLAUDE.md
+  // weight), not the truncated head. Match the existing `readProjectClaudeMd`
+  // format ("1.2 KB") for visual consistency.
+  const kb = (fileSize / 1024).toFixed(1);
+  const sizeLabel = `${kb} KB`;
+  return { head: body, sizeLabel };
+}
+
+/** UTF-8-safe truncation: keep at most `maxBytes` of `s` without splitting a
+ *  multi-byte codepoint. Falls back to a byte slice + Buffer-to-string roundtrip
+ *  which drops the trailing incomplete sequence cleanly. */
+function truncateByBytes(s: string, maxBytes: number): string {
+  const buf = Buffer.from(s, 'utf8');
+  if (buf.length <= maxBytes) return s;
+  // Slice + decode; invalid trailing bytes from a mid-codepoint cut become
+  // U+FFFD which we then strip from the tail (no other U+FFFDs survive because
+  // the original `s` is already U+FFFD-free at this point — JSON-safe input).
+  return buf.subarray(0, maxBytes).toString('utf8').replace(/�+$/, '');
+}
+
 /**
  * Render the chain briefing for one participant. Prepended once to that
  * agent's first turn (the tmux model wrote it to an inbox; the pure-SDK
