@@ -128,8 +128,64 @@ describe('AgentRunner', () => {
     expect(calls[0]!.prompt).toBe('first');
     expect(calls[0]!.permissionMode).toBe('bypassPermissions');
     expect(calls[0]!.allowDangerouslySkipPermissions).toBe(true);
-    expect(calls[0]!.mcpServers).toHaveProperty('bus');
+    // MCP server is keyed `cebab_bus` (not `bus`) so a worker's own
+    // project-defined `mcpServers.bus` cannot collide with — or clobber —
+    // the identity-pinned bus_send injection once `settingSources` widens
+    // to load that worker's `.claude/settings*.json`.
+    expect(calls[0]!.mcpServers).toHaveProperty('cebab_bus');
+    expect(calls[0]!.mcpServers).not.toHaveProperty('bus');
     expect(calls[1]!.resume).toBe('sess-7');
+  });
+
+  test('register passes the spec.settingSources through to the SDK', async () => {
+    // Chain participants and orchestrator workers register with
+    // ['user', 'project', 'local'] so their `.claude/settings*.json` (MCPs,
+    // allowedTools, hooks) loads exactly as a standalone `claude` session
+    // in the same cwd would. The orchestrator itself registers with
+    // ['user'] because its cwd is Cebab-owned and empty. Both paths must
+    // reach the SDK unchanged.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-ws')]);
+      },
+    });
+    runner.register({
+      name: 'worker',
+      cwd: '/tmp/worker',
+      settingSources: ['user', 'project', 'local'],
+    });
+    runner.register({
+      name: 'orchestrator',
+      cwd: '/tmp/orch',
+      settingSources: ['user'],
+    });
+
+    await runner.deliverTurn('worker', 'go');
+    await runner.deliverTurn('orchestrator', 'go');
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.settingSources).toEqual(['user', 'project', 'local']);
+    expect(calls[1]!.settingSources).toEqual(['user']);
+  });
+
+  test('register without settingSources defaults to ["user"]', async () => {
+    // Defensive fallback in runOneAttempt: if a registration site forgets
+    // to pass settingSources, the SDK runs with the narrowest scope rather
+    // than silently inheriting CLI defaults.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-default')]);
+      },
+    });
+    runner.register({ name: 'no-spec', cwd: '/tmp/no-spec' });
+    await runner.deliverTurn('no-spec', 'go');
+    expect(calls[0]!.settingSources).toEqual(['user']);
   });
 
   test('[R-B] onSessionId fires with the captured session id on result', async () => {

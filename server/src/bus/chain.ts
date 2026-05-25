@@ -547,9 +547,13 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
 
   // Per-participant briefing, prepended once to that agent's first turn (it
   // rides the first prompt rather than living in a project file). The
-  // project's own root CLAUDE.md is read here too (the SDK can't auto-load
-  // it for bus agents — settingSources lacks 'project') and injected on the
-  // same first turn; null when the project has none.
+  // project's own root CLAUDE.md is read here too and injected as framed
+  // text on the same first turn (null when the project has none). The SDK
+  // now also auto-loads project CLAUDE.md because chain participants run
+  // with `settingSources: ['user', 'project', 'local']`; we keep the
+  // explicit injection so the bytes are visible in the on-disk transcript
+  // and the operator's chat (the SDK's auto-load is system-context and
+  // doesn't surface). The duplication is a small token cost, intentional.
   const briefings = new Map<string, string>();
   const projectRules = new Map<string, ProjectRules | null>();
   opts.participants.forEach((p, i) => {
@@ -672,7 +676,11 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     runnerFactory: opts.runnerFactory,
   });
   for (const p of opts.participants) {
-    runner.register({ name: p.agentName, cwd: p.cwd, settingSources: ['user'] });
+    runner.register({
+      name: p.agentName,
+      cwd: p.cwd,
+      settingSources: ['user', 'project', 'local'],
+    });
   }
 
   const deliver = (agentName: string, text: string) => {

@@ -661,10 +661,13 @@ export function wireOrchestratorSession(p: {
   const workerProjectNames = new Map<string, string>(
     p.workers.map((w) => [w.agentName, w.projectName]),
   );
-  // Each worker's own root CLAUDE.md, read here because the SDK won't load
-  // it for bus agents (settingSources lacks 'project'). Injected once on the
-  // worker's first turn (see `deliver`). Recomputed automatically on R-B
-  // resume since `reconstructOrchestratorSession` rebuilds `p.workers` with
+  // Each worker's own root CLAUDE.md, read here and injected once on the
+  // worker's first turn (see `deliver`). The SDK now also auto-loads it
+  // because workers run with `settingSources: ['user', 'project', 'local']`;
+  // the explicit injection survives so the bytes show up in the on-disk
+  // transcript and the operator's chat (the SDK's load is system-context
+  // and doesn't surface). Recomputed automatically on R-B resume since
+  // `reconstructOrchestratorSession` rebuilds `p.workers` with
   // each `cwd` and re-enters this function. The orchestrator itself is never
   // in this map — its cwd is the Cebab workspace, not a target project.
   const workerProjectRules = new Map<string, ProjectRules | null>(
@@ -812,13 +815,28 @@ export function wireOrchestratorSession(p: {
     abortController,
     runnerFactory: p.runnerFactory,
   });
+  // Orchestrator stays narrow: its cwd is the empty Cebab-owned
+  // <sessionFolder>/orchestrator/ workspace — no `.claude/settings*.json`,
+  // no CLAUDE.md, nothing to load — so widening would be a no-op. Pinning
+  // `['user']` here documents the invariant.
   runner.register({
     name: ORCHESTRATOR_AGENT_NAME,
     cwd: paths.orchestratorWorkspace,
     settingSources: ['user'],
   });
+  // Workers load their project's full settings stack — MCPs,
+  // allowedTools/disallowedTools, env injectors, hooks — exactly as a
+  // standalone `claude` session in the same cwd would. Combined with
+  // `permissionMode: 'bypassPermissions'` (no human gate), this means a
+  // worker's project-defined hooks auto-execute on every bus turn for that
+  // worker; the consultant-mode guardrail in `runtime.ts` is the only
+  // behavioral brake.
   for (const w of p.workers) {
-    runner.register({ name: w.agentName, cwd: w.cwd, settingSources: ['user'] });
+    runner.register({
+      name: w.agentName,
+      cwd: w.cwd,
+      settingSources: ['user', 'project', 'local'],
+    });
   }
 
   // R-B: rehydrate each agent's `--resume` checkpoint from the persisted
@@ -916,7 +934,11 @@ export function wireOrchestratorSession(p: {
       await installBusForProject(projectId);
     }
     const newAgent = resolveAgent(projectId);
-    runner.register({ name: newAgent.agentName, cwd: newAgent.cwd, settingSources: ['user'] });
+    runner.register({
+      name: newAgent.agentName,
+      cwd: newAgent.cwd,
+      settingSources: ['user', 'project', 'local'],
+    });
     router.registerWorker(newAgent.agentName);
     addParticipant(sessionId, projectId, 'worker', null);
     workerProjectIds.push(projectId);

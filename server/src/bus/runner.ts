@@ -92,11 +92,16 @@ export function handleBusSend(
  * Build the in-process MCP server exposing the single `bus_send` tool for
  * ONE agent. `agentName` is captured in the closure and stamped as the event
  * `source`; the agent cannot override it. Pass the returned config to
- * `RunOptions.mcpServers` keyed `bus` → the agent sees `mcp__bus__bus_send`.
+ * `RunOptions.mcpServers` keyed `cebab_bus` → the agent sees
+ * `mcp__cebab_bus__bus_send`. The key is deliberately namespaced (not `bus`)
+ * so a project's own `.claude/settings*.json` defining `mcpServers.bus`
+ * cannot collide with — or worse, clobber — this identity-pinned injection
+ * once `settingSources` widens to `['user', 'project', 'local']` for
+ * workers/chain participants.
  */
 export function makeBusToolServer(agentName: string, onEvent: (ev: BusEvent) => void) {
   return createSdkMcpServer({
-    name: 'bus',
+    name: 'cebab_bus',
     version: '0.0.0',
     tools: [
       tool(
@@ -123,7 +128,16 @@ export type AgentSpec = {
   name: string;
   /** Working directory the agent's `claude` runs in. */
   cwd: string;
-  /** settings.json scopes. Workers: project-trusted; orchestrator: ['user']. */
+  /**
+   * settings.json scopes the SDK should layer for this agent's turns.
+   * Workers and chain participants: `['user', 'project', 'local']` — so a
+   * participant's own `.claude/settings*.json` (MCP servers, allowed/
+   * disallowed tools, env injectors, hooks) loads exactly as it would in a
+   * standalone `claude` session. Orchestrator: `['user']` — its cwd is an
+   * empty Cebab-owned workspace, so widening scope is a no-op and pinning
+   * it here documents that invariant. Defaults to `['user']` if a caller
+   * forgets to pass one (defensive narrow fallback).
+   */
   settingSources?: SettingSource[];
 };
 
@@ -346,7 +360,7 @@ export class AgentRunner {
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: spec.settingSources ?? ['user'],
-      mcpServers: { bus: makeBusToolServer(agentName, this.deps.onEvent) },
+      mcpServers: { cebab_bus: makeBusToolServer(agentName, this.deps.onEvent) },
       abortController: this.deps.abortController,
     });
 
