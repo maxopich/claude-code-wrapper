@@ -49,6 +49,7 @@ import {
   getMultiAgentSession,
   getPendingMutation,
   getPendingRetry,
+  recordSessionTeardown,
   setAwaitingContinue,
   setMutationsAcknowledged,
   setMutationPromoted,
@@ -127,6 +128,10 @@ export type StartChainOpts = {
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
   /** Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`. */
   onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /** PR-7: the saved-template id this run was started from, if any. Stamped
+   *  onto the row so the templates UI's "Last run" rail can SELECT by
+   *  template later. Absent for ad-hoc runs. */
+  templateId?: string;
 };
 
 export type ResumeChainOpts = {
@@ -228,6 +233,14 @@ export function createChainRouter(params: {
   // and intentionally does NOT bump this counter (it lives in DB/wire as
   // event N+1 but the displayed ratio matches the cap when it fires).
   let hopsCount = 0;
+  // PR-7: first error captured during this chain session for the rail.
+  // Sources mirror orchestrator: synthetic budget-exhaust text + any kind=
+  // 'error' bus event observed in handleEvent + worker-failed reason.
+  let firstError: string | null = null;
+  const captureError = (text: string) => {
+    if (firstError !== null) return;
+    firstError = text.slice(0, 200);
+  };
 
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
@@ -243,6 +256,14 @@ export function createChainRouter(params: {
       endMultiAgentSession(sessionId, reason === 'completed' ? 'completed' : reason);
     } catch (err) {
       console.error('[chain] endMultiAgentSession failed', err);
+    }
+    // PR-7: record final hops_used + first_error symmetrically with the
+    // orchestrator path; the rail's SELECT-by-template doesn't care which
+    // mode produced the row.
+    try {
+      recordSessionTeardown(sessionId, { hopsUsed: hopsCount, firstError });
+    } catch (err) {
+      console.error('[chain] recordSessionTeardown failed', err);
     }
     if (onTeardown && reason !== 'crashed') {
       try {
@@ -288,6 +309,10 @@ export function createChainRouter(params: {
       hopsCount += 1;
     } catch (err) {
       console.error('[chain] persist event failed', err);
+    }
+    // PR-7: capture kind='error' events as the run's first_error for the rail.
+    if (ev.kind === 'error') {
+      captureError(ev.text);
     }
     try {
       sink.onEvent(sessionId, ev, dbId);
@@ -336,6 +361,8 @@ export function createChainRouter(params: {
     // pattern `forwardCebabEvent` uses for legitimate Cebab traffic.
     if (hopsCount >= hopBudget) {
       const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
+      // PR-7: this synthetic error is THIS run's first_error if none earlier.
+      captureError(reasonText);
       try {
         const row = appendMultiAgentEvent(
           sessionId,
@@ -419,6 +446,10 @@ export function createChainRouter(params: {
     const errMessage =
       err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
     const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
+    // PR-7: a worker failure is a strong "first error" signal. Capture
+    // unconditionally so the rail's red chip + excerpt show even if the
+    // persist below trips.
+    captureError(reasonText);
     let errorEventId = 0;
     try {
       const row = appendMultiAgentEvent(
@@ -513,7 +544,13 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
 
   const iterationId = nextIterationId(paths);
 
-  createMultiAgentSession(sessionId, 'chain', iterationId, paths.folder, lifecycle);
+  createMultiAgentSession(sessionId, 'chain', iterationId, paths.folder, lifecycle, {
+    // PR-7: template provenance + effective hop budget at session start
+    // are stamped onto the row so the "Last run" rail can attribute this
+    // session and render hops_used/hop_budget post-teardown.
+    templateId: opts.templateId ?? null,
+    hopBudget,
+  });
   opts.participants.forEach((p, i) => addParticipant(sessionId, p.projectId, 'worker', i));
   prepareIterationDir(iterationId, agentNames, paths);
 

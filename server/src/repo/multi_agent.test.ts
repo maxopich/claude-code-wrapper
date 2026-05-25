@@ -12,11 +12,13 @@ import {
   computeRecoveryContext,
   createMultiAgentSession,
   endMultiAgentSession,
+  getLastRunForTemplate,
   listMultiAgentEvents,
   listMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
   listParticipants,
   listResolvedParticipants,
+  recordSessionTeardown,
   setProjectBusInstalled,
 } from './multi_agent.js';
 
@@ -371,5 +373,123 @@ describe('computeRecoveryContext (Item #7)', () => {
     expect(ctx!.interruptedAgents).toEqual([
       { agentName: 'dirty', lastEventTs: 300, lastCheckpointTs: 250 },
     ]);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// PR-7 (migration 013): per-template hopBudget plumb + last-run health rail.
+// ----------------------------------------------------------------------------
+
+describe('createMultiAgentSession + PR-7 template_id / hop_budget', () => {
+  test('round-trips templateId and hopBudget through insert + read', () => {
+    const row = createMultiAgentSession('p7-s1', 'orchestrator', '001', '/folder', 'persistent', {
+      templateId: 'tpl-abc',
+      hopBudget: 25,
+    });
+    expect(row.template_id).toBe('tpl-abc');
+    expect(row.hop_budget).toBe(25);
+
+    // Belt: re-read from a fresh listing, confirm the column write
+    // actually landed rather than just being the in-memory return.
+    const rows = listMultiAgentSessions();
+    const persisted = rows.find((r) => r.id === 'p7-s1');
+    expect(persisted?.template_id).toBe('tpl-abc');
+    expect(persisted?.hop_budget).toBe(25);
+  });
+
+  test('templateId and hopBudget both default to null when opts omitted', () => {
+    // Mirrors a pre-PR-7 call site (orchestrator/chain modes that haven't
+    // been updated yet would land here). The rail simply doesn't attribute
+    // these rows to any template.
+    const row = createMultiAgentSession('p7-s2', 'chain', '001', '/folder', 'persistent');
+    expect(row.template_id).toBeNull();
+    expect(row.hop_budget).toBeNull();
+  });
+
+  test('hops_used and first_error start null at create time', () => {
+    // These are written by recordSessionTeardown at teardown — the
+    // create row's view of them should be null even when the caller
+    // passed templateId/hopBudget.
+    const row = createMultiAgentSession('p7-s3', 'chain', '001', '/folder', 'persistent', {
+      templateId: 't',
+      hopBudget: 5,
+    });
+    expect(row.hops_used).toBeNull();
+    expect(row.first_error).toBeNull();
+  });
+});
+
+describe('recordSessionTeardown', () => {
+  test('writes hops_used and first_error onto an existing row', () => {
+    createMultiAgentSession('td-s1', 'orchestrator', '001', '/f', 'persistent', {
+      templateId: 't',
+      hopBudget: 12,
+    });
+    recordSessionTeardown('td-s1', { hopsUsed: 9, firstError: 'oops' });
+    const row = listMultiAgentSessions().find((r) => r.id === 'td-s1');
+    expect(row?.hops_used).toBe(9);
+    expect(row?.first_error).toBe('oops');
+    // Existing columns are untouched.
+    expect(row?.template_id).toBe('t');
+    expect(row?.hop_budget).toBe(12);
+  });
+
+  test('idempotent: a second call overwrites with the newer values', () => {
+    createMultiAgentSession('td-s2', 'chain', '001', '/f', 'persistent');
+    recordSessionTeardown('td-s2', { hopsUsed: 3 });
+    recordSessionTeardown('td-s2', { hopsUsed: 7, firstError: 'late error' });
+    const row = listMultiAgentSessions().find((r) => r.id === 'td-s2');
+    expect(row?.hops_used).toBe(7);
+    expect(row?.first_error).toBe('late error');
+  });
+
+  test('truncates firstError to 200 chars (defence in depth)', () => {
+    createMultiAgentSession('td-s3', 'chain', '001', '/f', 'persistent');
+    const big = 'x'.repeat(500);
+    recordSessionTeardown('td-s3', { hopsUsed: 1, firstError: big });
+    const row = listMultiAgentSessions().find((r) => r.id === 'td-s3');
+    expect(row?.first_error?.length).toBe(200);
+    expect(row?.first_error?.endsWith('x')).toBe(true);
+  });
+
+  test('empty / null firstError is stored as null (not "")', () => {
+    createMultiAgentSession('td-s4', 'chain', '001', '/f', 'persistent');
+    recordSessionTeardown('td-s4', { hopsUsed: 5, firstError: null });
+    const r1 = listMultiAgentSessions().find((r) => r.id === 'td-s4');
+    expect(r1?.first_error).toBeNull();
+    recordSessionTeardown('td-s4', { hopsUsed: 5, firstError: '' });
+    const r2 = listMultiAgentSessions().find((r) => r.id === 'td-s4');
+    expect(r2?.first_error).toBeNull();
+  });
+});
+
+describe('getLastRunForTemplate', () => {
+  test('returns the most-recent row for the given template id', () => {
+    // Three rows, two for tpl-A in different orders, one for tpl-B as noise.
+    createMultiAgentSession('older-a', 'chain', '001', '/f', 'persistent', { templateId: 'tpl-A' });
+    // Spin until the next ms ticks over so started_at strictly differs.
+    const t1 = Date.now();
+    while (Date.now() === t1) {
+      /* spin */
+    }
+    createMultiAgentSession('newer-a', 'chain', '002', '/f', 'persistent', { templateId: 'tpl-A' });
+    createMultiAgentSession('noise-b', 'chain', '003', '/f', 'persistent', { templateId: 'tpl-B' });
+
+    const row = getLastRunForTemplate('tpl-A');
+    expect(row?.id).toBe('newer-a');
+  });
+
+  test('returns undefined when no row matches', () => {
+    createMultiAgentSession('noise', 'chain', '001', '/f', 'persistent', { templateId: 'tpl-X' });
+    expect(getLastRunForTemplate('tpl-NONE')).toBeUndefined();
+  });
+
+  test('ignores rows with template_id = NULL (pre-013 / ad-hoc runs)', () => {
+    // Ad-hoc run (no template) followed by a templated run; the rail
+    // attributes the second one and silently drops the first.
+    createMultiAgentSession('adhoc', 'chain', '001', '/f', 'persistent');
+    createMultiAgentSession('tmpl', 'chain', '002', '/f', 'persistent', { templateId: 'tpl-keep' });
+    const row = getLastRunForTemplate('tpl-keep');
+    expect(row?.id).toBe('tmpl');
   });
 });

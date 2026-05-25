@@ -8,6 +8,7 @@ import type {
   MultiAgentTemplate,
   Project,
   ServerMsg,
+  TemplateLastRun,
 } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
 import { activeAgent, eventDefaultCollapsed } from '../store';
@@ -106,6 +107,12 @@ export function MultiAgentTab(props: {
    * each modal-open owns its own cache).
    */
   onReadProjectFacts: (projectId: number) => void;
+  /**
+   * PR-7: request the most-recent run for a saved template's rail. The
+   * matching `last_run_for_template` reply arrives via `subscribeServerMsg`;
+   * the templates panel owns a per-template cache keyed on templateId.
+   */
+  onReadLastRunForTemplate: (templateId: string) => void;
 }) {
   const { multiAgent, projects } = props;
   if (multiAgent.active) {
@@ -159,6 +166,9 @@ function DraftView(props: {
   /** PR-6: same subscription seam Logs uses — the modal's cache lives here,
    *  not in Redux, so it can invalidate per modal-open. */
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+  /** PR-7: request the most-recent run for a saved template's health rail.
+   *  Reply via `subscribeServerMsg`; cache lives in `TemplatesPanel`. */
+  onReadLastRunForTemplate: (templateId: string) => void;
 }) {
   const { multiAgent, projects } = props;
   const participants = multiAgent.draftParticipants
@@ -264,6 +274,7 @@ function DraftView(props: {
             onUpdateRoles={props.onUpdateTemplateRoles}
             onReadProjectFacts={props.onReadProjectFacts}
             subscribeServerMsg={props.subscribeServerMsg}
+            onReadLastRunForTemplate={props.onReadLastRunForTemplate}
           />
         </section>
 
@@ -599,8 +610,49 @@ function TemplatesPanel(props: {
   onReadProjectFacts: (projectId: number) => void;
   /** PR-6: forwarded subscription seam for the modal's facts cache. */
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+  /** PR-7: forwarded to the per-template preview's "Last run" rail. */
+  onReadLastRunForTemplate: (templateId: string) => void;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // PR-7: per-template "Last run" cache shared across this panel mount.
+  // Keyed by templateId; value is either undefined (never asked), null
+  // (asked, server replied lastRun=null), or a TemplateLastRun row.
+  // Refreshed: (a) on first card mount via TemplatePreview's useEffect,
+  // (b) on each `multi_agent_ended` whose session was started from any
+  // visible templateId (via the subscription below).
+  const [lastRuns, setLastRuns] = useState<Map<string, TemplateLastRun | null>>(() => new Map());
+  // Listen for `last_run_for_template` replies and ENDED events that
+  // should invalidate the rail. Subscribe once per panel mount.
+  useEffect(() => {
+    return props.subscribeServerMsg((msg) => {
+      if (msg.type === 'last_run_for_template') {
+        setLastRuns((prev) => {
+          const next = new Map(prev);
+          next.set(msg.templateId, msg.lastRun);
+          return next;
+        });
+        return;
+      }
+      if (msg.type === 'multi_agent_ended') {
+        // We don't know which template this run was attributed to from
+        // the ended event alone (sessionId isn't a template id). Cheapest
+        // correct option: refresh every cached template — the rail's
+        // SELECT is a single-row lookup so this is bounded. Without this,
+        // a just-finished run would show stale rail until the next mount.
+        setLastRuns((prev) => {
+          if (prev.size === 0) return prev;
+          // Defer per-key requests so React doesn't churn — we trigger
+          // refetches in the side-effect; the state map itself is
+          // untouched (the replies arrive via the same subscription).
+          for (const templateId of prev.keys()) {
+            props.onReadLastRunForTemplate(templateId);
+          }
+          return prev;
+        });
+      }
+    });
+  }, [props]);
 
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
@@ -643,6 +695,8 @@ function TemplatesPanel(props: {
         onUpdateRoles={props.onUpdateRoles}
         onReadProjectFacts={props.onReadProjectFacts}
         subscribeServerMsg={props.subscribeServerMsg}
+        onReadLastRunForTemplate={props.onReadLastRunForTemplate}
+        lastRun={lastRuns.get(selected.id)}
       />
     </div>
   );
@@ -738,8 +792,23 @@ function TemplatePreview(props: {
   onReadProjectFacts: (projectId: number) => void;
   /** PR-6: forwarded subscription seam for the modal's facts cache. */
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+  /** PR-7: trigger the rail's RPC on mount. */
+  onReadLastRunForTemplate: (templateId: string) => void;
+  /** PR-7: the last-run row for this template (`null` = no row, `undefined`
+   *  = parent hasn't received a reply yet — the rail simply doesn't render
+   *  in that case). */
+  lastRun: TemplateLastRun | null | undefined;
 }) {
-  const { template, projects } = props;
+  const { template, projects, onReadLastRunForTemplate } = props;
+  // PR-7: fire the rail RPC once per template mount. The parent caches
+  // replies in its `lastRuns` Map keyed by templateId; the parent's
+  // `multi_agent_ended` listener separately refreshes all cached
+  // templates so live updates flow without a remount. Depending only on
+  // `template.id` + the callback (stable across renders from App.tsx)
+  // avoids re-firing on every parent re-render.
+  useEffect(() => {
+    onReadLastRunForTemplate(template.id);
+  }, [onReadLastRunForTemplate, template.id]);
   const resolved = template.participants
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
@@ -795,6 +864,11 @@ function TemplatePreview(props: {
           {resolved.length === 1 ? '' : 's'}
           {unavailable > 0 ? ` · ${unavailable} unavailable` : ''}
         </div>
+        {/* PR-7: "Last run" health rail. Renders when the parent has a
+         *  cached reply for this template; otherwise the area is empty.
+         *  Click jumps to the iteration (LogsModal route in v1: defer
+         *  until the click site exists — for now the rail is read-only). */}
+        <TemplateLastRunRail template={template} lastRun={props.lastRun} />
       </div>
       {/* PR-1 + PR-2: custom-mode honesty surface. Fires only when the
           stored template carries mode='custom'. The notice is the factual
@@ -876,6 +950,125 @@ function TemplatePreview(props: {
       </div>
     </div>
   );
+}
+
+/**
+ * PR-7: "Last run" health rail rendered under a template's preview header.
+ *
+ * Three states:
+ *   - `lastRun === undefined`: parent hasn't fetched yet → render nothing
+ *     (avoids a layout-shift "Loading…" flash; the rail isn't load-bearing).
+ *   - `lastRun === null`: server confirmed no recorded run for this
+ *     template → render an "Hop budget: X (per template)" affordance when
+ *     `template.hopBudget` is set, otherwise nothing.
+ *   - `lastRun: TemplateLastRun`: render "Last run: 3h ago · 7/12 hops ·
+ *     <chip>" with a color-coded chip derived from
+ *     (status, hopsUsed === hopBudget) per the decision-log table U2.
+ */
+function TemplateLastRunRail(props: {
+  template: MultiAgentTemplate;
+  lastRun: TemplateLastRun | null | undefined;
+}) {
+  const { template, lastRun } = props;
+  // Show a hop-budget badge whenever the template has its own override —
+  // it's a permanent fact about the template, distinct from the variable
+  // "what happened on the last run" rail beneath. Both can co-exist.
+  const budgetBadge =
+    typeof template.hopBudget === 'number' ? (
+      <span
+        className="tpl-preview-budget"
+        title="This template overrides the global hop budget. Runs started from this template enforce the value below."
+      >
+        Hop budget: {template.hopBudget} (per template)
+      </span>
+    ) : null;
+
+  if (lastRun === undefined) return budgetBadge;
+  if (lastRun === null) return budgetBadge;
+
+  const label = deriveLastRunLabel(lastRun);
+  // "X / Y" only renders when both are present (post-013 rows). For
+  // pre-013 rows hopBudget is null — show "?" so the row is still legible.
+  const hopsText =
+    lastRun.hopsUsed === null
+      ? `?/${lastRun.hopBudget ?? '?'}`
+      : `${lastRun.hopsUsed}/${lastRun.hopBudget ?? '?'}`;
+  const agoText = formatAgo(lastRun.startedAt);
+  return (
+    <>
+      {budgetBadge}
+      <div className={`tpl-preview-rail tpl-preview-rail--${label.kind}`}>
+        <span className="tpl-preview-rail-label">Last run</span>
+        <span
+          className="tpl-preview-rail-time"
+          title={new Date(lastRun.startedAt).toLocaleString()}
+        >
+          {agoText}
+        </span>
+        <span className="tpl-preview-rail-hops">· {hopsText} hops ·</span>
+        <span className={`tpl-preview-rail-chip tpl-preview-rail-chip--${label.kind}`}>
+          {label.text}
+        </span>
+        {label.kind === 'failed' && lastRun.firstError && (
+          <span className="tpl-preview-rail-error" title={lastRun.firstError}>
+            · {truncateOneLine(lastRun.firstError, 60)}
+          </span>
+        )}
+      </div>
+    </>
+  );
+}
+
+/** Derive a rendering label from the persisted status + hops_used. Mirrors
+ *  decision-log table U2 — the protocol enum stays as-is, the label is a
+ *  render-time projection. Exported for unit testing in isolation. */
+export function deriveLastRunLabel(run: TemplateLastRun): {
+  kind: 'ok' | 'at-cap' | 'interrupted' | 'failed' | 'running';
+  text: string;
+} {
+  if (run.status === 'running') return { kind: 'running', text: 'running' };
+  if (run.status === 'crashed') return { kind: 'failed', text: 'failed' };
+  if (run.status === 'stopped') {
+    // Stop is "operator pulled the cord". Distinguish at-cap (budget
+    // tripped → router auto-stopped) from a hand-Stop.
+    if (
+      typeof run.hopsUsed === 'number' &&
+      typeof run.hopBudget === 'number' &&
+      run.hopsUsed >= run.hopBudget
+    ) {
+      return { kind: 'at-cap', text: 'at cap' };
+    }
+    return { kind: 'interrupted', text: 'interrupted' };
+  }
+  // status === 'completed'
+  if (
+    typeof run.hopsUsed === 'number' &&
+    typeof run.hopBudget === 'number' &&
+    run.hopsUsed >= run.hopBudget
+  ) {
+    return { kind: 'at-cap', text: 'at cap' };
+  }
+  return { kind: 'ok', text: 'ok' };
+}
+
+/** Coarse "time ago" string (m / h / d). Mirrors the existing iteration
+ *  browser's approach — no library, ASCII units, never lies about precision. */
+function formatAgo(ts: number): string {
+  const diff = Math.max(0, Date.now() - ts);
+  const min = Math.floor(diff / 60_000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const days = Math.floor(hr / 24);
+  return `${days}d ago`;
+}
+
+/** Single-line truncate for the inline error excerpt: kill internal
+ *  newlines first, then cap to `n` chars with an ellipsis. */
+function truncateOneLine(s: string, n: number): string {
+  const oneLine = s.replace(/\s+/g, ' ').trim();
+  return oneLine.length <= n ? oneLine : oneLine.slice(0, n - 1) + '…';
 }
 
 function TemplateNameModal(props: {

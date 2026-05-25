@@ -286,8 +286,16 @@ export function App() {
   }
   function startChain() {
     // Mode is enforced by the mounted tab (Chained Chat) — no mode guard.
-    const { draftParticipants, draftPrompt, draftLifecycle, draftPauseOnMutation } =
-      state.multiAgent;
+    const {
+      draftParticipants,
+      draftPrompt,
+      draftLifecycle,
+      draftPauseOnMutation,
+      // PR-7: template provenance + per-template hop budget. Both are null
+      // for ad-hoc runs; the server stamps them onto the row only if set.
+      draftTemplateId,
+      draftHopBudget,
+    } = state.multiAgent;
     if (draftPrompt.trim().length === 0) return;
     if (draftParticipants.length < 2) return;
     wsRef.current?.send({
@@ -297,12 +305,20 @@ export function App() {
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
       pauseOnMutation: draftPauseOnMutation,
+      ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
+      ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
     });
   }
   function startOrchestrator() {
     // Mode is enforced by the mounted tab (Multi-Agent) — no mode guard.
-    const { draftParticipants, draftPrompt, draftLifecycle, draftPauseOnMutation } =
-      state.multiAgent;
+    const {
+      draftParticipants,
+      draftPrompt,
+      draftLifecycle,
+      draftPauseOnMutation,
+      draftTemplateId,
+      draftHopBudget,
+    } = state.multiAgent;
     if (draftPrompt.trim().length === 0) return;
     // Orchestrator mode is hub-and-spoke; even one worker is functional
     // (degenerate, but useful for smoke testing the routing path).
@@ -314,6 +330,8 @@ export function App() {
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
       pauseOnMutation: draftPauseOnMutation,
+      ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
+      ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
     });
   }
   function stopMultiAgent(sessionId: string) {
@@ -426,6 +444,10 @@ export function App() {
     // Edit per-agent roles WITHOUT clobbering the template: save_template
     // upserts by name and replaces mode/lifecycle/participants wholesale, so
     // resend the template's OWN fields with just the roles map changed.
+    //
+    // PR-7: preserve `hopBudget` so editing roles doesn't reset a per-template
+    // budget back to "no override". Same goes for `layout` (PR-6) — both
+    // are passthroughs.
     wsRef.current?.send({
       type: 'save_template',
       name: t.name,
@@ -433,6 +455,8 @@ export function App() {
       lifecycle: t.lifecycle,
       participants: t.participants,
       roles,
+      layout: t.layout,
+      hopBudget: t.hopBudget,
     });
   }
   function deleteTemplate(id: string) {
@@ -475,6 +499,14 @@ export function App() {
     // the per-modal-open cache (so closed-then-reopened modal sees fresh
     // on-disk state).
     wsRef.current?.send({ type: 'read_project_facts', projectId });
+  }
+  function readLastRunForTemplate(templateId: string) {
+    // PR-7: WS round-trip for the templates UI's "Last run" rail. The reply
+    // (`last_run_for_template`) lives outside Redux; the templates panel
+    // owns a per-template cache keyed on templateId and refreshes on
+    // `multi_agent_ended` for a matching templateId (same side-channel
+    // pattern as project_facts above).
+    wsRef.current?.send({ type: 'get_last_run_for_template', templateId });
   }
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
@@ -679,6 +711,7 @@ export function App() {
                 onLoadSessionLog={loadSessionLog}
                 subscribeServerMsg={subscribeServerMsg}
                 onReadProjectFacts={readProjectFacts}
+                onReadLastRunForTemplate={readLastRunForTemplate}
               />
             )}
           </>

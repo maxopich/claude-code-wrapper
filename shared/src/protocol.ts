@@ -183,6 +183,23 @@ export type ClientMsg =
        * Persists in `multi_agent_sessions.pause_on_mutation`; survives R-B.
        */
       pauseOnMutation?: boolean;
+      /**
+       * PR-7: id of the saved template this run was started FROM, if any.
+       * The server stamps it onto `multi_agent_sessions.template_id` so the
+       * "Last run" rail can SELECT by template at list time. Absent for
+       * ad-hoc runs that didn't go through Apply-Template — those rows have
+       * `template_id IS NULL` and never feed a template's rail.
+       */
+      templateId?: string;
+      /**
+       * PR-7: per-run hop-budget override. When the operator applied a
+       * template with `template.hopBudget` set, the client mirrors it here
+       * so the resolver doesn't have to look it up again. Server-side
+       * precedence: this value > template.hopBudget > DB setting >
+       * `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`. Clamped server-side
+       * to `>= 1`; absent on pre-PR-7 clients.
+       */
+      hopBudget?: number;
     }
   | {
       /**
@@ -370,6 +387,13 @@ export type ClientMsg =
        *  server persists it as-is; the future editor enforces topology
        *  constraints before sending. Absent on chain/orchestrator saves. */
       layout?: CustomLayout;
+      /**
+       * PR-7: optional per-template hop budget override. When omitted, runs
+       * started from this template use the global default precedence. The
+       * save handler clamps to `>= 1` (sub-1 input is silently dropped) and
+       * rejects non-finite numbers.
+       */
+      hopBudget?: number;
     }
   | {
       /** Delete a template by id. Reply: a fresh `templates` ServerMsg. */
@@ -418,6 +442,22 @@ export type ClientMsg =
        */
       type: 'read_project_facts';
       projectId: number;
+    }
+  | {
+      /**
+       * PR-7: ask the server for the most-recent persisted run started from
+       * a given saved template. Read-only; safe to call without any active
+       * session. The reply is a single `last_run_for_template` ServerMsg
+       * carrying either the row (mapped to `TemplateLastRun`) or `null` when
+       * the template has never been used (or only used by pre-013 runs whose
+       * `template_id` column wasn't recorded).
+       *
+       * The templates UI calls this once per template card mount + once
+       * after each `multi_agent_ended` carrying a matching templateId, so
+       * the rail stays fresh without an aggressive polling loop.
+       */
+      type: 'get_last_run_for_template';
+      templateId: string;
     };
 
 // ---- Server → Browser ----
@@ -808,6 +848,17 @@ export type ServerMsg =
       projectId: number;
       facts: ProjectFacts;
     }
+  | {
+      /**
+       * PR-7: reply to `get_last_run_for_template`. The `lastRun` payload is
+       * `null` when no persisted row matches (template never used, or only
+       * used by pre-013 sessions whose `template_id` column wasn't recorded).
+       * The client renders the rail iff `lastRun !== null`.
+       */
+      type: 'last_run_for_template';
+      templateId: string;
+      lastRun: TemplateLastRun | null;
+    }
   | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string };
 
 /**
@@ -1143,6 +1194,44 @@ export type MultiAgentTemplate = {
    * without a layout.
    */
   layout?: CustomLayout;
+  /**
+   * PR-7 (round-2 plan): optional per-template hop budget override. When set,
+   * a run started from this template uses this value instead of the global
+   * default (DB setting > `CEBAB_HOP_BUDGET` env > built-in `DEFAULT_HOP_BUDGET`).
+   * Absent on templates saved before PR-7 — the renderer treats absent as
+   * "no override" (operator sees the global default applied to that run).
+   *
+   * Sanity: positive integer. Sub-1 values are rejected at the save handler.
+   */
+  hopBudget?: number;
+};
+
+/**
+ * PR-7 (round-2 plan): one past run for a given template, as surfaced to the
+ * "Last run" rail under that template's card.
+ *
+ * The runtime status enum (`IterationSummary.status`) is preserved AS-IS;
+ * the rail derives its render label ("ok" / "at cap" / "interrupted" /
+ * "failed") at the boundary — no protocol-level widening. See the table
+ * in PR-7's plan section for the mapping.
+ */
+export type TemplateLastRun = {
+  sessionId: string;
+  startedAt: number;
+  endedAt: number | null;
+  /** Same enum as `IterationSummary.status`. The client derives a label. */
+  status: 'running' | 'completed' | 'stopped' | 'crashed';
+  /** Final persisted hop count at teardown. `null` while still running. */
+  hopsUsed: number | null;
+  /** The hop budget that was in force for this run (post-resolution).
+   *  `null` for pre-013 rows whose hop_budget column was never populated. */
+  hopBudget: number | null;
+  /** First operator-facing error text observed during the run (~200 chars).
+   *  Used for the "failed · <excerpt>" line in the rail. Absent on clean
+   *  runs and on pre-013 rows. */
+  firstError?: string;
+  /** Absolute path to the iteration directory — clicking the rail opens it. */
+  artifactsDir?: string;
 };
 
 export const MULTI_AGENT_EVENT_KINDS: ReadonlySet<MultiAgentEventKind> = new Set([

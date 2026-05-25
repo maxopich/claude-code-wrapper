@@ -164,3 +164,100 @@ describe('listTemplates defensive mode filter (PR-6)', () => {
     expect(listTemplates()).toEqual([]);
   });
 });
+
+// PR-7: per-template hopBudget round-trip + clamp.
+describe('saveTemplate — PR-7 hopBudget', () => {
+  test('persists a positive integer hopBudget through save + list', () => {
+    saveTemplate({
+      name: 'big-budget',
+      mode: 'orchestrator',
+      lifecycle: 'persistent',
+      participants: [1],
+      hopBudget: 50,
+    });
+    const list = listTemplates();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.hopBudget).toBe(50);
+  });
+
+  test('absent hopBudget stores as undefined (no clamping)', () => {
+    saveTemplate({
+      name: 'default-budget',
+      mode: 'chain',
+      lifecycle: 'persistent',
+      participants: [1, 2],
+    });
+    expect(listTemplates()[0]!.hopBudget).toBeUndefined();
+  });
+
+  test('fractional input is floored', () => {
+    saveTemplate({
+      name: 'fractional',
+      mode: 'chain',
+      lifecycle: 'persistent',
+      participants: [1, 2],
+      // 17.9 → 17 (floor, not round) so the budget is never raised
+      // above what the operator typed.
+      hopBudget: 17.9,
+    });
+    expect(listTemplates()[0]!.hopBudget).toBe(17);
+  });
+
+  test('sub-1 / non-finite / non-number input is dropped to undefined', () => {
+    const cases: Array<number | unknown> = [0, -3, 0.5, NaN, Infinity];
+    cases.forEach((v, i) => {
+      saveTemplate({
+        name: `bad-${i}`,
+        mode: 'chain',
+        lifecycle: 'persistent',
+        participants: [1, 2],
+        hopBudget: v as number,
+      });
+    });
+    const list = listTemplates();
+    for (const t of list) {
+      expect(t.hopBudget).toBeUndefined();
+    }
+  });
+
+  test('upsert by name preserves the new hopBudget (overwrites prior)', () => {
+    saveTemplate({
+      name: 'tweak',
+      mode: 'orchestrator',
+      lifecycle: 'persistent',
+      participants: [1],
+      hopBudget: 10,
+    });
+    saveTemplate({
+      name: 'tweak',
+      mode: 'orchestrator',
+      lifecycle: 'persistent',
+      participants: [1],
+      hopBudget: 30,
+    });
+    const list = listTemplates();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.hopBudget).toBe(30);
+  });
+
+  test('upsert without hopBudget clears a prior override (no preservation)', () => {
+    // Editing a template via the roles editor sends `hopBudget: t.hopBudget`
+    // explicitly to preserve. A different caller that omits the field is
+    // taken at its word — undefined means "no per-template override".
+    saveTemplate({
+      name: 'wipe',
+      mode: 'chain',
+      lifecycle: 'persistent',
+      participants: [1, 2],
+      hopBudget: 7,
+    });
+    saveTemplate({
+      name: 'wipe',
+      mode: 'chain',
+      lifecycle: 'persistent',
+      participants: [1, 2],
+      // hopBudget omitted
+    });
+    expect(listTemplates()[0]!.hopBudget).toBeUndefined();
+  });
+});
