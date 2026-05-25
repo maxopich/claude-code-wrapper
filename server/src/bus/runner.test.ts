@@ -85,10 +85,22 @@ describe('handleBusSend', () => {
   });
 });
 
-test('makeBusToolServer builds a "bus" MCP server', () => {
-  const server = makeBusToolServer('alpha', () => {});
+test('makeBusToolServer builds a `cebab_bus` MCP server by default', () => {
+  const server = makeBusToolServer('alpha', () => {}) as { type: string; name: string };
   expect(server).toBeTruthy();
+  expect(server.type).toBe('sdk');
+  expect(server.name).toBe('cebab_bus');
   expect(BUS_KINDS).toEqual(['intro', 'prompt', 'reply', 'final']);
+});
+
+test('makeBusToolServer honors a custom server name (used for the `bus` deprecation shim)', () => {
+  // runOneAttempt registers a second instance under the `bus` key to keep
+  // resumed CLI sessions whose JSONL history calls `mcp__bus__bus_send`
+  // resolving after PR #99 renamed the canonical key. The metadata `name`
+  // must match the mcpServers key so the SDK advertises the prefix that
+  // the resumed history references.
+  const server = makeBusToolServer('alpha', () => {}, 'bus') as { type: string; name: string };
+  expect(server.name).toBe('bus');
 });
 
 // --- AgentRunner ---------------------------------------------------------
@@ -128,13 +140,46 @@ describe('AgentRunner', () => {
     expect(calls[0]!.prompt).toBe('first');
     expect(calls[0]!.permissionMode).toBe('bypassPermissions');
     expect(calls[0]!.allowDangerouslySkipPermissions).toBe(true);
-    // MCP server is keyed `cebab_bus` (not `bus`) so a worker's own
-    // project-defined `mcpServers.bus` cannot collide with — or clobber —
-    // the identity-pinned bus_send injection once `settingSources` widens
-    // to load that worker's `.claude/settings*.json`.
+    // Canonical key is `cebab_bus` (the rename was deliberate so a worker's
+    // own project-defined `mcpServers.bus` cannot collide with the identity-
+    // pinned bus_send injection). `bus` is ALSO registered as a deprecation
+    // shim so resumed CLI sessions whose JSONL history calls
+    // `mcp__bus__bus_send` keep resolving — see the alias coverage below.
     expect(calls[0]!.mcpServers).toHaveProperty('cebab_bus');
-    expect(calls[0]!.mcpServers).not.toHaveProperty('bus');
+    expect(calls[0]!.mcpServers).toHaveProperty('bus');
     expect(calls[1]!.resume).toBe('sess-7');
+  });
+
+  test('both `cebab_bus` and `bus` mcpServers expose identity-pinned bus_send (rename deprecation shim)', async () => {
+    // Regression for the silent-stall bug seen on Cebab session
+    // 67a5e371: PR #99 renamed `bus` → `cebab_bus`, and resumed CLI
+    // sessions that still called `mcp__bus__bus_send` from their JSONL
+    // history hit "No such tool available", fell back to plain assistant
+    // text, and the router dropped the reply. Registering `bus` under the
+    // same identity-pinned handler keeps those resumed turns working.
+    //
+    // The alias must remain identity-pinned: each registration is a
+    // separately-built McpSdkServerConfigWithInstance with its own closure
+    // capturing the agent name. They are NOT the same object reference, so
+    // the two instances cannot share mutable state that an agent could
+    // poison.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-alias')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await runner.deliverTurn('alpha', 'go');
+
+    const servers = calls[0]!.mcpServers as Record<string, { type: string; name: string }>;
+    expect(servers.cebab_bus?.type).toBe('sdk');
+    expect(servers.cebab_bus?.name).toBe('cebab_bus');
+    expect(servers.bus?.type).toBe('sdk');
+    expect(servers.bus?.name).toBe('bus');
+    expect(servers.cebab_bus).not.toBe(servers.bus);
   });
 
   test('register passes the spec.settingSources through to the SDK', async () => {
