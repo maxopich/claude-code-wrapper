@@ -98,10 +98,19 @@ export function handleBusSend(
  * cannot collide with — or worse, clobber — this identity-pinned injection
  * once `settingSources` widens to `['user', 'project', 'local']` for
  * workers/chain participants.
+ *
+ * `serverName` parameterizes the MCP server's metadata `name:` so the helper
+ * can build TWO instances at runtime — one for the canonical `cebab_bus` key
+ * and one for the deprecation-shim `bus` key (see `runOneAttempt`). Defaults
+ * to `'cebab_bus'` so existing callers stay unchanged.
  */
-export function makeBusToolServer(agentName: string, onEvent: (ev: BusEvent) => void) {
+export function makeBusToolServer(
+  agentName: string,
+  onEvent: (ev: BusEvent) => void,
+  serverName = 'cebab_bus',
+) {
   return createSdkMcpServer({
-    name: 'cebab_bus',
+    name: serverName,
     version: '0.0.0',
     tools: [
       tool(
@@ -360,7 +369,20 @@ export class AgentRunner {
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: spec.settingSources ?? ['user'],
-      mcpServers: { cebab_bus: makeBusToolServer(agentName, this.deps.onEvent) },
+      mcpServers: {
+        cebab_bus: makeBusToolServer(agentName, this.deps.onEvent),
+        // Deprecation shim for the `bus` → `cebab_bus` MCP-server rename
+        // (e04769e). A resumed CLI session whose JSONL history contains
+        // `mcp__bus__bus_send` calls will keep calling that name by reflex;
+        // without this alias the SDK returns "No such tool available" and the
+        // agent falls back to plain assistant text — which the bus router
+        // discards (only `bus_send` tool calls forward). Identity-pinning is
+        // preserved: each registration captures `agentName` in its own
+        // closure, so neither alias can be used to spoof a `source`. Remove
+        // after one release once no in-flight resumed sessions reference the
+        // old name.
+        bus: makeBusToolServer(agentName, this.deps.onEvent, 'bus'),
+      },
       abortController: this.deps.abortController,
     });
 
