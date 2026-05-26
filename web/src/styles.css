@@ -1177,15 +1177,48 @@ pre {
 }
 
 /* ---------- Top-level Chat / Multi-agent tab nav ---------- */
+/* Wraps `.main-tabs` on the left and the active-run identity strip + actions
+ * (`TopRunBar`) on the right. Lets Logs/Stop ride alongside the tabs instead
+ * of claiming their own header row. `flex-wrap` keeps narrow widths sane by
+ * dropping the right cluster to a second line rather than overflowing. */
+.main-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: var(--s-2) var(--s-3) 0;
+  flex-wrap: wrap;
+}
+.main-top-bar-right {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-shrink: 0;
+}
+.main-top-bar-title {
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.main-top-bar-title code {
+  font-size: 13px;
+  background: var(--bg-3);
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: normal;
+  color: var(--fg-1);
+}
+
 .main-tabs {
   display: flex;
   gap: 2px;
-  margin: var(--s-2) var(--s-3);
   padding: 2px;
   background: var(--bg-3);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
-  align-self: flex-start;
   flex-shrink: 0;
 }
 .main-tab {
@@ -3216,29 +3249,6 @@ pre {
 }
 
 /* ---------- Active multi-agent run (running + ended) ---------- */
-.multi-agent-active-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-.multi-agent-active-header h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.multi-agent-active-header h2 code {
-  font-size: 13px;
-  background: var(--bg-3);
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-weight: normal;
-}
-.multi-agent-active-actions {
-  flex-shrink: 0;
-}
-
 .run-status {
   font-size: 10px;
   text-transform: uppercase;
