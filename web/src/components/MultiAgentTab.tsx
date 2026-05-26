@@ -18,7 +18,7 @@ import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
-import { useModalKeys } from '../useModalKeys';
+import { useModalSurface } from '../useModalSurface';
 import { AgentTag } from './AgentTag';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
@@ -1076,14 +1076,14 @@ function TemplateNameModal(props: {
   const trimmed = value.trim();
   const canSave = trimmed.length > 0;
   const isDup = props.existingNames.includes(trimmed);
-  useModalKeys({
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({
     onClose: props.onClose,
     onConfirm: () => props.onSave(trimmed),
     canConfirm: canSave,
   });
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+      <div className="modal modal-surface">
         <header>
           <h2>Save as template</h2>
           <button className="icon-btn" onClick={props.onClose} title="Close">
@@ -2136,10 +2136,10 @@ function EventRow(props: {
 
 function EventModal(props: { event: MultiAgentEventView; onClose: () => void }) {
   const { event } = props;
-  useModalKeys({ onClose: props.onClose });
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: props.onClose });
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <div className="modal event-modal" onClick={(e) => e.stopPropagation()}>
+    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+      <div className="modal event-modal modal-surface">
         <header>
           <h2>
             {event.source} → {event.destination} · {event.kind} · {formatTs(event.ts)}

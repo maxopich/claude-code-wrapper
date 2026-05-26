@@ -10,14 +10,12 @@
  * by default at N≥9 and toggleable; the preference is persisted to
  * `localStorage` so the operator's last choice sticks across sessions.
  *
- * Focus management: there is no shared focus-trap utility in the
- * codebase (`useModalKeys` only handles Esc/Enter). PR-5 uses the
- * single-effect `inert` pattern — mark every sibling of the overlay,
- * walking up to `document.body`, with the `inert` attribute on open.
- * This blocks keyboard focus and pointer events from reaching the rest
- * of the page without depending on a focus-trap library. The
- * originating expand button restores focus on close (the parent owns
- * the button ref and calls .focus() after onClose runs).
+ * Focus management: the `inert`-trap + body scroll lock + backdrop
+ * click + activeElement restore that used to live inline here were
+ * lifted into `useModalSurface` (PR-2B) so every modal in the app
+ * gets them uniformly. The parent expand button's focus is also
+ * restored on close by the hook (replaces the parent's manual
+ * .focus() callback path).
  *
  * Reduced motion: the open animation is opacity-only when
  * `prefers-reduced-motion: reduce` (CSS rule pairs `.tpl-modal-overlay`
@@ -25,9 +23,9 @@
  * the dimmed backdrop is paused via the parent's `paused={modalOpen}`.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, MouseEvent as ReactMouseEvent } from 'react';
+import type { CSSProperties } from 'react';
 import type { MultiAgentTemplate, Project, ServerMsg } from '@cebab/shared/protocol';
-import { useModalKeys } from '../../useModalKeys';
+import { useModalSurface } from '../../useModalSurface';
 import { AgentDiagram } from './AgentDiagram';
 import { SplitViewPanel } from './SplitViewPanel';
 import { BypassPermissionsBanner } from './TemplatePreviewBanners';
@@ -70,7 +68,7 @@ export function TemplatePreviewModal(props: {
   const n = participants.length;
   const titleId = useMemo(() => `tpl-modal-title-${template.id}`, [template.id]);
 
-  useModalKeys({ onClose });
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
 
   // Split-view preference: stored boolean overrides the N-based default.
   // The default (no pref) is on at N≥9, off below. Toggling writes the
@@ -98,54 +96,12 @@ export function TemplatePreviewModal(props: {
   const [selectedPid, setSelectedPid] = useState<number | null>(null);
 
   const closeRef = useRef<HTMLButtonElement>(null);
-  const overlayRef = useRef<HTMLDivElement>(null);
 
-  // Initial focus on close button (mirrors LogsModal L52–54). Screen
-  // readers announce the dialog when its labelledby content + the
-  // button label come into focus.
+  // Initial focus on close button (mirrors LogsModal). Screen readers
+  // announce the dialog when its labelledby content + the button
+  // label come into focus.
   useEffect(() => {
     closeRef.current?.focus();
-  }, []);
-
-  // Body scroll lock — restored on unmount so chained modals still
-  // see the lock. Single-modal codebase today, so no ref-count needed.
-  useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, []);
-
-  // Focus trap via `inert`: mark every sibling of the overlay (walking
-  // up to document.body) with the inert attribute. inert blocks both
-  // keyboard focus and pointer events without aria-hidden's "still
-  // tab-able" pitfall. The cleanup removes only the siblings we
-  // marked, so any pre-existing inert content keeps its attribute.
-  useEffect(() => {
-    const overlay = overlayRef.current;
-    if (!overlay) return;
-    const inerted: HTMLElement[] = [];
-    // `node` is non-null throughout: it starts at `overlay` (just
-    // guarded above) and only ever gets reassigned to `parent` after
-    // the !parent break below — so the loop only needs the body-stop
-    // check, not a redundant truthiness test (CodeQL js/trivial-conditional).
-    let node: HTMLElement = overlay;
-    while (node !== document.body) {
-      const parent = node.parentElement;
-      if (!parent) break;
-      for (const sib of Array.from(parent.children)) {
-        if (sib === node) continue;
-        if (!(sib instanceof HTMLElement)) continue;
-        if (sib.hasAttribute('inert')) continue;
-        sib.setAttribute('inert', '');
-        inerted.push(sib);
-      }
-      node = parent;
-    }
-    return () => {
-      for (const el of inerted) el.removeAttribute('inert');
-    };
   }, []);
 
   // Scoped live region announcement: open / close.
@@ -157,10 +113,6 @@ export function TemplatePreviewModal(props: {
       setAnnouncement('');
     };
   }, [template.name, n]);
-
-  function onBackdropClick(e: ReactMouseEvent<HTMLDivElement>) {
-    if (e.target === e.currentTarget) onClose();
-  }
 
   const overlayStyle: CSSProperties = {
     ['--tpl-modal-origin-x']: props.origin ? `${props.origin.x}px` : '50%',
@@ -175,7 +127,7 @@ export function TemplatePreviewModal(props: {
       aria-modal="true"
       aria-labelledby={titleId}
       style={overlayStyle}
-      onMouseDown={onBackdropClick}
+      onMouseDown={onBackdropMouseDown}
     >
       <div className="tpl-modal">
         <header className="tpl-modal-header">
