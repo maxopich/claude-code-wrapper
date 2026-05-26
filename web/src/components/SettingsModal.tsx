@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { SettingsView } from '../store';
-import { useModalKeys } from '../useModalKeys';
+import { useModalSurface } from '../useModalSurface';
 
 export type SettingsSavePayload = {
   workspaceRoot: string;
@@ -33,15 +33,15 @@ export function SettingsModal(props: {
     props.onSave({ workspaceRoot: trimmed, defaultHopBudget: parsedHopBudget });
   };
 
-  useModalKeys({
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({
     onClose: props.onClose,
     onConfirm: save,
     canConfirm: canSave,
   });
 
   return (
-    <div className="modal-backdrop" onClick={props.onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+      <div className="modal modal-surface">
         <header>
           <h2>Settings</h2>
           <button className="icon-btn" onClick={props.onClose} title="Close">

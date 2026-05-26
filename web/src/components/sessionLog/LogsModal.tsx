@@ -14,7 +14,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LogRow, ServerMsg } from '@cebab/shared/protocol';
-import { useModalKeys } from '../../useModalKeys';
+import { useModalSurface } from '../../useModalSurface';
 import { useLogStream } from './useLogStream';
 import { applyLogFilters, useLogFilters } from './useLogFilters';
 import { LogToolbar } from './LogToolbar';
@@ -32,7 +32,7 @@ export function LogsModal(props: {
   ) => void;
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
-  useModalKeys({ onClose: props.onClose });
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: props.onClose });
 
   const stream = useLogStream({
     sessionId: props.sessionId,
@@ -84,12 +84,14 @@ export function LogsModal(props: {
 
   return (
     <div
+      ref={overlayRef}
       className="logs-modal-overlay"
       role="dialog"
       aria-modal="true"
       aria-label={`Session log for ${props.sessionId.slice(0, 8)}`}
+      onMouseDown={onBackdropMouseDown}
     >
-      <div className="logs-modal">
+      <div className="logs-modal modal-surface">
         <header className="logs-modal-header">
           <div>
             <h3 className="logs-modal-title">Session log</h3>

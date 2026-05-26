@@ -162,8 +162,11 @@ pre {
  * cebab-redesign.html. .brand-mark is applied to a <ClaudeMark> svg, so
  * padding (inside the 22px box via global border-box) leaves a 14px star. */
 .ic {
-  width: 14px;
-  height: 14px;
+  /* Inline-with-text icons scale with the surrounding font-size; the
+   * brand mark and `.ic-lg` keep explicit px because they're logos /
+   * detail icons, not text-flow glyphs. */
+  width: 1em;
+  height: 1em;
   display: inline-block;
   vertical-align: -2px;
   flex-shrink: 0;
@@ -2684,11 +2687,42 @@ pre {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-@media (hover: none) {
+/* PR-2B: minimum interactive-control sizes. Desktop floor 32 px;
+ * coarse / no-hover pointers (touch, pen) bump to 44 px per WCAG
+ * 2.5.5. The legacy one-off (hover:none) block that lived here only
+ * covered `.tpl-expand-btn` — generalize to every interactive
+ * control. `.tpl-expand-btn` keeps its `opacity: 1` override below. */
+.icon-btn,
+.ghost-btn,
+.primary-btn,
+.mode-pill,
+.main-tab,
+.lifecycle-btn,
+.tpl-item-del,
+.tpl-expand-btn,
+.sidebar-collapse-btn,
+.sidebar-reopen-btn,
+.tpl-modal-close {
+  min-height: 32px;
+  min-width: 32px;
+}
+@media (hover: none), (pointer: coarse) {
+  .icon-btn,
+  .ghost-btn,
+  .primary-btn,
+  .mode-pill,
+  .main-tab,
+  .lifecycle-btn,
+  .tpl-item-del,
+  .tpl-expand-btn,
+  .sidebar-collapse-btn,
+  .sidebar-reopen-btn,
+  .tpl-modal-close {
+    min-height: 44px;
+    min-width: 44px;
+  }
   .tpl-expand-btn {
     opacity: 1;
-    width: 44px;
-    height: 44px;
   }
 }
 .tpl-expand-glyph {
@@ -2720,6 +2754,28 @@ pre {
   stroke: var(--accent);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
+}
+
+/* PR-2B: shared modal-surface base. Add this class alongside a
+ * modal's existing surface class (`.logs-modal`, `.modal`) to get a
+ * standard desktop max-size cap + full-bleed below the sm breakpoint
+ * (WCAG 1.4.10 small-viewport reflow). `.tpl-modal` is excluded — it
+ * is a canvas-preview dialog with intentional wider sizing; its own
+ * 480 px breakpoint was bumped to 600 px in this PR for parity. */
+.modal-surface {
+  max-width: min(960px, 92vw);
+  max-height: 90dvh;
+}
+@media (max-width: 599.98px) {
+  .modal-surface {
+    inset: 0;
+    width: 100vw;
+    height: 100dvh;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+    border: 0;
+  }
 }
 
 /* Modal overlay (AC-18). Mirrors `.logs-modal-overlay` with
@@ -3035,16 +3091,18 @@ pre {
   word-break: break-word;
 }
 
-/* Full-bleed on small screens (AC-20). 0 padding, 0 radius, full
- * viewport. Tiles inside are already ≥44×44 at typical N due to the
- * stage being big at min(100vw,1400px). */
-@media (max-width: 480px) {
+/* Full-bleed on small screens (AC-20 + PR-2B). 0 padding, 0 radius,
+ * full viewport. Bumped from 480 → 599.98 px to harmonize with the
+ * `.modal-surface` base used by the other modals. Tiles inside are
+ * already ≥44×44 at typical N due to the stage being big at
+ * min(100vw,1400px). */
+@media (max-width: 599.98px) {
   .tpl-modal-overlay {
     padding: 0;
   }
   .tpl-modal {
     width: 100vw;
-    height: 100vh;
+    height: 100dvh;
     max-height: none;
     border-radius: 0;
     border: none;
