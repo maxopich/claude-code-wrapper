@@ -13,6 +13,10 @@
  * change. Compact + full density both pull from this table; the
  * choice of which token to read is the responsibility of the caller.
  *
+ * Px on purpose — mirrored 1:1 by the `--tpl-fs-*` CSS variables in
+ * `styles.css`. SVG `<text>` needs numeric `fontSize`, so neither
+ * side is rem-ified even though the rest of the CSS type ramp is.
+ *
  *  - `name`         standard name size at orch row / chain wrap (12)
  *  - `nameCompact`  slightly larger name at chain row tier (13)
  *  - `role`         role text under names (11; compact only)
