@@ -172,6 +172,37 @@ pre {
   height: 100dvh;
 }
 
+/* PR-3: sidebar icon-rail at ≤sm. The aside is forced to a 48 px
+ * column; non-icon affordances (text labels, controls, footer, the
+ * session list nested under expanded projects) are hidden. The
+ * user's `cebab.sidebarCollapsed` preference is preserved — restored
+ * when the viewport widens past sm. */
+.app[data-sidebar-mode='rail'] .sidebar > header > h1,
+.app[data-sidebar-mode='rail'] .sidebar > header > .sidebar-header-controls,
+.app[data-sidebar-mode='rail'] .sidebar-footer,
+.app[data-sidebar-mode='rail'] .session-list,
+.app[data-sidebar-mode='rail'] .project-name,
+.app[data-sidebar-mode='rail'] .trust,
+.app[data-sidebar-mode='rail'] .project-live-dot {
+  display: none;
+}
+.app[data-sidebar-mode='rail'] .sidebar > header,
+.app[data-sidebar-mode='rail'] .project-header {
+  justify-content: center;
+  padding: var(--s-2);
+  gap: 0;
+}
+
+/* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
+ * 2K / 4K monitors; the chat reading column (capped at 90ch by
+ * `.chat` padding) drifts to the right edge otherwise. */
+@media (min-width: 1600px) {
+  .app {
+    max-width: 1600px;
+    margin-inline: auto;
+  }
+}
+
 /* Inline-SVG icon helper (Icon.tsx) + sidebar brand mark — ported from
  * cebab-redesign.html. .brand-mark is applied to a <ClaudeMark> svg, so
  * padding (inside the 22px box via global border-box) leaves a 14px star. */
@@ -602,7 +633,12 @@ pre {
 
 .chat {
   overflow-y: auto;
-  padding: 16px 24px;
+  /* PR-3: cap the reading column at ~90ch on wide viewports while
+   * keeping the 24 px minimum gutter on narrow ones. The calc()
+   * result is negative below ~90ch+gutter so max() picks the 24 px
+   * floor; above it, padding grows symmetrically and the content
+   * stays centered without an extra wrapper element. */
+  padding: 16px max(24px, calc((100% - 90ch) / 2));
   display: flex;
   flex-direction: column;
   gap: 14px;
