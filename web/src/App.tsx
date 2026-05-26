@@ -17,6 +17,7 @@ import { SettingsModal } from './components/SettingsModal';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
 import { Icon } from './components/Icon';
+import { mqBelow } from './breakpoints';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -28,6 +29,7 @@ const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
 const SIDEBAR_MIN = 170;
 const SIDEBAR_MAX = 480;
 const SIDEBAR_DEFAULT = 220;
+const SIDEBAR_KEY_STEP = 16;
 
 function clampSidebarWidth(n: number): number {
   if (!Number.isFinite(n)) return SIDEBAR_DEFAULT;
@@ -79,26 +81,69 @@ export function App() {
     writeStored('cebab.sidebarWidth', String(sidebarWidth));
   }, [sidebarWidth]);
 
-  function startSidebarResize(e: React.MouseEvent) {
+  // At ≤md the sidebar collapses to an icon rail / collapsed mode (PR-3)
+  // and is not user-resizable; unmount the resizer to keep it out of the
+  // tab order and out of pointer-event reach.
+  const [resizerSuppressed, setResizerSuppressed] = useState(() =>
+    typeof window === 'undefined' ? false : window.matchMedia(mqBelow('md')).matches,
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(mqBelow('md'));
+    const onChange = (e: MediaQueryListEvent) => setResizerSuppressed(e.matches);
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, []);
+
+  function onResizerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
+    const target = e.currentTarget;
+    try {
+      target.setPointerCapture(e.pointerId);
+    } catch {
+      /* not all environments support pointer capture */
+    }
     sidebarResizingRef.current = true;
     setSidebarResizing(true);
-    document.body.style.userSelect = 'none';
-    document.body.style.cursor = 'col-resize';
     // Sidebar's left edge is viewport x=0, so pointer x is the new width.
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       if (sidebarResizingRef.current) setSidebarWidth(clampSidebarWidth(ev.clientX));
     };
-    const onUp = () => {
+    const onUp = (ev: PointerEvent) => {
       sidebarResizingRef.current = false;
       setSidebarResizing(false);
-      document.body.style.userSelect = '';
-      document.body.style.cursor = '';
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
+      target.removeEventListener('pointermove', onMove);
+      target.removeEventListener('pointerup', onUp);
+      target.removeEventListener('pointercancel', onUp);
+      try {
+        target.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* idempotent on most browsers */
+      }
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
+    target.addEventListener('pointermove', onMove);
+    target.addEventListener('pointerup', onUp);
+    target.addEventListener('pointercancel', onUp);
+  }
+
+  function onResizerKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    switch (e.key) {
+      case 'ArrowLeft':
+        e.preventDefault();
+        setSidebarWidth((w) => clampSidebarWidth(w - SIDEBAR_KEY_STEP));
+        return;
+      case 'ArrowRight':
+        e.preventDefault();
+        setSidebarWidth((w) => clampSidebarWidth(w + SIDEBAR_KEY_STEP));
+        return;
+      case 'Home':
+        e.preventDefault();
+        setSidebarWidth(SIDEBAR_MIN);
+        return;
+      case 'End':
+        e.preventDefault();
+        setSidebarWidth(SIDEBAR_MAX);
+        return;
+    }
   }
 
   useEffect(() => {
@@ -545,7 +590,7 @@ export function App() {
         gridTemplateColumns: sidebarCollapsed ? '0 1fr' : `${sidebarWidth}px 1fr`,
       }}
     >
-      <aside className="sidebar">
+      <aside className="sidebar" id="app-sidebar">
         <header>
           <ClaudeMark className="brand-mark" />
           <h1>cebab</h1>
@@ -596,12 +641,20 @@ export function App() {
             </span>
           </button>
         </footer>
-        {!sidebarCollapsed && (
+        {!sidebarCollapsed && !resizerSuppressed && (
           <div
             className={`sidebar-resizer ${sidebarResizing ? 'dragging' : ''}`}
-            onMouseDown={startSidebarResize}
-            title="Drag to resize sidebar"
-            aria-hidden="true"
+            onPointerDown={onResizerPointerDown}
+            onKeyDown={onResizerKeyDown}
+            role="separator"
+            aria-orientation="vertical"
+            aria-valuemin={SIDEBAR_MIN}
+            aria-valuemax={SIDEBAR_MAX}
+            aria-valuenow={sidebarWidth}
+            aria-controls="app-sidebar"
+            aria-label="Resize sidebar"
+            tabIndex={0}
+            title="Drag or use arrow keys to resize sidebar"
           />
         )}
       </aside>
