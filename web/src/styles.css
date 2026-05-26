@@ -4674,6 +4674,43 @@ pre {
   align-items: center;
 }
 
+/* PR-4: stepped column hide as the viewport narrows. Drop order is
+ * kind → agent → ts (the lowest-information columns disappear first;
+ * timestamp goes last because it's the visual anchor). LogRowDetail
+ * still surfaces every hidden field when a row is expanded. The
+ * grid-template-columns track count is reduced to match each tier so
+ * hidden cells don't leave empty gutter tracks behind. */
+@media (max-width: 899.98px) {
+  .logs-row-summary {
+    grid-template-columns: 110px 120px 1fr auto;
+  }
+  .logs-row-kind {
+    display: none;
+  }
+  /* Sticky ts gutter only earns its keep on a wide horizontal-scroll
+   * desktop view; under md the row is narrow enough that sticky
+   * positioning just causes layout jank at the breakpoint. */
+  .logs-row-ts {
+    position: static;
+  }
+}
+@media (max-width: 799.98px) {
+  .logs-row-summary {
+    grid-template-columns: 110px 1fr auto;
+  }
+  .logs-row-agent {
+    display: none;
+  }
+}
+@media (max-width: 699.98px) {
+  .logs-row-summary {
+    grid-template-columns: 1fr auto;
+  }
+  .logs-row-ts {
+    display: none;
+  }
+}
+
 .logs-table-empty {
   padding: var(--s-6);
   text-align: center;
