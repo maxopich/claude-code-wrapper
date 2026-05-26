@@ -81,18 +81,39 @@ export function App() {
     writeStored('cebab.sidebarWidth', String(sidebarWidth));
   }, [sidebarWidth]);
 
-  // At ≤md the sidebar collapses to an icon rail / collapsed mode (PR-3)
-  // and is not user-resizable; unmount the resizer to keep it out of the
-  // tab order and out of pointer-event reach.
+  // At ≤md the sidebar isn't user-resizable; unmount the resizer to
+  // keep it out of the tab order and out of pointer-event reach. At
+  // ≤sm the sidebar auto-collapses to an icon rail (PR-3), so the
+  // resizer is also gone there. Both states are derived from
+  // matchMedia and re-subscribed on resize.
   const [resizerSuppressed, setResizerSuppressed] = useState(() =>
     typeof window === 'undefined' ? false : window.matchMedia(mqBelow('md')).matches,
   );
+  const [isBelowSm, setIsBelowSm] = useState(() =>
+    typeof window === 'undefined' ? false : window.matchMedia(mqBelow('sm')).matches,
+  );
   useEffect(() => {
-    const mql = window.matchMedia(mqBelow('md'));
-    const onChange = (e: MediaQueryListEvent) => setResizerSuppressed(e.matches);
-    mql.addEventListener('change', onChange);
-    return () => mql.removeEventListener('change', onChange);
+    const mqMd = window.matchMedia(mqBelow('md'));
+    const mqSm = window.matchMedia(mqBelow('sm'));
+    const onMd = (e: MediaQueryListEvent) => setResizerSuppressed(e.matches);
+    const onSm = (e: MediaQueryListEvent) => setIsBelowSm(e.matches);
+    mqMd.addEventListener('change', onMd);
+    mqSm.addEventListener('change', onSm);
+    return () => {
+      mqMd.removeEventListener('change', onMd);
+      mqSm.removeEventListener('change', onSm);
+    };
   }, []);
+
+  // Tri-state sidebar mode. `rail` forces an icon-only column at ≤sm
+  // regardless of the stored `cebab.sidebarCollapsed` preference (which
+  // we deliberately do NOT mutate — the stored value is restored when
+  // the viewport widens past sm again).
+  const sidebarMode: 'rail' | 'collapsed' | 'open' = isBelowSm
+    ? 'rail'
+    : sidebarCollapsed
+      ? 'collapsed'
+      : 'open';
 
   function onResizerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
@@ -586,8 +607,14 @@ export function App() {
   return (
     <div
       className="app"
+      data-sidebar-mode={sidebarMode}
       style={{
-        gridTemplateColumns: sidebarCollapsed ? '0 1fr' : `${sidebarWidth}px 1fr`,
+        gridTemplateColumns:
+          sidebarMode === 'rail'
+            ? '48px 1fr'
+            : sidebarMode === 'collapsed'
+              ? '0 1fr'
+              : `${sidebarWidth}px 1fr`,
       }}
     >
       <aside className="sidebar" id="app-sidebar">
@@ -658,7 +685,7 @@ export function App() {
           />
         )}
       </aside>
-      {sidebarCollapsed && (
+      {sidebarMode === 'collapsed' && (
         <button
           className="sidebar-reopen-btn"
           title="Show sidebar"

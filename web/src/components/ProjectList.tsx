@@ -27,9 +27,10 @@ export function ProjectList(props: {
               className={`project-header ${expanded ? 'active' : ''}`}
               title={
                 p.hasClaudeMd
-                  ? undefined
-                  : `No CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
+                  ? p.name
+                  : `${p.name}\n\nNo CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
               }
+              aria-label={p.name}
               draggable
               onDragStart={(e) => {
                 // JSON payload with a kind tag so the Multi-Agent drop zone
