@@ -20,7 +20,7 @@ import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalKeys } from '../useModalKeys';
 import { AgentTag } from './AgentTag';
-import { ArtifactsView } from './ArtifactsView';
+import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
@@ -121,7 +121,6 @@ export function MultiAgentTab(props: {
         run={multiAgent.active}
         tabMode={props.mode}
         projects={projects}
-        onStop={props.onStopMultiAgent}
         onSendUserPrompt={props.onSendUserPrompt}
         onContinue={props.onContinueMultiAgent}
         onRetryWorker={props.onRetryWorker}
@@ -129,9 +128,6 @@ export function MultiAgentTab(props: {
         onContinueThroughMutation={props.onContinueThroughMutation}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
-        onDismiss={props.onDismissActive}
-        onLoadSessionLog={props.onLoadSessionLog}
-        subscribeServerMsg={props.subscribeServerMsg}
       />
     );
   }
@@ -1261,12 +1257,10 @@ function ActiveRunView(props: {
   /** The tab this view is mounted under; used only for a cross-tab notice. */
   tabMode: 'chain' | 'orchestrator';
   projects: Project[];
-  onStop: (sessionId: string) => void;
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onContinue: (sessionId: string) => void;
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (sessionId: string, projectId: number) => void;
-  onDismiss: () => void;
   /** Item #4: Retry the worker named in this session's pending-retry slot.
    *  The slot is server-authoritative — no agentName/prompt args. */
   onRetryWorker: (sessionId: string) => void;
@@ -1277,27 +1271,11 @@ function ActiveRunView(props: {
   /** Item #5: operator clicked Continue on the pause-on-first-mutation
    *  banner. Stateless from the client's POV — server reads the slot. */
   onContinueThroughMutation: (sessionId: string) => void;
-  /**
-   * Phase H: request a paginated chunk of the merged session log. The
-   * matching `session_log_chunk` is delivered via `subscribeServerMsg`.
-   */
-  onLoadSessionLog: (
-    sessionId: string,
-    offset: number,
-    limit: number,
-    revealSensitive: boolean,
-  ) => void;
-  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const { run } = props;
   const crossTab = run.mode !== props.tabMode;
   const isRunning = run.status === 'running';
   const isOrchestrator = run.mode === 'orchestrator';
-  const isTemp = run.lifecycle === 'temp';
-  // Stop is in-flight until the run leaves 'running' (server's
-  // multi_agent_ended — or the synthetic 'crashed' if stop threw), at which
-  // point this whole button is replaced by Dismiss, so no clearing needed.
-  const [stopPending, setStopPending] = useState(false);
   // Transient highlight target for spine→scrollback jumps. Cleared after a
   // short pulse so it reads as "this is the row I just jumped to".
   const [highlightedEventId, setHighlightedEventId] = useState<number | null>(null);
@@ -1316,89 +1294,8 @@ function ActiveRunView(props: {
     window.setTimeout(() => setHighlightedEventId((cur) => (cur === eventId ? null : cur)), 1800);
   }
 
-  function handleStop() {
-    if (!isTemp) {
-      // Persistent: stop is non-destructive (folder + installs survive).
-      // No confirm needed.
-      setStopPending(true);
-      props.onStop(run.sessionId);
-      return;
-    }
-    // Temp: warn before nuking. Workers count = participants minus
-    // orchestrator entry for orchestrator mode.
-    const workerCount = isOrchestrator
-      ? Math.max(0, run.participantAgentNames.length - 1)
-      : run.participantAgentNames.length;
-    const ok = window.confirm(
-      `End this temp session?\n\nCebab will:\n  • Clear bus integration from ${workerCount} participant${
-        workerCount === 1 ? '' : 's'
-      } (DB flag only)\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, iteration files) are wiped.`,
-    );
-    if (ok) {
-      setStopPending(true);
-      props.onStop(run.sessionId);
-    }
-  }
-
   return (
     <div className="multi-agent">
-      <header className="multi-agent-header multi-agent-active-header">
-        <div>
-          <h2>
-            {run.mode === 'chain' ? 'Chained Chat' : 'Multi-Agent'}:{' '}
-            <code>{run.sessionId.slice(0, 8)}</code>{' '}
-            <span
-              className={`run-status run-status-${run.status}`}
-              title={STATUS_TITLE[run.status]}
-            >
-              {run.status}
-            </span>
-          </h2>
-        </div>
-        <div className="multi-agent-active-actions">
-          <LogsButton
-            sessionId={run.sessionId}
-            dangerousCount={
-              run.mutations.filter((m) => m.category === 'dangerous' && m.confirmedAt !== null)
-                .length
-            }
-            onLoadSessionLog={props.onLoadSessionLog}
-            subscribeServerMsg={props.subscribeServerMsg}
-          />
-          {isRunning ? (
-            <button
-              className="primary-btn"
-              disabled={stopPending}
-              onClick={handleStop}
-              title={
-                isTemp
-                  ? "End & cleanup: abort every agent's in-process query, clear bus integration from each participant (DB flag), then rm-rf the session folder. You'll be asked to confirm."
-                  : 'Abort every agent’s in-process query and tear the session down. Folder + bus installs stay so you can resume later (same server process only).'
-              }
-            >
-              {stopPending ? (
-                <>
-                  <span className="btn-spinner" />
-                  Stopping…
-                </>
-              ) : isTemp ? (
-                'End & cleanup'
-              ) : (
-                'Stop'
-              )}
-            </button>
-          ) : (
-            <button
-              className="ghost-btn"
-              onClick={props.onDismiss}
-              title="Clear the scrollback and return to the draft view. Iteration artifacts on disk are unaffected."
-            >
-              Close
-            </button>
-          )}
-        </div>
-      </header>
-
       {crossTab && (
         <p className="multi-agent-warning">
           This {run.mode === 'chain' ? 'Chained Chat' : 'Multi-Agent'} run was started from the
@@ -1443,11 +1340,6 @@ function ActiveRunView(props: {
             ))}
           </ol>
         )}
-      </section>
-
-      <section className="multi-agent-section">
-        <h3>Artifacts</h3>
-        <ArtifactsView run={run} />
       </section>
 
       {isOrchestrator && isRunning && run.awaitingContinue && (
@@ -1757,6 +1649,15 @@ function SessionSettingsPanel(props: {
           </>
         )}
 
+        {groupArtifacts(run.mutations).length > 0 && (
+          <>
+            <dt>Artifacts</dt>
+            <dd>
+              <ArtifactsDisclosure run={run} />
+            </dd>
+          </>
+        )}
+
         <dt>Working files</dt>
         <dd>
           <WorkingFiles run={run} />
@@ -1917,6 +1818,106 @@ function UserPromptInput(props: { onSend: (text: string) => void }) {
         </button>
       </div>
     </section>
+  );
+}
+
+/**
+ * Top-bar attachment that lives next to the main tabs. Renders the active
+ * run's identity (mode + short session id + status pill) and its actions
+ * (Logs + Stop / End & cleanup / Close). Gating is done by the caller —
+ * App.tsx only mounts this when `state.multiAgent.active && view !== 'chat'`.
+ *
+ * Owns the `stopPending` flag and the temp-lifecycle `confirm()` gate that
+ * used to live in `ActiveRunView`. Mirrors the prior button JSX verbatim so
+ * the visible affordances are unchanged — only the position moves.
+ */
+export function TopRunBar(props: {
+  run: MultiAgentRun;
+  onStop: (sessionId: string) => void;
+  onDismiss: () => void;
+  onLoadSessionLog: (
+    sessionId: string,
+    offset: number,
+    limit: number,
+    revealSensitive: boolean,
+  ) => void;
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+}) {
+  const { run } = props;
+  const isRunning = run.status === 'running';
+  const isOrchestrator = run.mode === 'orchestrator';
+  const isTemp = run.lifecycle === 'temp';
+  const [stopPending, setStopPending] = useState(false);
+
+  function handleStop() {
+    if (!isTemp) {
+      setStopPending(true);
+      props.onStop(run.sessionId);
+      return;
+    }
+    const workerCount = isOrchestrator
+      ? Math.max(0, run.participantAgentNames.length - 1)
+      : run.participantAgentNames.length;
+    const ok = window.confirm(
+      `End this temp session?\n\nCebab will:\n  • Clear bus integration from ${workerCount} participant${
+        workerCount === 1 ? '' : 's'
+      } (DB flag only)\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, iteration files) are wiped.`,
+    );
+    if (ok) {
+      setStopPending(true);
+      props.onStop(run.sessionId);
+    }
+  }
+
+  return (
+    <div className="main-top-bar-right">
+      <span className="main-top-bar-title">
+        {run.mode === 'chain' ? 'Chained Chat' : 'Multi-Agent'}:{' '}
+        <code>{run.sessionId.slice(0, 8)}</code>{' '}
+        <span className={`run-status run-status-${run.status}`} title={STATUS_TITLE[run.status]}>
+          {run.status}
+        </span>
+      </span>
+      <LogsButton
+        sessionId={run.sessionId}
+        dangerousCount={
+          run.mutations.filter((m) => m.category === 'dangerous' && m.confirmedAt !== null).length
+        }
+        onLoadSessionLog={props.onLoadSessionLog}
+        subscribeServerMsg={props.subscribeServerMsg}
+      />
+      {isRunning ? (
+        <button
+          className="primary-btn"
+          disabled={stopPending}
+          onClick={handleStop}
+          title={
+            isTemp
+              ? "End & cleanup: abort every agent's in-process query, clear bus integration from each participant (DB flag), then rm-rf the session folder. You'll be asked to confirm."
+              : 'Abort every agent’s in-process query and tear the session down. Folder + bus installs stay so you can resume later (same server process only).'
+          }
+        >
+          {stopPending ? (
+            <>
+              <span className="btn-spinner" />
+              Stopping…
+            </>
+          ) : isTemp ? (
+            'End & cleanup'
+          ) : (
+            'Stop'
+          )}
+        </button>
+      ) : (
+        <button
+          className="ghost-btn"
+          onClick={props.onDismiss}
+          title="Clear the scrollback and return to the draft view. Iteration artifacts on disk are unaffected."
+        >
+          Close
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -2292,6 +2293,32 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
           ))}
         </ol>
       )}
+    </>
+  );
+}
+
+/**
+ * Sibling of `MutationsDisclosure` — collapses the `<ArtifactsView>` into a
+ * Session-info row so promoted-file deliverables don't claim a full-width
+ * scrollback-adjacent section. Same `▸/▾` ghost-btn pattern as Mutations and
+ * Routing trail; caller (`SessionSettingsPanel`) only renders the row when
+ * `groupArtifacts(run.mutations).length > 0`.
+ */
+function ArtifactsDisclosure(props: { run: MultiAgentRun }) {
+  const [open, setOpen] = useState(false);
+  const count = groupArtifacts(props.run.mutations).length;
+  return (
+    <>
+      <button
+        type="button"
+        className="ghost-btn"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        title="Promoted file mutations grouped by path. Subsequent edits to the same file collapse into the row's edit count."
+      >
+        {open ? '▾' : '▸'} {count} artifact{count === 1 ? '' : 's'}
+      </button>
+      {open && <ArtifactsView run={props.run} />}
     </>
   );
 }

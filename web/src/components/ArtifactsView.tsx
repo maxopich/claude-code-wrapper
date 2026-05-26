@@ -32,7 +32,7 @@ type ArtifactGroup = {
   editCount: number;
 };
 
-function groupArtifacts(mutations: readonly MultiAgentMutationView[]): ArtifactGroup[] {
+export function groupArtifacts(mutations: readonly MultiAgentMutationView[]): ArtifactGroup[] {
   const byFile = new Map<string, ArtifactGroup>();
   for (const m of mutations) {
     if (m.filePath === null || m.confirmedAt === null || !m.promoted) continue;

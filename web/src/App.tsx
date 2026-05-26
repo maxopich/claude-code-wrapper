@@ -14,7 +14,7 @@ import { ModeToggle } from './components/ModeToggle';
 import { ChatHeaderChip } from './components/ChatHeaderChip';
 import { SlashCommandButtons } from './components/SlashCommandButtons';
 import { SettingsModal } from './components/SettingsModal';
-import { MultiAgentTab, MultiAgentActivityBar } from './components/MultiAgentTab';
+import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
 import { Icon } from './components/Icon';
 
@@ -627,32 +627,43 @@ export function App() {
           </div>
         ) : (
           <>
-            <nav className="main-tabs" aria-label="Main view">
-              <button
-                className={`main-tab ${view === 'chat' ? 'active' : ''}`}
-                onClick={() => dispatch({ type: 'ma_set_view', view: 'chat' })}
-                aria-pressed={view === 'chat'}
-              >
-                <Icon name="chat" />
-                Chat
-              </button>
-              <button
-                className={`main-tab ${view === 'multi-agent' ? 'active' : ''}`}
-                onClick={() => dispatch({ type: 'ma_set_view', view: 'multi-agent' })}
-                aria-pressed={view === 'multi-agent'}
-              >
-                <Icon name="agents" />
-                Multi-Agent
-              </button>
-              <button
-                className={`main-tab ${view === 'chained-chat' ? 'active' : ''}`}
-                onClick={() => dispatch({ type: 'ma_set_view', view: 'chained-chat' })}
-                aria-pressed={view === 'chained-chat'}
-              >
-                <Icon name="chain" />
-                Chained Chat
-              </button>
-            </nav>
+            <div className="main-top-bar">
+              <nav className="main-tabs" aria-label="Main view">
+                <button
+                  className={`main-tab ${view === 'chat' ? 'active' : ''}`}
+                  onClick={() => dispatch({ type: 'ma_set_view', view: 'chat' })}
+                  aria-pressed={view === 'chat'}
+                >
+                  <Icon name="chat" />
+                  Chat
+                </button>
+                <button
+                  className={`main-tab ${view === 'multi-agent' ? 'active' : ''}`}
+                  onClick={() => dispatch({ type: 'ma_set_view', view: 'multi-agent' })}
+                  aria-pressed={view === 'multi-agent'}
+                >
+                  <Icon name="agents" />
+                  Multi-Agent
+                </button>
+                <button
+                  className={`main-tab ${view === 'chained-chat' ? 'active' : ''}`}
+                  onClick={() => dispatch({ type: 'ma_set_view', view: 'chained-chat' })}
+                  aria-pressed={view === 'chained-chat'}
+                >
+                  <Icon name="chain" />
+                  Chained Chat
+                </button>
+              </nav>
+              {view !== 'chat' && state.multiAgent.active && (
+                <TopRunBar
+                  run={state.multiAgent.active}
+                  onStop={stopMultiAgent}
+                  onDismiss={dismissActiveRun}
+                  onLoadSessionLog={loadSessionLog}
+                  subscribeServerMsg={subscribeServerMsg}
+                />
+              )}
+            </div>
             {view !== 'chat' && <MultiAgentActivityBar run={state.multiAgent.active} />}
             {view === 'chat' ? (
               <>
