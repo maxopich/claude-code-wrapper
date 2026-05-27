@@ -1309,6 +1309,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // state changes for now.
       return state;
 
+    case 'project_authority':
+      // Cluster B Phase 3 (BE-B3): server reply to `get_project_authority`.
+      // The AuthorityPanel (Phase 6+ web UI) will own its own context-like
+      // slice for the response — it's project-scoped and only renders when
+      // the operator opens the panel. Keeping it out of the main reducer
+      // state matches the inbox_snapshot pattern: large/optional payloads
+      // ride a side-channel so the main store doesn't re-render on every
+      // refresh. Exhaustiveness no-op for now.
+      return state;
+
     case 'inbox_snapshot':
       // Cluster A Phase 5: the inbox panel (`<NotificationInbox/>`) owns
       // this state via a sibling context (`InboxContext`) so the main

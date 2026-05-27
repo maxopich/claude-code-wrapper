@@ -609,6 +609,29 @@ export type ClientMsg =
        * ids it cleared).
        */
       type: 'clear_dismissed_inbox';
+    }
+  | {
+      /**
+       * Cluster B Phase 3 (BE-B3 / BE-B4): operator asks for the current
+       * authority snapshot of a project (effective tools + MCP servers +
+       * allow/deny attribution + env-injection scan + hooks scan). The
+       * answer rides `project_authority`.
+       *
+       * `mode: 'cache'` — return whatever the server has cached from the
+       * most recent `session_started` for any session in this project; if
+       * the project has never started a session in this WS connection,
+       * returns `authority: null`. Cheap, synchronous.
+       *
+       * `mode: 'probe'` — Phase 3b will spawn a `maxTurns: 0` SDK run with
+       * `subscriptionOnlyEnv` and the project's Trust-derived `settingSources`
+       * so the inspector shows live state without waiting for the next real
+       * turn. Phase 3 falls through to cache behavior with a `[project_authority]`
+       * info log; no UI consumes the probe path yet (Phase 7 preflight modal
+       * wires the "Refresh" button — spec §10).
+       */
+      type: 'get_project_authority';
+      projectId: number;
+      mode: 'cache' | 'probe';
     };
 
 // ---- Server → Browser ----
@@ -1226,7 +1249,205 @@ export type ServerMsg =
       type: 'session_reconstructed';
       sessionId: string;
       reasonCode: SessionRecoveredReasonCode;
+    }
+  | {
+      /**
+       * Cluster B Phase 3 (BE-B3): reply to `get_project_authority`. Carries
+       * the resolved snapshot — effective tools + MCP servers + allow/deny
+       * attribution + env-injection detection + hooks — or `null` if the
+       * project has never started a session in this WS connection (cache
+       * miss) and probe is not implemented yet.
+       *
+       * Per critical/B-authority-transparency.md §3 (load-bearing invariant
+       * #1: declared ≠ effective): the resolver merges the cached SDK
+       * `session_started` snapshot (= effective state at runner boundary)
+       * with file-read scans of `.claude/settings*.json` (= declared
+       * provenance). The two sources are clearly tagged in the response so
+       * the AuthorityPanel (Phase 6+) can render "Effective" as the primary
+       * column with `▾ configured sources` disclosure (UI-B4 / §6.4).
+       */
+      type: 'project_authority';
+      projectId: number;
+      authority: ProjectAuthority | null;
     };
+
+/**
+ * Cluster B Phase 3 (BE-B1 / §4.2): per-tool view used by the AuthorityPanel
+ * to show effective tool availability with provenance.
+ *
+ * `source` distinguishes the three plug-in points:
+ *   - 'builtin'        — Cebab/SDK-supplied (Bash, Read, Edit, etc.)
+ *   - 'mcp'            — exposed via an MCP server; `mcpServer` names the
+ *                        owner so a `needs-auth` server can cascade
+ *                        effectively-unavailable into its tools (BE-B6).
+ *   - 'cebab-injected' — bus_send and any other in-process MCP Cebab pins
+ *                        per-agent (`server/src/bus/runner.ts`).
+ *
+ * `rulingScope` is the WIN of the allow/deny merge — the layer whose entry
+ * decided this tool's `allowed`/`denied` flags. `'default'` means no
+ * explicit allow OR deny rule matched, so the SDK applied its built-in
+ * fallback. Catches the agentic-reviewer §6.4 divergence "tool denied by
+ * SDK not in any visible deny list" — that's the rulingScope=default + denied
+ * case the inspector flags.
+ *
+ * `calledCount` / `deniedCount` are populated by the v1.x usage-diff
+ * pipeline (spec §4.8); Phase 3 leaves them undefined. The 3-column
+ * "Used vs Available vs Attempted-but-denied" view lands in Phase 10.
+ */
+export type ToolView = {
+  name: string;
+  source: 'builtin' | 'mcp' | 'cebab-injected';
+  mcpServer?: string;
+  allowed: boolean;
+  denied: boolean;
+  rulingScope: 'user' | 'project' | 'local' | 'default';
+  calledCount?: number;
+  deniedCount?: number;
+};
+
+/**
+ * Cluster B Phase 3 (BE-B5 / §4.2): MCP server view in the AuthorityPanel.
+ *
+ * `scope` attributes which `settings*.json` layer declared the server (Cebab
+ * applies project > local > user precedence; see resolver §4.3). The
+ * `'cebab-injected'` scope is reserved for the bus_send MCP that Cebab pins
+ * per-agent from `bus/runner.ts` — distinct from operator-declared MCPs so
+ * the UI can mark it as "Cebab-managed, not editable here".
+ *
+ * `status` is the SDK's `mcp_servers[i].status` string verbatim
+ * (`'connected' | 'needs-auth' | 'failed' | 'disabled' | 'unknown'` in the
+ * current SDK; we accept any string for forward-compat with new SDK
+ * statuses — the AuthorityPanel renders unknown statuses as "unknown" per
+ * UI-B15). When `status: 'needs-auth'`, the SDK refuses to call the
+ * server's tools — Phase 3's `resolveToolAuthority` cascades that into
+ * `ToolView.allowed = false` for any `mcp__<name>__*` tool (BE-B6).
+ *
+ * `trust`, `binarySha`, `firstSeenAt`, `lastSeenAt` are TOFU plumbing
+ * resolved against the `mcp_trust` table (migration 016). Phase 3 marks
+ * everything `trust: 'unknown'` because the gate isn't wired yet; Phase 4
+ * fills them in by JOIN against `mcp_trust`. Leaving the fields here in
+ * Phase 3 means Phase 4 is a pure server-side change — no protocol churn.
+ */
+export type McpServerView = {
+  name: string;
+  status: string;
+  scope: 'user' | 'project' | 'local' | 'cebab-injected';
+  originPath?: string;
+  tools: string[];
+  config?: {
+    command?: string;
+    args?: string[];
+    /** NAMES only — the spec's BE-B12 [security] invariant: never values. */
+    envKeys?: string[];
+  };
+  trust: 'trusted' | 'pending_tofu' | 'hash_changed' | 'denied' | 'unknown';
+  binarySha?: string;
+  firstSeenAt?: number;
+  lastSeenAt?: number;
+};
+
+/**
+ * Cluster B Phase 3 (§4.2 + agentic-reviewer §11.1): a single declared
+ * hook from any `.claude/settings*.json` layer.
+ *
+ * Why every project should care: a project-local hook (scope `'local'`)
+ * defined in `.claude/settings.local.json` runs with the operator's
+ * permissions on every matching SDK event — `PreToolUse` hooks can mutate
+ * tool input or refuse the call, `Stop` hooks can spawn arbitrary
+ * subprocesses post-session. The inspector lets the operator see what's
+ * been pre-wired before committing to a session start (UI-B40 force-expands
+ * project-local hooks).
+ *
+ * `hookKind` is `string` rather than a narrow enum — the SDK declares ~29
+ * hook event names (`HOOK_EVENTS` in @anthropic-ai/claude-agent-sdk) and
+ * adds more across versions; pinning a narrow union here would force a
+ * protocol bump on every SDK upgrade. The AuthorityPanel renders the kind
+ * verbatim.
+ *
+ * `binarySha` is the sha256 of the resolved hook command's binary target
+ * (when resolvable; absent for shell-builtin or relative-path commands).
+ * Phase 4's TOFU gate JOINs against this same shape for MCP servers.
+ */
+export type HookView = {
+  hookKind: string;
+  scope: 'user' | 'project' | 'local';
+  scopePath: string;
+  command: string;
+  args?: string[];
+  binarySha?: string;
+};
+
+/**
+ * Cluster B Phase 3 (§4.2 + §4.5 + E1): a credential-class env key the
+ * resolver found declared in any `.claude/settings*.json` layer's `env:`
+ * block.
+ *
+ * Why this exists: `subscriptionOnlyEnv()` in `server/src/runner/claude.ts`
+ * strips `ANTHROPIC_API_KEY` + friends from `process.env` so a stray
+ * `export` in `~/.zshrc` can't reroute the operator through paid billing —
+ * but the SDK separately layers in `env:` from project `settings.json` for
+ * trusted projects, and that re-injection bypasses `subscriptionOnlyEnv()`.
+ * The detection is the prerequisite for the Phase 5 `session_start_gated`
+ * refuse-and-edit flow.
+ *
+ * BE-B12 [security]: this view carries NAMES + posture hints, NEVER values.
+ * `isSet` reflects whether `process.env[envKey]` is currently populated
+ * (so the operator can distinguish "declared but unset" from "actively
+ * being injected") — but we never expose the value itself, not even as a
+ * length or prefix. A screenshot of the AuthorityPanel must not leak the
+ * operator's token.
+ */
+export type EnvInjection = {
+  envKey: string;
+  scope: 'user' | 'project' | 'local';
+  scopePath: string;
+  /**
+   * Human-readable hint about why this key is credential-class — Phase 3
+   * ships a small fixed table ("subscription auth", "bedrock backend",
+   * etc.); v1.1 may expand.
+   */
+  posture: string;
+  isSet: boolean;
+};
+
+/**
+ * Cluster B Phase 3 (BE-B3 / §4.2): the top-level snapshot the
+ * AuthorityPanel renders. Merges:
+ *   1. Effective state (model, tools, mcp_servers, slash_commands, skills,
+ *      agents, plugins) sourced from the cached `session_started` — what
+ *      the SDK actually sees at the runner boundary.
+ *   2. Declared provenance (allow/deny attribution per scope, env
+ *      injections, hooks) sourced from file-read scans of
+ *      `.claude/settings*.json`.
+ *
+ * `capturedAt` is the wall-clock ts of the snapshot; `fromProbe: false`
+ * means the cached `session_started` was used as-is (cache mode or Phase 3
+ * fall-through), `true` means Phase 3b spawned a fresh probe.
+ *
+ * `settingSourcesUsed` reflects the SDK's actual `settingSources` for the
+ * cached session — trusted projects see `['user', 'project', 'local']`,
+ * untrusted see `['user']`. The AuthorityPanel uses this to know which
+ * layers it should display (e.g. don't render "project" allow/deny rules
+ * for an untrusted project even if a sibling has declared them).
+ */
+export type ProjectAuthority = {
+  projectId: number;
+  capturedAt: number;
+  fromProbe: boolean;
+  model?: string;
+  apiKeySource?: string;
+  permissionMode?: string;
+  cwd?: string;
+  settingSourcesUsed: ('user' | 'project' | 'local')[];
+  tools: ToolView[];
+  mcpServers: McpServerView[];
+  slashCommands: string[];
+  skills: string[];
+  agents: string[];
+  plugins: { name: string; path: string }[];
+  hooks: HookView[];
+  detectedEnvInjections: EnvInjection[];
+};
 
 /**
  * Cluster A Phase 1: structurally distinct severity tier vs class.

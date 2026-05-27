@@ -44,6 +44,7 @@ import type {
   WrapperErrorKind,
 } from '@cebab/shared/protocol';
 import { translate } from './translate.js';
+import { resolveProjectAuthority } from '../repo/project_authority.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
 import { buildSessionLogChunk } from './session_log.js';
@@ -292,6 +293,32 @@ function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
   };
 }
 
+/**
+ * Cluster B Phase 3 (BE-B3): cached snapshot of the most recent
+ * `session_started` per project for this WS connection — the effective-
+ * state side of `ProjectAuthority`. Lifetime = lifetime of the WS conn
+ * (per cebab-1's gotcha #3: never auto-fire a probe to refill this; only
+ * the operator's explicit "Refresh" button does that, Phase 3b).
+ *
+ * Stored shape mirrors the relevant subset of the `session_started`
+ * ServerMsg. Doesn't include sessionId because the AuthorityPanel is
+ * project-scoped (per spec §6.1) and we only need ONE init snapshot per
+ * project per connection — the most recent wins.
+ */
+type CachedSessionStarted = {
+  capturedAt: number;
+  model?: string;
+  tools?: string[];
+  cwd?: string;
+  permissionMode?: string;
+  apiKeySource?: string;
+  mcpServers?: { name: string; status: string }[];
+  slashCommands?: string[];
+  skills?: string[];
+  agents?: string[];
+  plugins?: { name: string; path: string }[];
+};
+
 type Conn = {
   ws: WebSocket;
   pendingPermissions: Map<string, PendingPermission>;
@@ -302,6 +329,8 @@ type Conn = {
    *  `sendUserPrompt` method; the WS handler narrows via `'sendUserPrompt'
    *  in active` rather than carrying a separate mode discriminator here. */
   multiAgent: ChainSessionHandle | OrchestratorSessionHandle | null;
+  /** Cluster B Phase 3: per-project authority cache; see CachedSessionStarted. */
+  authorityCache: Map<number, CachedSessionStarted>;
 };
 
 export function startWsServer(server: HttpServer): WebSocketServer {
@@ -348,6 +377,34 @@ function send(ws: WebSocket, msg: ServerMsg): void {
   if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
 }
 
+/**
+ * Cluster B Phase 3 (BE-B3): update the per-Conn authority cache when a
+ * `session_started` envelope is about to be sent. Latest snapshot per
+ * project wins (the AuthorityPanel is project-scoped). Replay also hits
+ * this — replaying an old session_started populates the cache with the
+ * historical init, so `get_project_authority` against an idle project
+ * returns *something* useful (last-known instead of always-null).
+ *
+ * BE-B2: `session_started` fires for EVERY turn, not just the first, so
+ * this naturally tracks fresh effective state per turn without per-call
+ * subscription.
+ */
+function cacheSessionStartedIfNeeded(conn: Conn, out: ServerMsg): void {
+  if (out.type !== 'session_started') return;
+  const snapshot: CachedSessionStarted = { capturedAt: Date.now() };
+  if (out.model !== undefined) snapshot.model = out.model;
+  if (out.tools !== undefined) snapshot.tools = out.tools;
+  if (out.cwd !== undefined) snapshot.cwd = out.cwd;
+  if (out.permissionMode !== undefined) snapshot.permissionMode = out.permissionMode;
+  if (out.apiKeySource !== undefined) snapshot.apiKeySource = out.apiKeySource;
+  if (out.mcpServers !== undefined) snapshot.mcpServers = out.mcpServers;
+  if (out.slashCommands !== undefined) snapshot.slashCommands = out.slashCommands;
+  if (out.skills !== undefined) snapshot.skills = out.skills;
+  if (out.agents !== undefined) snapshot.agents = out.agents;
+  if (out.plugins !== undefined) snapshot.plugins = out.plugins;
+  conn.authorityCache.set(out.projectId, snapshot);
+}
+
 function onConnection(ws: WebSocket): void {
   console.log('[ws] client connected');
   const conn: Conn = {
@@ -355,6 +412,7 @@ function onConnection(ws: WebSocket): void {
     pendingPermissions: new Map(),
     inFlight: new Map(),
     multiAgent: null,
+    authorityCache: new Map(),
   };
 
   // Cluster A Phase 3 (E1, BE-10): tell the operator which auth-precedence
@@ -1049,6 +1107,29 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         rows: clearedSnapshot.rows,
         unackedCountBySession: clearedSnapshot.unackedCountBySession,
         unackedGlobal: clearedSnapshot.unackedGlobal,
+      });
+      return;
+    }
+    case 'get_project_authority': {
+      // Cluster B Phase 3 (BE-B3 / BE-B4): resolve and ship the authority
+      // snapshot. Cache lookup first; the resolver merges in the file-read
+      // scans (allow/deny attribution, env injections, hooks, declared MCP
+      // servers) regardless of cache hit so pre-flight inspection of a
+      // project that has never started a session in this WS connection
+      // still returns useful data (just with empty effective tools/agents).
+      //
+      // Probe mode falls through to cache in Phase 3 (with an info log);
+      // Phase 3b will spawn `maxTurns: 0` SDK runs here.
+      const cached = conn.authorityCache.get(msg.projectId);
+      const authority = resolveProjectAuthority({
+        projectId: msg.projectId,
+        mode: msg.mode,
+        ...(cached !== undefined && { latestSessionStarted: cached }),
+      });
+      send(conn.ws, {
+        type: 'project_authority',
+        projectId: msg.projectId,
+        authority,
       });
       return;
     }
@@ -2091,6 +2172,7 @@ async function runOneTurn(
       await persistMessage(sessionId, sdkMsg);
       const out = translate(sdkMsg, project.id);
       if (out) {
+        cacheSessionStartedIfNeeded(conn, out);
         send(conn.ws, out);
         // Cluster A Phase 3 (B2): typed `rate_limit_event` also fans out as
         // an operational warn toast via the dispatcher. We do this only on
@@ -2189,7 +2271,10 @@ async function replaySession(conn: Conn, projectId: number, sessionId: string): 
       continue;
     }
     const out = translate(parsed, projectId);
-    if (out) send(conn.ws, out);
+    if (out) {
+      cacheSessionStartedIfNeeded(conn, out);
+      send(conn.ws, out);
+    }
   }
   send(conn.ws, { type: 'session_history_end', projectId, sessionId });
 
