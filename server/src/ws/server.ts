@@ -46,6 +46,12 @@ import type {
 import { translate } from './translate.js';
 import { resolveProjectAuthority } from '../repo/project_authority.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
+import {
+  awaitMcpTrustDecisions,
+  makeTrustGateState,
+  type TrustGateOutcome,
+  type TrustGateState,
+} from '../repo/mcp_trust_gate.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
 import { buildSessionLogChunk } from './session_log.js';
@@ -332,6 +338,12 @@ type Conn = {
   multiAgent: ChainSessionHandle | OrchestratorSessionHandle | null;
   /** Cluster B Phase 3: per-project authority cache; see CachedSessionStarted. */
   authorityCache: Map<number, CachedSessionStarted>;
+  /**
+   * Cluster B Phase 4b: TOFU spawn-gate state. Holds parked `pendingId`
+   * promises (one per emitted `mcp_auto_install_pending`) and the per-session
+   * deny_once set. Cleared implicitly on disconnect via Conn drop.
+   */
+  trustGate: TrustGateState;
 };
 
 export function startWsServer(server: HttpServer): WebSocketServer {
@@ -390,6 +402,46 @@ function send(ws: WebSocket, msg: ServerMsg): void {
  * this naturally tracks fresh effective state per turn without per-call
  * subscription.
  */
+/**
+ * Cluster B Phase 4b (§4.4): run the TOFU spawn-gate for every unique
+ * project in `projectIds`, in declaration order. Each call enumerates the
+ * project's declared MCP servers (via `resolveProjectAuthority`) and parks
+ * on `mcp_auto_install_pending` for any first_seen / hash_changed entries.
+ * Returns when every parked decision has resolved.
+ *
+ * The gate is invoked once per unique project — duplicates are deduped here
+ * so a chain with `[A, A, B]` only re-prompts once for A.
+ *
+ * Caller (`start_multi_agent` for bus, `runOneTurn` for single-agent) MUST
+ * `await` this before calling `pickRunner` / `startOrchestratorSession` /
+ * `startChainSession`. The await is the structural block — if the operator
+ * never replies, the spawn never happens.
+ *
+ * On a project_authority resolution miss (project row deleted mid-flight),
+ * we skip silently — `getProject` upstream already rejected the start, so
+ * this case is structurally unreachable in practice.
+ */
+async function gateProjectsForSpawn(conn: Conn, projectIds: number[]): Promise<void> {
+  const seen = new Set<number>();
+  for (const projectId of projectIds) {
+    if (seen.has(projectId)) continue;
+    seen.add(projectId);
+    const cached = conn.authorityCache.get(projectId);
+    const authority = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      ...(cached !== undefined && { latestSessionStarted: cached }),
+    });
+    if (!authority) continue;
+    await awaitMcpTrustDecisions({
+      projectId,
+      gate: conn.trustGate,
+      send: (m) => send(conn.ws, m),
+      servers: authority.mcpServers,
+    });
+  }
+}
+
 function cacheSessionStartedIfNeeded(conn: Conn, out: ServerMsg): void {
   if (out.type !== 'session_started') return;
   const snapshot: CachedSessionStarted = { capturedAt: Date.now() };
@@ -414,6 +466,7 @@ function onConnection(ws: WebSocket): void {
     inFlight: new Map(),
     multiAgent: null,
     authorityCache: new Map(),
+    trustGate: makeTrustGateState(),
   };
 
   // Cluster A Phase 3 (E1, BE-10): tell the operator which auth-precedence
@@ -1137,21 +1190,71 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     case 'mcp_trust_decision': {
       // Cluster B Phase 4 (§4.4): operator's TOFU decision. Two persisted
       // states (`trust` / `trust_pinned`) and two rejection states
-      // (`deny_once` / `deny_remember`). `deny_once` is NOT recorded — it's
-      // per-session in-memory state Phase 4b will track; we silently
-      // acknowledge and let the next spawn re-prompt. The other three land
-      // in `mcp_trust` AND `safety_audit` (dual-write per BE-1 invariant).
+      // (`deny_once` / `deny_remember`).
       //
-      // No "pendingId-not-found" error path here — Phase 4a doesn't park
-      // pendings yet (Phase 4b adds that), and operator-initiated decisions
-      // from the AuthorityPanel ship without a pendingId. Either way, the
-      // decision is recorded; the spawn-gate hold-and-release is Phase 4b.
+      // Two entry paths:
+      //   A) Gate-driven (`pendingId` present + parked): the spawn-gate
+      //      (Phase 4b) is awaiting this decision before starting the
+      //      session. We resolve the parked promise via the gate entry's
+      //      `resolve(outcome)` callback — which itself runs the
+      //      mcp_trust + safety_audit dual-write and unblocks the spawn.
+      //   B) Operator-initiated (no `pendingId`, OR pendingId stale/unknown):
+      //      decision came from the AuthorityPanel Trust/Deny affordance
+      //      with no parked spawn. We persist directly here. trust_pinned
+      //      still validates binarySha. deny_once with no parked gate is
+      //      a no-op (in-memory state has no anchor without a project id;
+      //      the next gate pass will re-prompt anyway).
+      //
+      // Path A always wins when both could apply — the parked spawn needs
+      // to be unstuck before any other side effect, and the gate handles
+      // the dual-write internally with the right project id + sessionKey.
+      if (msg.pendingId) {
+        const entry = conn.trustGate.pending.get(msg.pendingId);
+        if (entry) {
+          // trust_pinned requires binarySha — same guard as path B, surfaced
+          // here so the parked spawn doesn't sit forever on a bad message.
+          if (msg.decision === 'trust_pinned' && !msg.binarySha) {
+            send(conn.ws, {
+              type: 'wrapper_error',
+              kind: 'process_crashed',
+              message: `mcp_trust_decision: trust_pinned requires binarySha (server=${msg.serverName})`,
+            });
+            // Don't resolve — leave the gate awaiting; the operator can
+            // re-send with the corrected payload. (UX-side this shouldn't
+            // happen since the modal greys the affordance when sha is null.)
+            return;
+          }
+          const outcome: TrustGateOutcome =
+            msg.decision === 'trust'
+              ? { kind: 'allow' }
+              : msg.decision === 'trust_pinned'
+                ? { kind: 'allow_pinned', binarySha: msg.binarySha as string }
+                : msg.decision === 'deny_once'
+                  ? { kind: 'deny_once' }
+                  : { kind: 'deny_remember' };
+          try {
+            entry.resolve(outcome);
+          } catch (err) {
+            // The gate's internal applyDecision wraps in try/finally so the
+            // spawn-promise always resolves; a throw here would only be the
+            // safety_audit append going sideways. Surface it.
+            const message = err instanceof Error ? err.message : String(err);
+            send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+          }
+          return;
+        }
+        // pendingId given but not parked — fall through to path B. Common
+        // case: the operator's client retried a decision after the gate
+        // already resolved (or the spawn aborted upstream).
+      }
+      // Path B: operator-initiated persistence.
       if (msg.decision === 'deny_once') {
-        // Reserve handling for Phase 4b — for now log and return so the
-        // client can move on. The reply is implicit (the operator's
-        // AuthorityPanel re-renders on the next session_started).
+        // deny_once without a parked gate has nowhere to land (no project
+        // anchor for the in-memory set). Log and acknowledge silently — the
+        // operator's next start_session will re-prompt via the gate, and
+        // they can deny_once at that point.
         console.log(
-          `[mcp_trust] deny_once for ${msg.serverName} @ ${msg.originPath} (in-memory; Phase 4b)`,
+          `[mcp_trust] deny_once without parked gate for ${msg.serverName} @ ${msg.originPath} — no-op`,
         );
         return;
       }
@@ -1500,6 +1603,15 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
           return;
         }
+        // Cluster B Phase 4b (§4.4): TOFU spawn-gate. Per unique worker
+        // project, prompt the operator for any declared MCP server that
+        // isn't currently 'trusted'. Awaiting blocks the spawn until every
+        // decision arrives. The orchestrator itself runs from an empty
+        // cwd (no MCPs to gate); only workers carry project-declared MCPs.
+        await gateProjectsForSpawn(
+          conn,
+          workers.map((w) => w.projectId),
+        );
         try {
           const handle = await startOrchestratorSession({
             workers,
@@ -1559,6 +1671,13 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
         return;
       }
+      // Cluster B Phase 4b (§4.4): TOFU spawn-gate, mirror of the
+      // orchestrator path. Chain participants may repeat (e.g. [A, B, A])
+      // and the helper dedupes on projectId so A is gated once.
+      await gateProjectsForSpawn(
+        conn,
+        participants.map((p) => p.projectId),
+      );
       try {
         const handle = await startChainSession({
           participants,
@@ -2123,6 +2242,13 @@ async function runOneTurn(
   const sessionId = msg.sessionId ?? randomUUID();
   if (!msg.sessionId) createSession(sessionId, project.id);
   touchProject(project.id);
+
+  // Cluster B Phase 4b (§4.4): TOFU spawn-gate. Same helper the bus
+  // start-paths use, scoped to this single project. Fires per turn; when
+  // every declared MCP is already 'trusted' it's a silent no-op (one
+  // checkTrust lookup per row). On first_seen / hash_changed the operator
+  // is prompted and the spawn awaits their decision before pickRunner.
+  await gateProjectsForSpawn(conn, [project.id]);
 
   const ac = new AbortController();
 
