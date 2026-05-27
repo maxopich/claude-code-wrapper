@@ -362,6 +362,12 @@ function markCrashedAndAnnounceSuperseded(
         sessionId: orphanSessionId,
         action: { kind: 'reopen', sessionId: orphanSessionId },
         sticky: true,
+        // Cluster A Phase 6: §7 floor sub-code label so the inbox panel's
+        // SessionRecoveredReasonCode filter chip can group this row with
+        // `reconstructed` / `reconstruction_failed`. Same semantic as the
+        // spec's `swept_competing` — the older row was crashed because a
+        // newer iteration took over the single-active slot.
+        reasonCode: 'swept_competing',
       },
       callbacks.sendServerMsg,
     );

@@ -1293,16 +1293,19 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'session_superseded':
     case 'chain_not_reconstructed':
     case 'bus_auto_installed':
-      // Cluster A Phase 3+4: the dispatcher fans every one of these into a
+    case 'tool_denied':
+    case 'session_reconstructed':
+      // Cluster A Phase 3+4+6: the dispatcher fans every one of these into a
       // matching `notification` envelope (see `server/src/notifications/
       // dispatcher.ts`); the dock owns the operator-facing surface. The
       // typed events themselves are kept on the wire for forward-compat
       // non-toast consumers (Cluster B per-agent routing-trail counter,
       // E1 ignored-variables inspector, D B2 rate-limit banner, Cluster D
       // session-recovery surface for `session_superseded` /
-      // `chain_not_reconstructed`, Phase 5 install inspector for
-      // `bus_auto_installed`) — when those land, they'll consume the
-      // typed event here and dispatch session/banner state. No reducer
+      // `chain_not_reconstructed` / `session_reconstructed`, Phase 5
+      // install inspector for `bus_auto_installed`, future tool-policy
+      // diagnostics for `tool_denied`) — when those land, they'll consume
+      // the typed event here and dispatch session/banner state. No reducer
       // state changes for now.
       return state;
 

@@ -24,12 +24,22 @@ import type { NotificationEnvelope, ServerMsg } from '@cebab/shared/protocol';
  *   - `bus_auto_installed` (add_multi_agent_participant → dispatcher.emit info)
  *   - dangerous-mutation safety toast (onMutation closure → dispatcher.emit danger)
  *
+ * Phase 6 wires the §7-floor remainder: each pairs a typed wire event
+ * with a dispatcher fan-out, identical to the Phase 3/4 pattern. New
+ * envelopes ride through the `notification` pass-through:
+ *   - `tool_denied` (ws/server.ts permission_decision deny → dispatcher.emit warn)
+ *   - `session_reconstructed` (bus/reconstruct.ts success → dispatcher.emit success)
+ *   - rate_limit hit vs cleared split (ws/server.ts SDK stream → dispatcher.emit
+ *     warn vs info, dedupeKey carries the sub-code)
+ *   - wrapper_error sub-code routing (auth_expired / process_crash /
+ *     parse_error → dispatcher.emit error with NotificationAction)
+ *
  * The dispatcher fans each into a matching `notification` envelope, which
  * is what this table consumes (via the existing `'notification'` pass-through
  * case). The typed events also ship on the wire for future non-toast
  * consumers (Cluster B routing-trail counter, E1 inspector, D B2 banner,
  * D session-recovery surface) — if you find yourself adding more cases
- * here for Phase 3/4 sources, you're probably double-toasting; route via
+ * here for Phase 3/4/6 sources, you're probably double-toasting; route via
  * the dispatcher instead.
  */
 
