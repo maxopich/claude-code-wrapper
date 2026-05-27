@@ -132,6 +132,11 @@ export function reconstructOrchestratorSession(
      *  payload. */
     onMutation?: BusSink['onMutation'];
     onPendingMutation?: BusSink['onPendingMutation'];
+    /** Cluster A Phase 3 (D4): dispatcher notification fan-out for the
+     *  rebuilt router so a router_drop in a reconstructed session reaches
+     *  the operator. */
+    sendNotification?: BusSink['sendNotification'];
+    sendRouterDrop?: BusSink['sendRouterDrop'];
   },
 ): boolean {
   if (!isReconstructable(row).ok) return false;
@@ -202,6 +207,8 @@ export function reconstructOrchestratorSession(
       onPendingRetry: callbacks.onPendingRetry,
       onMutation: callbacks.onMutation,
       onPendingMutation: callbacks.onPendingMutation,
+      sendNotification: callbacks.sendNotification,
+      sendRouterDrop: callbacks.sendRouterDrop,
       seededSessions,
       briefedAgents,
       hopBudget: callbacks.hopBudget,

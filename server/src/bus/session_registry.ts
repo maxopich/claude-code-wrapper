@@ -20,7 +20,11 @@
 import type { BusEvent } from './runner.js';
 import type { MultiAgentEndedReason } from './runtime.js';
 import type { MultiAgentLifecycle, MutationRecord } from '../repo/multi_agent.js';
-import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
+import type {
+  NotificationEnvelope,
+  PendingRetryDescriptor,
+  RouterDropReasonCode,
+} from '@cebab/shared/protocol';
 
 /** The WS-facing sink. Swapped on reconnect, silenced on detach. Identical
  *  shape to the old `StartChainOpts.onEvent/onEnded` so the WS layer and the
@@ -39,6 +43,29 @@ export type BusSink = {
   /** Item #5: pause-on-first-mutation slot set (with the offending row) or
    *  cleared (`pending: null`). Mirrors `onPendingRetry`'s shape. */
   onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /**
+   * Cluster A Phase 3 (D4): the dispatcher's notification envelope for a
+   * router-drop safety event (or a future operational toast originating from
+   * the bus runtime). Called AFTER the `safety_audit` row is written
+   * (dispatcher.emit enforces BE-1). The WS layer wires this to
+   * `send(conn.ws, env)`; reconnect swaps the callback alongside `onEvent`
+   * so a re-attached browser keeps receiving live envelopes.
+   */
+  sendNotification?: (env: NotificationEnvelope & { type: 'notification' }) => void;
+  /**
+   * Cluster A Phase 3 (D4): typed `router_drop` ServerMsg for future
+   * non-toast consumers (Cluster B per-agent routing-trail counter, D4
+   * inspector). Optional today — the operator dock is driven by
+   * `sendNotification` above; this is forward-compat.
+   */
+  sendRouterDrop?: (drop: {
+    sessionId: string;
+    reasonCode: RouterDropReasonCode;
+    source: string;
+    destination: string;
+    kind: string;
+    auditRowId: string;
+  }) => void;
 };
 
 /** A sink that drops everything — installed by `detach()` so a still-running
@@ -49,6 +76,8 @@ export const NOOP_SINK: BusSink = {
   onPendingRetry: () => {},
   onMutation: () => {},
   onPendingMutation: () => {},
+  sendNotification: () => {},
+  sendRouterDrop: () => {},
 };
 
 /**

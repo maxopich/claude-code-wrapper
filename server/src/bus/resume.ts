@@ -81,6 +81,11 @@ export type ResumeCallbacks = {
   /** Item #5: pause-on-mutation slot set/clear for AFTER-reconstruct.
    *  Initial pending value ships on `multi_agent_started.pendingMutation`. */
   onPendingMutation?: BusSink['onPendingMutation'];
+  /** Cluster A Phase 3 (D4): dispatcher notification fan-out for router
+   *  drops in a reconstructed (R-B) or re-attached session. */
+  sendNotification?: BusSink['sendNotification'];
+  /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
+  sendRouterDrop?: BusSink['sendRouterDrop'];
 };
 
 export type ResumedSession = {
@@ -132,6 +137,8 @@ export async function attemptResumeMultiAgent(
         onPendingRetry: callbacks.onPendingRetry,
         onMutation: callbacks.onMutation,
         onPendingMutation: callbacks.onPendingMutation,
+        sendNotification: callbacks.sendNotification,
+        sendRouterDrop: callbacks.sendRouterDrop,
       })
     ) {
       live = getLiveSession(candidate.id);
@@ -149,6 +156,8 @@ export async function attemptResumeMultiAgent(
     onPendingRetry: callbacks.onPendingRetry,
     onMutation: callbacks.onMutation,
     onPendingMutation: callbacks.onPendingMutation,
+    sendNotification: callbacks.sendNotification,
+    sendRouterDrop: callbacks.sendRouterDrop,
   };
   live.rebind(sink);
 
@@ -177,7 +186,14 @@ export async function resumeMultiAgentTarget(
   sessionId: string,
   callbacks: Pick<
     ResumeCallbacks,
-    'onEvent' | 'onEnded' | 'hopBudget' | 'onPendingRetry' | 'onMutation' | 'onPendingMutation'
+    | 'onEvent'
+    | 'onEnded'
+    | 'hopBudget'
+    | 'onPendingRetry'
+    | 'onMutation'
+    | 'onPendingMutation'
+    | 'sendNotification'
+    | 'sendRouterDrop'
   >,
 ): Promise<TargetResumeResult> {
   const row = getMultiAgentSession(sessionId);
@@ -198,6 +214,8 @@ export async function resumeMultiAgentTarget(
         onPendingRetry: callbacks.onPendingRetry,
         onMutation: callbacks.onMutation,
         onPendingMutation: callbacks.onPendingMutation,
+        sendNotification: callbacks.sendNotification,
+        sendRouterDrop: callbacks.sendRouterDrop,
       })
     ) {
       live = getLiveSession(sessionId);
@@ -214,6 +232,8 @@ export async function resumeMultiAgentTarget(
       onPendingRetry: callbacks.onPendingRetry,
       onMutation: callbacks.onMutation,
       onPendingMutation: callbacks.onPendingMutation,
+      sendNotification: callbacks.sendNotification,
+      sendRouterDrop: callbacks.sendRouterDrop,
     });
   } catch (err) {
     console.error(`[resume] targeted resume threw for ${sessionId}`, err);

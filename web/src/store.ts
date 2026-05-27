@@ -1287,6 +1287,19 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // safety events that ALSO update a session) have a place to land.
       return state;
 
+    case 'rate_limit_event':
+    case 'router_drop':
+    case 'env_scrubbed':
+      // Cluster A Phase 3: the dispatcher fans every one of these into a
+      // matching `notification` envelope (see `server/src/notifications/
+      // dispatcher.ts`); the dock owns the operator-facing surface. The
+      // typed events themselves are kept on the wire for forward-compat
+      // non-toast consumers (Cluster B per-agent routing-trail counter,
+      // E1 ignored-variables inspector, D B2 rate-limit banner) — when
+      // those land, they'll consume the typed event here and dispatch
+      // session/banner state. No reducer state changes for now.
+      return state;
+
     case 'wrapper_error': {
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)

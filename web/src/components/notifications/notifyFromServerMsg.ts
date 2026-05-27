@@ -11,10 +11,19 @@ import type { NotificationEnvelope, ServerMsg } from '@cebab/shared/protocol';
  * Phase 2 scope: pass-through for the server-dispatcher's typed
  * `notification` envelope (Phase 1 BE-1..BE-5 invariants), plus a
  * narrow fallback for `wrapper_error` messages that aren't session-scoped
- * (UI-14). Phase 3 wires the four highest-leverage typed sources
- * (router_drop, rate_limit_event, env_scrubbed, wrapper_error of all
- * stripes) into the server dispatcher — at which point this table mostly
- * stays the same and the source-specific wiring lives server-side.
+ * (UI-14).
+ *
+ * Phase 3 wires three new typed sources server-side:
+ *   - `rate_limit_event` (translate.ts → live-stream loop calls dispatcher.emit)
+ *   - `router_drop` (orchestrator + chain F2/F3 drop sites → dispatcher.emit safety)
+ *   - `env_scrubbed` (every WS attach → dispatcher.emit safety)
+ *
+ * The dispatcher fans each into a matching `notification` envelope, which
+ * is what this table consumes (via the existing `'notification'` pass-through
+ * case). The typed events also ship on the wire for future non-toast
+ * consumers (Cluster B routing-trail counter, E1 inspector, D B2 banner) —
+ * if you find yourself adding more cases here for Phase 3 sources, you're
+ * probably double-toasting; route via the dispatcher instead.
  */
 
 const PHASE_2_WRAPPER_DEDUPE_KEY_PREFIX = 'wrap';
