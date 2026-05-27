@@ -692,6 +692,28 @@ export type ClientMsg =
       pendingStartId: string;
       typedAcknowledgment: string;
       reasonText?: string;
+    }
+  | {
+      /**
+       * Cluster D Phase 4 (spec §4.2, BE-D4): operator clicked "Retry now"
+       * in the RateLimitBanner. The server is expected to re-deliver the
+       * captured user message on the same SDK session via `--resume
+       * <sessionId>`, so no fresh `system/init` quota burn happens.
+       *
+       * Phase 4a forward-declares the discriminant so client code (Phase
+       * 4c) can emit it before the server handler lands in Phase 4b.
+       * Phase 4b adds the message-capture machinery + the server handler
+       * + the recovery_log row (failureClass='rate_limit',
+       * operatorAction='manual_retry').
+       *
+       * Idempotent: a second `retry_rate_limited` after the first one has
+       * been accepted is a wrapper_error ("retry already in flight");
+       * after the retry resolves, a second click is treated as a fresh
+       * retry. Idempotency is keyed by sessionId — there is no separate
+       * retry id (a session only has one held turn at a time).
+       */
+      type: 'retry_rate_limited';
+      sessionId: string;
     };
 
 // ---- Server → Browser ----
@@ -705,7 +727,35 @@ export type ServerMsg =
     }
   | { type: 'session_history_start'; projectId: number; sessionId: string }
   | { type: 'session_history_end'; projectId: number; sessionId: string }
-  | { type: 'session_running'; projectId: number; sessionId: string; running: boolean }
+  | {
+      type: 'session_running';
+      projectId: number;
+      sessionId: string;
+      running: boolean;
+      /**
+       * Cluster D Phase 4 (spec §4.2): additive sub-status surfaced when the
+       * UI needs to distinguish "actively producing tokens" from secondary
+       * waits — rate-limit backoff, post-restart awaiting-continue, operator
+       * pause. Old clients reading just `running` continue to work; new
+       * clients (RateLimitBanner, SweptSessionBanner, AuthExpiredBanner)
+       * key off `status` to render their tier + countdown + actions.
+       *
+       * Wire semantics:
+       *   - `'thinking'` — running=true, no banner state. The default when
+       *     status is omitted; included here only so the discriminant union
+       *     stays exhaustive.
+       *   - `'rate_limited'` — running=true logically (the turn is held, not
+       *     dead) but no tokens are being produced; the operator sees the
+       *     RateLimitBanner countdown. Flipped on hard `rate_limit_event`.
+       *   - `'awaiting_continue'` — R-B reconstruction state; running=false
+       *     until the operator clicks Continue.
+       *   - `'paused'` — operator-initiated pause of auto-retry (Phase 4b's
+       *     `pause_auto_retry` ClientMsg).
+       *
+       * Phase 4a ships the type slot; Phase 4b wires the actual flips.
+       */
+      status?: 'thinking' | 'rate_limited' | 'awaiting_continue' | 'paused';
+    }
   | {
       type: 'session_started';
       sessionId: string;
@@ -1137,21 +1187,85 @@ export type ServerMsg =
       /**
        * Cluster A Phase 3 (B2): typed rate-limit signal lifted out of the
        * generic `system_event { subtype: 'rate_limit' }` fall-through in
-       * `ws/translate.ts`. Carries the SDK's `rate_limit_info` payload so a
-       * future per-session banner (Cluster D B2) can render a live
-       * retry-after countdown; the operator-facing toast is fanned out
+       * `ws/translate.ts`. The per-session RateLimitBanner (Cluster D Phase
+       * 4c) renders the countdown; the operator-facing toast is fanned out
        * separately as a `notification` envelope by the dispatcher.
+       *
+       * Cluster D Phase 4a extensions (spec §4.1):
+       *   - `resetsAtMs` is the converted wall-clock-ms timestamp. The
+       *     SDK's raw `resetsAt` is in **seconds** (not ms — a real-world
+       *     bite-back spec §4.1 explicitly calls out). The translator
+       *     multiplies by 1000 at the boundary so every consumer can
+       *     compare against `Date.now()` without conversion. The legacy
+       *     `resetsAt` field is preserved as raw-from-SDK seconds for
+       *     forward-compat and back-fill; new consumers should prefer
+       *     `resetsAtMs`.
+       *   - `overageStatus` / `overageResetsAtMs` / `isUsingOverage`
+       *     capture the SDK's overage-pool fields so the banner can
+       *     distinguish "hard limit hit but overage available" from
+       *     "fully exhausted".
+       *
+       * Status vocabulary (spec §4.1): `'allowed' | 'approaching' | 'hard'`.
+       * Kept as `string` here for forward-compat with future SDK enum
+       * additions; the translator passes through whatever the SDK ships.
        */
       type: 'rate_limit_event';
       sessionId: string;
-      /** SDK status enum, e.g. `'allowed_warning' | 'limited'`. */
+      /** Spec §4.1: `'allowed' | 'approaching' | 'hard'` (string for fwd-compat). */
       status?: string;
-      /** Wall-clock ms the limit resets at; surfaced as a countdown. */
+      /** RAW from SDK (seconds since epoch). Prefer `resetsAtMs` in new code. */
       resetsAt?: number;
-      /** SDK's discriminator, e.g. `'subscription'`. */
+      /** Cluster D Phase 4a: SDK seconds × 1000. Use this for countdowns. */
+      resetsAtMs?: number;
+      /** SDK's discriminator, e.g. `'five_hour' | 'weekly' | 'subscription'`. */
       rateLimitType?: string;
+      /** SDK overage-pool status, e.g. `'allowed' | 'exceeded'`. */
+      overageStatus?: string;
+      /** SDK seconds × 1000 for overage reset. */
+      overageResetsAtMs?: number;
+      /** True iff the SDK reports the turn is consuming overage budget. */
+      isUsingOverage?: boolean;
       /** Raw payload from the SDK for forward-compat. */
       payload: unknown;
+    }
+  | {
+      /**
+       * Cluster D Phase 4a (spec §4.2): emitted before each backoff sleep
+       * when an SDK turn is being auto-retried. Two reason codes:
+       *
+       *   - `'transient_overload'` — bus turns retrying 529/Overloaded
+       *     (replaces the existing `console.warn` at `bus/runner.ts`).
+       *   - `'rate_limit_hard'` — single-agent auto-retry after a hard
+       *     rate_limit_event (Phase 4b adds the source site; Phase 4a
+       *     forward-declares the reason code).
+       *
+       * The accompanying `recovery_log` row (`failureClass:'rate_limit'` or
+       * `'other'`, `operatorAction:'auto_retry'`) is the durable record
+       * — `auto_retry` is a live WS signal for the operator-facing banner
+       * (it lets the countdown UI show "attempt 3 of 5" without waiting
+       * for the next SDK message). One `auto_retry` ⇄ one recovery_log
+       * row written by the same emit site.
+       *
+       * `[security]` BE-D7: the emit site MUST pin retries to
+       * `isTransientOverload(err)` (bus) or `wrapperKind === 'rate_limited'`
+       * (single-agent) — never to a generic catch-all — so a malformed
+       * tool call or an OAuth failure does not silently spin up a retry
+       * loop that exhausts the SDK quota.
+       */
+      type: 'auto_retry';
+      sessionId: string;
+      /** 1-indexed; the attempt about to fire. */
+      attempt: number;
+      /** Inclusive of the attempt that already failed plus all retries. */
+      maxAttempts: number;
+      /** Delay before the next attempt fires, in ms. */
+      backoffMs: number;
+      reason: 'transient_overload' | 'rate_limit_hard';
+      /** Wall-clock ms when the retry will fire (`Date.now() + backoffMs`). */
+      retryAt: number;
+      /** Optional sub-agent identifier (bus participant name); omitted in
+       * the single-agent case where the session id is sufficient. */
+      agentName?: string;
     }
   | {
       /**

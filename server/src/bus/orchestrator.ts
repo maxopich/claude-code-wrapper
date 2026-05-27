@@ -61,6 +61,7 @@ import type {
   RouterDropReasonCode,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
+import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
@@ -994,6 +995,37 @@ export function wireOrchestratorSession(p: {
     onToolResult: onToolResultHook,
     abortController,
     runnerFactory: p.runnerFactory,
+    // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): mirror the chain.ts
+    // wiring — every transient-overload retry emits an `auto_retry`
+    // ServerMsg + writes a `recovery_log` row. Identical shape; both
+    // bus topologies need the same observability so the regression-gate
+    // queries don't have a hole for orchestrator runs.
+    onAutoRetry: (info) => {
+      try {
+        p.sendServerMsg?.({
+          type: 'auto_retry',
+          sessionId,
+          attempt: info.attempt,
+          maxAttempts: info.maxAttempts,
+          backoffMs: info.backoffMs,
+          reason: info.reason,
+          retryAt: info.retryAt,
+          agentName: info.agentName,
+        });
+      } catch (err) {
+        console.error('[orchestrator] sendServerMsg auto_retry threw', err);
+      }
+      try {
+        appendRecoveryLog({
+          sessionId,
+          failureClass: 'other',
+          operatorAction: 'auto_retry',
+          timeToRecoveryMs: info.backoffMs,
+        });
+      } catch (err) {
+        console.error('[orchestrator] appendRecoveryLog auto_retry threw', err);
+      }
+    },
   });
   // Orchestrator stays narrow: its cwd is the empty Cebab-owned
   // <sessionFolder>/orchestrator/ workspace — no `.claude/settings*.json`,

@@ -219,6 +219,38 @@ export type AgentRunnerDeps = {
    * Tests pass `[0, 0, 0]` to keep the retry path testable in fake time.
    */
   overloadBackoffMs?: readonly number[];
+  /**
+   * Cluster D Phase 4a (spec §4.2 BE-D5): observability hook for the
+   * transient-overload retry path. Called BEFORE each backoff sleep with
+   * the next-attempt metadata so the orchestrator/chain wiring can:
+   *
+   *   - emit an `auto_retry` ServerMsg (live operator-facing signal,
+   *     drives the RateLimitBanner countdown in Phase 4c), and
+   *   - write a `recovery_log` row (`failureClass='other'`,
+   *     `operatorAction='auto_retry'`) — the durable record the
+   *     regression-gate queries (spec §8.5) consume.
+   *
+   * The hook fires for `'transient_overload'` reasons only; single-agent
+   * `'rate_limit_hard'` retries (Phase 4b) live on a different code path
+   * and use this same reason-code vocabulary but a different emit site.
+   *
+   * `[security]` BE-D7: the hook fires *only* from inside the existing
+   * `isTransientOverload(err)` branch — never on generic errors. The
+   * branch is the trust boundary; this hook is downstream of it.
+   *
+   * Optional: unit tests and code paths that don't need the wire signal
+   * leave it unset (the `console.warn` log line is preserved as a
+   * complementary debug breadcrumb regardless).
+   */
+  onAutoRetry?: (info: {
+    agentName: string;
+    attempt: number; // 1-indexed; the attempt about to fire after backoff
+    maxAttempts: number; // attempts + retries inclusive
+    backoffMs: number;
+    retryAt: number; // wall-clock ms when the retry will fire
+    reason: 'transient_overload';
+    error: unknown;
+  }) => void;
 };
 
 /**
@@ -340,9 +372,28 @@ export class AgentRunner {
           throw err;
         }
         const delay = backoffMs[attempt]!;
+        // Cluster D Phase 4a (BE-D5): the console.warn debug breadcrumb
+        // stays — it's cheap and useful in raw server logs — but we ALSO
+        // fire onAutoRetry so the wired callers (chain.ts /
+        // orchestrator.ts) can emit an `auto_retry` ServerMsg + write a
+        // recovery_log row. `[security]` BE-D7: we're already inside the
+        // `isTransientOverload(err)` branch — the hook can't fire on a
+        // non-transient error.
         console.warn(
           `[runner] ${agentName} hit transient overload (attempt ${attempt + 1}/${maxAttempts}): ${(err as Error).message}. Backing off ${delay}ms before retry.`,
         );
+        // 1-indexed attempt # of the retry that's about to fire (NOT the
+        // attempt that just failed). e.g. failed-1st-try → attempt=2.
+        const nextAttempt = attempt + 2;
+        this.deps.onAutoRetry?.({
+          agentName,
+          attempt: nextAttempt,
+          maxAttempts,
+          backoffMs: delay,
+          retryAt: Date.now() + delay,
+          reason: 'transient_overload',
+          error: err,
+        });
         await sleep(delay);
       }
     }
