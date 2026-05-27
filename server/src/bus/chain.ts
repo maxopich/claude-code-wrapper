@@ -67,6 +67,7 @@ import type {
   RouterDropReasonCode,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
+import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import {
   archiveAgentHop,
@@ -815,6 +816,43 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onToolResult: onToolResultHook,
     abortController,
     runnerFactory: opts.runnerFactory,
+    // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): every transient-
+    // overload retry fans out an `auto_retry` ServerMsg AND writes a
+    // `recovery_log` row. The row is the durable record the
+    // regression-gate queries (spec §8.5) read; the ServerMsg is the
+    // live signal the RateLimitBanner (Phase 4c) drives its countdown
+    // from. Failures here are isolated — a sink/DB error can't break
+    // the SDK retry loop itself; we just lose the observability for
+    // that attempt.
+    onAutoRetry: (info) => {
+      try {
+        opts.sendServerMsg?.({
+          type: 'auto_retry',
+          sessionId,
+          attempt: info.attempt,
+          maxAttempts: info.maxAttempts,
+          backoffMs: info.backoffMs,
+          reason: info.reason,
+          retryAt: info.retryAt,
+          agentName: info.agentName,
+        });
+      } catch (err) {
+        console.error('[chain] sendServerMsg auto_retry threw', err);
+      }
+      try {
+        appendRecoveryLog({
+          sessionId,
+          failureClass: 'other',
+          operatorAction: 'auto_retry',
+          // Time-to-recovery is the backoff itself; the retry HAS NOT
+          // succeeded yet, so the outcome stays null (backfilled later
+          // by the resolution path — Phase 4b/c).
+          timeToRecoveryMs: info.backoffMs,
+        });
+      } catch (err) {
+        console.error('[chain] appendRecoveryLog auto_retry threw', err);
+      }
+    },
   });
   for (const p of opts.participants) {
     runner.register({

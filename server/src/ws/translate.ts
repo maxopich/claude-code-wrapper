@@ -103,21 +103,48 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
 
     case 'rate_limit_event': {
       // Cluster A Phase 3 (B2): typed event lifted out of the generic
-      // `system_event { subtype: 'rate_limit' }` fall-through so a future
-      // per-session banner can render a live countdown and the dispatcher
-      // can fan out an operational warn toast. The wire-level
-      // `rate_limit_info` payload is preserved verbatim for forward-compat.
+      // `system_event { subtype: 'rate_limit' }` fall-through so the
+      // RateLimitBanner (Cluster D Phase 4c) can render a live countdown
+      // and the dispatcher can fan out an operational warn toast. The
+      // wire-level `rate_limit_info` payload is preserved verbatim for
+      // forward-compat.
+      //
+      // Cluster D Phase 4a (spec §4.1, BE-D3): convert SDK's `resetsAt`
+      // (raw SECONDS since epoch — a real-world bite-back the spec
+      // explicitly calls out) to `resetsAtMs`. Every consumer wants ms
+      // so they can do `Date.now() - resetsAtMs` for countdown math
+      // without rediscovering the unit per call site. Legacy `resetsAt`
+      // is preserved as raw-from-SDK seconds for forward-compat; new
+      // code uses `resetsAtMs`.
+      //
+      // Overage fields (`overageStatus` / `overageResetsAt` /
+      // `isUsingOverage`) are forwarded too so the banner can
+      // distinguish "hard limit hit but overage available" from "fully
+      // exhausted". Same seconds→ms conversion applies to
+      // `overageResetsAt`.
       const info = (m as AnyMsg & { rate_limit_info?: Record<string, unknown> }).rate_limit_info;
       const status = typeof info?.status === 'string' ? info.status : undefined;
       const rateLimitType =
         typeof info?.rateLimitType === 'string' ? info.rateLimitType : undefined;
       const resetsAt = typeof info?.resetsAt === 'number' ? info.resetsAt : undefined;
+      const resetsAtMs = resetsAt !== undefined ? resetsAt * 1000 : undefined;
+      const overageStatus =
+        typeof info?.overageStatus === 'string' ? info.overageStatus : undefined;
+      const overageResetsAt =
+        typeof info?.overageResetsAt === 'number' ? info.overageResetsAt : undefined;
+      const overageResetsAtMs = overageResetsAt !== undefined ? overageResetsAt * 1000 : undefined;
+      const isUsingOverage =
+        typeof info?.isUsingOverage === 'boolean' ? info.isUsingOverage : undefined;
       return {
         type: 'rate_limit_event',
         sessionId,
         status,
         resetsAt,
+        resetsAtMs,
         rateLimitType,
+        overageStatus,
+        overageResetsAtMs,
+        isUsingOverage,
         payload: info ?? m,
       };
     }

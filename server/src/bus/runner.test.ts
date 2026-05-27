@@ -863,6 +863,238 @@ describe('AgentRunner — per-agent turn serialization', () => {
       errSpy.mockRestore();
     });
   });
+
+  // --- Cluster D Phase 4a: onAutoRetry observability hook (spec §4.2) ----
+  //
+  // The hook MUST fire once per retry attempt, BEFORE the backoff sleep,
+  // with metadata that lets chain.ts / orchestrator.ts emit an `auto_retry`
+  // ServerMsg + write a `recovery_log` row. `[security]` BE-D7: the hook
+  // MUST NOT fire for non-transient errors (the trust boundary is the
+  // existing `isTransientOverload(err)` branch, NOT the catch-all).
+  describe('onAutoRetry hook (Cluster D Phase 4a)', () => {
+    type AutoRetryCall = {
+      agentName: string;
+      attempt: number;
+      maxAttempts: number;
+      backoffMs: number;
+      retryAt: number;
+      reason: string;
+    };
+
+    test('fires once per retry attempt with the correct metadata', async () => {
+      const calls: AutoRetryCall[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [10, 20, 30], // distinct delays per attempt
+        onAutoRetry: (info) => {
+          calls.push({
+            agentName: info.agentName,
+            attempt: info.attempt,
+            maxAttempts: info.maxAttempts,
+            backoffMs: info.backoffMs,
+            retryAt: info.retryAt,
+            reason: info.reason,
+          });
+        },
+        runnerFactory: () => {
+          n++;
+          if (n < 3) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              throw new Error('API Error: 529 Overloaded');
+            }
+            return { [Symbol.asyncIterator]: () => boom(), close: () => {} };
+          }
+          return fakeRunner([resultMsg('sess-ok')]);
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/w' });
+
+      const before = Date.now();
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('worker', 'go');
+      const after = Date.now();
+      warnSpy.mockRestore();
+
+      // Two failed attempts → two onAutoRetry calls (attempts 2 and 3).
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toMatchObject({
+        agentName: 'worker',
+        attempt: 2, // 1-indexed; 1st attempt failed, retry attempt is 2
+        maxAttempts: 4, // 3 backoff entries + 1 initial
+        backoffMs: 10,
+        reason: 'transient_overload',
+      });
+      expect(calls[1]).toMatchObject({
+        agentName: 'worker',
+        attempt: 3,
+        backoffMs: 20,
+      });
+      // retryAt = Date.now() + backoffMs ≈ now + delay; we assert it's
+      // within the test's wall-clock window with a tiny margin.
+      expect(calls[0]!.retryAt).toBeGreaterThanOrEqual(before + 10);
+      expect(calls[0]!.retryAt).toBeLessThanOrEqual(after + 10);
+    });
+
+    test('fires N times for N failures before success', async () => {
+      const calls: AutoRetryCall[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        onAutoRetry: (info) =>
+          calls.push({
+            agentName: info.agentName,
+            attempt: info.attempt,
+            maxAttempts: info.maxAttempts,
+            backoffMs: info.backoffMs,
+            retryAt: info.retryAt,
+            reason: info.reason,
+          }),
+        runnerFactory: () => {
+          n++;
+          if (n < 4) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              throw new Error('Overloaded');
+            }
+            return { [Symbol.asyncIterator]: () => boom(), close: () => {} };
+          }
+          return fakeRunner([resultMsg('done')]);
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/w' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('worker', 'go');
+      warnSpy.mockRestore();
+
+      expect(calls).toHaveLength(3); // 3 retries before success
+      expect(calls.map((c) => c.attempt)).toEqual([2, 3, 4]);
+    });
+
+    test('also fires when max retries are exhausted (rejected turn)', async () => {
+      const calls: AutoRetryCall[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0],
+        onAutoRetry: (info) =>
+          calls.push({
+            agentName: info.agentName,
+            attempt: info.attempt,
+            maxAttempts: info.maxAttempts,
+            backoffMs: info.backoffMs,
+            retryAt: info.retryAt,
+            reason: info.reason,
+          }),
+        runnerFactory: () => {
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            throw new Error('API Error: 529 Overloaded');
+          }
+          return { [Symbol.asyncIterator]: () => boom(), close: () => {} };
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/w' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      // 1 initial + 2 retries; the 3rd attempt's failure (no more retries)
+      // does NOT fire onAutoRetry — there's no upcoming retry to announce.
+      await expect(runner.deliverTurn('worker', 'go')).rejects.toThrow(/Overloaded/);
+      warnSpy.mockRestore();
+
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.attempt).toBe(2);
+      expect(calls[1]!.attempt).toBe(3);
+    });
+
+    test('[security] BE-D7: does NOT fire for non-transient errors', async () => {
+      // ENOENT / wrapper-config errors must not silently spin up a retry
+      // loop. The hook fires inside the `isTransientOverload(err)` branch
+      // only; this test guards that the trust boundary holds.
+      const calls: AutoRetryCall[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        onAutoRetry: (info) =>
+          calls.push({
+            agentName: info.agentName,
+            attempt: info.attempt,
+            maxAttempts: info.maxAttempts,
+            backoffMs: info.backoffMs,
+            retryAt: info.retryAt,
+            reason: info.reason,
+          }),
+        runnerFactory: () => {
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            throw new Error('ENOENT: claude binary not found');
+          }
+          return { [Symbol.asyncIterator]: () => boom(), close: () => {} };
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/w' });
+
+      await expect(runner.deliverTurn('worker', 'go')).rejects.toThrow(/ENOENT/);
+      expect(calls).toEqual([]); // no retry hooks fired
+    });
+
+    test('[security] does NOT fire when the abort signal short-circuits the retry', async () => {
+      const ac = new AbortController();
+      const calls: AutoRetryCall[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        abortController: ac,
+        overloadBackoffMs: [0, 0, 0],
+        onAutoRetry: (info) =>
+          calls.push({
+            agentName: info.agentName,
+            attempt: info.attempt,
+            maxAttempts: info.maxAttempts,
+            backoffMs: info.backoffMs,
+            retryAt: info.retryAt,
+            reason: info.reason,
+          }),
+        runnerFactory: () => {
+          async function* boom(): AsyncGenerator<SDKMessage> {
+            ac.abort();
+            throw new Error('Overloaded');
+          }
+          return { [Symbol.asyncIterator]: () => boom(), close: () => {} };
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/w' });
+
+      await expect(runner.deliverTurn('worker', 'go')).rejects.toThrow(/Overloaded/);
+      // Abort happened before the retry decision — no `auto_retry`
+      // ServerMsg should mislead the operator about a retry that won't
+      // happen.
+      expect(calls).toEqual([]);
+    });
+
+    test('absent hook is a silent no-op (old call sites still work)', async () => {
+      // The bus runner predates onAutoRetry; pre-Phase-4a callers that
+      // don't set the field must not crash on the optional-call.
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0],
+        // onAutoRetry NOT set
+        runnerFactory: () => {
+          n++;
+          if (n === 1) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              throw new Error('Overloaded');
+            }
+            return { [Symbol.asyncIterator]: () => boom(), close: () => {} };
+          }
+          return fakeRunner([resultMsg('ok')]);
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/w' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await expect(runner.deliverTurn('worker', 'go')).resolves.toBeUndefined();
+      warnSpy.mockRestore();
+      expect(n).toBe(2);
+    });
+  });
 });
 
 describe('isTransientOverload (Item: 529 absorb)', () => {

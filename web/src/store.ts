@@ -1358,6 +1358,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'bus_auto_installed':
     case 'tool_denied':
     case 'session_reconstructed':
+    case 'auto_retry':
       // Cluster A Phase 3+4+6: the dispatcher fans every one of these into a
       // matching `notification` envelope (see `server/src/notifications/
       // dispatcher.ts`); the dock owns the operator-facing surface. The
@@ -1371,6 +1372,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // state changes for now. (`router_drop` exited this list in Phase 6d
       // — it now accumulates onto `active.routerDrops` for the counter
       // chip in the activity bar.)
+      //
+      // `auto_retry` (Cluster D Phase 4a) joins the list as a forward-decl:
+      // Phase 4c's RateLimitBanner reducer state will graduate it out of
+      // this no-op block.
       return state;
 
     case 'project_authority':
