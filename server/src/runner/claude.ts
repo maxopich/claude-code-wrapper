@@ -36,13 +36,33 @@ export type RunOptions = {
  * The list is exported so the WS layer can surface `getScrubbedEnvVars()`
  * on every attach (Cluster A Phase 3, BE-10/E1) — names only, never values.
  */
-const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
+export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
 ];
+
+/**
+ * Cluster B Phase 3: human-readable posture hints for the credential-class
+ * env keys. Used by `repo/project_authority.ts`'s `detectEnvInjections`
+ * scan so the AuthorityPanel can render "Subscription auth" / "Bedrock
+ * backend" labels rather than just the env-var name.
+ *
+ * Pinned next to `SCRUBBED_ENV_VAR_NAMES` so a future addition to that
+ * list forces a matching posture string (CI catches the missing key via
+ * the resolver's typecheck — `detectEnvInjections` looks up by name).
+ *
+ * NAMES only — never values. BE-B12 [security] invariant.
+ */
+export const SCRUBBED_ENV_POSTURES: Readonly<Record<string, string>> = {
+  ANTHROPIC_API_KEY: 'Subscription auth (API key would override OAuth)',
+  ANTHROPIC_AUTH_TOKEN: 'Subscription auth (bearer token would override OAuth)',
+  CLAUDE_CODE_USE_BEDROCK: 'Bedrock backend (re-routes off Anthropic API)',
+  CLAUDE_CODE_USE_VERTEX: 'Vertex backend (re-routes off Anthropic API)',
+  CLAUDE_CODE_USE_FOUNDRY: 'Foundry backend (re-routes off Anthropic API)',
+};
 
 /**
  * Strip every env var that would override OAuth subscription auth.
