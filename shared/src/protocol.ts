@@ -670,6 +670,28 @@ export type ClientMsg =
       originPath: string;
       binarySha?: string;
       decision: 'trust' | 'trust_pinned' | 'deny_once' | 'deny_remember';
+    }
+  | {
+      /**
+       * Cluster B Phase 5 (§4.5): operator's typed-acknowledgment reply to a
+       * parked `session_start_gated`. The server validates
+       * `typedAcknowledgment === 'inject'` (case-sensitive) BEFORE resolving
+       * the gate — a mistyped string is a wrapper_error, the spawn stays
+       * parked, and the operator can retry. This deliberately matches the
+       * UX intent: the modal makes the operator type the word "inject"
+       * before the credential-injecting session proceeds.
+       *
+       * `reasonText` is optional free-form context the operator can type
+       * ("CI sync, expected this") — persisted into the safety_audit row
+       * payload so the forensic trail captures the why, not just the click.
+       *
+       * Operator identity is resolved server-side via `getOperatorId()` per
+       * Cluster A convention; not on the wire.
+       */
+      type: 'acknowledge_and_start';
+      pendingStartId: string;
+      typedAcknowledgment: string;
+      reasonText?: string;
     };
 
 // ---- Server → Browser ----
@@ -1341,6 +1363,41 @@ export type ServerMsg =
       binarySha?: string;
       reason: 'first_seen' | 'hash_changed';
       previousSha?: string;
+    }
+  | {
+      /**
+       * Cluster B Phase 5 (§4.5): env-injection start-gate ServerMsg. Fires
+       * BEFORE pickRunner / startSession when the resolver detects any
+       * credential-class env var declared in the project's `.claude/
+       * settings*.json` `env:` block (returned by `detectEnvInjections`).
+       *
+       * Why it matters: `subscriptionOnlyEnv()` strips `ANTHROPIC_API_KEY` +
+       * friends from `process.env` so a stray shell export can't redirect
+       * the operator through paid billing. But the SDK separately layers in
+       * `env:` from settings.json for trusted projects, and that
+       * re-injection bypasses the scrub. The gate makes the bypass visible
+       * + audited before a single token-using turn fires.
+       *
+       * Discharge contract: the client opens a modal with `[Refuse & edit]`
+       * focused by default + a typed-acknowledgment field. The operator's
+       * `acknowledge_and_start` reply with `typedAcknowledgment === 'inject'`
+       * (case-sensitive, server-validated) releases the parked spawn. A
+       * `safety_audit` row lands on every override.
+       *
+       * `detectedInjections` repeats the resolver's `EnvInjection[]` so the
+       * modal can render the per-key posture without a second round-trip.
+       * BE-B12 [security]: the wire never carries env *values* — only key
+       * names, scope, source path, posture hint, and `isSet`.
+       *
+       * `projectId` is set so the client can correlate the gate with the
+       * specific project (a chain run may park multiple `session_start_gated`
+       * envelopes in flight, one per participant project with injections).
+       */
+      type: 'session_start_gated';
+      pendingStartId: string;
+      projectId: number;
+      reason: 'env_injection_detected';
+      detectedInjections: EnvInjection[];
     };
 
 /**
