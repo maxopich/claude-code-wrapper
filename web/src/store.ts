@@ -166,6 +166,36 @@ export type MultiAgentRun = {
    *  disclosure inside the awaiting-continue banner. Cleared optimistically
    *  on Continue click via `ma_clear_awaiting` — banner-bound lifetime. */
   recoveryContext: RecoveryContextView | null;
+  /** Cluster B Phase 6d (D4 / UI-B24/B28): client-side accumulator of
+   *  `router_drop` ServerMsgs received during this session. Drives the
+   *  `RouterDropsCounter` chip in the activity bar + the `RouterDropsLog`
+   *  modal.
+   *
+   *  The wire `router_drop` envelope (`shared/src/protocol.ts:1168`) has no
+   *  timestamp — the orchestrator emits it synchronously with the audit
+   *  write, no per-event ts on the wire. We tag the receive-time client-side
+   *  for the UI's "N drops in last 60s" regime calibration (UI-B28). The
+   *  server's `safety_audit` row IS the authoritative ts; this list is
+   *  ephemeral (lost on WS disconnect, not replayed on re-attach — Phase 6d
+   *  is best-effort; a future R-A enhancement could rehydrate from the
+   *  audit query).
+   *
+   *  Deduped by `auditRowId` — the only stable id on the wire. */
+  routerDrops: RouterDropView[];
+};
+
+/**
+ * Cluster B Phase 6d (D4): client-side enriched view of a `router_drop`
+ * ServerMsg. Adds `receivedAt` because the wire shape doesn't carry a ts —
+ * see `MultiAgentRun.routerDrops` for rationale.
+ */
+export type RouterDropView = {
+  auditRowId: string;
+  reasonCode: 'forged_source' | 'worker_to_user' | 'worker_to_worker' | 'unknown_source';
+  source: string;
+  destination: string;
+  kind: string;
+  receivedAt: number;
 };
 
 /**
@@ -741,6 +771,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // banner that survived a restart). Null in every other case;
             // banner-bound lifetime.
             recoveryContext: msg.recoveryContext ?? null,
+            // Phase 6d: drops are client-accumulated; always empty at start.
+            // A future R-A enhancement could rehydrate from the server's
+            // safety_audit table.
+            routerDrops: [],
           },
         },
       };
@@ -1287,8 +1321,37 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // safety events that ALSO update a session) have a place to land.
       return state;
 
+    case 'router_drop': {
+      // Cluster B Phase 6d (D4 / UI-B24): accumulate drops onto the active
+      // MultiAgentRun for the RouterDropsCounter chip. The dispatcher still
+      // fans the same envelope into a `notification` envelope server-side
+      // (the inbox/toast path); this case adds the per-run client state.
+      //
+      // We only accumulate when the envelope's sessionId matches the active
+      // run — drops on stale/dismissed sessions are ignored.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      // Dedupe by auditRowId. Server may re-emit on attach in a future phase;
+      // today the only dup path is double-render, but the guard is cheap.
+      if (active.routerDrops.some((d) => d.auditRowId === msg.auditRowId)) return state;
+      const drop: RouterDropView = {
+        auditRowId: msg.auditRowId,
+        reasonCode: msg.reasonCode,
+        source: msg.source,
+        destination: msg.destination,
+        kind: msg.kind,
+        receivedAt: Date.now(),
+      };
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, routerDrops: [...active.routerDrops, drop] },
+        },
+      };
+    }
+
     case 'rate_limit_event':
-    case 'router_drop':
     case 'env_scrubbed':
     case 'session_superseded':
     case 'chain_not_reconstructed':
@@ -1299,14 +1362,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // matching `notification` envelope (see `server/src/notifications/
       // dispatcher.ts`); the dock owns the operator-facing surface. The
       // typed events themselves are kept on the wire for forward-compat
-      // non-toast consumers (Cluster B per-agent routing-trail counter,
-      // E1 ignored-variables inspector, D B2 rate-limit banner, Cluster D
-      // session-recovery surface for `session_superseded` /
-      // `chain_not_reconstructed` / `session_reconstructed`, Phase 5
+      // non-toast consumers (E1 ignored-variables inspector, D B2 rate-limit
+      // banner, Cluster D session-recovery surface for `session_superseded`
+      // / `chain_not_reconstructed` / `session_reconstructed`, Phase 5
       // install inspector for `bus_auto_installed`, future tool-policy
       // diagnostics for `tool_denied`) — when those land, they'll consume
       // the typed event here and dispatch session/banner state. No reducer
-      // state changes for now.
+      // state changes for now. (`router_drop` exited this list in Phase 6d
+      // — it now accumulates onto `active.routerDrops` for the counter
+      // chip in the activity bar.)
       return state;
 
     case 'project_authority':

@@ -603,6 +603,7 @@ describe('store / eventDefaultCollapsed', () => {
       mutations: [],
       pendingMutation: null,
       recoveryContext: null,
+      routerDrops: [],
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
@@ -1280,5 +1281,104 @@ describe('store / recoveryContext (Item #7)', () => {
       msg: { type: 'multi_agent_ended', sessionId: 's-rec', reason: 'stopped', iterationId: null },
     });
     expect(s.multiAgent.active!.recoveryContext).toBeNull();
+  });
+});
+
+// Cluster B Phase 6d: router_drop envelopes accumulate onto
+// MultiAgentRun.routerDrops for the activity-bar counter chip.
+describe('store / router_drop accumulation (Phase 6d)', () => {
+  const baseStarted = {
+    type: 'multi_agent_started' as const,
+    sessionId: 's-drop',
+    mode: 'orchestrator' as const,
+    participants: [1],
+    participantAgentNames: ['orchestrator', 'workerA'],
+    lifecycle: 'persistent' as const,
+    sessionFolder: '/ws/.cebab/s-drop',
+    hopBudget: 30,
+    pauseOnMutation: false,
+    mutationsAcknowledged: false,
+    mutations: [],
+  };
+
+  test('multi_agent_started initializes routerDrops to empty', () => {
+    const s = reduce(initialState, { type: 'server', msg: baseStarted });
+    expect(s.multiAgent.active!.routerDrops).toEqual([]);
+  });
+
+  test('router_drop appends a RouterDropView with client receivedAt', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'router_drop',
+        sessionId: 's-drop',
+        reasonCode: 'forged_source',
+        source: 'workerA',
+        destination: 'cebab',
+        kind: 'reply',
+        auditRowId: 'audit-1',
+      },
+    });
+    const drops = s.multiAgent.active!.routerDrops;
+    expect(drops).toHaveLength(1);
+    expect(drops[0]).toMatchObject({
+      auditRowId: 'audit-1',
+      reasonCode: 'forged_source',
+      source: 'workerA',
+      destination: 'cebab',
+      kind: 'reply',
+    });
+    expect(typeof drops[0]!.receivedAt).toBe('number');
+  });
+
+  test('router_drop dedupes by auditRowId', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    const drop = {
+      type: 'router_drop' as const,
+      sessionId: 's-drop',
+      reasonCode: 'worker_to_user' as const,
+      source: 'workerA',
+      destination: '_user',
+      kind: 'reply',
+      auditRowId: 'audit-dedupe',
+    };
+    s = reduce(s, { type: 'server', msg: drop });
+    s = reduce(s, { type: 'server', msg: drop });
+    expect(s.multiAgent.active!.routerDrops).toHaveLength(1);
+  });
+
+  test('router_drop with non-matching sessionId is ignored', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'router_drop',
+        sessionId: 's-different',
+        reasonCode: 'forged_source',
+        source: 'workerA',
+        destination: 'cebab',
+        kind: 'reply',
+        auditRowId: 'audit-stranger',
+      },
+    });
+    expect(s.multiAgent.active!.routerDrops).toEqual([]);
+  });
+
+  test('router_drop is a no-op when there is no active run', () => {
+    const before = reduce(initialState, { type: 'select_project', projectId: 1 });
+    const after = reduce(before, {
+      type: 'server',
+      msg: {
+        type: 'router_drop',
+        sessionId: 'nonexistent',
+        reasonCode: 'forged_source',
+        source: 'a',
+        destination: 'b',
+        kind: 'reply',
+        auditRowId: 'audit-orphan',
+      },
+    });
+    expect(after).toBe(before);
   });
 });
