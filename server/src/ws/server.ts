@@ -52,6 +52,13 @@ import {
   type TrustGateOutcome,
   type TrustGateState,
 } from '../repo/mcp_trust_gate.js';
+import {
+  ACKNOWLEDGMENT_TRIGGER,
+  awaitEnvInjectionAck,
+  makeStartGateState,
+  recordEnvInjectionAcknowledgment,
+  type StartGateState,
+} from '../repo/session_start_gate.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
 import { buildSessionLogChunk } from './session_log.js';
@@ -344,6 +351,12 @@ type Conn = {
    * deny_once set. Cleared implicitly on disconnect via Conn drop.
    */
   trustGate: TrustGateState;
+  /**
+   * Cluster B Phase 5: env-injection start-gate state. Holds parked
+   * `pendingStartId` promises (one per emitted `session_start_gated`).
+   * Cleared implicitly on disconnect.
+   */
+  startGate: StartGateState;
 };
 
 export function startWsServer(server: HttpServer): WebSocketServer {
@@ -403,19 +416,28 @@ function send(ws: WebSocket, msg: ServerMsg): void {
  * subscription.
  */
 /**
- * Cluster B Phase 4b (§4.4): run the TOFU spawn-gate for every unique
- * project in `projectIds`, in declaration order. Each call enumerates the
- * project's declared MCP servers (via `resolveProjectAuthority`) and parks
- * on `mcp_auto_install_pending` for any first_seen / hash_changed entries.
- * Returns when every parked decision has resolved.
+ * Cluster B Phase 4b + 5 (§4.4 + §4.5): run all pre-spawn gates for every
+ * unique project in `projectIds`, in declaration order. Each call:
  *
- * The gate is invoked once per unique project — duplicates are deduped here
- * so a chain with `[A, A, B]` only re-prompts once for A.
+ *   1. Resolves the project's authority snapshot (declared MCPs + detected
+ *      env injections + everything else from `project_authority`).
+ *   2. (§4.4) Parks on `mcp_auto_install_pending` for each `first_seen` /
+ *      `hash_changed` MCP server until the operator decides.
+ *   3. (§4.5) If any credential-class env keys were detected in the
+ *      project's settings.json, emits a single `session_start_gated` and
+ *      parks until the operator types `'inject'` via `acknowledge_and_start`.
  *
- * Caller (`start_multi_agent` for bus, `runOneTurn` for single-agent) MUST
- * `await` this before calling `pickRunner` / `startOrchestratorSession` /
- * `startChainSession`. The await is the structural block — if the operator
- * never replies, the spawn never happens.
+ * Gates run in this order so the env prompt comes AFTER trust prompts —
+ * the operator sees "trust these MCPs" first, then "you're injecting
+ * credentials" — matching the spec's mental model of "first decide what
+ * runs, then decide what credentials it sees."
+ *
+ * Duplicates are deduped here so a chain with `[A, A, B]` only re-prompts
+ * once for A. Caller (`start_multi_agent` for bus, `runOneTurn` for
+ * single-agent) MUST `await` this before calling `pickRunner` /
+ * `startOrchestratorSession` / `startChainSession`. The await is the
+ * structural block — if the operator never replies, the spawn never
+ * happens.
  *
  * On a project_authority resolution miss (project row deleted mid-flight),
  * we skip silently — `getProject` upstream already rejected the start, so
@@ -438,6 +460,12 @@ async function gateProjectsForSpawn(conn: Conn, projectIds: number[]): Promise<v
       gate: conn.trustGate,
       send: (m) => send(conn.ws, m),
       servers: authority.mcpServers,
+    });
+    await awaitEnvInjectionAck({
+      projectId,
+      gate: conn.startGate,
+      send: (m) => send(conn.ws, m),
+      injections: authority.detectedEnvInjections,
     });
   }
 }
@@ -467,6 +495,7 @@ function onConnection(ws: WebSocket): void {
     multiAgent: null,
     authorityCache: new Map(),
     trustGate: makeTrustGateState(),
+    startGate: makeStartGateState(),
   };
 
   // Cluster A Phase 3 (E1, BE-10): tell the operator which auth-precedence
@@ -1294,6 +1323,59 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // owns the originPath needs a refresh, and the operator can just
       // re-trigger get_project_authority manually. Phase 6+ wires an
       // automatic re-fetch alongside the inspector.
+      return;
+    }
+    case 'acknowledge_and_start': {
+      // Cluster B Phase 5 (§4.5): operator's typed-acknowledgment reply to
+      // a parked `session_start_gated`. Three guards before unblocking:
+      //
+      //   1. pendingStartId must match a live parked entry. A stale id —
+      //      the operator clicked twice, or the WS reconnected and the
+      //      pending Map cleared — is silently no-op'd; client either
+      //      already proceeded OR will re-trigger on next start.
+      //   2. typedAcknowledgment === 'inject' (case-sensitive). Anything
+      //      else is wrapper_error; the gate stays parked so the operator
+      //      can correct + retry without losing the spawn.
+      //   3. The safety_audit append must succeed (BE-1). If it throws,
+      //      wrapper_error is surfaced and the entry STAYS parked — same
+      //      no-spawn semantics as a broken chain; the operator's choice
+      //      didn't take, the run didn't start.
+      //
+      // Only after all three pass do we resolve the parked promise. The
+      // entry is deleted FIRST to keep the Map clean even if a hypothetical
+      // throw escaped the rest of the body.
+      const entry = conn.startGate.pending.get(msg.pendingStartId);
+      if (!entry) {
+        // Idempotent no-op (mirrors `ack_notification` shape). Don't
+        // wrapper_error a stale id — the operator's UI just resyncs.
+        return;
+      }
+      if (msg.typedAcknowledgment !== ACKNOWLEDGMENT_TRIGGER) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: `acknowledge_and_start: typedAcknowledgment must be exactly ${JSON.stringify(
+            ACKNOWLEDGMENT_TRIGGER,
+          )}`,
+        });
+        return;
+      }
+      try {
+        recordEnvInjectionAcknowledgment({
+          projectId: entry.projectId,
+          injections: entry.injections,
+          ...(msg.reasonText !== undefined ? { reasonText: msg.reasonText } : {}),
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        // Don't resolve — keep parked so the operator can retry. A broken
+        // audit chain is the kind of bug that needs operator visibility,
+        // not a silent spawn-proceed.
+        return;
+      }
+      conn.startGate.pending.delete(msg.pendingStartId);
+      entry.resolve();
       return;
     }
     case 'set_permission_mode': {
