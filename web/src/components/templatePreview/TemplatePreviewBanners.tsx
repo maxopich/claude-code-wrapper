@@ -24,20 +24,30 @@
  *     the banner is the screen-reader cue, the notice is the operator's
  *     "why does this template look like an orchestrator" answer.
  *
- * A11y posture:
+ * Cluster D Phase 3 migration (spec §8.1): the two banners now render
+ * through `<SessionBanner>` with `classStem="tpl-banner"` so the DOM
+ * stays byte-identical to the pre-migration markup (same root, same
+ * `.tpl-banner-glyph`, same `.tpl-banner-text`/`.tpl-banner-title`/
+ * `.tpl-banner-body` inside) while inheriting the tier→a11y mapping +
+ * forthcoming focus-steal contract. Snapshot tests assert parity.
+ * `CustomModeNotice` is plain prose, not a banner — left untouched.
+ *
+ * A11y posture (unchanged from PR-1):
  *  - Bypass banner uses `role="alert"` on first mount per session so
  *    screen readers announce the safety statement once, then
- *    `role="status"` on subsequent mounts (modal opens, re-renders) to
- *    avoid alert-spam fatigue. "Per session" = sessionStorage key.
- *  - CustomMode banner is `role="status"` (the condition is informational,
- *    not safety-critical).
+ *    `role="status"` on subsequent mounts. SessionBanner honours the
+ *    explicit `role` override so this dance survives the migration.
+ *  - CustomMode banner is `role="status"` (override the default
+ *    `role="region"` for the info tier — the existing markup uses
+ *    "status" and operator tools have learned to expect it there).
  *  - CustomModeNotice is plain prose; the surrounding banner already
- *    carries the announcement, so the notice has no role attribute.
+ *    carries the announcement.
  *
  * Shape-coded, never relying on color alone: `⚠` for warning, `ⓘ` for
- * info. CSS in `styles.css` `.tpl-banner` block; notice in `.tpl-preview-note`.
+ * info.
  */
 import { useState } from 'react';
+import { SessionBanner } from '../banners/SessionBanner.js';
 
 const BYPASS_SEEN_KEY = 'cebab.bypass-banner-seen';
 
@@ -61,34 +71,52 @@ export function BypassPermissionsBanner() {
   // mount in a session gets `true` (announce via role="alert").
   const [firstMount] = useState<boolean>(consumeFirstMountFlag);
   return (
-    <div className="tpl-banner is-warn" role={firstMount ? 'alert' : 'status'}>
-      <span className="tpl-banner-glyph" aria-hidden="true">
-        ⚠
-      </span>
-      <div className="tpl-banner-text">
-        <div className="tpl-banner-title">Auto-approved tool calls</div>
-        <div className="tpl-banner-body">
+    <SessionBanner
+      id="bypass-permissions-banner"
+      // Invariant = "always-on context, bottom of stack" per spec §8.2.
+      // Tier doesn't drive a11y here because we override role explicitly
+      // to preserve the first-mount alert pattern from before migration.
+      tier="invariant"
+      glyph="⚠"
+      title="Auto-approved tool calls"
+      body={
+        <>
           Every participant in a multi-agent session auto-approves tool calls (
           <code>bypassPermissions</code>). There is no per-tool prompt during the run.
-        </div>
-      </div>
-    </div>
+        </>
+      }
+      role={firstMount ? 'alert' : 'status'}
+      // Suppress aria-live entirely on subsequent mounts; the alert role
+      // is its own announcement signal on first mount, and `region` +
+      // polite would compete with that.
+      ariaLive="off"
+      // Phase 3 compat: render through `.tpl-banner.is-warn` so the
+      // existing CSS keeps applying byte-identically and snapshot tests
+      // pass.
+      classStem="tpl-banner"
+      compatClass="is-warn"
+      stealsFocus={false}
+    />
   );
 }
 
 export function CustomModeBanner() {
   return (
-    <div className="tpl-banner is-info" role="status">
-      <span className="tpl-banner-glyph" aria-hidden="true">
-        ⓘ
-      </span>
-      <div className="tpl-banner-text">
-        <div className="tpl-banner-title">Custom topology preview</div>
-        <div className="tpl-banner-body">
-          This topology preview is an approximation — custom routing isn't fully visualized yet.
-        </div>
-      </div>
-    </div>
+    <SessionBanner
+      id="custom-mode-banner"
+      tier="info"
+      glyph="ⓘ"
+      title="Custom topology preview"
+      body="This topology preview is an approximation — custom routing isn't fully visualized yet."
+      // Existing markup used role="status" for status-like info; preserve
+      // that for operators relying on it. (The tier default for info
+      // would have been role="region".)
+      role="status"
+      ariaLive="off"
+      classStem="tpl-banner"
+      compatClass="is-info"
+      stealsFocus={false}
+    />
   );
 }
 
@@ -103,7 +131,8 @@ export function CustomModeBanner() {
  * persisted template is an explicit user action.
  *
  * No role/aria: the sibling banner already owns the announcement. This is
- * supporting copy, not a separate landmark.
+ * supporting copy, not a separate landmark. Not migrated to SessionBanner
+ * — it's a `<p>`, not a banner.
  */
 export function CustomModeNotice() {
   return (

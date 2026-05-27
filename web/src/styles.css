@@ -2369,6 +2369,186 @@ pre {
   padding: 0 24px var(--s-2);
 }
 
+/* ---- Cluster D Phase 3: <SessionBanner> + <BannerStack> ----------- */
+/*
+ * Unified banner family — single CSS contract for the six tier variants
+ * (info/warn/progress/error/danger/invariant). Mirrors the existing
+ * `.tpl-banner` grid shape (glyph | text | dismiss-or-future-action) so
+ * the migrated banners stay visually identical; the new selectors are
+ * additive. `.tpl-banner` + `.multi-agent-warning` are kept as compat
+ * classes for one release; SessionBanner emits both in its className.
+ *
+ * Tiering colour reuses the semantic token family that already exists:
+ *   info / warn / err  → existing tokens
+ *   progress           → fg-2 + accent-glow (subtler, "still working")
+ *   danger             → err (same as error) with stronger border
+ *   invariant          → border-only; no fill (always-on context)
+ */
+.session-banner {
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  gap: var(--s-2);
+  align-items: start;
+  padding: 8px var(--s-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: var(--t-sm);
+  line-height: 1.4;
+}
+.session-banner + .session-banner {
+  margin-top: var(--s-1);
+}
+.session-banner-glyph {
+  font-size: 14px;
+  line-height: 1;
+  margin-top: 1px;
+  /* Forced-colors mode reads the shape, not the platform emoji. */
+  font-variant-emoji: text;
+}
+.session-banner-text {
+  /* Min-width:0 lets long words wrap inside the grid cell rather than
+   * pushing the dismiss button off-screen. */
+  min-width: 0;
+}
+.session-banner-title {
+  font-weight: 600;
+}
+.session-banner-body {
+  color: var(--fg-2);
+}
+.session-banner-body p {
+  margin: 0;
+}
+.session-banner-body p + p {
+  margin-top: 4px;
+}
+.session-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+}
+.session-banner-detail {
+  margin-top: 8px;
+  font-size: var(--t-xs);
+}
+.session-banner-detail summary {
+  cursor: pointer;
+  color: var(--fg-2);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.session-banner-dismiss {
+  background: transparent;
+  border: 0;
+  color: var(--fg-2);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  align-self: start;
+}
+.session-banner-dismiss:hover {
+  color: var(--fg-0);
+}
+
+/* Tier variants — colour reuses semantic tokens. Same colour family as
+ * `.tpl-banner.is-*` so the migrated banners look unchanged. SessionBanner
+ * always emits `is-${tier}` (never the BEM `--tier` form), so a single
+ * selector per tier is enough. */
+.session-banner.is-info {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--border));
+}
+.session-banner.is-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+.session-banner.is-progress {
+  color: var(--fg-2);
+  background: var(--accent-glow);
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
+}
+.session-banner.is-error {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 30%, var(--border));
+}
+/* Danger = error's louder cousin: heavier border + accent shadow. The
+ * focus-steal is the primary cue; the visual is the redundant one. */
+.session-banner.is-danger {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: var(--err);
+  border-width: 1px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--err) 25%, transparent);
+}
+/* Invariant = always-on (BypassPermissions). Stays warn-coloured because
+ * the existing banner is `.tpl-banner.is-warn`; spec §8.2 only requires
+ * it sit at the bottom of the stack. */
+.session-banner.is-invariant {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+
+/* Focus ring on the focused-target action — the danger tier focus-steal
+ * lands here; reuse the standard accent ring so it's recognisable. */
+.session-banner-actions :focus-visible,
+.session-banner[tabindex='-1']:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- <BannerStack> --------------------------------------------------
+ *
+ * Wrapper region for ordered banners. Spec §8.4 wants a single
+ * `role="region" aria-label="Session notices"` landmark so screen-reader
+ * users hear one entry, not N.
+ */
+.session-banner-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.session-banner-stack-overflow {
+  margin-top: var(--s-1);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.session-banner-stack-overflow > summary {
+  cursor: pointer;
+  padding: 4px var(--s-2);
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+}
+.session-banner-stack-overflow-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+}
+
+/* Motion: opacity-only on enter (120ms). `prefers-reduced-motion: reduce`
+ * → no transform fade; respect spec AC-41. */
+@media (prefers-reduced-motion: no-preference) {
+  .session-banner {
+    animation: session-banner-fade-in 120ms var(--ease-out);
+  }
+  @keyframes session-banner-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
 /* PR-1: lifecycle=temp inline note. Plain prose, not a banner — appears
  * directly under the toggle the operator just clicked, so the choice and
  * its consequence are visually adjacent. */

@@ -33,6 +33,13 @@ import {
   CustomModeBanner,
   CustomModeNotice,
 } from './templatePreview/TemplatePreviewBanners';
+// Cluster D Phase 3: the 3 inline multi-agent warnings below (awaiting-
+// continue, pending-retry, pending-mutation) now render through the
+// unified SessionBanner with `classStem="multi-agent-warning"` so the
+// legacy `.multi-agent-warning*` styles still apply byte-equivalently
+// and the operator gets the tier→a11y mapping + focus-steal contract
+// for free.
+import { SessionBanner } from './banners/SessionBanner';
 
 /**
  * Multi-Agent tab.
@@ -1358,93 +1365,141 @@ function ActiveRunView(props: {
         )}
       </section>
 
+      {/* Cluster D Phase 3 migration: three inline recovery banners now
+       * render through <SessionBanner classStem="multi-agent-warning"
+       * layout="flat">. The legacy `.multi-agent-warning` /
+       * `.multi-agent-warning-actions` classes are preserved so existing
+       * CSS keeps the colour + action-row layout byte-equivalent. Tier
+       * = "warn" for all three; a11y role is pinned to "status" to
+       * match the pre-migration markup (the banner-stack focus-steal
+       * contract isn't in play here — these are mounted directly, not
+       * inside a <BannerStack>). */}
       {isOrchestrator && isRunning && run.awaitingContinue && (
-        <div className="multi-agent-warning" role="status">
-          <p>
-            <strong>Recovered after a Cebab restart.</strong> This run is re-attached read-only —
-            nothing is running. The agent that was mid-turn will pick up from its last completed
-            step; file writes or commands from that interrupted step are <em>not</em> rolled back.
-            Review the scrollback above (see the recovery note), then continue when ready.
-          </p>
-          <button
-            className="primary-btn"
-            onClick={() => props.onContinue(run.sessionId)}
-            title="Deliver a 'continue where you left off' nudge to the orchestrator (it resumes its real CLI session). This is the only action that re-runs agents after a restart."
-          >
-            Continue session
-          </button>
-          {run.recoveryContext && <RecoveryDisclosure recovery={run.recoveryContext} />}
-        </div>
+        <SessionBanner
+          id={`multi-agent-warning-awaiting-${run.sessionId}`}
+          tier="warn"
+          classStem="multi-agent-warning"
+          layout="flat"
+          role="status"
+          ariaLive="polite"
+          stealsFocus={false}
+          body={
+            <>
+              <p>
+                <strong>Recovered after a Cebab restart.</strong> This run is re-attached read-only
+                — nothing is running. The agent that was mid-turn will pick up from its last
+                completed step; file writes or commands from that interrupted step are <em>not</em>{' '}
+                rolled back. Review the scrollback above (see the recovery note), then continue when
+                ready.
+              </p>
+              {/* RecoveryDisclosure already has its own internal toggle
+               * ("▾ Recovery details"), so we render it inline rather
+               * than nesting it in SessionBanner's `<details>` slot —
+               * that would be a double-disclosure with two summaries. */}
+              {run.recoveryContext && <RecoveryDisclosure recovery={run.recoveryContext} />}
+            </>
+          }
+          actions={[
+            {
+              label: 'Continue session',
+              variant: 'primary',
+              onClick: () => props.onContinue(run.sessionId),
+              title:
+                "Deliver a 'continue where you left off' nudge to the orchestrator (it resumes its real CLI session). This is the only action that re-runs agents after a restart.",
+            },
+          ]}
+        />
       )}
 
       {isRunning && run.pendingRetry && (
-        <div className="multi-agent-warning" role="status">
-          <p>
-            <strong>
-              <code>{run.pendingRetry.agentName}</code>'s last turn failed.
-            </strong>{' '}
-            {run.pendingRetry.reason}
-          </p>
-          <p>
-            Retry replays the same prompt; the worker resumes its CLI session, so full prior context
-            is intact. Any partial file writes from the failed turn are <em>not</em> rolled back.
-          </p>
-          <div className="multi-agent-warning-actions">
-            <button
-              className="primary-btn"
-              onClick={() => props.onRetryWorker(run.sessionId)}
-              title="Re-deliver the captured prompt to this worker. The agent's --resume brings back full prior context."
-            >
-              Retry {run.pendingRetry.agentName}
-            </button>
-            <button
-              onClick={() => props.onAbandonSession(run.sessionId)}
-              title="End the session as Stopped. The session folder and trail are preserved for post-mortem."
-            >
-              Abandon session
-            </button>
-            <button
-              className="ghost-btn"
-              onClick={() => jumpToEvent(run.pendingRetry!.errorEventId)}
-              title="Scroll to the error event in the scrollback"
-            >
-              Jump to error
-            </button>
-          </div>
-        </div>
+        <SessionBanner
+          id={`multi-agent-warning-retry-${run.sessionId}`}
+          tier="warn"
+          classStem="multi-agent-warning"
+          layout="flat"
+          role="status"
+          ariaLive="polite"
+          stealsFocus={false}
+          body={
+            <>
+              <p>
+                <strong>
+                  <code>{run.pendingRetry.agentName}</code>'s last turn failed.
+                </strong>{' '}
+                {run.pendingRetry.reason}
+              </p>
+              <p>
+                Retry replays the same prompt; the worker resumes its CLI session, so full prior
+                context is intact. Any partial file writes from the failed turn are <em>not</em>{' '}
+                rolled back.
+              </p>
+            </>
+          }
+          actions={[
+            {
+              label: `Retry ${run.pendingRetry.agentName}`,
+              variant: 'primary',
+              onClick: () => props.onRetryWorker(run.sessionId),
+              title:
+                "Re-deliver the captured prompt to this worker. The agent's --resume brings back full prior context.",
+            },
+            {
+              label: 'Abandon session',
+              onClick: () => props.onAbandonSession(run.sessionId),
+              title:
+                'End the session as Stopped. The session folder and trail are preserved for post-mortem.',
+            },
+            {
+              label: 'Jump to error',
+              variant: 'ghost',
+              onClick: () => jumpToEvent(run.pendingRetry!.errorEventId),
+              title: 'Scroll to the error event in the scrollback',
+            },
+          ]}
+        />
       )}
 
       {isRunning && run.pendingMutation && (
-        <div className="multi-agent-warning" role="status">
-          <p>
-            <strong>
-              <code>{run.pendingMutation.agentName}</code> is about to{' '}
-              <span className={`mutation-summary mutation-${run.pendingMutation.category}`}>
-                {run.pendingMutation.summary}
-              </span>
-              .
-            </strong>
-          </p>
-          <p>
-            You enabled "Pause before any worker mutates the filesystem" for this session. This is
-            the first mutation. Continue to allow this call and let subsequent mutations auto-allow.
-          </p>
-          <div className="multi-agent-warning-actions">
-            <button
-              className="primary-btn"
-              onClick={() => props.onContinueThroughMutation(run.sessionId)}
-              title="Allow this tool call and any subsequent mutations in this session."
-            >
-              Continue with this mutation
-            </button>
-            <button
-              onClick={() => props.onAbandonSession(run.sessionId)}
-              title="End the session as Stopped. The session folder and trail are preserved."
-            >
-              Stop session
-            </button>
-          </div>
-        </div>
+        <SessionBanner
+          id={`multi-agent-warning-mutation-${run.sessionId}`}
+          tier="warn"
+          classStem="multi-agent-warning"
+          layout="flat"
+          role="status"
+          ariaLive="polite"
+          stealsFocus={false}
+          body={
+            <>
+              <p>
+                <strong>
+                  <code>{run.pendingMutation.agentName}</code> is about to{' '}
+                  <span className={`mutation-summary mutation-${run.pendingMutation.category}`}>
+                    {run.pendingMutation.summary}
+                  </span>
+                  .
+                </strong>
+              </p>
+              <p>
+                You enabled "Pause before any worker mutates the filesystem" for this session. This
+                is the first mutation. Continue to allow this call and let subsequent mutations
+                auto-allow.
+              </p>
+            </>
+          }
+          actions={[
+            {
+              label: 'Continue with this mutation',
+              variant: 'primary',
+              onClick: () => props.onContinueThroughMutation(run.sessionId),
+              title: 'Allow this tool call and any subsequent mutations in this session.',
+            },
+            {
+              label: 'Stop session',
+              onClick: () => props.onAbandonSession(run.sessionId),
+              title: 'End the session as Stopped. The session folder and trail are preserved.',
+            },
+          ]}
+        />
       )}
 
       {isOrchestrator &&
