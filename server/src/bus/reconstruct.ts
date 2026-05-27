@@ -137,6 +137,13 @@ export function reconstructOrchestratorSession(
      *  the operator. */
     sendNotification?: BusSink['sendNotification'];
     sendRouterDrop?: BusSink['sendRouterDrop'];
+    /** Cluster A Phase 4: generic ServerMsg sender used for the new typed
+     *  events + as the dispatcher.emit `send` callback. The
+     *  chain-not-reconstructed signal (BE-11) is emitted by the resume
+     *  caller before this function would return false; this callback is
+     *  threaded through for router-attached dangerous-mutation safety
+     *  toasts originating from the rebuilt router. */
+    sendServerMsg?: BusSink['sendServerMsg'];
   },
 ): boolean {
   if (!isReconstructable(row).ok) return false;
@@ -209,6 +216,7 @@ export function reconstructOrchestratorSession(
       onPendingMutation: callbacks.onPendingMutation,
       sendNotification: callbacks.sendNotification,
       sendRouterDrop: callbacks.sendRouterDrop,
+      sendServerMsg: callbacks.sendServerMsg,
       seededSessions,
       briefedAgents,
       hopBudget: callbacks.hopBudget,

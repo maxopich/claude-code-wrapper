@@ -137,6 +137,9 @@ export type StartChainOpts = {
   sendNotification?: BusSink['sendNotification'];
   /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
   sendRouterDrop?: BusSink['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender (dangerous-mutation safety
+   *  toast + dispatcher.emit fan-out for chain runs). */
+  sendServerMsg?: BusSink['sendServerMsg'];
   /** PR-7: the saved-template id this run was started from, if any. Stamped
    *  onto the row so the templates UI's "Last run" rail can SELECT by
    *  template later. Absent for ad-hoc runs. */
@@ -150,6 +153,8 @@ export type ResumeChainOpts = {
   /** Cluster A Phase 3: rebind sink callbacks on reconnect. */
   sendNotification?: BusSink['sendNotification'];
   sendRouterDrop?: BusSink['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender for the rebound chain sink. */
+  sendServerMsg?: BusSink['sendServerMsg'];
 };
 
 export type ChainSessionHandle = {
@@ -229,6 +234,10 @@ export function createChainRouter(params: {
   /** Cluster A Phase 3 (D4): forward-compat typed `router_drop` ServerMsg
    *  for non-toast consumers. Threaded onto `BusSink.sendRouterDrop`. */
   sendRouterDrop?: BusSink['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender. Threaded onto
+   *  `BusSink.sendServerMsg` so the rebound sink keeps shipping the
+   *  dangerous-mutation safety toast. */
+  sendServerMsg?: BusSink['sendServerMsg'];
 }): ChainRouter {
   const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
     params;
@@ -244,6 +253,7 @@ export function createChainRouter(params: {
     onPendingRetry: params.onPendingRetry,
     sendNotification: params.sendNotification,
     sendRouterDrop: params.sendRouterDrop,
+    sendServerMsg: params.sendServerMsg,
   };
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
@@ -856,6 +866,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onPendingRetry: opts.onPendingRetry,
     sendNotification: opts.sendNotification,
     sendRouterDrop: opts.sendRouterDrop,
+    sendServerMsg: opts.sendServerMsg,
   });
 
   const handle: ChainSessionHandle = {
@@ -1001,6 +1012,7 @@ export async function resumeChainSession(
     onEnded: opts.onEnded,
     sendNotification: opts.sendNotification,
     sendRouterDrop: opts.sendRouterDrop,
+    sendServerMsg: opts.sendServerMsg,
   });
   return live.handle as ChainSessionHandle;
 }

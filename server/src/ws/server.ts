@@ -51,6 +51,7 @@ import {
 import { getScrubbedEnvVars } from '../runner/claude.js';
 import { appendSafetyAuditAck, HIGHEST_SUBCODES } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
+import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
 import {
   resolveChainParticipants,
   startChainSession,
@@ -314,6 +315,7 @@ function resumeCallbacks(
   | 'onPendingMutation'
   | 'sendNotification'
   | 'sendRouterDrop'
+  | 'sendServerMsg'
 > {
   return {
     onEvent: (sessionId, ev, dbEventId) => {
@@ -344,6 +346,11 @@ function resumeCallbacks(
         sessionId,
         mutation: mutationRecordToView(mutation),
       });
+      // Cluster A Phase 4 (UI-15): a `dangerous`-class mutation also fans a
+      // sticky safety notification with an Open-in-Logs CTA. NR-2: the
+      // LogsButton cumulative-count chip is unchanged — this toast is
+      // point-in-time (additive).
+      dispatchDangerousMutationForConn(sessionId, mutation, conn);
     },
     onPendingMutation: (sessionId, pending) => {
       send(conn.ws, {
@@ -361,7 +368,37 @@ function resumeCallbacks(
     sendRouterDrop: (drop) => {
       send(conn.ws, { type: 'router_drop', ...drop });
     },
+    // Cluster A Phase 4: generic ServerMsg sender. Carries the new typed
+    // events (`session_superseded`, `chain_not_reconstructed`,
+    // `bus_auto_installed`, dangerous-mutation safety toast envelope) AND
+    // dispatcher.emit notification envelopes originating from the bus
+    // runtime (orchestrator/chain) in a reconstructed session.
+    sendServerMsg: (msg) => {
+      send(conn.ws, msg);
+    },
   };
+}
+
+/**
+ * Cluster A Phase 4 (UI-15): adapter for the extracted
+ * `maybeDispatchDangerousMutation` helper — owns the WS send coupling and
+ * the audit-write-failure logging policy. The dispatcher contract +
+ * payload shape live in `notifications/dangerous_mutation.ts` so they
+ * test without a `Conn`.
+ */
+function dispatchDangerousMutationForConn(
+  sessionId: string,
+  mutation: MutationRecord,
+  conn: Conn,
+): void {
+  const result = maybeDispatchDangerousMutation(sessionId, mutation, (msg) => send(conn.ws, msg));
+  if (result && !result.ok) {
+    // BE-1: dispatcher refused (audit write failed). We can't roll back
+    // the mutation (the SDK already dispatched the tool), so the
+    // safety-log gap is logged for post-mortem. The wider mutation event
+    // already shipped on the wire; only the safety toast is missing.
+    console.error('[ws] dangerous mutation dispatcher.emit failed', result.error);
+  }
 }
 
 /**
@@ -1000,12 +1037,16 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // Item #5: per-mutation live forwarding → `multi_agent_mutation`. Fires
       // for every classified non-'read' tool call observed during this
       // session. The initial batch on attach ships on `multi_agent_started`.
+      // Cluster A Phase 4 (UI-15): dangerous-category mutations ALSO fan a
+      // sticky safety toast with an Open-in-Logs CTA (additive — the
+      // LogsButton cumulative-count chip stays per NR-2).
       const onMutation = (sessionId: string, mutation: MutationRecord) => {
         send(conn.ws, {
           type: 'multi_agent_mutation',
           sessionId,
           mutation: mutationRecordToView(mutation),
         });
+        dispatchDangerousMutationForConn(sessionId, mutation, conn);
       };
       // Item #5: pause-on-mutation slot set/clear → wire. Fresh starts never
       // carry a pending slot on `multi_agent_started`; this is the delta.
@@ -1033,6 +1074,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         auditRowId: string;
       }) => {
         send(conn.ws, { type: 'router_drop', ...drop });
+      };
+      // Cluster A Phase 4: generic ServerMsg sender. Threaded into the
+      // bus runtime so the dispatcher.emit fan-out + new typed events
+      // (`session_superseded`, `chain_not_reconstructed`,
+      // `bus_auto_installed`, dangerous-mutation safety toast) reach the
+      // browser without one bespoke callback per event.
+      const sendServerMsg = (msg: ServerMsg) => {
+        send(conn.ws, msg);
       };
 
       // Per-session folders live under the workspace root, so it must be
@@ -1096,6 +1145,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             onPendingMutation,
             sendNotification,
             sendRouterDrop,
+            sendServerMsg,
             hopBudget,
             pauseOnMutation: msg.pauseOnMutation === true,
             // PR-7: stamp template provenance onto the row so the rail can
@@ -1154,6 +1204,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           onPendingMutation,
           sendNotification,
           sendRouterDrop,
+          sendServerMsg,
           hopBudget,
           pauseOnMutation: msg.pauseOnMutation === true,
           // PR-7: stamp template provenance onto the row.
@@ -1470,6 +1521,34 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           });
           const rows = await syncWorkspaceProjects();
           send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+          // Cluster A Phase 4 (D6/D11): split out of the
+          // `multi_agent_participant_added` echo so the auto-install side
+          // effect is observable as a typed event + an info-tier dock
+          // toast. The sidebar bus-installed indicator already flips via
+          // `bus_integration_changed` above; this is the operator-visible
+          // notification of WHY it flipped (adding a participant
+          // implicitly enabled the bus for that project).
+          send(conn.ws, {
+            type: 'bus_auto_installed',
+            sessionId: msg.sessionId,
+            projectId: msg.projectId,
+            agentName: result.agentName,
+          });
+          const notifResult = emitNotification(
+            {
+              class: 'operational',
+              severity: 'info',
+              dedupeKey: `bus_auto_installed:${msg.projectId}`,
+              title: 'Bus integration auto-installed',
+              message: `Project added to bus as ${result.agentName}.`,
+              sessionId: msg.sessionId,
+              projectId: msg.projectId,
+            },
+            (m) => send(conn.ws, m),
+          );
+          if (!notifResult.ok) {
+            console.error('[ws] bus_auto_installed dispatcher.emit failed', notifResult.error);
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

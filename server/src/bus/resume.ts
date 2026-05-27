@@ -36,6 +36,7 @@ import { getLiveSession, type BusSink } from './session_registry.js';
 import { reconstructOrchestratorSession } from './reconstruct.js';
 import type { ChainSessionHandle, ResumeChainOpts } from './chain.js';
 import type { OrchestratorSessionHandle } from './orchestrator.js';
+import { emit as emitNotification } from '../notifications/dispatcher.js';
 
 /**
  * One persisted event, replayed to the browser after a resume so the
@@ -86,6 +87,11 @@ export type ResumeCallbacks = {
   sendNotification?: BusSink['sendNotification'];
   /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
   sendRouterDrop?: BusSink['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender. Used for the new typed
+   *  events (`session_superseded`, `chain_not_reconstructed`,
+   *  `bus_auto_installed`, dangerous-mutation safety toasts) and as the
+   *  dispatcher.emit `send` callback (notification envelopes). */
+  sendServerMsg?: BusSink['sendServerMsg'];
 };
 
 export type ResumedSession = {
@@ -118,8 +124,15 @@ export async function attemptResumeMultiAgent(
   if (activeRows.length === 0) return null;
 
   const candidate = activeRows[0]!;
-  // Single-active invariant: any older running rows are orphans.
-  for (const r of activeRows.slice(1)) markCrashedSilent(r.id);
+  // Single-active invariant: any older running rows are orphans. Phase 4
+  // (D3): the older rows are SUPERSEDED by the candidate; surface that as
+  // a typed `session_superseded` ServerMsg + warn-tier dock toast with a
+  // "Reopen" CTA so the operator can recover (UX-6). The orphan row is
+  // still marked `crashed` (same as the pre-Phase 4 silent sweep) — the
+  // notification is additive, not a state change.
+  for (const r of activeRows.slice(1)) {
+    markCrashedAndAnnounceSuperseded(r.id, candidate.id, candidate.started_at, callbacks);
+  }
 
   let live = getLiveSession(candidate.id);
   if (!live) {
@@ -139,12 +152,22 @@ export async function attemptResumeMultiAgent(
         onPendingMutation: callbacks.onPendingMutation,
         sendNotification: callbacks.sendNotification,
         sendRouterDrop: callbacks.sendRouterDrop,
+        sendServerMsg: callbacks.sendServerMsg,
       })
     ) {
       live = getLiveSession(candidate.id);
     }
   }
   if (!live) {
+    // Phase 4 (BE-11): chain mode reconstruction is deferred — surface that
+    // BEFORE the crashed marker ships so the operator dock sees the
+    // typed event ahead of `multi_agent_ended { reason: 'crashed' }`.
+    // The check is intentionally narrow to chain mode; other bail reasons
+    // (folder-missing, no-iteration, pre-007 row) stay silent for now and
+    // are subsumed by Cluster D's wider session-recovery surface.
+    if (candidate.mode === 'chain') {
+      announceChainNotReconstructed(candidate.id, callbacks);
+    }
     markCrashedSilent(candidate.id);
     callbacks.onResumeFailed?.(candidate.id, 'reattach-failed');
     return null;
@@ -158,6 +181,7 @@ export async function attemptResumeMultiAgent(
     onPendingMutation: callbacks.onPendingMutation,
     sendNotification: callbacks.sendNotification,
     sendRouterDrop: callbacks.sendRouterDrop,
+    sendServerMsg: callbacks.sendServerMsg,
   };
   live.rebind(sink);
 
@@ -194,6 +218,7 @@ export async function resumeMultiAgentTarget(
     | 'onPendingMutation'
     | 'sendNotification'
     | 'sendRouterDrop'
+    | 'sendServerMsg'
   >,
 ): Promise<TargetResumeResult> {
   const row = getMultiAgentSession(sessionId);
@@ -216,12 +241,21 @@ export async function resumeMultiAgentTarget(
         onPendingMutation: callbacks.onPendingMutation,
         sendNotification: callbacks.sendNotification,
         sendRouterDrop: callbacks.sendRouterDrop,
+        sendServerMsg: callbacks.sendServerMsg,
       })
     ) {
       live = getLiveSession(sessionId);
     }
   }
-  if (!live) return { ok: false, reason: 'reattach-failed' };
+  if (!live) {
+    // Phase 4 (BE-11): chain reconstruction deferred — surface as a typed
+    // event + warn toast BEFORE the operator gets the generic 'reattach
+    // failed' reply. Mirror of the auto-resume path above.
+    if (row.mode === 'chain') {
+      announceChainNotReconstructed(sessionId, callbacks);
+    }
+    return { ok: false, reason: 'reattach-failed' };
+  }
 
   const prevStatus = row.status as MultiAgentStatus;
   reactivateMultiAgentSession(sessionId);
@@ -234,6 +268,7 @@ export async function resumeMultiAgentTarget(
       onPendingMutation: callbacks.onPendingMutation,
       sendNotification: callbacks.sendNotification,
       sendRouterDrop: callbacks.sendRouterDrop,
+      sendServerMsg: callbacks.sendServerMsg,
     });
   } catch (err) {
     console.error(`[resume] targeted resume threw for ${sessionId}`, err);
@@ -268,6 +303,110 @@ function markCrashedSilent(sessionId: string): void {
     endMultiAgentSession(sessionId, 'crashed');
   } catch (err) {
     console.error(`[resume] failed to mark ${sessionId} crashed`, err);
+  }
+}
+
+/**
+ * Cluster A Phase 4 (D3): mark an older `running` row crashed AND announce
+ * it to the operator as `session_superseded`. Inverts the silent sweep
+ * `markCrashedSilent` used to do at the same site. The typed wire event +
+ * warn-tier toast carry the SUPERSEDING session's id/ts so the dock CTA can
+ * disambiguate "reopen this one" from "reopen any prior crash". Failure to
+ * persist the crash state still logs (matches `markCrashedSilent`); the
+ * notification is best-effort.
+ */
+function markCrashedAndAnnounceSuperseded(
+  orphanSessionId: string,
+  supersedingSessionId: string,
+  supersedingTs: number,
+  callbacks: ResumeCallbacks,
+): void {
+  // Step 1: state change (unchanged from `markCrashedSilent`). If this
+  // fails we still try to ship the notification so the operator at least
+  // sees that something supplanted the orphan row — but log loudly so the
+  // db error doesn't get masked by the toast.
+  try {
+    endMultiAgentSession(orphanSessionId, 'crashed');
+  } catch (err) {
+    console.error(`[resume] failed to mark ${orphanSessionId} crashed (supersede)`, err);
+  }
+
+  // Step 2: typed ServerMsg for downstream consumers (Cluster D iterations
+  // panel + future inspector). Optional callback — pre-Phase-4 callers
+  // (tests, smokes) may not wire it.
+  callbacks.sendServerMsg?.({
+    type: 'session_superseded',
+    sessionId: orphanSessionId,
+    supersedingSessionId,
+    supersedingTs,
+  });
+
+  // Step 3: operator-facing toast via the dispatcher. Operational warn
+  // tier, dedupeKey scoped to the orphan id so a duplicate emit (rare —
+  // would require another `attemptResumeMultiAgent` to find the same
+  // orphan still in activeRows, which it wouldn't after the crash mark)
+  // collapses. Sticky=true so a reload still shows it from the inbox
+  // replay (the dispatcher persists sticky operational per BE-4). The
+  // `reopen` action references the orphan id — UX-6 wires the dock CTA
+  // to a `resume_multi_agent` ClientMsg (already supported by the WS
+  // layer) which the operator may choose to fire after acknowledging the
+  // supplant.
+  if (callbacks.sendServerMsg) {
+    const result = emitNotification(
+      {
+        class: 'operational',
+        severity: 'warn',
+        dedupeKey: `session_superseded:${orphanSessionId}`,
+        title: 'A prior session was superseded',
+        message: `Session ${orphanSessionId.slice(0, 8)} was marked crashed because a newer iteration started.`,
+        sessionId: orphanSessionId,
+        action: { kind: 'reopen', sessionId: orphanSessionId },
+        sticky: true,
+      },
+      callbacks.sendServerMsg,
+    );
+    if (!result.ok) {
+      console.error('[resume] session_superseded dispatcher.emit failed', result.error);
+    }
+  }
+}
+
+/**
+ * Cluster A Phase 4 (D2 precursor, BE-11): emit `chain_not_reconstructed`
+ * BEFORE the operator receives the `multi_agent_ended { reason: 'crashed' }`
+ * for a chain-mode session that couldn't be brought back across a server
+ * restart. Chain R-B is intentionally deferred — Cluster D's wider
+ * session-recovery surface will replace this with a proper recovery flow;
+ * Phase 4 just stops the silence.
+ */
+function announceChainNotReconstructed(
+  sessionId: string,
+  callbacks: ResumeCallbacks | Pick<ResumeCallbacks, 'sendServerMsg' | 'sendNotification'>,
+): void {
+  // Typed wire event for the iterations panel / inspector. Skipped if the
+  // caller didn't supply the generic sender (legacy unit tests).
+  callbacks.sendServerMsg?.({
+    type: 'chain_not_reconstructed',
+    sessionId,
+    reason: 'chain mode reconstruction is not implemented (R-B covers orchestrator only)',
+  });
+
+  if (callbacks.sendServerMsg) {
+    const result = emitNotification(
+      {
+        class: 'operational',
+        severity: 'warn',
+        dedupeKey: `chain_not_reconstructed:${sessionId}`,
+        title: 'Chain session could not be resumed',
+        message: `Session ${sessionId.slice(0, 8)} ran in chain mode; chain reconstruction is not yet supported across server restarts.`,
+        sessionId,
+        sticky: true,
+      },
+      callbacks.sendServerMsg,
+    );
+    if (!result.ok) {
+      console.error('[resume] chain_not_reconstructed dispatcher.emit failed', result.error);
+    }
   }
 }
 
