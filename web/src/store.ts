@@ -1279,12 +1279,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     }
 
     case 'notification':
-      // Cluster A Phase 1: the wire envelope is defined and the server
-      // dispatches it, but the client host (`<NotificationStack/>` + reducer
-      // slice) lands in Phase 2. Phase 1 swallows the envelope as a no-op so
-      // a server running Phase 1 code talking to a Phase 1 client doesn't
-      // break — once Phase 2 ships, this case dispatches into the
-      // notifications slice instead of returning state.
+      // Cluster A Phase 2: notification envelopes are dispatched OUTSIDE the
+      // store via App.tsx's onMessage call to `notifyFromServerMsg` — a
+      // separate slice owned by `<NotificationsProvider>`. The store keeps
+      // a no-op case here so the union exhaustiveness check passes and so
+      // that future cross-references (e.g. dispatching session state on
+      // safety events that ALSO update a session) have a place to land.
       return state;
 
     case 'wrapper_error': {
