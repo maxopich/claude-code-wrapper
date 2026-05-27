@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
+  ClientMsg,
   MultiAgentLifecycle,
   MultiAgentTemplate,
   NotificationEnvelope,
@@ -20,6 +21,8 @@ import { ClaudeMark } from './components/ClaudeMark';
 import { Icon } from './components/Icon';
 import { mqBelow } from './breakpoints';
 import {
+  InboxProvider,
+  NotificationBell,
   NotificationsProvider,
   NotificationStack,
   notifyFromServerMsg,
@@ -80,19 +83,34 @@ export function App() {
   const wsRef = useRef<WsHandle | null>(null);
   const notifPushRef = useRef<((n: NotificationEnvelope) => void) | null>(null);
   const notifDismissRef = useRef<((id: string) => void) | null>(null);
+  // Cluster A Phase 5: bridge for the inbox provider. Same pattern as
+  // notifPushRef/notifDismissRef from Phase 2 — App.tsx's onMessage
+  // pipes `inbox_snapshot` ServerMsgs through this ref into the
+  // provider's reducer.
+  const inboxHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
+  }, []);
+  // Cluster A Phase 5: ClientMsg sink for the InboxProvider. Reads the
+  // current wsRef on every call so transient connection drops route
+  // through the most recent socket; equivalent to handleAck's pattern.
+  const inboxSend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
   }, []);
 
   return (
     <NotificationsProvider onAck={handleAck}>
       <NotificationsBridge pushRef={notifPushRef} dismissRef={notifDismissRef} />
-      <AppShell
-        wsRef={wsRef}
-        notifPushRef={notifPushRef}
-        notifDismissRef={notifDismissRef}
-      />
-      <NotificationStack />
+      <InboxProvider send={inboxSend} handlerRef={inboxHandlerRef}>
+        <AppShell
+          wsRef={wsRef}
+          notifPushRef={notifPushRef}
+          notifDismissRef={notifDismissRef}
+          inboxHandlerRef={inboxHandlerRef}
+          onAck={handleAck}
+        />
+        <NotificationStack />
+      </InboxProvider>
     </NotificationsProvider>
   );
 }
@@ -126,9 +144,18 @@ type AppShellProps = {
   wsRef: React.MutableRefObject<WsHandle | null>;
   notifPushRef: React.MutableRefObject<((n: NotificationEnvelope) => void) | null>;
   notifDismissRef: React.MutableRefObject<((id: string) => void) | null>;
+  /**
+   * Cluster A Phase 5: bridge ref the InboxProvider populates with its
+   * own ServerMsg handler. AppShell's onMessage calls this AFTER the
+   * main reducer dispatch so the inbox state and the store stay in
+   * sync without coupling the two.
+   */
+  inboxHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
+  onAck: (id: string, ackReason?: string) => void;
 };
 
-function AppShell({ wsRef, notifPushRef, notifDismissRef }: AppShellProps) {
+function AppShell({ wsRef, notifPushRef, notifDismissRef, inboxHandlerRef, onAck }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
   /**
    * Phase H side channel: ServerMsg subscribers for surfaces whose state
@@ -327,6 +354,16 @@ function AppShell({ wsRef, notifPushRef, notifDismissRef }: AppShellProps) {
             if (push) notifyFromServerMsg(msg, { push });
           } catch (err) {
             console.error('[notifications] dispatch threw', err);
+          }
+          // Cluster A Phase 5: hand the message to the InboxProvider's
+          // bridge so `inbox_snapshot` updates the bell badge + panel
+          // state. The handler is a narrow type-filter — other ServerMsgs
+          // are silently ignored, so this is safe to invoke for every
+          // message without an outer type-check.
+          try {
+            inboxHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[inbox] handler threw', err);
           }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
@@ -758,6 +795,16 @@ function AppShell({ wsRef, notifPushRef, notifDismissRef }: AppShellProps) {
               className={state.connected ? 'dot on' : 'dot off'}
               title={state.connected ? 'connected' : 'disconnected'}
             />
+            {/*
+              Cluster A Phase 5: notifications inbox bell. Per DEC-1 (XCT-3
+              chrome lock), the bell ideally lives in an app-shell header
+              — but Cebab has no such header today. The validation report's
+              fallback is to keep notification chrome in the sidebar header
+              alongside the connection dot until the app-shell header
+              actually lands. Order matches XCT-3's left-to-right intent:
+              ConnectionDot (state) → Bell (events).
+            */}
+            <NotificationBell onAck={onAck} />
             <button
               className="icon-btn sidebar-collapse-btn"
               title="Hide sidebar"

@@ -52,6 +52,7 @@ import { getScrubbedEnvVars } from '../runner/claude.js';
 import { appendSafetyAuditAck, HIGHEST_SUBCODES } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
+import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
   resolveChainParticipants,
   startChainSession,
@@ -251,6 +252,20 @@ function onConnection(ws: WebSocket): void {
     // drives the dock; this carries the var-names payload separately.
     send(ws, { type: 'env_scrubbed', vars: scrubbedVars });
   }
+
+  // Cluster A Phase 5: seed the bell badge + inbox panel without
+  // requiring the operator to open it first. Runs AFTER env_scrubbed so
+  // the snapshot includes that just-written sticky safety row. The
+  // unsolicited push uses an empty filter (all classes/severities/
+  // sessions, unacked only) — the panel can re-`request_inbox_snapshot`
+  // with narrower filters when the operator interacts with chips.
+  const initialSnapshot = buildInboxSnapshot();
+  send(ws, {
+    type: 'inbox_snapshot',
+    rows: initialSnapshot.rows,
+    unackedCountBySession: initialSnapshot.unackedCountBySession,
+    unackedGlobal: initialSnapshot.unackedGlobal,
+  });
 
   ws.on('message', (raw) => {
     let parsed: ClientMsg;
@@ -822,6 +837,47 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         appendSafetyAuditAck(row.audit_row_id, ackedAt, ackedBy, reason);
       }
       markNotificationAcked(msg.id, ackedAt, ackedBy, reason);
+      // Cluster A Phase 5: push a fresh snapshot so the bell badge
+      // decrements without the panel re-requesting. The panel's per-row
+      // ack handler can also rely on this update for the unacked count.
+      const ackedSnapshot = buildInboxSnapshot();
+      send(conn.ws, {
+        type: 'inbox_snapshot',
+        rows: ackedSnapshot.rows,
+        unackedCountBySession: ackedSnapshot.unackedCountBySession,
+        unackedGlobal: ackedSnapshot.unackedGlobal,
+      });
+      return;
+    }
+    case 'request_inbox_snapshot': {
+      // Cluster A Phase 5: panel-initiated snapshot request with filters.
+      // Filters are server-side so the wire stays small (rows can be
+      // hundreds; the full list isn't relevant when the operator narrows
+      // by tier or session). The reply ALSO includes the unfiltered
+      // per-session counts so the sidebar badges stay coherent regardless
+      // of the panel's current filter.
+      const snapshot = buildInboxSnapshot(msg.filters);
+      send(conn.ws, {
+        type: 'inbox_snapshot',
+        rows: snapshot.rows,
+        unackedCountBySession: snapshot.unackedCountBySession,
+        unackedGlobal: snapshot.unackedGlobal,
+      });
+      return;
+    }
+    case 'clear_dismissed_inbox': {
+      // Cluster A Phase 5: bulk-ack operational rows ONLY. Safety rows
+      // are untouched (BE-7 typed-reason ack policy). After the update,
+      // ship a fresh snapshot so the panel re-renders from authoritative
+      // server state rather than the client guessing which ids it acked.
+      clearDismissedInbox();
+      const clearedSnapshot = buildInboxSnapshot();
+      send(conn.ws, {
+        type: 'inbox_snapshot',
+        rows: clearedSnapshot.rows,
+        unackedCountBySession: clearedSnapshot.unackedCountBySession,
+        unackedGlobal: clearedSnapshot.unackedGlobal,
+      });
       return;
     }
     case 'set_permission_mode': {

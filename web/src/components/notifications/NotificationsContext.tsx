@@ -5,6 +5,7 @@ import {
   notificationsReducer,
   type NotificationsState,
 } from './notificationsReducer';
+import { isMuted } from './muteStore';
 
 /**
  * Cluster A Phase 2: context for the notification dock.
@@ -44,6 +45,13 @@ export function NotificationsProvider({ children, onAck }: NotificationsProvider
   const [state, dispatch] = useReducer(notificationsReducer, initialNotificationsState);
 
   const push = useCallback((n: NotificationEnvelope) => {
+    // Cluster A Phase 5: display-side mute. The server still persists
+    // every sticky-operational / safety row to the inbox regardless of
+    // client mute state — silencing here only suppresses the toast.
+    // The inbox panel always shows all rows (a forgotten mute should
+    // not hide history). `isMuted` already guards against muting
+    // error/danger; defense-in-depth is in the helper.
+    if (isMuted(n)) return;
     dispatch({ type: 'push', n, now: Date.now() });
   }, []);
 
