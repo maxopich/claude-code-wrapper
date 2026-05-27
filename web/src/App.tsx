@@ -1,7 +1,8 @@
-import { useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
   MultiAgentLifecycle,
   MultiAgentTemplate,
+  NotificationEnvelope,
   ServerMsg,
   SessionPermissionMode,
 } from '@cebab/shared/protocol';
@@ -18,6 +19,12 @@ import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/Mu
 import { ClaudeMark } from './components/ClaudeMark';
 import { Icon } from './components/Icon';
 import { mqBelow } from './breakpoints';
+import {
+  NotificationsProvider,
+  NotificationStack,
+  notifyFromServerMsg,
+  useNotificationsActions,
+} from './components/notifications';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -51,9 +58,78 @@ function writeStored(key: string, value: string): void {
   }
 }
 
+/**
+ * Mint a client-side notification envelope id. Used for connect/disconnect
+ * toasts that the client originates (no server roundtrip). Server-dispatched
+ * envelopes carry their own UUID (BE-5 dedupe key); this is for the few
+ * cases where the client itself shapes an envelope.
+ */
+function mintNotificationId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
+  return `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Cluster A Phase 2: top-level wrapper that mounts the notifications
+ * provider before `AppShell` so `AppShell` can call `useNotificationsActions`
+ * via the in-provider `NotificationsBridge`. `onAck` lives here because the
+ * provider needs a stable callback at mount; `AppShell` owns the actual
+ * WS ref and populates it post-mount via the bridge.
+ */
 export function App() {
-  const [state, dispatch] = useReducer(reduce, initialState);
   const wsRef = useRef<WsHandle | null>(null);
+  const notifPushRef = useRef<((n: NotificationEnvelope) => void) | null>(null);
+  const notifDismissRef = useRef<((id: string) => void) | null>(null);
+  const handleAck = useCallback((id: string, ackReason?: string) => {
+    wsRef.current?.send({ type: 'ack_notification', id, ackReason });
+  }, []);
+
+  return (
+    <NotificationsProvider onAck={handleAck}>
+      <NotificationsBridge pushRef={notifPushRef} dismissRef={notifDismissRef} />
+      <AppShell
+        wsRef={wsRef}
+        notifPushRef={notifPushRef}
+        notifDismissRef={notifDismissRef}
+      />
+      <NotificationStack />
+    </NotificationsProvider>
+  );
+}
+
+/**
+ * Inside the provider, exposes the actions back to App-scoped refs so the
+ * existing WS lifecycle effect (which lives outside the provider context
+ * boundary in terms of hook calls — it's a useEffect inside AppShell) can
+ * push and dismiss without prop-drilling.
+ */
+function NotificationsBridge({
+  pushRef,
+  dismissRef,
+}: {
+  pushRef: React.MutableRefObject<((n: NotificationEnvelope) => void) | null>;
+  dismissRef: React.MutableRefObject<((id: string) => void) | null>;
+}) {
+  const { push, dismiss } = useNotificationsActions();
+  useEffect(() => {
+    pushRef.current = push;
+    dismissRef.current = dismiss;
+    return () => {
+      pushRef.current = null;
+      dismissRef.current = null;
+    };
+  }, [push, dismiss, pushRef, dismissRef]);
+  return null;
+}
+
+type AppShellProps = {
+  wsRef: React.MutableRefObject<WsHandle | null>;
+  notifPushRef: React.MutableRefObject<((n: NotificationEnvelope) => void) | null>;
+  notifDismissRef: React.MutableRefObject<((id: string) => void) | null>;
+};
+
+function AppShell({ wsRef, notifPushRef, notifDismissRef }: AppShellProps) {
+  const [state, dispatch] = useReducer(reduce, initialState);
   /**
    * Phase H side channel: ServerMsg subscribers for surfaces whose state
    * doesn't belong in Redux. The Logs modal subscribes here for
@@ -167,6 +243,14 @@ export function App() {
     }
   }
 
+  // WS lifecycle bookkeeping for connect/disconnect toasts (UX-11):
+  //   - `hasOpenedRef`: skip the success toast on the FIRST open (initial
+  //     connection — there was nothing to reconnect from).
+  //   - `wsDisconnectToastIdRef`: the id of the sticky "Disconnected"
+  //     toast, so a reconnect can dismiss it. Cleared on dismiss.
+  const hasOpenedRef = useRef(false);
+  const wsDisconnectToastIdRef = useRef<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     let ws: WsHandle | null = null;
@@ -192,10 +276,58 @@ export function App() {
           dispatch({ type: 'ws_open' });
           ws?.send({ type: 'get_settings' });
           ws?.send({ type: 'list_projects' });
+          // UX-11: only toast "Reconnected" after the FIRST open. The first
+          // open is just initial-connection — no banner needed; subsequent
+          // opens follow a disconnect and are reconnect events worth
+          // announcing (and clearing the prior sticky warn).
+          if (hasOpenedRef.current) {
+            if (wsDisconnectToastIdRef.current) {
+              notifDismissRef.current?.(wsDisconnectToastIdRef.current);
+              wsDisconnectToastIdRef.current = null;
+            }
+            notifPushRef.current?.({
+              id: mintNotificationId(),
+              ts: Date.now(),
+              severity: 'success',
+              class: 'operational',
+              dedupeKey: 'ws:reconnected',
+              title: 'Reconnected',
+              sticky: false,
+            });
+          }
+          hasOpenedRef.current = true;
         },
-        onClose: () => dispatch({ type: 'ws_close' }),
+        onClose: () => {
+          dispatch({ type: 'ws_close' });
+          // UX-11: sticky warn while the socket is down. ws.ts doesn't
+          // auto-reconnect today, so the message points to a reload — Phase
+          // 5+ adds an action button once a retry path exists.
+          const id = mintNotificationId();
+          wsDisconnectToastIdRef.current = id;
+          notifPushRef.current?.({
+            id,
+            ts: Date.now(),
+            severity: 'warn',
+            class: 'operational',
+            dedupeKey: 'ws:disconnected',
+            title: 'Disconnected',
+            message: 'Reload the page to reconnect.',
+            sticky: true,
+          });
+        },
         onMessage: (msg) => {
           dispatch({ type: 'server', msg });
+          // Cluster A Phase 2: route the wire envelope (and any narrowly
+          // typed fallbacks like sessionless wrapper_error) into the dock.
+          // Wrapped in try/catch so a dispatch-table bug can't break WS
+          // message processing (same defensive shape as the subscriber loop
+          // below).
+          try {
+            const push = notifPushRef.current;
+            if (push) notifyFromServerMsg(msg, { push });
+          } catch (err) {
+            console.error('[notifications] dispatch threw', err);
+          }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
           // try/catch per-subscriber so a broken listener can't stop the
@@ -215,7 +347,7 @@ export function App() {
       cancelled = true;
       ws?.close();
     };
-  }, []);
+  }, [wsRef, notifPushRef, notifDismissRef]);
 
   // First-run UX: open the settings modal automatically when we learn the
   // workspace path is unset / invalid.

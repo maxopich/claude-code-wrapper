@@ -114,6 +114,10 @@
   --dur-1: 120ms;
   --dur-2: 200ms;
   --dur-3: 320ms;
+  /* Cluster A Phase 2: notification dock stacking. Sits between the
+   * TopRunBar / sidebar chrome (default flow) and the modal overlays
+   * (z-index: 100 — see .modal-overlay / .tpl-modal-overlay). */
+  --notif-stack-z: 90;
   /* Fonts */
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -4848,3 +4852,237 @@ pre {
 .logs-row.is-anchor-highlight {
   animation: logsRowFlash 1.6s ease-out;
 }
+
+/* =========================================================================
+ * Cluster A Phase 2: notification dock
+ *
+ * Bottom-right anchored toast host (UI-4). Mobile breakpoint pins it
+ * bottom-center, full-width minus 16px. Per-tier border-left in tier color
+ * (UI-5); --bg-4 surface, --line-3 border, --r-md radius, --shadow-md
+ * elevation (UI-6). prefers-reduced-motion swaps the slide-in for an
+ * opacity-only transition (UI-8).
+ *
+ * Empty state (UI-2): `data-empty="true"` keeps the live-region scaffolding
+ * mounted (so AT topology stays stable) while removing all visible chrome.
+ * ========================================================================= */
+.notif-stack {
+  position: fixed;
+  right: var(--s-4);
+  bottom: var(--s-4);
+  width: 320px;
+  max-width: calc(100vw - var(--s-4) * 2);
+  z-index: var(--notif-stack-z);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  pointer-events: none;
+}
+.notif-stack > .notif {
+  pointer-events: auto;
+}
+.notif-stack[data-empty='true'] {
+  /* Live regions only — no visible chrome. */
+  pointer-events: none;
+}
+
+@media (max-width: 599.98px) {
+  .notif-stack {
+    right: var(--s-2);
+    left: var(--s-2);
+    bottom: var(--s-2);
+    width: auto;
+    max-width: none;
+  }
+}
+
+.notif {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--s-3);
+  align-items: start;
+  padding: var(--s-3) var(--s-3) var(--s-3) var(--s-3);
+  background: var(--bg-4);
+  border: 1px solid var(--line-3);
+  border-left: 3px solid var(--line-3); /* default; overridden per tier */
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  color: inherit;
+  font-family: var(--font-sans);
+  font-size: var(--t-md);
+  line-height: 1.4;
+  animation: notif-in var(--dur-2) var(--ease-out);
+}
+.notif[data-severity='info'] {
+  border-left-color: var(--info);
+}
+.notif[data-severity='success'] {
+  border-left-color: var(--ok);
+}
+.notif[data-severity='warn'] {
+  border-left-color: var(--warn);
+}
+.notif[data-severity='error'] {
+  border-left-color: var(--err);
+}
+.notif[data-severity='danger'] {
+  border-left-color: var(--accent);
+}
+
+.notif:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes notif-in {
+  from {
+    transform: translateX(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notif {
+    animation: notif-in-rm var(--dur-2) var(--ease-out);
+  }
+  @keyframes notif-in-rm {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+.notif-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px; /* optical: align glyph with first text line */
+}
+.notif-glyph svg {
+  width: 16px;
+  height: 16px;
+  color: var(--line-3); /* default; overridden per tier */
+}
+.notif[data-severity='info'] .notif-glyph svg {
+  color: var(--info);
+}
+.notif[data-severity='success'] .notif-glyph svg {
+  color: var(--ok);
+}
+.notif[data-severity='warn'] .notif-glyph svg {
+  color: var(--warn);
+}
+.notif[data-severity='error'] .notif-glyph svg {
+  color: var(--err);
+}
+.notif[data-severity='danger'] .notif-glyph svg {
+  color: var(--accent);
+}
+
+.notif-body {
+  min-width: 0;
+}
+
+.notif-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+  color: var(--line-3);
+  margin-bottom: var(--s-1);
+}
+.notif[data-severity='info'] .notif-tier-label {
+  color: var(--info);
+}
+.notif[data-severity='success'] .notif-tier-label {
+  color: var(--ok);
+}
+.notif[data-severity='warn'] .notif-tier-label {
+  color: var(--warn);
+}
+.notif[data-severity='error'] .notif-tier-label {
+  color: var(--err);
+}
+.notif[data-severity='danger'] .notif-tier-label {
+  color: var(--accent);
+}
+.notif-count {
+  padding: 1px var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--line-1);
+  color: inherit;
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.notif-title {
+  font-weight: 600;
+  font-size: var(--t-md);
+  word-wrap: break-word;
+}
+.notif-message {
+  margin-top: var(--s-1);
+  font-size: var(--t-sm);
+  opacity: 0.85;
+  word-wrap: break-word;
+}
+.notif-actions {
+  margin-top: var(--s-2);
+  display: flex;
+  gap: var(--s-2);
+}
+.notif-action-btn {
+  appearance: none;
+  border: 1px solid var(--line-3);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-1) var(--s-3);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  min-height: 32px;
+}
+.notif-action-btn:hover,
+.notif-action-btn:focus-visible {
+  background: var(--bg-5);
+  border-color: var(--accent);
+  outline: none;
+}
+
+.notif-close {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  opacity: 0.55;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-sm);
+}
+.notif-close:hover,
+.notif-close:focus-visible {
+  opacity: 1;
+  outline: 1px solid var(--accent);
+}
+
