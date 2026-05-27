@@ -5689,3 +5689,375 @@ pre {
   color: var(--fg-2);
 }
 
+/* ---- Cluster B Phase 6b: AuthorityPanel family ---------------------------
+ *
+ * Token-reuse only per UI-B34. The hierarchy is:
+ *
+ *   .authority-panel             — outer host (mounted in preflight modal,
+ *                                  in-session disclosure, post-run review)
+ *   .authority-panel-header      — title + status + Refresh button
+ *   .authority-panel-body        — container for sections
+ *
+ *   .authority-section           — generic <details> wrapper used by
+ *                                  every list/card inside the panel
+ *   .authority-section-summary   — clickable header row
+ *   .authority-section-stripe-*  — left-stripe diff hint (accent/added/
+ *                                  removed) per UI-B30
+ *
+ *   .model-identity-card         — dl/dt/dd grid for the four identity
+ *                                  rows (model / api key / perm / cwd)
+ *
+ *   .tools-list-*                — search + list + per-tool <details>
+ *   .tool-row-*                  — single tool row + risk badge + source chip
+ *   .mutation-badge-read         — new "read" variant; matches existing
+ *                                  -mutate / -dangerous shape
+ */
+
+.authority-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+}
+.authority-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.authority-panel-title {
+  margin: 0;
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--fg-0);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex: 0 0 auto;
+}
+.authority-panel-status {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  flex: 1 1 auto;
+}
+.authority-panel-refresh {
+  font-size: var(--t-xs);
+  padding: 2px 8px;
+}
+.authority-panel-loading,
+.authority-panel-empty {
+  padding: 16px;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  text-align: center;
+  background: var(--bg-3);
+  border-radius: var(--r-sm);
+}
+.authority-panel-empty strong {
+  color: var(--fg-0);
+}
+.authority-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ---- AuthoritySection ---- */
+.authority-section {
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+}
+.authority-section-stripe {
+  border-left-width: 3px;
+}
+.authority-section-stripe-accent {
+  border-left-color: var(--accent);
+}
+.authority-section-stripe-added {
+  border-left-color: var(--ok);
+}
+.authority-section-stripe-removed {
+  border-left-color: var(--err);
+}
+.authority-section-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+/* Hide the native marker — we render our own glyph so we control rotation. */
+.authority-section-summary::-webkit-details-marker {
+  display: none;
+}
+.authority-section-glyph {
+  display: inline-block;
+  width: 10px;
+  color: var(--fg-2);
+  font-size: var(--t-xs);
+  transition: transform 120ms ease;
+}
+.authority-section[open] > .authority-section-summary > .authority-section-glyph {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .authority-section-glyph {
+    transition: none;
+  }
+}
+.authority-section-title {
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  font-weight: 500;
+}
+.authority-section-count {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+}
+.authority-section-sublabel {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  font-style: italic;
+}
+.authority-section-trailing {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.authority-section-body {
+  padding: 8px 12px 12px 12px;
+  border-top: 1px solid var(--line-3);
+}
+.authority-section-sr-mirror {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+/* ---- ModelIdentityCard ---- */
+.model-identity-card {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+.model-identity-row {
+  display: contents;
+}
+.model-identity-row > dt {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  align-self: baseline;
+}
+.model-identity-row > dd {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+}
+.model-identity-model,
+.model-identity-cwd {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--accent-ink, var(--accent));
+  word-break: break-all;
+}
+.model-identity-perm-default {
+  color: var(--fg-1);
+}
+.model-identity-perm-warn {
+  color: var(--warn);
+}
+.model-identity-perm-danger {
+  color: var(--err);
+  font-weight: 600;
+}
+.model-identity-perm-hint {
+  color: var(--fg-2);
+  font-style: italic;
+}
+.model-identity-key-ok {
+  color: var(--ok);
+}
+.model-identity-key-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
+.model-identity-muted {
+  color: var(--fg-2);
+  font-style: italic;
+}
+.model-identity-source-chip {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  color: var(--fg-1);
+  margin-right: 4px;
+}
+
+/* ---- ToolsList ---- */
+.tools-list-root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tools-list-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tools-list-search {
+  flex: 1 1 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--line-3);
+  background: var(--bg-2);
+  border-radius: var(--r-sm);
+  color: var(--fg-0);
+  font-size: var(--t-sm);
+}
+.tools-list-search:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+.tools-list-counts {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 360px;
+  overflow-y: auto;
+  outline: none;
+}
+.tools-list:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.tools-list-empty {
+  padding: 16px;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  text-align: center;
+}
+.tools-list-stub {
+  padding: 16px;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+}
+.tool-row {
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+}
+.tool-row:hover,
+.tool-row.tool-row-active {
+  background: var(--bg-2);
+  border-color: var(--line-3);
+}
+.tool-row-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.tool-row-summary::-webkit-details-marker {
+  display: none;
+}
+.tool-row-name {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  flex: 1 1 auto;
+}
+.tool-row-source {
+  font-size: var(--t-xs);
+  text-transform: lowercase;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+  color: var(--fg-1);
+}
+.tool-row-source-mcp {
+  color: var(--accent-ink, var(--accent));
+}
+.tool-row-source-cebab-injected {
+  color: var(--info);
+}
+.tool-row-mcp-server {
+  margin-left: 4px;
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+}
+.tool-row-unavailable {
+  opacity: 0.6;
+}
+.tool-row-unavailable-badge {
+  font-size: var(--t-xs);
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  background: var(--err-soft);
+  color: var(--err);
+  border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+  font-weight: 600;
+}
+.tool-row-body {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 4px 8px 8px 8px;
+  padding: 8px;
+  background: var(--bg-3);
+  border-radius: var(--r-sm);
+}
+.tool-row-fact {
+  display: contents;
+}
+.tool-row-fact > dt {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.tool-row-fact > dd {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+}
+.tool-row-hint {
+  color: var(--fg-2);
+  font-style: italic;
+}
+.tool-row-reason {
+  color: var(--warn);
+}
+
+/* New "read" variant — matches existing -mutate / -dangerous shape so we
+ * stay inside the spec's token-reuse rule. */
+.mutation-badge-read {
+  color: var(--fg-2);
+  border-color: var(--line-3);
+  background: var(--bg-2);
+}
+
