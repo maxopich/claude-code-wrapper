@@ -55,6 +55,23 @@ export type NotifyContext = {
   mintId?: () => string;
   /** For deterministic test timestamps; production uses Date.now(). */
   now?: () => number;
+  /**
+   * Cluster D Phase 4c (UI-D6): banner ↔ toast dedup. When a banner is
+   * already mounted for a session and `kind` is the matching banner kind,
+   * the dispatcher's parallel `notification` fan-out should be
+   * suppressed — the operator would otherwise see the same event twice
+   * (the banner + the toast). Today only `'rate_limit'` plumbs through;
+   * extend the union as later phases mount more banners
+   * (`'auth_expired'`, `'swept_session'`, …) and their dispatcher emits
+   * keyed dedupeKeys.
+   *
+   * Returns `true` ⇔ "banner is visible for this session/kind, skip the
+   * toast." Returns `false`/`undefined` ⇔ no banner → fall through to
+   * the normal `push`. Implementations read from whatever live state
+   * holds the banner mounting decision (typically `state.sessionsByProject
+   * [pid][sid].rateLimit !== undefined` for the rate-limit kind).
+   */
+  isBannerVisibleFor?: (sessionId: string, kind: 'rate_limit') => boolean;
 };
 
 /**
@@ -76,6 +93,24 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
     case 'notification':
       // Pass-through. The dispatcher (server/src/notifications/dispatcher.ts)
       // already shaped this envelope and wrote any audit row before sending.
+      //
+      // Cluster D Phase 4c (UI-D6) banner ↔ toast dedup: when a banner is
+      // visible for the same session/kind, the toast is the second of two
+      // operator-facing surfaces showing the same event — suppress it.
+      //
+      // We match the rate-limit dispatcher's stable dedupeKey prefix
+      // (`rate_limit:hit:<sessionId>` / `rate_limit:cleared:<sessionId>` —
+      // see `server/src/ws/server.ts:rateLimitDispatch`). The check is
+      // narrow: a custom dedupeKey that just happens to start with the
+      // same prefix would also be deduped, but the prefix is server-
+      // controlled and not a legitimate collision surface.
+      if (
+        msg.sessionId &&
+        msg.dedupeKey.startsWith('rate_limit:') &&
+        ctx.isBannerVisibleFor?.(msg.sessionId, 'rate_limit')
+      ) {
+        return;
+      }
       ctx.push(msg);
       return;
 

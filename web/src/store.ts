@@ -53,6 +53,67 @@ export type MessageView =
       projectName?: string;
     };
 
+/**
+ * Cluster D Phase 4c (spec §4.1/§4.2/UI-D6/UI-D7): live state for the
+ * rate-limit banner. Only present while the session is in a rate-limited
+ * state — `undefined` (the absence-of-slice) is the "no banner, no
+ * countdown" condition.
+ *
+ * Per-session because rate-limits are session-scoped: a five-hour cap hits
+ * one session, not all of them. Lives on `SessionView` rather than a
+ * sibling context because the banner is mounted inside the session-scoped
+ * BannerStack (single-agent) or the orchestrator's run view (multi-agent)
+ * — both of which already key off the per-session state slice, so a
+ * separate context would just split the source of truth.
+ *
+ * Wire sources that populate this:
+ *   - `rate_limit_event { status: 'hard', resetsAtMs, overage* }` → slice
+ *     is created with countdown target + overage hints.
+ *   - `session_running { status: 'rate_limited' }` → slice is preserved
+ *     while the held turn waits.
+ *   - `auto_retry { attempt, maxAttempts, backoffMs, retryAt }` → sets
+ *     the `autoRetry` sub-field so the operator sees "attempt 2 of 5 in
+ *     0:23" inside the banner.
+ *
+ * Sink that clears this:
+ *   - `rate_limit_event { status: 'allowed' }` (the §7-floor "cleared"
+ *     sub-code) → clears the slice.
+ *   - `session_running { running: false }` with NO `status` field → the
+ *     server signals the turn ended cleanly; clears the slice so the
+ *     `heldMessages` drain effect can fire (see SessionView.heldMessages).
+ *
+ * `paused` lives on the client only (spec §4.2 explicitly: "cadence lives
+ * on the client" so tab close + reopen doesn't lose pause state to the
+ * wrong source of truth). The CountdownChip respects it; a paused
+ * countdown still shows the time-until-reset but doesn't auto-fire the
+ * `retry_rate_limited { auto: true }`.
+ */
+export type RateLimitState = {
+  /** Wall-clock ms when the rate limit lifts. Drives the CountdownChip. */
+  resetsAtMs?: number;
+  /** SDK overage-pool reset (separate countdown when overage is in play). */
+  overageResetsAtMs?: number;
+  /** SDK overage status, e.g. `'allowed' | 'exceeded'`. */
+  overageStatus?: string;
+  /** True iff the current turn is consuming overage budget. */
+  isUsingOverage?: boolean;
+  /** Bus auto-retry context, if the server is auto-retrying for us. */
+  autoRetry?: {
+    attempt: number;
+    maxAttempts: number;
+    backoffMs: number;
+    /** Wall-clock ms when the auto-retry will fire. */
+    retryAt: number;
+    reason: 'transient_overload' | 'rate_limit_hard';
+    agentName?: string;
+  };
+  /** Operator-toggled auto-retry pause. Manual retry button still works. */
+  paused: boolean;
+  /** True while a `retry_rate_limited` ClientMsg is in flight (debounce
+   *  the button + countdown to avoid double-fires). */
+  retryInFlight: boolean;
+};
+
 export type SessionView = {
   id: string;
   projectId: number;
@@ -64,7 +125,32 @@ export type SessionView = {
   // wait begin), or null when no turn is in flight. Anchors the thinking
   // indicator's elapsed timer. Set on send, cleared on result/error/replay.
   runStartedAt: number | null;
+  /**
+   * Cluster D Phase 4c (UI-D7): operator messages composed while the
+   * session is rate-limited. Capped at 3 per spec §4.2 — the 4th attempt
+   * is rejected and the composer shows a "queue full" hint. Drained
+   * automatically once `rateLimit` clears AND the session is not running
+   * (a drain effect in App.tsx watches both fields and shifts one at a
+   * time, sending each via the normal `send_message` / `multi_agent_user_
+   * prompt` path).
+   *
+   * Lives outside `rateLimit` because the queue must survive the moment
+   * of clearance: when `rateLimit` becomes `undefined`, the queue stays
+   * populated so the drain effect has something to read. Once the drain
+   * effect has shipped all items, the queue is empty again.
+   */
+  heldMessages: string[];
+  /**
+   * Cluster D Phase 4c: present iff the session has been observed under
+   * rate-limit state. Absence ⇔ "no banner, no countdown".
+   */
+  rateLimit?: RateLimitState;
 };
+
+/** Max number of messages the held-queue accepts before refusing new ones.
+ *  Per spec §4.2 (UI-D7). Exported so the composer can compute "queue full"
+ *  hints without re-asserting the constant. */
+export const HELD_MESSAGES_CAP = 3;
 
 /**
  * One inter-agent event as shown in the multi-agent scrollback. Mirrors the
@@ -410,7 +496,23 @@ export type Action =
   | { type: 'ma_dismiss_active' }
   | { type: 'ma_clear_awaiting' }
   | { type: 'ma_clear_pending_retry' }
-  | { type: 'ma_clear_pending_mutation' };
+  | { type: 'ma_clear_pending_mutation' }
+  // ---- Cluster D Phase 4c (UI-D7 + spec §4.2) -----------------------------
+  // Client-side rate-limit transitions. The server is stateless about retry
+  // cadence (per spec rationale: client owns it so pause survives tab close);
+  // these actions are the per-pane local edits the banner + composer make.
+  /** Composer captured a message while session is rate-limited. */
+  | { type: 'rl_enqueue_held'; sessionId: string; text: string }
+  /** Drop a single queued message (per spec UI-D7: operator can prune). */
+  | { type: 'rl_drop_held'; sessionId: string; index: number }
+  /** Pop the head of the queue after the drain effect ws-sent it. */
+  | { type: 'rl_drain_one'; sessionId: string }
+  /** Toggle auto-retry pause (manual retry still works while paused). */
+  | { type: 'rl_set_paused'; sessionId: string; paused: boolean }
+  /** Optimistically mark retryInFlight=true on operator/auto click; the
+   *  banner uses this to disable the retry button until the next
+   *  session_running echo. */
+  | { type: 'rl_retry_sent'; sessionId: string };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -465,6 +567,7 @@ export function reduce(state: AppState, action: Action): AppState {
           messages: [],
           streamingText: '',
           runStartedAt: Date.now(),
+          heldMessages: [],
         };
       }
 
@@ -668,6 +771,76 @@ export function reduce(state: AppState, action: Action): AppState {
           },
         },
       };
+    }
+
+    // ---- Cluster D Phase 4c rate-limit client-driven transitions ---------
+
+    case 'rl_enqueue_held': {
+      const pid = projectFor(state, action.sessionId);
+      if (pid === null) return state;
+      const session = state.sessionsByProject[pid]?.[action.sessionId];
+      if (!session) return state;
+      // Cap at HELD_MESSAGES_CAP (spec §4.2 / UI-D7). The composer also
+      // refuses past the cap, so this is defense-in-depth — silently
+      // drop overflow rather than throw.
+      if (session.heldMessages.length >= HELD_MESSAGES_CAP) return state;
+      return putSession(state, pid, action.sessionId, {
+        ...session,
+        heldMessages: [...session.heldMessages, action.text],
+      });
+    }
+
+    case 'rl_drop_held': {
+      const pid = projectFor(state, action.sessionId);
+      if (pid === null) return state;
+      const session = state.sessionsByProject[pid]?.[action.sessionId];
+      if (!session) return state;
+      if (action.index < 0 || action.index >= session.heldMessages.length) return state;
+      const next = session.heldMessages.slice();
+      next.splice(action.index, 1);
+      return putSession(state, pid, action.sessionId, {
+        ...session,
+        heldMessages: next,
+      });
+    }
+
+    case 'rl_drain_one': {
+      // The drain effect in App.tsx / MultiAgentTab.tsx has just ws-sent
+      // the head of the queue (via the normal `send_message` or
+      // `multi_agent_user_prompt` path). Pop it from the queue. Idempotent
+      // on an empty queue so a double-fire effect can't NRE.
+      const pid = projectFor(state, action.sessionId);
+      if (pid === null) return state;
+      const session = state.sessionsByProject[pid]?.[action.sessionId];
+      if (!session || session.heldMessages.length === 0) return state;
+      return putSession(state, pid, action.sessionId, {
+        ...session,
+        heldMessages: session.heldMessages.slice(1),
+      });
+    }
+
+    case 'rl_set_paused': {
+      const pid = projectFor(state, action.sessionId);
+      if (pid === null) return state;
+      const session = state.sessionsByProject[pid]?.[action.sessionId];
+      if (!session || !session.rateLimit) return state;
+      if (session.rateLimit.paused === action.paused) return state;
+      return putSession(state, pid, action.sessionId, {
+        ...session,
+        rateLimit: { ...session.rateLimit, paused: action.paused },
+      });
+    }
+
+    case 'rl_retry_sent': {
+      const pid = projectFor(state, action.sessionId);
+      if (pid === null) return state;
+      const session = state.sessionsByProject[pid]?.[action.sessionId];
+      if (!session || !session.rateLimit) return state;
+      if (session.rateLimit.retryInFlight) return state;
+      return putSession(state, pid, action.sessionId, {
+        ...session,
+        rateLimit: { ...session.rateLimit, retryInFlight: true },
+      });
     }
 
     case 'server':
@@ -1023,9 +1196,64 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       const live: Record<string, true> = { ...state.liveSessions };
       if (msg.running) live[msg.sessionId] = true;
       else delete live[msg.sessionId];
+
+      // Cluster D Phase 4c (spec §4.2): rate-limit slice lifecycle.
+      //
+      //  - status: 'rate_limited' arrives twice per held turn (once on the
+      //    hard rate_limit_event, once again on the finally-block running:
+      //    false echo). On either, ensure the slice exists so the banner
+      //    renders even before the typed `rate_limit_event` arrives
+      //    (defensive — `rate_limit_event` is the canonical countdown
+      //    source, but session_running is a useful flag-only fallback).
+      //  - status undefined (or 'thinking') indicates a normal running
+      //    transition. If a slice was in flight, it has now cleared — drop
+      //    it so the banner unmounts. Held messages stay queued; the
+      //    drain effect in App.tsx will ship them on the next tick.
+      //  - status: 'awaiting_continue' / 'paused' don't touch the
+      //    rate-limit slice (those belong to other recovery surfaces).
+      let sessions = state.sessionsByProject;
+      const projectMap = sessions[msg.projectId];
+      const existing = projectMap?.[msg.sessionId];
+      if (existing) {
+        const status = msg.status;
+        let nextRL: RateLimitState | undefined = existing.rateLimit;
+        if (status === 'rate_limited') {
+          // Preserve any prior countdown data; if the slice didn't exist
+          // yet (the typed rate_limit_event lost the race), seed a stub
+          // so the banner still mounts.
+          nextRL = nextRL ?? { paused: false, retryInFlight: false };
+          // Any in-flight retry has now been observed by the server (the
+          // running:true echo confirms the new run); clear the debounce.
+          nextRL = { ...nextRL, retryInFlight: false };
+        } else if (status === undefined || status === 'thinking') {
+          // Turn is back to normal — banner goes away.
+          nextRL = undefined;
+        }
+        if (nextRL !== existing.rateLimit) {
+          let updatedSession: SessionView;
+          if (nextRL === undefined) {
+            // Drop the `rateLimit` key entirely — `rateLimit: undefined`
+            // would type-narrow the same way but its lingering presence
+            // mucks up `Object.hasOwn` tests + JSON snapshot diffs.
+            const { rateLimit: dropped, ...rest } = existing;
+            void dropped;
+            updatedSession = rest as SessionView;
+          } else {
+            updatedSession = { ...existing, rateLimit: nextRL };
+          }
+          sessions = {
+            ...sessions,
+            [msg.projectId]: {
+              ...projectMap!,
+              [msg.sessionId]: updatedSession,
+            },
+          };
+        }
+      }
       return {
         ...state,
         liveSessions: live,
+        sessionsByProject: sessions,
         sessionToProject: {
           ...state.sessionToProject,
           [msg.sessionId]: msg.projectId,
@@ -1044,6 +1272,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         streamingText: '',
         // Replay is not a live wait — no elapsed timer for historical turns.
         runStartedAt: null,
+        heldMessages: [],
       };
       return {
         ...state,
@@ -1101,6 +1330,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           // Server announced a running session with no optimistic pending to
           // migrate (resume/attach) — anchor the timer now.
           runStartedAt: Date.now(),
+          heldMessages: [],
         };
       }
 
@@ -1351,31 +1581,103 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case 'rate_limit_event':
+    case 'rate_limit_event': {
+      // Cluster D Phase 4c (spec §4.1, B2): the typed rate_limit_event
+      // populates / updates / clears the per-session `rateLimit` slice
+      // that the RateLimitBanner reads. The dispatcher ALSO fans the
+      // same envelope into a `notification` (see server/src/notifications/
+      // dispatcher.ts) — UI-D6's banner↔toast dedup lives in
+      // `notifyFromServerMsg.ts`, which checks whether the banner is
+      // visible for this session and suppresses the duplicate toast.
+      //
+      // Status vocabulary (spec §4.1):
+      //   - 'hard'        → mount/refresh banner; carry countdown + overage.
+      //   - 'approaching' → leave banner alone (preview-only; not a held
+      //                     turn). The dispatcher's `cleared`/`hit` toast
+      //                     path covers operator visibility today.
+      //   - 'allowed'     → cleared. Drop the slice so the banner unmounts.
+      //
+      // Forward-compat: any unknown status leaves the slice as-is; the
+      // server stays the source of truth via session_running echoes.
+      const projectId = projectFor(state, msg.sessionId);
+      if (projectId === null) return state;
+      const session = state.sessionsByProject[projectId]?.[msg.sessionId];
+      if (!session) return state;
+      if (msg.status === 'allowed') {
+        if (!session.rateLimit) return state;
+        const { rateLimit: _drop, ...rest } = session;
+        void _drop;
+        return putSession(state, projectId, msg.sessionId, rest as SessionView);
+      }
+      if (msg.status !== 'hard') return state;
+      const prev = session.rateLimit ?? { paused: false, retryInFlight: false };
+      const next: RateLimitState = {
+        ...prev,
+        resetsAtMs: msg.resetsAtMs ?? prev.resetsAtMs,
+        overageStatus: msg.overageStatus ?? prev.overageStatus,
+        overageResetsAtMs: msg.overageResetsAtMs ?? prev.overageResetsAtMs,
+        isUsingOverage: msg.isUsingOverage ?? prev.isUsingOverage,
+        // Any in-flight retry is observed; new hard event means the retry
+        // was rejected at the same wall — clear the debounce.
+        retryInFlight: false,
+      };
+      return putSession(state, projectId, msg.sessionId, {
+        ...session,
+        rateLimit: next,
+      });
+    }
+
+    case 'auto_retry': {
+      // Cluster D Phase 4c: bus auto-retry signal — populates the
+      // `autoRetry` sub-field so the banner can render "attempt 2 of 5
+      // in 0:23". Single-agent auto-retry (reason: 'rate_limit_hard') is
+      // forward-declared by the protocol but Phase 4b/c keep the
+      // single-agent client-driven (the CountdownChip fires
+      // `retry_rate_limited { auto: true }` on elapse); this case ALSO
+      // accepts that variant so a future server-driven single-agent
+      // auto-retry path Just Works without further reducer changes.
+      const projectId = projectFor(state, msg.sessionId);
+      if (projectId === null) return state;
+      const session = state.sessionsByProject[projectId]?.[msg.sessionId];
+      if (!session) return state;
+      const prev = session.rateLimit ?? { paused: false, retryInFlight: false };
+      const next: RateLimitState = {
+        ...prev,
+        autoRetry: {
+          attempt: msg.attempt,
+          maxAttempts: msg.maxAttempts,
+          backoffMs: msg.backoffMs,
+          retryAt: msg.retryAt,
+          reason: msg.reason,
+          ...(msg.agentName !== undefined ? { agentName: msg.agentName } : {}),
+        },
+      };
+      return putSession(state, projectId, msg.sessionId, {
+        ...session,
+        rateLimit: next,
+      });
+    }
+
     case 'env_scrubbed':
     case 'session_superseded':
     case 'chain_not_reconstructed':
     case 'bus_auto_installed':
     case 'tool_denied':
     case 'session_reconstructed':
-    case 'auto_retry':
       // Cluster A Phase 3+4+6: the dispatcher fans every one of these into a
       // matching `notification` envelope (see `server/src/notifications/
       // dispatcher.ts`); the dock owns the operator-facing surface. The
       // typed events themselves are kept on the wire for forward-compat
-      // non-toast consumers (E1 ignored-variables inspector, D B2 rate-limit
-      // banner, Cluster D session-recovery surface for `session_superseded`
-      // / `chain_not_reconstructed` / `session_reconstructed`, Phase 5
+      // non-toast consumers (E1 ignored-variables inspector, Cluster D
+      // session-recovery surface for `session_superseded` /
+      // `chain_not_reconstructed` / `session_reconstructed`, Phase 5
       // install inspector for `bus_auto_installed`, future tool-policy
       // diagnostics for `tool_denied`) — when those land, they'll consume
       // the typed event here and dispatch session/banner state. No reducer
       // state changes for now. (`router_drop` exited this list in Phase 6d
       // — it now accumulates onto `active.routerDrops` for the counter
-      // chip in the activity bar.)
-      //
-      // `auto_retry` (Cluster D Phase 4a) joins the list as a forward-decl:
-      // Phase 4c's RateLimitBanner reducer state will graduate it out of
-      // this no-op block.
+      // chip in the activity bar; `rate_limit_event` / `auto_retry`
+      // exited in Phase 4c — see above.)
       return state;
 
     case 'project_authority':
@@ -1411,6 +1713,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         messages: [],
         streamingText: '',
         runStartedAt: null,
+        heldMessages: [],
       };
       return {
         ...putSession(state, projectId, sessionId, {
