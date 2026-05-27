@@ -16,6 +16,8 @@ import {
   listMultiAgentEvents,
   listMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
+  archiveMultiAgentSession,
+  unarchiveMultiAgentSession,
   listParticipants,
   listResolvedParticipants,
   recordSessionTeardown,
@@ -107,6 +109,64 @@ describe('listMultiAgentSessionsWithIteration', () => {
 
     const rows = listMultiAgentSessionsWithIteration();
     expect(rows.map((r) => r.id)).toEqual(['newer', 'older']);
+  });
+});
+
+describe('Cluster D Phase 1 — archive column (migration 017)', () => {
+  test('archived defaults to 0 for new sessions', () => {
+    const row = createMultiAgentSession('s1', 'chain', '001');
+    expect(row.archived).toBe(0);
+  });
+
+  test('archiveMultiAgentSession flips 0→1; returns true', () => {
+    createMultiAgentSession('s1', 'chain', '001');
+    expect(archiveMultiAgentSession('s1')).toBe(true);
+    const rows = listMultiAgentSessions();
+    expect(rows[0]!.archived).toBe(1);
+  });
+
+  test('archive is idempotent — second archive returns false (no row changed)', () => {
+    createMultiAgentSession('s1', 'chain', '001');
+    archiveMultiAgentSession('s1');
+    expect(archiveMultiAgentSession('s1')).toBe(false);
+  });
+
+  test('archive on unknown id returns false', () => {
+    expect(archiveMultiAgentSession('nope')).toBe(false);
+  });
+
+  test('listMultiAgentSessionsWithIteration excludes archived by default', () => {
+    createMultiAgentSession('a', 'chain', '001');
+    createMultiAgentSession('b', 'chain', '002');
+    archiveMultiAgentSession('a');
+    const rows = listMultiAgentSessionsWithIteration();
+    expect(rows.map((r) => r.id)).toEqual(['b']);
+  });
+
+  test('listMultiAgentSessionsWithIteration({ includeArchived: true }) surfaces archived rows', () => {
+    createMultiAgentSession('a', 'chain', '001');
+    // Force distinct started_at so the DESC sort is deterministic.
+    const t = Date.now();
+    while (Date.now() === t) {
+      /* spin */
+    }
+    createMultiAgentSession('b', 'chain', '002');
+    archiveMultiAgentSession('a');
+    const rows = listMultiAgentSessionsWithIteration({ includeArchived: true });
+    expect(rows.map((r) => r.id).sort()).toEqual(['a', 'b']);
+  });
+
+  test('unarchiveMultiAgentSession reverses archive; subsequent default-list includes the row', () => {
+    createMultiAgentSession('a', 'chain', '001');
+    archiveMultiAgentSession('a');
+    expect(unarchiveMultiAgentSession('a')).toBe(true);
+    const rows = listMultiAgentSessionsWithIteration();
+    expect(rows.map((r) => r.id)).toEqual(['a']);
+  });
+
+  test('unarchive on a non-archived row returns false', () => {
+    createMultiAgentSession('a', 'chain', '001');
+    expect(unarchiveMultiAgentSession('a')).toBe(false);
   });
 });
 
