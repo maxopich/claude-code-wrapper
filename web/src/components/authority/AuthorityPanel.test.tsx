@@ -148,7 +148,7 @@ describe('AuthorityPanel — cache-miss empty state', () => {
 });
 
 describe('AuthorityPanel — ready state', () => {
-  test('renders all Phase 6b + 6c sections', () => {
+  test('renders all Phase 6b + 6c + 8 sections', () => {
     const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
     act(() => {
       handlerRef.current!({
@@ -166,11 +166,65 @@ describe('AuthorityPanel — ready state', () => {
     expect(titles).toContain('Allow / deny rules');
     expect(titles).toContain('Env injection scan');
     expect(titles).toContain('Hooks');
+    // Phase 8 additions:
+    expect(titles).toContain('Slash commands');
+    expect(titles).toContain('Skills');
+    expect(titles).toContain('Sub-agents');
     // Tools count badge should show 1.
     const toolsSection = Array.from(
       container.querySelectorAll<HTMLElement>('.authority-section'),
     ).find((s) => s.querySelector('.authority-section-title')?.textContent === 'Tools')!;
     expect(toolsSection.querySelector('.authority-section-count')?.textContent).toBe('1');
+  });
+
+  test('Phase 8 sections show counts derived from the authority snapshot', () => {
+    const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority({
+          slashCommands: ['/help', '/clear', '/compact'],
+          skills: ['skill-a', 'skill-b'],
+          agents: ['planner', 'explorer', 'reviewer', 'general'],
+        }),
+      });
+    });
+    const findSection = (title: string) =>
+      Array.from(container.querySelectorAll<HTMLElement>('.authority-section')).find(
+        (s) => s.querySelector('.authority-section-title')?.textContent === title,
+      )!;
+    expect(
+      findSection('Slash commands').querySelector('.authority-section-count')?.textContent,
+    ).toBe('3');
+    expect(findSection('Skills').querySelector('.authority-section-count')?.textContent).toBe('2');
+    expect(findSection('Sub-agents').querySelector('.authority-section-count')?.textContent).toBe(
+      '4',
+    );
+  });
+
+  test('Phase 8 sections show "none enumerated/declared" sublabel when empty', () => {
+    const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority(),
+      });
+    });
+    const findSection = (title: string) =>
+      Array.from(container.querySelectorAll<HTMLElement>('.authority-section')).find(
+        (s) => s.querySelector('.authority-section-title')?.textContent === title,
+      )!;
+    expect(
+      findSection('Slash commands').querySelector('.authority-section-sublabel')?.textContent,
+    ).toBe('none enumerated');
+    expect(findSection('Skills').querySelector('.authority-section-sublabel')?.textContent).toBe(
+      'none enumerated',
+    );
+    expect(
+      findSection('Sub-agents').querySelector('.authority-section-sublabel')?.textContent,
+    ).toBe('none declared');
   });
 
   test('Env injection scan force-opens when any injection is detected', () => {

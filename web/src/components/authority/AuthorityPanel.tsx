@@ -7,6 +7,9 @@ import { McpServersList } from './McpServersList';
 import { AllowDenyView } from './AllowDenyView';
 import { EnvScrubInspector } from './EnvScrubInspector';
 import { HooksList } from './HooksList';
+import { SlashCommandsList } from './SlashCommandsList';
+import { SkillsList } from './SkillsList';
+import { SubAgentsList } from './SubAgentsList';
 
 // Cluster B Phase 6b (UI-B1): host that composes the authority sections.
 //
@@ -194,8 +197,35 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       >
         <HooksList hooks={authority.hooks} />
       </AuthoritySection>
-      {/* Phase 6d adds RouterDropsCounter/Log. Phase 8 adds the
-       *  SlashCommandsList / SkillsList / SubAgentsList cards. */}
+      {/* Phase 8 — UI-B41 / B42 / B43: the three name-only enumerations
+       *  from the SDK init payload. All collapsed-by-default since their
+       *  contents are read-only enumerations and the operator only digs
+       *  in when triaging a specific question ("did /foo land?", "is
+       *  this skill loaded?", "is sub-agent X declared?"). */}
+      <AuthoritySection
+        title="Slash commands"
+        count={authority.slashCommands.length}
+        sublabel={authority.slashCommands.length === 0 ? 'none enumerated' : undefined}
+        defaultOpen={false}
+      >
+        <SlashCommandsList commands={authority.slashCommands} />
+      </AuthoritySection>
+      <AuthoritySection
+        title="Skills"
+        count={authority.skills.length}
+        sublabel={authority.skills.length === 0 ? 'none enumerated' : undefined}
+        defaultOpen={false}
+      >
+        <SkillsList skills={authority.skills} />
+      </AuthoritySection>
+      <AuthoritySection
+        title="Sub-agents"
+        count={authority.agents.length}
+        sublabel={authority.agents.length === 0 ? 'none declared' : undefined}
+        defaultOpen={false}
+      >
+        <SubAgentsList agents={authority.agents} />
+      </AuthoritySection>
     </div>
   );
 }
