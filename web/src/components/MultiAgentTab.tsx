@@ -24,6 +24,7 @@ import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
 import { RouterDropsCounter } from './authority/RouterDropsCounter';
+import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
 import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
 import type { ModalOrigin } from './templatePreview/TemplatePreviewModal';
@@ -381,6 +382,11 @@ function DraftView(props: {
                       >
                         ×
                       </button>
+                      {/* Cluster B Phase 6e (UI-B8): per-participant
+                       *  authority inspect button. Opens the preflight modal
+                       *  scoped to JUST this project. Cebab-injected MCPs +
+                       *  TOFU + env injections all surface here. */}
+                      <DraftParticipantAuthorityButton projectId={p.id} />
                     </div>
                   </li>
                 ))}
@@ -508,6 +514,15 @@ function DraftView(props: {
 
       {validation !== null && (
         <p className="multi-agent-warning multi-agent-warning-composer">{validation}</p>
+      )}
+      {/* Cluster B Phase 6e (UI-B8): composer-adjacent [Inspect authority]
+       *  ghost-btn opens the AuthorityPreflightModal in aggregate mode
+       *  (one panel per participant project). Only renders when there's at
+       *  least one participant — empty draft has nothing to inspect. */}
+      {participants.length > 0 && (
+        <div className="multi-agent-inspect-row">
+          <DraftInspectAuthorityButton projectIds={participants.map((p) => p.id)} />
+        </div>
       )}
       <MultiAgentComposer
         mode={props.mode}
@@ -1641,6 +1656,27 @@ function SessionSettingsPanel(props: {
           )}
         </dd>
 
+        {/* Cluster B Phase 6e (UI-B9): authority inspector entry-point.
+         *  Lives between Hop budget (the capacity row) and Mutations (the
+         *  consequence row) per spec — authority is the *predicate* for
+         *  what each participant can do. The button opens the
+         *  AuthorityPreflightModal in aggregate mode (one panel per
+         *  participant project); the dl row stays compact. */}
+        {(() => {
+          const participantProjectIds = workerSlugs
+            .map((slug) => props.projects.find((p) => p.busAgentName === slug)?.id)
+            .filter((id): id is number => typeof id === 'number');
+          if (participantProjectIds.length === 0) return null;
+          return (
+            <>
+              <dt>Authority</dt>
+              <dd>
+                <SessionSettingsAuthorityButton projectIds={participantProjectIds} />
+              </dd>
+            </>
+          );
+        })()}
+
         {run.mutations.length > 0 && (
           <>
             <dt>Mutations</dt>
@@ -2323,6 +2359,87 @@ function ArtifactsDisclosure(props: { run: MultiAgentRun }) {
         {open ? '▾' : '▸'} {count} artifact{count === 1 ? '' : 's'}
       </button>
       {open && <ArtifactsView run={props.run} />}
+    </>
+  );
+}
+
+/**
+ * Cluster B Phase 6e (UI-B9): in-session entry-point to the authority
+ * inspector. Keeps the SessionSettingsPanel dl tight (button + modal) rather
+ * than inlining a full panel. The modal opens in aggregate mode, one
+ * AuthorityPanel per participant project.
+ */
+function SessionSettingsAuthorityButton(props: { projectIds: number[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        className="ghost-btn ma-mutations-toggle"
+        onClick={() => setOpen(true)}
+        aria-label="Inspect resolved authority for all participants"
+        title="Open the AuthorityPanel preflight inspector (one panel per participant project)"
+      >
+        ▸ Inspect {props.projectIds.length} participant
+        {props.projectIds.length === 1 ? '' : 's'}…
+      </button>
+      {open && (
+        <AuthorityPreflightModal projectIds={props.projectIds} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+/**
+ * Cluster B Phase 6e (UI-B8 / DraftView per-participant): trailing icon
+ * button on each participant row. Opens the preflight modal scoped to ONE
+ * project — sibling pattern to the +new-chat ⓘ in ProjectList.
+ */
+function DraftParticipantAuthorityButton(props: { projectId: number }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        className="icon-btn"
+        title="Inspect resolved authority (tools, MCP servers, env, hooks) before starting"
+        aria-label="Inspect authority for this participant"
+        onClick={() => setOpen(true)}
+      >
+        ⓘ
+      </button>
+      {open && (
+        <AuthorityPreflightModal projectIds={[props.projectId]} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
+}
+
+/**
+ * Cluster B Phase 6e (UI-B8 / DraftView composer): aggregate-mode inspect
+ * button next to the composer textarea. Opens the preflight modal with
+ * every participant project so the operator can review authority across
+ * the whole draft before clicking Start.
+ */
+function DraftInspectAuthorityButton(props: { projectIds: number[] }) {
+  const [open, setOpen] = useState(false);
+  const label =
+    props.projectIds.length === 1
+      ? 'Inspect authority'
+      : `Inspect authority · ${props.projectIds.length} participants`;
+  return (
+    <>
+      <button
+        type="button"
+        className="ghost-btn multi-agent-inspect-btn"
+        onClick={() => setOpen(true)}
+        title="Open the AuthorityPanel preflight inspector for every participant in this draft"
+      >
+        {label}
+      </button>
+      {open && (
+        <AuthorityPreflightModal projectIds={props.projectIds} onClose={() => setOpen(false)} />
+      )}
     </>
   );
 }

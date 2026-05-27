@@ -6756,3 +6756,80 @@ pre {
   word-break: break-all;
 }
 
+/* ---- Cluster B Phase 6e: placement integration ------------------------- */
+
+/* +new-chat row trailing ⓘ button. Compact, hidden until row is hovered so
+ * it doesn't compete with the row's primary "new chat" affordance. */
+.session-row-authority-btn {
+  background: transparent;
+  border: none;
+  color: var(--fg-3);
+  font-size: var(--t-sm);
+  padding: 0 4px;
+  margin-left: auto;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease;
+}
+.session-row:hover .session-row-authority-btn,
+.session-row-authority-btn:focus-visible {
+  opacity: 1;
+  color: var(--accent-ink, var(--accent));
+  outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-row-authority-btn {
+    transition: none;
+  }
+}
+
+/* ChatHeaderChip Phase 6e wrapper — keeps the chip + the new [Authority…]
+ * link visually grouped without changing the chip's geometry. */
+.trust-chip-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.trust-chip-authority-link {
+  background: transparent;
+  border: none;
+  color: var(--accent-ink, var(--accent));
+  font-size: var(--t-xs);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  padding: 0;
+}
+.trust-chip-authority-link:hover,
+.trust-chip-authority-link:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
+/* AuthorityPreflightModal sizing — wider than the gate modals because it
+ * mounts a full AuthorityPanel (potentially several stacked in aggregate
+ * mode). The .gate-modal base supplies the chrome. */
+.authority-preflight-modal {
+  width: min(960px, 95vw);
+  max-height: 90vh;
+}
+.authority-preflight-panels {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+/* DraftView composer-adjacent [Inspect authority] ghost-btn row. */
+.multi-agent-inspect-row {
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 8px;
+}
+.multi-agent-inspect-btn {
+  font-size: var(--t-xs);
+  padding: 4px 10px;
+}
+

@@ -29,6 +29,8 @@ import {
   useNotificationsActions,
 } from './components/notifications';
 import { GateModalsProvider } from './components/authority/GateModalsContext';
+import { AuthorityProvider } from './components/authority/AuthorityContext';
+import { AuthorityPanel } from './components/authority/AuthorityPanel';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -95,6 +97,11 @@ export function App() {
   // this ref into the GateModalsProvider's queue. The provider then
   // surfaces a modal whose Submit ships the matching ClientMsg.
   const gateHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  // Cluster B Phase 6e: bridge for the AuthorityProvider. Same shape as the
+  // inbox / gate handlers — App.tsx's onMessage routes `project_authority`
+  // ServerMsgs through this ref into the provider's per-project cache. Every
+  // mounted `<AuthorityPanel>` reads from that cache via `useAuthoritySlot`.
+  const authorityHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -109,21 +116,29 @@ export function App() {
   const gateSend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
+  // Cluster B Phase 6e: ClientMsg sink for the AuthorityProvider — pipes
+  // `get_project_authority` requests onto the active WS.
+  const authoritySend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
 
   return (
     <NotificationsProvider onAck={handleAck}>
       <NotificationsBridge pushRef={notifPushRef} dismissRef={notifDismissRef} />
       <InboxProvider send={inboxSend} handlerRef={inboxHandlerRef}>
         <GateModalsProvider send={gateSend} handlerRef={gateHandlerRef}>
-          <AppShell
-            wsRef={wsRef}
-            notifPushRef={notifPushRef}
-            notifDismissRef={notifDismissRef}
-            inboxHandlerRef={inboxHandlerRef}
-            gateHandlerRef={gateHandlerRef}
-            onAck={handleAck}
-          />
-          <NotificationStack />
+          <AuthorityProvider send={authoritySend} handlerRef={authorityHandlerRef}>
+            <AppShell
+              wsRef={wsRef}
+              notifPushRef={notifPushRef}
+              notifDismissRef={notifDismissRef}
+              inboxHandlerRef={inboxHandlerRef}
+              gateHandlerRef={gateHandlerRef}
+              authorityHandlerRef={authorityHandlerRef}
+              onAck={handleAck}
+            />
+            <NotificationStack />
+          </AuthorityProvider>
         </GateModalsProvider>
       </InboxProvider>
     </NotificationsProvider>
@@ -172,6 +187,12 @@ type AppShellProps = {
    * dispatch so the modal queue and store stay independent.
    */
   gateHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cluster B Phase 6e: bridge ref the AuthorityProvider populates. Same
+   * pattern — onMessage routes `project_authority` envelopes here after the
+   * reducer; the provider caches per project for every mounted AuthorityPanel.
+   */
+  authorityHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
@@ -182,6 +203,7 @@ function AppShell({
   notifDismissRef,
   inboxHandlerRef,
   gateHandlerRef,
+  authorityHandlerRef,
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -401,6 +423,15 @@ function AppShell({
             gateHandlerRef.current?.(msg);
           } catch (err) {
             console.error('[gate-modals] handler threw', err);
+          }
+          // Cluster B Phase 6e: hand to the AuthorityProvider bridge so
+          // `project_authority` envelopes land in the per-project cache that
+          // every mounted AuthorityPanel reads from. Same narrow-filter
+          // posture — non-authority messages are dropped.
+          try {
+            authorityHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[authority] handler threw', err);
           }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
@@ -966,7 +997,11 @@ function AppShell({
                 {session && !isSessionPending(session.id) && (
                   <div className="chat-header">
                     {activeProject && (
-                      <ChatHeaderChip trusted={activeProject.trusted} mode={permissionMode} />
+                      <ChatHeaderChip
+                        trusted={activeProject.trusted}
+                        mode={permissionMode}
+                        projectId={activeProject.id}
+                      />
                     )}
                     <ModeToggle
                       mode={permissionMode}
@@ -975,6 +1010,14 @@ function AppShell({
                     />
                     <SlashCommandButtons disabled={inputDisabled} onSend={sendMessage} />
                   </div>
+                )}
+                {/* Cluster B Phase 6e (UI-B7): in-session authority disclosure.
+                 *  Sections inside are collapsed by default — the panel
+                 *  header itself is a thin row with Refresh, so the
+                 *  operator's chat scrollback isn't pushed down meaningfully
+                 *  on first paint. */}
+                {session && !isSessionPending(session.id) && activeProject && (
+                  <AuthorityPanel projectId={activeProject.id} mode="in-session" />
                 )}
                 <ChatView
                   session={session}
