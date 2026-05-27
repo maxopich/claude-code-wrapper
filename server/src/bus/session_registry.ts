@@ -24,6 +24,7 @@ import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
   RouterDropReasonCode,
+  ServerMsg,
 } from '@cebab/shared/protocol';
 
 /** The WS-facing sink. Swapped on reconnect, silenced on detach. Identical
@@ -66,6 +67,15 @@ export type BusSink = {
     kind: string;
     auditRowId: string;
   }) => void;
+  /**
+   * Cluster A Phase 4: generic ServerMsg sender for new typed events
+   * (`session_superseded`, `chain_not_reconstructed`, `bus_auto_installed`,
+   * dangerous-mutation safety notifications) and for direct dispatcher.emit
+   * fan-out. Subsumes the narrower Phase 3 typed callbacks for new sites;
+   * the existing `sendNotification` / `sendRouterDrop` callbacks above stay
+   * to preserve the wire shape Phase 3 tests assert.
+   */
+  sendServerMsg?: (msg: ServerMsg) => void;
 };
 
 /** A sink that drops everything — installed by `detach()` so a still-running
@@ -78,6 +88,7 @@ export const NOOP_SINK: BusSink = {
   onPendingMutation: () => {},
   sendNotification: () => {},
   sendRouterDrop: () => {},
+  sendServerMsg: () => {},
 };
 
 /**

@@ -960,6 +960,64 @@ export type ServerMsg =
       type: 'env_scrubbed';
       /** Names of the env vars present in `process.env` that were stripped. */
       vars: string[];
+    }
+  | {
+      /**
+       * Cluster A Phase 4 (D3): inverts the silent `markCrashedSilent` sweep
+       * at `bus/resume.ts:117` — when a newer multi-agent session became
+       * active while an older one was still marked `running` (e.g. a
+       * mid-turn server restart followed by the operator starting a fresh
+       * iteration), the older row is now reported on the wire alongside the
+       * crashed marker so the operator can `Reopen` (will sweep the current
+       * session) or `Archive` (acknowledge and move on) per UX-6.
+       *
+       * `supersedingSessionId` / `supersedingTs` identify which iteration
+       * displaced this one — the toast's CTA needs them to disambiguate
+       * "reopen this" from "reopen any prior crash".
+       */
+      type: 'session_superseded';
+      /** The orphaned session that was just marked crashed. */
+      sessionId: string;
+      /** The session that displaced it (newest active row at resume time). */
+      supersedingSessionId: string;
+      /** Wall-clock ms of the displacing session's `started_at` row. */
+      supersedingTs: number;
+    }
+  | {
+      /**
+       * Cluster A Phase 4 (D2 precursor): emitted from
+       * `bus/reconstruct.ts` immediately BEFORE the chain-mode
+       * fall-back to `multi_agent_ended { reason: 'crashed' }` (BE-11).
+       *
+       * Chain reconstruction is intentionally deferred (orchestrator R-B
+       * only in v1), so a server restart over a `running` chain row
+       * silently dropped it. This typed event surfaces the bail-out so the
+       * operator dock can render a warn toast naming the affected session;
+       * Cluster D's wider session-recovery surface will subsume it.
+       */
+      type: 'chain_not_reconstructed';
+      sessionId: string;
+      /** Human-readable bail reason (currently always "chain mode deferred"). */
+      reason: string;
+    }
+  | {
+      /**
+       * Cluster A Phase 4 (D6/D11): split out of the
+       * `multi_agent_participant_added` echo when
+       * `busWasAlreadyInstalled === false`. The participant-added wire
+       * already carried the boolean flag, but no operator-visible event
+       * fired — the sidebar bus-installed dot just flipped silently. This
+       * makes the auto-install observable as a typed event; the dispatcher
+       * fans it out as an info-tier toast.
+       *
+       * Same project + agent identifiers as the participant_added echo so
+       * a single deep-link inspector ("View install log" CTA in Phase 5)
+       * can resolve back to both.
+       */
+      type: 'bus_auto_installed';
+      sessionId: string;
+      projectId: number;
+      agentName: string;
     };
 
 /**

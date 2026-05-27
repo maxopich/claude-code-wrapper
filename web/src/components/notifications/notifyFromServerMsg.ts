@@ -18,12 +18,19 @@ import type { NotificationEnvelope, ServerMsg } from '@cebab/shared/protocol';
  *   - `router_drop` (orchestrator + chain F2/F3 drop sites → dispatcher.emit safety)
  *   - `env_scrubbed` (every WS attach → dispatcher.emit safety)
  *
+ * Phase 4 wires four more sources server-side:
+ *   - `session_superseded` (bus/resume.ts → dispatcher.emit warn)
+ *   - `chain_not_reconstructed` (bus/resume.ts → dispatcher.emit warn)
+ *   - `bus_auto_installed` (add_multi_agent_participant → dispatcher.emit info)
+ *   - dangerous-mutation safety toast (onMutation closure → dispatcher.emit danger)
+ *
  * The dispatcher fans each into a matching `notification` envelope, which
  * is what this table consumes (via the existing `'notification'` pass-through
  * case). The typed events also ship on the wire for future non-toast
- * consumers (Cluster B routing-trail counter, E1 inspector, D B2 banner) —
- * if you find yourself adding more cases here for Phase 3 sources, you're
- * probably double-toasting; route via the dispatcher instead.
+ * consumers (Cluster B routing-trail counter, E1 inspector, D B2 banner,
+ * D session-recovery surface) — if you find yourself adding more cases
+ * here for Phase 3/4 sources, you're probably double-toasting; route via
+ * the dispatcher instead.
  */
 
 const PHASE_2_WRAPPER_DEDUPE_KEY_PREFIX = 'wrap';

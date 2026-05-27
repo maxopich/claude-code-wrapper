@@ -198,6 +198,10 @@ export type StartOrchestratorOpts = {
   /** Cluster A Phase 3 (D4): forward-compat typed `router_drop` ServerMsg
    *  fan-out for non-toast consumers. */
   sendRouterDrop?: BusSink['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender for new typed events
+   *  (dangerous-mutation safety toast, future bus-runtime events) and
+   *  dispatcher.emit. Threaded into the router's BusSink. */
+  sendServerMsg?: BusSink['sendServerMsg'];
   /** PR-7: the saved-template id this run was started from, if any. Stamped
    *  onto the row so the templates UI's "Last run" rail can SELECT by
    *  template later. Absent for ad-hoc runs. */
@@ -212,6 +216,8 @@ export type ResumeOrchestratorOpts = {
    *  continue to reach the new WS sink. Optional for tests + legacy callers. */
   sendNotification?: BusSink['sendNotification'];
   sendRouterDrop?: BusSink['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender for the rebound sink. */
+  sendServerMsg?: BusSink['sendServerMsg'];
 };
 
 export type AddWorkerResult = {
@@ -309,6 +315,10 @@ export function createOrchestratorRouter(params: {
   /** Cluster A Phase 3 (D4): forward-compat typed `router_drop` ServerMsg
    *  for non-toast consumers. Threaded onto `BusSink.sendRouterDrop`. */
   sendRouterDrop?: BusSink['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender. Threaded onto
+   *  `BusSink.sendServerMsg` so the rebound sink keeps shipping the
+   *  dangerous-mutation safety toast + future bus-runtime events. */
+  sendServerMsg?: BusSink['sendServerMsg'];
 }): OrchestratorRouter {
   const {
     sessionId,
@@ -330,6 +340,7 @@ export function createOrchestratorRouter(params: {
     onPendingRetry: params.onPendingRetry,
     sendNotification: params.sendNotification,
     sendRouterDrop: params.sendRouterDrop,
+    sendServerMsg: params.sendServerMsg,
   };
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
@@ -799,6 +810,8 @@ export function wireOrchestratorSession(p: {
   sendNotification?: StartOrchestratorOpts['sendNotification'];
   /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
   sendRouterDrop?: StartOrchestratorOpts['sendRouterDrop'];
+  /** Cluster A Phase 4: generic ServerMsg sender threaded into the router. */
+  sendServerMsg?: StartOrchestratorOpts['sendServerMsg'];
   seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
   briefedAgents?: ReadonlyArray<string>;
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
@@ -1091,6 +1104,7 @@ export function wireOrchestratorSession(p: {
     onPendingRetry: p.onPendingRetry,
     sendNotification: p.sendNotification,
     sendRouterDrop: p.sendRouterDrop,
+    sendServerMsg: p.sendServerMsg,
   });
 
   async function addWorker(projectId: number): Promise<AddWorkerResult> {
@@ -1298,6 +1312,7 @@ export async function startOrchestratorSession(
     onPendingMutation: opts.onPendingMutation,
     sendNotification: opts.sendNotification,
     sendRouterDrop: opts.sendRouterDrop,
+    sendServerMsg: opts.sendServerMsg,
     hopBudget: opts.hopBudget,
     pauseOnMutation: opts.pauseOnMutation,
   });
@@ -1348,6 +1363,7 @@ export async function resumeOrchestratorSession(
     onEnded: opts.onEnded,
     sendNotification: opts.sendNotification,
     sendRouterDrop: opts.sendRouterDrop,
+    sendServerMsg: opts.sendServerMsg,
   });
   return live.handle as unknown as OrchestratorSessionHandle;
 }
