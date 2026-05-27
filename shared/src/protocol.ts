@@ -629,6 +629,44 @@ export type ServerMsg =
       projectId: number;
       model: string;
       tools: string[];
+      // Cluster B Phase 2 (BE-B1, B1 / F1 / E1 / agentic-reviewer §11):
+      // The SDK init payload (SDKSystemMessage subtype 'init') is rich —
+      // cwd, permissionMode, apiKeySource, slash_commands, skills, agents,
+      // plugins, mcp_servers (with status), output_style, fast_mode_state,
+      // memory_paths — but Cebab was forwarding only model + tools and
+      // silently dropping the rest. The B1 "data on wire, nothing rendered"
+      // audit (critical/B-authority-transparency.md §1) names this as the
+      // single biggest gap.
+      //
+      // All new fields are OPTIONAL so old clients ignore them and the
+      // translator can omit anything the SDK doesn't ship (forward-compat:
+      // SDK adds a new init field → we surface nothing for it until protocol
+      // catches up; CI doesn't break). The translator at server/src/ws/
+      // translate.ts is the only producer; it mirrors the SDK shape verbatim
+      // and the AuthorityPanel (Phase 6+) is the only consumer.
+      //
+      // Wire cost: a few hundred bytes per turn — accepted (spec R-B5).
+      // Persistence: the most recent init lands in Conn.inFlight per session
+      // so `get_project_authority { mode: 'cache' }` (Phase 3) can return
+      // the snapshot without re-spawning the SDK.
+      cwd?: string;
+      permissionMode?:
+        | 'default'
+        | 'acceptEdits'
+        | 'bypassPermissions'
+        | 'plan'
+        | 'dontAsk'
+        | 'auto';
+      apiKeySource?: 'user' | 'project' | 'org' | 'temporary' | 'oauth';
+      claudeCodeVersion?: string;
+      outputStyle?: string;
+      fastModeState?: 'off' | 'cooldown' | 'on';
+      memoryPaths?: { auto?: string; [k: string]: string | undefined };
+      mcpServers?: { name: string; status: string }[];
+      slashCommands?: string[];
+      skills?: string[];
+      agents?: string[];
+      plugins?: { name: string; path: string }[];
     }
   | { type: 'assistant_message'; sessionId: string; uuid: string; blocks: ContentBlock[] }
   | { type: 'user_message'; sessionId: string; uuid: string; blocks: ContentBlock[] }

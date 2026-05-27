@@ -34,9 +34,34 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
   switch (m.type) {
     case 'system':
       if (m.subtype === 'init') {
+        // Cluster B Phase 2 (BE-B1): stop dropping the rich SDK init payload.
+        // The SDK's SDKSystemMessage subtype 'init' carries cwd,
+        // permission_mode, apiKeySource, slash_commands, skills, agents,
+        // plugins, mcp_servers (with per-server status), output_style,
+        // fast_mode_state, claude_code_version, memory_paths — all of which
+        // Cebab silently dropped pre-Phase-2.
+        //
+        // We forward verbatim and let the AuthorityPanel (Phase 6+) render.
+        // Missing fields on the SDK side stay undefined on the wire (the
+        // schema is fully-optional); old clients ignore the extras.
+        //
+        // snake_case on the SDK → camelCase on the wire (Cebab convention
+        // across the rest of protocol.ts).
         const init = m as AnyMsg & {
           model: string;
           tools: string[];
+          cwd?: string;
+          permission_mode?: string;
+          apiKeySource?: string;
+          claude_code_version?: string;
+          output_style?: string;
+          fast_mode_state?: string;
+          memory_paths?: { auto?: string; [k: string]: string | undefined };
+          mcp_servers?: { name: string; status: string }[];
+          slash_commands?: string[];
+          skills?: string[];
+          agents?: string[];
+          plugins?: { name: string; path: string }[];
         };
         return {
           type: 'session_started',
@@ -44,6 +69,29 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
           projectId,
           model: init.model,
           tools: init.tools ?? [],
+          ...(init.cwd !== undefined && { cwd: init.cwd }),
+          ...(init.permission_mode !== undefined && {
+            // PermissionMode union is enforced at the protocol type, but the
+            // SDK may add new variants — we cast and forward, the client
+            // gracefully ignores unknowns.
+            permissionMode: init.permission_mode as 'default' | 'acceptEdits' | 'bypassPermissions',
+          }),
+          ...(init.apiKeySource !== undefined && {
+            apiKeySource: init.apiKeySource as 'user' | 'project' | 'org' | 'temporary' | 'oauth',
+          }),
+          ...(init.claude_code_version !== undefined && {
+            claudeCodeVersion: init.claude_code_version,
+          }),
+          ...(init.output_style !== undefined && { outputStyle: init.output_style }),
+          ...(init.fast_mode_state !== undefined && {
+            fastModeState: init.fast_mode_state as 'off' | 'cooldown' | 'on',
+          }),
+          ...(init.memory_paths !== undefined && { memoryPaths: init.memory_paths }),
+          ...(init.mcp_servers !== undefined && { mcpServers: init.mcp_servers }),
+          ...(init.slash_commands !== undefined && { slashCommands: init.slash_commands }),
+          ...(init.skills !== undefined && { skills: init.skills }),
+          ...(init.agents !== undefined && { agents: init.agents }),
+          ...(init.plugins !== undefined && { plugins: init.plugins }),
         };
       }
       return {
