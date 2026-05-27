@@ -11,6 +11,8 @@ import type {
 import { SCRUBBED_ENV_POSTURES, SCRUBBED_ENV_VAR_NAMES } from '../runner/claude.js';
 import { getProject } from './projects.js';
 import { checkTrust, computeBinarySha, listForServer } from './mcp_trust.js';
+import { listSessionsForProject } from './sessions.js';
+import { getDb } from '../db.js';
 
 // Cluster B Phase 3 (§4.3): file-read-only resolver for ProjectAuthority.
 //
@@ -395,6 +397,123 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
 }
 
 /**
+ * Cluster B Phase 10 (UI-B31 / spec §4.8): per-tool usage tally across every
+ * session in a project.
+ *
+ * The "Used vs Available" inspector (`<ToolsList mode='usage-diff'>`) wants
+ * two counters on every `ToolView`:
+ *   - `calledCount` — how many times the SDK ran this tool (post-permission)
+ *   - `deniedCount` — how many times the operator denied a request for it
+ *
+ * Both signals live in the `events` table, which already records every SDK
+ * message via `persistMessage()`. We don't add new instrumentation — just an
+ * aggregation pass (spec §4.8: "every tool call already produces an SDK
+ * event with `tool_name + ts + result_status`. No new instrumentation;
+ * just retention + aggregation."). Three event shapes feed the tally:
+ *
+ *   - `type='assistant'` rows whose `message.content` contains a
+ *     `tool_use` block — the SDK actually invoked the tool. Each block
+ *     bumps `calledCount[name]`.
+ *   - `type='wrapper' subtype='permission_request'` rows carry
+ *     `{ requestId, toolName }` — we index them so we can resolve a
+ *     denial's `requestId` back to a tool name.
+ *   - `type='wrapper' subtype='permission_decided'` rows carry
+ *     `{ requestId, decision }` — when `decision === 'deny'`, we look up
+ *     the toolName via the requestId index and bump `deniedCount[name]`.
+ *
+ * The two passes happen in a single SQL fetch + JS aggregation. We
+ * deliberately don't try to surface "SDK refused at runtime" denials
+ * (tool_result with is_error=true) — those are usually input-shape
+ * failures rather than authorization signals and would muddy the
+ * "Attempted-but-denied" column the operator reads for trust intent.
+ *
+ * Stream events are excluded from `events` (see `persistMessage()` line
+ * 23-24 — `stream_event` short-circuits before insert), so we don't
+ * double-count tool_use blocks that arrive both as deltas and again in
+ * the final assistant message.
+ *
+ * Sessions with no events (newly-created) contribute zero rows. Projects
+ * with no sessions return an empty Map — the resolver then leaves every
+ * `ToolView.calledCount` / `deniedCount` undefined, which the
+ * AuthorityPanel renders as "(no usage yet)" rather than zero badges.
+ */
+export type ToolUsageTally = Map<string, { calledCount: number; deniedCount: number }>;
+
+export function tallyToolUsage(projectId: number): ToolUsageTally {
+  const sessions = listSessionsForProject(projectId);
+  if (sessions.length === 0) return new Map();
+  const sessionIds = sessions.map((s) => s.id);
+  // Bind every session id as a positional parameter — better-sqlite3 won't
+  // bind an array in a single placeholder, so we expand. The list is
+  // bounded by the operator's per-project session count (typically <100).
+  const placeholders = sessionIds.map(() => '?').join(',');
+  const rows = getDb()
+    .prepare<string[], { type: string; subtype: string | null; raw: string }>(
+      `SELECT type, subtype, raw FROM events
+        WHERE session_id IN (${placeholders})
+          AND (
+            type = 'assistant'
+            OR (type = 'wrapper' AND (subtype = 'permission_request' OR subtype = 'permission_decided'))
+          )`,
+    )
+    .all(...sessionIds);
+
+  const tally: ToolUsageTally = new Map();
+  const reqToTool = new Map<string, string>();
+
+  for (const r of rows) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(r.raw);
+    } catch {
+      // A row with non-JSON raw is broken at persistence time; skip rather
+      // than poison the tally for one bad row.
+      continue;
+    }
+
+    if (r.type === 'assistant') {
+      // SDK shape: { type: 'assistant', message: { content: ContentBlock[] }, ... }
+      const content = (payload as { message?: { content?: unknown } })?.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (
+          block &&
+          typeof block === 'object' &&
+          (block as { type?: unknown }).type === 'tool_use' &&
+          typeof (block as { name?: unknown }).name === 'string'
+        ) {
+          bumpCalled(tally, (block as { name: string }).name);
+        }
+      }
+    } else if (r.type === 'wrapper' && r.subtype === 'permission_request') {
+      const p = payload as { requestId?: unknown; toolName?: unknown };
+      if (typeof p.requestId === 'string' && typeof p.toolName === 'string') {
+        reqToTool.set(p.requestId, p.toolName);
+      }
+    } else if (r.type === 'wrapper' && r.subtype === 'permission_decided') {
+      const p = payload as { requestId?: unknown; decision?: unknown };
+      if (p.decision === 'deny' && typeof p.requestId === 'string') {
+        const toolName = reqToTool.get(p.requestId);
+        if (toolName) bumpDenied(tally, toolName);
+      }
+    }
+  }
+  return tally;
+}
+
+function bumpCalled(t: ToolUsageTally, name: string): void {
+  const cur = t.get(name);
+  if (cur) cur.calledCount += 1;
+  else t.set(name, { calledCount: 1, deniedCount: 0 });
+}
+
+function bumpDenied(t: ToolUsageTally, name: string): void {
+  const cur = t.get(name);
+  if (cur) cur.deniedCount += 1;
+  else t.set(name, { calledCount: 0, deniedCount: 1 });
+}
+
+/**
  * Cluster B Phase 3 (BE-B3): resolver entry point. Given a `projectId` and
  * (optionally) the most recent `session_started` snapshot the WS layer has
  * cached for any session in this project, return the merged
@@ -480,6 +599,26 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   const tools: ToolView[] = initTools.map((t) =>
     resolveToolAuthority(t, layers, { mcpServers: declaredMcp }),
   );
+
+  // Cluster B Phase 10 (UI-B31 / spec §4.8): attach the usage tally so the
+  // ToolsList's usage-diff mode can render Used + Attempted-but-denied
+  // counts per tool. Tally walks the project's persisted `events` rows;
+  // missing names in `initTools` (e.g. a tool the operator denied that
+  // was later removed from the SDK's surface) are silently ignored — the
+  // operator can still see total denies for the current surface, which is
+  // the most-asked question. A future enhancement could surface "denied
+  // but no longer on surface" as its own row when that edge case matters.
+  const tally = tallyToolUsage(input.projectId);
+  for (const tool of tools) {
+    const counts = tally.get(tool.name);
+    if (!counts) continue;
+    // Leave undefined when zero so the AuthorityPanel can distinguish
+    // "tool exists on surface but nobody has tried it" from "tool was
+    // tried zero times" — both are the same number but the former is the
+    // expected default and shouldn't paint a chip.
+    if (counts.calledCount > 0) tool.calledCount = counts.calledCount;
+    if (counts.deniedCount > 0) tool.deniedCount = counts.deniedCount;
+  }
 
   const out: ProjectAuthority = {
     projectId: input.projectId,
