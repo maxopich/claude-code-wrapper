@@ -9,10 +9,13 @@ import {
   detectMcpServers,
   resolveProjectAuthority,
   resolveToolAuthority,
+  tallyToolUsage,
 } from './project_authority.js';
 import { closeDb, getDb } from '../db.js';
 import { config } from '../config.js';
 import { upsertProject, setProjectTrusted } from './projects.js';
+import { createSession } from './sessions.js';
+import { insertEvent, nextSeq } from './events.js';
 
 // Cluster B Phase 3 (§4.3): resolver tests cover the four file-read
 // scanners (resolveToolAuthority, detectEnvInjections, detectHooks,
@@ -555,6 +558,9 @@ describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
     expect(out!.mcpServers.find((s) => s.name === 'bad')!.trust).toBe('denied');
   });
 
+  // Phase 10 tally tests live in their own describe at the bottom of the
+  // file — see "tallyToolUsage / Phase 10 usage-diff pipeline".
+
   test('trusted_pinned_hash + binary changed → trust=hash_changed', async () => {
     // Write a fake binary, pin its hash, then mutate the file and
     // re-resolve. The post-mutation sha mismatches the pinned, so the
@@ -586,5 +592,198 @@ describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
         (s) => s.name === 'pinned',
       )!.trust,
     ).toBe('hash_changed');
+  });
+});
+
+// ---- Cluster B Phase 10: tallyToolUsage + resolver enrichment ----
+
+describe('tallyToolUsage (Phase 10 / UI-B31 / spec §4.8)', () => {
+  function insertAssistantToolUse(sessionId: string, toolName: string): void {
+    insertEvent(
+      sessionId,
+      nextSeq(sessionId),
+      'assistant',
+      null,
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [{ type: 'tool_use', id: `t-${Math.random()}`, name: toolName, input: {} }],
+        },
+      }),
+    );
+  }
+  function insertPermissionRequest(sessionId: string, requestId: string, toolName: string): void {
+    insertEvent(
+      sessionId,
+      nextSeq(sessionId),
+      'wrapper',
+      'permission_request',
+      JSON.stringify({ type: 'wrapper', subtype: 'permission_request', requestId, toolName }),
+    );
+  }
+  function insertPermissionDecided(
+    sessionId: string,
+    requestId: string,
+    decision: 'allow' | 'deny',
+  ): void {
+    insertEvent(
+      sessionId,
+      nextSeq(sessionId),
+      'wrapper',
+      'permission_decided',
+      JSON.stringify({ type: 'wrapper', subtype: 'permission_decided', requestId, decision }),
+    );
+  }
+
+  test('project with no sessions → empty tally', () => {
+    expect(tallyToolUsage(projectId).size).toBe(0);
+  });
+
+  test('counts tool_use blocks across all sessions in the project', () => {
+    const s1 = createSession('s-tally-1', projectId).id;
+    const s2 = createSession('s-tally-2', projectId).id;
+    insertAssistantToolUse(s1, 'Read');
+    insertAssistantToolUse(s1, 'Read');
+    insertAssistantToolUse(s1, 'Bash');
+    insertAssistantToolUse(s2, 'Read');
+    insertAssistantToolUse(s2, 'Edit');
+    const tally = tallyToolUsage(projectId);
+    expect(tally.get('Read')?.calledCount).toBe(3);
+    expect(tally.get('Bash')?.calledCount).toBe(1);
+    expect(tally.get('Edit')?.calledCount).toBe(1);
+  });
+
+  test('attributes operator denials to the right tool via the requestId index', () => {
+    const s = createSession('s-tally-deny', projectId).id;
+    insertPermissionRequest(s, 'req-a', 'Bash');
+    insertPermissionDecided(s, 'req-a', 'deny');
+    insertPermissionRequest(s, 'req-b', 'Bash');
+    insertPermissionDecided(s, 'req-b', 'deny');
+    insertPermissionRequest(s, 'req-c', 'Edit');
+    insertPermissionDecided(s, 'req-c', 'allow'); // not counted
+    const tally = tallyToolUsage(projectId);
+    expect(tally.get('Bash')?.deniedCount).toBe(2);
+    // Edit was allowed (not denied) — must not appear with a deniedCount.
+    expect(tally.get('Edit')?.deniedCount ?? 0).toBe(0);
+  });
+
+  test('called + denied tallies coexist on the same tool', () => {
+    const s = createSession('s-tally-mix', projectId).id;
+    insertPermissionRequest(s, 'r1', 'Bash');
+    insertPermissionDecided(s, 'r1', 'deny');
+    insertAssistantToolUse(s, 'Bash');
+    insertAssistantToolUse(s, 'Bash');
+    const tally = tallyToolUsage(projectId);
+    expect(tally.get('Bash')).toEqual({ calledCount: 2, deniedCount: 1 });
+  });
+
+  test('non-JSON raw rows are skipped (resilience)', () => {
+    const s = createSession('s-tally-bad', projectId).id;
+    insertEvent(s, nextSeq(s), 'assistant', null, 'this is not json');
+    insertAssistantToolUse(s, 'Read');
+    expect(tallyToolUsage(projectId).get('Read')?.calledCount).toBe(1);
+  });
+
+  test('denial with unknown requestId is silently dropped (no synthetic tool)', () => {
+    const s = createSession('s-tally-orphan', projectId).id;
+    // permission_decided lands without a prior permission_request — possible
+    // if the row arrived from a different session_id (cross-session bug) or
+    // an out-of-order replay. We refuse to credit it.
+    insertPermissionDecided(s, 'orphan-req', 'deny');
+    expect(tallyToolUsage(projectId).size).toBe(0);
+  });
+});
+
+describe('resolveProjectAuthority — Phase 10 usage-diff enrichment', () => {
+  test('populates calledCount / deniedCount on tools from the tally', () => {
+    const s = createSession('s-enrich', projectId).id;
+    // 3× Read calls, 1× Bash denied
+    insertEvent(
+      s,
+      nextSeq(s),
+      'assistant',
+      null,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Read' }] },
+      }),
+    );
+    insertEvent(
+      s,
+      nextSeq(s),
+      'assistant',
+      null,
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', name: 'Read' },
+            { type: 'tool_use', name: 'Read' },
+          ],
+        },
+      }),
+    );
+    insertEvent(
+      s,
+      nextSeq(s),
+      'wrapper',
+      'permission_request',
+      JSON.stringify({
+        type: 'wrapper',
+        subtype: 'permission_request',
+        requestId: 'r',
+        toolName: 'Bash',
+      }),
+    );
+    insertEvent(
+      s,
+      nextSeq(s),
+      'wrapper',
+      'permission_decided',
+      JSON.stringify({
+        type: 'wrapper',
+        subtype: 'permission_decided',
+        requestId: 'r',
+        decision: 'deny',
+      }),
+    );
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { tools: ['Read', 'Bash', 'Edit'] },
+    });
+    expect(out!.tools.find((t) => t.name === 'Read')?.calledCount).toBe(3);
+    expect(out!.tools.find((t) => t.name === 'Bash')?.deniedCount).toBe(1);
+    // Edit never appeared in tally → both counts stay undefined (distinct
+    // from explicit zero; AuthorityPanel renders "no usage" rather than
+    // a stale "0" chip).
+    const edit = out!.tools.find((t) => t.name === 'Edit')!;
+    expect(edit.calledCount).toBeUndefined();
+    expect(edit.deniedCount).toBeUndefined();
+  });
+
+  test('tally names not in initTools are silently dropped (current-surface only)', () => {
+    // A tool the SDK once exposed but no longer does — we don't synthesise
+    // a ToolView for it in this phase. The operator's view is "what's on
+    // the surface NOW, and how did it perform".
+    const s = createSession('s-stale', projectId).id;
+    insertEvent(
+      s,
+      nextSeq(s),
+      'assistant',
+      null,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'RetiredTool' }] },
+      }),
+    );
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { tools: ['Read'] },
+    });
+    expect(out!.tools.map((t) => t.name)).toEqual(['Read']);
+    // Read has no tally entry → counts undefined; sanity check.
+    expect(out!.tools[0].calledCount).toBeUndefined();
   });
 });

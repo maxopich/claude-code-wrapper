@@ -1,14 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { McpServerView, ToolView } from '@cebab/shared/protocol';
 
-// Cluster B Phase 6b (UI-B4 / B10 / B11 / B12 / B33 / B34): the inspector's
-// Tools section.
+// Cluster B Phase 6b + Phase 10 (UI-B4 / B10 / B11 / B12 / B31 / B33 / B34):
+// the inspector's Tools section.
 //
-// `mode: 'list'` is the only shape Phase 6b ships — the 3-column
-// Available/Used/Attempted-but-denied diff (UI-B31, mode='usage-diff') waits
-// for Phase 10 when `ToolView.calledCount` / `deniedCount` are populated by
-// the usage-diff pipeline (spec §4.8). Phase 3 leaves those undefined, so a
-// diff render would be all zeros and misleading.
+// Two modes:
+//   - `mode: 'list'` (default; Phase 6b) — flat catalog of every tool on
+//     the SDK surface, sorted alphabetically, with provenance + risk
+//     badges. Used for the pre-flight inspector where nothing has run yet.
+//   - `mode: 'usage-diff'` (Phase 10 / UI-B31) — same row chrome plus
+//     per-tool Used / Attempted-but-denied count chips, and a filter
+//     toggle (All / Used / Unused / Attempted). Populated from
+//     `ToolView.calledCount` / `deniedCount` which the server tallies
+//     in `tallyToolUsage()` (server/src/repo/project_authority.ts) by
+//     aggregating tool_use blocks + permission_decided rows in the
+//     project's persisted events.
+//
+// Why one row + chips rather than three physical columns (UI-B31 literal
+// reading): scanning three parallel lists for the same tool is operator-
+// hostile — they want "what did Bash do?" answered in one place. The chips
+// + toggle deliver the same Available/Used/Attempted information at higher
+// density without forcing a triple lookup. The "Attempted" chip is the red
+// signal-of-interest per UI-B31; the "Used" chip is accent-tinted.
+//
+// Default toggle by panel mode (per spec §6.6): preflight = 'all',
+// in-session = 'all', post-run = 'attempted' (operator's first triage
+// question is "what did we try that bounced?").
 //
 // Rendering rules:
 //   - UI-B10: alphabetical (no source-grouping that hides effectively-
@@ -72,18 +89,46 @@ function makeMatcher(query: string): (t: ToolView) => boolean {
   };
 }
 
+export type UsageToggle = 'all' | 'used' | 'unused' | 'attempted';
+
 export type ToolsListProps = {
   tools: ToolView[];
   mcpServers: McpServerView[];
-  /** 'list' = Phase 6b shape. 'usage-diff' reserved for Phase 10. */
+  /** 'list' = Phase 6b shape. 'usage-diff' = Phase 10 (UI-B31). */
   mode?: 'list' | 'usage-diff';
+  /**
+   * Initial toggle state when `mode === 'usage-diff'`. AuthorityPanel
+   * picks this per its own mode (preflight=all, in-session=all,
+   * post-run=attempted). Ignored when `mode === 'list'`.
+   */
+  defaultUsageToggle?: UsageToggle;
 };
 
+function passesUsageToggle(t: ToolView, toggle: UsageToggle): boolean {
+  const used = (t.calledCount ?? 0) > 0;
+  const denied = (t.deniedCount ?? 0) > 0;
+  switch (toggle) {
+    case 'all':
+      return true;
+    case 'used':
+      return used;
+    case 'unused':
+      // Unused = surfaced but never called AND never explicitly denied.
+      // A tool the operator denied isn't "unused" — it was tried.
+      return !used && !denied;
+    case 'attempted':
+      // The red-signal column: operator tried it, was bounced. ZERO is
+      // healthy (per spec §6.6).
+      return denied;
+  }
+}
+
 export function ToolsList(props: ToolsListProps) {
-  const { tools, mcpServers, mode = 'list' } = props;
+  const { tools, mcpServers, mode = 'list', defaultUsageToggle = 'all' } = props;
   const [rawQuery, setRawQuery] = useState('');
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState<number>(-1);
+  const [usageToggle, setUsageToggle] = useState<UsageToggle>(defaultUsageToggle);
   const listRef = useRef<HTMLDivElement>(null);
 
   // UI-B11: debounce ≤100ms. Avoids re-running the alphabetize+filter on
@@ -103,18 +148,30 @@ export function ToolsList(props: ToolsListProps) {
     const matcher = makeMatcher(query);
     const out = tools.filter(matcher).slice();
     out.sort((a, b) => a.name.localeCompare(b.name));
+    if (mode === 'usage-diff') {
+      return out.filter((t) => passesUsageToggle(t, usageToggle));
+    }
     return out;
-  }, [tools, query]);
+  }, [tools, query, mode, usageToggle]);
 
-  if (mode === 'usage-diff') {
-    // Phase 10 stub — explicit so a reviewer can't miss it; the diff
-    // pipeline is in spec §4.8 and not in this PR.
-    return (
-      <div className="tools-list-stub">
-        <em>Usage diff (Used / Available / Attempted-but-denied) lands in Phase 10.</em>
-      </div>
-    );
-  }
+  // Cluster B Phase 10: aggregate counts feed the toggle button labels so
+  // the operator sees "Used (4)" not just "Used" before clicking. The
+  // numbers stay stable across the filter (we count against unfiltered
+  // tools, not the post-toggle subset).
+  const usageCounts = useMemo(() => {
+    if (mode !== 'usage-diff') return null;
+    let used = 0;
+    let unused = 0;
+    let attempted = 0;
+    for (const t of tools) {
+      const u = (t.calledCount ?? 0) > 0;
+      const d = (t.deniedCount ?? 0) > 0;
+      if (u) used += 1;
+      else if (!d) unused += 1;
+      if (d) attempted += 1;
+    }
+    return { all: tools.length, used, unused, attempted };
+  }, [tools, mode]);
 
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
     if (filtered.length === 0) return;
@@ -160,6 +217,32 @@ export function ToolsList(props: ToolsListProps) {
           {filtered.length} of {tools.length}
         </span>
       </div>
+      {mode === 'usage-diff' && usageCounts && (
+        <div className="tools-list-usage-toggle" role="group" aria-label="Filter by usage state">
+          {(['all', 'used', 'unused', 'attempted'] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              className={`tools-list-usage-toggle-btn ${
+                usageToggle === t ? 'tools-list-usage-toggle-btn-active' : ''
+              } ${t === 'attempted' ? 'tools-list-usage-toggle-btn-attempted' : ''}`}
+              aria-pressed={usageToggle === t}
+              onClick={() => setUsageToggle(t)}
+            >
+              {t === 'all'
+                ? 'All'
+                : t === 'used'
+                  ? 'Used'
+                  : t === 'unused'
+                    ? 'Unused'
+                    : 'Attempted'}
+              <span className="tools-list-usage-toggle-count" aria-hidden="true">
+                {usageCounts[t]}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
       <div
         ref={listRef}
         id="authority-tools-results"
@@ -188,13 +271,29 @@ export function ToolsList(props: ToolsListProps) {
                     : t.source === 'mcp' && t.mcpServer && needsAuthServers.has(t.mcpServer)
                       ? `mcp server needs-auth: ${t.mcpServer}`
                       : null;
+            // Phase 10: usage-diff per-row chrome. The chips render in
+            // both modes (when counts are present), but the toggle UI and
+            // stripe accent only apply to usage-diff. A `used` row gets
+            // an `--ok-soft` left stripe (UI-B30 alignment); an
+            // `attempted` row gets `--err-soft` — the red signal-of-
+            // interest column.
+            const used = (t.calledCount ?? 0) > 0;
+            const attempted = (t.deniedCount ?? 0) > 0;
+            const stripeClass =
+              mode === 'usage-diff'
+                ? attempted
+                  ? 'tool-row-stripe-attempted'
+                  : used
+                    ? 'tool-row-stripe-used'
+                    : ''
+                : '';
             return (
               <details
                 key={t.name}
                 id={`tool-row-${idx}`}
                 className={`tool-row ${isEffectivelyUnavailable ? 'tool-row-unavailable' : ''} ${
                   idx === activeIdx ? 'tool-row-active' : ''
-                }`}
+                } ${stripeClass}`}
                 role="listitem"
               >
                 <summary className="tool-row-summary">
@@ -215,6 +314,27 @@ export function ToolsList(props: ToolsListProps) {
                     {t.source}
                     {t.mcpServer && <span className="tool-row-mcp-server">·{t.mcpServer}</span>}
                   </span>
+                  {/* Chips only render in usage-diff mode; preflight stays
+                   *  a pure catalog view even if counts happen to be
+                   *  populated (e.g. a Refresh after a previous run). */}
+                  {mode === 'usage-diff' && used && (
+                    <span
+                      className="tool-row-usage-chip tool-row-usage-chip-used"
+                      aria-label={`used ${t.calledCount} times`}
+                      title={`Called ${t.calledCount} time${t.calledCount === 1 ? '' : 's'}`}
+                    >
+                      used ×{t.calledCount}
+                    </span>
+                  )}
+                  {mode === 'usage-diff' && attempted && (
+                    <span
+                      className="tool-row-usage-chip tool-row-usage-chip-attempted"
+                      aria-label={`denied ${t.deniedCount} times`}
+                      title={`Operator denied ${t.deniedCount} request${t.deniedCount === 1 ? '' : 's'}`}
+                    >
+                      denied ×{t.deniedCount}
+                    </span>
+                  )}
                   {isEffectivelyUnavailable && (
                     <span
                       className="tool-row-unavailable-badge"
@@ -249,6 +369,22 @@ export function ToolsList(props: ToolsListProps) {
                     <div className="tool-row-fact">
                       <dt>Reason</dt>
                       <dd className="tool-row-reason">{reason}</dd>
+                    </div>
+                  )}
+                  {/* Phase 10: Used / Denied counts in the expandable
+                   *  body so a screen reader user can navigate to the
+                   *  facts without the chip clutter, and so the operator
+                   *  drilling into a denied row can see the exact tally. */}
+                  {typeof t.calledCount === 'number' && (
+                    <div className="tool-row-fact">
+                      <dt>Used</dt>
+                      <dd>{t.calledCount}</dd>
+                    </div>
+                  )}
+                  {typeof t.deniedCount === 'number' && (
+                    <div className="tool-row-fact">
+                      <dt>Denied by operator</dt>
+                      <dd>{t.deniedCount}</dd>
                     </div>
                   )}
                 </dl>

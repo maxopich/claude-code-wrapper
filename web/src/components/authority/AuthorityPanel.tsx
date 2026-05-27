@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { useAuthorityActions, useAuthoritySlot, type AuthoritySlot } from './AuthorityContext';
 import { AuthoritySection } from './AuthoritySection';
 import { ModelIdentityCard } from './ModelIdentityCard';
-import { ToolsList } from './ToolsList';
+import { ToolsList, type UsageToggle } from './ToolsList';
 import { McpServersList } from './McpServersList';
 import { AllowDenyView } from './AllowDenyView';
 import { EnvScrubInspector } from './EnvScrubInspector';
@@ -23,11 +23,12 @@ import { SubAgentsList } from './SubAgentsList';
 //                    so the operator's existing focus on the session isn't
 //                    disrupted; sections still expandable. Header reads
 //                    "Project authority".
-//   - 'post-run'   — opened after a session ends. UI-B32 says toggle
-//                    defaults to "Attempted" (usage-diff) for the Tools
-//                    section, but that mode is Phase 10; Phase 6b's
-//                    post-run is identical to in-session in render. Header
-//                    reads "Authority — last run".
+//   - 'post-run'   — opened after a session ends. UI-B31 + spec §6.6:
+//                    Tools section flips to mode='usage-diff' with the
+//                    default toggle on "Attempted" (operator's first
+//                    triage question is "what bounced?"). In-session
+//                    also uses usage-diff but defaults the toggle to
+//                    "All". Header reads "Authority — last run".
 //
 // Mode-driven behavioural diffs are intentionally narrow (UI-B1): the
 // underlying widgets don't branch on mode at all — the panel just sets
@@ -72,6 +73,26 @@ function defaultOpenForSection(section: 'model' | 'tools', mode: AuthorityPanelM
   // Tools collapsed by default in every mode — long list, default-expanded
   // would bury the model/auth posture chips.
   return false;
+}
+
+/**
+ * Cluster B Phase 10 (UI-B31 / spec §6.6): map the panel's lifecycle
+ * mode to the per-Tools usage-diff behaviour.
+ *   - preflight  — list mode (no run; counts are all zero; the usage
+ *                  toggle would be misleading clutter).
+ *   - in-session — usage-diff mode, toggle defaults to 'all' (operator
+ *                  is watching the session; survey view is most useful).
+ *   - post-run   — usage-diff mode, toggle defaults to 'attempted' (the
+ *                  red signal-of-interest column is the first triage
+ *                  question after a session ends).
+ */
+function toolsModeForPanel(mode: AuthorityPanelMode): {
+  mode: 'list' | 'usage-diff';
+  defaultToggle: UsageToggle;
+} {
+  if (mode === 'preflight') return { mode: 'list', defaultToggle: 'all' };
+  if (mode === 'post-run') return { mode: 'usage-diff', defaultToggle: 'attempted' };
+  return { mode: 'usage-diff', defaultToggle: 'all' };
 }
 
 export function AuthorityPanel(props: AuthorityPanelProps) {
@@ -143,7 +164,12 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
         sublabel={authority.tools.length === 0 ? 'no tools resolved' : undefined}
         defaultOpen={defaultOpenForSection('tools', mode)}
       >
-        <ToolsList tools={authority.tools} mcpServers={authority.mcpServers} mode="list" />
+        <ToolsList
+          tools={authority.tools}
+          mcpServers={authority.mcpServers}
+          mode={toolsModeForPanel(mode).mode}
+          defaultUsageToggle={toolsModeForPanel(mode).defaultToggle}
+        />
       </AuthoritySection>
       <AuthoritySection
         title="MCP servers"

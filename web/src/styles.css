@@ -6061,6 +6061,99 @@ pre {
   background: var(--bg-2);
 }
 
+/* ---- Cluster B Phase 10: usage-diff (UI-B31 + B30) ---- */
+/* Per-row count chips inline in the summary; left stripe per usage state
+ * (UI-B30): used = accent-soft, attempted = err-soft (the red column).
+ * The toggle bar above the list mirrors the .ma-* chip-family geometry
+ * (UI-B34 token reuse — no new constants). */
+.tools-list-usage-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 4px 0;
+  flex-wrap: wrap;
+}
+.tools-list-usage-toggle-btn {
+  font-family: var(--font-sans);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-3);
+  background: var(--bg-2);
+  color: var(--fg-1);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tools-list-usage-toggle-btn:hover,
+.tools-list-usage-toggle-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+.tools-list-usage-toggle-btn-active {
+  background: var(--accent-soft, color-mix(in srgb, var(--accent) 12%, var(--bg-2)));
+  border-color: var(--accent);
+  color: var(--fg-0);
+  font-weight: 600;
+}
+.tools-list-usage-toggle-btn-attempted {
+  /* The red column gets its own border tint so the operator's eye lands
+   * on it without having to read the label. Active state below promotes
+   * to the err-soft fill. */
+  border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
+  color: var(--err);
+}
+.tools-list-usage-toggle-btn-attempted.tools-list-usage-toggle-btn-active {
+  background: var(--err-soft);
+  border-color: var(--err);
+  color: var(--err);
+}
+.tools-list-usage-toggle-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  min-width: 14px;
+  text-align: center;
+}
+.tools-list-usage-toggle-btn-active .tools-list-usage-toggle-count {
+  background: var(--bg-0);
+  color: var(--fg-0);
+}
+.tool-row-usage-chip {
+  font-size: var(--t-xs);
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line-3);
+  background: var(--bg-3);
+  color: var(--fg-1);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.tool-row-usage-chip-used {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, var(--bg-3));
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--line-3));
+}
+.tool-row-usage-chip-attempted {
+  /* The red signal-of-interest chip per UI-B31. */
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
+  font-weight: 600;
+}
+.tool-row-stripe-used {
+  border-left: 3px solid color-mix(in srgb, var(--ok) 60%, transparent);
+}
+.tool-row-stripe-attempted {
+  border-left: 3px solid var(--err);
+}
+
 /* ---- Cluster B Phase 6c: McpServersList / AllowDenyView / EnvScrubInspector
  *      / HooksList -------------------------------------------------------- */
 

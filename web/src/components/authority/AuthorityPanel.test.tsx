@@ -303,6 +303,95 @@ describe('AuthorityPanel — ready state', () => {
     expect(toolsSection.open).toBe(false);
   });
 
+  test('preflight mode renders Tools in list mode (no usage-toggle bar)', () => {
+    const { handlerRef } = mountPanel({ mode: 'preflight', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority(),
+      });
+    });
+    // Open the Tools section so the inner ToolsList is in the DOM.
+    const toolsSection = Array.from(
+      container.querySelectorAll<HTMLDetailsElement>('details.authority-section'),
+    ).find((s) => s.querySelector('.authority-section-title')?.textContent === 'Tools')!;
+    act(() => {
+      toolsSection.open = true;
+    });
+    // The usage-toggle bar is the marker for usage-diff mode; preflight
+    // suppresses it.
+    expect(toolsSection.querySelector('.tools-list-usage-toggle')).toBeNull();
+  });
+
+  test('in-session mode renders Tools in usage-diff mode with toggle defaulting to All', () => {
+    const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority({
+          tools: [
+            {
+              name: 'Read',
+              source: 'builtin',
+              allowed: true,
+              denied: false,
+              rulingScope: 'default',
+              calledCount: 3,
+            },
+          ],
+        }),
+      });
+    });
+    const toolsSection = Array.from(
+      container.querySelectorAll<HTMLDetailsElement>('details.authority-section'),
+    ).find((s) => s.querySelector('.authority-section-title')?.textContent === 'Tools')!;
+    act(() => {
+      toolsSection.open = true;
+    });
+    expect(toolsSection.querySelector('.tools-list-usage-toggle')).not.toBeNull();
+    // The "All" button is active (aria-pressed=true) by default.
+    const buttons = toolsSection.querySelectorAll<HTMLButtonElement>(
+      '.tools-list-usage-toggle-btn',
+    );
+    const all = Array.from(buttons).find((b) => b.textContent?.includes('All'))!;
+    expect(all.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('post-run mode defaults the Tools toggle to Attempted (red signal-of-interest column)', () => {
+    const { handlerRef } = mountPanel({ mode: 'post-run', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority({
+          tools: [
+            {
+              name: 'Bash',
+              source: 'builtin',
+              allowed: false,
+              denied: true,
+              rulingScope: 'project',
+              deniedCount: 2,
+            },
+          ],
+        }),
+      });
+    });
+    const toolsSection = Array.from(
+      container.querySelectorAll<HTMLDetailsElement>('details.authority-section'),
+    ).find((s) => s.querySelector('.authority-section-title')?.textContent === 'Tools')!;
+    act(() => {
+      toolsSection.open = true;
+    });
+    const buttons = toolsSection.querySelectorAll<HTMLButtonElement>(
+      '.tools-list-usage-toggle-btn',
+    );
+    const attempted = Array.from(buttons).find((b) => b.textContent?.includes('Attempted'))!;
+    expect(attempted.getAttribute('aria-pressed')).toBe('true');
+  });
+
   test('in-session mode keeps both sections closed by default', () => {
     const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
     act(() => {
