@@ -1278,6 +1278,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       return state;
     }
 
+    case 'notification':
+      // Cluster A Phase 1: the wire envelope is defined and the server
+      // dispatches it, but the client host (`<NotificationStack/>` + reducer
+      // slice) lands in Phase 2. Phase 1 swallows the envelope as a no-op so
+      // a server running Phase 1 code talking to a Phase 1 client doesn't
+      // break — once Phase 2 ships, this case dispatches into the
+      // notifications slice instead of returning state.
+      return state;
+
     case 'wrapper_error': {
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
