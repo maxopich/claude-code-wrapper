@@ -458,6 +458,26 @@ export type ClientMsg =
        */
       type: 'get_last_run_for_template';
       templateId: string;
+    }
+  | {
+      /**
+       * Cluster A Phase 1: operator acknowledges a sticky notification.
+       *
+       * Sticky operational notifications (`error`) and ALL safety
+       * notifications (`danger`) persist in the `notifications` table until
+       * acked — the WS-attach replay re-fans them until this message arrives.
+       *
+       * `ackReason` is REQUIRED when the underlying safety event's
+       * `reason_code` is one of the "highest sub-class" codes (per spec
+       * BE-7): forged_source, defang.bypass_suspected, audit.tamper_detected.
+       * Acks without a reason for those codes are rejected with a
+       * wrapper_error; the UI must collect a one-line operator-typed reason
+       * (the typed-acknowledgment affordance). Idempotent — re-acking an
+       * already-acked or unknown id is a silent no-op.
+       */
+      type: 'ack_notification';
+      id: string;
+      ackReason?: string;
     };
 
 // ---- Server → Browser ----
@@ -859,7 +879,87 @@ export type ServerMsg =
       templateId: string;
       lastRun: TemplateLastRun | null;
     }
-  | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string };
+  | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string }
+  | (NotificationEnvelope & { type: 'notification' });
+
+/**
+ * Cluster A Phase 1: structurally distinct severity tier vs class.
+ *
+ * `NotificationSeverity` is the display axis the UI uses for colour, glyph,
+ * live-region politeness, and dismiss timing — six visible tiers
+ * (info/success/warn/error/danger). `progress` is collapsed into `info` on
+ * the wire; the client opts into the indeterminate-spinner render via the
+ * action discriminant. `NotificationClass` is the structural axis the
+ * server enforces: `safety` writes a `safety_audit` row before emit (BE-1)
+ * and is never coalesced at the recording layer (BE-2); `operational` is
+ * coalesced by a tier-specific window. The visible severity of a safety
+ * event MAY be `warn` for display ergonomics (per spec OQ-3), but its
+ * class stays `safety` for audit semantics.
+ */
+export type NotificationSeverity = 'info' | 'success' | 'warn' | 'error' | 'danger';
+export type NotificationClass = 'operational' | 'safety';
+
+/**
+ * Operator action a notification can offer alongside its text. Each variant
+ * encodes both a label-implying intent (the client renders the appropriate
+ * label per kind) and the parameters needed to execute it. The dispatcher
+ * never sends free-text action strings; the UI's button copy is derived
+ * from `kind` so localisation/relabelling lives in one place.
+ *
+ * v1 surface (extend additively in later phases): open-target navigations,
+ * re-auth (auth-expired re-auth flow / Cluster D B3), session lifecycle
+ * (resume/archive/reopen for the sweep + recovery surfaces), and per-agent
+ * restart (process_crashed recovery / Cluster D B3).
+ */
+export type NotificationAction =
+  | { kind: 'open_session'; sessionId: string }
+  | { kind: 'open_logs'; sessionId: string; rowAnchor?: string }
+  | { kind: 'open_settings' }
+  | { kind: 'reauth' }
+  | { kind: 'resume'; sessionId: string }
+  | { kind: 'archive'; sessionId: string }
+  | { kind: 'reopen'; sessionId: string }
+  | { kind: 'restart_agent'; sessionId: string; agentName?: string };
+
+/**
+ * Server-minted notification envelope; stable across reconnect-replay so the
+ * client can dedupe by `id` when a sticky row re-fans on WS attach. The
+ * envelope shape mirrors the `notifications` table (migration 014) so the
+ * sticky-replay path doesn't need a shape translation.
+ *
+ * `dedupeKey` is the server's operational-coalesce key; on the client it
+ * doubles as the in-place update key (an arriving envelope whose key already
+ * sits in the stack increments a `×N` badge instead of stacking). `class`
+ * drives the audit + ack semantics described on `NotificationClass`.
+ *
+ * `auditRowId` and `reasonCode` are populated only for `class === 'safety'`
+ * rows and let the inbox UI deep-link to the forensic record and (Phase 5)
+ * filter by enumerated sub-code.
+ */
+export type NotificationEnvelope = {
+  id: string;
+  ts: number;
+  severity: NotificationSeverity;
+  class: NotificationClass;
+  dedupeKey: string;
+  title: string;
+  message?: string;
+  details?: unknown;
+  sessionId?: string;
+  projectId?: number;
+  action?: NotificationAction;
+  sticky: boolean;
+  /** Safety class only. References safety_audit.id for deep-linking. */
+  auditRowId?: string;
+  /** Safety class only. Enumerated sub-code (see floor vocabulary). */
+  reasonCode?: string;
+  /**
+   * Set by the dispatcher when an envelope coalesces over a prior in-window
+   * emit with the same `dedupeKey`. Absent on the first emit; subsequent
+   * coalesces increment it. The UI uses it for the `×N` badge.
+   */
+  count?: number;
+};
 
 /**
  * PR-6: static facts about a project for the per-participant disclosure.

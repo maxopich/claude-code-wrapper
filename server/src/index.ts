@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { closeDb, getDb } from './db.js';
 import { closeLogger } from './runner/logger.js';
 import { closeAllQueries } from './runner/lifecycle.js';
+import { verifyChain } from './notifications/safety_audit.js';
 import { startWsServer } from './ws/server.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
 import { authTokenPath, getAuthToken, initAuthToken } from './auth.js';
@@ -17,6 +18,19 @@ function main(): void {
   console.log(`[cebab] data=${config.dataDir}`);
 
   getDb();
+
+  // Cluster A Phase 1: walk the safety_audit hash chain at boot. Phase 1
+  // just logs the outcome — a broken chain in Phase 3 will additionally
+  // emit an `audit.tamper_detected` danger notification and refuse further
+  // safety emissions until acknowledged. The walk is cheap (the genesis
+  // marker anchors verification, so the chain length equals real-event
+  // count since the last migration).
+  const chainResult = verifyChain();
+  if (chainResult.ok) {
+    console.log(`[cebab] safety_audit chain ok (${chainResult.rowsChecked} rows)`);
+  } else {
+    console.error(`[cebab] safety_audit chain BROKEN at ${chainResult.brokenAt}`);
+  }
 
   const root = resolveWorkspaceRoot();
   console.log(

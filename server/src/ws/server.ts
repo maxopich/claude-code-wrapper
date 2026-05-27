@@ -39,6 +39,9 @@ import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
 import { buildSessionLogChunk } from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
+import { getNotification, markNotificationAcked } from '../notifications/dispatcher.js';
+import { appendSafetyAuditAck, HIGHEST_SUBCODES } from '../notifications/safety_audit.js';
+import { getOperatorId } from '../notifications/operator.js';
 import {
   resolveChainParticipants,
   startChainSession,
@@ -695,6 +698,37 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         requestId: msg.requestId,
         decision: msg.decision,
       } as never);
+      return;
+    }
+    case 'ack_notification': {
+      // Cluster A Phase 1: operator acknowledges a sticky notification.
+      // Idempotent: a re-ack (or an ack of an unknown id) is a silent
+      // no-op so racing browsers / double-clicks don't surface errors.
+      const row = getNotification(msg.id);
+      if (!row || row.acked_at !== null) return;
+      // BE-7: highest sub-class safety events require a typed reason. Without
+      // it, the typed-ack affordance hasn't been collected — reject so the
+      // UI can re-prompt rather than silently logging an empty acked_reason.
+      if (
+        row.class === 'safety' &&
+        row.reason_code &&
+        HIGHEST_SUBCODES.has(row.reason_code) &&
+        (!msg.ackReason || msg.ackReason.trim() === '')
+      ) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: `notification ${msg.id} requires an acknowledgment reason`,
+        });
+        return;
+      }
+      const ackedAt = Date.now();
+      const ackedBy = getOperatorId();
+      const reason = msg.ackReason?.trim() || null;
+      if (row.class === 'safety' && row.audit_row_id) {
+        appendSafetyAuditAck(row.audit_row_id, ackedAt, ackedBy, reason);
+      }
+      markNotificationAcked(msg.id, ackedAt, ackedBy, reason);
       return;
     }
     case 'set_permission_mode': {
