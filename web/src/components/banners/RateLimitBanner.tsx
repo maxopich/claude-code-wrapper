@@ -32,7 +32,7 @@
 // ws-sends one at a time, dispatching `rl_drain_one` per ship).
 
 import React from 'react';
-import type { RateLimitState } from '../../store.js';
+import type { MultiAgentAutoRetry, RateLimitState } from '../../store.js';
 import type { BannerStackItem } from './BannerStack.js';
 import type { BannerAction } from './SessionBanner.js';
 import { CountdownChip } from './CountdownChip.js';
@@ -256,6 +256,91 @@ export function buildRateLimitBannerItem(args: BuildRateLimitBannerItemArgs): Ba
     // Tier=warn defaults to role=region + ariaLive=polite per SessionBanner's
     // tier mapping — that matches spec §8.4 for a warn-tier informational
     // recovery banner, so no overrides.
+    arrivedAt,
+  };
+}
+
+// =====================================================================
+// Cluster D Phase 4d — multi-agent (bus) auto-retry banner
+// =====================================================================
+//
+// The bus runs its own retry loop server-side; the operator just
+// observes. Bus auto-retry is therefore OBSERVE-ONLY:
+//
+//   - No "Retry now" button (the bus owns timing; a manual fire would
+//     race the runner and have to be queued or rejected — neither is
+//     useful from the operator's seat).
+//   - No "Pause auto-retry" button (the runner doesn't honour an
+//     external pause; a UI-only pause would be a lie).
+//   - No held-message queue (the multi-agent prompt path is the
+//     orchestrator's `multi_agent_user_prompt`, which writes a router
+//     event regardless of the bus's retry state — the operator can keep
+//     talking; the orchestrator just queues those for the next hop
+//     window. There's no captured-turn to re-fire.).
+//
+// What's the same:
+//   - Warn tier + hourglass glyph (visual consistency with the single-
+//     agent rate-limit banner).
+//   - CountdownChip ticking to `retryAt`.
+//   - On chip elapse, the banner clears itself (the retry has fired or
+//     is firing right now). If attempt N+1 also fails, the next
+//     `auto_retry` ServerMsg repopulates the slice with attempt+1.
+//
+// `agentName` lands in the body prose when present so the operator
+// knows WHICH bus participant is being retried — that's the operator's
+// main mental hook on a multi-agent run.
+
+export type BusAutoRetryBannerCallbacks = {
+  /** Fired by the CountdownChip's onElapsed — banner self-clears so the
+   *  retry's success (next multi_agent_event) is unobscured. */
+  onClear: () => void;
+};
+
+export function busAutoRetryBannerTitle(state: MultiAgentAutoRetry): string {
+  // Same shape as the single-agent autoRetry title for parity.
+  return `Bus auto-retry — attempt ${state.attempt} of ${state.maxAttempts}`;
+}
+
+export type BuildBusAutoRetryBannerItemArgs = {
+  sessionId: string;
+  state: MultiAgentAutoRetry;
+  callbacks: BusAutoRetryBannerCallbacks;
+  /** Injection seam for tests; defaults to Date.now. */
+  now?: () => number;
+  arrivedAt?: number;
+};
+
+export function buildBusAutoRetryBannerItem(
+  args: BuildBusAutoRetryBannerItemArgs,
+): BannerStackItem {
+  const { sessionId, state, callbacks, arrivedAt } = args;
+  const now = args.now ?? Date.now;
+
+  const reasonLabel =
+    state.reason === 'transient_overload' ? 'transient overload (529)' : 'hard rate-limit';
+
+  const body = (
+    <p className="rate-limit-banner-prose">
+      The bus runner is auto-retrying{' '}
+      {state.agentName ? (
+        <>
+          for <code>{state.agentName}</code>{' '}
+        </>
+      ) : null}
+      after a {reasonLabel}. Next attempt{' '}
+      <CountdownChip targetMs={state.retryAt} onElapsed={callbacks.onClear} now={now} label="in" />.
+      The retry is fully server-driven — no operator action needed.
+    </p>
+  );
+
+  return {
+    id: `bus-auto-retry-${sessionId}`,
+    tier: 'warn',
+    title: busAutoRetryBannerTitle(state),
+    glyph: '⏳',
+    body,
+    // No actions: the bus owns the retry loop. See module-level comment
+    // above for why Retry/Pause aren't offered.
     arrivedAt,
   };
 }

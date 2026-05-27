@@ -18,3 +18,13 @@ export type { CountdownChipProps } from './CountdownChip.js';
 // Imported by App.tsx + MultiAgentTab.tsx to compose the BannerStack item.
 export { buildRateLimitBannerItem, rateLimitBannerTitle } from './RateLimitBanner.js';
 export type { BuildRateLimitBannerItemArgs, RateLimitBannerCallbacks } from './RateLimitBanner.js';
+
+// Cluster D Phase 4d: observe-only multi-agent bus auto-retry banner
+// factory + callbacks contract. Imported by MultiAgentTab.tsx — the
+// bus runs its own retry loop server-side, so there's no operator
+// "retry" or "pause" action (those would race the bus).
+export { buildBusAutoRetryBannerItem, busAutoRetryBannerTitle } from './RateLimitBanner.js';
+export type {
+  BuildBusAutoRetryBannerItemArgs,
+  BusAutoRetryBannerCallbacks,
+} from './RateLimitBanner.js';

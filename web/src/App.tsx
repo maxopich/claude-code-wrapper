@@ -760,6 +760,13 @@ function AppShell({
     dispatch({ type: 'ma_clear_awaiting' });
     wsRef.current?.send({ type: 'continue_multi_agent', sessionId });
   }
+  // Cluster D Phase 4d: bus auto-retry banner self-clears when the
+  // CountdownChip's onElapsed fires (retry just fired or is firing now).
+  // No server round-trip — the bus runner owns the retry loop; this is
+  // a pure client-side dispatch to unmount the banner.
+  const clearAutoRetry = useCallback(() => {
+    dispatch({ type: 'ma_clear_auto_retry' });
+  }, []);
   function retryWorker(sessionId: string) {
     // Item #4: re-deliver the captured prompt of the worker named in this
     // session's pending-retry slot. Optimistically drop the banner so the
@@ -1186,6 +1193,7 @@ function AppShell({
                 onRetryWorker={retryWorker}
                 onAbandonSession={abandonSession}
                 onContinueThroughMutation={continueThroughMutation}
+                onClearAutoRetry={clearAutoRetry}
                 onSetDraftPauseOnMutation={setDraftPauseOnMutation}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}

@@ -40,6 +40,7 @@ import {
 // and the operator gets the tier→a11y mapping + focus-steal contract
 // for free.
 import { SessionBanner } from './banners/SessionBanner';
+import { buildBusAutoRetryBannerItem } from './banners';
 
 /**
  * Multi-Agent tab.
@@ -82,6 +83,10 @@ export function MultiAgentTab(props: {
   onAbandonSession: (sessionId: string) => void;
   /** Item #5: operator clicked Continue on the pause-on-first-mutation banner. */
   onContinueThroughMutation: (sessionId: string) => void;
+  /** Cluster D Phase 4d: CountdownChip onElapsed sink — clears the bus
+   *  auto-retry slice so the banner unmounts. If attempt N+1 also fails,
+   *  the next `auto_retry` ServerMsg repopulates the slice. */
+  onClearAutoRetry: () => void;
   /** Item #5: setup-screen toggle for pause-on-first-mutation. */
   onSetDraftPauseOnMutation: (value: boolean) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
@@ -137,6 +142,7 @@ export function MultiAgentTab(props: {
         onContinueThroughMutation={props.onContinueThroughMutation}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
+        onClearAutoRetry={props.onClearAutoRetry}
       />
     );
   }
@@ -1294,6 +1300,8 @@ function ActiveRunView(props: {
   /** Item #5: operator clicked Continue on the pause-on-first-mutation
    *  banner. Stateless from the client's POV — server reads the slot. */
   onContinueThroughMutation: (sessionId: string) => void;
+  /** Cluster D Phase 4d: clear the bus auto-retry slice on chip elapse. */
+  onClearAutoRetry: () => void;
 }) {
   const { run } = props;
   const crossTab = run.mode !== props.tabMode;
@@ -1365,6 +1373,27 @@ function ActiveRunView(props: {
         )}
       </section>
 
+      {/* Cluster D Phase 4d: bus auto-retry banner. Observe-only — the
+       * bus runner owns the retry loop server-side, so the operator
+       * sees countdown + agent + reason but no Retry/Pause buttons (a
+       * UI-only pause would lie; a manual fire would race the bus).
+       *
+       * Mounted as a direct <SessionBanner> (not via BannerStack) for
+       * symmetry with the three inline `.multi-agent-warning` banners
+       * below — keeping the multi-agent surface's banner-mount pattern
+       * uniform. Visually it sits above the recovery banners because
+       * rate-limit is a transient runtime condition; awaiting-continue/
+       * pending-retry/pending-mutation are operator decisions and stay
+       * primary. */}
+      {isRunning && run.autoRetry && (
+        <SessionBanner
+          {...buildBusAutoRetryBannerItem({
+            sessionId: run.sessionId,
+            state: run.autoRetry,
+            callbacks: { onClear: props.onClearAutoRetry },
+          })}
+        />
+      )}
       {/* Cluster D Phase 3 migration: three inline recovery banners now
        * render through <SessionBanner classStem="multi-agent-warning"
        * layout="flat">. The legacy `.multi-agent-warning` /
