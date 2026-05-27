@@ -5436,3 +5436,256 @@ pre {
   outline: none;
 }
 
+/* ----------------------------------------------------------------------
+ * Cluster B Phase 6a: pre-spawn gate modals (MCP TOFU, env injection).
+ *
+ * Single class family `.gate-modal-*` covers both — McpTofuModal and
+ * EnvInjectionGateModal share the same chrome (overlay + dialog box +
+ * header + facts dl + button row). The differences (TOFU's 4-button row
+ * vs env's typed input) live in component-specific child elements.
+ *
+ * Token-only styling per the design system. New tokens: none — z-index
+ * 110 puts gate modals above .logs-modal-overlay (100) so a stack
+ * "logs open in background, then gate fires" doesn't bury the gate.
+ * --------------------------------------------------------------------*/
+
+.gate-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 110;
+  padding: var(--s-4);
+}
+
+.gate-modal {
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-lg);
+  width: min(620px, 100%);
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  padding: var(--s-4);
+  gap: var(--s-3);
+}
+
+.gate-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.gate-modal-title {
+  margin: 0;
+  font-size: var(--t-lg);
+  color: var(--fg-0);
+}
+
+.gate-modal-reason {
+  font-size: var(--t-sm);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+  background: var(--bg-3);
+  color: var(--fg-1);
+  white-space: nowrap;
+}
+.gate-modal-reason-hash_changed {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.gate-modal-reason-first_seen {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.gate-modal-reason-env {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.gate-modal-help {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+  line-height: 1.45;
+}
+
+.gate-modal-facts {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--s-2) var(--s-3);
+  font-size: var(--t-sm);
+}
+
+.gate-modal-fact {
+  display: contents;
+}
+.gate-modal-fact > dt {
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.gate-modal-fact > dd {
+  margin: 0;
+  color: var(--fg-0);
+  overflow-wrap: anywhere;
+}
+
+.gate-modal-path {
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+}
+
+.gate-modal-sha {
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+  word-break: break-all;
+}
+.gate-modal-sha-prev {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.gate-modal-sha-absent {
+  color: var(--fg-2);
+  font-style: italic;
+}
+
+.gate-modal-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  justify-content: flex-end;
+  margin-top: var(--s-2);
+}
+
+.gate-modal-btn {
+  /* Reuses .ghost-btn for the base — only adds gate-specific accents. */
+  padding: var(--s-2) var(--s-3);
+}
+.gate-modal-btn-primary {
+  background: var(--accent);
+  color: var(--bg-0);
+  border-color: var(--accent);
+}
+.gate-modal-btn-primary:hover,
+.gate-modal-btn-primary:focus-visible {
+  background: var(--accent);
+  filter: brightness(1.08);
+  outline: none;
+}
+.gate-modal-btn-danger {
+  color: var(--err);
+  border-color: var(--err);
+}
+.gate-modal-btn:disabled,
+.gate-modal-btn[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* -- env injection list ------------------------------------------------ */
+
+.gate-modal-injection-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  padding: var(--s-2);
+  background: var(--bg-3);
+}
+
+.gate-modal-injection-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+}
+
+.gate-modal-injection-key {
+  color: var(--fg-0);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.gate-modal-injection-posture {
+  color: var(--fg-2);
+  font-size: var(--t-xs);
+  white-space: nowrap;
+}
+.gate-modal-injection-scope {
+  font-size: var(--t-xs);
+  padding: 1px var(--s-2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+  background: var(--bg-2);
+  color: var(--fg-1);
+}
+.gate-modal-injection-scope-local {
+  /* project-local is the least-trusted tier (spec §5.3) — surface it. */
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.gate-modal-injection-set {
+  font-size: var(--t-xs);
+  padding: 1px var(--s-2);
+  border-radius: var(--r-sm);
+}
+.gate-modal-injection-set-yes {
+  background: rgba(255, 90, 90, 0.12);
+  color: var(--err);
+}
+.gate-modal-injection-set-no {
+  background: var(--bg-2);
+  color: var(--fg-2);
+}
+
+/* -- typed-acknowledgment input ---------------------------------------- */
+
+.gate-modal-input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.gate-modal-label {
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+
+.gate-modal-input {
+  padding: var(--s-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+  color: var(--fg-0);
+  font-size: var(--t-sm);
+}
+.gate-modal-input:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.gate-modal-input-ack {
+  /* Make the typed-ack field visually distinct so the operator can't
+   * mistake it for the optional reason field. */
+  font-family: var(--font-mono, monospace);
+  letter-spacing: 0.04em;
+}
+
+.gate-modal-input-help {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+

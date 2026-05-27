@@ -28,6 +28,7 @@ import {
   notifyFromServerMsg,
   useNotificationsActions,
 } from './components/notifications';
+import { GateModalsProvider } from './components/authority/GateModalsContext';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -88,6 +89,12 @@ export function App() {
   // pipes `inbox_snapshot` ServerMsgs through this ref into the
   // provider's reducer.
   const inboxHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  // Cluster B Phase 6a: bridge for the gate-modals provider. Same shape
+  // as inboxHandlerRef — App.tsx's onMessage routes
+  // `mcp_auto_install_pending` + `session_start_gated` envelopes through
+  // this ref into the GateModalsProvider's queue. The provider then
+  // surfaces a modal whose Submit ships the matching ClientMsg.
+  const gateHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -97,19 +104,27 @@ export function App() {
   const inboxSend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
+  // Cluster B Phase 6a: ClientMsg sink for the GateModalsProvider. Same
+  // wsRef indirection as inboxSend — keeps the provider WS-agnostic.
+  const gateSend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
 
   return (
     <NotificationsProvider onAck={handleAck}>
       <NotificationsBridge pushRef={notifPushRef} dismissRef={notifDismissRef} />
       <InboxProvider send={inboxSend} handlerRef={inboxHandlerRef}>
-        <AppShell
-          wsRef={wsRef}
-          notifPushRef={notifPushRef}
-          notifDismissRef={notifDismissRef}
-          inboxHandlerRef={inboxHandlerRef}
-          onAck={handleAck}
-        />
-        <NotificationStack />
+        <GateModalsProvider send={gateSend} handlerRef={gateHandlerRef}>
+          <AppShell
+            wsRef={wsRef}
+            notifPushRef={notifPushRef}
+            notifDismissRef={notifDismissRef}
+            inboxHandlerRef={inboxHandlerRef}
+            gateHandlerRef={gateHandlerRef}
+            onAck={handleAck}
+          />
+          <NotificationStack />
+        </GateModalsProvider>
       </InboxProvider>
     </NotificationsProvider>
   );
@@ -151,11 +166,24 @@ type AppShellProps = {
    * sync without coupling the two.
    */
   inboxHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cluster B Phase 6a: bridge ref the GateModalsProvider populates.
+   * Same routing posture as inboxHandlerRef — called AFTER the reducer
+   * dispatch so the modal queue and store stay independent.
+   */
+  gateHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
 
-function AppShell({ wsRef, notifPushRef, notifDismissRef, inboxHandlerRef, onAck }: AppShellProps) {
+function AppShell({
+  wsRef,
+  notifPushRef,
+  notifDismissRef,
+  inboxHandlerRef,
+  gateHandlerRef,
+  onAck,
+}: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
   /**
    * Phase H side channel: ServerMsg subscribers for surfaces whose state
@@ -364,6 +392,15 @@ function AppShell({ wsRef, notifPushRef, notifDismissRef, inboxHandlerRef, onAck
             inboxHandlerRef.current?.(msg);
           } catch (err) {
             console.error('[inbox] handler threw', err);
+          }
+          // Cluster B Phase 6a: hand to the GateModalsProvider bridge
+          // so `mcp_auto_install_pending` + `session_start_gated`
+          // surface their modals. Same narrow-filter posture as the
+          // inbox handler — non-gate messages are silently dropped.
+          try {
+            gateHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[gate-modals] handler threw', err);
           }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
