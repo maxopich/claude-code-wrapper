@@ -78,6 +78,32 @@ export type WrapperErrorKind =
   | 'process_crashed'
   | 'parse_error';
 
+/**
+ * Cluster A Phase 3: enumerated sub-codes for router-drop safety events.
+ *
+ * Each F2/F3 source-allowlist filter in `bus/orchestrator.ts` (and the
+ * analogous chain-mode filters in `bus/chain.ts`) maps to exactly one of
+ * these codes. They land in `safety_audit.reason_code` and on the wire as
+ * the `RouterDropEvent.reasonCode` field — a forward-compat input to the
+ * Phase 5 inbox panel's filter chip and Cluster B's D4 routing-trail
+ * inspector.
+ *
+ * The drop site distinguishes per-row context (source/destination/kind) in
+ * the audit row's payload; the reason code is the structural category.
+ *
+ * | code | semantics |
+ * |---|---|
+ * | `forged_source` | F3 — agent attempted to spoof `source=cebab` |
+ * | `worker_to_user` | F2 — only the orchestrator may address `_user` |
+ * | `worker_to_worker` | F2 — worker→worker reply bypasses the orchestrator |
+ * | `unknown_source` | F2 round-2 — source name is not a known participant |
+ */
+export type RouterDropReasonCode =
+  | 'forged_source'
+  | 'worker_to_user'
+  | 'worker_to_worker'
+  | 'unknown_source';
+
 /** Per-session permission mode the wrapper exposes to the UI. */
 export type SessionPermissionMode = 'default' | 'acceptEdits';
 
@@ -880,7 +906,61 @@ export type ServerMsg =
       lastRun: TemplateLastRun | null;
     }
   | { type: 'wrapper_error'; sessionId?: string; kind: WrapperErrorKind; message: string }
-  | (NotificationEnvelope & { type: 'notification' });
+  | (NotificationEnvelope & { type: 'notification' })
+  | {
+      /**
+       * Cluster A Phase 3 (B2): typed rate-limit signal lifted out of the
+       * generic `system_event { subtype: 'rate_limit' }` fall-through in
+       * `ws/translate.ts`. Carries the SDK's `rate_limit_info` payload so a
+       * future per-session banner (Cluster D B2) can render a live
+       * retry-after countdown; the operator-facing toast is fanned out
+       * separately as a `notification` envelope by the dispatcher.
+       */
+      type: 'rate_limit_event';
+      sessionId: string;
+      /** SDK status enum, e.g. `'allowed_warning' | 'limited'`. */
+      status?: string;
+      /** Wall-clock ms the limit resets at; surfaced as a countdown. */
+      resetsAt?: number;
+      /** SDK's discriminator, e.g. `'subscription'`. */
+      rateLimitType?: string;
+      /** Raw payload from the SDK for forward-compat. */
+      payload: unknown;
+    }
+  | {
+      /**
+       * Cluster A Phase 3 (D4): replaces the four `console.warn` drop
+       * sites in `bus/orchestrator.ts:415-435` and the analogous chain
+       * sites. Forward-compat surface for the Cluster B per-agent
+       * routing-trail counter; the operator toast is fanned out separately
+       * as a safety-class `notification` envelope by the dispatcher (which
+       * also writes the `safety_audit` row before this event ships).
+       *
+       * `auditRowId` is the `safety_audit.id` of the row written for this
+       * drop — a future inbox panel uses it to deep-link to the audit trail.
+       */
+      type: 'router_drop';
+      sessionId: string;
+      reasonCode: RouterDropReasonCode;
+      source: string;
+      destination: string;
+      /** `BusEvent.kind` of the dropped event (e.g. `'reply'`, `'error'`). */
+      kind: string;
+      auditRowId: string;
+    }
+  | {
+      /**
+       * Cluster A Phase 3 (E1): names of env vars `runner/claude.ts`
+       * stripped from the spawn env so a stray `ANTHROPIC_API_KEY` (etc.)
+       * can't silently route a session through paid billing. Values are
+       * NEVER on the wire (UX-5). Emitted once per WS attach so a
+       * late-opening browser tab still sees it; the operator toast is
+       * fanned out by the dispatcher as a sticky safety `notification`.
+       */
+      type: 'env_scrubbed';
+      /** Names of the env vars present in `process.env` that were stripped. */
+      vars: string[];
+    };
 
 /**
  * Cluster A Phase 1: structurally distinct severity tier vs class.

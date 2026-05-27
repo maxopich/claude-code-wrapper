@@ -33,13 +33,22 @@ import {
   syncWorkspaceProjects,
   workspaceRootValid,
 } from '../workspace.js';
-import type { MultiAgentLifecycle } from '@cebab/shared/protocol';
+import type {
+  MultiAgentLifecycle,
+  NotificationEnvelope,
+  RouterDropReasonCode,
+} from '@cebab/shared/protocol';
 import { translate } from './translate.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
 import { buildSessionLogChunk } from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
-import { getNotification, markNotificationAcked } from '../notifications/dispatcher.js';
+import {
+  emit as emitNotification,
+  getNotification,
+  markNotificationAcked,
+} from '../notifications/dispatcher.js';
+import { getScrubbedEnvVars } from '../runner/claude.js';
 import { appendSafetyAuditAck, HIGHEST_SUBCODES } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import {
@@ -210,6 +219,38 @@ function onConnection(ws: WebSocket): void {
     multiAgent: null,
   };
 
+  // Cluster A Phase 3 (E1, BE-10): tell the operator which auth-precedence
+  // env vars `runner/claude.ts` stripped from this session's spawn env. Fires
+  // on every attach (initial + reconnect) so a late-opening browser tab sees
+  // the scrub; the dispatcher's safety dedupeKey (`env_scrubbed:boot`) is
+  // shared across calls so the UI layer collapses repeats while the audit
+  // row is written every time per BE-2 (safety never coalesces at recording).
+  const scrubbedVars = getScrubbedEnvVars(process.env);
+  if (scrubbedVars.length > 0) {
+    const titlePieces = [`Cebab is using your Claude subscription`];
+    const message = `Stripped from spawn env: ${scrubbedVars.join(', ')}.`;
+    const result = emitNotification(
+      {
+        class: 'safety',
+        severity: 'danger',
+        dedupeKey: 'env_scrubbed:boot',
+        title: titlePieces[0],
+        message,
+        reasonCode: 'api_key_scrubbed',
+        auditKind: 'auth.transition',
+        auditPayload: { vars: scrubbedVars },
+      },
+      (msg) => send(ws, msg),
+    );
+    if (!result.ok) {
+      console.error('[ws] env_scrubbed dispatcher.emit failed', result.error);
+    }
+    // Forward-compat: also ship the typed event for any non-toast consumer
+    // (Cluster B E1 inspector). The dispatcher fan-out above is what
+    // drives the dock; this carries the var-names payload separately.
+    send(ws, { type: 'env_scrubbed', vars: scrubbedVars });
+  }
+
   ws.on('message', (raw) => {
     let parsed: ClientMsg;
     try {
@@ -266,7 +307,13 @@ function resumeCallbacks(
   conn: Conn,
 ): Pick<
   ResumeCallbacks,
-  'onEvent' | 'onEnded' | 'onPendingRetry' | 'onMutation' | 'onPendingMutation'
+  | 'onEvent'
+  | 'onEnded'
+  | 'onPendingRetry'
+  | 'onMutation'
+  | 'onPendingMutation'
+  | 'sendNotification'
+  | 'sendRouterDrop'
 > {
   return {
     onEvent: (sessionId, ev, dbEventId) => {
@@ -304,6 +351,15 @@ function resumeCallbacks(
         sessionId,
         pending: pending ? mutationRecordToView(pending) : null,
       });
+    },
+    // Cluster A Phase 3 (D4): rebound on every reconnect so router-drop
+    // safety toasts continue to reach the new WS sink. The dispatcher has
+    // already written the audit row before this callback fires.
+    sendNotification: (env) => {
+      send(conn.ws, env);
+    },
+    sendRouterDrop: (drop) => {
+      send(conn.ws, { type: 'router_drop', ...drop });
     },
   };
 }
@@ -960,6 +1016,24 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           pending: pending ? mutationRecordToView(pending) : null,
         });
       };
+      // Cluster A Phase 3 (D4): the orchestrator/chain router calls these
+      // when an F2/F3 source-allowlist drop fires. The dispatcher has already
+      // written the safety_audit row (BE-1) and shaped the envelope; the WS
+      // layer just forwards it. The typed `router_drop` ServerMsg is
+      // forward-compat for non-toast consumers (Cluster B routing-trail).
+      const sendNotification = (env: NotificationEnvelope & { type: 'notification' }) => {
+        send(conn.ws, env);
+      };
+      const sendRouterDrop = (drop: {
+        sessionId: string;
+        reasonCode: RouterDropReasonCode;
+        source: string;
+        destination: string;
+        kind: string;
+        auditRowId: string;
+      }) => {
+        send(conn.ws, { type: 'router_drop', ...drop });
+      };
 
       // Per-session folders live under the workspace root, so it must be
       // a valid existing directory. The Settings modal validates on save,
@@ -1020,6 +1094,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             onPendingRetry,
             onMutation,
             onPendingMutation,
+            sendNotification,
+            sendRouterDrop,
             hopBudget,
             pauseOnMutation: msg.pauseOnMutation === true,
             // PR-7: stamp template provenance onto the row so the rail can
@@ -1076,6 +1152,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           onPendingRetry,
           onMutation,
           onPendingMutation,
+          sendNotification,
+          sendRouterDrop,
           hopBudget,
           pauseOnMutation: msg.pauseOnMutation === true,
           // PR-7: stamp template provenance onto the row.
@@ -1705,7 +1783,30 @@ async function runOneTurn(
     for await (const sdkMsg of runner) {
       await persistMessage(sessionId, sdkMsg);
       const out = translate(sdkMsg, project.id);
-      if (out) send(conn.ws, out);
+      if (out) {
+        send(conn.ws, out);
+        // Cluster A Phase 3 (B2): typed `rate_limit_event` also fans out as
+        // an operational warn toast via the dispatcher. We do this only on
+        // the live stream — `replaySession` deliberately doesn't toast
+        // historical events.
+        if (out.type === 'rate_limit_event') {
+          const resetText =
+            typeof out.resetsAt === 'number'
+              ? ` Retry after ${new Date(out.resetsAt).toLocaleTimeString()}.`
+              : '';
+          emitNotification(
+            {
+              class: 'operational',
+              severity: 'warn',
+              dedupeKey: `rate_limit:${sessionId}`,
+              title: 'Rate limit',
+              message: `${out.status ?? 'limited'}${resetText}`,
+              sessionId,
+            },
+            (msg) => send(conn.ws, msg),
+          );
+        }
+      }
     }
   } catch (err) {
     const wrap = classifyError(err);

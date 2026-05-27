@@ -55,7 +55,12 @@ import {
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
-import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
+import type {
+  NotificationEnvelope,
+  PendingRetryDescriptor,
+  RouterDropReasonCode,
+} from '@cebab/shared/protocol';
+import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
@@ -183,6 +188,16 @@ export type StartOrchestratorOpts = {
    * `pending: null`). Optional; the wire layer null-checks.
    */
   onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /**
+   * Cluster A Phase 3 (D4): dispatcher notification fan-out — the orchestrator
+   * router calls this on every F2/F3 source-allowlist drop AFTER the
+   * `safety_audit` row is written (BE-1). The WS layer wires it to
+   * `send(conn.ws, env)`; `attemptResumeMultiAgent` rebinds it on reconnect.
+   */
+  sendNotification?: BusSink['sendNotification'];
+  /** Cluster A Phase 3 (D4): forward-compat typed `router_drop` ServerMsg
+   *  fan-out for non-toast consumers. */
+  sendRouterDrop?: BusSink['sendRouterDrop'];
   /** PR-7: the saved-template id this run was started from, if any. Stamped
    *  onto the row so the templates UI's "Last run" rail can SELECT by
    *  template later. Absent for ad-hoc runs. */
@@ -193,6 +208,10 @@ export type ResumeOrchestratorOpts = {
   sessionId: string;
   onEvent: StartOrchestratorOpts['onEvent'];
   onEnded: StartOrchestratorOpts['onEnded'];
+  /** Cluster A Phase 3: rebind sink callbacks on reconnect so router drops
+   *  continue to reach the new WS sink. Optional for tests + legacy callers. */
+  sendNotification?: BusSink['sendNotification'];
+  sendRouterDrop?: BusSink['sendRouterDrop'];
 };
 
 export type AddWorkerResult = {
@@ -283,6 +302,13 @@ export function createOrchestratorRouter(params: {
   /** Optional pending-retry set/clear sink (Item #4). Threaded onto
    *  `BusSink.onPendingRetry` so rebind/detach honor the plumbing. */
   onPendingRetry?: StartOrchestratorOpts['onPendingRetry'];
+  /** Cluster A Phase 3 (D4): dispatcher notification fan-out for router
+   *  drops (and any other bus-runtime-originated toast). Threaded onto
+   *  `BusSink.sendNotification` so the rebind/detach plumbing is shared. */
+  sendNotification?: BusSink['sendNotification'];
+  /** Cluster A Phase 3 (D4): forward-compat typed `router_drop` ServerMsg
+   *  for non-toast consumers. Threaded onto `BusSink.sendRouterDrop`. */
+  sendRouterDrop?: BusSink['sendRouterDrop'];
 }): OrchestratorRouter {
   const {
     sessionId,
@@ -302,6 +328,8 @@ export function createOrchestratorRouter(params: {
     onEvent: params.onEvent,
     onEnded: params.onEnded,
     onPendingRetry: params.onPendingRetry,
+    sendNotification: params.sendNotification,
+    sendRouterDrop: params.sendRouterDrop,
   };
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
@@ -408,6 +436,66 @@ export function createOrchestratorRouter(params: {
     return true;
   };
 
+  /**
+   * Cluster A Phase 3 (D4): on every F2/F3 router-drop, write a safety_audit
+   * row + fan an operator-facing safety notification. The console.warn lines
+   * below were the silent-async source the new dock + audit log close. The
+   * dispatcher enforces BE-1 (audit row written BEFORE the WS envelope ships)
+   * and BE-2 (safety class never coalesces at the recording layer — 200 drops
+   * = 200 audit rows even though the UI may collapse them to "×200" via
+   * dedupeKey).
+   *
+   * `console.warn` is kept as a developer-facing breadcrumb (operators rarely
+   * tail server logs) — the source of truth is the audit row + dock toast.
+   */
+  const dispatchRouterDrop = (params: {
+    reasonCode: RouterDropReasonCode;
+    source: string;
+    destination: string;
+    kind: string;
+    title: string;
+    message: string;
+  }) => {
+    const result = emitNotification(
+      {
+        class: 'safety',
+        severity: 'danger',
+        dedupeKey: `router_drop:${params.reasonCode}:${sessionId}`,
+        title: params.title,
+        message: params.message,
+        sessionId,
+        reasonCode: params.reasonCode,
+        auditKind: 'router.drop',
+        auditPayload: {
+          source: params.source,
+          destination: params.destination,
+          kind: params.kind,
+        },
+      },
+      (msg) => {
+        if (msg.type === 'notification') {
+          sink.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+        }
+      },
+    );
+    if (result.ok) {
+      sink.sendRouterDrop?.({
+        sessionId,
+        reasonCode: params.reasonCode,
+        source: params.source,
+        destination: params.destination,
+        kind: params.kind,
+        auditRowId: result.id,
+      });
+    } else {
+      // BE-1: audit write failed — the dispatcher refuses to emit and we log
+      // so an operator tailing the server has a chance to notice. The agent
+      // action that triggered the drop is already being refused (we return
+      // early from handleEvent below regardless).
+      console.error('[orchestrator] router_drop dispatcher.emit failed', result.error);
+    }
+  };
+
   const handleEvent = (ev: BusEvent) => {
     if (ended) return;
     // F3: source=cebab arriving through an agent is a forgery (Cebab routes
@@ -416,21 +504,53 @@ export function createOrchestratorRouter(params: {
       console.warn(
         `[orchestrator] drop forged source=cebab dest=${ev.destination} kind=${ev.kind}`,
       );
+      dispatchRouterDrop({
+        reasonCode: 'forged_source',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Forged source=cebab dropped',
+        message: `dest=${ev.destination} kind=${ev.kind}`,
+      });
       return;
     }
     // F2: only the orchestrator may address the user.
     if (ev.destination === USER_RECIPIENT && ev.source !== ORCHESTRATOR_AGENT_NAME) {
       console.warn(`[orchestrator] drop dest=user from non-orchestrator source=${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'worker_to_user',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Worker tried to address user directly',
+        message: `from=${ev.source}`,
+      });
       return;
     }
     // F2: workers must reply via the orchestrator — no worker→worker.
     if (workerSet.has(ev.source) && workerSet.has(ev.destination)) {
       console.warn(`[orchestrator] drop worker→worker ${ev.source}→${ev.destination}`);
+      dispatchRouterDrop({
+        reasonCode: 'worker_to_worker',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Worker→worker bypass dropped',
+        message: `${ev.source} → ${ev.destination}`,
+      });
       return;
     }
     // F2 round-2: source must be the orchestrator or a known worker.
     if (ev.source !== ORCHESTRATOR_AGENT_NAME && !workerSet.has(ev.source)) {
       console.warn(`[orchestrator] drop event from non-participant source=${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'unknown_source',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Unknown source on bus',
+        message: `source=${ev.source}`,
+      });
       return;
     }
 
@@ -675,6 +795,10 @@ export function wireOrchestratorSession(p: {
   onPendingRetry?: StartOrchestratorOpts['onPendingRetry'];
   onMutation?: StartOrchestratorOpts['onMutation'];
   onPendingMutation?: StartOrchestratorOpts['onPendingMutation'];
+  /** Cluster A Phase 3 (D4): dispatcher notification fan-out. */
+  sendNotification?: StartOrchestratorOpts['sendNotification'];
+  /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
+  sendRouterDrop?: StartOrchestratorOpts['sendRouterDrop'];
   seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
   briefedAgents?: ReadonlyArray<string>;
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
@@ -965,6 +1089,8 @@ export function wireOrchestratorSession(p: {
     hopBudget,
     initialHopsCount: p.initialHopsCount,
     onPendingRetry: p.onPendingRetry,
+    sendNotification: p.sendNotification,
+    sendRouterDrop: p.sendRouterDrop,
   });
 
   async function addWorker(projectId: number): Promise<AddWorkerResult> {
@@ -1170,6 +1296,8 @@ export async function startOrchestratorSession(
     onPendingRetry: opts.onPendingRetry,
     onMutation: opts.onMutation,
     onPendingMutation: opts.onPendingMutation,
+    sendNotification: opts.sendNotification,
+    sendRouterDrop: opts.sendRouterDrop,
     hopBudget: opts.hopBudget,
     pauseOnMutation: opts.pauseOnMutation,
   });
@@ -1215,7 +1343,12 @@ export async function resumeOrchestratorSession(
 ): Promise<OrchestratorSessionHandle | null> {
   const live = getLiveSession(opts.sessionId);
   if (!live || live.mode !== 'orchestrator') return null;
-  live.rebind({ onEvent: opts.onEvent, onEnded: opts.onEnded });
+  live.rebind({
+    onEvent: opts.onEvent,
+    onEnded: opts.onEnded,
+    sendNotification: opts.sendNotification,
+    sendRouterDrop: opts.sendRouterDrop,
+  });
   return live.handle as unknown as OrchestratorSessionHandle;
 }
 

@@ -61,7 +61,12 @@ import {
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
-import type { PendingRetryDescriptor } from '@cebab/shared/protocol';
+import type {
+  NotificationEnvelope,
+  PendingRetryDescriptor,
+  RouterDropReasonCode,
+} from '@cebab/shared/protocol';
+import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
 import {
   archiveAgentHop,
@@ -128,6 +133,10 @@ export type StartChainOpts = {
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
   /** Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`. */
   onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /** Cluster A Phase 3 (D4): dispatcher notification fan-out. */
+  sendNotification?: BusSink['sendNotification'];
+  /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
+  sendRouterDrop?: BusSink['sendRouterDrop'];
   /** PR-7: the saved-template id this run was started from, if any. Stamped
    *  onto the row so the templates UI's "Last run" rail can SELECT by
    *  template later. Absent for ad-hoc runs. */
@@ -138,6 +147,9 @@ export type ResumeChainOpts = {
   sessionId: string;
   onEvent: StartChainOpts['onEvent'];
   onEnded: StartChainOpts['onEnded'];
+  /** Cluster A Phase 3: rebind sink callbacks on reconnect. */
+  sendNotification?: BusSink['sendNotification'];
+  sendRouterDrop?: BusSink['sendRouterDrop'];
 };
 
 export type ChainSessionHandle = {
@@ -211,6 +223,12 @@ export function createChainRouter(params: {
   /** Optional pending-retry set/clear sink (Item #4). Threaded onto
    *  `BusSink.onPendingRetry` so rebind/detach honor the same plumbing. */
   onPendingRetry?: StartChainOpts['onPendingRetry'];
+  /** Cluster A Phase 3 (D4): dispatcher notification fan-out for chain
+   *  router drops. Threaded onto `BusSink.sendNotification`. */
+  sendNotification?: BusSink['sendNotification'];
+  /** Cluster A Phase 3 (D4): forward-compat typed `router_drop` ServerMsg
+   *  for non-toast consumers. Threaded onto `BusSink.sendRouterDrop`. */
+  sendRouterDrop?: BusSink['sendRouterDrop'];
 }): ChainRouter {
   const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
     params;
@@ -224,6 +242,8 @@ export function createChainRouter(params: {
     onEvent: params.onEvent,
     onEnded: params.onEnded,
     onPendingRetry: params.onPendingRetry,
+    sendNotification: params.sendNotification,
+    sendRouterDrop: params.sendRouterDrop,
   };
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
@@ -276,23 +296,97 @@ export function createChainRouter(params: {
     sink.onEnded(sessionId, reason, reason === 'completed' ? iterationId : null);
   };
 
+  /**
+   * Cluster A Phase 3 (D4): chain-mode mirror of the orchestrator's
+   * dispatchRouterDrop. Same BE-1/BE-2 invariants — safety_audit row first,
+   * never coalesced at the recording layer, console.warn kept as a developer
+   * breadcrumb.
+   */
+  const dispatchRouterDrop = (params: {
+    reasonCode: RouterDropReasonCode;
+    source: string;
+    destination: string;
+    kind: string;
+    title: string;
+    message: string;
+  }) => {
+    const result = emitNotification(
+      {
+        class: 'safety',
+        severity: 'danger',
+        dedupeKey: `router_drop:${params.reasonCode}:${sessionId}`,
+        title: params.title,
+        message: params.message,
+        sessionId,
+        reasonCode: params.reasonCode,
+        auditKind: 'router.drop',
+        auditPayload: {
+          source: params.source,
+          destination: params.destination,
+          kind: params.kind,
+        },
+      },
+      (msg) => {
+        if (msg.type === 'notification') {
+          sink.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+        }
+      },
+    );
+    if (result.ok) {
+      sink.sendRouterDrop?.({
+        sessionId,
+        reasonCode: params.reasonCode,
+        source: params.source,
+        destination: params.destination,
+        kind: params.kind,
+        auditRowId: result.id,
+      });
+    } else {
+      console.error('[chain] router_drop dispatcher.emit failed', result.error);
+    }
+  };
+
   const handleEvent = (ev: BusEvent) => {
     if (ended) return;
     // F3: source=cebab is Cebab's own traffic, routed in-process via
     //     forwardCebabEvent — never legitimately arriving through an agent.
     if (ev.source === CEBAB_SOURCE) {
       console.warn(`[chain] drop forged source=cebab dest=${ev.destination} kind=${ev.kind}`);
+      dispatchRouterDrop({
+        reasonCode: 'forged_source',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Forged source=cebab dropped',
+        message: `dest=${ev.destination} kind=${ev.kind}`,
+      });
       return;
     }
     // F2: chain terminates at `_sink`, never at `user`. dest=user is a spoof.
     if (ev.destination === USER_RECIPIENT) {
       console.warn(`[chain] drop dest=user from ${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'worker_to_user',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Agent tried to address user directly',
+        message: `from=${ev.source}`,
+      });
       return;
     }
     // F2: source must be a known participant. (Defense-in-depth — the
     //     in-process tool already pins an unspoofable source.)
     if (!participantSet.has(ev.source)) {
       console.warn(`[chain] drop event from non-participant source=${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'unknown_source',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Unknown source on bus',
+        message: `source=${ev.source}`,
+      });
       return;
     }
 
@@ -760,6 +854,8 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     deliver,
     hopBudget,
     onPendingRetry: opts.onPendingRetry,
+    sendNotification: opts.sendNotification,
+    sendRouterDrop: opts.sendRouterDrop,
   });
 
   const handle: ChainSessionHandle = {
@@ -900,7 +996,12 @@ export async function resumeChainSession(
   // Re-attach: swap the WS sink on the original, still-running router. The
   // returned handle is the ORIGINAL one (authoritative stop/detach/
   // iterationId) — we only redirected its event stream to this connection.
-  live.rebind({ onEvent: opts.onEvent, onEnded: opts.onEnded });
+  live.rebind({
+    onEvent: opts.onEvent,
+    onEnded: opts.onEnded,
+    sendNotification: opts.sendNotification,
+    sendRouterDrop: opts.sendRouterDrop,
+  });
   return live.handle as ChainSessionHandle;
 }
 

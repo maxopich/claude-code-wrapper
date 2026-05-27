@@ -28,18 +28,27 @@ export type RunOptions = {
 };
 
 /**
+ * Auth-precedence env vars that override OAuth subscription. The Anthropic
+ * CLI prefers `ANTHROPIC_API_KEY` over subscription, so a stray
+ * `export ANTHROPIC_API_KEY=...` in `.zshrc` would silently route us through
+ * paid billing; the Bedrock/Vertex/Foundry flags switch backends entirely.
+ *
+ * The list is exported so the WS layer can surface `getScrubbedEnvVars()`
+ * on every attach (Cluster A Phase 3, BE-10/E1) — names only, never values.
+ */
+const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+];
+
+/**
  * Strip every env var that would override OAuth subscription auth.
- * The Anthropic auth precedence puts API keys above subscription, so a stray
- * `export ANTHROPIC_API_KEY=...` in .zshrc would silently route us through paid billing.
  */
 function subscriptionOnlyEnv(env: NodeJS.ProcessEnv): Record<string, string> {
-  const blocked = new Set([
-    'ANTHROPIC_API_KEY',
-    'ANTHROPIC_AUTH_TOKEN',
-    'CLAUDE_CODE_USE_BEDROCK',
-    'CLAUDE_CODE_USE_VERTEX',
-    'CLAUDE_CODE_USE_FOUNDRY',
-  ]);
+  const blocked = new Set(SCRUBBED_ENV_VAR_NAMES);
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
     if (v === undefined) continue;
@@ -47,6 +56,17 @@ function subscriptionOnlyEnv(env: NodeJS.ProcessEnv): Record<string, string> {
     out[k] = v;
   }
   return out;
+}
+
+/**
+ * Cluster A Phase 3 (E1, UX-5): return the names of `SCRUBBED_ENV_VAR_NAMES`
+ * that were actually present in `env`. Used by the WS env_scrubbed emission
+ * on every attach — names only, never values, so a screenshot of the toast
+ * can't leak the operator's token. Returns `[]` if none were set, so the
+ * dispatcher can short-circuit the emit.
+ */
+export function getScrubbedEnvVars(env: NodeJS.ProcessEnv): string[] {
+  return SCRUBBED_ENV_VAR_NAMES.filter((name) => typeof env[name] === 'string' && env[name] !== '');
 }
 
 export function runClaude(opts: RunOptions): Query {

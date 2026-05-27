@@ -53,13 +53,26 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         payload: m,
       };
 
-    case 'rate_limit_event':
+    case 'rate_limit_event': {
+      // Cluster A Phase 3 (B2): typed event lifted out of the generic
+      // `system_event { subtype: 'rate_limit' }` fall-through so a future
+      // per-session banner can render a live countdown and the dispatcher
+      // can fan out an operational warn toast. The wire-level
+      // `rate_limit_info` payload is preserved verbatim for forward-compat.
+      const info = (m as AnyMsg & { rate_limit_info?: Record<string, unknown> }).rate_limit_info;
+      const status = typeof info?.status === 'string' ? info.status : undefined;
+      const rateLimitType =
+        typeof info?.rateLimitType === 'string' ? info.rateLimitType : undefined;
+      const resetsAt = typeof info?.resetsAt === 'number' ? info.resetsAt : undefined;
       return {
-        type: 'system_event',
+        type: 'rate_limit_event',
         sessionId,
-        subtype: 'rate_limit',
-        payload: (m as AnyMsg & { rate_limit_info?: unknown }).rate_limit_info ?? m,
+        status,
+        resetsAt,
+        rateLimitType,
+        payload: info ?? m,
       };
+    }
 
     case 'assistant': {
       const a = m as AnyMsg & {
