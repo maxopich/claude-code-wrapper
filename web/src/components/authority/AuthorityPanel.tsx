@@ -3,6 +3,10 @@ import { useAuthorityActions, useAuthoritySlot, type AuthoritySlot } from './Aut
 import { AuthoritySection } from './AuthoritySection';
 import { ModelIdentityCard } from './ModelIdentityCard';
 import { ToolsList } from './ToolsList';
+import { McpServersList } from './McpServersList';
+import { AllowDenyView } from './AllowDenyView';
+import { EnvScrubInspector } from './EnvScrubInspector';
+import { HooksList } from './HooksList';
 
 // Cluster B Phase 6b (UI-B1): host that composes the authority sections.
 //
@@ -138,10 +142,78 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       >
         <ToolsList tools={authority.tools} mcpServers={authority.mcpServers} mode="list" />
       </AuthoritySection>
-      {/* Phase 6c will mount: McpServersList, AllowDenyView, EnvScrubInspector,
-       *  HooksList. Phase 6d adds RouterDropsCounter/Log. Phase 8 adds the
-       *  SlashCommandsList / SkillsList / SubAgentsList cards. Each new
-       *  section just inserts another <AuthoritySection>. */}
+      <AuthoritySection
+        title="MCP servers"
+        count={authority.mcpServers.length}
+        sublabel={authority.mcpServers.length === 0 ? 'none declared' : undefined}
+        defaultOpen={false}
+      >
+        <McpServersList servers={authority.mcpServers} />
+      </AuthoritySection>
+      <AuthoritySection
+        title="Allow / deny rules"
+        // Count derived from the same per-tool attribution AllowDenyView
+        // groups on — explicit allows + denied (any rulingScope). Default-
+        // deny rows count too because the operator should see "20 tools
+        // denied" even if the rules are implicit.
+        count={countAllowDenyRules(authority.tools)}
+        defaultOpen={false}
+      >
+        <AllowDenyView tools={authority.tools} />
+      </AuthoritySection>
+      <AuthoritySection
+        title="Env injection scan"
+        count={authority.detectedEnvInjections.length}
+        sublabel={
+          authority.detectedEnvInjections.length === 0
+            ? 'no credential-class keys detected'
+            : `${authority.detectedEnvInjections.length} would inject — review before starting`
+        }
+        // Force-open when ANY injection is detected — this is the highest-
+        // signal posture row the operator can look at before kicking off a
+        // session.
+        defaultOpen={authority.detectedEnvInjections.length > 0}
+        stripe={authority.detectedEnvInjections.length > 0 ? 'accent' : 'none'}
+      >
+        <EnvScrubInspector injections={authority.detectedEnvInjections} />
+      </AuthoritySection>
+      <AuthoritySection
+        title="Hooks"
+        count={authority.hooks.length}
+        sublabel={
+          authority.hooks.length === 0
+            ? 'none declared'
+            : hasLocalHook(authority.hooks)
+              ? 'project-local hook present — review'
+              : undefined
+        }
+        // Force-open when a project-local hook exists — UI-B40's force-
+        // expand intent.
+        defaultOpen={hasLocalHook(authority.hooks)}
+        stripe={hasLocalHook(authority.hooks) ? 'removed' : 'none'}
+      >
+        <HooksList hooks={authority.hooks} />
+      </AuthoritySection>
+      {/* Phase 6d adds RouterDropsCounter/Log. Phase 8 adds the
+       *  SlashCommandsList / SkillsList / SubAgentsList cards. */}
     </div>
   );
+}
+
+/**
+ * Count of allow/deny "rules" derived from per-tool attribution. Mirrors
+ * AllowDenyView's grouping logic — explicit allows + every deny (including
+ * the SDK-default-deny tail, which the operator still wants to know about).
+ */
+function countAllowDenyRules(tools: { allowed: boolean; denied: boolean; rulingScope: string }[]) {
+  let n = 0;
+  for (const t of tools) {
+    if (t.denied) n += 1;
+    else if (t.allowed && t.rulingScope !== 'default') n += 1;
+  }
+  return n;
+}
+
+function hasLocalHook(hooks: { scope: 'user' | 'project' | 'local' }[]): boolean {
+  return hooks.some((h) => h.scope === 'local');
 }
