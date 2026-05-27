@@ -71,6 +71,7 @@ import {
 import { getScrubbedEnvVars } from '../runner/claude.js';
 import { appendSafetyAuditAck, HIGHEST_SUBCODES } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
+import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
@@ -291,6 +292,43 @@ export function rateLimitDispatch(
   };
 }
 
+/**
+ * Cluster D Phase 4b (spec §4.2): pure validation for the
+ * `retry_rate_limited` ClientMsg. Returns the resolution code the
+ * dispatch site reacts to. Split out of the inline case body so unit
+ * tests can exercise the three-way branch without spinning up a real
+ * WS conn + SDK.
+ *
+ *   - `'no-held-prompt'` — `capturedPrompts` has no entry for
+ *     `sessionId`. The held turn already cleared (success, hard
+ *     failure, or duplicate click after the queue moved on).
+ *   - `'in-flight'` — `inFlight.has(sessionId)` is true. A second
+ *     retry click while the first one is still running would spawn
+ *     parallel SDK turns on the same `--resume` id and wedge the
+ *     session per the bus runner's serialization rationale.
+ *   - `'ok'` — both checks pass; carries the bytes the dispatch site
+ *     needs to re-invoke `runOneTurn` (text + projectId).
+ *
+ * `inFlight` is widened to a structural `{ has(id): boolean }` so the
+ * test can pass a plain `{ has: () => false }` stub instead of
+ * constructing a real Map.
+ */
+export type RetryRateLimitedResolution =
+  | { kind: 'ok'; text: string; projectId: number }
+  | { kind: 'no-held-prompt' }
+  | { kind: 'in-flight' };
+
+export function resolveRetryRateLimited(
+  capturedPrompts: Map<string, { text: string; projectId: number }>,
+  inFlight: { has(id: string): boolean },
+  sessionId: string,
+): RetryRateLimitedResolution {
+  const captured = capturedPrompts.get(sessionId);
+  if (!captured) return { kind: 'no-held-prompt' };
+  if (inFlight.has(sessionId)) return { kind: 'in-flight' };
+  return { kind: 'ok', text: captured.text, projectId: captured.projectId };
+}
+
 function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
   return {
     id: m.id,
@@ -357,6 +395,32 @@ type Conn = {
    * Cleared implicitly on disconnect.
    */
   startGate: StartGateState;
+  /**
+   * Cluster D Phase 4b (spec §4.2 / BE-D4): captured user prompt per
+   * active session, holding the bytes Cebab last delivered into the
+   * SDK turn that's now held by a rate-limit. The `retry_rate_limited`
+   * handler reads this map to re-deliver the same prompt on the same
+   * `--resume` session id (no fresh `system/init` quota burn).
+   *
+   * Lifecycle (single-agent only — bus participants own their own
+   * captured-prompt state via `lastPromptOut` inside chain.ts):
+   *
+   *   - WRITE at `runOneTurn` entry, BEFORE the SDK starts.
+   *   - DELETE on successful turn completion.
+   *   - DELETE on non-rate-limit failure (auth_expired, process_crash,
+   *     etc. — those need a different recovery flow, not a re-deliver).
+   *   - KEEP on `wrapperKind === 'rate_limited'` so the
+   *     `retry_rate_limited` handler can find the prompt.
+   *
+   * Lives on the Conn (not in module-level state) so a second operator
+   * pane attaching to the same session doesn't inherit the first
+   * pane's held-prompt — each pane manages its own retry intent.
+   * Cleared implicitly on WS close.
+   *
+   * The map's existence-as-signal is also the "this session is held"
+   * indicator that gates `runOneTurn`'s finally-block status flip.
+   */
+  capturedPrompts: Map<string, { text: string; projectId: number }>;
 };
 
 export function startWsServer(server: HttpServer): WebSocketServer {
@@ -496,6 +560,7 @@ function onConnection(ws: WebSocket): void {
     authorityCache: new Map(),
     trustGate: makeTrustGateState(),
     startGate: makeStartGateState(),
+    capturedPrompts: new Map(),
   };
 
   // Cluster A Phase 3 (E1, BE-10): tell the operator which auth-precedence
@@ -2207,6 +2272,70 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       });
       return;
     }
+    case 'retry_rate_limited': {
+      // Cluster D Phase 4b (spec §4.2, BE-D4 / BE-D8): re-deliver the
+      // captured user prompt on the same `--resume` session id so the
+      // SDK reuses its init quota. The retry trigger comes either
+      // from the operator clicking "Retry now" in the RateLimitBanner
+      // (Phase 4c) or from the client-scheduled auto-fire
+      // (`{ auto: true }`); both paths land here.
+      //
+      // Validation is `resolveRetryRateLimited` — see its docstring for
+      // the matrix of `no-held-prompt` vs `in-flight` vs `ok`. We split
+      // it out for unit-testability since the rest of this case body
+      // is integration-shaped (calls runOneTurn).
+      const resolution = resolveRetryRateLimited(
+        conn.capturedPrompts,
+        conn.inFlight,
+        msg.sessionId,
+      );
+      if (resolution.kind === 'no-held-prompt') {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message:
+            'No held prompt to retry — the session is not currently waiting on a rate-limit recovery.',
+        });
+        return;
+      }
+      if (resolution.kind === 'in-flight') {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: 'Retry already in flight for this session.',
+        });
+        return;
+      }
+      // Write the recovery_log row BEFORE re-running so the metric is
+      // captured even if the retry's `runOneTurn` itself throws
+      // synchronously. `auto` distinguishes operator-click
+      // (`manual_retry`) from the client-side auto-scheduler
+      // (`auto_retry`) — spec §8.5's regression-gate query separates
+      // them so a release that silently leans on auto-retry instead of
+      // fixing the underlying rate-limit budget is visible in the
+      // metrics.
+      try {
+        appendRecoveryLog({
+          sessionId: msg.sessionId,
+          failureClass: 'rate_limit',
+          operatorAction: msg.auto ? 'auto_retry' : 'manual_retry',
+        });
+      } catch (err) {
+        console.error('[ws] appendRecoveryLog rate-limit retry failed', err);
+      }
+      // Re-invoke runOneTurn with the captured bytes; `runOneTurn` is
+      // responsible for clearing or re-asserting `capturedPrompts`
+      // based on the new turn's outcome.
+      await runOneTurn(conn, {
+        type: 'send_message',
+        projectId: resolution.projectId,
+        sessionId: msg.sessionId,
+        text: resolution.text,
+      });
+      return;
+    }
     case 'send_message': {
       await runOneTurn(conn, msg);
       return;
@@ -2404,6 +2533,17 @@ async function runOneTurn(
     });
   };
 
+  // Cluster D Phase 4b (BE-D4): cache the user-prompt bytes BEFORE the
+  // SDK turn starts so a hard rate-limit can offer the operator a
+  // single-click retry that re-delivers the same prompt. The map is
+  // cleared on success or non-rate-limit failure; the
+  // `retry_rate_limited` handler reads it to look up the prompt + the
+  // owning project (we keep both so the handler can re-invoke
+  // `runOneTurn` without re-querying the sessions table). Pre-empt any
+  // stale entry — a second send to the same session id is the operator
+  // moving past a held rate-limit on their own.
+  conn.capturedPrompts.set(sessionId, { text: msg.text, projectId: project.id });
+
   const runner = pickRunner({
     cwd: project.path,
     prompt: msg.text,
@@ -2435,6 +2575,14 @@ async function runOneTurn(
     mode: permissionMode,
   });
 
+  // Cluster D Phase 4b: `held` reflects "the turn ended due to a hard
+  // rate-limit and the captured prompt is still in `conn.capturedPrompts`
+  // waiting for a `retry_rate_limited`". The finally block reads it to
+  // decide whether to attach `status: 'rate_limited'` to the
+  // `session_running` flip — so the client knows this isn't a normal
+  // turn end, the prompt is held and a retry-now affordance applies.
+  let heldByRateLimit = false;
+
   try {
     for await (const sdkMsg of runner) {
       await persistMessage(sessionId, sdkMsg);
@@ -2463,6 +2611,22 @@ async function runOneTurn(
             },
             (msg) => send(conn.ws, msg),
           );
+          // Cluster D Phase 4b (BE-D2 / spec §4.1): hard rate-limit
+          // flips `session_running.status` to `'rate_limited'`. The
+          // turn is still in flight at this point (the SDK may yet
+          // recover after the reset, or it may error out below); we
+          // emit running=true with the status set so the operator
+          // banner shows the countdown without waiting for the
+          // finally-block running=false.
+          if (out.status === 'hard') {
+            send(conn.ws, {
+              type: 'session_running',
+              projectId: project.id,
+              sessionId,
+              running: true,
+              status: 'rate_limited',
+            });
+          }
         }
       }
     }
@@ -2501,6 +2665,12 @@ async function runOneTurn(
         (out) => send(conn.ws, out),
       );
     }
+    // Cluster D Phase 4b: rate-limited classification → keep the
+    // captured prompt for `retry_rate_limited` to find. Other kinds
+    // (auth_expired, process_crashed, parse_error) need a different
+    // recovery flow (re-auth modal, restart, etc.); the prompt would
+    // be stale data on those paths, so drop it.
+    heldByRateLimit = wrap.kind === 'rate_limited';
   } finally {
     try {
       runner.close?.();
@@ -2510,11 +2680,23 @@ async function runOneTurn(
     unregister();
     conn.inFlight.delete(sessionId);
     closeLogger(sessionId);
+    // Cluster D Phase 4b: clear the captured prompt UNLESS the turn
+    // ended held by a rate-limit. This is the only path that wants the
+    // prompt to persist past the turn — every other end (success, non-
+    // rate-limit failure) means the bytes are stale and the next user
+    // input writes a fresh entry.
+    if (!heldByRateLimit) {
+      conn.capturedPrompts.delete(sessionId);
+    }
     send(conn.ws, {
       type: 'session_running',
       projectId: project.id,
       sessionId,
       running: false,
+      // When held, signal status so the client's reducer can keep the
+      // banner mounted and the input-disabled overlay in place. Old
+      // clients ignore the field; new clients (Phase 4c) reduce it.
+      ...(heldByRateLimit && { status: 'rate_limited' as const }),
     });
   }
 }

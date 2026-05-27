@@ -695,25 +695,42 @@ export type ClientMsg =
     }
   | {
       /**
-       * Cluster D Phase 4 (spec §4.2, BE-D4): operator clicked "Retry now"
-       * in the RateLimitBanner. The server is expected to re-deliver the
-       * captured user message on the same SDK session via `--resume
-       * <sessionId>`, so no fresh `system/init` quota burn happens.
+       * Cluster D Phase 4 (spec §4.2, BE-D4): "Retry now" trigger for a
+       * held single-agent turn that hit a rate-limit. The server
+       * re-delivers the captured user message on the same SDK session
+       * via `--resume <sessionId>`, so no fresh `system/init` quota
+       * burn happens.
        *
-       * Phase 4a forward-declares the discriminant so client code (Phase
-       * 4c) can emit it before the server handler lands in Phase 4b.
-       * Phase 4b adds the message-capture machinery + the server handler
-       * + the recovery_log row (failureClass='rate_limit',
-       * operatorAction='manual_retry').
+       * Phase 4a forward-declared the discriminant; Phase 4b ships the
+       * message-capture machinery + the server handler + the
+       * `recovery_log` row.
        *
-       * Idempotent: a second `retry_rate_limited` after the first one has
-       * been accepted is a wrapper_error ("retry already in flight");
-       * after the retry resolves, a second click is treated as a fresh
-       * retry. Idempotency is keyed by sessionId — there is no separate
-       * retry id (a session only has one held turn at a time).
+       * `auto` distinguishes operator-click (default, `false`) from a
+       * client-side auto-scheduled retry (the `<CountdownChip>` in
+       * Phase 4c ticks down and fires `{ auto: true }` when it hits
+       * zero). The server uses this to tag the `recovery_log` row's
+       * `operatorAction` as `'manual_retry'` vs `'auto_retry'` — the
+       * spec §8.5 regression-gate query distinguishes which path
+       * recovered the session.
+       *
+       * Why the cadence lives on the client (and not the server):
+       * pause / resume is a per-operator-pane decision; the server
+       * staying stateless about retry timing means a tab close +
+       * reopen doesn't lose pause state to the wrong source of truth,
+       * and a second operator opening the same session doesn't see a
+       * countdown someone else paused.
+       *
+       * Idempotency: while a retry is in flight, a second
+       * `retry_rate_limited` for the same sessionId is a
+       * `wrapper_error` ("retry already in flight"); once the retry
+       * resolves (success or new error), a fresh click is accepted.
+       * Idempotency is keyed by sessionId — a session has at most one
+       * held turn at a time.
        */
       type: 'retry_rate_limited';
       sessionId: string;
+      /** Client-scheduled auto-fire (default false = operator click). */
+      auto?: boolean;
     };
 
 // ---- Server → Browser ----
