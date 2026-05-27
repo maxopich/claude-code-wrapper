@@ -23,6 +23,7 @@ import { AgentTag } from './AgentTag';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
+import { RouterDropsCounter } from './authority/RouterDropsCounter';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
 import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
 import type { ModalOrigin } from './templatePreview/TemplatePreviewModal';
@@ -2012,6 +2013,9 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
         {hops} / {budget} hops
       </span>
       {run.mutations.length > 0 && <MutationsCounterChip mutations={run.mutations} />}
+      {/* Cluster B Phase 6d (UI-B24): router-drops counter, hidden when
+       *  count = 0. Sits after MutationsCounterChip per spec §6.2. */}
+      <RouterDropsCounter drops={run.routerDrops} sessionId={run.sessionId} />
     </div>
   );
 }

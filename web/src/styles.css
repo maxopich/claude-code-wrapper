@@ -6587,3 +6587,172 @@ pre {
   word-break: break-all;
 }
 
+/* ---- Cluster B Phase 6d: RouterDropsCounter chip + RouterDropsLog ------- */
+
+/* Counter chip — same render seam as .ma-mutations-chip (UI-B34 token
+ * reuse). 4-regime calibration per UI-B28: occasional=warn (yellow),
+ * persistent=warn (orange via slightly heavier tint), burst=err (red). */
+.ma-router-drops-chip {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+  color: var(--warn);
+  background: var(--warn-soft);
+  margin-left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ma-router-drops-chip:hover,
+.ma-router-drops-chip:focus-visible {
+  outline: none;
+  filter: brightness(1.15);
+}
+.ma-router-drops-chip-occasional {
+  /* Default warn-tint (matches base) */
+}
+.ma-router-drops-chip-persistent {
+  /* Same warn family, heavier border + glow so it reads as "more urgent"
+   * without jumping to err palette. */
+  border-color: var(--warn);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 25%, transparent);
+}
+.ma-router-drops-chip-burst {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 45%, var(--border));
+  font-weight: 700;
+}
+
+/* RouterDropsModal sizing. Inherits .gate-modal base. */
+.router-drops-modal {
+  max-width: 720px;
+  width: min(720px, 90vw);
+}
+
+/* RouterDropsLog — list inside the modal. */
+.router-drops-log {
+  list-style: none;
+  margin: 8px 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.router-drops-log-empty {
+  padding: 16px;
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  text-align: center;
+}
+.router-drops-row {
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+}
+.router-drops-row-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--fg-0);
+  cursor: pointer;
+  text-align: left;
+}
+.router-drops-row-summary:hover,
+.router-drops-row-summary:focus-visible {
+  outline: none;
+  background: var(--bg-2);
+}
+.router-drops-row-ts {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  flex: 0 0 auto;
+}
+.router-drops-row-route {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.router-drops-row-source,
+.router-drops-row-dest {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+  background: var(--bg-2);
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+}
+.router-drops-row-arrow {
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+}
+.router-drops-reason-chip {
+  font-size: var(--t-xs);
+  text-transform: lowercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line-3);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.router-drops-reason-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
+}
+.router-drops-reason-danger {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 45%, var(--line-3));
+  font-weight: 600;
+}
+.router-drops-row-glyph {
+  color: var(--fg-2);
+  font-size: var(--t-xs);
+}
+.router-drops-row-detail {
+  margin: 0;
+  padding: 8px 10px 10px 10px;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  border-top: 1px solid var(--line-3);
+}
+.router-drops-row-detail-row {
+  display: contents;
+}
+.router-drops-row-detail-row > dt {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.router-drops-row-detail-row > dd {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.router-drops-row-audit-id {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  word-break: break-all;
+}
+
