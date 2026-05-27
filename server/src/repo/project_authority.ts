@@ -10,6 +10,7 @@ import type {
 } from '@cebab/shared/protocol';
 import { SCRUBBED_ENV_POSTURES, SCRUBBED_ENV_VAR_NAMES } from '../runner/claude.js';
 import { getProject } from './projects.js';
+import { checkTrust, computeBinarySha, listForServer } from './mcp_trust.js';
 
 // Cluster B Phase 3 (§4.3): file-read-only resolver for ProjectAuthority.
 //
@@ -286,9 +287,12 @@ export function detectHooks(layers: SettingsLayer[]): HookView[] {
  * layer's settings file so the operator can `[Open settings.json]` on the
  * right file.
  *
- * TOFU fields (`trust`, `binarySha`, `firstSeenAt`, `lastSeenAt`) are
- * Phase 4 — Phase 3 marks every row `trust: 'unknown'` so the
- * AuthorityPanel renders no trust badge yet.
+ * Phase 4 fills in the TOFU fields (`trust`, `binarySha`, `firstSeenAt`,
+ * `lastSeenAt`) via a JOIN against `mcp_trust` (see
+ * `enrichWithTrustState`). Without the enrichment pass the row stays
+ * `trust: 'unknown'` — the resolver's orchestrator always runs the JOIN,
+ * but callers (tests, etc.) can use `detectMcpServers` alone if they
+ * don't want the DB hit.
  *
  * Effective status (`status: 'connected' | 'needs-auth' | …`) is overlaid
  * from the cached `session_started.mcpServers` at merge time — settings
@@ -333,6 +337,61 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
     out.push(view);
   }
   return out;
+}
+
+/**
+ * Cluster B Phase 4 (§4.4): TOFU enrichment pass. For each declared MCP
+ * server with a resolvable command, computes the binary sha and looks up
+ * the trust state in `mcp_trust`. Mutates the views in-place and returns
+ * them for chaining.
+ *
+ * Mapping from repository lookup → protocol enum:
+ *   - `trusted` / `trusted_pinned_hash` → `trust: 'trusted'`
+ *   - `denied_remember`                  → `trust: 'denied'`
+ *   - `hash_changed`                     → `trust: 'hash_changed'`
+ *   - `first_seen`                       → `trust: 'pending_tofu'`
+ *
+ * Cebab-injected servers (`scope: 'cebab-injected'`, e.g. `cebab_bus`)
+ * are always `trust: 'trusted'` — Cebab pins them, no operator decision
+ * is needed. They skip the lookup.
+ *
+ * `firstSeenAt` / `lastSeenAt` come from `listForServer` (most-recent
+ * first); the oldest decision in the list is firstSeenAt. Absent when
+ * the server has never had a recorded decision.
+ */
+export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
+  for (const view of views) {
+    if (view.scope === 'cebab-injected') {
+      view.trust = 'trusted';
+      continue;
+    }
+    if (!view.originPath) continue;
+    const candidateSha = view.config?.command ? computeBinarySha(view.config.command) : null;
+    if (candidateSha !== null) view.binarySha = candidateSha;
+    const lookup = checkTrust(view.name, view.originPath, candidateSha);
+    switch (lookup.decision) {
+      case 'trusted':
+      case 'trusted_pinned_hash':
+        view.trust = 'trusted';
+        break;
+      case 'denied_remember':
+        view.trust = 'denied';
+        break;
+      case 'hash_changed':
+        view.trust = 'hash_changed';
+        break;
+      case 'first_seen':
+        view.trust = 'pending_tofu';
+        break;
+    }
+    // Decision history → first/last seen.
+    const history = listForServer(view.name, view.originPath);
+    if (history.length > 0) {
+      view.lastSeenAt = history[0].ts;
+      view.firstSeenAt = history[history.length - 1].ts;
+    }
+  }
+  return views;
 }
 
 /**
@@ -408,6 +467,11 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
       });
     }
   }
+  // Phase 4 (§4.4): JOIN against mcp_trust to populate per-row TOFU
+  // state. Runs after the cebab-injected append so those rows get
+  // 'trusted' via the same pass (no operator decision needed for
+  // Cebab-pinned servers).
+  enrichWithTrustState(declaredMcp);
 
   // Tools: every tool name the SDK reported, attributed against layers +
   // MCP availability. When the cache is empty, no tools are resolved
