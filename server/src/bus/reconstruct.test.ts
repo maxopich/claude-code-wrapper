@@ -237,3 +237,64 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
     expect(getMultiAgentSession(SID)!.status).toBe('crashed');
   });
 });
+
+describe('Cluster A Phase 6: session_reconstructed emit on R-B success', () => {
+  test('emits typed session_reconstructed + dispatcher success toast', () => {
+    seedReconstructable();
+    const row = getMultiAgentSession(SID)!;
+    const sendServerMsg = vi.fn();
+
+    const ok = reconstructOrchestratorSession(row, {
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      sendServerMsg,
+    });
+
+    expect(ok).toBe(true);
+    // Two messages: the typed event (for forward-compat consumers) AND
+    // the dispatcher's `notification` envelope (the operator-facing toast).
+    const types = sendServerMsg.mock.calls.map((c) => c[0]?.type);
+    expect(types).toContain('session_reconstructed');
+    expect(types).toContain('notification');
+
+    const typed = sendServerMsg.mock.calls.find((c) => c[0]?.type === 'session_reconstructed')?.[0];
+    expect(typed).toMatchObject({
+      type: 'session_reconstructed',
+      sessionId: SID,
+      reasonCode: 'reconstructed',
+    });
+
+    const toast = sendServerMsg.mock.calls.find((c) => c[0]?.type === 'notification')?.[0];
+    expect(toast).toMatchObject({
+      type: 'notification',
+      class: 'operational',
+      severity: 'success',
+      // dedupeKey ties the toast to this specific session so a second
+      // reconstruct (e.g. a second browser tab connecting before the
+      // operator continues) doesn't double-toast.
+      dedupeKey: `session_reconstructed:${SID}`,
+      sessionId: SID,
+      sticky: true,
+      reasonCode: 'reconstructed',
+    });
+    // CTA is "Resume" — the operator's next action after acknowledging
+    // the recovery is to continue the (paused) session.
+    expect(toast.action).toEqual({ kind: 'resume', sessionId: SID });
+  });
+
+  test('no emit when sendServerMsg is absent (legacy callers still work)', () => {
+    seedReconstructable();
+    const row = getMultiAgentSession(SID)!;
+    // Pre-Phase-6 callbacks shape — no `sendServerMsg`. Must not throw.
+    expect(() =>
+      reconstructOrchestratorSession(row, {
+        onEvent: vi.fn(),
+        onEnded: vi.fn(),
+        hopBudget: 1000,
+      }),
+    ).not.toThrow();
+    // Banner still landed in scrollback as the fallback recovery signal.
+    expect(listMultiAgentEvents(SID).map((e) => e.text)).toContain(RECOVERY_BANNER);
+  });
+});

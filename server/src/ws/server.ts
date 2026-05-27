@@ -34,9 +34,14 @@ import {
   workspaceRootValid,
 } from '../workspace.js';
 import type {
+  AuthTransitionReasonCode,
   MultiAgentLifecycle,
+  NotificationAction,
   NotificationEnvelope,
+  NotificationSeverity,
   RouterDropReasonCode,
+  SessionCrashedReasonCode,
+  WrapperErrorKind,
 } from '@cebab/shared/protocol';
 import { translate } from './translate.js';
 import { classifyError } from './errors.js';
@@ -107,6 +112,13 @@ export type PendingPermission = {
       | { behavior: 'deny'; message: string },
   ) => void;
   toolInput: Record<string, unknown>;
+  /**
+   * Cluster A Phase 6: persisted so the deny path can include the tool name
+   * in the `tool_denied` ServerMsg + dispatcher notification. Set when the
+   * canUseTool callback parks the Promise; read when the operator's
+   * permission_decision arrives.
+   */
+  toolName: string;
 };
 
 /**
@@ -140,6 +152,130 @@ type InFlight = {
  *  Migration 012 adds filePath / cwd / confirmedAt / promoted; `toolUseId`
  *  is server-internal (correlation key only) and is intentionally NOT
  *  surfaced on the wire. */
+/**
+ * Cluster A Phase 6: map a wrapper-error kind to the dispatcher knobs for
+ * its dock notification. Centralised so the catch site in `runOneTurn`
+ * doesn't carry a fat switch and the mapping is testable in isolation.
+ *
+ * `rate_limited` is intentionally absent — the live `rate_limit_event`
+ * stream is the canonical surface for that signal (handled in the SDK
+ * loop, separate from the exception catch).
+ *
+ * Severity choice: we treat both `auth_expired` and `process_crashed` as
+ * `error` (the agent's turn died); `parse_error` is the same shape (the
+ * SDK threw on a malformed message it couldn't recover from — UX-9
+ * specifies that *recovered* parse errors don't notify, but the exception
+ * path IS the turn-killing branch). `claude_not_found` is `error` here
+ * too — spec §3 makes it `danger` for first-launch but that distinction
+ * needs a boot-time path we don't have wired today; the subsequent-launch
+ * `error` case fits the wrapper_error catch.
+ */
+type WrapperErrorDispatch = {
+  severity: NotificationSeverity;
+  title: string;
+  reasonCode: SessionCrashedReasonCode | AuthTransitionReasonCode | 'claude_not_found';
+  auditKind: string;
+  action?: NotificationAction;
+};
+
+export function wrapperErrorDispatch(
+  kind: WrapperErrorKind,
+  sessionId: string,
+): WrapperErrorDispatch {
+  switch (kind) {
+    case 'auth_expired':
+      return {
+        severity: 'error',
+        title: 'Re-authentication required',
+        reasonCode: 'auth_expired',
+        auditKind: 'auth.transition',
+        // UX-3: a Re-authenticate primary action; the client's
+        // notifyFromServerMsg / dock translates the `reauth` kind to the
+        // CTA copy and (Cluster D) wires the re-auth flow.
+        action: { kind: 'reauth' },
+      };
+    case 'parse_error':
+      return {
+        severity: 'error',
+        title: 'Turn failed: parse error',
+        reasonCode: 'parse_error',
+        auditKind: 'session.crashed',
+      };
+    case 'claude_not_found':
+      return {
+        severity: 'error',
+        title: 'Claude CLI not found',
+        reasonCode: 'claude_not_found',
+        auditKind: 'session.crashed',
+        action: { kind: 'open_settings' },
+      };
+    case 'rate_limited':
+      // Handled separately via the live `rate_limit_event` stream; included
+      // here for exhaustiveness so a future kind addition doesn't silently
+      // fall through. If the catch ever reaches this branch (an error
+      // classified as rate_limited that didn't ride the SDK event stream),
+      // surface it as a normal warn so it's not lost.
+      return {
+        severity: 'warn',
+        title: 'Rate limit',
+        reasonCode: 'process_crash',
+        auditKind: 'session.crashed',
+      };
+    case 'process_crashed':
+    default:
+      return {
+        severity: 'error',
+        title: 'Turn failed',
+        reasonCode: 'process_crash',
+        auditKind: 'session.crashed',
+        action: { kind: 'restart_agent', sessionId },
+      };
+  }
+}
+
+/**
+ * Cluster A Phase 6: classify a `rate_limit_event` payload as `hit` (an
+ * active limit operator needs to wait out) vs `cleared` (an informational
+ * signal — the SDK is back under the rate budget, or never crossed it).
+ *
+ * Heuristic:
+ *   - resetsAt in the future → hit (warn)
+ *   - resetsAt absent OR already in the past → cleared (info)
+ *
+ * The SDK's `status` string is forward-compat noise and may differ per
+ * provider; relying on `resetsAt` keeps the branch resilient. Pure
+ * function so the runOneTurn live-stream call site stays a thin wrapper
+ * and this branch can be unit-tested without spinning up the WS stack.
+ */
+export type RateLimitDispatch = {
+  subCode: 'hit' | 'cleared';
+  severity: NotificationSeverity;
+  title: string;
+  message: string;
+};
+
+export function rateLimitDispatch(
+  out: { status?: string; resetsAt?: number },
+  now: number = Date.now(),
+): RateLimitDispatch {
+  const isActiveLimit = typeof out.resetsAt === 'number' && out.resetsAt > now;
+  if (isActiveLimit && typeof out.resetsAt === 'number') {
+    const resetText = ` Retry after ${new Date(out.resetsAt).toLocaleTimeString()}.`;
+    return {
+      subCode: 'hit',
+      severity: 'warn',
+      title: 'Rate limit',
+      message: `${out.status ?? 'limited'}${resetText}`,
+    };
+  }
+  return {
+    subCode: 'cleared',
+    severity: 'info',
+    title: 'Rate limit cleared',
+    message: out.status ?? 'limit lifted',
+  };
+}
+
 function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
   return {
     id: m.id,
@@ -780,13 +916,15 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         return;
       }
       conn.pendingPermissions.delete(msg.requestId);
+      const toolName = pending.toolName;
+      const denyMessage = msg.message ?? 'User denied this action';
       if (msg.decision === 'allow') {
         const updated = msg.updatedInput ?? pending.toolInput;
         pending.resolve({ behavior: 'allow', updatedInput: updated });
       } else {
         pending.resolve({
           behavior: 'deny',
-          message: msg.message ?? 'User denied this action',
+          message: denyMessage,
         });
       }
       // Echo a permission_decided so the UI flips Allow/Deny → "decided" and
@@ -806,6 +944,40 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         requestId: msg.requestId,
         decision: msg.decision,
       } as never);
+      // Cluster A Phase 6: the denial is operator-driven (not a safety
+      // violation), so we surface it as an operational warn toast — the
+      // operator may be on another tab when they hit Deny and the agent's
+      // next step lands; the dock makes the rejection visible there. The
+      // in-session UI already shows the card flipping to "Denied" via the
+      // permission_decided echo above; this is the cross-session/cross-tab
+      // signal. Allow path stays silent (no notification on grant — that's
+      // the common case and the tool_use block itself is the user-visible
+      // signal that the tool ran).
+      if (msg.decision === 'deny' && toolName) {
+        send(conn.ws, {
+          type: 'tool_denied',
+          sessionId: msg.sessionId,
+          requestId: msg.requestId,
+          toolName,
+          reasonCode: 'permission_required_not_granted',
+          message: denyMessage,
+        });
+        emitNotification(
+          {
+            class: 'operational',
+            severity: 'warn',
+            // Dedup by tool name within the session — repeated denials of
+            // the same tool ("Bash" again, "Edit" again) collapse to one
+            // toast with a ×N badge instead of stacking.
+            dedupeKey: `tool_denied:${msg.sessionId}:${toolName}`,
+            title: `Denied: ${toolName}`,
+            message: denyMessage,
+            sessionId: msg.sessionId,
+            reasonCode: 'permission_required_not_granted',
+          },
+          (out) => send(conn.ws, out),
+        );
+      }
       return;
     }
     case 'ack_notification': {
@@ -1879,7 +2051,7 @@ async function runOneTurn(
       projectName: project.name,
     } as never);
     return new Promise((resolve) => {
-      conn.pendingPermissions.set(requestId, { sessionId, resolve, toolInput: input });
+      conn.pendingPermissions.set(requestId, { sessionId, resolve, toolInput: input, toolName });
     });
   };
 
@@ -1925,18 +2097,19 @@ async function runOneTurn(
         // the live stream — `replaySession` deliberately doesn't toast
         // historical events.
         if (out.type === 'rate_limit_event') {
-          const resetText =
-            typeof out.resetsAt === 'number'
-              ? ` Retry after ${new Date(out.resetsAt).toLocaleTimeString()}.`
-              : '';
+          // Cluster A Phase 6: dedupeKey carries the sub-code so a
+          // hit→cleared transition produces two distinct envelopes (rather
+          // than collapsing into one warn with stale countdown text).
+          const dispatch = rateLimitDispatch(out);
           emitNotification(
             {
               class: 'operational',
-              severity: 'warn',
-              dedupeKey: `rate_limit:${sessionId}`,
-              title: 'Rate limit',
-              message: `${out.status ?? 'limited'}${resetText}`,
+              severity: dispatch.severity,
+              dedupeKey: `rate_limit:${dispatch.subCode}:${sessionId}`,
+              title: dispatch.title,
+              message: dispatch.message,
               sessionId,
+              reasonCode: dispatch.subCode,
             },
             (msg) => send(conn.ws, msg),
           );
@@ -1953,6 +2126,31 @@ async function runOneTurn(
       uuid: randomUUID(),
       message: wrap.message,
     } as never);
+    // Cluster A Phase 6: fan out as an operational notification with a
+    // typed reason-code so the dock + inbox surface session crashes /
+    // auth lapses uniformly. The session-scoped MessageBlock status banner
+    // already shows the wrapper_error inline (store.ts handles that), so
+    // this is the dock + inbox path — the operator may be on another tab
+    // when the turn dies. `rate_limited` is handled separately on the live
+    // stream via the typed `rate_limit_event` path; we skip it here to
+    // avoid double-toasting.
+    if (wrap.kind !== 'rate_limited') {
+      const dispatch = wrapperErrorDispatch(wrap.kind, sessionId);
+      emitNotification(
+        {
+          class: 'operational',
+          severity: dispatch.severity,
+          dedupeKey: `${dispatch.auditKind}:${sessionId}`,
+          title: dispatch.title,
+          message: wrap.message,
+          sessionId,
+          sticky: true,
+          reasonCode: dispatch.reasonCode,
+          ...(dispatch.action ? { action: dispatch.action } : {}),
+        },
+        (out) => send(conn.ws, out),
+      );
+    }
   } finally {
     try {
       runner.close?.();

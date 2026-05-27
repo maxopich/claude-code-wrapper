@@ -219,6 +219,13 @@ export function emit(
     projectId: input.projectId,
     action: input.action,
     sticky: input.sticky ?? false,
+    // Cluster A Phase 6: operational events MAY carry a reason-code (e.g.
+    // `swept_competing`, `auth_expired`, `parse_error`) for inbox grouping
+    // and routing-trail diagnostics. Safety class always sets it; operational
+    // class only sets it for the §7-floor sub-codes wired through here.
+    // Undefined for the common case (most operational toasts don't need one),
+    // which means `notifications.reason_code` stays NULL in the DB.
+    reasonCode: input.reasonCode,
   };
   if (env.sticky) persistNotification(env);
   send({ type: 'notification', ...env });

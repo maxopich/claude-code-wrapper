@@ -97,6 +97,9 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       sticky: true,
       action: { kind: 'reopen', sessionId: OLDER_SID },
       dedupeKey: `session_superseded:${OLDER_SID}`,
+      // Cluster A Phase 6: §7 floor sub-code label so the inbox filter
+      // chip can group the row with `reconstructed` / `reconstruction_failed`.
+      reasonCode: 'swept_competing',
     });
   });
 

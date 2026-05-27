@@ -9,7 +9,10 @@ import { cleanupPendingPermissionsForSession, type PendingPermission } from './s
 
 function makePending(sessionId: string) {
   const resolve = vi.fn<PendingPermission['resolve']>();
-  return { sessionId, resolve, toolInput: {} } satisfies PendingPermission;
+  // Cluster A Phase 6: PendingPermission now carries `toolName` so the
+  // deny path can include it in `tool_denied` + the dispatcher notification.
+  // The cleanup tests don't read it, but the type requires it.
+  return { sessionId, resolve, toolInput: {}, toolName: 'Test' } satisfies PendingPermission;
 }
 
 describe('[security][F12] cleanupPendingPermissionsForSession', () => {

@@ -104,6 +104,69 @@ export type RouterDropReasonCode =
   | 'worker_to_worker'
   | 'unknown_source';
 
+/**
+ * Cluster A Phase 6 — extended §7 vocabulary (subset that has source sites
+ * today). These enums document the floor so future phases can wire the rest
+ * additively without protocol churn. The dispatcher's `reasonCode` field
+ * accepts any string (forward-compat); these types narrow the call-sites
+ * that already exist.
+ *
+ * Where each code is emitted:
+ *
+ * - `ToolDeniedReasonCode` — `ws/server.ts` `permission_decision` deny path
+ *   currently only emits `permission_required_not_granted`. The other
+ *   sub-codes (allowlist_miss, denylist_hit, classifier_*) are reserved for
+ *   a future SDK-classifier integration; they're listed here so the inbox
+ *   filter chip and routing-trail diagnostics can be coded against the
+ *   full enum without re-declaring later.
+ *
+ * - `SessionCrashedReasonCode` — `ws/server.ts` `wrapper_error` catch maps
+ *   `WrapperErrorKind` ('process_crashed' / 'parse_error') to these codes.
+ *   `unknown` is the safety-net bucket for any future kind that doesn't
+ *   classify cleanly.
+ *
+ * - `AuthTransitionReasonCode` — overlaps with the env_scrub source already
+ *   wired in Phase 3 (api/bedrock/vertex/foundry flag scrubs). Phase 6
+ *   adds `auth_expired` from the wrapper_error catch. The `reauth_started`
+ *   / `reauth_complete` / `subscription_forced` codes await Cluster D's
+ *   re-auth flow.
+ *
+ * - `SessionRecoveredReasonCode` — `reconstructed` is wired in Phase 6 from
+ *   `bus/reconstruct.ts`; `reconstruction_failed` rides the existing
+ *   `chain_not_reconstructed` event (Phase 4); `superseded` /
+ *   `swept_competing` are the same concept and both come from `bus/resume.ts`.
+ *
+ * - `RateLimitReasonCode` — splits the existing `rate_limit_event` into
+ *   `hit` (a live limit, has a future `resetsAt`) vs `cleared` (an
+ *   informational signal — limit just lifted or never applied).
+ */
+export type ToolDeniedReasonCode =
+  | 'permission_required_not_granted'
+  | 'allowlist_miss'
+  | 'denylist_hit'
+  | 'classifier_dangerous'
+  | 'classifier_destructive';
+
+export type SessionCrashedReasonCode = 'process_crash' | 'parse_error' | 'unknown';
+
+export type AuthTransitionReasonCode =
+  | 'subscription_forced'
+  | 'api_key_scrubbed'
+  | 'bedrock_flag_scrubbed'
+  | 'vertex_flag_scrubbed'
+  | 'foundry_flag_scrubbed'
+  | 'auth_expired'
+  | 'reauth_started'
+  | 'reauth_complete';
+
+export type SessionRecoveredReasonCode =
+  | 'reconstructed'
+  | 'reconstruction_failed'
+  | 'superseded'
+  | 'swept_competing';
+
+export type RateLimitReasonCode = 'hit' | 'cleared';
+
 /** Per-session permission mode the wrapper exposes to the UI. */
 export type SessionPermissionMode = 'default' | 'acceptEdits';
 
@@ -1084,6 +1147,47 @@ export type ServerMsg =
       rows: NotificationEnvelope[];
       unackedCountBySession: Record<string, number>;
       unackedGlobal: number;
+    }
+  | {
+      /**
+       * Cluster A Phase 6: emitted when the operator rejects a permission
+       * request (the `deny` branch of `permission_decision`). The existing
+       * `permission_decided` event carries the decision for in-session UI
+       * (the request card flips to "Denied"); `tool_denied` is the
+       * dock/inbox-facing surface so a denial is visible even when the
+       * operator switches tabs before the agent's next step lands.
+       *
+       * `reasonCode` is open enum (`ToolDeniedReasonCode`); Phase 6 only
+       * emits `permission_required_not_granted`. The other sub-codes
+       * (allowlist_miss, denylist_hit, classifier_*) are reserved for a
+       * future SDK-classifier wiring — they're in the enum so the inbox
+       * filter chip can be coded against the full vocabulary now.
+       */
+      type: 'tool_denied';
+      sessionId: string;
+      requestId: string;
+      toolName: string;
+      reasonCode: ToolDeniedReasonCode;
+      /** Operator-supplied message if any (default: "User denied this action"). */
+      message?: string;
+    }
+  | {
+      /**
+       * Cluster A Phase 6 (D2): success-side counterpart to
+       * `chain_not_reconstructed`. Emitted from `bus/reconstruct.ts` after
+       * `wireOrchestratorSession` returns and the row is back in the live
+       * registry. Pairs with the existing `RECOVERY_BANNER` (which lands in
+       * scrollback as a `multi_agent_events` row) by surfacing the recovery
+       * in the dock too — the banner only shows to whoever is viewing the
+       * session; the toast reaches the operator wherever they are.
+       *
+       * `reasonCode` is always `'reconstructed'` today; the field is typed
+       * as the full `SessionRecoveredReasonCode` so the inbox filter can
+       * group reconstructed/superseded/swept-competing under one chip.
+       */
+      type: 'session_reconstructed';
+      sessionId: string;
+      reasonCode: SessionRecoveredReasonCode;
     };
 
 /**

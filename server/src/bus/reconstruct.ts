@@ -48,6 +48,7 @@ import {
   type ResolvedAgent,
 } from './runtime.js';
 import { hasLiveSession, type BusSink } from './session_registry.js';
+import { emit as emitNotification } from '../notifications/dispatcher.js';
 
 /**
  * Persisted, operator-facing notice prepended to the replayed scrollback
@@ -245,6 +246,41 @@ export function reconstructOrchestratorSession(
     appendMultiAgentEvent(row.id, CEBAB_SOURCE, USER_RECIPIENT, 'intro', RECOVERY_BANNER);
   } catch (err) {
     console.error(`[reconstruct] banner append failed for ${row.id}`, err);
+  }
+
+  // Cluster A Phase 6 (D2): typed `session_reconstructed` ServerMsg + a
+  // success-info toast. The persisted banner above lands in scrollback for
+  // anyone viewing the recovered session; this dock toast reaches the
+  // operator wherever they are (different tab, sidebar collapsed). Sticky
+  // so a reload still shows it from the inbox replay — operators
+  // re-attaching after the restart should see the recovery happened.
+  //
+  // Best-effort: pre-Phase-6 callers (legacy unit tests) may not wire
+  // `sendServerMsg`; in that case the typed event + toast are skipped and
+  // the existing scrollback banner is still the source of truth.
+  if (callbacks.sendServerMsg) {
+    callbacks.sendServerMsg({
+      type: 'session_reconstructed',
+      sessionId: row.id,
+      reasonCode: 'reconstructed',
+    });
+    const result = emitNotification(
+      {
+        class: 'operational',
+        severity: 'success',
+        dedupeKey: `session_reconstructed:${row.id}`,
+        title: 'Session recovered',
+        message: `Session ${row.id.slice(0, 8)} was rebuilt after a Cebab restart — paused for review.`,
+        sessionId: row.id,
+        action: { kind: 'resume', sessionId: row.id },
+        sticky: true,
+        reasonCode: 'reconstructed',
+      },
+      callbacks.sendServerMsg,
+    );
+    if (!result.ok) {
+      console.error('[reconstruct] session_reconstructed dispatcher.emit failed', result.error);
+    }
   }
 
   return true;
