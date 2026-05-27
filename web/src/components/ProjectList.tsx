@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Project, SessionSummary } from '@cebab/shared/protocol';
 import { ClaudeMark } from './ClaudeMark';
+import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
 
 export function ProjectList(props: {
   projects: Project[];
@@ -14,81 +15,109 @@ export function ProjectList(props: {
   onToggleTrust: (id: number, trusted: boolean) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
 }) {
+  // Cluster B Phase 6e: tracks which project's preflight modal is open. One
+  // at a time — the operator clicks an ⓘ button, modal opens for THAT
+  // project, closing returns to null. Local state avoids prop-drilling
+  // through every row.
+  const [preflightForProject, setPreflightForProject] = useState<number | null>(null);
   return (
-    <ul className="project-list">
-      {props.projects.map((p) => {
-        const expanded = p.id === props.activeProjectId;
-        const sessions = props.knownSessions[p.id] ?? [];
-        const activeSessionId = props.activeSessionByProject[p.id];
-        const projectIsLive = sessions.some((s) => props.liveSessions[s.id]);
-        return (
-          <li key={p.id} className={`project-row ${expanded ? 'expanded' : ''}`}>
-            <div
-              className={`project-header ${expanded ? 'active' : ''}`}
-              title={
-                p.hasClaudeMd
-                  ? p.name
-                  : `${p.name}\n\nNo CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
-              }
-              aria-label={p.name}
-              draggable
-              onDragStart={(e) => {
-                // JSON payload with a kind tag so the Multi-Agent drop zone
-                // can validate that it came from us rather than another app.
-                e.dataTransfer.setData(
-                  'application/json',
-                  JSON.stringify({ kind: 'cebab-project', id: p.id }),
-                );
-                e.dataTransfer.effectAllowed = 'copy';
-              }}
-              onClick={() => props.onSelectProject(p.id)}
-            >
-              <span
-                className={`project-live-dot ${projectIsLive ? 'on' : ''}`}
-                title={projectIsLive ? 'session running' : ''}
-              />
-              {p.hasClaudeMd ? (
-                <ClaudeMark className="claude-mark" title="Agent project (CLAUDE.md present)" />
-              ) : (
-                <span className="claude-mark-spacer" aria-hidden="true" />
-              )}
-              <span className="project-name">{p.name}</span>
-              <button
-                className={`trust ${p.trusted ? 'on' : 'off'}`}
-                title={p.trusted ? 'Trusted (auto-approve tools)' : 'Asks before tool use'}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  props.onToggleTrust(p.id, !p.trusted);
+    <>
+      <ul className="project-list">
+        {props.projects.map((p) => {
+          const expanded = p.id === props.activeProjectId;
+          const sessions = props.knownSessions[p.id] ?? [];
+          const activeSessionId = props.activeSessionByProject[p.id];
+          const projectIsLive = sessions.some((s) => props.liveSessions[s.id]);
+          return (
+            <li key={p.id} className={`project-row ${expanded ? 'expanded' : ''}`}>
+              <div
+                className={`project-header ${expanded ? 'active' : ''}`}
+                title={
+                  p.hasClaudeMd
+                    ? p.name
+                    : `${p.name}\n\nNo CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
+                }
+                aria-label={p.name}
+                draggable
+                onDragStart={(e) => {
+                  // JSON payload with a kind tag so the Multi-Agent drop zone
+                  // can validate that it came from us rather than another app.
+                  e.dataTransfer.setData(
+                    'application/json',
+                    JSON.stringify({ kind: 'cebab-project', id: p.id }),
+                  );
+                  e.dataTransfer.effectAllowed = 'copy';
                 }}
+                onClick={() => props.onSelectProject(p.id)}
               >
-                {p.trusted ? 'trusted' : 'asks'}
-              </button>
-            </div>
-            {expanded && (
-              <ul className="session-list">
-                <li
-                  className={`session-row new ${!activeSessionId ? 'active' : ''}`}
-                  onClick={() => props.onNewSession(p.id)}
+                <span
+                  className={`project-live-dot ${projectIsLive ? 'on' : ''}`}
+                  title={projectIsLive ? 'session running' : ''}
+                />
+                {p.hasClaudeMd ? (
+                  <ClaudeMark className="claude-mark" title="Agent project (CLAUDE.md present)" />
+                ) : (
+                  <span className="claude-mark-spacer" aria-hidden="true" />
+                )}
+                <span className="project-name">{p.name}</span>
+                <button
+                  className={`trust ${p.trusted ? 'on' : 'off'}`}
+                  title={p.trusted ? 'Trusted (auto-approve tools)' : 'Asks before tool use'}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.onToggleTrust(p.id, !p.trusted);
+                  }}
                 >
-                  <span className="session-marker">+</span>
-                  <span className="session-name">new chat</span>
-                </li>
-                {sessions.map((s) => (
-                  <SessionRow
-                    key={s.id}
-                    session={s}
-                    live={props.liveSessions[s.id] === true}
-                    active={s.id === activeSessionId}
-                    onSelect={() => props.onSelectSession(p.id, s.id)}
-                    onRename={(title) => props.onRenameSession(s.id, title)}
-                  />
-                ))}
-              </ul>
-            )}
-          </li>
-        );
-      })}
-    </ul>
+                  {p.trusted ? 'trusted' : 'asks'}
+                </button>
+              </div>
+              {expanded && (
+                <ul className="session-list">
+                  <li
+                    className={`session-row new ${!activeSessionId ? 'active' : ''}`}
+                    onClick={() => props.onNewSession(p.id)}
+                  >
+                    <span className="session-marker">+</span>
+                    <span className="session-name">new chat</span>
+                    {/* Cluster B Phase 6e (UI-B5): trailing ⓘ button opens the
+                     *  AuthorityPreflightModal scoped to this project. stopPropagation
+                     *  so the click doesn't also fire onNewSession. */}
+                    <button
+                      type="button"
+                      className="session-row-authority-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setPreflightForProject(p.id);
+                      }}
+                      aria-label={`Inspect authority for ${p.name} before starting`}
+                      title="Inspect resolved authority (tools, MCP servers, env, hooks) before starting a session"
+                    >
+                      ⓘ
+                    </button>
+                  </li>
+                  {sessions.map((s) => (
+                    <SessionRow
+                      key={s.id}
+                      session={s}
+                      live={props.liveSessions[s.id] === true}
+                      active={s.id === activeSessionId}
+                      onSelect={() => props.onSelectSession(p.id, s.id)}
+                      onRename={(title) => props.onRenameSession(s.id, title)}
+                    />
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {preflightForProject !== null && (
+        <AuthorityPreflightModal
+          projectIds={[preflightForProject]}
+          onClose={() => setPreflightForProject(null)}
+        />
+      )}
+    </>
   );
 }
 
