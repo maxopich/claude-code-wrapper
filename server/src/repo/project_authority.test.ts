@@ -479,3 +479,112 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
     });
   });
 });
+
+// ---- Phase 4: TOFU JOIN integration ----
+
+describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
+  test('declared MCP with no recorded trust → trust=pending_tofu', async () => {
+    // Use dynamic import here so we exercise the live mcp_trust module
+    // (no mocks) — the resolver consults checkTrust internally.
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ mcpServers: { fresh: { command: '/bin/echo' } } }),
+    );
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const fresh = out!.mcpServers.find((s) => s.name === 'fresh')!;
+    expect(fresh.trust).toBe('pending_tofu');
+    // binarySha is computed at resolver time (real sha of /bin/echo);
+    // we only assert it's a string of expected sha256 length when the
+    // binary exists on this OS — but on Windows CI `/bin/echo` won't
+    // resolve. Guard with a "computed-or-absent" check.
+    if (fs.existsSync('/bin/echo')) {
+      expect(typeof fresh.binarySha).toBe('string');
+      expect(fresh.binarySha?.length).toBe(64);
+    }
+  });
+
+  test('declared MCP with a trusted decision → trust=trusted + lastSeenAt populated', async () => {
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ mcpServers: { remembered: { command: 'npx' } } }),
+    );
+    const { recordTrustDecision: rec } = await import('./mcp_trust.js');
+    // npx → unresolvable, so binarySha is null in both the recorder and
+    // the resolver lookup. The null-distinct lookup still matches.
+    rec({
+      serverName: 'remembered',
+      originPath: path.join(projectPath, '.claude', 'settings.json'),
+      binarySha: null,
+      decision: 'trusted',
+    });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const view = out!.mcpServers.find((s) => s.name === 'remembered')!;
+    expect(view.trust).toBe('trusted');
+    expect(view.lastSeenAt).toBeTypeOf('number');
+    expect(view.firstSeenAt).toBeTypeOf('number');
+  });
+
+  test('cebab-injected servers always trust=trusted (skip the JOIN)', () => {
+    // The cebab_bus MCP is identity-pinned by Cebab — no operator
+    // decision needed; the enrichment pass shortcuts these.
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: {
+        mcpServers: [{ name: 'cebab_bus', status: 'connected' }],
+      },
+    });
+    const bus = out!.mcpServers.find((s) => s.name === 'cebab_bus')!;
+    expect(bus.scope).toBe('cebab-injected');
+    expect(bus.trust).toBe('trusted');
+  });
+
+  test('declared MCP with denied_remember decision → trust=denied', async () => {
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ mcpServers: { bad: { command: 'npx' } } }),
+    );
+    const { recordTrustDecision: rec } = await import('./mcp_trust.js');
+    rec({
+      serverName: 'bad',
+      originPath: path.join(projectPath, '.claude', 'settings.json'),
+      binarySha: null,
+      decision: 'denied_remember',
+    });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    expect(out!.mcpServers.find((s) => s.name === 'bad')!.trust).toBe('denied');
+  });
+
+  test('trusted_pinned_hash + binary changed → trust=hash_changed', async () => {
+    // Write a fake binary, pin its hash, then mutate the file and
+    // re-resolve. The post-mutation sha mismatches the pinned, so the
+    // resolver flips to hash_changed.
+    const fakeBin = path.join(tmpRoot, 'fake-mcp-bin');
+    fs.writeFileSync(fakeBin, 'v1');
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ mcpServers: { pinned: { command: fakeBin } } }),
+    );
+    const { computeBinarySha: csha, recordTrustDecision: rec } = await import('./mcp_trust.js');
+    const v1Sha = csha(fakeBin)!;
+    rec({
+      serverName: 'pinned',
+      originPath: path.join(projectPath, '.claude', 'settings.json'),
+      binarySha: v1Sha,
+      decision: 'trusted_pinned_hash',
+    });
+    // First resolve: hash matches → trusted.
+    expect(
+      resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers.find(
+        (s) => s.name === 'pinned',
+      )!.trust,
+    ).toBe('trusted');
+    // Mutate the binary.
+    fs.writeFileSync(fakeBin, 'v2-different');
+    expect(
+      resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers.find(
+        (s) => s.name === 'pinned',
+      )!.trust,
+    ).toBe('hash_changed');
+  });
+});

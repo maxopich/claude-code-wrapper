@@ -45,6 +45,7 @@ import type {
 } from '@cebab/shared/protocol';
 import { translate } from './translate.js';
 import { resolveProjectAuthority } from '../repo/project_authority.js';
+import { recordTrustDecision } from '../repo/mcp_trust.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
 import { buildSessionLogChunk } from './session_log.js';
@@ -1131,6 +1132,65 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         projectId: msg.projectId,
         authority,
       });
+      return;
+    }
+    case 'mcp_trust_decision': {
+      // Cluster B Phase 4 (§4.4): operator's TOFU decision. Two persisted
+      // states (`trust` / `trust_pinned`) and two rejection states
+      // (`deny_once` / `deny_remember`). `deny_once` is NOT recorded — it's
+      // per-session in-memory state Phase 4b will track; we silently
+      // acknowledge and let the next spawn re-prompt. The other three land
+      // in `mcp_trust` AND `safety_audit` (dual-write per BE-1 invariant).
+      //
+      // No "pendingId-not-found" error path here — Phase 4a doesn't park
+      // pendings yet (Phase 4b adds that), and operator-initiated decisions
+      // from the AuthorityPanel ship without a pendingId. Either way, the
+      // decision is recorded; the spawn-gate hold-and-release is Phase 4b.
+      if (msg.decision === 'deny_once') {
+        // Reserve handling for Phase 4b — for now log and return so the
+        // client can move on. The reply is implicit (the operator's
+        // AuthorityPanel re-renders on the next session_started).
+        console.log(
+          `[mcp_trust] deny_once for ${msg.serverName} @ ${msg.originPath} (in-memory; Phase 4b)`,
+        );
+        return;
+      }
+      const persisted =
+        msg.decision === 'trust'
+          ? 'trusted'
+          : msg.decision === 'trust_pinned'
+            ? 'trusted_pinned_hash'
+            : 'denied_remember';
+      // trust_pinned without a binarySha is a UX bug (the client should
+      // grey out the affordance) AND a meaningless lookup state — reject
+      // explicitly so the operator gets a wrapper_error instead of a
+      // silently-stored junk row.
+      if (persisted === 'trusted_pinned_hash' && !msg.binarySha) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: `mcp_trust_decision: trust_pinned requires binarySha (server=${msg.serverName})`,
+        });
+        return;
+      }
+      try {
+        recordTrustDecision({
+          serverName: msg.serverName,
+          originPath: msg.originPath,
+          binarySha: msg.binarySha ?? null,
+          decision: persisted,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        return;
+      }
+      // Re-emit project_authority for every project this operator might
+      // be inspecting, so the AuthorityPanel sees the new trust state on
+      // the next render? Phase 4a is conservative: only the project that
+      // owns the originPath needs a refresh, and the operator can just
+      // re-trigger get_project_authority manually. Phase 6+ wires an
+      // automatic re-fetch alongside the inspector.
       return;
     }
     case 'set_permission_mode': {

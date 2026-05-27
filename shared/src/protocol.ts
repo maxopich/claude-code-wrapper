@@ -632,6 +632,44 @@ export type ClientMsg =
       type: 'get_project_authority';
       projectId: number;
       mode: 'cache' | 'probe';
+    }
+  | {
+      /**
+       * Cluster B Phase 4 (§4.4): operator's TOFU decision for an MCP server
+       * about to be (or previously) spawned by the SDK from a project's
+       * `settings*.json`. Two trigger paths:
+       *
+       *   1. **Operator-initiated** (Phase 7 UI, available now):
+       *      AuthorityPanel offers Trust/Deny actions per MCP server card;
+       *      the client ships this message with `pendingId` absent.
+       *      The server records the decision in `mcp_trust` + `safety_audit`
+       *      so the next session's resolver JOIN reflects it.
+       *
+       *   2. **Gate-initiated** (Phase 4b): a `mcp_auto_install_pending`
+       *      ServerMsg parks a pre-spawn block and waits for this reply
+       *      with the matching `pendingId`. Trust/trust_pinned releases
+       *      the block; deny_once/deny_remember rejects.
+       *
+       * Decisions persisted:
+       *   - `trust`         → mcp_trust row (decision='trusted')
+       *   - `trust_pinned`  → mcp_trust row (decision='trusted_pinned_hash');
+       *                       requires `binarySha` (UI greys out the affordance
+       *                       when the target is unresolvable, e.g. npx)
+       *   - `deny_remember` → mcp_trust row (decision='denied_remember')
+       *   - `deny_once`     → NO mcp_trust row; per-session in-memory deny
+       *                       (Phase 4b session-state). Operator re-prompted
+       *                       on the next spawn.
+       *
+       * Operator identity is resolved server-side via `getOperatorId()`
+       * (matches Cluster A's ack pattern) — not from the client, which can't
+       * be trusted to report it accurately.
+       */
+      type: 'mcp_trust_decision';
+      pendingId?: string;
+      serverName: string;
+      originPath: string;
+      binarySha?: string;
+      decision: 'trust' | 'trust_pinned' | 'deny_once' | 'deny_remember';
     };
 
 // ---- Server → Browser ----
@@ -1269,6 +1307,40 @@ export type ServerMsg =
       type: 'project_authority';
       projectId: number;
       authority: ProjectAuthority | null;
+    }
+  | {
+      /**
+       * Cluster B Phase 4 (§4.4): TOFU spawn-gate ServerMsg. Fires BEFORE
+       * an MCP binary spawns when the resolver finds an unfamiliar server
+       * (`first_seen`) or a previously-pinned server whose binary sha
+       * changed (`hash_changed`). The client opens a Trust-this-server
+       * modal; the operator's `mcp_trust_decision` reply with the matching
+       * `pendingId` releases the block (trust / trust_pinned) or rejects
+       * it (deny_once / deny_remember).
+       *
+       * Phase 4a ships the protocol but does not yet emit this message —
+       * Phase 4b wires the gate into the start-session paths (after
+       * project-authority resolution finds untrusted declared MCPs).
+       * Until then this discriminant is reserved + reducer-exhausted.
+       *
+       * `binarySha` is absent for unresolvable targets (e.g. `npx <name>`,
+       * bare commands without an absolute path). In that case the client's
+       * Trust-pinned-hash affordance must be greyed out — a pinned hash on
+       * a target whose hash isn't computable is meaningless.
+       *
+       * `previousSha` is set only when `reason === 'hash_changed'`; the
+       * operator needs both the old and new hashes to decide whether the
+       * change looks like a legitimate upgrade.
+       */
+      type: 'mcp_auto_install_pending';
+      pendingId: string;
+      serverName: string;
+      originPath: string;
+      command: string;
+      args?: string[];
+      binarySha?: string;
+      reason: 'first_seen' | 'hash_changed';
+      previousSha?: string;
     };
 
 /**

@@ -1310,13 +1310,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       return state;
 
     case 'project_authority':
-      // Cluster B Phase 3 (BE-B3): server reply to `get_project_authority`.
-      // The AuthorityPanel (Phase 6+ web UI) will own its own context-like
-      // slice for the response — it's project-scoped and only renders when
-      // the operator opens the panel. Keeping it out of the main reducer
-      // state matches the inbox_snapshot pattern: large/optional payloads
-      // ride a side-channel so the main store doesn't re-render on every
-      // refresh. Exhaustiveness no-op for now.
+    case 'mcp_auto_install_pending':
+      // Cluster B Phase 3+4: AuthorityPanel + McpTofuModal (Phase 6+ UI)
+      // will own their own context-like slices for these — both are
+      // project-scoped + modal-triggered, and the main store shouldn't
+      // re-render on every refresh / pending. The pattern matches
+      // inbox_snapshot. Exhaustiveness no-op for now.
       return state;
 
     case 'inbox_snapshot':
