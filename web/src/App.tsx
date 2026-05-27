@@ -31,6 +31,8 @@ import {
 import { GateModalsProvider } from './components/authority/GateModalsContext';
 import { AuthorityProvider } from './components/authority/AuthorityContext';
 import { AuthorityPanel } from './components/authority/AuthorityPanel';
+import { BannerStack, buildRateLimitBannerItem, type BannerStackItem } from './components/banners';
+import { HELD_MESSAGES_CAP } from './store';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -207,6 +209,17 @@ function AppShell({
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
+  // Cluster D Phase 4c (UI-D6): the WS onMessage callback in the connect
+  // effect closes over a stale `state` snapshot. The banner ↔ toast dedup
+  // predicate needs the LATEST state to answer "is the rate-limit banner
+  // mounted for sessionId X right now?", so we mirror state into a ref
+  // updated on every reducer dispatch. This is the same mutable-ref-into-
+  // effect pattern as `notifPushRef` / `inboxHandlerRef` — kept narrow:
+  // only the WS effect's `notifyFromServerMsg` call reads it.
+  const stateRef = useRef(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
   /**
    * Phase H side channel: ServerMsg subscribers for surfaces whose state
    * doesn't belong in Redux. The Logs modal subscribes here for
@@ -401,7 +414,24 @@ function AppShell({
           // below).
           try {
             const push = notifPushRef.current;
-            if (push) notifyFromServerMsg(msg, { push });
+            if (push) {
+              notifyFromServerMsg(msg, {
+                push,
+                // Cluster D Phase 4c (UI-D6): suppress the rate-limit toast
+                // when the rate-limit banner is already mounted for that
+                // session. The predicate reads `stateRef.current` (kept
+                // fresh by the useEffect above) — using stale `state`
+                // captured by the connect effect would let the dedup miss
+                // a banner that just appeared.
+                isBannerVisibleFor: (sessionId, kind) => {
+                  if (kind !== 'rate_limit') return false;
+                  const pid = stateRef.current.sessionToProject[sessionId];
+                  if (pid === undefined) return false;
+                  const sv = stateRef.current.sessionsByProject[pid]?.[sessionId];
+                  return !!sv?.rateLimit;
+                },
+              });
+            }
           } catch (err) {
             console.error('[notifications] dispatch threw', err);
           }
@@ -513,6 +543,18 @@ function AppShell({
 
   function sendMessage(text: string) {
     if (!state.activeProjectId) return;
+    // Cluster D Phase 4c (UI-D7): when this session is rate-limited, the
+    // captured turn the server is holding is the original prompt — fresh
+    // operator messages must NOT race straight to the SDK (they'd 429 the
+    // same way). Queue them locally; the drain effect below ships each
+    // one in order once the rate-limit clears and the captured turn
+    // finishes. The cap is enforced both here (composer-side) and in
+    // the reducer (defense-in-depth).
+    if (session?.rateLimit) {
+      if (session.heldMessages.length >= HELD_MESSAGES_CAP) return; // composer should disable
+      dispatch({ type: 'rl_enqueue_held', sessionId: session.id, text });
+      return;
+    }
     dispatch({ type: 'user_send', text });
     wsRef.current?.send({
       type: 'send_message',
@@ -521,6 +563,63 @@ function AppShell({
       text,
     });
   }
+
+  // Cluster D Phase 4c: rate-limit operator callbacks. Encapsulated here
+  // so the banner factory stays prop-only and the WS bridge stays in
+  // one file. `triggerRetry` is shared between manual + auto fire — the
+  // `auto` flag is the only difference, and it tags the recovery_log
+  // row server-side (`'manual_retry'` vs `'auto_retry'`, spec §8.5).
+  const triggerRateLimitRetry = useCallback((sessionId: string, auto: boolean) => {
+    dispatch({ type: 'rl_retry_sent', sessionId });
+    wsRef.current?.send({ type: 'retry_rate_limited', sessionId, auto });
+  }, []);
+  const setRateLimitPaused = useCallback((sessionId: string, paused: boolean) => {
+    dispatch({ type: 'rl_set_paused', sessionId, paused });
+  }, []);
+  const dropHeldMessage = useCallback((sessionId: string, index: number) => {
+    dispatch({ type: 'rl_drop_held', sessionId, index });
+  }, []);
+
+  // Cluster D Phase 4c: drain the held-message queue when rate-limit
+  // clears + the previous turn (the captured re-fire) has fully
+  // settled. We ship one message per pass; subsequent shipments wait
+  // for the next idle window. The session.status === 'running' guard
+  // is critical: without it, this effect would fire all 3 held
+  // messages in parallel the instant rateLimit goes undefined, each
+  // racing the others for the SDK's `--resume` turn (which serializes
+  // anyway — but you'd see three optimistic user messages flash into
+  // the chat and only one of them would actually round-trip).
+  useEffect(() => {
+    if (!session) return;
+    if (session.rateLimit) return; // still rate-limited, wait
+    if (session.heldMessages.length === 0) return; // nothing to drain
+    if (state.liveSessions[session.id]) return; // server says turn still in flight
+    if (session.status === 'running') return; // optimistic local-status guard
+
+    const next = session.heldMessages[0];
+    if (next === undefined) return;
+    dispatch({ type: 'rl_drain_one', sessionId: session.id });
+    dispatch({ type: 'user_send', text: next });
+    wsRef.current?.send({
+      type: 'send_message',
+      projectId: session.projectId,
+      sessionId: isSessionPending(session.id) ? undefined : session.id,
+      text: next,
+    });
+    // The deps cover every signal the drain reads. Including session
+    // itself would re-run on every reducer dispatch (router_drop,
+    // streamingText delta, etc.); reading the narrow fields gives us
+    // the right cadence — re-render on rate_limit_event clearance, on
+    // queue shift, on liveSessions flip, on status flip.
+  }, [
+    session,
+    session?.id,
+    session?.projectId,
+    session?.rateLimit,
+    session?.heldMessages,
+    session?.status,
+    state.liveSessions,
+  ]);
 
   function decidePermission(requestId: string, decision: 'allow' | 'deny') {
     if (!session) return;
@@ -1019,12 +1118,52 @@ function AppShell({
                 {session && !isSessionPending(session.id) && activeProject && (
                   <AuthorityPanel projectId={activeProject.id} mode="in-session" />
                 )}
+                {/* Cluster D Phase 4c (B2): rate-limit banner. Mounted via
+                 *  <BannerStack> so when later phases add the auth-expired
+                 *  + swept-session banners they slot into the same priority-
+                 *  sorted region. The factory returns null-equivalent (no
+                 *  item) when the session has no rateLimit slice, so the
+                 *  stack stays empty and BannerStack renders null itself
+                 *  (no DOM cost). */}
+                {session && session.rateLimit && (
+                  <BannerStack
+                    banners={(() => {
+                      const items: BannerStackItem[] = [];
+                      items.push(
+                        buildRateLimitBannerItem({
+                          sessionId: session.id,
+                          state: session.rateLimit,
+                          heldMessages: session.heldMessages,
+                          callbacks: {
+                            onManualRetry: () => triggerRateLimitRetry(session.id, false),
+                            onAutoRetry: () => triggerRateLimitRetry(session.id, true),
+                            onPauseToggle: (paused) => setRateLimitPaused(session.id, paused),
+                            onDropHeld: (i) => dropHeldMessage(session.id, i),
+                          },
+                        }),
+                      );
+                      return items;
+                    })()}
+                  />
+                )}
                 <ChatView
                   session={session}
                   isLive={sessionIsLive}
                   onPermissionDecide={decidePermission}
                 />
-                <InputBox disabled={inputDisabled} onSend={sendMessage} />
+                <InputBox
+                  disabled={inputDisabled}
+                  onSend={sendMessage}
+                  /* Phase 4c: when rate-limited, the composer is still
+                   * enabled (so the operator can queue follow-up messages
+                   * via the held-queue) — but past the cap it disables
+                   * itself to avoid silent drops. The InputBox doesn't
+                   * know about rate-limit; the parent enforces by
+                   * passing `disabled` when the queue is full. */
+                  {...(session?.rateLimit && session.heldMessages.length >= HELD_MESSAGES_CAP
+                    ? { disabled: true }
+                    : {})}
+                />
               </>
             ) : (
               <MultiAgentTab

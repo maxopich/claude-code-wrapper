@@ -22,6 +22,7 @@ function sess(over: Partial<SessionView> = {}): SessionView {
     messages: [],
     streamingText: '',
     runStartedAt: Date.now(),
+    heldMessages: [],
     ...over,
   };
 }

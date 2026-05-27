@@ -81,3 +81,125 @@ describe('notifyFromServerMsg', () => {
     expect(r.pushed).toHaveLength(0);
   });
 });
+
+// Cluster D Phase 4c (UI-D6): banner ↔ toast dedup. When a rate-limit
+// banner is mounted for a session, the dispatcher's parallel `notification`
+// envelope (the toast) should be suppressed so the operator doesn't see
+// the same event in two places.
+describe('notifyFromServerMsg — Cluster D Phase 4c rate-limit dedup (UI-D6)', () => {
+  function rateLimitEnvelope(sessionId: string, subCode: 'hit' | 'cleared') {
+    return {
+      type: 'notification' as const,
+      id: `srv-${subCode}`,
+      ts: 12345,
+      severity: 'warn' as const,
+      class: 'operational' as const,
+      dedupeKey: `rate_limit:${subCode}:${sessionId}`,
+      title: subCode === 'hit' ? 'Rate limit' : 'Rate limit cleared',
+      message: subCode === 'hit' ? 'limited' : 'lifted',
+      sessionId,
+      reasonCode: subCode,
+      sticky: false,
+    };
+  }
+
+  test('predicate returns true for the session → toast is suppressed', () => {
+    const r = recorder();
+    const isBannerVisibleFor = vi.fn(() => true);
+    notifyFromServerMsg(rateLimitEnvelope('sess-1', 'hit'), {
+      push: r.push,
+      isBannerVisibleFor,
+    });
+    expect(r.pushed).toHaveLength(0);
+    expect(isBannerVisibleFor).toHaveBeenCalledWith('sess-1', 'rate_limit');
+  });
+
+  test('predicate returns false → toast goes through', () => {
+    const r = recorder();
+    const isBannerVisibleFor = vi.fn(() => false);
+    notifyFromServerMsg(rateLimitEnvelope('sess-1', 'hit'), {
+      push: r.push,
+      isBannerVisibleFor,
+    });
+    expect(r.pushed).toHaveLength(1);
+    expect(r.pushed[0]).toMatchObject({ dedupeKey: 'rate_limit:hit:sess-1' });
+  });
+
+  test('predicate is omitted → toast goes through (back-compat default)', () => {
+    // Older callers (or tests) may not pass `isBannerVisibleFor`. In that
+    // case the dedup path is silently bypassed.
+    const r = recorder();
+    notifyFromServerMsg(rateLimitEnvelope('sess-1', 'hit'), { push: r.push });
+    expect(r.pushed).toHaveLength(1);
+  });
+
+  test('non-rate_limit envelopes never invoke the predicate', () => {
+    const r = recorder();
+    const isBannerVisibleFor = vi.fn(() => true);
+    // A safety-class router-drop notification with a sessionId — must
+    // NOT be deduped (it's a different banner family / no banner yet).
+    notifyFromServerMsg(
+      {
+        type: 'notification' as const,
+        id: 'srv-2',
+        ts: 1,
+        severity: 'warn' as const,
+        class: 'safety' as const,
+        dedupeKey: 'router_drop:forged_source:abc',
+        title: 'Router drop',
+        sessionId: 'sess-1',
+        reasonCode: 'forged_source',
+        sticky: true,
+      },
+      { push: r.push, isBannerVisibleFor },
+    );
+    expect(r.pushed).toHaveLength(1);
+    expect(isBannerVisibleFor).not.toHaveBeenCalled();
+  });
+
+  test('rate_limit dedupeKey for a DIFFERENT sessionId still goes through (predicate is sessionId-specific)', () => {
+    const r = recorder();
+    // Banner mounted for sess-A, but toast is for sess-B.
+    const isBannerVisibleFor = vi.fn((sid: string) => sid === 'sess-A');
+    notifyFromServerMsg(rateLimitEnvelope('sess-B', 'hit'), {
+      push: r.push,
+      isBannerVisibleFor,
+    });
+    expect(r.pushed).toHaveLength(1);
+    expect(isBannerVisibleFor).toHaveBeenCalledWith('sess-B', 'rate_limit');
+  });
+
+  test('rate_limit envelope with no sessionId (sessionless) is always passed through', () => {
+    const r = recorder();
+    const isBannerVisibleFor = vi.fn(() => true);
+    notifyFromServerMsg(
+      {
+        type: 'notification' as const,
+        id: 'srv-3',
+        ts: 1,
+        severity: 'warn' as const,
+        class: 'operational' as const,
+        dedupeKey: 'rate_limit:hit:global',
+        title: 'Rate limit',
+        sticky: false,
+      },
+      { push: r.push, isBannerVisibleFor },
+    );
+    expect(r.pushed).toHaveLength(1);
+    expect(isBannerVisibleFor).not.toHaveBeenCalled();
+  });
+
+  test('dedup covers both rate_limit:hit and rate_limit:cleared (whole prefix family)', () => {
+    const r = recorder();
+    const isBannerVisibleFor = vi.fn(() => true);
+    notifyFromServerMsg(rateLimitEnvelope('sess-1', 'hit'), {
+      push: r.push,
+      isBannerVisibleFor,
+    });
+    notifyFromServerMsg(rateLimitEnvelope('sess-1', 'cleared'), {
+      push: r.push,
+      isBannerVisibleFor,
+    });
+    expect(r.pushed).toHaveLength(0);
+  });
+});

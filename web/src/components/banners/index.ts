@@ -10,3 +10,11 @@ export type { SessionBannerProps, BannerAction, BannerTier } from './SessionBann
 
 export { BannerStack } from './BannerStack.js';
 export type { BannerStackProps, BannerStackItem } from './BannerStack.js';
+
+export { CountdownChip, formatRemaining } from './CountdownChip.js';
+export type { CountdownChipProps } from './CountdownChip.js';
+
+// Cluster D Phase 4c: rate-limit banner factory + callbacks contract.
+// Imported by App.tsx + MultiAgentTab.tsx to compose the BannerStack item.
+export { buildRateLimitBannerItem, rateLimitBannerTitle } from './RateLimitBanner.js';
+export type { BuildRateLimitBannerItemArgs, RateLimitBannerCallbacks } from './RateLimitBanner.js';
