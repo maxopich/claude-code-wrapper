@@ -6061,3 +6061,529 @@ pre {
   background: var(--bg-2);
 }
 
+/* ---- Cluster B Phase 6c: McpServersList / AllowDenyView / EnvScrubInspector
+ *      / HooksList -------------------------------------------------------- */
+
+/* ---- McpServersList ---- */
+.mcp-servers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mcp-servers-empty {
+  padding: 12px;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  text-align: center;
+}
+.mcp-server-card {
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
+.mcp-server-card-cebab-injected {
+  opacity: 0.75;
+}
+.mcp-server-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mcp-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fg-3);
+  display: inline-block;
+  flex: 0 0 auto;
+}
+.mcp-status-ok {
+  background: var(--ok);
+  box-shadow: 0 0 6px var(--ok);
+}
+.mcp-status-warn {
+  background: var(--warn);
+  box-shadow: 0 0 6px var(--warn);
+}
+.mcp-status-err {
+  background: var(--err);
+  box-shadow: 0 0 6px var(--err);
+}
+.mcp-status-muted {
+  background: var(--fg-3);
+}
+.mcp-server-name {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+.mcp-scope-chip,
+.mcp-trust-chip {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line-3);
+  background: var(--bg-3);
+  color: var(--fg-1);
+}
+.mcp-scope-user {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--line-3));
+}
+.mcp-scope-project {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line-3));
+}
+.mcp-scope-local {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
+}
+.mcp-scope-cebab {
+  color: var(--fg-2);
+  font-style: italic;
+}
+.mcp-trust-ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--line-3));
+}
+.mcp-trust-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
+}
+.mcp-trust-err {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 45%, var(--line-3));
+}
+.mcp-trust-muted {
+  color: var(--fg-2);
+}
+.mcp-tool-count {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  margin-left: auto;
+}
+.mcp-server-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0 0 0;
+}
+.mcp-server-fact {
+  display: contents;
+}
+.mcp-server-fact > dt {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  align-self: baseline;
+}
+.mcp-server-fact > dd {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.mcp-server-origin {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mcp-server-path,
+.mcp-server-args,
+.mcp-server-sha {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-1);
+  word-break: break-all;
+}
+.mcp-server-sha {
+  color: var(--fg-2);
+}
+.mcp-copy-btn {
+  font-size: var(--t-xs);
+  padding: 1px 6px;
+}
+.mcp-server-envkey-list,
+.mcp-server-tool-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.mcp-server-envkey-list code,
+.mcp-server-tool-list code {
+  font-size: var(--t-xs);
+  background: var(--bg-3);
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+  color: var(--fg-1);
+}
+
+/* ---- AllowDenyView ---- */
+.allow-deny-view {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+@media (max-width: 640px) {
+  /* UI-B16: collapse to stacked tabs-ish layout on narrow viewports. We
+   * keep it as stacked columns rather than introducing a tab control. */
+  .allow-deny-view {
+    grid-template-columns: 1fr;
+  }
+}
+.allow-deny-pane {
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  display: flex;
+  flex-direction: column;
+}
+.allow-deny-pane-allow {
+  border-left: 3px solid var(--ok);
+}
+.allow-deny-pane-deny {
+  border-left: 3px solid var(--err);
+}
+.allow-deny-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line-3);
+}
+.allow-deny-pane-title {
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+.allow-deny-pane-count {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  padding: 1px 6px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+  border-radius: 999px;
+}
+.allow-deny-pane-empty {
+  padding: 12px;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  font-style: italic;
+}
+.allow-deny-pane-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.allow-deny-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+}
+.allow-deny-row:hover {
+  background: var(--bg-3);
+}
+.allow-deny-name {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  flex: 1 1 auto;
+}
+.allow-deny-scope-chip {
+  font-size: var(--t-xs);
+  text-transform: lowercase;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+  color: var(--fg-1);
+  background: var(--bg-3);
+}
+.allow-deny-scope-user {
+  color: var(--info);
+}
+.allow-deny-scope-project {
+  color: var(--accent);
+}
+.allow-deny-scope-local {
+  color: var(--warn);
+}
+.allow-deny-scope-default {
+  color: var(--fg-2);
+  font-style: italic;
+}
+.allow-deny-pane-hint {
+  padding: 6px 10px;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  font-style: italic;
+  border-top: 1px solid var(--line-3);
+}
+
+/* ---- EnvScrubInspector ---- */
+.env-scrub-empty {
+  padding: 12px;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.env-scrub-empty p {
+  margin: 0;
+}
+.env-scrub-empty .env-scrub-help {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.env-scrub-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.env-scrub-banner {
+  /* UI-B21: inline warn banner — scoped to the inspector, NOT a page-level
+   * banner. Reuses the warn token family. */
+  padding: 8px 12px;
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line-3));
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+  color: var(--fg-0);
+  font-size: var(--t-sm);
+}
+.env-scrub-banner strong {
+  color: var(--warn);
+}
+.env-scrub-scope {
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.env-scrub-scope-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line-3);
+}
+.env-injection-scope-chip {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+  color: var(--fg-1);
+}
+.env-injection-scope-local {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
+}
+.env-injection-scope-project {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line-3));
+}
+.env-injection-scope-user {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 35%, var(--line-3));
+}
+.env-scrub-scope-path {
+  flex: 1 1 auto;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  word-break: break-all;
+}
+.env-scrub-scope-count {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.env-injection-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.env-injection-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+}
+.env-injection-row:hover {
+  background: var(--bg-3);
+}
+.env-injection-key {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  flex: 0 0 auto;
+}
+.env-injection-posture {
+  flex: 1 1 auto;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.env-injection-set {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+}
+.env-injection-set-yes {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
+  font-weight: 600;
+}
+.env-injection-set-no {
+  color: var(--fg-2);
+  background: var(--bg-3);
+}
+
+/* ---- HooksList ---- */
+.hooks-empty {
+  padding: 12px;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  text-align: center;
+}
+.hooks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.hooks-kind-group {
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.hooks-kind-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line-3);
+}
+.hooks-kind-name {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  font-weight: 600;
+  flex: 1 1 auto;
+}
+.hooks-kind-count {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+}
+.hooks-kind-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hook-card {
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+}
+.hook-card-warn {
+  border-left: 3px solid var(--warn);
+}
+.hook-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.hook-card-warn-icon {
+  color: var(--warn);
+  font-size: var(--t-sm);
+  font-weight: 700;
+}
+.hook-scope-chip {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  color: var(--fg-1);
+}
+.hook-scope-user {
+  color: var(--info);
+}
+.hook-scope-project {
+  color: var(--accent);
+}
+.hook-scope-local {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
+}
+.hook-card-path {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  flex: 1 1 auto;
+  word-break: break-all;
+}
+.hook-card-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 10px;
+  margin: 6px 0 0 0;
+}
+.hook-card-fact {
+  display: contents;
+}
+.hook-card-fact > dt {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.hook-card-fact > dd {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.hook-card-args,
+.hook-card-sha {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  word-break: break-all;
+}
+

@@ -148,7 +148,7 @@ describe('AuthorityPanel — cache-miss empty state', () => {
 });
 
 describe('AuthorityPanel — ready state', () => {
-  test('renders the ModelIdentity + Tools sections', () => {
+  test('renders all Phase 6b + 6c sections', () => {
     const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
     act(() => {
       handlerRef.current!({
@@ -162,11 +162,69 @@ describe('AuthorityPanel — ready state', () => {
     ).map((el) => el.textContent);
     expect(titles).toContain('Model & identity');
     expect(titles).toContain('Tools');
+    expect(titles).toContain('MCP servers');
+    expect(titles).toContain('Allow / deny rules');
+    expect(titles).toContain('Env injection scan');
+    expect(titles).toContain('Hooks');
     // Tools count badge should show 1.
     const toolsSection = Array.from(
       container.querySelectorAll<HTMLElement>('.authority-section'),
     ).find((s) => s.querySelector('.authority-section-title')?.textContent === 'Tools')!;
     expect(toolsSection.querySelector('.authority-section-count')?.textContent).toBe('1');
+  });
+
+  test('Env injection scan force-opens when any injection is detected', () => {
+    const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority({
+          detectedEnvInjections: [
+            {
+              envKey: 'ANTHROPIC_API_KEY',
+              scope: 'project',
+              scopePath: '/u/p/.claude/settings.json',
+              posture: 'subscription auth bypass',
+              isSet: true,
+            },
+          ],
+        }),
+      });
+    });
+    const envSection = Array.from(
+      container.querySelectorAll<HTMLDetailsElement>('details.authority-section'),
+    ).find(
+      (s) => s.querySelector('.authority-section-title')?.textContent === 'Env injection scan',
+    )!;
+    expect(envSection.open).toBe(true);
+    // Accent stripe applied.
+    expect(envSection.className).toContain('authority-section-stripe-accent');
+  });
+
+  test('Hooks section force-opens with warn stripe when a local hook is present', () => {
+    const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority({
+          hooks: [
+            {
+              hookKind: 'PreToolUse',
+              scope: 'local',
+              scopePath: '/u/p/.claude/settings.local.json',
+              command: '/bin/x',
+            },
+          ],
+        }),
+      });
+    });
+    const hooksSection = Array.from(
+      container.querySelectorAll<HTMLDetailsElement>('details.authority-section'),
+    ).find((s) => s.querySelector('.authority-section-title')?.textContent === 'Hooks')!;
+    expect(hooksSection.open).toBe(true);
+    expect(hooksSection.className).toContain('authority-section-stripe-removed');
   });
 
   test('preflight mode opens Model & identity by default; Tools stays closed', () => {
