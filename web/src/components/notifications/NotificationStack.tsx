@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { NotificationAction } from '@cebab/shared/protocol';
 import { useNotificationsActions, useNotificationsState } from './NotificationsContext';
 import { Notification } from './Notification';
 import type { DisplayNotification } from './notificationsReducer';
+import { addMute } from './muteStore';
 
 /**
  * Cluster A Phase 2: bottom-right toast dock host.
@@ -38,6 +39,20 @@ export type NotificationStackProps = {
 export function NotificationStack({ onAction }: NotificationStackProps) {
   const state = useNotificationsState();
   const { dismiss } = useNotificationsActions();
+
+  /**
+   * Cluster A Phase 5 mute hook: when the operator clicks "Mute" on a
+   * non-error/non-danger toast, register a 1-hour mute keyed by the
+   * notification's dedupeKey prefix (`source` in the spec's vocabulary,
+   * e.g. `bus_auto_installed`, `chain_not_reconstructed`). 1 hour is
+   * the spec's default scope; the manage-mutes UI can convert to
+   * "forever" or unmute. Dismissal is handled by Notification's own
+   * `handleMuteClick` after this callback returns, so the toast goes
+   * away immediately.
+   */
+  const handleMute = useCallback((n: DisplayNotification) => {
+    addMute(n, 'hour');
+  }, []);
 
   // Live-region mirror text. Cleared one rAF later so repeated pushes of
   // the same string still re-announce. The two refs let the assertive
@@ -90,7 +105,13 @@ export function NotificationStack({ onAction }: NotificationStackProps) {
       data-empty={state.visible.length === 0 ? 'true' : 'false'}
     >
       {state.visible.map((n) => (
-        <Notification key={n.id} notification={n} onDismiss={dismiss} onAction={onAction} />
+        <Notification
+          key={n.id}
+          notification={n}
+          onDismiss={dismiss}
+          onAction={onAction}
+          onMute={handleMute}
+        />
       ))}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {politeText}

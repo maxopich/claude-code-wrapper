@@ -5,6 +5,7 @@ import type {
   NotificationSeverity,
 } from '@cebab/shared/protocol';
 import type { DisplayNotification } from './notificationsReducer';
+import { isMuteAllowed } from './muteStore';
 
 /**
  * Cluster A Phase 2: a single dock toast.
@@ -93,9 +94,18 @@ export type NotificationProps = {
    * navigation handlers.
    */
   onAction?: (action: NotificationAction, notification: DisplayNotification) => void;
+  /**
+   * Cluster A Phase 5: optional mute handler. When provided, mute-
+   * eligible toasts (info/success/warn — NOT error/danger) render a
+   * "Mute" button. Click invokes this with the envelope; the host
+   * writes the localStorage mute entry and dismisses the toast. The
+   * spec disallows muting error/danger (operator MUST attend); the
+   * button is hidden for those tiers via `isMuteAllowed`.
+   */
+  onMute?: (notification: DisplayNotification) => void;
 };
 
-export function Notification({ notification, onDismiss, onAction }: NotificationProps) {
+export function Notification({ notification, onDismiss, onAction, onMute }: NotificationProps) {
   const { id, severity, title, message, action, count, sticky } = notification;
   const timeoutMs = resolveTimeout(notification);
   const [paused, setPaused] = useState(false);
@@ -138,6 +148,16 @@ export function Notification({ notification, onDismiss, onAction }: Notification
     handleDismiss();
   }, [action, onAction, notification, handleDismiss]);
 
+  const muteAvailable = onMute && isMuteAllowed(severity);
+  const handleMuteClick = useCallback(() => {
+    if (onMute) onMute(notification);
+    // Don't restoreFocus — the mute action is a "make this go away"
+    // gesture; restoring focus to the previously focused element is
+    // the appropriate behavior, matching dismiss.
+    restoreFocus();
+    onDismiss(id);
+  }, [onMute, notification, restoreFocus, onDismiss, id]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === 'Escape') {
@@ -153,9 +173,11 @@ export function Notification({ notification, onDismiss, onAction }: Notification
    * UI-11: toast host is tabbable only when it has actions. Otherwise the
    * notification is purely informational and shouldn't interrupt keyboard
    * navigation. Esc still works once tab focus lands here naturally
-   * (which only happens with actions today).
+   * (which only happens with actions today). Mute counts as an action
+   * for tab-order purposes — operators need keyboard access to silence
+   * a noisy source.
    */
-  const tabIndex = action ? 0 : -1;
+  const tabIndex = action || muteAvailable ? 0 : -1;
 
   /**
    * UX-7: danger uses alertdialog so AT treats it as modal-blocking.
@@ -196,11 +218,24 @@ export function Notification({ notification, onDismiss, onAction }: Notification
           {title}
         </div>
         {message && <div className="notif-message">{message}</div>}
-        {action && (
+        {(action || muteAvailable) && (
           <div className="notif-actions">
-            <button type="button" className="notif-action-btn" onClick={handleActionClick}>
-              {actionLabel(action)}
-            </button>
+            {action && (
+              <button type="button" className="notif-action-btn" onClick={handleActionClick}>
+                {actionLabel(action)}
+              </button>
+            )}
+            {muteAvailable && (
+              <button
+                type="button"
+                className="notif-mute-btn"
+                onClick={handleMuteClick}
+                aria-label="Mute this notification type for 1 hour"
+                title="Mute this notification type for 1 hour"
+              >
+                Mute
+              </button>
+            )}
           </div>
         )}
       </div>

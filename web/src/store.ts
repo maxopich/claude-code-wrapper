@@ -1306,6 +1306,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // state changes for now.
       return state;
 
+    case 'inbox_snapshot':
+      // Cluster A Phase 5: the inbox panel (`<NotificationInbox/>`) owns
+      // this state via a sibling context (`InboxContext`) so the main
+      // store doesn't churn on every sticky-replay snapshot. The context
+      // subscribes directly via App.tsx's onMessage side-channel. Reducer
+      // exhaustiveness keeps the union honest; the side-effect path is
+      // where the bell badge + panel actually update.
+      return state;
+
     case 'wrapper_error': {
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)

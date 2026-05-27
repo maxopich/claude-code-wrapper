@@ -504,6 +504,48 @@ export type ClientMsg =
       type: 'ack_notification';
       id: string;
       ackReason?: string;
+    }
+  | {
+      /**
+       * Cluster A Phase 5: operator opened the inbox panel (bell icon) and
+       * the client asks the server for a fresh snapshot of the persisted
+       * `notifications` table — sticky-operational and ALL safety rows,
+       * acked and unacked, most recent first. Replaces the previous
+       * "fire-and-forget toast" model with persistent inbox replay.
+       *
+       * Filters are server-side so the wire stays small; an empty `filters`
+       * (or omitted) returns the full inbox (capped at the floor per spec
+       * §5: 200 most recent OR 7 days, whichever is larger). The server
+       * sends an unsolicited `inbox_snapshot` on every WS attach as well,
+       * so the bell badge populates without the panel being opened.
+       *
+       * `sessionId: null` filters to global-scoped notifications (rows whose
+       * `session_id IS NULL`); `sessionId: '<sid>'` filters to a single
+       * session. Omitting the key returns all sessions.
+       */
+      type: 'request_inbox_snapshot';
+      filters?: {
+        sessionId?: string | null;
+        classes?: NotificationClass[];
+        severities?: NotificationSeverity[];
+        /** When true, include rows whose `acked_at IS NOT NULL`. */
+        includeAcked?: boolean;
+      };
+    }
+  | {
+      /**
+       * Cluster A Phase 5: bulk-ack of dismissed operational notifications.
+       *
+       * Marks every UNACKED operational row as acked (records `acked_at` +
+       * `acked_by` from the server's `getOperatorId()`); safety rows are
+       * UNTOUCHED — safety acknowledgment is per-row with operator typed
+       * reasons (BE-7) and cannot be bulk-cleared.
+       *
+       * The server responds with a fresh `inbox_snapshot` so the panel
+       * re-renders from authoritative state (vs the client guessing which
+       * ids it cleared).
+       */
+      type: 'clear_dismissed_inbox';
     };
 
 // ---- Server → Browser ----
@@ -1018,6 +1060,30 @@ export type ServerMsg =
       sessionId: string;
       projectId: number;
       agentName: string;
+    }
+  | {
+      /**
+       * Cluster A Phase 5: server's response to `request_inbox_snapshot`
+       * AND the unsolicited push on every WS attach (so the bell badge
+       * populates without the operator opening the panel).
+       *
+       * `rows` is the filtered set of persisted notification envelopes
+       * (sticky-operational + all safety), most recent first. The shape is
+       * identical to `NotificationEnvelope` so the inbox panel can re-use
+       * the same renderer the dock does — display-coalescing aside, an
+       * inbox row IS a notification.
+       *
+       * `unackedCountBySession` lets the sidebar render per-session unread
+       * badges without each session row issuing its own query (spec §5
+       * "per-session badge on session list row"). Keyed by sessionId;
+       * the empty string `""` carries global-scope rows whose
+       * `session_id IS NULL` so the badge code can iterate uniformly.
+       * `unackedGlobal` is the convenience total across all sessions.
+       */
+      type: 'inbox_snapshot';
+      rows: NotificationEnvelope[];
+      unackedCountBySession: Record<string, number>;
+      unackedGlobal: number;
     };
 
 /**

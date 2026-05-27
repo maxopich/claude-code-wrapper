@@ -5086,3 +5086,353 @@ pre {
   outline: 1px solid var(--accent);
 }
 
+/* -------------------------------------------------------------------------
+ * Cluster A Phase 5: notifications inbox bell + panel + manage-mutes.
+ * Bell lives in `.sidebar-header-controls` (DEC-1 fallback — no app-shell
+ * header today); panel renders as an absolute-positioned popover anchored
+ * to the sidebar's bottom-right. Tokens are reuse-only: --bg-4, --line-3,
+ * --accent, --r-md, --shadow-md, tier colors --info/--ok/--warn/--err/--accent.
+ * No new color tokens; the new --notif-stack-z stays the only Phase-A-introduced
+ * z-index.
+ * ------------------------------------------------------------------------- */
+
+.notif-bell {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  opacity: 0.7;
+}
+.notif-bell:hover,
+.notif-bell:focus-visible {
+  opacity: 1;
+}
+.notif-bell[data-has-unread='true'] {
+  opacity: 1;
+  color: var(--accent);
+}
+.notif-bell svg {
+  width: 16px;
+  height: 16px;
+}
+.notif-bell-badge {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: var(--err);
+  color: var(--bg-0, #fff);
+  font-size: 9px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  line-height: 1;
+  /* Keep the badge from inheriting the bell's icon-btn focus ring. */
+  pointer-events: none;
+}
+
+/* Inbox popover — anchored to the sidebar header's bottom edge, slightly
+ * wider than the sidebar's narrowest width so it doesn't pinch. The
+ * z-index sits above modal-overlay-anchored chrome but below modal content
+ * (the inbox is informational; a modal still wins focus). */
+.notif-inbox-popover {
+  position: absolute;
+  top: 48px; /* sidebar header height (approx; sidebar-header has no min-height token) */
+  left: var(--s-3);
+  right: var(--s-3);
+  max-width: 380px;
+  max-height: min(70vh, 600px);
+  background: var(--bg-4);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  z-index: var(--notif-stack-z);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: notif-in var(--dur-2) var(--ease-out);
+}
+
+.notif-inbox {
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* allow inner list to scroll */
+  flex: 1;
+}
+
+.notif-inbox-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-3);
+}
+.notif-inbox-title {
+  margin: 0;
+  font-size: var(--t-md);
+  font-weight: 600;
+  color: var(--text-1, inherit);
+}
+.notif-inbox-close {
+  width: 24px;
+  height: 24px;
+  font-size: 18px;
+}
+
+.notif-inbox-filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-3);
+}
+.notif-inbox-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-1);
+}
+.notif-inbox-chip-label {
+  font-size: var(--t-sm);
+  opacity: 0.7;
+  margin-right: var(--s-1);
+}
+.notif-inbox-chip {
+  appearance: none;
+  border: 1px solid var(--line-3);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.notif-inbox-chip:hover {
+  background: var(--bg-5);
+}
+.notif-inbox-chip[data-active='true'] {
+  background: var(--bg-5);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.notif-inbox-chip[data-tier='info'][data-active='true'] {
+  border-color: var(--info);
+  color: var(--info);
+}
+.notif-inbox-chip[data-tier='success'][data-active='true'] {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.notif-inbox-chip[data-tier='warn'][data-active='true'] {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+.notif-inbox-chip[data-tier='error'][data-active='true'] {
+  border-color: var(--err);
+  color: var(--err);
+}
+.notif-inbox-chip[data-tier='danger'][data-active='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.notif-inbox-toggle {
+  font-size: var(--t-sm);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  cursor: pointer;
+}
+
+.notif-inbox-actions {
+  display: flex;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-3);
+}
+
+.notif-inbox-mutes {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  background: var(--bg-3, transparent);
+  max-height: 200px;
+  overflow: auto;
+}
+.notif-inbox-mute-empty {
+  font-size: var(--t-sm);
+  opacity: 0.65;
+}
+.notif-inbox-mute-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+}
+.notif-inbox-mute-key {
+  flex: 1;
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.notif-inbox-mute-until {
+  opacity: 0.65;
+  font-size: var(--t-sm);
+}
+
+.notif-inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+.notif-inbox-empty {
+  padding: var(--s-3);
+  opacity: 0.65;
+  font-size: var(--t-sm);
+  text-align: center;
+}
+.notif-inbox-row {
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-3);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-left: 3px solid var(--line-3);
+}
+.notif-inbox-row:last-child {
+  border-bottom: 0;
+}
+.notif-inbox-row[data-severity='info'] {
+  border-left-color: var(--info);
+}
+.notif-inbox-row[data-severity='success'] {
+  border-left-color: var(--ok);
+}
+.notif-inbox-row[data-severity='warn'] {
+  border-left-color: var(--warn);
+}
+.notif-inbox-row[data-severity='error'] {
+  border-left-color: var(--err);
+}
+.notif-inbox-row[data-severity='danger'] {
+  border-left-color: var(--accent);
+}
+.notif-inbox-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+}
+.notif-inbox-row-tier {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+}
+.notif-inbox-row-tier[data-tier='info'] {
+  color: var(--info);
+}
+.notif-inbox-row-tier[data-tier='success'] {
+  color: var(--ok);
+}
+.notif-inbox-row-tier[data-tier='warn'] {
+  color: var(--warn);
+}
+.notif-inbox-row-tier[data-tier='error'] {
+  color: var(--err);
+}
+.notif-inbox-row-tier[data-tier='danger'] {
+  color: var(--accent);
+}
+.notif-inbox-row-ts {
+  opacity: 0.6;
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+}
+.notif-inbox-row-muted {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  background: var(--bg-5);
+  font-size: 10px;
+  opacity: 0.8;
+}
+.notif-inbox-row-title {
+  font-weight: 500;
+  font-size: var(--t-md);
+}
+.notif-inbox-row-msg {
+  font-size: var(--t-sm);
+  opacity: 0.85;
+  word-wrap: break-word;
+}
+.notif-inbox-row-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin-top: 2px;
+}
+.notif-inbox-row-action {
+  font-size: var(--t-sm);
+  opacity: 0.7;
+  font-style: italic;
+}
+.notif-inbox-row-ack {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--line-3);
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: 2px var(--s-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.notif-inbox-row-ack:hover,
+.notif-inbox-row-ack:focus-visible {
+  background: var(--bg-5);
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Mute button on the toast itself (matches .notif-action-btn but visually
+ * secondary — slightly dimmer label, no border on hover so it doesn't
+ * compete with the primary action). */
+.notif-mute-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-1) var(--s-3);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  min-height: 32px;
+  opacity: 0.65;
+}
+.notif-mute-btn:hover,
+.notif-mute-btn:focus-visible {
+  opacity: 1;
+  border-color: var(--line-3);
+  background: var(--bg-5);
+  outline: none;
+}
+
