@@ -91,6 +91,13 @@ export type MultiAgentSessionRow = {
    *  run ended cleanly and on pre-013 rows. Surfaced as the
    *  "failed · <excerpt>" tail in the rail's red chip. */
   first_error: string | null;
+  /** Cluster D Phase 1 (migration 017): 1 iff the operator has archived
+   *  this session ("set aside, don't show in the default picker"). 0 for
+   *  every pre-017 row and every freshly-created session. The Phase 5
+   *  SweptSessionBanner's `[Archive]` action flips this to 1 via
+   *  `archiveMultiAgentSession`; `list_archived_iterations` (later phase
+   *  ClientMsg) is the only path that includes archived rows. */
+  archived: number;
 };
 
 /**
@@ -623,15 +630,73 @@ export function listMultiAgentSessions(): MultiAgentSessionRow[] {
  * iteration browser UI doesn't have to render "(no iteration recorded)"
  * placeholders for pre-006 rows. Callers that need every row regardless
  * can fall back to `listMultiAgentSessions`.
+ *
+ * Cluster D Phase 1 (migration 017): excludes archived rows by default
+ * — the iteration browser is the operator's everyday picker and swept-
+ * then-archived sessions are visible noise there. The
+ * `list_archived_iterations` ClientMsg (later phase) calls
+ * `listMultiAgentSessionsWithIteration({ includeArchived: true })` to
+ * surface them on demand.
  */
-export function listMultiAgentSessionsWithIteration(): MultiAgentSessionRow[] {
+export function listMultiAgentSessionsWithIteration(opts?: {
+  includeArchived?: boolean;
+}): MultiAgentSessionRow[] {
+  const includeArchived = opts?.includeArchived === true;
+  if (includeArchived) {
+    return getDb()
+      .prepare<[], MultiAgentSessionRow>(
+        `SELECT * FROM multi_agent_sessions
+          WHERE iteration_id IS NOT NULL
+          ORDER BY started_at DESC`,
+      )
+      .all();
+  }
   return getDb()
     .prepare<[], MultiAgentSessionRow>(
       `SELECT * FROM multi_agent_sessions
-        WHERE iteration_id IS NOT NULL
+        WHERE iteration_id IS NOT NULL AND archived = 0
         ORDER BY started_at DESC`,
     )
     .all();
+}
+
+/**
+ * Cluster D Phase 1 (spec §6.4 / BE-D22): flip a multi-agent session's
+ * `archived` column to 1. Used by the Phase 5 `archive_session`
+ * ClientMsg handler; idempotent (UPDATE-by-id on a row that's already
+ * archived is a 0-row UPDATE, returns false).
+ *
+ * Does NOT touch on-disk artifacts (per BE-D23, the `removeArtifacts`
+ * flag is set at the handler level, not in this helper). The handler
+ * deletes the per-session folder after this row update succeeds, and
+ * only when the operator explicitly opted in.
+ *
+ * Returns true if the update flipped a 0→1; false when the row was
+ * already archived or doesn't exist.
+ */
+export function archiveMultiAgentSession(id: string): boolean {
+  const result = getDb()
+    .prepare<
+      [string],
+      unknown
+    >('UPDATE multi_agent_sessions SET archived = 1 WHERE id = ? AND archived = 0')
+    .run(id);
+  return result.changes > 0;
+}
+
+/**
+ * Inverse of `archiveMultiAgentSession`. Mostly for tests + a future
+ * "unarchive" affordance (not in v1 scope; the spec ships archive as
+ * one-way for simplicity, but the data model supports reversal).
+ */
+export function unarchiveMultiAgentSession(id: string): boolean {
+  const result = getDb()
+    .prepare<
+      [string],
+      unknown
+    >('UPDATE multi_agent_sessions SET archived = 0 WHERE id = ? AND archived = 1')
+    .run(id);
+  return result.changes > 0;
 }
 
 /**
