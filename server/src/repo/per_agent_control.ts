@@ -89,10 +89,7 @@ function rowToControlState(row: ControlRow): ControlState {
  * (sessionId, projectId) doesn't identify a participant row — the caller
  * (Phase 4b's handler) is expected to short-circuit with a wrapper_error.
  */
-export function getControlState(
-  sessionId: string,
-  projectId: number,
-): ControlState | undefined {
+export function getControlState(sessionId: string, projectId: number): ControlState | undefined {
   const row = getDb()
     .prepare<[string, number], ControlRow>(
       `SELECT session_id, project_id, muted, paused_until, pause_expiry_action,
@@ -128,11 +125,7 @@ export function listControlStates(sessionId: string): ControlState[] {
  * row change) and the caller is expected to either short-circuit or log.
  * Doesn't read the audit/forensics path — that's the handler's job.
  */
-export function setParticipantMuted(
-  sessionId: string,
-  projectId: number,
-  muted: boolean,
-): boolean {
+export function setParticipantMuted(sessionId: string, projectId: number, muted: boolean): boolean {
   const newVal = muted ? 1 : 0;
   const info = getDb()
     .prepare(
@@ -211,4 +204,125 @@ export function setParticipantKicked(
     )
     .run(kickedAt, mode, sessionId, projectId);
   return info.changes > 0;
+}
+
+// ---------- Cluster C Phase 4e: R-B reseed read helpers ----------
+//
+// Reconstruct (bus/reconstruct.ts) needs the agent slug (bus_agent_name)
+// keyed reseed payload, not the raw per_agent_control rows — the router's
+// in-memory sets are keyed by slug. The helpers below JOIN with the
+// projects table so the reseed path doesn't need a second query per
+// participant.
+//
+// Filtering policy:
+//   - mute/kick: only include participants whose `bus_agent_name` is
+//     populated. A NULL slug means an unhealthy participant row (the
+//     foreign key never linked); we'd have no way to address it on the
+//     router anyway, so skipping the seed is correct.
+//   - pause: include only `paused_until IS NOT NULL` rows; the timer
+//     scheduler does its own past-deadline handling (fires immediately
+//     when `pausedUntil <= now()`), so we don't filter expired rows
+//     here.
+//
+// All three helpers narrow to bus_agent_name + project_id so the
+// reconstruct caller can build the seed arrays without a follow-up
+// query.
+
+type AgentNameRow = { project_id: number; bus_agent_name: string };
+
+/**
+ * Phase 4e: agent slugs of every currently-muted participant for the
+ * session. The reconstruct path passes this into `wireOrchestratorSession`
+ * as `initialMutedAgents` so the rebuilt router's `mutedSet` is in sync
+ * with durable state from the first event after restart.
+ */
+export function listMutedAgentNames(sessionId: string): string[] {
+  return getDb()
+    .prepare<[string], AgentNameRow>(
+      `SELECT p.project_id, pr.bus_agent_name
+       FROM multi_agent_participants p
+       JOIN projects pr ON pr.id = p.project_id
+       WHERE p.session_id = ?
+         AND p.muted = 1
+         AND pr.bus_agent_name IS NOT NULL
+         AND pr.bus_agent_name != ''`,
+    )
+    .all(sessionId)
+    .map((r) => r.bus_agent_name);
+}
+
+/**
+ * Phase 4e: agent slugs of every kicked participant for the session.
+ * Mirrors `listMutedAgentNames`. Kick is irreversible at the DB layer
+ * (no `unkick`), so any non-null `kicked_at` is a permanent kick — the
+ * reseed always includes them.
+ */
+export function listKickedAgentNames(sessionId: string): string[] {
+  return getDb()
+    .prepare<[string], AgentNameRow>(
+      `SELECT p.project_id, pr.bus_agent_name
+       FROM multi_agent_participants p
+       JOIN projects pr ON pr.id = p.project_id
+       WHERE p.session_id = ?
+         AND p.kicked_at IS NOT NULL
+         AND pr.bus_agent_name IS NOT NULL
+         AND pr.bus_agent_name != ''`,
+    )
+    .all(sessionId)
+    .map((r) => r.bus_agent_name);
+}
+
+/**
+ * Phase 4e: full pause-state snapshot for every actively-paused
+ * participant in the session. The reconstruct path uses this to
+ * re-schedule pause expiry timers via `getPauseExpiryRegistry().schedule()`.
+ *
+ * The returned shape carries everything the timer scheduler needs
+ * EXCEPT the original pause's `reasonCode` / `reasonText` — those
+ * weren't persisted on the participant row (the persistence model is
+ * "DB columns capture the durable state; reasons live in safety_audit").
+ * The reconstruct caller queries `findLatestControlAudit` to recover
+ * those before scheduling.
+ *
+ * `pauseExpiryAction` is narrowed via the `isPauseExpiryAction` guard;
+ * a row with a corrupted column is skipped (and warn-logged at the
+ * call site). Returning a strict union shape protects the scheduler
+ * from having to defend against schema corruption.
+ */
+export type ActivePauseEntry = {
+  projectId: number;
+  agentName: string;
+  pausedUntil: number;
+  pauseExpiryAction: PauseExpiryAction;
+};
+
+type PauseEntryRow = {
+  project_id: number;
+  bus_agent_name: string;
+  paused_until: number;
+  pause_expiry_action: string;
+};
+
+export function listActivePauseEntries(sessionId: string): ActivePauseEntry[] {
+  return getDb()
+    .prepare<[string], PauseEntryRow>(
+      `SELECT p.project_id, pr.bus_agent_name, p.paused_until, p.pause_expiry_action
+       FROM multi_agent_participants p
+       JOIN projects pr ON pr.id = p.project_id
+       WHERE p.session_id = ?
+         AND p.paused_until IS NOT NULL
+         AND p.pause_expiry_action IS NOT NULL
+         AND pr.bus_agent_name IS NOT NULL
+         AND pr.bus_agent_name != ''`,
+    )
+    .all(sessionId)
+    .filter((r): r is PauseEntryRow & { pause_expiry_action: PauseExpiryAction } =>
+      isPauseExpiryAction(r.pause_expiry_action),
+    )
+    .map((r) => ({
+      projectId: r.project_id,
+      agentName: r.bus_agent_name,
+      pausedUntil: r.paused_until,
+      pauseExpiryAction: r.pause_expiry_action,
+    }));
 }

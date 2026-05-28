@@ -25,7 +25,15 @@ import {
   upsertAgentSession,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
+import {
+  getControlState,
+  setParticipantKicked,
+  setParticipantMuted,
+  setParticipantPause,
+} from '../repo/per_agent_control.js';
+import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { upsertProject } from '../repo/projects.js';
+import { __resetRegistryForTesting, getPauseExpiryRegistry } from '../ws/pause_expiry.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -75,6 +83,7 @@ beforeEach(() => {
   getDb();
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  __resetRegistryForTesting();
 });
 
 afterEach(() => {
@@ -83,6 +92,7 @@ afterEach(() => {
   closeDb();
   config.dataDir = originalDataDir;
   unregisterLiveSession(SID);
+  __resetRegistryForTesting();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -296,5 +306,259 @@ describe('Cluster A Phase 6: session_reconstructed emit on R-B success', () => {
     ).not.toThrow();
     // Banner still landed in scrollback as the fallback recovery signal.
     expect(listMultiAgentEvents(SID).map((e) => e.text)).toContain(RECOVERY_BANNER);
+  });
+});
+
+// ===== Cluster C Phase 4e: R-B reseed for mute / kick / pause-expiry =====
+//
+// On server restart, the in-memory router/runner state is gone. The
+// reconstruct path now reads `multi_agent_participants` for muted +
+// kicked agents and reseeds the rebuilt router's mute/kick sets, then
+// reschedules pause-expiry timers for any active pauses. These tests
+// verify:
+//   1. The router's `isMuted` / `isKicked` probes reflect the durable
+//      state immediately after reconstruct (no router events needed).
+//   2. The pause-expiry registry has a scheduled timer per active
+//      pause, with the original reasonCode + reasonText recovered from
+//      safety_audit.
+//   3. A pause whose deadline already elapsed during downtime fires on
+//      the next tick + does the right side effect (auto_resume clears
+//      DB; auto_kick flips kicked_at + writes the kick audit).
+//
+// The `OrchestratorSessionHandle`'s `isMuted` / `isKicked` are the
+// router's probe methods (kept verbatim from C4b/C4d); reseed
+// correctness is "does isMuted return true for a previously-muted
+// agent slug, with no router events fired in between?"
+
+function getOrchestratorHandle(sessionId: string): {
+  isMuted: (n: string) => boolean;
+  isKicked: (n: string) => boolean;
+} {
+  const live = getLiveSession(sessionId);
+  if (!live || live.mode !== 'orchestrator') {
+    throw new Error('expected an orchestrator handle to be live');
+  }
+  return live.handle as unknown as {
+    isMuted: (n: string) => boolean;
+    isKicked: (n: string) => boolean;
+  };
+}
+
+describe('reconstructOrchestratorSession — R-B reseed (Phase 4e)', () => {
+  test('reseeds mute set from multi_agent_participants.muted', () => {
+    seedReconstructable();
+    // Worker projects: coder + reviewer (per seedReconstructable). The
+    // bus_agent_name slugs are set via setProjectBusInstalled.
+    const coder = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+      .get()!;
+    setParticipantMuted(SID, coder.id, true);
+
+    const ok = reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+    expect(ok).toBe(true);
+
+    const handle = getOrchestratorHandle(SID);
+    expect(handle.isMuted('coder')).toBe(true);
+    expect(handle.isMuted('reviewer')).toBe(false);
+  });
+
+  test('reseeds kick set from multi_agent_participants.kicked_at', () => {
+    seedReconstructable();
+    const reviewer = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Reviewer'")
+      .get()!;
+    setParticipantKicked(SID, reviewer.id, Date.now() - 60_000, 'drain');
+
+    const ok = reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+    expect(ok).toBe(true);
+
+    const handle = getOrchestratorHandle(SID);
+    expect(handle.isKicked('reviewer')).toBe(true);
+    expect(handle.isKicked('coder')).toBe(false);
+  });
+
+  test('reseeds both mute + kick simultaneously', () => {
+    seedReconstructable();
+    const coder = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+      .get()!;
+    const reviewer = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Reviewer'")
+      .get()!;
+    setParticipantMuted(SID, coder.id, true);
+    setParticipantKicked(SID, reviewer.id, Date.now() - 1_000, 'drain');
+
+    reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+    const handle = getOrchestratorHandle(SID);
+    expect(handle.isMuted('coder')).toBe(true);
+    expect(handle.isKicked('reviewer')).toBe(true);
+  });
+
+  test('reschedules pause-expiry timer with reasonCode recovered from safety_audit', () => {
+    seedReconstructable();
+    const coder = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+      .get()!;
+    const pausedUntil = Date.now() + 60_000;
+    setParticipantPause(SID, coder.id, pausedUntil, 'auto_resume');
+    // Write the pause's audit row so reseed can recover the reasonCode.
+    appendSafetyAudit({
+      ts: Date.now() - 1_000,
+      sessionId: SID,
+      agentId: 'coder',
+      kind: 'agent_control.paused',
+      reasonCode: 'runaway_loop',
+      payload: {
+        projectId: coder.id,
+        agentSlug: 'coder',
+        reasonText: 'looping on the same thought',
+        timeoutMs: 60_000,
+        expiryAction: 'auto_resume',
+        pausedUntil,
+      },
+    });
+
+    reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+    const registry = getPauseExpiryRegistry();
+    expect(registry.isScheduled(SID, coder.id)).toBe(true);
+    const entry = registry.getEntry(SID, coder.id);
+    expect(entry?.reasonCode).toBe('runaway_loop');
+    expect(entry?.reasonText).toBe('looping on the same thought');
+    expect(entry?.pausedUntil).toBe(pausedUntil);
+    expect(entry?.expiryAction).toBe('auto_resume');
+  });
+
+  test('falls back to topology_repair reasonCode when audit row is missing', () => {
+    seedReconstructable();
+    const coder = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+      .get()!;
+    setParticipantPause(SID, coder.id, Date.now() + 30_000, 'auto_resume');
+    // NO audit row — simulates a backdoor write that skipped the audit.
+
+    reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+    const entry = getPauseExpiryRegistry().getEntry(SID, coder.id);
+    expect(entry?.reasonCode).toBe('topology_repair');
+    expect(entry?.reasonText).toBeNull();
+    // Warn logged about the missing audit row.
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  test('reseeded auto_resume timer fires + clears the DB on next tick when deadline already elapsed', async () => {
+    vi.useFakeTimers();
+    try {
+      seedReconstructable();
+      const coder = getDb()
+        .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+        .get()!;
+      // Deadline already in the past (server was down past the deadline).
+      const pausedUntil = Date.now() - 1_000;
+      setParticipantPause(SID, coder.id, pausedUntil, 'auto_resume');
+      appendSafetyAudit({
+        ts: pausedUntil - 60_000,
+        sessionId: SID,
+        agentId: 'coder',
+        kind: 'agent_control.paused',
+        reasonCode: 'off_task',
+        payload: { projectId: coder.id, agentSlug: 'coder', expiryAction: 'auto_resume' },
+      });
+
+      reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+      // Pause column populated.
+      expect(getControlState(SID, coder.id)?.pausedUntil).toBe(pausedUntil);
+
+      // Advance through the 0ms setTimeout the registry uses for
+      // past-deadline scheduling. Fake timers also let the
+      // microtask-level executor run synchronously.
+      vi.advanceTimersByTime(1);
+
+      // After fire: pause cleared.
+      expect(getControlState(SID, coder.id)?.pausedUntil).toBeNull();
+      // Trigger audit written.
+      const trigger = getDb()
+        .prepare<
+          [],
+          { kind: string; reason_code: string; payload_json: string }
+        >("SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+        .get();
+      expect(trigger?.kind).toBe('pause.expired_without_resume');
+      expect(trigger?.reason_code).toBe('off_task');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('reseeded auto_kick timer fires + flips kicked_at on past-deadline reseed', () => {
+    vi.useFakeTimers();
+    try {
+      seedReconstructable();
+      const coder = getDb()
+        .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+        .get()!;
+      const pausedUntil = Date.now() - 1_000;
+      setParticipantPause(SID, coder.id, pausedUntil, 'auto_kick');
+      appendSafetyAudit({
+        ts: pausedUntil - 60_000,
+        sessionId: SID,
+        agentId: 'coder',
+        kind: 'agent_control.paused',
+        reasonCode: 'cost_ceiling',
+        payload: { projectId: coder.id, agentSlug: 'coder', expiryAction: 'auto_kick' },
+      });
+
+      reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+      vi.advanceTimersByTime(1);
+
+      // Auto-kick happened: kicked_at populated; pause cleared.
+      const state = getControlState(SID, coder.id)!;
+      expect(state.kickedAt).not.toBeNull();
+      expect(state.kickedMode).toBe('drain');
+      expect(state.pausedUntil).toBeNull();
+
+      // Router reflects the kick.
+      const handle = getOrchestratorHandle(SID);
+      expect(handle.isKicked('coder')).toBe(true);
+
+      // Both audits written: the trigger + the kick.
+      const kinds = getDb()
+        .prepare<[], { kind: string }>(
+          "SELECT kind FROM safety_audit WHERE kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked' ORDER BY ts ASC",
+        )
+        .all()
+        .map((r) => r.kind);
+      expect(kinds).toEqual(['pause.expired_without_resume', 'agent_control.kicked']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('no active pauses → no timers scheduled (clean fresh reconstruct)', () => {
+    seedReconstructable();
+    reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+    expect(getPauseExpiryRegistry().getScheduledCount()).toBe(0);
+  });
+
+  test('multiple paused participants → each gets its own timer', () => {
+    seedReconstructable();
+    const coder = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+      .get()!;
+    const reviewer = getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Reviewer'")
+      .get()!;
+    setParticipantPause(SID, coder.id, Date.now() + 60_000, 'auto_resume');
+    setParticipantPause(SID, reviewer.id, Date.now() + 90_000, 'auto_kick');
+
+    reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+    const registry = getPauseExpiryRegistry();
+    expect(registry.isScheduled(SID, coder.id)).toBe(true);
+    expect(registry.isScheduled(SID, reviewer.id)).toBe(true);
+    expect(registry.getScheduledCount()).toBe(2);
   });
 });

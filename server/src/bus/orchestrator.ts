@@ -1082,6 +1082,28 @@ export function wireOrchestratorSession(p: {
   /** Item #5: opt-in pause-on-first-mutation. Surfaced on the handle; read
    *  inside the `onMutation` hook to decide whether to gate. Default false. */
   pauseOnMutation?: boolean;
+  /**
+   * Cluster C Phase 4e (R-B reseed): bus_agent_name slugs the operator
+   * previously muted, hydrated from `multi_agent_participants.muted` at
+   * reconstruct time. Forwarded into `createOrchestratorRouter` so the
+   * rebuilt router's `mutedSet` is in sync with durable state from the
+   * first event after restart — without this seed, a router_drop filter
+   * that depended on operator-set mute state would silently re-enable
+   * a muted agent until the next operator action.
+   *
+   * Fresh-start callers (start_multi_agent) omit this — the router
+   * starts with an empty mutedSet.
+   */
+  initialMutedAgents?: readonly string[];
+  /**
+   * Cluster C Phase 4e (R-B reseed): bus_agent_name slugs the operator
+   * previously kicked. Same shape as `initialMutedAgents` — forwarded
+   * into `createOrchestratorRouter` so the rebuilt router's `kickedSet`
+   * is restored from `multi_agent_participants.kicked_at IS NOT NULL`
+   * rows. Kick is irreversible at the DB layer, so any non-null
+   * kicked_at row stays in the seed permanently.
+   */
+  initialKickedAgents?: readonly string[];
 }): {
   handle: OrchestratorSessionHandle;
   router: OrchestratorRouter;
@@ -1390,6 +1412,9 @@ export function wireOrchestratorSession(p: {
     sendNotification: p.sendNotification,
     sendRouterDrop: p.sendRouterDrop,
     sendServerMsg: p.sendServerMsg,
+    // Phase 4e: forward R-B reseed of mute + kick sets into the router.
+    initialMutedAgents: p.initialMutedAgents,
+    initialKickedAgents: p.initialKickedAgents,
   });
 
   async function addWorker(projectId: number): Promise<AddWorkerResult> {
