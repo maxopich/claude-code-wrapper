@@ -40,6 +40,7 @@ import type {
   NotificationAction,
   NotificationEnvelope,
   NotificationSeverity,
+  ReopenSessionFailureReason,
   RouterDropReasonCode,
   SessionCrashedReasonCode,
   WorkspaceDiff,
@@ -100,6 +101,7 @@ import {
   archiveMultiAgentSession,
   clearFinishedMultiAgentSessions,
   computeRecoveryContext,
+  endMultiAgentSession,
   getLastRunForTemplate,
   getMultiAgentSession,
   getPendingMutation,
@@ -109,6 +111,7 @@ import {
   listMultiAgentSessionsWithIteration,
   listResolvedParticipants,
   setAwaitingContinue,
+  unarchiveMultiAgentSession,
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { canReconstruct } from '../bus/reconstruct.js';
@@ -492,6 +495,232 @@ export async function executeReopenSessionProbe(args: {
     projectPath,
     workspaceDiff,
   });
+}
+
+/**
+ * Cluster D Phase 5c (spec §6.3 / BE-D20, BE-D21, BE-D24): commit step
+ * of the swept-session reopen flow. Validates the operator's typed
+ * "reopen" gate (re-running the workspace diff for safety against a
+ * stale modal), detaches the current active session (if any) and marks
+ * it crashed with a `session_superseded` notification carrying
+ * `reasonCode: 'operator_reopen'`, unarchives the target if needed,
+ * then reactivates it via the existing `resumeMultiAgentTarget` (R-B)
+ * path. Writes a `recovery_log` row so the spec §8.5
+ * `sweepReopenRate()` roll-up sees this case.
+ *
+ * The conn-bound concerns (detach + adopt) ride a small bridge object
+ * (`detachCurrentActive` / `adoptResumed`) so the helper itself doesn't
+ * need a Conn type — same testability pattern as
+ * `executeArchiveSession` / `executeReopenSessionProbe`. The
+ * `resumeCallbacks` field is a Pick of `ResumeCallbacks` with
+ * `hopBudget` filled in.
+ *
+ * Chain mode handling: `resumeMultiAgentTarget` reconstructs only
+ * orchestrator sessions via R-B. A chain-mode target whose live handle
+ * is gone (server restarted) is unreopenable in v1 — we surface
+ * `chain_reconstruction_unsupported` so the modal can render a
+ * specific message rather than a generic "failed".
+ */
+export async function executeReopenSessionConfirmed(args: {
+  sessionId: string;
+  acknowledgedWorkspaceDiff: boolean;
+  typedConfirmation?: string;
+  currentActiveSessionId: string | null;
+  detachCurrentActive: () => void;
+  adoptResumed: (resumed: ResumedSession) => void;
+  resumeCallbacks: Parameters<typeof resumeMultiAgentTarget>[1];
+  send: (msg: ServerMsg) => void;
+  /** Test seam: override the diff computer. */
+  computeDiff?: (projectPath: string) => Promise<WorkspaceDiff>;
+  /** Test seam: override the resume implementation (avoids needing a
+   *  live session registry / R-B reconstruction in unit tests). */
+  resumeTarget?: typeof resumeMultiAgentTarget;
+}): Promise<void> {
+  const {
+    sessionId,
+    acknowledgedWorkspaceDiff,
+    typedConfirmation,
+    currentActiveSessionId,
+    detachCurrentActive,
+    adoptResumed,
+    resumeCallbacks: cbs,
+    send,
+  } = args;
+  const diff = args.computeDiff ?? computeWorkspaceDiff;
+
+  // ---- Step 1: target validation (mirrors probe; race-checks ----)
+  const row = getMultiAgentSession(sessionId);
+  if (!row) {
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'not_found',
+      message: `No such multi-agent session ${sessionId}`,
+    });
+    return;
+  }
+  if (row.status === 'running') {
+    // Race: between probe and confirm the row became running again
+    // (operator hit Resume from another surface, or something else
+    // reactivated it). Reject cleanly.
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'still_running',
+      message: 'This session is already running.',
+    });
+    return;
+  }
+
+  const participants = listResolvedParticipants(sessionId);
+  if (participants.length === 0) {
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'no_participant',
+      message: 'This session has no resolvable participant project.',
+    });
+    return;
+  }
+
+  // ---- Step 2: typed-confirmation gate (BE-D21) ----
+  if (!acknowledgedWorkspaceDiff) {
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'ack_required',
+      message: 'Reopening requires explicit acknowledgment of the workspace diff.',
+    });
+    return;
+  }
+
+  // Re-compute the diff server-side so a stale modal can't lie. If the
+  // freshly-computed diff has any changes OR we can't enumerate the
+  // workspace, the typed gate fires.
+  const projectPath = participants[0]!.project_path;
+  const freshDiff = await diff(projectPath);
+  const needsTypedGate = freshDiff.filesChanged > 0 || !freshDiff.fullDiffAvailable;
+  if (needsTypedGate && typedConfirmation !== 'reopen') {
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'typed_confirmation_required',
+      message: `Type "reopen" to confirm — the workspace has ${
+        freshDiff.fullDiffAvailable
+          ? `${freshDiff.filesChanged} uncommitted change(s)`
+          : 'unknown state'
+      }.`,
+    });
+    return;
+  }
+
+  // ---- Step 3: displace the current active (if any) ----
+  // Same posture as the existing auto-sweep in bus/resume.ts — the
+  // displaced row is marked crashed + a typed `session_superseded`
+  // notification fires. Different here: the reasonCode is
+  // `operator_reopen` (not `swept_competing`) so the inbox panel /
+  // recovery_log can distinguish the two causes.
+  if (currentActiveSessionId && currentActiveSessionId !== sessionId) {
+    try {
+      detachCurrentActive();
+      endMultiAgentSession(currentActiveSessionId, 'crashed');
+      send({
+        type: 'session_superseded',
+        sessionId: currentActiveSessionId,
+        supersedingSessionId: sessionId,
+        supersedingTs: Date.now(),
+      });
+      const notif = emitNotification(
+        {
+          class: 'operational',
+          severity: 'warn',
+          dedupeKey: `session_superseded:${currentActiveSessionId}`,
+          title: 'A prior session was superseded',
+          message: `Session ${currentActiveSessionId.slice(
+            0,
+            8,
+          )} was crashed because you reopened an older one.`,
+          sessionId: currentActiveSessionId,
+          action: { kind: 'archive', sessionId: currentActiveSessionId },
+          sticky: true,
+          reasonCode: 'operator_reopen',
+        },
+        send,
+      );
+      if (!notif.ok) {
+        console.error(
+          '[reopen_session_confirmed] session_superseded dispatcher.emit failed',
+          notif.error,
+        );
+      }
+    } catch (err) {
+      console.error(`[reopen_session_confirmed] failed to displace ${currentActiveSessionId}`, err);
+      // Continue — the swap is still useful even if the displacement
+      // notification didn't ship. The DB end-call is what matters; the
+      // notification is best-effort.
+    }
+  }
+
+  // ---- Step 4: unarchive if needed (operator changed their mind) ----
+  if (row.archived === 1) {
+    unarchiveMultiAgentSession(sessionId);
+  }
+
+  // ---- Step 5: reactivate via R-B / live re-attach ----
+  const reactivate = args.resumeTarget ?? resumeMultiAgentTarget;
+  let result: Awaited<ReturnType<typeof resumeMultiAgentTarget>>;
+  try {
+    result = await reactivate(sessionId, cbs);
+  } catch (err) {
+    console.error(`[reopen_session_confirmed] resumeMultiAgentTarget threw for ${sessionId}`, err);
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'reactivate_failed',
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  if (!result.ok) {
+    // Map TargetResumeFailure → ReopenSessionFailureReason. The two
+    // we expect here:
+    //   - 'reattach-failed' for chain mode (R-B is orchestrator-only)
+    //     OR a guard failure (folder missing, etc.). Mode-check
+    //     against the row distinguishes them.
+    //   - 'not-found' / 'already-running' shouldn't reach here (we
+    //     guarded above), but map defensively.
+    let reason: ReopenSessionFailureReason = 'reactivate_failed';
+    let message = 'Failed to reactivate the session.';
+    if (result.reason === 'reattach-failed' && row.mode === 'chain') {
+      reason = 'chain_reconstruction_unsupported';
+      message = 'Chain-mode reconstruction across a Cebab server restart is not supported in v1.';
+    } else if (result.reason === 'already-running') {
+      reason = 'still_running';
+      message = 'This session is already running.';
+    } else if (result.reason === 'not-found') {
+      reason = 'not_found';
+      message = 'Session vanished between confirm and reactivate.';
+    }
+    send({ type: 'reopen_session_failed', sessionId, reason, message });
+    return;
+  }
+
+  // ---- Step 6: adopt + emit ----
+  adoptResumed(result.resumed);
+
+  // BE-D24: recovery_log entry. Best-effort — a log-write failure
+  // shouldn't roll back the swap.
+  try {
+    appendRecoveryLog({
+      sessionId,
+      parentSessionId: currentActiveSessionId,
+      failureClass: 'sweep',
+      operatorAction: 'reopen',
+    });
+  } catch (err) {
+    console.error(`[reopen_session_confirmed] recovery_log append failed for ${sessionId}`, err);
+  }
 }
 
 function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
@@ -2394,11 +2623,39 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // target session is finalizable + has a resolvable participant
       // path, computes a workspace diff against that path, and replies
       // with `reopen_session_confirm_required` for the modal to render.
-      // Does NOT swap or reconstruct — that's Phase 5c's confirmed
-      // handler. Extracted into a testable async function for the same
+      // Does NOT swap or reconstruct — that's `reopen_session_confirmed`
+      // below. Extracted into a testable async function for the same
       // reason as `executeArchiveSession`.
       await executeReopenSessionProbe({
         sessionId: msg.sessionId,
+        send: (m) => send(conn.ws, m),
+      });
+      return;
+    }
+    case 'reopen_session_confirmed': {
+      // Cluster D Phase 5c (spec §6.3 / BE-D20, BE-D21): commit step.
+      // Body delegated to `executeReopenSessionConfirmed` for testability.
+      // The conn-bound side effects (detach current active, set
+      // `conn.multiAgent`) ride a small bridge object so the helper
+      // doesn't need a full Conn type.
+      await executeReopenSessionConfirmed({
+        sessionId: msg.sessionId,
+        acknowledgedWorkspaceDiff: msg.acknowledgedWorkspaceDiff === true,
+        typedConfirmation: msg.typedConfirmation,
+        currentActiveSessionId: conn.multiAgent?.sessionId ?? null,
+        detachCurrentActive: () => {
+          if (conn.multiAgent) {
+            conn.multiAgent.detach();
+            conn.multiAgent = null;
+          }
+        },
+        adoptResumed: (resumed) => {
+          emitResumedSession(conn, resumed);
+        },
+        resumeCallbacks: {
+          ...resumeCallbacks(conn),
+          hopBudget: resolveHopBudget(),
+        },
         send: (m) => send(conn.ws, m),
       });
       return;

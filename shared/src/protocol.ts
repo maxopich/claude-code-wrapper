@@ -486,6 +486,55 @@ export type ClientMsg =
     }
   | {
       /**
+       * Cluster D Phase 5c (spec §6.3 / BE-D20, BE-D21): step 2 of the
+       * swept-session reopen flow. After `reopen_session` returns
+       * `reopen_session_confirm_required` and the modal renders the diff,
+       * the operator clicks "Reopen" (typing "reopen" when the workspace
+       * had any changes); this message commits the swap.
+       *
+       * Validation (server re-runs the diff for safety — the modal could
+       * stale-render if the operator left the dialog open for a long
+       * time + something changed on disk):
+       *   - `acknowledgedWorkspaceDiff` MUST be true (forces the modal
+       *     code path to deliberately set the flag).
+       *   - When the server's freshly-computed diff has
+       *     `filesChanged > 0` OR `!fullDiffAvailable`, `typedConfirmation`
+       *     MUST be the literal string `'reopen'`. (Spec BE-D21 — typed
+       *     gate on any uncertainty about workspace state. Empty diff +
+       *     fullDiffAvailable means "we are confident the workspace
+       *     hasn't moved"; only that path skips the typed gate.)
+       *
+       * Side effects on success:
+       *   - If the connection has an active multi-agent session, it is
+       *     detached and marked `crashed` (no operator data loss — the
+       *     events are persisted; same posture as the existing single-
+       *     active sweep). A `session_superseded` notification fires for
+       *     the displaced session (`reasonCode: 'operator_reopen'`).
+       *   - The target session is unarchived (if archived) and
+       *     reactivated via the existing R-B reconstruction path.
+       *   - `recovery_log` row written
+       *     ({ failureClass: 'sweep', operatorAction: 'reopen' }) so the
+       *     spec §8.5 sweepReopenRate roll-up sees this case.
+       *   - The browser receives the standard `multi_agent_started` +
+       *     event replay (same envelopes `resume_multi_agent` already
+       *     ships) so the reducer transitions cleanly into the active-run
+       *     view.
+       *
+       * Rejects with `reopen_session_failed` when:
+       *   - The target session is unknown OR has become running between
+       *     probe and confirm (race).
+       *   - The typed gate fails (acknowledgedWorkspaceDiff=false OR
+       *     typedConfirmation missing when required).
+       *   - Reactivation itself fails (chain mode without a live handle,
+       *     or R-B reconstruction couldn't bring the row back).
+       */
+      type: 'reopen_session_confirmed';
+      sessionId: string;
+      acknowledgedWorkspaceDiff: boolean;
+      typedConfirmation?: string;
+    }
+  | {
+      /**
        * Mutate the lifecycle of a running multi-agent session
        * (`persistent` ↔ `temp`). Only affects teardown behavior — the
        * session keeps running unchanged; on End/Stop the new value
@@ -2021,7 +2070,19 @@ export type WorkspaceDiff = {
  * doubles as the client-side i18n key). New reasons must add a matching
  * UI branch.
  */
-export type ReopenSessionFailureReason = 'not_found' | 'still_running' | 'no_participant';
+export type ReopenSessionFailureReason =
+  | 'not_found'
+  | 'still_running'
+  | 'no_participant'
+  // Cluster D Phase 5c — `reopen_session_confirmed`-specific reasons:
+  /** acknowledgedWorkspaceDiff was missing/false. Modal should re-prompt. */
+  | 'ack_required'
+  /** typedConfirmation was missing or != 'reopen' when diff required it. */
+  | 'typed_confirmation_required'
+  /** Chain-mode session whose live handle is gone — R-B is orchestrator-only. */
+  | 'chain_reconstruction_unsupported'
+  /** R-B reconstruction failed for some other reason (folder missing, etc.). */
+  | 'reactivate_failed';
 
 /**
  * Phase H: discriminator for `LogRow.kind`. Each row in the merged session
