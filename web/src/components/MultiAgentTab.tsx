@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type {
+  ControlReasonCode,
   IterationSummary,
   MultiAgentEventKind,
   MultiAgentLifecycle,
   MultiAgentMutationView,
   MultiAgentTemplate,
+  PauseExpiryAction,
   Project,
   ServerMsg,
   TemplateLastRun,
@@ -26,6 +28,7 @@ import { LogsButton } from './sessionLog';
 import { RouterDropsCounter } from './authority/RouterDropsCounter';
 import { ParticipantControlsCounter } from './agentControl/ParticipantControlsCounter';
 import { ParticipantStatePills } from './agentControl/ParticipantStatePills';
+import { ParticipantControlMenu } from './agentControl/ParticipantControlMenu';
 import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
 import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
@@ -102,6 +105,31 @@ export function MultiAgentTab(props: {
   onSetDraftPauseOnMutation: (value: boolean) => void;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
+  /**
+   * Cluster C Phase 4g2: per-participant control verb dispatch. Each forwards
+   * to a typed ClientMsg via wsRef in App.tsx. ReasonCode is plumbed even
+   * though Phase 4g2's ⋮ menu pins it to `'topology_repair'` — the next
+   * slice (4g3) introduces the reason picker without needing to widen the
+   * surface again.
+   */
+  onMuteParticipant: (sessionId: string, projectId: number, reasonCode: ControlReasonCode) => void;
+  onUnmuteParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+  ) => void;
+  onPauseParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    timeoutMs: number,
+    expiryAction: PauseExpiryAction,
+  ) => void;
+  onResumeParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+  ) => void;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
@@ -154,6 +182,10 @@ export function MultiAgentTab(props: {
         onContinueThroughMutation={props.onContinueThroughMutation}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
+        onMuteParticipant={props.onMuteParticipant}
+        onUnmuteParticipant={props.onUnmuteParticipant}
+        onPauseParticipant={props.onPauseParticipant}
+        onResumeParticipant={props.onResumeParticipant}
         onClearAutoRetry={props.onClearAutoRetry}
       />
     );
@@ -1302,6 +1334,29 @@ function ActiveRunView(props: {
   onContinue: (sessionId: string) => void;
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (sessionId: string, projectId: number) => void;
+  /**
+   * Cluster C Phase 4g2: per-participant control verbs from the ⋮ menu in
+   * SessionSettingsPanel. SessionId is bound here so the menu only needs
+   * (projectId, reasonCode, ...) at the leaf.
+   */
+  onMuteParticipant: (sessionId: string, projectId: number, reasonCode: ControlReasonCode) => void;
+  onUnmuteParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+  ) => void;
+  onPauseParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    timeoutMs: number,
+    expiryAction: PauseExpiryAction,
+  ) => void;
+  onResumeParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+  ) => void;
   /** Item #4: Retry the worker named in this session's pending-retry slot.
    *  The slot is server-authoritative — no agentName/prompt args. */
   onRetryWorker: (sessionId: string) => void;
@@ -1382,6 +1437,24 @@ function ActiveRunView(props: {
         }
         onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
         onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
+        onMuteParticipant={(projectId, reasonCode) =>
+          props.onMuteParticipant(run.sessionId, projectId, reasonCode)
+        }
+        onUnmuteParticipant={(projectId, reasonCode) =>
+          props.onUnmuteParticipant(run.sessionId, projectId, reasonCode)
+        }
+        onPauseParticipant={(projectId, reasonCode, timeoutMs, expiryAction) =>
+          props.onPauseParticipant(
+            run.sessionId,
+            projectId,
+            reasonCode,
+            timeoutMs,
+            expiryAction,
+          )
+        }
+        onResumeParticipant={(projectId, reasonCode) =>
+          props.onResumeParticipant(run.sessionId, projectId, reasonCode)
+        }
         highlightedEventId={highlightedEventId}
         onJump={jumpToEvent}
       />
@@ -1655,6 +1728,21 @@ function SessionSettingsPanel(props: {
   activeAgent: string | null;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
+  /**
+   * Cluster C Phase 4g2: per-participant control verbs from the ⋮ menu in
+   * each participant row. SessionId is already bound by the caller; the
+   * menu provides projectId + reasonCode (and pause-specific timeout +
+   * expiryAction).
+   */
+  onMuteParticipant: (projectId: number, reasonCode: ControlReasonCode) => void;
+  onUnmuteParticipant: (projectId: number, reasonCode: ControlReasonCode) => void;
+  onPauseParticipant: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    timeoutMs: number,
+    expiryAction: PauseExpiryAction,
+  ) => void;
+  onResumeParticipant: (projectId: number, reasonCode: ControlReasonCode) => void;
   /** Drives the (collapsed-by-default) routing-trail disclosure: the
    *  spine→scrollback jump highlight lives in ActiveRunView and is passed
    *  through so the trail can stay tucked inside this panel. */
@@ -1756,23 +1844,51 @@ function SessionSettingsPanel(props: {
                 )}
               </li>
             )}
-            {workerSlugs.map((slug, i) => (
-              <li key={slug} className="settings-participant">
-                <code>{slug}</code>
-                <ParticipantTrustChip slug={slug} projects={props.projects} />
-                {props.activeAgent === slug && (
-                  <ThinkingIndicator
-                    variant="inline"
-                    phase="thinking"
-                    startedAt={turnStartedAt}
-                    label={slug}
-                  />
-                )}
-                {!isOrchestrator && i < workerSlugs.length - 1 && (
-                  <span className="settings-arrow">→</span>
-                )}
-              </li>
-            ))}
+            {workerSlugs.map((slug, i) => {
+              // Cluster C Phase 4g2: resolve slug→projectId so the ⋮ menu
+              // can dispatch control verbs (envelopes are keyed by
+              // projectId). When the slug doesn't match any project (e.g.
+              // an off-roster participant, the orchestrator's `cebab`
+              // sink, or a transient state), the menu is omitted.
+              const proj = props.projects.find((p) => p.busAgentName === slug);
+              const control = proj ? run.participantControls[proj.id] : undefined;
+              return (
+                <li key={slug} className="settings-participant">
+                  <code>{slug}</code>
+                  <ParticipantTrustChip slug={slug} projects={props.projects} />
+                  {props.activeAgent === slug && (
+                    <ThinkingIndicator
+                      variant="inline"
+                      phase="thinking"
+                      startedAt={turnStartedAt}
+                      label={slug}
+                    />
+                  )}
+                  {/* Cluster C Phase 4g2: ⋮ menu — only mounted when the
+                   *  run is in-flight (canEdit=true), the participant has
+                   *  a project mapping, and we're in orchestrator mode (the
+                   *  only mode that supports the full mute/pause/resume
+                   *  vocabulary today; chain-mode pause+resume is
+                   *  technically valid but holding off until 4g3 when the
+                   *  topology guards have UI feedback). */}
+                  {props.canEdit && isOrchestrator && proj && (
+                    <ParticipantControlMenu
+                      projectId={proj.id}
+                      agentLabel={slug}
+                      sessionMode={run.mode}
+                      control={control}
+                      onMute={props.onMuteParticipant}
+                      onUnmute={props.onUnmuteParticipant}
+                      onPause={props.onPauseParticipant}
+                      onResume={props.onResumeParticipant}
+                    />
+                  )}
+                  {!isOrchestrator && i < workerSlugs.length - 1 && (
+                    <span className="settings-arrow">→</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
           {props.canEdit && (
             <div className="add-participant">

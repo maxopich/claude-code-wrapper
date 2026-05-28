@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
   ClientMsg,
+  ControlReasonCode,
   MultiAgentLifecycle,
   MultiAgentTemplate,
   NotificationAction,
   NotificationEnvelope,
+  PauseExpiryAction,
   ServerMsg,
   SessionPermissionMode,
   StopReasonCode,
@@ -923,6 +925,49 @@ function AppShell({
   function addParticipant(projectId: number) {
     dispatch({ type: 'ma_add_participant', projectId });
   }
+  // Cluster C Phase 4g2: per-participant control-verb senders. Each is a
+  // thin wrapper around the typed ClientMsg shapes in shared/src/protocol.ts;
+  // the server's executors live in server/src/ws/control_verbs.ts and
+  // dual-write a per_agent_control row + safety_audit row before echoing.
+  // ReasonCode is plumbed through but Phase 4g2's UI pins it to
+  // 'topology_repair' — the reason picker lands in Phase 4g3.
+  function muteParticipant(
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+  ) {
+    wsRef.current?.send({ type: 'mute_participant', sessionId, projectId, reasonCode });
+  }
+  function unmuteParticipant(
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+  ) {
+    wsRef.current?.send({ type: 'unmute_participant', sessionId, projectId, reasonCode });
+  }
+  function pauseParticipant(
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    timeoutMs: number,
+    expiryAction: PauseExpiryAction,
+  ) {
+    wsRef.current?.send({
+      type: 'pause_participant',
+      sessionId,
+      projectId,
+      reasonCode,
+      timeoutMs,
+      expiryAction,
+    });
+  }
+  function resumeParticipant(
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+  ) {
+    wsRef.current?.send({ type: 'resume_participant', sessionId, projectId, reasonCode });
+  }
   function removeParticipant(projectId: number) {
     dispatch({ type: 'ma_remove_participant', projectId });
   }
@@ -1514,6 +1559,10 @@ function AppShell({
                 onSetDraftPauseOnMutation={setDraftPauseOnMutation}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}
+                onMuteParticipant={muteParticipant}
+                onUnmuteParticipant={unmuteParticipant}
+                onPauseParticipant={pauseParticipant}
+                onResumeParticipant={resumeParticipant}
                 onDismissActive={dismissActiveRun}
                 onRefreshIterations={refreshIterations}
                 onClearIterations={clearIterations}
