@@ -1392,6 +1392,18 @@ export type ServerMsg =
       /** True iff the *resolved* workspace root (stored OR default fallback) exists. */
       workspaceRootValid: boolean;
       defaultWorkspaceRoot: string;
+      /**
+       * Cluster E Phase 3 (A4): provenance of `defaultWorkspaceRoot` so the
+       * UI can attribute the fallback path. `'env'` means the `WORKSPACE_ROOT`
+       * environment variable was set at server boot; `'builtin'` means the
+       * server fell back to the hard-coded `~/agents`. Optional for
+       * forward-compat — older clients ignore it.
+       *
+       * Surfaced in the SettingsModal's "(default fallback)" annotation and
+       * in the empty-state copy so the operator can see whether their stray
+       * `WORKSPACE_ROOT=...` export in the shell is leaking through.
+       */
+      defaultWorkspaceRootSource?: 'env' | 'builtin';
       /** Resolved default hop budget (DB setting > `CEBAB_HOP_BUDGET` env >
        *  built-in `DEFAULT_HOP_BUDGET`). Always present; the Settings modal
        *  seeds its input from this value. */

@@ -1889,3 +1889,57 @@ describe('store / countControlledParticipants', () => {
     expect(countControlledParticipants(s.multiAgent.active, now)).toBe(3);
   });
 });
+
+// Cluster E Phase 3 (A4): settings reducer carries the new
+// defaultWorkspaceRootSource field through to SettingsView when present;
+// older server payloads (field absent) leave the SettingsView's field
+// undefined rather than coercing to a default.
+describe('store / settings reducer carries defaultWorkspaceRootSource (E3)', () => {
+  test('forwards source=env when server sets it', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultWorkspaceRootSource: 'env',
+        defaultHopBudget: 30,
+      },
+    });
+    expect(s.settings?.defaultWorkspaceRootSource).toBe('env');
+  });
+
+  test('forwards source=builtin when server sets it', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: '/whatever',
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultWorkspaceRootSource: 'builtin',
+        defaultHopBudget: 30,
+      },
+    });
+    expect(s.settings?.defaultWorkspaceRootSource).toBe('builtin');
+  });
+
+  test('older server omits the field → SettingsView leaves it undefined', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        // defaultWorkspaceRootSource intentionally omitted (Phase 2 server)
+        defaultHopBudget: 30,
+      },
+    });
+    expect(s.settings?.defaultWorkspaceRootSource).toBeUndefined();
+  });
+});

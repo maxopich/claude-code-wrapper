@@ -28,6 +28,15 @@ export function SettingsModal(props: {
   const hopBudgetChanged = hopBudgetValid && parsedHopBudget !== props.settings.defaultHopBudget;
   const canSave = trimmed.length > 0 && hopBudgetValid && (workspaceChanged || hopBudgetChanged);
 
+  // Cluster E Phase 3 (A4): the "(default fallback)" annotation is visible
+  // ONLY when the operator hasn't stored a workspace (workspaceRoot === null)
+  // AND the current input still matches the default — i.e. the pre-filled
+  // value hasn't been edited yet. Editing immediately clears the hint so
+  // the operator's typed-in path doesn't carry the misleading label.
+  const isShowingFallback =
+    props.settings.workspaceRoot === null && trimmed === props.settings.defaultWorkspaceRoot;
+  const fallbackSource = props.settings.defaultWorkspaceRootSource;
+
   const save = () => {
     if (!canSave) return;
     props.onSave({ workspaceRoot: trimmed, defaultHopBudget: parsedHopBudget });
@@ -50,7 +59,21 @@ export function SettingsModal(props: {
         </header>
         <section>
           <label>
-            <div className="label">Workspace folder</div>
+            <div className="label">
+              Workspace folder
+              {/* Cluster E Phase 3 (A4): inline "(default fallback)" tag
+                * when the operator hasn't saved a custom path AND the input
+                * value still equals the default. Vanishes as soon as they
+                * edit the field. Source attribution distinguishes
+                * "env" (WORKSPACE_ROOT was set at server boot) from
+                * "builtin" (~/agents). */}
+              {isShowingFallback && (
+                <span className="settings-modal-fallback-tag" data-testid="fallback-tag">
+                  {' '}
+                  ({sourceLabel(fallbackSource)})
+                </span>
+              )}
+            </div>
             <input
               type="text"
               value={value}
@@ -67,7 +90,16 @@ export function SettingsModal(props: {
             auto-load.
           </p>
           {props.settings.workspaceRoot === null && (
-            <p className="hint">No workspace folder set yet. Pick one to begin.</p>
+            // Cluster E Phase 3 (A4): when no workspace is saved, name
+            // the resolved default path so the operator knows where runs
+            // and logs will land if they accept the fallback. Previous
+            // copy was a generic "Pick one to begin"; the path callout
+            // surfaces the actual landing location.
+            <p className="hint">
+              No workspace folder set yet — runs and logs land in{' '}
+              <code>{props.settings.defaultWorkspaceRoot}</code>{' '}
+              {fallbackSourceSentence(fallbackSource)} unless you set a workspace.
+            </p>
           )}
           {!props.settings.workspaceRootValid && props.settings.workspaceRoot && (
             <p className="hint warn">
@@ -105,4 +137,40 @@ export function SettingsModal(props: {
       </div>
     </div>
   );
+}
+
+/**
+ * Cluster E Phase 3 (A4): short label for the inline "(default fallback)" tag
+ * next to the Workspace folder label. Server forwards either:
+ *   'env'     → the WORKSPACE_ROOT env var resolved the path at boot
+ *   'builtin' → server fell back to the hard-coded ~/agents
+ * Undefined source means the server is older than Phase 3 — we still show
+ * "default fallback" so the operator at least sees that this is a default,
+ * just without attribution.
+ */
+function sourceLabel(source: 'env' | 'builtin' | undefined): string {
+  switch (source) {
+    case 'env':
+      return 'default — from WORKSPACE_ROOT env';
+    case 'builtin':
+      return 'default — built-in ~/agents';
+    default:
+      return 'default fallback';
+  }
+}
+
+/**
+ * Cluster E Phase 3 (A4): suffix in the empty-state hint that mirrors the
+ * `sourceLabel` attribution but reads naturally as a sentence fragment
+ * after the resolved path.
+ */
+function fallbackSourceSentence(source: 'env' | 'builtin' | undefined): string {
+  switch (source) {
+    case 'env':
+      return '(resolved from the WORKSPACE_ROOT env var)';
+    case 'builtin':
+      return "(Cebab's built-in default)";
+    default:
+      return '(default fallback)';
+  }
 }

@@ -1394,6 +1394,15 @@ pre {
   padding: 1px 5px;
   border-radius: 4px;
 }
+
+/* Cluster E Phase 3 (A4): "(default fallback)" tag inline with the
+ * Workspace folder label. Lighter than the label so it reads as a
+ * qualifier; uses --fg-3 (existing token) to match the .hint family. */
+.settings-modal-fallback-tag {
+  font-weight: 400;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+}
 .modal footer {
   padding: 12px 18px;
   border-top: 1px solid var(--line-1);

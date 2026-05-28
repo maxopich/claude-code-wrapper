@@ -18,6 +18,17 @@ export const config = {
    * via the Settings modal, and the resolved value is overridable via the
    * WORKSPACE_ROOT env var. */
   workspaceRootDefault: resolvePath(process.env.WORKSPACE_ROOT ?? '~/agents'),
+  /**
+   * Cluster E Phase 3 (A4): provenance of `workspaceRootDefault`. Surfaced
+   * on the `settings` ServerMsg so the operator's SettingsModal can label
+   * the fallback path with its source — distinguishing "from your
+   * WORKSPACE_ROOT env" vs "Cebab's built-in ~/agents default" matters
+   * because the env path may have been set in a stray .zshrc the operator
+   * has forgotten about.
+   */
+  workspaceRootDefaultSource: (process.env.WORKSPACE_ROOT ? 'env' : 'builtin') as
+    | 'env'
+    | 'builtin',
   mock: process.env.MOCK === '1',
   dataDir: path.join(os.homedir(), '.cebab'),
   /** Hard cap on agent turns per user message. Prevents runaway loops. */

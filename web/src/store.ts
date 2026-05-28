@@ -615,6 +615,13 @@ export type SettingsView = {
   workspaceRoot: string | null;
   workspaceRootValid: boolean;
   defaultWorkspaceRoot: string;
+  /**
+   * Cluster E Phase 3 (A4): provenance of `defaultWorkspaceRoot`. `'env'`
+   * = the server resolved it from the `WORKSPACE_ROOT` env var; `'builtin'`
+   * = the server fell back to the hard-coded `~/agents`. Undefined for
+   * older server payloads (forward-compat).
+   */
+  defaultWorkspaceRootSource?: 'env' | 'builtin';
   /** Resolved default hop budget (DB > env > built-in). The Settings modal's
    *  input is seeded from this and shows the operator the current effective
    *  value regardless of which precedence step won. */
@@ -1475,6 +1482,13 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           workspaceRoot: msg.workspaceRoot,
           workspaceRootValid: msg.workspaceRootValid,
           defaultWorkspaceRoot: msg.defaultWorkspaceRoot,
+          // Cluster E Phase 3 (A4): forward provenance of the fallback
+          // path so the SettingsModal can label it. Optional on the wire
+          // — older servers omit, the modal degrades to a neutral
+          // "(default fallback)" label without the source attribution.
+          ...(msg.defaultWorkspaceRootSource !== undefined
+            ? { defaultWorkspaceRootSource: msg.defaultWorkspaceRootSource }
+            : {}),
           defaultHopBudget: msg.defaultHopBudget,
         },
       };
