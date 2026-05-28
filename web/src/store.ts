@@ -395,6 +395,39 @@ export type MultiAgentState = {
   draftHopBudget: number | null;
 };
 
+/**
+ * Cluster D Phase 6 (spec §6.4 / UI-D22): top-level slice tracking the
+ * "Claude subscription credentials look expired" condition. Populated
+ * from `wrapper_error { kind: 'auth_expired' }` arrivals; cleared when
+ * a subsequent `session_started` ServerMsg lands (the SDK only emits
+ * that after the OAuth handshake succeeds, so it's the cleanest
+ * positive-signal "credentials work again" marker).
+ *
+ * App-wide, not per-session. The subscription is process-level state —
+ * if it expires, every session is affected; if it renews (operator
+ * runs `claude login` in a terminal), every session is unblocked. The
+ * banner mounts in App.tsx outside any session container.
+ *
+ * `dismissed` is a soft hide: the operator may dismiss the banner to
+ * clear visual clutter while they go re-authenticate, but the next
+ * `auth_expired` observation re-shows it (the reducer flips it back
+ * to false on each populate). The slice itself is only cleared by the
+ * positive signal — dismissal is just a visibility toggle.
+ */
+export type AuthExpiredState = {
+  /** ms timestamp of the first auth_expired this process lifetime. */
+  firstSeenMs: number;
+  /** ms timestamp of the most recent observation. */
+  lastSeenMs: number;
+  /** How many times observed (each WS-arrived wrapper_error bumps it). */
+  count: number;
+  /** The wrapper's error message (already a human-readable string). */
+  lastMessage: string;
+  /** Operator clicked Dismiss on the banner. Reset to false on the
+   *  next populate so a fresh failure re-surfaces the banner. */
+  dismissed?: boolean;
+};
+
 export type AppState = {
   connected: boolean;
   projects: Project[];
@@ -429,6 +462,10 @@ export type AppState = {
   wrapperErrorSeq: number;
   // Multi-agent draft + view state.
   multiAgent: MultiAgentState;
+  /** Cluster D Phase 6: app-wide auth-expired slice. See AuthExpiredState
+   *  JSDoc for the lifecycle. Undefined when no auth lapse has been
+   *  observed this process lifetime. */
+  authExpired?: AuthExpiredState;
 };
 
 export type SettingsView = {
@@ -454,6 +491,9 @@ export const initialState: AppState = {
   permissionModeBySession: {},
   settings: null,
   wrapperErrorSeq: 0,
+  // Cluster D Phase 6: starts undefined; populated when wrapper_error
+  // with kind='auth_expired' lands. Cleared on next session_started.
+  authExpired: undefined,
   multiAgent: {
     view: 'chat',
     draftLifecycle: 'persistent',
@@ -554,7 +594,13 @@ export type Action =
   /** Optimistically mark retryInFlight=true on operator/auto click; the
    *  banner uses this to disable the retry button until the next
    *  session_running echo. */
-  | { type: 'rl_retry_sent'; sessionId: string };
+  | { type: 'rl_retry_sent'; sessionId: string }
+  /** Cluster D Phase 6: operator clicked Dismiss on the AuthExpiredBanner.
+   *  Sets `authExpired.dismissed = true` (the slice stays — count + first/
+   *  last timestamps remain useful for tooltips). The next `wrapper_error
+   *  { kind: 'auth_expired' }` observation flips dismissed back to false
+   *  so a fresh failure re-surfaces the banner. */
+  | { type: 'auth_expired_dismissed' };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -812,6 +858,19 @@ export function reduce(state: AppState, action: Action): AppState {
             mutationsAcknowledged: true,
           },
         },
+      };
+    }
+
+    case 'auth_expired_dismissed': {
+      // Cluster D Phase 6: soft hide. The slice persists (count + first/
+      // last timestamps remain useful for tooltips and accurate re-surface
+      // on re-fire); only `dismissed` flips. Identity preserved when
+      // nothing to dismiss (the banner gating already checks `!dismissed`,
+      // but bailing here keeps re-renders honest).
+      if (!state.authExpired || state.authExpired.dismissed) return state;
+      return {
+        ...state,
+        authExpired: { ...state.authExpired, dismissed: true },
       };
     }
 
@@ -1465,6 +1524,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         pendingByProject: pendingNext,
         sessionToProject: { ...state.sessionToProject, [msg.sessionId]: projectId },
         knownSessions: { ...state.knownSessions, [projectId]: knownNext },
+        // Cluster D Phase 6: positive auth signal. The SDK only emits
+        // `session_started` after the OAuth handshake succeeds (auth must
+        // be valid for the spawn to reach init), so any prior auth_expired
+        // slice is now stale — drop it. Identity-preserving when there's
+        // nothing to clear (undefined === undefined for shallow equality).
+        authExpired: undefined,
       };
     }
 
@@ -1841,6 +1906,26 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         runStartedAt: null,
         heldMessages: [],
       };
+      // Cluster D Phase 6: ALSO promote `auth_expired` into the top-level
+      // slice so the app-wide AuthExpiredBanner can mount. Per-session
+      // inline rendering (the chat message-list 'error' entry below) and
+      // the toast notification (already routed by the dispatcher) stay
+      // independent; this slice is the durable in-page signal.
+      const now = Date.now();
+      const nextAuthExpired =
+        msg.kind === 'auth_expired'
+          ? {
+              firstSeenMs: state.authExpired?.firstSeenMs ?? now,
+              lastSeenMs: now,
+              count: (state.authExpired?.count ?? 0) + 1,
+              lastMessage: msg.message,
+              // Re-surface the banner on every fresh observation — the
+              // operator may have dismissed it, then attempted another
+              // message, so the dismiss should not silence the second
+              // failure.
+              dismissed: false,
+            }
+          : state.authExpired;
       return {
         ...putSession(state, projectId, sessionId, {
           ...session,
@@ -1858,6 +1943,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           ],
         }),
         wrapperErrorSeq: state.wrapperErrorSeq + 1,
+        authExpired: nextAuthExpired,
       };
     }
   }
