@@ -19,6 +19,7 @@ import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
 import { ChatHeaderChip } from './components/ChatHeaderChip';
+import { ModelChip } from './components/ModelChip';
 import { SlashCommandButtons } from './components/SlashCommandButtons';
 import { SettingsModal } from './components/SettingsModal';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
@@ -1540,6 +1541,12 @@ function AppShell({
               <>
                 {session && !isSessionPending(session.id) && (
                   <div className="chat-header">
+                    {/* Cluster E Phase 2 (B4-1): ModelChip is the first
+                     *  chip in the header — operator can tell which
+                     *  model is producing the responses at a glance.
+                     *  Reads from `session.model` which the reducer
+                     *  captures on every `session_started`. */}
+                    <ModelChip model={session.model} />
                     {activeProject && (
                       <ChatHeaderChip
                         trusted={activeProject.trusted}

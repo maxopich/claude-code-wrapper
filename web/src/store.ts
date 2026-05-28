@@ -173,6 +173,15 @@ export type SessionView = {
    * (older payloads) — the palette degrades to Cebab-local only.
    */
   slashCommands?: readonly string[];
+  /**
+   * Cluster E Phase 2 (E2 / B4): the SDK-reported model identifier
+   * from the most recent `session_started` for this session. Surfaced
+   * by `ModelChip` in the chat header so the operator can tell which
+   * model produced a response (Opus vs Sonnet vs Haiku, version
+   * bumps). Undefined before the first init lands or when older
+   * payloads omit it; the chip renders "model: default" in that case.
+   */
+  model?: string;
 };
 
 /** Max number of messages the held-queue accepts before refusing new ones.
@@ -1646,6 +1655,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // session_started; old payloads (no Phase 2) ship undefined and
         // the palette degrades to Cebab-local only.
         ...(msg.slashCommands !== undefined ? { slashCommands: msg.slashCommands } : {}),
+        // Cluster E Phase 2 (B4): capture the SDK-reported model
+        // identifier for the ChatHeader's ModelChip. `msg.model` is
+        // required on the wire (`session_started.model: string`), so
+        // we always store it — undefined-checks guard against future
+        // protocol changes that make it optional.
+        ...(msg.model !== undefined ? { model: msg.model } : {}),
       };
       nextProjectMap[msg.sessionId] = session;
 

@@ -1532,6 +1532,51 @@ pre {
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: var(--warn-soft);
 }
+
+/* ---- Cluster E Phase 2 (B4): ModelChip ----------------------------
+ *
+ * Mirrors `.ma-hop-budget-chip` geometry verbatim per ui-agent §6 — same
+ * font, padding, border radius — but uses the neutral text color and a
+ * slightly distinct background tint so the chip reads as informational
+ * rather than budget-warning. The `is-warn` variant kicks in if the
+ * caller passes a `selectedModel` that differs from `model`.
+ *
+ * Reserved tokens: --fg-2 (label color), --bg-5 with --bg-3 fallback
+ * (background), --line-2 with --border fallback. No new tokens.
+ */
+.model-chip {
+  font-size: 10px;
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2, var(--border));
+  color: var(--fg-2);
+  background: var(--bg-5, var(--bg-3));
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.model-chip.is-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+  background: var(--warn-soft);
+}
+.model-chip-prefix {
+  color: var(--fg-3, var(--fg-2));
+  opacity: 0.7;
+}
+.model-chip-name {
+  color: inherit;
+}
+.model-chip-warn-icon {
+  font-size: 11px;
+  color: var(--warn);
+}
+
 /* Inline warn qualifier inside the Session-info "Hop budget" row. Sized to
  * sit next to the count without dominating it. */
 .settings-grid-warn {
