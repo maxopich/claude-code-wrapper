@@ -22,12 +22,19 @@ import type { RouterDropView } from '../../store';
 //                                 this agent; drop is intended, not a
 //                                 security violation, so it tints info
 //                                 not warn)
+//   - kicked_source       — info (Cluster C Phase 4d: drain-in-progress
+//                                 outbound from kicked agent's in-flight
+//                                 turn; operator-driven, not alarming)
+//   - kicked_destination  — info (Cluster C Phase 4d: stale routing
+//                                 attempt addressed at a kicked agent;
+//                                 operator-driven, not alarming)
 //
 // Forged-source is the only danger tier — it's a spoof attempt. F2 routing
-// violations tint warn. Operator-driven mute drops tint info because the
-// operator explicitly asked for them; they belong in the log as forensics
-// (so "what did the muted agent try to say?" is recoverable) but are
-// expected, not alarming.
+// violations tint warn. Operator-driven mute/kick drops tint info because
+// the operator explicitly asked for them; they belong in the log as
+// forensics (so "what did the muted agent try to say?" or "did the
+// orchestrator try to talk to the kicked worker after the kick?" is
+// recoverable) but are expected, not alarming.
 
 const REASON_TINT: Record<RouterDropView['reasonCode'], string> = {
   forged_source: 'router-drops-reason-danger',
@@ -35,6 +42,8 @@ const REASON_TINT: Record<RouterDropView['reasonCode'], string> = {
   worker_to_worker: 'router-drops-reason-warn',
   unknown_source: 'router-drops-reason-warn',
   muted_source: 'router-drops-reason-info',
+  kicked_source: 'router-drops-reason-info',
+  kicked_destination: 'router-drops-reason-info',
 };
 
 const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
@@ -43,6 +52,8 @@ const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
   worker_to_worker: 'worker → worker (F2)',
   unknown_source: 'unknown source (F2)',
   muted_source: 'muted source',
+  kicked_source: 'kicked source (drain)',
+  kicked_destination: 'kicked destination',
 };
 
 function formatTime(ts: number): string {

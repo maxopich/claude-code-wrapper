@@ -287,6 +287,35 @@ export type OrchestratorSessionHandle = {
   pauseAgent: (agentName: string) => boolean;
   resumeAgent: (agentName: string) => boolean;
   getPendingDeliveries: (agentName: string) => number;
+  /**
+   * Cluster C Phase 4d: flip the orchestrator router's in-memory kicked set.
+   * Returns true iff the set changed (re-kick returns false — handler
+   * surfaces as `participant_already_kicked`).
+   *
+   * Kick is BIDIRECTIONAL: the router drops events where the kicked agent
+   * is `ev.source` (drain in progress; bus_send calls from the in-flight
+   * turn) AND where it's `ev.destination` (stale routing attempts at the
+   * kicked agent). Mute is one-way (source only); kick removes the
+   * participant from active routing entirely.
+   *
+   * Drain semantics (drain mode, the only v1-supported mode):
+   *   - In-flight turn at kick time keeps running — `AgentRunner` is NOT
+   *     told to abort. The router-side drops are the only enforcement.
+   *   - bus_send calls the draining turn issues return their "delivered to
+   *     <recipient>" white lie (same oracle-suppression pattern as mute,
+   *     by-construction in `bus/runner.ts:handleBusSend`).
+   *   - No new turns ever start for the kicked agent because the router
+   *     drops every event addressed to it before the `deliver?.()` call.
+   *
+   * The WS handler calls this AFTER persisting the DB flip
+   * (per_agent_control.setParticipantKicked) so the durable source-of-
+   * truth is in place before the in-memory hot-path mirror flips.
+   *
+   * Hard-mode kick (per-agent AbortController) is out of v1 — handler
+   * returns `hard_kill_unsupported_v1` for `mode='hard'`.
+   */
+  kickAgent: (agentName: string) => boolean;
+  isKicked: (agentName: string) => boolean;
 };
 
 type OrchestratorRouter = {
@@ -320,6 +349,20 @@ type OrchestratorRouter = {
   /** Snapshot of currently muted agent slugs. Used by tests + the
    *  forensic-bundle multi-agent path (a future C4f slice). */
   isMuted: (agentName: string) => boolean;
+  /**
+   * Cluster C Phase 4d: flip the in-memory kicked set. Returns true iff
+   * the set changed; the WS handler treats false as a no-op idempotent
+   * acknowledgment of a re-kick (the DB column is already kicked).
+   *
+   * Caller MUST have already flipped `multi_agent_participants.kicked_at`
+   * (the source of truth) before invoking this — the in-memory set is a
+   * hot-path mirror. R-A/R-B reconstruct passes the seed via the
+   * factory's `initialKickedAgents` param instead of calling kickAgent
+   * per agent (matches mute's reseed pattern).
+   */
+  kickAgent: (agentName: string) => boolean;
+  /** Probe for tests + multi-agent forensic bundle (C4f follow-up). */
+  isKicked: (agentName: string) => boolean;
 };
 
 /**
@@ -373,6 +416,20 @@ export function createOrchestratorRouter(params: {
    * via `setMute()`; this param is the one-shot reseed.
    */
   initialMutedAgents?: readonly string[];
+  /**
+   * Cluster C Phase 4d: seed the in-memory `kickedSet` from durable state.
+   * Parallel to `initialMutedAgents` — R-A (browser reattach) + R-B
+   * (server restart) read every participant's
+   * `multi_agent_participants.kicked_at IS NOT NULL` rows and pass the
+   * agent slugs here so kicked workers stay kicked across resumption.
+   * The WS handler keeps the column + this set in sync via `kickAgent`;
+   * this param is the one-shot reseed.
+   *
+   * v1 wireOrchestratorSession callers don't read this yet (matches the
+   * mute reseed pattern from C4b — both reseed paths land together in
+   * a future R-A/R-B-control-state slice).
+   */
+  initialKickedAgents?: readonly string[];
 }): OrchestratorRouter {
   const {
     sessionId,
@@ -401,6 +458,24 @@ export function createOrchestratorRouter(params: {
    * intent.
    */
   const mutedSet: Set<string> = new Set(params.initialMutedAgents ?? []);
+  /**
+   * Cluster C Phase 4d (spec §3 invariant 1 + §5.1 kick semantics): set of
+   * agent slugs the operator has kicked. Unlike `mutedSet` (one-way: drop
+   * when `ev.source` matches), the router consults this set for BOTH
+   * directions — drop where `ev.source` is a kicked agent (drain-in-
+   * progress outbound) AND where `ev.destination` is a kicked agent
+   * (stale routing attempts that would re-engage the participant).
+   *
+   * Source of truth: `multi_agent_participants.kicked_at IS NOT NULL`
+   * column. This in-memory set is the hot-path mirror so the router
+   * doesn't hit SQLite per event. The WS handler flips the column FIRST
+   * (irreversibly — no `unkick`), then calls `kickAgent` to update
+   * this set. A server restart + R-B reconstruction reseeds via the
+   * factory's `initialKickedAgents` param (matches the mute reseed
+   * pattern; the read path lands in a future R-A/R-B-control-state
+   * slice).
+   */
+  const kickedSet: Set<string> = new Set(params.initialKickedAgents ?? []);
 
   let sink: BusSink = {
     onEvent: params.onEvent,
@@ -632,6 +707,54 @@ export function createOrchestratorRouter(params: {
       });
       return;
     }
+    // Cluster C Phase 4d (spec §5.1 kick semantics): kick drop. Runs
+    // BEFORE the mute drop so a participant that is both muted AND
+    // kicked surfaces the more-severe kick reason code in the
+    // router_drop forensics. The order doesn't change the routing
+    // outcome — both checks return — but it keeps the operator's view
+    // accurate ("this drop is because the participant was kicked, not
+    // because it was earlier muted").
+    //
+    // Bidirectional: drop where `ev.source` is kicked (drain-in-
+    // progress outbound from the dying in-flight turn) OR where
+    // `ev.destination` is kicked (stale routing attempt that would
+    // re-engage the participant). Source check runs first so the
+    // drop-row carries the cleaner reason — "this is the kicked
+    // agent talking" vs "someone tried to talk to the kicked agent."
+    //
+    // Same oracle-suppression invariant as mute: the kicked agent's
+    // `bus_send` returns the white-lie "delivered to <recipient>"
+    // by-construction at `bus/runner.ts:handleBusSend`, so the
+    // draining turn has no visible signal that its outbound was
+    // dropped. AE-3 [security] still holds.
+    if (kickedSet.has(ev.source)) {
+      console.warn(
+        `[orchestrator] drop kicked source=${ev.source} dest=${ev.destination} kind=${ev.kind}`,
+      );
+      dispatchRouterDrop({
+        reasonCode: 'kicked_source',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: `Kicked ${ev.source} tried to emit ${ev.kind}`,
+        message: `${ev.source} → ${ev.destination}: ${ev.text.slice(0, 80)}`,
+      });
+      return;
+    }
+    if (kickedSet.has(ev.destination)) {
+      console.warn(
+        `[orchestrator] drop event to kicked dest=${ev.destination} source=${ev.source} kind=${ev.kind}`,
+      );
+      dispatchRouterDrop({
+        reasonCode: 'kicked_destination',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: `Stale routing to kicked ${ev.destination}`,
+        message: `${ev.source} → ${ev.destination}: ${ev.text.slice(0, 80)}`,
+      });
+      return;
+    }
     // Cluster C Phase 4b (spec §3 invariant 1 + AE-1): mute drop. Runs
     // AFTER the F2/F3 forgery + topology checks (those are defense-in-
     // depth that should fire on any pathological event regardless of
@@ -860,6 +983,25 @@ export function createOrchestratorRouter(params: {
   };
   const isMuted = (agentName: string): boolean => mutedSet.has(agentName);
 
+  // Cluster C Phase 4d: kick is irreversible (no `unkick`), so this is
+  // an add-only operation. Returns false on re-kick so the WS handler
+  // can surface the `participant_already_kicked` idempotent ack. We
+  // accept a boolean for symmetry with `setMute` so a future
+  // forensics-replay path that wants to "unkick" the in-memory mirror
+  // (for an audit-log scrubbing tool, say) has a place to plug in —
+  // production paths only ever pass `true`.
+  const setKick = (agentName: string, kicked: boolean): boolean => {
+    const was = kickedSet.has(agentName);
+    if (kicked === was) return false;
+    if (kicked) {
+      kickedSet.add(agentName);
+    } else {
+      kickedSet.delete(agentName);
+    }
+    return true;
+  };
+  const isKicked = (agentName: string): boolean => kickedSet.has(agentName);
+
   return {
     teardown,
     handleEvent,
@@ -874,6 +1016,8 @@ export function createOrchestratorRouter(params: {
     onWorkerFailed,
     setMute,
     isMuted,
+    kickAgent: (agentName) => setKick(agentName, true),
+    isKicked,
   };
 }
 
@@ -1391,6 +1535,8 @@ export function wireOrchestratorSession(p: {
     pauseAgent: (agentName) => runner.pause(agentName),
     resumeAgent: (agentName) => runner.resume(agentName),
     getPendingDeliveries: (agentName) => runner.getPendingDeliveries(agentName),
+    kickAgent: (agentName) => router.kickAgent(agentName),
+    isKicked: (agentName) => router.isKicked(agentName),
   };
 
   registerLiveSession({

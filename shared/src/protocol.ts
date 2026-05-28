@@ -112,7 +112,28 @@ export type RouterDropReasonCode =
    * handler time; the per-event router_drop addendum keeps the operator's
    * "what did the muted agent try to say?" forensics view populated.
    */
-  | 'muted_source';
+  | 'muted_source'
+  /**
+   * Cluster C Phase 4d: operator kicked this participant (drain mode). Router
+   * drops every BusEvent where `ev.source === <agent>` — kicked agents are
+   * removed from active routing, but the in-flight turn keeps running so
+   * `bus_send` calls it issues while draining land here as forensic
+   * drop-rows. Distinct from `muted_source` so the operator can tell apart
+   * "operator silenced this worker, but it's still doing valid work" from
+   * "this worker was kicked and the in-flight turn is draining out."
+   */
+  | 'kicked_source'
+  /**
+   * Cluster C Phase 4d: complement of `kicked_source` — router drops every
+   * BusEvent where `ev.destination === <kicked agent>`. Unlike mute (which
+   * is one-way and lets the muted agent keep receiving), kick is
+   * bidirectional: a kicked worker is removed from routing in both
+   * directions, so a stale orchestrator reply addressed at a kicked worker
+   * never wakes a fresh turn. The drop-row is forensically useful (it
+   * answers "did the orchestrator try to talk to the kicked worker after
+   * the kick?") without re-engaging the participant.
+   */
+  | 'kicked_destination';
 
 /**
  * Cluster A Phase 6 — extended §7 vocabulary (subset that has source sites
@@ -325,7 +346,9 @@ export const CONTROLLABILITY_FAILURE_CODES: ReadonlySet<ControllabilityFailureCo
 ]);
 
 export function isControllabilityFailureCode(v: unknown): v is ControllabilityFailureCode {
-  return typeof v === 'string' && CONTROLLABILITY_FAILURE_CODES.has(v as ControllabilityFailureCode);
+  return (
+    typeof v === 'string' && CONTROLLABILITY_FAILURE_CODES.has(v as ControllabilityFailureCode)
+  );
 }
 
 /** Per-session permission mode the wrapper exposes to the UI. */
@@ -2160,7 +2183,11 @@ export type ServerMsg =
       type: 'recovery_log_snapshot';
       aggregates: RecoveryClassAggregate[];
       sweepReopenRate: { rate: number; sweeps: number } | null;
-      authResumeChoiceRatio: { inSessionRate: number; inSession: number; newSession: number } | null;
+      authResumeChoiceRatio: {
+        inSessionRate: number;
+        inSession: number;
+        newSession: number;
+      } | null;
       recent: RecoveryLogEntry[];
     }
   | {
