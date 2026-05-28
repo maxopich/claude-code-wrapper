@@ -165,6 +165,14 @@ export type SessionView = {
     ts: number;
     reasonSubmitted: boolean;
   };
+  /**
+   * Cluster E Phase 1 (E1): SDK-discovered slash commands forwarded on
+   * `session_started.slashCommands[]` (Cluster B Phase 2 widened the
+   * envelope). Surfaced by `SlashCommandPalette` as the "Discovered
+   * from session" group. Undefined means the SDK didn't ship the field
+   * (older payloads) — the palette degrades to Cebab-local only.
+   */
+  slashCommands?: readonly string[];
 };
 
 /** Max number of messages the held-queue accepts before refusing new ones.
@@ -1633,6 +1641,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             text: `session ${msg.sessionId.slice(0, 8)} • model ${msg.model} • ${msg.tools.length} tools`,
           },
         ],
+        // Cluster E Phase 1: capture SDK-discovered slash commands for
+        // the palette. Cluster B Phase 2 forwards this field on every
+        // session_started; old payloads (no Phase 2) ship undefined and
+        // the palette degrades to Cebab-local only.
+        ...(msg.slashCommands !== undefined ? { slashCommands: msg.slashCommands } : {}),
       };
       nextProjectMap[msg.sessionId] = session;
 

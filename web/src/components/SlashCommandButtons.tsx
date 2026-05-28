@@ -1,3 +1,5 @@
+import { SLASH_COMMANDS } from '../slashCommands';
+
 /**
  * Quick-access buttons for the Claude Code slash commands the operator
  * uses most while managing a session. Each button dispatches the same
@@ -5,31 +7,24 @@
  * CLI parses the slash and returns a synthetic `assistant` message which
  * the server translates into a `command_output` ServerMsg.
  *
- * The intent is convenience; everything is also typeable. We pick the
- * commands the operator can't do from elsewhere in the Cebab UI:
- *   /context — context-window usage card
- *   /compact — compact conversation (emits a `compact_boundary`)
- *   /skills  — list available skills with token costs
- *   /mcp     — MCP server connect status
- *   /cost    — running session cost + usage breakdown
+ * The intent is convenience; everything is also typeable (and as of
+ * Cluster E Phase 1, every Cebab-local command + every SDK-discovered
+ * command is also reachable via the `/`-triggered `SlashCommandPalette`).
+ *
+ * The vocabulary is the `'cebab'`-sourced entries of `SLASH_COMMANDS` in
+ * `web/src/slashCommands.ts`. Adding a Cebab-local command there auto-
+ * adds a button here without further edits.
  */
-const COMMANDS: { label: string; command: string; title: string }[] = [
-  { label: '/context', command: '/context', title: 'Show context-window usage breakdown' },
-  { label: '/compact', command: '/compact', title: 'Compact the conversation to free context' },
-  { label: '/skills', command: '/skills', title: 'List available skills' },
-  { label: '/mcp', command: '/mcp', title: 'MCP server connection status' },
-  { label: '/cost', command: '/cost', title: 'Show session cost and usage' },
-];
-
 export function SlashCommandButtons(props: { disabled?: boolean; onSend: (text: string) => void }) {
+  const buttonCommands = SLASH_COMMANDS.filter((c) => c.source === 'cebab');
   return (
     <div className="slash-commands" role="group" aria-label="Session commands">
-      {COMMANDS.map((c) => (
+      {buttonCommands.map((c) => (
         <button
           key={c.command}
           className="slash-command-btn"
           disabled={props.disabled}
-          title={c.title}
+          title={c.description}
           onClick={() => props.onSend(c.command)}
         >
           {c.label}

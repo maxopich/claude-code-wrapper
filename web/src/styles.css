@@ -1119,6 +1119,118 @@ pre {
   }
 }
 
+/* ---- Cluster E Phase 1: SlashCommandPalette popover -------------------
+ *
+ * The palette sits above the composer textarea. .input-box is the
+ * composer wrap (CSS grid with the textarea + send/stop button); we
+ * make it `position: relative` so the palette's absolute positioning
+ * anchors to the wrap and the popover floats above the textarea.
+ *
+ * Surface vocabulary mirrors other ephemeral popovers (RecoveryLog
+ * inspector, KickForensics modal): --bg-4 surface, --line-3 border,
+ * --shadow-md drop, --r-md radius. No new tokens.
+ *
+ * Reduced motion: no entrance fade. Hover/active is the only motion
+ * left (highlight bg swap), which is instantaneous regardless.
+ */
+.input-box {
+  position: relative;
+}
+.slash-palette {
+  position: absolute;
+  /* Anchor above the textarea, leaving a small gap. Padding accounts
+   * for .input-box's --s-3 top + the textarea's own border. */
+  left: var(--s-6);
+  right: var(--s-6);
+  bottom: calc(100% - var(--s-3));
+  max-width: 520px;
+  background: var(--bg-4, var(--bg-3));
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-md, 8px);
+  box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.2));
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.slash-palette-input {
+  flex: 0 0 auto;
+  border: none;
+  border-bottom: 1px solid var(--line-2, var(--border));
+  background: transparent;
+  color: var(--ink, inherit);
+  font: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-2) var(--s-3);
+  outline: none;
+}
+.slash-palette-input:focus {
+  background: var(--bg-3, var(--bg));
+}
+.slash-palette-listbox {
+  flex: 1 1 auto;
+  max-height: 280px;
+  overflow-y: auto;
+}
+.slash-palette-empty {
+  margin: 0;
+  padding: var(--s-3);
+  font-size: var(--t-sm);
+  color: var(--fg-2, var(--fg));
+  text-align: center;
+}
+.slash-palette-empty code {
+  background: var(--bg-3, var(--bg));
+  padding: 1px 6px;
+  border-radius: var(--r-sm, 4px);
+  font-size: var(--t-xs, 11px);
+}
+.slash-palette-section {
+  padding: var(--s-1) 0;
+}
+.slash-palette-section + .slash-palette-section {
+  border-top: 1px solid var(--line-2, var(--border));
+}
+.slash-palette-section-title {
+  margin: 0;
+  padding: var(--s-1) var(--s-3) 2px;
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.slash-palette-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.slash-palette-row {
+  display: grid;
+  grid-template-columns: minmax(8ch, max-content) 1fr;
+  gap: var(--s-2);
+  align-items: baseline;
+  padding: var(--s-1) var(--s-3);
+  cursor: pointer;
+}
+.slash-palette-row.is-active {
+  background: var(--accent-glow, var(--bg-3));
+}
+.slash-palette-row-command {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+  font-weight: 500;
+  background: transparent;
+}
+.slash-palette-row-description {
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+}
+.slash-palette-row-description-empty {
+  font-style: italic;
+}
+
 /* ---- Mode toggle ---- */
 .mode-toggle {
   display: flex;

@@ -1613,6 +1613,11 @@ function AppShell({
                   isRunning={running}
                   onSend={sendMessage}
                   onStop={interruptSession}
+                  /* Cluster E Phase 1: SDK-discovered slash commands for
+                   * the palette's "Discovered from session" group. The
+                   * reducer captures this from session_started; undefined
+                   * before the first init lands or for older payloads. */
+                  sdkSlashCommands={session?.slashCommands}
                 />
               </>
             ) : (
