@@ -11,7 +11,10 @@ import {
   getControlState,
   isKickMode,
   isPauseExpiryAction,
+  listActivePauseEntries,
   listControlStates,
+  listKickedAgentNames,
+  listMutedAgentNames,
   setParticipantKicked,
   setParticipantMuted,
   setParticipantPause,
@@ -81,9 +84,10 @@ describe('migration 020 + repo defaults', () => {
 
   test('control-state index exists', () => {
     const idxs = getDb()
-      .prepare<[], { name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multi_agent_participants'",
-      )
+      .prepare<
+        [],
+        { name: string }
+      >("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multi_agent_participants'")
       .all();
     expect(idxs.some((r) => r.name === 'multi_agent_participants_control_state')).toBe(true);
   });
@@ -202,5 +206,147 @@ describe('type guards', () => {
     expect(isKickMode('hard')).toBe(true);
     expect(isKickMode('soft')).toBe(false);
     expect(isKickMode(undefined)).toBe(false);
+  });
+});
+
+// ===== Cluster C Phase 4e: reseed read helpers =====
+//
+// These helpers feed the R-B reconstruct path's seed arrays for the
+// rebuilt router's mute/kick sets + the pause-expiry registry's timer
+// rehydration. Each helper JOINs `multi_agent_participants` with
+// `projects` to get the bus_agent_name (the router's key), so a
+// participant whose project lacks a bus slug is filtered out — the
+// router wouldn't be able to address it anyway.
+
+function seedWithSlugs(sessionId = 'sess-1'): {
+  orchestratorId: number;
+  workerAId: number;
+  workerBId: number;
+} {
+  const orch = upsertProject('orch', '/tmp/orch');
+  const wa = upsertProject('worker-a', '/tmp/wa');
+  const wb = upsertProject('worker-b', '/tmp/wb');
+  // Slugs required for the JOIN-based helpers to return the participant.
+  getDb()
+    .prepare('UPDATE projects SET bus_agent_name = ?, bus_installed = 1 WHERE id = ?')
+    .run('alpha', wa.id);
+  getDb()
+    .prepare('UPDATE projects SET bus_agent_name = ?, bus_installed = 1 WHERE id = ?')
+    .run('beta', wb.id);
+  createMultiAgentSession(sessionId, 'orchestrator');
+  addParticipant(sessionId, orch.id, 'orchestrator');
+  addParticipant(sessionId, wa.id, 'worker');
+  addParticipant(sessionId, wb.id, 'worker');
+  return { orchestratorId: orch.id, workerAId: wa.id, workerBId: wb.id };
+}
+
+describe('listMutedAgentNames', () => {
+  test('returns slugs of every muted participant for the session', () => {
+    const { workerAId, workerBId } = seedWithSlugs();
+    setParticipantMuted('sess-1', workerAId, true);
+    setParticipantMuted('sess-1', workerBId, true);
+    expect(listMutedAgentNames('sess-1').sort()).toEqual(['alpha', 'beta']);
+  });
+
+  test('excludes unmuted participants', () => {
+    const { workerAId } = seedWithSlugs();
+    setParticipantMuted('sess-1', workerAId, true);
+    expect(listMutedAgentNames('sess-1')).toEqual(['alpha']);
+  });
+
+  test('skips participants whose bus_agent_name is NULL (unhealthy row)', () => {
+    const { workerAId, workerBId } = seedWithSlugs();
+    setParticipantMuted('sess-1', workerAId, true);
+    setParticipantMuted('sess-1', workerBId, true);
+    // Strip the slug from worker A — JOIN filters them out.
+    getDb().prepare('UPDATE projects SET bus_agent_name = NULL WHERE id = ?').run(workerAId);
+    expect(listMutedAgentNames('sess-1')).toEqual(['beta']);
+  });
+
+  test('returns empty for unknown session', () => {
+    expect(listMutedAgentNames('sess-unknown')).toEqual([]);
+  });
+
+  test('scope is per session (other sessions do not bleed in)', () => {
+    const { workerAId: a1 } = seedWithSlugs('sess-1');
+    // Create a second session whose worker uses a different slug.
+    const otherWorker = upsertProject('other-worker', '/tmp/ow');
+    getDb()
+      .prepare('UPDATE projects SET bus_agent_name = ?, bus_installed = 1 WHERE id = ?')
+      .run('gamma', otherWorker.id);
+    createMultiAgentSession('sess-2', 'orchestrator');
+    addParticipant('sess-2', otherWorker.id, 'worker');
+    setParticipantMuted('sess-1', a1, true);
+    setParticipantMuted('sess-2', otherWorker.id, true);
+    expect(listMutedAgentNames('sess-1')).toEqual(['alpha']);
+    expect(listMutedAgentNames('sess-2')).toEqual(['gamma']);
+  });
+});
+
+describe('listKickedAgentNames', () => {
+  test('returns slugs of every kicked participant', () => {
+    const { workerAId } = seedWithSlugs();
+    setParticipantKicked('sess-1', workerAId, 1_700_000_000_000, 'drain');
+    expect(listKickedAgentNames('sess-1')).toEqual(['alpha']);
+  });
+
+  test('excludes non-kicked participants', () => {
+    seedWithSlugs();
+    expect(listKickedAgentNames('sess-1')).toEqual([]);
+  });
+
+  test('kick is irreversible — DB row stays in the list after any subsequent action', () => {
+    const { workerAId } = seedWithSlugs();
+    setParticipantKicked('sess-1', workerAId, 1_700_000_000_000, 'drain');
+    setParticipantMuted('sess-1', workerAId, true); // muting AFTER kick doesn't remove from kicked list
+    expect(listKickedAgentNames('sess-1')).toEqual(['alpha']);
+  });
+});
+
+describe('listActivePauseEntries', () => {
+  test('returns full pause snapshot for every actively-paused participant', () => {
+    const { workerAId, workerBId } = seedWithSlugs();
+    setParticipantPause('sess-1', workerAId, 1_700_000_010_000, 'auto_resume');
+    setParticipantPause('sess-1', workerBId, 1_700_000_020_000, 'auto_kick');
+    const entries = listActivePauseEntries('sess-1');
+    expect(entries).toHaveLength(2);
+    const byAgent = new Map(entries.map((e) => [e.agentName, e]));
+    expect(byAgent.get('alpha')).toEqual({
+      projectId: workerAId,
+      agentName: 'alpha',
+      pausedUntil: 1_700_000_010_000,
+      pauseExpiryAction: 'auto_resume',
+    });
+    expect(byAgent.get('beta')).toEqual({
+      projectId: workerBId,
+      agentName: 'beta',
+      pausedUntil: 1_700_000_020_000,
+      pauseExpiryAction: 'auto_kick',
+    });
+  });
+
+  test('excludes participants whose pause was cleared', () => {
+    const { workerAId, workerBId } = seedWithSlugs();
+    setParticipantPause('sess-1', workerAId, 1_700_000_010_000, 'auto_resume');
+    setParticipantPause('sess-1', workerBId, 1_700_000_010_000, 'auto_resume');
+    clearParticipantPause('sess-1', workerAId);
+    expect(listActivePauseEntries('sess-1').map((e) => e.agentName)).toEqual(['beta']);
+  });
+
+  test('filters rows with corrupted pause_expiry_action via the type guard', () => {
+    const { workerAId } = seedWithSlugs();
+    setParticipantPause('sess-1', workerAId, 1_700_000_010_000, 'auto_resume');
+    // Simulate corruption (would never happen via the typed repo writes).
+    getDb()
+      .prepare('UPDATE multi_agent_participants SET pause_expiry_action = ? WHERE project_id = ?')
+      .run('escalate', workerAId);
+    expect(listActivePauseEntries('sess-1')).toEqual([]);
+  });
+
+  test('skips participants without bus_agent_name', () => {
+    const { workerAId } = seedWithSlugs();
+    setParticipantPause('sess-1', workerAId, 1_700_000_010_000, 'auto_resume');
+    getDb().prepare('UPDATE projects SET bus_agent_name = NULL WHERE id = ?').run(workerAId);
+    expect(listActivePauseEntries('sess-1')).toEqual([]);
   });
 });

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
-import { findStoppedAuditIdForAckId } from './safety_audit_lookup.js';
+import { findLatestControlReason, findStoppedAuditIdForAckId } from './safety_audit_lookup.js';
 
 // Cluster C Phase 3: lookup-by-interruptAckId. Tests run against real SQLite
 // so the json_extract path is exercised end-to-end.
@@ -107,5 +107,109 @@ describe('findStoppedAuditIdForAckId', () => {
       payload: { interruptAckId: 'ack-dup' },
     });
     expect(findStoppedAuditIdForAckId('sess-1', 'ack-dup')).toBe(second.id);
+  });
+});
+
+// Cluster C Phase 4e: control-verb reason recovery — R-B reconstruct
+// uses this to rehydrate the pause-expiry timer's reasonCode + reasonText
+// that weren't persisted on the participant row.
+
+describe('findLatestControlReason', () => {
+  test('returns most recent agent_control.paused row for (sessionId, projectId)', () => {
+    appendSafetyAudit({
+      ts: 1_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.paused',
+      reasonCode: 'off_task',
+      payload: { projectId: 42, agentSlug: 'alpha', reasonText: 'first pause' },
+    });
+    appendSafetyAudit({
+      ts: 2_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.paused',
+      reasonCode: 'cost_ceiling',
+      payload: { projectId: 42, agentSlug: 'alpha', reasonText: 'second pause' },
+    });
+    const result = findLatestControlReason('sess-1', 42, 'agent_control.paused');
+    expect(result).toEqual({ reasonCode: 'cost_ceiling', reasonText: 'second pause' });
+  });
+
+  test('returns undefined when no matching row exists', () => {
+    expect(findLatestControlReason('sess-x', 99, 'agent_control.paused')).toBeUndefined();
+  });
+
+  test('reasonText is undefined when payload field is null', () => {
+    appendSafetyAudit({
+      ts: 1_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.paused',
+      reasonCode: 'off_task',
+      payload: { projectId: 42, agentSlug: 'alpha', reasonText: null },
+    });
+    const result = findLatestControlReason('sess-1', 42, 'agent_control.paused');
+    expect(result).toEqual({ reasonCode: 'off_task', reasonText: undefined });
+  });
+
+  test('scoped by projectId: another participant in the same session does not match', () => {
+    appendSafetyAudit({
+      ts: 1_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.paused',
+      reasonCode: 'off_task',
+      payload: { projectId: 42, agentSlug: 'alpha' },
+    });
+    appendSafetyAudit({
+      ts: 2_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.paused',
+      reasonCode: 'runaway_loop',
+      payload: { projectId: 99, agentSlug: 'beta' },
+    });
+    expect(findLatestControlReason('sess-1', 42, 'agent_control.paused')?.reasonCode).toBe(
+      'off_task',
+    );
+    expect(findLatestControlReason('sess-1', 99, 'agent_control.paused')?.reasonCode).toBe(
+      'runaway_loop',
+    );
+  });
+
+  test('kind filter: other kinds in same session do not match', () => {
+    appendSafetyAudit({
+      ts: 1_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.muted',
+      reasonCode: 'runaway_loop',
+      payload: { projectId: 42, agentSlug: 'alpha' },
+    });
+    // No paused row — should return undefined despite a muted row existing.
+    expect(findLatestControlReason('sess-1', 42, 'agent_control.paused')).toBeUndefined();
+    // Muted lookup finds the row.
+    expect(findLatestControlReason('sess-1', 42, 'agent_control.muted')?.reasonCode).toBe(
+      'runaway_loop',
+    );
+  });
+
+  test('returns undefined when reason_code is corrupted to a non-enum value', () => {
+    appendSafetyAudit({
+      ts: 1_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.paused',
+      // Cast through unknown to allow the corrupted value at the test layer.
+      reasonCode: 'nope-not-an-enum-value' as unknown as 'off_task',
+      payload: { projectId: 42, agentSlug: 'alpha' },
+    });
+    expect(findLatestControlReason('sess-1', 42, 'agent_control.paused')).toBeUndefined();
+  });
+
+  test('also works for agent_control.kicked rows', () => {
+    appendSafetyAudit({
+      ts: 1_000,
+      sessionId: 'sess-1',
+      kind: 'agent_control.kicked',
+      reasonCode: 'topology_repair',
+      payload: { projectId: 42, agentSlug: 'alpha' },
+    });
+    const result = findLatestControlReason('sess-1', 42, 'agent_control.kicked');
+    expect(result?.reasonCode).toBe('topology_repair');
   });
 });

@@ -35,6 +35,12 @@ import {
   type MultiAgentLifecycle,
   type MultiAgentSessionRow,
 } from '../repo/multi_agent.js';
+import {
+  listActivePauseEntries,
+  listKickedAgentNames,
+  listMutedAgentNames,
+} from '../repo/per_agent_control.js';
+import { findLatestControlReason } from '../repo/safety_audit_lookup.js';
 import { sessionPathsFromFolder } from './paths.js';
 import {
   ensureOrchestratorWorkspace,
@@ -47,8 +53,10 @@ import {
   USER_RECIPIENT,
   type ResolvedAgent,
 } from './runtime.js';
-import { hasLiveSession, type BusSink } from './session_registry.js';
+import { getLiveSession, hasLiveSession, type BusSink } from './session_registry.js';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
+import { executeExpireParticipant } from '../ws/control_verbs.js';
+import { getPauseExpiryRegistry } from '../ws/pause_expiry.js';
 
 /**
  * Persisted, operator-facing notice prepended to the replayed scrollback
@@ -203,6 +211,21 @@ export function reconstructOrchestratorSession(
     console.warn(`[reconstruct] prepareIterationDir failed for ${row.id}`, err);
   }
 
+  // Cluster C Phase 4e: R-B reseed of per-agent control state. Mute +
+  // kick are pure router-set membership — read durable rows and seed
+  // the rebuilt router so the very first event after restart respects
+  // the operator's standing mutes/kicks. Without this, a muted worker
+  // could emit one event through the rebuilt router before the
+  // operator's next interaction re-applied the mute.
+  //
+  // Defensive: a missing bus_agent_name for a participant is filtered
+  // out at the repo layer (the slugs are the router's keys; a NULL
+  // slug means the project's bus install was missing). Such
+  // participants stay un-seeded; the operator's next action surfaces
+  // the divergence.
+  const initialMutedAgents = listMutedAgentNames(row.id);
+  const initialKickedAgents = listKickedAgentNames(row.id);
+
   try {
     wireOrchestratorSession({
       sessionId: row.id,
@@ -227,10 +250,88 @@ export function reconstructOrchestratorSession(
       // always DB-fresh inside `onMutationHook`; this is purely the handle's
       // self-report.
       pauseOnMutation: row.pause_on_mutation === 1,
+      // Phase 4e: forward mute + kick seeds into the rebuilt router.
+      initialMutedAgents,
+      initialKickedAgents,
     });
   } catch (err) {
     console.error(`[reconstruct] wireOrchestratorSession failed for ${row.id}`, err);
     return false;
+  }
+
+  // Cluster C Phase 4e: reschedule pause expiry timers for every
+  // currently-paused participant. Reseed after the session is wired so
+  // the timer's fire callback has a live handle to consult via
+  // `getLiveSession` at fire time (the handle wasn't in the registry
+  // yet at the start of this function).
+  //
+  // The original pause's `reasonCode` + `reasonText` weren't persisted
+  // on the participant row — they live in safety_audit. Query
+  // `findLatestControlReason` to recover them; if the audit row is
+  // missing (corrupted DB or a participant that was paused via a
+  // raw-SQL backdoor that skipped the audit dual-write), fall back to
+  // `topology_repair` so the timer still fires + write a warn log so
+  // the divergence is auditable.
+  //
+  // A non-positive remaining delay (the deadline already elapsed
+  // during downtime) fires the timer synchronously on the next tick —
+  // the executor's defensive re-check catches diverged states and
+  // no-ops cleanly.
+  const activePauses = listActivePauseEntries(row.id);
+  for (const pauseEntry of activePauses) {
+    const recovered = findLatestControlReason(row.id, pauseEntry.projectId, 'agent_control.paused');
+    if (!recovered) {
+      console.warn(
+        `[reconstruct] no audit row found for paused participant ${row.id}/${pauseEntry.projectId} (${pauseEntry.agentName}); using fallback reasonCode='topology_repair'`,
+      );
+    }
+    const reasonCode = recovered?.reasonCode ?? 'topology_repair';
+    const reasonText = recovered?.reasonText ?? null;
+    const sessionIdAtSchedule = row.id;
+    getPauseExpiryRegistry().schedule(
+      {
+        sessionId: sessionIdAtSchedule,
+        projectId: pauseEntry.projectId,
+        agentName: pauseEntry.agentName,
+        pausedUntil: pauseEntry.pausedUntil,
+        expiryAction: pauseEntry.pauseExpiryAction,
+        reasonCode,
+        reasonText,
+      },
+      (entry) => {
+        // Fire-time orchestrator handle: look up the current live
+        // session from the registry rather than capturing at schedule
+        // time. The handle instance is created by
+        // `wireOrchestratorSession` above and stays put across R-A
+        // re-attaches; we use the structural typing of
+        // `executeExpireParticipant`'s `orchestratorHandle` param so
+        // we don't need to import the full `OrchestratorSessionHandle`
+        // type here.
+        const live = getLiveSession(entry.sessionId);
+        const handle =
+          live?.mode === 'orchestrator'
+            ? (live.handle as unknown as {
+                resumeAgent: (agentName: string) => boolean;
+                kickAgent: (agentName: string) => boolean;
+              })
+            : undefined;
+        const result = executeExpireParticipant({
+          entry,
+          orchestratorHandle: handle,
+        });
+        if (!result.ok) {
+          console.error(
+            `[reconstruct] reseeded pause-expiry executor failed for ${entry.sessionId}/${entry.projectId}`,
+            result.error,
+          );
+        }
+        // No ServerMsg emit on the reseeded path — the durable state
+        // (DB + audit) is the trail. A connected operator sees the
+        // updated state on their next interaction; future R-A
+        // attach-time snapshot push (C4g+ when the reducer tracks
+        // control state) will make this transparent.
+      },
+    );
   }
 
   // Conservative: paused for operator review. No turn delivered here.
