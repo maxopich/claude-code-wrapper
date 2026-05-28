@@ -46,9 +46,7 @@ function settings(over: Partial<SettingsView> = {}): SettingsView {
 
 function render(settingsView: SettingsView, onSave = vi.fn(), onClose = vi.fn()) {
   act(() => {
-    root.render(
-      <SettingsModal settings={settingsView} onSave={onSave} onClose={onClose} />,
-    );
+    root.render(<SettingsModal settings={settingsView} onSave={onSave} onClose={onClose} />);
   });
 }
 
@@ -150,5 +148,65 @@ describe('SettingsModal — empty-state hint names the path', () => {
       (e) => e.textContent ?? '',
     );
     expect(hintTexts.some((t) => t.includes('WORKSPACE_ROOT'))).toBe(true);
+  });
+});
+
+// Cluster F Phase A1b (UI-A1) — defaultMaxTurns input + save payload.
+describe('SettingsModal — defaultMaxTurns', () => {
+  function getMaxTurnsInput(): HTMLInputElement {
+    return document.querySelector('[data-testid="default-max-turns-input"]') as HTMLInputElement;
+  }
+
+  test('seeds from settings.defaultMaxTurns when present', () => {
+    render(settings({ defaultMaxTurns: 200 }));
+    expect(getMaxTurnsInput().value).toBe('200');
+  });
+
+  test('falls back to built-in 50 when settings.defaultMaxTurns is absent', () => {
+    // Older server didn't ship the field; modal still renders a sensible
+    // seed value so the operator can save without first probing.
+    render(settings({ defaultMaxTurns: undefined }));
+    expect(getMaxTurnsInput().value).toBe('50');
+  });
+
+  test('onSave payload includes the parsed defaultMaxTurns', () => {
+    const onSave = vi.fn();
+    render(settings({ workspaceRoot: '/already/set', defaultMaxTurns: 50 }), onSave);
+    act(() => {
+      typeInto(getMaxTurnsInput(), '150');
+    });
+    act(() => {
+      // Click the Save button (canSave is true because max turns changed)
+      (document.querySelector('.primary-btn') as HTMLButtonElement).click();
+    });
+    expect(onSave).toHaveBeenCalledWith({
+      workspaceRoot: '/already/set',
+      defaultHopBudget: 30,
+      defaultMaxTurns: 150,
+    });
+  });
+
+  test('changing only defaultMaxTurns enables Save', () => {
+    render(settings({ workspaceRoot: '/already/set', defaultMaxTurns: 50 }));
+    const saveBtn = document.querySelector('.primary-btn') as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(true); // nothing changed yet
+    act(() => {
+      typeInto(getMaxTurnsInput(), '75');
+    });
+    expect(saveBtn.disabled).toBe(false);
+  });
+
+  test('Save stays disabled when max-turns input is invalid', () => {
+    render(settings({ workspaceRoot: '/already/set', defaultMaxTurns: 50 }));
+    act(() => {
+      typeInto(getMaxTurnsInput(), '0');
+    });
+    const saveBtn = document.querySelector('.primary-btn') as HTMLButtonElement;
+    expect(saveBtn.disabled).toBe(true);
+    // Warn hint is shown explaining the failure.
+    const hints = Array.from(document.querySelectorAll('.hint.warn')).map(
+      (e) => e.textContent ?? '',
+    );
+    expect(hints.some((t) => t.includes('Max turns must be a positive integer'))).toBe(true);
   });
 });

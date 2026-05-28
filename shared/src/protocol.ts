@@ -1419,6 +1419,22 @@ export type ServerMsg =
       totalCostUsd: number;
       result?: string;
       errors?: string[];
+      /**
+       * Cluster F Phase A1b (UI-A1): the SDK's `result.num_turns` echoed
+       * verbatim so the client can render a "turns used / cap" chip and the
+       * MaxTurnsResultCard can name the exact count that hit the cap.
+       * Optional — older servers omit; older clients ignore.
+       */
+      numTurns?: number;
+      /**
+       * Cluster F Phase A1b (UI-A1): the `maxTurns` value the server actually
+       * passed to the SDK for this turn (post-resolver). Snapshotted into
+       * the envelope so the MaxTurnsResultCard can compute Extend +N
+       * without re-querying the settings store (which may have changed
+       * mid-turn). The 80% warn chip uses it as the denominator. Optional
+       * for forward-compat.
+       */
+      effectiveMaxTurns?: number;
     }
   | {
       type: 'settings';

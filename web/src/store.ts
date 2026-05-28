@@ -35,6 +35,22 @@ export type MessageView =
       cost: number;
       result?: string;
       errors?: string[];
+      /**
+       * Cluster F Phase A1b (UI-A1): the SDK's `result.num_turns` echoed
+       * through translate.ts. Populated on every result envelope that
+       * isn't a zero-turn synthetic command. Drives the chat-header
+       * turn-counter chip ("42 / 50") and the MaxTurnsResultCard's
+       * "reached the cap" body copy.
+       */
+      numTurns?: number;
+      /**
+       * Cluster F Phase A1b (UI-A1): the server's resolved `maxTurns`
+       * for this specific turn (post-precedence). The MaxTurnsResultCard
+       * uses it to compute Extend +N targets without re-querying the
+       * settings store (the operator might have edited the default
+       * between turns). The chat-header chip uses it as the denominator.
+       */
+      effectiveMaxTurns?: number;
     }
   | { kind: 'error'; id: string; errorKind: WrapperErrorKind; message: string }
   | {
@@ -1561,9 +1577,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           // Cluster F Phase A1a (UI-A1): forward the server-resolved
           // MAX_TURNS so the F-A1b SettingsModal input seeds from
           // server truth. Optional for forward-compat.
-          ...(msg.defaultMaxTurns !== undefined
-            ? { defaultMaxTurns: msg.defaultMaxTurns }
-            : {}),
+          ...(msg.defaultMaxTurns !== undefined ? { defaultMaxTurns: msg.defaultMaxTurns } : {}),
         },
       };
 
@@ -1976,6 +1990,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             cost: msg.totalCostUsd,
             result: msg.result,
             errors: msg.errors,
+            // Cluster F Phase A1b (UI-A1): persist turn-count + effective
+            // cap onto the message so MaxTurnsResultCard can render both
+            // without prop-drilling session state. Omit when absent
+            // (older server payloads pre-A1b).
+            ...(msg.numTurns !== undefined ? { numTurns: msg.numTurns } : {}),
+            ...(msg.effectiveMaxTurns !== undefined
+              ? { effectiveMaxTurns: msg.effectiveMaxTurns }
+              : {}),
           },
         ],
       });

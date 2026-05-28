@@ -37,6 +37,62 @@ describe('translate', () => {
     expect(out).toMatchObject({ type: 'result', subtype: 'error_during_execution' });
   });
 
+  // Cluster F Phase A1b (UI-A1): translate.ts forwards the SDK's
+  // `num_turns` so the client's turn-counter chip + MaxTurnsResultCard
+  // have ground truth without re-parsing the raw SDKMessage.
+  test('result.numTurns: forwards SDK num_turns when present', () => {
+    const out = translate(
+      fake({
+        type: 'result',
+        subtype: 'error_max_turns',
+        duration_ms: 100,
+        total_cost_usd: 0.01,
+        num_turns: 42,
+      }),
+      PID,
+    );
+    expect(out).toMatchObject({
+      type: 'result',
+      subtype: 'error_max_turns',
+      numTurns: 42,
+    });
+  });
+
+  test('result.numTurns: omits when SDK did not ship num_turns', () => {
+    const out = translate(
+      fake({
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 100,
+        total_cost_usd: 0.01,
+        // num_turns intentionally absent
+      }),
+      PID,
+    );
+    expect(out).toBeTruthy();
+    if (!out || out.type !== 'result') throw new Error('expected result');
+    expect(out.numTurns).toBeUndefined();
+  });
+
+  test('result.numTurns === 0 short-circuits the envelope (synthetic /command)', () => {
+    // Pre-existing contract: slash commands close out with num_turns=0,
+    // total_cost_usd=0; the translator drops these to avoid a noisy
+    // "success · $0.0000" card after the command_output card. The A1b
+    // numTurns forwarding does NOT change that — verify the drop still
+    // fires.
+    const out = translate(
+      fake({
+        type: 'result',
+        subtype: 'success',
+        duration_ms: 0,
+        total_cost_usd: 0,
+        num_turns: 0,
+      }),
+      PID,
+    );
+    expect(out).toBeNull();
+  });
+
   test('wrapper:permission_request maps back to a permission_request ServerMsg on replay', () => {
     const out = translate(
       fake({

@@ -2085,3 +2085,77 @@ describe('store / settings reducer carries defaultMaxTurns (F-A1a)', () => {
     expect(s.settings?.defaultMaxTurns).toBe(125);
   });
 });
+
+// Cluster F Phase A1b — `result` reducer must persist numTurns + effectiveMaxTurns
+// onto the message entry. These drive the TurnCounterChip (post-hoc 80% warn)
+// and the MaxTurnsResultCard's Extend +N target computation.
+describe('store / result reducer carries numTurns + effectiveMaxTurns (F-A1b)', () => {
+  test('forwards both fields when present', () => {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'hi' });
+    const pending = activeSession(s)!;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-1',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    // Migrate pending to real id by replaying the session_started above
+    // — the test fixture is set up so the user_send message is preserved.
+    void pending;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: 'sess-1',
+        subtype: 'error_max_turns',
+        durationMs: 12345,
+        totalCostUsd: 0.05,
+        numTurns: 50,
+        effectiveMaxTurns: 50,
+      },
+    });
+    const sess = activeSession(s)!;
+    const last = sess.messages[sess.messages.length - 1];
+    expect(last).toBeDefined();
+    if (!last || last.kind !== 'result') throw new Error('expected result kind');
+    expect(last.subtype).toBe('error_max_turns');
+    expect(last.numTurns).toBe(50);
+    expect(last.effectiveMaxTurns).toBe(50);
+  });
+
+  test('omits fields gracefully when the server payload lacks them (older server)', () => {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'hi' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-1',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: 'sess-1',
+        subtype: 'success',
+        durationMs: 10,
+        totalCostUsd: 0.001,
+        // numTurns + effectiveMaxTurns absent
+      },
+    });
+    const sess = activeSession(s)!;
+    const last = sess.messages[sess.messages.length - 1];
+    if (!last || last.kind !== 'result') throw new Error('expected result kind');
+    expect(last.numTurns).toBeUndefined();
+    expect(last.effectiveMaxTurns).toBeUndefined();
+  });
+});
