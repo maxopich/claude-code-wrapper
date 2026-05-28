@@ -1109,3 +1109,180 @@ describe('executeExpireParticipant — missing live handle', () => {
     expect(warnSpy).toHaveBeenCalled();
   });
 });
+
+// ===== Cluster C Phase 4f: forensic capture on kick + auto-kick =====
+//
+// The kick paths now write a controllability_forensics row keyed to the
+// kick's safety_audit_id, populated with the agent's bus inbox/outbox
+// + mutation tail. These tests verify the row lands + carries the
+// expected per-participant shape.
+
+describe('executeKickParticipant — forensic capture (Phase 4f)', () => {
+  test('writes a controllability_forensics row keyed to the kick audit', async () => {
+    const { workerId } = seedSession();
+    // Seed bus events so the forensic bundle has tail content.
+    const { appendMultiAgentEvent } = await import('../repo/multi_agent.js');
+    appendMultiAgentEvent('sess-1', 'orchestrator', 'worker-slug', 'prompt', 'do thing');
+    appendMultiAgentEvent('sess-1', 'worker-slug', 'orchestrator', 'reply', 'on it');
+
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId, reasonCode: 'runaway_loop' }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const forensicsRow = getDb()
+      .prepare<
+        [string],
+        {
+          safety_audit_id: string;
+          agent_slug: string;
+          bus_inbox_outbox_json: string;
+          events_last_n_json: string;
+        }
+      >(
+        'SELECT safety_audit_id, agent_slug, bus_inbox_outbox_json, events_last_n_json FROM controllability_forensics WHERE safety_audit_id = ?',
+      )
+      .get(result.auditId);
+
+    expect(forensicsRow).toBeDefined();
+    expect(forensicsRow?.safety_audit_id).toBe(result.auditId);
+    expect(forensicsRow?.agent_slug).toBe('worker-slug');
+    const bio = JSON.parse(forensicsRow!.bus_inbox_outbox_json) as {
+      inbox: Array<{ kind: string; textPreview: string }>;
+      outbox: Array<{ kind: string; textPreview: string }>;
+      totalSessionEvents: number;
+    };
+    expect(bio.inbox).toHaveLength(1);
+    expect(bio.inbox[0]?.textPreview).toBe('do thing');
+    expect(bio.outbox).toHaveLength(1);
+    expect(bio.outbox[0]?.textPreview).toBe('on it');
+    expect(bio.totalSessionEvents).toBe(2);
+  });
+
+  test('forensic write failure does NOT propagate; audit row stays', () => {
+    const { workerId } = seedSession();
+    const throwingAppend = vi.fn(() => {
+      throw new Error('forensics db full');
+    });
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+      appendForensicsRow: throwingAppend,
+    });
+    // Kick succeeded (audit + DB intact) despite the forensic write failure.
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const auditCount = getDb()
+      .prepare<
+        [],
+        { c: number }
+      >("SELECT COUNT(*) as c FROM safety_audit WHERE kind = 'agent_control.kicked'")
+      .get()!.c;
+    expect(auditCount).toBe(1);
+    // Forensic writer was called + threw; the error log fired.
+    expect(throwingAppend).toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalled();
+  });
+
+  test('forensic row mutation tail surfaces agent-attributed mutations only', async () => {
+    const { workerId } = seedSession();
+    const { appendMultiAgentMutation } = await import('../repo/multi_agent.js');
+    appendMultiAgentMutation('sess-1', 'worker-slug', 'Write', 'mutate', 'wrote A', {
+      filePath: '/tmp/A',
+      cwd: '/tmp',
+      toolUseId: null,
+    });
+    // A mutation by a DIFFERENT agent that should NOT appear in the forensic row.
+    appendMultiAgentMutation('sess-1', 'other-agent', 'Write', 'mutate', 'wrote B', {
+      filePath: '/tmp/B',
+      cwd: '/tmp',
+      toolUseId: null,
+    });
+
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const row = getDb()
+      .prepare<
+        [string],
+        { mutation_rationale_json: string }
+      >('SELECT mutation_rationale_json FROM controllability_forensics WHERE safety_audit_id = ?')
+      .get(result.auditId)!;
+    const mr = JSON.parse(row.mutation_rationale_json) as {
+      recentMutations: Array<{ toolName: string; summary: string }>;
+      totalMutations: number;
+    };
+    expect(mr.recentMutations).toHaveLength(1);
+    expect(mr.recentMutations[0]?.summary).toBe('wrote A');
+    expect(mr.totalMutations).toBe(1);
+  });
+});
+
+describe('executeExpireParticipant auto_kick — forensic capture (Phase 4f)', () => {
+  test('auto_kick path writes a forensic row keyed to the agent_control.kicked audit', async () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_kick');
+    const { appendMultiAgentEvent } = await import('../repo/multi_agent.js');
+    appendMultiAgentEvent('sess-1', 'orchestrator', 'worker-slug', 'prompt', 'first prompt');
+
+    const result = executeExpireParticipant({
+      entry: buildExpireEntry(workerId, { expiryAction: 'auto_kick' }),
+      orchestratorHandle: makeFakeExpireHandle(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('auto_kick');
+    expect(result.kickAuditId).toBeDefined();
+
+    // The forensic row is keyed to the KICK audit, not the trigger audit.
+    const row = getDb()
+      .prepare<
+        [string],
+        { agent_slug: string; bus_inbox_outbox_json: string }
+      >('SELECT agent_slug, bus_inbox_outbox_json FROM controllability_forensics WHERE safety_audit_id = ?')
+      .get(result.kickAuditId!);
+    expect(row).toBeDefined();
+    expect(row?.agent_slug).toBe('worker-slug');
+    const bio = JSON.parse(row!.bus_inbox_outbox_json) as {
+      inbox: Array<{ textPreview: string }>;
+    };
+    expect(bio.inbox.map((e) => e.textPreview)).toEqual(['first prompt']);
+
+    // No forensic row is written for the TRIGGER audit
+    // (pause.expired_without_resume) — that audit captures the trigger
+    // event; the state-at-kick bundle hangs off the kick audit row.
+    const triggerRow = getDb()
+      .prepare<
+        [string],
+        { c: number }
+      >('SELECT COUNT(*) as c FROM controllability_forensics WHERE safety_audit_id = ?')
+      .get(result.triggerAuditId)!;
+    expect(triggerRow.c).toBe(0);
+  });
+
+  test('auto_resume path does NOT write a forensic row (no state change to capture)', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_resume');
+    const result = executeExpireParticipant({
+      entry: buildExpireEntry(workerId, { expiryAction: 'auto_resume' }),
+      orchestratorHandle: makeFakeExpireHandle(),
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('auto_resume');
+    // No forensic rows for any audit produced on this path.
+    const count = getDb()
+      .prepare<[], { c: number }>('SELECT COUNT(*) as c FROM controllability_forensics')
+      .get()!.c;
+    expect(count).toBe(0);
+  });
+});
