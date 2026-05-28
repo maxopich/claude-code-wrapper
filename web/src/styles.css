@@ -7434,3 +7434,240 @@ pre {
   color: var(--ink-dim);
   font-size: var(--t-sm);
 }
+
+/* -------------------------------------------------------------------------
+ * Cluster D Phase 8b: RecoveryLogInspector popover.
+ *
+ * Sidebar trigger button (RecoveryLogButton) mirrors .notif-bell shape but
+ * without the badge/unread state — the recovery_log isn't an inbox. Popover
+ * reuses the notif-inbox-popover geometry but shifts right so the two
+ * popovers don't collide if both happen to be open (which the buttons'
+ * outside-click handlers already prevent, but the layout stays sane in
+ * tests / future affordances).
+ *
+ * Tokens used: --s-2/3, --bg-4, --line-3, --r-md, --shadow-md, --notif-stack-z,
+ * --t-sm/md/lg, --ink/--ink-dim, --accent, --info/--ok/--warn/--err. No new
+ * tokens added.
+ * ------------------------------------------------------------------------- */
+
+.recovery-log-btn {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  opacity: 0.7;
+}
+.recovery-log-btn:hover,
+.recovery-log-btn:focus-visible {
+  opacity: 1;
+}
+.recovery-log-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.recovery-log-popover {
+  position: absolute;
+  top: 48px; /* matches .notif-inbox-popover */
+  left: var(--s-3);
+  right: var(--s-3);
+  max-width: 440px;
+  max-height: min(70vh, 600px);
+  background: var(--bg-4);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  z-index: var(--notif-stack-z);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: notif-in var(--dur-2) var(--ease-out);
+}
+
+.recovery-log-inspector {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.recovery-log-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-3);
+  position: sticky;
+  top: 0;
+  background: var(--bg-4);
+  z-index: 1;
+}
+.recovery-log-inspector-title {
+  margin: 0;
+  font-size: var(--t-md);
+  font-weight: 600;
+}
+.recovery-log-inspector-close {
+  width: 24px;
+  height: 24px;
+  font-size: 18px;
+}
+
+.recovery-log-inspector-section {
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--line-3);
+}
+.recovery-log-inspector-section:last-child {
+  border-bottom: none;
+}
+.recovery-log-inspector-section-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-sm);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim);
+}
+.recovery-log-inspector-empty {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink-dim);
+}
+
+.recovery-log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-sm);
+}
+.recovery-log-table th,
+.recovery-log-table td {
+  padding: 4px 6px;
+  text-align: left;
+  border-bottom: 1px solid var(--line-3);
+}
+.recovery-log-table thead th {
+  color: var(--ink-dim);
+  font-weight: 500;
+  font-size: var(--t-xs, 11px);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.recovery-log-table tr:last-child td {
+  border-bottom: none;
+}
+.recovery-log-table-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.recovery-log-class-chip {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: var(--t-xs, 11px);
+  font-weight: 500;
+  background: color-mix(in oklab, var(--ink-dim) 18%, transparent);
+  color: var(--ink);
+  border: 1px solid color-mix(in oklab, var(--ink-dim) 35%, transparent);
+}
+.recovery-log-class-rate_limit {
+  background: color-mix(in oklab, var(--info) 18%, transparent);
+  color: var(--info);
+  border-color: color-mix(in oklab, var(--info) 35%, transparent);
+}
+.recovery-log-class-auth_expired {
+  background: color-mix(in oklab, var(--warn) 18%, transparent);
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 35%, transparent);
+}
+.recovery-log-class-sweep {
+  background: color-mix(in oklab, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+.recovery-log-class-chain_crash {
+  background: color-mix(in oklab, var(--err) 18%, transparent);
+  color: var(--err);
+  border-color: color-mix(in oklab, var(--err) 35%, transparent);
+}
+
+.recovery-log-gauges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.recovery-log-gauge {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.recovery-log-gauge-label {
+  font-size: var(--t-xs, 11px);
+  color: var(--ink-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.recovery-log-gauge-value {
+  font-size: var(--t-md);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.recovery-log-gauge-value.recovery-log-gauge-empty {
+  font-weight: 400;
+  font-size: var(--t-sm);
+  color: var(--ink-dim);
+}
+.recovery-log-gauge-detail {
+  font-size: var(--t-sm);
+  font-weight: 400;
+  color: var(--ink-dim);
+}
+
+.recovery-log-recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.recovery-log-recent-row {
+  padding: var(--s-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  background: color-mix(in oklab, var(--bg-4) 92%, transparent);
+}
+.recovery-log-recent-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+}
+.recovery-log-recent-row-action {
+  font-weight: 500;
+}
+.recovery-log-recent-row-ts {
+  margin-left: auto;
+  color: var(--ink-dim);
+  font-size: var(--t-xs, 11px);
+  font-variant-numeric: tabular-nums;
+}
+.recovery-log-recent-row-meta {
+  margin-top: 4px;
+  font-size: var(--t-xs, 11px);
+  color: var(--ink-dim);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.recovery-log-recent-row-session {
+  font-family: var(--font-mono, monospace);
+}
