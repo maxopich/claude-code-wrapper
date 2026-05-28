@@ -268,6 +268,43 @@ export type MultiAgentRun = {
    *
    *  Deduped by `auditRowId` — the only stable id on the wire. */
   routerDrops: RouterDropView[];
+  /**
+   * Cluster D Phase 4d (B2 / spec §4.2): the bus's most recent in-flight
+   * auto-retry attempt. Populated by `auto_retry` ServerMsg fired from
+   * `bus/runner.ts`'s `isTransientOverload(err)` branch (see chain.ts +
+   * orchestrator.ts wiring at Phase 4a); drives the multi-agent
+   * RateLimit/AutoRetry banner.
+   *
+   * Lives on `MultiAgentRun` (not `SessionView`) because the bus session
+   * id is not in `state.sessionToProject` / `sessionsByProject` — bus
+   * sessions live in this slice, single-agent sessions in the per-
+   * project map. Phase 4c's `SessionView.rateLimit` is the parallel
+   * structure for the single-agent path.
+   *
+   * Observe-only: the bus owns the retry loop. There is no operator
+   * "retry now" or "pause" button (those would race the bus). The
+   * banner is informational — countdown to next attempt + agent name.
+   * Cleared by either:
+   *   - a new `auto_retry` arriving (attempt N+1; overwrites)
+   *   - the `ma_clear_auto_retry` action (CountdownChip's onElapsed
+   *     dispatches it when retryAt is reached — the retry has fired
+   *     or is about to, so the banner unmounts; if attempt N+1 also
+   *     fails the next auto_retry repopulates this slice)
+   */
+  autoRetry?: MultiAgentAutoRetry;
+};
+
+/** Cluster D Phase 4d: bus auto-retry info (sub-slice of MultiAgentRun).
+ *  Wire-mirror of the `auto_retry` ServerMsg minus the redundant
+ *  `sessionId` (the run's own id). */
+export type MultiAgentAutoRetry = {
+  attempt: number;
+  maxAttempts: number;
+  backoffMs: number;
+  /** Wall-clock ms when the retry fires. The CountdownChip ticks down to this. */
+  retryAt: number;
+  reason: 'transient_overload' | 'rate_limit_hard';
+  agentName?: string;
 };
 
 /**
@@ -497,6 +534,11 @@ export type Action =
   | { type: 'ma_clear_awaiting' }
   | { type: 'ma_clear_pending_retry' }
   | { type: 'ma_clear_pending_mutation' }
+  /** Cluster D Phase 4d: drop the bus auto-retry slice (the CountdownChip's
+   *  onElapsed fires this — the retry has fired, banner should unmount.
+   *  If attempt N+1 also fails, the next `auto_retry` ServerMsg
+   *  repopulates the slice with the fresh countdown). */
+  | { type: 'ma_clear_auto_retry' }
   // ---- Cluster D Phase 4c (UI-D7 + spec §4.2) -----------------------------
   // Client-side rate-limit transitions. The server is stateless about retry
   // cadence (per spec rationale: client owns it so pause survives tab close);
@@ -769,6 +811,23 @@ export function reduce(state: AppState, action: Action): AppState {
             pendingMutation: null,
             mutationsAcknowledged: true,
           },
+        },
+      };
+    }
+
+    case 'ma_clear_auto_retry': {
+      // Cluster D Phase 4d: the CountdownChip's onElapsed fires this. The
+      // retry has fired; the banner unmounts. If attempt N+1 also fails,
+      // a fresh `auto_retry` ServerMsg from the bus repopulates the slice.
+      const active = state.multiAgent.active;
+      if (!active || !active.autoRetry) return state;
+      const { autoRetry: _drop, ...rest } = active;
+      void _drop;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: rest,
         },
       };
     }
@@ -1628,11 +1687,38 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     }
 
     case 'auto_retry': {
-      // Cluster D Phase 4c: bus auto-retry signal — populates the
-      // `autoRetry` sub-field so the banner can render "attempt 2 of 5
-      // in 0:23". Single-agent auto-retry (reason: 'rate_limit_hard') is
-      // forward-declared by the protocol but Phase 4b/c keep the
-      // single-agent client-driven (the CountdownChip fires
+      // Cluster D Phase 4d: multi-agent bus auto-retry routes to
+      // `MultiAgentRun.autoRetry`. The bus session id is `multiAgent.
+      // active.sessionId`; the bus runner's `onAutoRetry` callback
+      // (chain.ts + orchestrator.ts wiring in Phase 4a) emits the
+      // ServerMsg with that id. Bus sessions don't appear in
+      // `sessionToProject` / `sessionsByProject`, so the single-agent
+      // path below would silently no-op — handle the bus case first.
+      const active = state.multiAgent.active;
+      if (active && active.sessionId === msg.sessionId) {
+        return {
+          ...state,
+          multiAgent: {
+            ...state.multiAgent,
+            active: {
+              ...active,
+              autoRetry: {
+                attempt: msg.attempt,
+                maxAttempts: msg.maxAttempts,
+                backoffMs: msg.backoffMs,
+                retryAt: msg.retryAt,
+                reason: msg.reason,
+                ...(msg.agentName !== undefined ? { agentName: msg.agentName } : {}),
+              },
+            },
+          },
+        };
+      }
+      // Cluster D Phase 4c: single-agent path. Populates the rateLimit
+      // slice's `autoRetry` sub-field so the banner can render "attempt
+      // 2 of 5 in 0:23". Single-agent auto-retry (reason: 'rate_limit_
+      // hard') is forward-declared by the protocol but Phase 4b/c keep
+      // the single-agent client-driven (the CountdownChip fires
       // `retry_rate_limited { auto: true }` on elapse); this case ALSO
       // accepts that variant so a future server-driven single-agent
       // auto-retry path Just Works without further reducer changes.

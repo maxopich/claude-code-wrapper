@@ -424,3 +424,191 @@ describe('pause + retry-in-flight client transitions', () => {
     expect(sessionOf(s)).toBe(after); // no second flip
   });
 });
+
+// Cluster D Phase 4d: bus auto-retry routes to MultiAgentRun.autoRetry
+// rather than SessionView.rateLimit. The bus session id lives in
+// `state.multiAgent.active.sessionId` (NOT in `sessionToProject`), so the
+// single-agent path would silently no-op for those.
+const BUS_SID = 'bus-test-session';
+
+function bootstrapMulti(): AppState {
+  let s = bootstrap();
+  // multi_agent_started is the canonical install path. Use it to seed
+  // an active orchestrator run with a distinct sessionId from SID.
+  s = reduce(s, {
+    type: 'server',
+    msg: {
+      type: 'multi_agent_started',
+      sessionId: BUS_SID,
+      mode: 'orchestrator',
+      participants: [PID],
+      participantAgentNames: ['reviewer'],
+      lifecycle: 'persistent',
+      sessionFolder: '/tmp/bus',
+      hopBudget: 30,
+      pauseOnMutation: false,
+      mutations: [],
+      mutationsAcknowledged: false,
+    },
+  });
+  return s;
+}
+
+function activeRun(s: AppState) {
+  const a = s.multiAgent.active;
+  if (!a) throw new Error('expected an active multi-agent run');
+  return a;
+}
+
+describe('auto_retry routes to MultiAgentRun.autoRetry when sessionId is the bus session', () => {
+  test('populates active.autoRetry with all wire fields', () => {
+    let s = bootstrapMulti();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'auto_retry',
+        sessionId: BUS_SID,
+        attempt: 2,
+        maxAttempts: 5,
+        backoffMs: 30_000,
+        retryAt: 1_700_000_030_000,
+        reason: 'transient_overload',
+        agentName: 'reviewer',
+      },
+    });
+    expect(activeRun(s).autoRetry).toEqual({
+      attempt: 2,
+      maxAttempts: 5,
+      backoffMs: 30_000,
+      retryAt: 1_700_000_030_000,
+      reason: 'transient_overload',
+      agentName: 'reviewer',
+    });
+  });
+
+  test('agentName omitted on the wire means it stays absent on the slice', () => {
+    let s = bootstrapMulti();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'auto_retry',
+        sessionId: BUS_SID,
+        attempt: 1,
+        maxAttempts: 5,
+        backoffMs: 10_000,
+        retryAt: 1,
+        reason: 'transient_overload',
+      },
+    });
+    const ar = activeRun(s).autoRetry;
+    if (!ar) throw new Error('expected autoRetry to be populated');
+    expect(ar.agentName).toBeUndefined();
+    expect(Object.hasOwn(ar, 'agentName')).toBe(false);
+  });
+
+  test('successive auto_retry events overwrite (attempt N+1 replaces N)', () => {
+    let s = bootstrapMulti();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'auto_retry',
+        sessionId: BUS_SID,
+        attempt: 1,
+        maxAttempts: 5,
+        backoffMs: 10_000,
+        retryAt: 1_000,
+        reason: 'transient_overload',
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'auto_retry',
+        sessionId: BUS_SID,
+        attempt: 2,
+        maxAttempts: 5,
+        backoffMs: 20_000,
+        retryAt: 2_000,
+        reason: 'transient_overload',
+      },
+    });
+    expect(activeRun(s).autoRetry?.attempt).toBe(2);
+    expect(activeRun(s).autoRetry?.retryAt).toBe(2_000);
+  });
+
+  test('auto_retry for an unknown session is a silent no-op (no active, no SessionView)', () => {
+    let s = bootstrap();
+    const before = s;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'auto_retry',
+        sessionId: 'unknown-bus-session',
+        attempt: 1,
+        maxAttempts: 5,
+        backoffMs: 10_000,
+        retryAt: 1_000,
+        reason: 'transient_overload',
+      },
+    });
+    expect(s).toBe(before);
+  });
+
+  test('auto_retry for a single-agent SessionView (NOT the active bus session) still falls through to SessionView.rateLimit', () => {
+    // Regression guard: bus-session match uses `active.sessionId === msg.
+    // sessionId`. For SID, `active.sessionId` is BUS_SID, so strict-equal
+    // returns false → falls through to the Phase 4c single-agent path
+    // unchanged (this is critical so Phase 4c behavior isn't broken).
+    let s = bootstrapMulti();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'auto_retry',
+        sessionId: SID,
+        attempt: 3,
+        maxAttempts: 5,
+        backoffMs: 5_000,
+        retryAt: 1,
+        reason: 'rate_limit_hard',
+      },
+    });
+    expect(sessionOf(s).rateLimit?.autoRetry?.attempt).toBe(3);
+    expect(activeRun(s).autoRetry).toBeUndefined();
+  });
+});
+
+describe('ma_clear_auto_retry', () => {
+  test('drops the autoRetry slice from the active run (Object.hasOwn becomes false)', () => {
+    let s = bootstrapMulti();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'auto_retry',
+        sessionId: BUS_SID,
+        attempt: 1,
+        maxAttempts: 5,
+        backoffMs: 10_000,
+        retryAt: 1,
+        reason: 'transient_overload',
+      },
+    });
+    expect(activeRun(s).autoRetry).toBeDefined();
+    s = reduce(s, { type: 'ma_clear_auto_retry' });
+    expect(activeRun(s).autoRetry).toBeUndefined();
+    expect(Object.hasOwn(activeRun(s), 'autoRetry')).toBe(false);
+  });
+
+  test('no-op when no active run', () => {
+    let s = bootstrap();
+    const before = s;
+    s = reduce(s, { type: 'ma_clear_auto_retry' });
+    expect(s).toBe(before);
+  });
+
+  test('no-op when active run has no autoRetry slice (idempotent)', () => {
+    let s = bootstrapMulti();
+    const before = s;
+    s = reduce(s, { type: 'ma_clear_auto_retry' });
+    expect(s).toBe(before);
+  });
+});

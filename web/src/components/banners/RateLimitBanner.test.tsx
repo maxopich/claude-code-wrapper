@@ -4,11 +4,13 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { SessionBanner } from './SessionBanner.js';
 import {
+  buildBusAutoRetryBannerItem,
   buildRateLimitBannerItem,
+  busAutoRetryBannerTitle,
   rateLimitBannerTitle,
   type RateLimitBannerCallbacks,
 } from './RateLimitBanner.js';
-import type { RateLimitState } from '../../store.js';
+import type { MultiAgentAutoRetry, RateLimitState } from '../../store.js';
 
 // Cluster D Phase 4c: RateLimitBanner is a factory producing
 // BannerStackItem props. The tests exercise:
@@ -369,5 +371,158 @@ describe('buildRateLimitBannerItem — render integration', () => {
     expect(container.textContent).toContain('Overage budget');
     expect(container.textContent).toContain('in use');
     expect(container.textContent).toContain('1:30'); // overage refill countdown
+  });
+});
+
+// Cluster D Phase 4d: observe-only multi-agent bus auto-retry banner.
+// The bus owns the retry loop server-side; no Retry/Pause/heldQueue.
+const NOW_4D = 1_700_000_000_000;
+const stableNow4d = () => NOW_4D;
+
+describe('busAutoRetryBannerTitle', () => {
+  test('embeds attempt n of m, no rate-limit phrasing (it is bus-specific)', () => {
+    expect(
+      busAutoRetryBannerTitle({
+        attempt: 2,
+        maxAttempts: 5,
+        backoffMs: 30_000,
+        retryAt: NOW_4D + 30_000,
+        reason: 'transient_overload',
+      }),
+    ).toBe('Bus auto-retry — attempt 2 of 5');
+  });
+});
+
+describe('buildBusAutoRetryBannerItem — shape', () => {
+  const baseAutoRetry: MultiAgentAutoRetry = {
+    attempt: 1,
+    maxAttempts: 5,
+    backoffMs: 30_000,
+    retryAt: NOW_4D + 30_000,
+    reason: 'transient_overload',
+  };
+
+  test('id derives from sessionId; tier=warn; glyph=hourglass', () => {
+    const item = buildBusAutoRetryBannerItem({
+      sessionId: 'bus-sess-1',
+      state: baseAutoRetry,
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+    });
+    expect(item.id).toBe('bus-auto-retry-bus-sess-1');
+    expect(item.tier).toBe('warn');
+    expect(item.glyph).toBe('⏳');
+  });
+
+  test('NO actions (observe-only — bus owns the retry loop)', () => {
+    const item = buildBusAutoRetryBannerItem({
+      sessionId: 'bus-sess-1',
+      state: baseAutoRetry,
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+    });
+    expect(item.actions).toBeUndefined();
+  });
+
+  test('arrivedAt prop passes through verbatim for BannerStack tiebreak', () => {
+    const item = buildBusAutoRetryBannerItem({
+      sessionId: 'bus-sess-1',
+      state: baseAutoRetry,
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+      arrivedAt: 9999,
+    });
+    expect(item.arrivedAt).toBe(9999);
+  });
+});
+
+describe('buildBusAutoRetryBannerItem — render integration', () => {
+  const baseAutoRetry: MultiAgentAutoRetry = {
+    attempt: 1,
+    maxAttempts: 5,
+    backoffMs: 30_000,
+    retryAt: NOW_4D + 30_000,
+    reason: 'transient_overload',
+  };
+
+  function renderItem(args: Parameters<typeof buildBusAutoRetryBannerItem>[0]) {
+    const item = buildBusAutoRetryBannerItem(args);
+    act(() => {
+      root.render(<SessionBanner {...item} />);
+    });
+    return item;
+  }
+
+  test('body prose names the reason (transient overload 529)', () => {
+    renderItem({
+      sessionId: 'bus-1',
+      state: baseAutoRetry,
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+    });
+    expect(container.textContent).toContain('transient overload (529)');
+    expect(container.textContent).toContain('0:30');
+  });
+
+  test('rate_limit_hard reason renders distinct phrasing', () => {
+    renderItem({
+      sessionId: 'bus-1',
+      state: { ...baseAutoRetry, reason: 'rate_limit_hard' },
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+    });
+    expect(container.textContent).toContain('hard rate-limit');
+    expect(container.textContent).not.toContain('transient overload');
+  });
+
+  test('agentName renders inline as <code> when present', () => {
+    renderItem({
+      sessionId: 'bus-1',
+      state: { ...baseAutoRetry, agentName: 'reviewer' },
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+    });
+    const codeEl = container.querySelector('code');
+    expect(codeEl?.textContent).toBe('reviewer');
+  });
+
+  test('agentName omitted → no <code> agent chip', () => {
+    renderItem({
+      sessionId: 'bus-1',
+      state: baseAutoRetry,
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+    });
+    expect(container.querySelector('code')).toBeNull();
+  });
+
+  test('countdown elapse fires onClear (the chip-driven banner self-clear)', () => {
+    let n = NOW_4D;
+    const now = () => n;
+    const onClear = vi.fn();
+    renderItem({
+      sessionId: 'bus-1',
+      state: { ...baseAutoRetry, retryAt: n + 2_000 },
+      callbacks: { onClear },
+      now,
+    });
+    n += 2000;
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onClear).toHaveBeenCalledTimes(1);
+  });
+
+  test('explanation prose makes clear no operator action is needed', () => {
+    renderItem({
+      sessionId: 'bus-1',
+      state: baseAutoRetry,
+      callbacks: { onClear: vi.fn() },
+      now: stableNow4d,
+    });
+    // The "no operator action needed" framing is what distinguishes
+    // this banner from the single-agent one — it's the cue that the
+    // absence of buttons is intentional, not a missing feature.
+    expect(container.textContent).toContain('no operator action');
   });
 });
