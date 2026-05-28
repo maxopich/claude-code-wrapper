@@ -26,6 +26,7 @@ import { AgentTag } from './AgentTag';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
+import { HopBudgetInput } from './HopBudgetInput';
 import { ModelChip, summarizeBusModel } from './ModelChip';
 import { RouterDropsCounter } from './authority/RouterDropsCounter';
 import { ParticipantControlsCounter } from './agentControl/ParticipantControlsCounter';
@@ -105,6 +106,18 @@ export function MultiAgentTab(props: {
   onClearAutoRetry: () => void;
   /** Item #5: setup-screen toggle for pause-on-first-mutation. */
   onSetDraftPauseOnMutation: (value: boolean) => void;
+  /**
+   * Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input.
+   * Forwarded to the matching `ma_set_draft_hop_budget` action; null
+   * clears the override so the server resolver falls through.
+   */
+  onSetDraftHopBudget: (value: number | null) => void;
+  /**
+   * Cluster F Phase D9: server-resolved default for the placeholder /
+   * empty-state hint. Null when settings haven't loaded yet — the
+   * input degrades to a generic placeholder until settings arrive.
+   */
+  defaultHopBudget: number | null;
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
   /**
@@ -228,6 +241,10 @@ function DraftView(props: {
   onSetDraftPrompt: (text: string) => void;
   /** Item #5: setup-screen toggle for pause-on-first-mutation. */
   onSetDraftPauseOnMutation: (value: boolean) => void;
+  /** Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input. */
+  onSetDraftHopBudget: (value: number | null) => void;
+  /** Cluster F Phase D9: server-resolved default for input placeholder. */
+  defaultHopBudget: number | null;
   onStart: () => void;
   onResumeSession: (sessionId: string) => void;
   wrapperErrorSeq: number;
@@ -514,6 +531,19 @@ function DraftView(props: {
             />
             Pause before any worker mutates the filesystem
           </label>
+          {/* Cluster F Phase D9 (UI-D9): per-run hop-budget override. The
+              wire was complete (start_multi_agent.hopBudget + template
+              field + resolver precedence) but no UI input existed. This
+              fills the gap. Placeholder shows the server default; null
+              value falls through the precedence chain. */}
+          {props.defaultHopBudget !== null && (
+            <HopBudgetInput
+              value={multiAgent.draftHopBudget}
+              source={multiAgent.draftHopBudgetSource}
+              defaultValue={props.defaultHopBudget}
+              onChange={props.onSetDraftHopBudget}
+            />
+          )}
         </section>
 
         <section className="multi-agent-section">

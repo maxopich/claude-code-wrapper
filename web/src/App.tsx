@@ -1226,6 +1226,13 @@ function AppShell({
     // `start_multi_agent` sends it as `pauseOnMutation`.
     dispatch({ type: 'ma_set_draft_pause_on_mutation', value });
   }
+  function setDraftHopBudget(value: number | null) {
+    // Cluster F Phase D9 (UI-D9): operator-typed hop-budget override.
+    // The action flips draftHopBudgetSource to 'user' so the DraftView's
+    // "(from template)" annotation hides — the value is no longer the
+    // template's even if the operator typed a number that matches.
+    dispatch({ type: 'ma_set_draft_hop_budget', value });
+  }
   function setActiveLifecycle(sessionId: string, lifecycle: MultiAgentLifecycle) {
     // Server validates: orchestrator-mode only, sessionId must match the
     // active session. On success, server echoes `multi_agent_lifecycle_changed`
@@ -1706,6 +1713,8 @@ function AppShell({
                 onContinueThroughMutation={continueThroughMutation}
                 onClearAutoRetry={clearAutoRetry}
                 onSetDraftPauseOnMutation={setDraftPauseOnMutation}
+                onSetDraftHopBudget={setDraftHopBudget}
+                defaultHopBudget={state.settings?.defaultHopBudget ?? null}
                 onSetActiveLifecycle={setActiveLifecycle}
                 onAddActiveParticipant={addActiveParticipant}
                 onMuteParticipant={muteParticipant}

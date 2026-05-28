@@ -1943,3 +1943,78 @@ describe('store / settings reducer carries defaultWorkspaceRootSource (E3)', () 
     expect(s.settings?.defaultWorkspaceRootSource).toBeUndefined();
   });
 });
+
+// Cluster F Phase D9 — draftHopBudget reducer cases:
+//   - ma_apply_template populates draftHopBudget + tags source='template'
+//     (when the template has a hopBudget) or null + null (when it doesn't)
+//   - ma_set_draft_hop_budget(value) sets value + tags source='user'
+//   - ma_set_draft_hop_budget(null) clears both
+//   - Manual edits (lifecycle flip, reorder, dismiss_active) clear both
+describe('store / draftHopBudget + source (F-D9)', () => {
+  test('ma_apply_template with hopBudget sets value + source="template"', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't1',
+        name: 'Twin',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [],
+        hopBudget: 42,
+      },
+    });
+    expect(s.multiAgent.draftHopBudget).toBe(42);
+    expect(s.multiAgent.draftHopBudgetSource).toBe('template');
+  });
+
+  test('ma_apply_template without hopBudget leaves both null', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't1',
+        name: 'Twin',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [],
+      },
+    });
+    expect(s.multiAgent.draftHopBudget).toBeNull();
+    expect(s.multiAgent.draftHopBudgetSource).toBeNull();
+  });
+
+  test('ma_set_draft_hop_budget(75) sets value + source="user"', () => {
+    let s = initialState;
+    s = reduce(s, { type: 'ma_set_draft_hop_budget', value: 75 });
+    expect(s.multiAgent.draftHopBudget).toBe(75);
+    expect(s.multiAgent.draftHopBudgetSource).toBe('user');
+  });
+
+  test('ma_set_draft_hop_budget(null) clears both value and source', () => {
+    let s = initialState;
+    s = reduce(s, { type: 'ma_set_draft_hop_budget', value: 75 });
+    s = reduce(s, { type: 'ma_set_draft_hop_budget', value: null });
+    expect(s.multiAgent.draftHopBudget).toBeNull();
+    expect(s.multiAgent.draftHopBudgetSource).toBeNull();
+  });
+
+  test('user override after template populates flips source to "user"', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't1',
+        name: 'Twin',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [],
+        hopBudget: 42,
+      },
+    });
+    expect(s.multiAgent.draftHopBudgetSource).toBe('template');
+    s = reduce(s, { type: 'ma_set_draft_hop_budget', value: 100 });
+    expect(s.multiAgent.draftHopBudget).toBe(100);
+    expect(s.multiAgent.draftHopBudgetSource).toBe('user');
+  });
+});
