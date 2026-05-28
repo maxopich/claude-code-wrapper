@@ -322,6 +322,27 @@ export type MultiAgentRun = {
    */
   participantControls: Record<number, ParticipantControlView>;
   /**
+   * Cluster E Phase 2.x (B4-1): per-participant model identifiers
+   * captured from each `session_started` ServerMsg whose `projectId`
+   * belongs to this run's participants. Keyed by `projectId`; value is
+   * the raw model string from the SDK init.
+   *
+   * The bus doesn't carry a single "session model" on the wire —
+   * each participant (chain hop or orchestrator/worker) runs its own
+   * SDK query() with its project's resolved model. This client-side
+   * aggregation lets `TopRunBar`'s ModelChip render a sensible
+   * summary:
+   *   - all values identical → that model
+   *   - mixed values → "various"
+   *   - empty → undefined → chip falls back to "default"
+   *
+   * Empty `{}` at session start; entries accumulate as participants'
+   * SDK inits arrive. NOT replayed across WS reconnect — same caveat
+   * as `participantControls`, the chip lights up once at least one
+   * `session_started` lands post-reconnect.
+   */
+  modelsByProject: Record<number, string>;
+  /**
    * Cluster D Phase 4d (B2 / spec §4.2): the bus's most recent in-flight
    * auto-retry attempt. Populated by `auto_retry` ServerMsg fired from
    * `bus/runner.ts`'s `isTransientOverload(err)` branch (see chain.ts +
@@ -1223,6 +1244,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // start; a future R-A enhancement could rehydrate by reading
             // back from the server's per_agent_control table.
             participantControls: {},
+            // Phase E2.x: per-participant model identifiers accumulate
+            // from each session_started for a participant project.
+            // Same R-A caveat — empty until at least one participant's
+            // SDK init arrives post-attach.
+            modelsByProject: {},
           },
         },
       };
@@ -1682,6 +1708,39 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       const pendingNext = { ...state.pendingByProject };
       if (pendingNext[projectId] === pendingId) delete pendingNext[projectId];
 
+      // Cluster E Phase 2.x: if this session_started belongs to a bus
+      // participant of the currently-active MultiAgentRun, also push
+      // the model into `multiAgent.active.modelsByProject` so the
+      // TopRunBar's ModelChip can summarize across participants.
+      //
+      // Participant detection: a project belongs to the active bus
+      // session iff its `busAgentName` matches one of the run's
+      // `participantAgentNames`. Single-agent sessions (no bus run, or
+      // a project that isn't a participant) leave the map untouched.
+      let multiAgentNext = state.multiAgent;
+      const activeRun = state.multiAgent.active;
+      if (activeRun && msg.model !== undefined) {
+        const proj = state.projects.find((p) => p.id === projectId);
+        const slug = proj?.busAgentName ?? null;
+        if (slug !== null && activeRun.participantAgentNames.includes(slug)) {
+          // Already cached identical value? Skip the spread to keep
+          // referential equality on the noop case (this reducer fires
+          // every turn — the model rarely changes mid-session).
+          if (activeRun.modelsByProject[projectId] !== msg.model) {
+            multiAgentNext = {
+              ...state.multiAgent,
+              active: {
+                ...activeRun,
+                modelsByProject: {
+                  ...activeRun.modelsByProject,
+                  [projectId]: msg.model,
+                },
+              },
+            };
+          }
+        }
+      }
+
       return {
         ...state,
         sessionsByProject: { ...state.sessionsByProject, [projectId]: nextProjectMap },
@@ -1698,6 +1757,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // slice is now stale — drop it. Identity-preserving when there's
         // nothing to clear (undefined === undefined for shallow equality).
         authExpired: undefined,
+        multiAgent: multiAgentNext,
       };
     }
 

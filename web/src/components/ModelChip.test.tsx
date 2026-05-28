@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
-import { ModelChip, shortModelLabel } from './ModelChip';
+import { ModelChip, shortModelLabel, summarizeBusModel } from './ModelChip';
 
 // Cluster E Phase 2 (B4) — ModelChip contract:
 //   - Renders the model identifier in chip form
@@ -155,5 +155,80 @@ describe('ModelChip — tooltipExtra', () => {
     });
     const title = container.querySelector('.model-chip')?.getAttribute('title');
     expect(title).toContain('Provider: subscription');
+  });
+});
+
+// Cluster E Phase 2.x — summarizeBusModel + 'various' rendering:
+//   - undefined map → undefined (chip falls back to "default")
+//   - empty map → undefined
+//   - all entries equal → that string
+//   - multiple distinct → 'various'
+//   - empty-string entries ignored (treated as "not reported")
+//   - ModelChip renders 'various' verbatim (no claude-* trimming)
+
+describe('summarizeBusModel', () => {
+  test('undefined → undefined', () => {
+    expect(summarizeBusModel(undefined)).toBeUndefined();
+  });
+
+  test('empty map → undefined', () => {
+    expect(summarizeBusModel({})).toBeUndefined();
+  });
+
+  test('single entry → that model', () => {
+    expect(summarizeBusModel({ 1: 'claude-sonnet-4-5-20250929' })).toBe(
+      'claude-sonnet-4-5-20250929',
+    );
+  });
+
+  test('all entries identical → that model', () => {
+    expect(
+      summarizeBusModel({
+        1: 'claude-sonnet-4-5-20250929',
+        2: 'claude-sonnet-4-5-20250929',
+        3: 'claude-sonnet-4-5-20250929',
+      }),
+    ).toBe('claude-sonnet-4-5-20250929');
+  });
+
+  test('mixed entries → "various"', () => {
+    expect(
+      summarizeBusModel({
+        1: 'claude-sonnet-4-5-20250929',
+        2: 'claude-opus-4-1',
+      }),
+    ).toBe('various');
+  });
+
+  test('empty-string values ignored', () => {
+    // Only "" entries → undefined; same-model entries with stray "" → that model.
+    expect(summarizeBusModel({ 1: '' })).toBeUndefined();
+    expect(summarizeBusModel({ 1: 'claude-sonnet-4-5', 2: '' })).toBe('claude-sonnet-4-5');
+  });
+});
+
+describe('ModelChip — multi-agent "various"', () => {
+  test('renders "various" label verbatim (no claude-* trimming)', () => {
+    act(() => {
+      root.render(<ModelChip model="various" />);
+    });
+    const chip = container.querySelector('.model-chip');
+    expect(chip?.textContent).toContain('various');
+    // No "claude-" or date suffix would survive trimming anyway, but
+    // this asserts the literal sentinel survives the shortModelLabel path.
+  });
+
+  test('tooltip carries the literal "various" + tooltipExtra explanation', () => {
+    act(() => {
+      root.render(
+        <ModelChip
+          model="various"
+          tooltipExtra="Participants reported different models — open Authority to inspect per-agent."
+        />,
+      );
+    });
+    const title = container.querySelector('.model-chip')?.getAttribute('title');
+    expect(title).toContain('various');
+    expect(title).toContain('Authority');
   });
 });
