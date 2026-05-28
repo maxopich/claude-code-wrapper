@@ -644,6 +644,15 @@ export type SettingsView = {
    *  input is seeded from this and shows the operator the current effective
    *  value regardless of which precedence step won. */
   defaultHopBudget: number;
+  /**
+   * Cluster F Phase A1a (UI-A1): resolved default MAX_TURNS for
+   * single-agent runs. Precedence mirrors `defaultHopBudget`:
+   * DB setting (`max_turns`) > `MAX_TURNS` env > built-in 50.
+   * Optional for forward-compat — older servers omit and the F-A1b
+   * SettingsModal input falls back to placeholder copy without a
+   * known value.
+   */
+  defaultMaxTurns?: number;
 };
 
 export const initialState: AppState = {
@@ -1549,6 +1558,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             ? { defaultWorkspaceRootSource: msg.defaultWorkspaceRootSource }
             : {}),
           defaultHopBudget: msg.defaultHopBudget,
+          // Cluster F Phase A1a (UI-A1): forward the server-resolved
+          // MAX_TURNS so the F-A1b SettingsModal input seeds from
+          // server truth. Optional for forward-compat.
+          ...(msg.defaultMaxTurns !== undefined
+            ? { defaultMaxTurns: msg.defaultMaxTurns }
+            : {}),
         },
       };
 
