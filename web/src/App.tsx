@@ -33,6 +33,7 @@ import { GateModalsProvider } from './components/authority/GateModalsContext';
 import { AuthorityProvider } from './components/authority/AuthorityContext';
 import { AuthorityPanel } from './components/authority/AuthorityPanel';
 import { BannerStack, buildRateLimitBannerItem, type BannerStackItem } from './components/banners';
+import { ReopenProvider, useReopenActions } from './components/reopen';
 import { HELD_MESSAGES_CAP } from './store';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
@@ -105,6 +106,15 @@ export function App() {
   // ServerMsgs through this ref into the provider's per-project cache. Every
   // mounted `<AuthorityPanel>` reads from that cache via `useAuthoritySlot`.
   const authorityHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  // Cluster D Phase 5d: bridges for the ReopenProvider.
+  //   - `reopenHandlerRef` — App.tsx routes reopen_session_confirm_required
+  //     / reopen_session_failed / multi_agent_started ServerMsgs into the
+  //     provider's reducer (mirror of inbox/gate handlers).
+  //   - `reopenRequestRef` — `onNotificationAction`'s `kind:'reopen'` case
+  //     reads this to open the modal + ship the probe ClientMsg in one
+  //     call. Populated by a NotificationsBridge-style inner component.
+  const reopenHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  const reopenRequestRef = useRef<((sessionId: string) => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -124,35 +134,41 @@ export function App() {
   const authoritySend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
+  // Cluster D Phase 5d: ClientMsg sink for the ReopenProvider. Same wsRef
+  // indirection as the others — keeps the provider WS-agnostic.
+  const reopenSend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
 
-  // Cluster D Phase 5: route NotificationStack action clicks onto the WS.
-  // Phase 5 wires `archive` (used by `session_superseded` toasts) onto the
-  // matching `archive_session` ClientMsg — the toast carries the orphan
-  // session id, the server flips the row + replies `iteration_archived`,
-  // the reducer drops it from the iterations cache. Other action kinds
-  // (open_session/open_logs/reauth/resume/reopen/restart_agent) are
-  // intentionally not routed here yet — those will land alongside their
-  // respective banner/modal flows (Phase 5b reopen, Phase 6 reauth, etc.).
-  // A no-op here is the same behavior the stack had before this PR.
+  // Cluster D Phase 5/5d: route NotificationStack action clicks onto the WS.
+  //   - `archive` (used by `session_superseded` toasts, Phase 5) → ships
+  //     `archive_session` ClientMsg directly.
+  //   - `reopen` (Phase 5d) → calls `reopenRequestRef.current(sessionId)`
+  //     which opens the ReopenSessionModal AND ships the `reopen_session`
+  //     probe; the modal drives the rest of the flow (confirm_required,
+  //     typed gate, commit). The ref is populated by `ReopenBridge`
+  //     below — wsRef-style indirection so a reconnect doesn't strand it.
+  //   - Other action kinds (open_session / open_logs / reauth / resume /
+  //     restart_agent) are intentional no-ops; explicit cases keep the
+  //     discriminated-union exhaustiveness check honest so a future kind
+  //     surfaces at compile time.
   //
-  // Pinned to wsRef.current per call (not captured at mount) so a transient
-  // reconnect doesn't strand the action on a dead socket — same idiom as
-  // `inboxSend`/`gateSend`/`authoritySend` above.
+  // Pinned to wsRef.current / reopenRequestRef.current per call (not
+  // captured at mount) so a transient reconnect doesn't strand the action
+  // on a dead socket.
   const onNotificationAction = useCallback((action: NotificationAction) => {
     switch (action.kind) {
       case 'archive':
         wsRef.current?.send({ type: 'archive_session', sessionId: action.sessionId });
         return;
-      // All other kinds are intentional no-ops in Phase 5. Adding them as
-      // explicit `case` lines keeps the discriminated-union exhaustiveness
-      // check honest — when a new kind lands, this switch surfaces the gap
-      // at compile time.
+      case 'reopen':
+        reopenRequestRef.current?.(action.sessionId);
+        return;
       case 'open_session':
       case 'open_logs':
       case 'open_settings':
       case 'reauth':
       case 'resume':
-      case 'reopen':
       case 'restart_agent':
         return;
     }
@@ -164,21 +180,47 @@ export function App() {
       <InboxProvider send={inboxSend} handlerRef={inboxHandlerRef}>
         <GateModalsProvider send={gateSend} handlerRef={gateHandlerRef}>
           <AuthorityProvider send={authoritySend} handlerRef={authorityHandlerRef}>
-            <AppShell
-              wsRef={wsRef}
-              notifPushRef={notifPushRef}
-              notifDismissRef={notifDismissRef}
-              inboxHandlerRef={inboxHandlerRef}
-              gateHandlerRef={gateHandlerRef}
-              authorityHandlerRef={authorityHandlerRef}
-              onAck={handleAck}
-            />
-            <NotificationStack onAction={onNotificationAction} />
+            <ReopenProvider send={reopenSend} handlerRef={reopenHandlerRef}>
+              <ReopenBridge requestRef={reopenRequestRef} />
+              <AppShell
+                wsRef={wsRef}
+                notifPushRef={notifPushRef}
+                notifDismissRef={notifDismissRef}
+                inboxHandlerRef={inboxHandlerRef}
+                gateHandlerRef={gateHandlerRef}
+                authorityHandlerRef={authorityHandlerRef}
+                reopenHandlerRef={reopenHandlerRef}
+                onAck={handleAck}
+              />
+              <NotificationStack onAction={onNotificationAction} />
+            </ReopenProvider>
           </AuthorityProvider>
         </GateModalsProvider>
       </InboxProvider>
     </NotificationsProvider>
   );
+}
+
+/**
+ * Cluster D Phase 5d: bridge component that captures the ReopenProvider's
+ * `requestReopen` action into a ref so the outer `onNotificationAction`
+ * callback can fire it for `kind:'reopen'` clicks. Same pattern as
+ * NotificationsBridge — keeps the cross-boundary wiring honest about
+ * the provider/consumer split.
+ */
+function ReopenBridge({
+  requestRef,
+}: {
+  requestRef: React.MutableRefObject<((sessionId: string) => void) | null>;
+}) {
+  const { requestReopen } = useReopenActions();
+  useEffect(() => {
+    requestRef.current = requestReopen;
+    return () => {
+      requestRef.current = null;
+    };
+  }, [requestReopen, requestRef]);
+  return null;
 }
 
 /**
@@ -229,6 +271,14 @@ type AppShellProps = {
    * reducer; the provider caches per project for every mounted AuthorityPanel.
    */
   authorityHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cluster D Phase 5d: bridge ref the ReopenProvider populates. Routes
+   * `reopen_session_confirm_required` / `reopen_session_failed` /
+   * `multi_agent_started` envelopes into the provider's reducer so the
+   * modal can transition through probe → confirm → commit → close (or
+   * surface error states).
+   */
+  reopenHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
@@ -240,6 +290,7 @@ function AppShell({
   inboxHandlerRef,
   gateHandlerRef,
   authorityHandlerRef,
+  reopenHandlerRef,
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -496,6 +547,17 @@ function AppShell({
             authorityHandlerRef.current?.(msg);
           } catch (err) {
             console.error('[authority] handler threw', err);
+          }
+          // Cluster D Phase 5d: hand to the ReopenProvider bridge so
+          // `reopen_session_confirm_required` / `reopen_session_failed` /
+          // `multi_agent_started` envelopes drive the modal's state
+          // machine. Same narrow-filter posture — non-reopen messages
+          // (including multi_agent_started outside an in-flight reopen)
+          // are silently ignored by the reducer's sessionId match.
+          try {
+            reopenHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[reopen] handler threw', err);
           }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
