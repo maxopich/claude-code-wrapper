@@ -95,7 +95,12 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       severity: 'warn',
       sessionId: OLDER_SID,
       sticky: true,
-      action: { kind: 'reopen', sessionId: OLDER_SID },
+      // Cluster D Phase 5: action flipped from {kind:'reopen'} to
+      // {kind:'archive'} — reopen needs the workspace-diff modal (5b)
+      // and would be a dead-end on the toast until then. App.tsx's
+      // onNotificationAction routes `archive` to `archive_session`
+      // which the ws/server.ts handler now implements.
+      action: { kind: 'archive', sessionId: OLDER_SID },
       dedupeKey: `session_superseded:${OLDER_SID}`,
       // Cluster A Phase 6: §7 floor sub-code label so the inbox filter
       // chip can group the row with `reconstructed` / `reconstruction_failed`.

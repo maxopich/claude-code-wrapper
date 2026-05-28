@@ -3,6 +3,7 @@ import type {
   ClientMsg,
   MultiAgentLifecycle,
   MultiAgentTemplate,
+  NotificationAction,
   NotificationEnvelope,
   ServerMsg,
   SessionPermissionMode,
@@ -124,6 +125,39 @@ export function App() {
     wsRef.current?.send(msg);
   }, []);
 
+  // Cluster D Phase 5: route NotificationStack action clicks onto the WS.
+  // Phase 5 wires `archive` (used by `session_superseded` toasts) onto the
+  // matching `archive_session` ClientMsg — the toast carries the orphan
+  // session id, the server flips the row + replies `iteration_archived`,
+  // the reducer drops it from the iterations cache. Other action kinds
+  // (open_session/open_logs/reauth/resume/reopen/restart_agent) are
+  // intentionally not routed here yet — those will land alongside their
+  // respective banner/modal flows (Phase 5b reopen, Phase 6 reauth, etc.).
+  // A no-op here is the same behavior the stack had before this PR.
+  //
+  // Pinned to wsRef.current per call (not captured at mount) so a transient
+  // reconnect doesn't strand the action on a dead socket — same idiom as
+  // `inboxSend`/`gateSend`/`authoritySend` above.
+  const onNotificationAction = useCallback((action: NotificationAction) => {
+    switch (action.kind) {
+      case 'archive':
+        wsRef.current?.send({ type: 'archive_session', sessionId: action.sessionId });
+        return;
+      // All other kinds are intentional no-ops in Phase 5. Adding them as
+      // explicit `case` lines keeps the discriminated-union exhaustiveness
+      // check honest — when a new kind lands, this switch surfaces the gap
+      // at compile time.
+      case 'open_session':
+      case 'open_logs':
+      case 'open_settings':
+      case 'reauth':
+      case 'resume':
+      case 'reopen':
+      case 'restart_agent':
+        return;
+    }
+  }, []);
+
   return (
     <NotificationsProvider onAck={handleAck}>
       <NotificationsBridge pushRef={notifPushRef} dismissRef={notifDismissRef} />
@@ -139,7 +173,7 @@ export function App() {
               authorityHandlerRef={authorityHandlerRef}
               onAck={handleAck}
             />
-            <NotificationStack />
+            <NotificationStack onAction={onNotificationAction} />
           </AuthorityProvider>
         </GateModalsProvider>
       </InboxProvider>
