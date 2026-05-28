@@ -203,6 +203,121 @@ export function isStopReasonCode(v: unknown): v is StopReasonCode {
   return typeof v === 'string' && STOP_REASON_CODES.has(v as StopReasonCode);
 }
 
+/**
+ * Cluster C Phase 4a (Part 2 backend foundation, spec §3 "Reason code
+ * enum"): enumerated reason codes for the per-agent control verbs
+ * (mute/unmute/pause/resume/kick). This is the SUPERSET of the
+ * single-agent `StopReasonCode` from §4.2 — Stop's `done_early`
+ * doesn't make sense for mute/kick of one of N workers in an
+ * orchestrator session, so it's intentionally absent here.
+ *
+ * `other` requires a non-empty `reasonText` supplement (Phase 4b
+ * handler enforces the pairing, same shape as `stop_reason`). `cost`
+ * is renamed to `cost_ceiling` per the spec's verb-side enum — the
+ * single-agent enum's bare `cost` was the older shorthand.
+ */
+export type ControlReasonCode =
+  | 'runaway_loop'
+  | 'off_task'
+  | 'cost_ceiling'
+  | 'tool_misuse'
+  | 'incorrect_output'
+  | 'forensics'
+  | 'topology_repair'
+  | 'other';
+
+export const CONTROL_REASON_CODES: ReadonlySet<ControlReasonCode> = new Set([
+  'runaway_loop',
+  'off_task',
+  'cost_ceiling',
+  'tool_misuse',
+  'incorrect_output',
+  'forensics',
+  'topology_repair',
+  'other',
+]);
+
+export function isControlReasonCode(v: unknown): v is ControlReasonCode {
+  return typeof v === 'string' && CONTROL_REASON_CODES.has(v as ControlReasonCode);
+}
+
+/**
+ * Cluster C Phase 4a: kick variants. v1 server accepts only `'drain'`
+ * (soft kick: stop routing, let in-flight turn drain). `'hard'` is
+ * carried on the wire so the client-side enum is forward-compatible,
+ * but Phase 4b's handler returns `wrapper_error` with code
+ * `hard_kill_unsupported_v1` until the per-agent AbortController
+ * refactor (spec §5.2 "kick (hard)") lands.
+ */
+export type KickMode = 'drain' | 'hard';
+
+export const KICK_MODES: ReadonlySet<KickMode> = new Set(['drain', 'hard']);
+
+export function isKickMode(v: unknown): v is KickMode {
+  return typeof v === 'string' && KICK_MODES.has(v as KickMode);
+}
+
+/**
+ * Cluster C Phase 4a: pause-expiry actions. `auto_resume` lets the
+ * paused participant pick back up where it left off; `auto_kick`
+ * escalates to a kick (drain mode) on expiry — used for the operator
+ * who's setting a deadline ("if I haven't come back in 10m, get this
+ * worker out of the session"). The expiry handler itself (timer +
+ * dispatch) lands in Phase 4c with the dedicated pause-timeout work.
+ */
+export type PauseExpiryAction = 'auto_resume' | 'auto_kick';
+
+export const PAUSE_EXPIRY_ACTIONS: ReadonlySet<PauseExpiryAction> = new Set([
+  'auto_resume',
+  'auto_kick',
+]);
+
+export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
+  return typeof v === 'string' && PAUSE_EXPIRY_ACTIONS.has(v as PauseExpiryAction);
+}
+
+/**
+ * Cluster C Phase 4a: failure codes the Phase 4b handlers may return
+ * via `wrapper_error` to reject a control verb. These are NOT safety
+ * audit `reasonCode`s — they're operator-facing diagnostic codes.
+ *
+ *   - chain_mute_unsupported    — Mute requested in chain mode (spec §5.3)
+ *   - chain_topology_broken     — Kick of a chain-middle participant
+ *   - hard_kill_unsupported_v1  — Kick mode='hard' before AbortController refactor
+ *   - already_in_state          — Mute on muted / pause on paused / etc.
+ *   - participant_not_found     — Unknown (sessionId, projectId) pair
+ *   - participant_already_kicked — Operating on a kicked participant
+ *   - orchestrator_cannot_kick  — Kick targeted at the orchestrator row
+ *   - pause_timeout_required    — `timeoutMs` missing or non-positive
+ *   - pause_expiry_action_invalid — `expiryAction` not one of PAUSE_EXPIRY_ACTIONS
+ */
+export type ControllabilityFailureCode =
+  | 'chain_mute_unsupported'
+  | 'chain_topology_broken'
+  | 'hard_kill_unsupported_v1'
+  | 'already_in_state'
+  | 'participant_not_found'
+  | 'participant_already_kicked'
+  | 'orchestrator_cannot_kick'
+  | 'pause_timeout_required'
+  | 'pause_expiry_action_invalid';
+
+export const CONTROLLABILITY_FAILURE_CODES: ReadonlySet<ControllabilityFailureCode> = new Set([
+  'chain_mute_unsupported',
+  'chain_topology_broken',
+  'hard_kill_unsupported_v1',
+  'already_in_state',
+  'participant_not_found',
+  'participant_already_kicked',
+  'orchestrator_cannot_kick',
+  'pause_timeout_required',
+  'pause_expiry_action_invalid',
+]);
+
+export function isControllabilityFailureCode(v: unknown): v is ControllabilityFailureCode {
+  return typeof v === 'string' && CONTROLLABILITY_FAILURE_CODES.has(v as ControllabilityFailureCode);
+}
+
 /** Per-session permission mode the wrapper exposes to the UI. */
 export type SessionPermissionMode = 'default' | 'acceptEdits';
 
@@ -982,6 +1097,83 @@ export type ClientMsg =
       interruptAckId: string;
       reasonCode: StopReasonCode;
       reasonText?: string;
+    }
+  /**
+   * Cluster C Phase 4a (Part 2 backend foundation, spec §5.1): per-agent
+   * mute / unmute / pause / resume / kick. These ClientMsgs define the
+   * wire shape for the operator's per-worker control verbs in
+   * orchestrator + chain bus sessions. The Phase 4a slice ships the
+   * shape + the persistence layer; the WS handlers and the
+   * router/runner enforcement land in Phase 4b.
+   *
+   * Wire identity = (sessionId, projectId) — same composite key the
+   * multi_agent_participants table uses. `sessionId` is the bus
+   * session's `multi_agent_sessions.id`; `projectId` identifies the
+   * specific participant within that session's roster.
+   *
+   * Every action requires an enumerated `reasonCode` (the §3 enum)
+   * plus an optional `reasonText` ('other' requires it, validated at
+   * the wire). The reason becomes part of the safety_audit row that
+   * the Phase 4b handler dual-writes before the wire ack.
+   *
+   * Topology guards (Phase 4b enforces, codes defined in
+   * `ControllabilityFailureCode` above):
+   *   - Mute in chain mode → `chain_mute_unsupported`
+   *   - Kick of chain-middle participant → `chain_topology_broken`
+   *   - Kick mode='hard' (v1) → `hard_kill_unsupported_v1`
+   *   - Kick of orchestrator row → `orchestrator_cannot_kick`
+   */
+  | {
+      type: 'mute_participant';
+      sessionId: string;
+      projectId: number;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+    }
+  | {
+      type: 'unmute_participant';
+      sessionId: string;
+      projectId: number;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+    }
+  | {
+      /**
+       * Pause: hold scheduling for this participant. `timeoutMs` is
+       * REQUIRED per spec §5.6 — the wire validator (Phase 4b) rejects
+       * a missing or non-positive value with `pause_timeout_required`.
+       * `expiryAction` determines auto-behavior on expiry: resume
+       * silently or auto-kick with the pause's `reasonCode` carried
+       * forward.
+       */
+      type: 'pause_participant';
+      sessionId: string;
+      projectId: number;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+      timeoutMs: number;
+      expiryAction: PauseExpiryAction;
+    }
+  | {
+      type: 'resume_participant';
+      sessionId: string;
+      projectId: number;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+    }
+  | {
+      /**
+       * Remove a participant from the active routing set. v1 server
+       * accepts only `mode: 'drain'` (soft kick — drop routing
+       * immediately, drain in-flight turn in background). `'hard'`
+       * returns wrapper_error until per-agent AbortController lands.
+       */
+      type: 'kick_participant';
+      sessionId: string;
+      projectId: number;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+      mode: KickMode;
     };
 
 // ---- Server → Browser ----
@@ -2007,6 +2199,54 @@ export type ServerMsg =
        * `stop_reason` messages with a mismatched id.
        */
       interruptAckId: string;
+    }
+  /**
+   * Cluster C Phase 4a (Part 2 backend foundation, spec §5.7 + §5.9):
+   * state-change echoes for the per-agent control verbs. One envelope
+   * per verb so the client reducer (Phase 4d) can dispatch on `type`
+   * without unpacking a union sub-tag. Server emits AFTER the
+   * per_agent_control DB write succeeds AND after the safety_audit
+   * dual-write (Phase 4b's handler order); the client treats the echo
+   * as the canonical "this state is now true" signal and reconciles
+   * any optimistic flip.
+   *
+   * `actor` field is a forward-compat hook (always 'operator' in v1).
+   * Multi-operator forensics (XCT-1) reads it for "who muted X?" but
+   * the wire shape doesn't need a separate enum yet.
+   */
+  | {
+      type: 'participant_mute_changed';
+      sessionId: string;
+      projectId: number;
+      muted: boolean;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+      actor: 'operator';
+      /** Server epoch ms of the state flip. */
+      ts: number;
+    }
+  | {
+      type: 'participant_pause_changed';
+      sessionId: string;
+      projectId: number;
+      /** Absolute epoch ms when auto-expiry will fire; null for resume. */
+      pausedUntil: number | null;
+      /** Action to fire on expiry when paused; null on resume. */
+      expiryAction: PauseExpiryAction | null;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+      actor: 'operator';
+      ts: number;
+    }
+  | {
+      type: 'participant_kicked';
+      sessionId: string;
+      projectId: number;
+      mode: KickMode;
+      reasonCode: ControlReasonCode;
+      reasonText?: string;
+      actor: 'operator';
+      ts: number;
     };
 
 /**
