@@ -892,6 +892,26 @@ export type ClientMsg =
        */
       type: 'cancel_auth_refresh';
       runId: string;
+    }
+  | {
+      /**
+       * Cluster D Phase 8a (spec §8.5): operator request for a snapshot of
+       * the `recovery_log` table. The reply (`recovery_log_snapshot`)
+       * carries the per-class aggregates the regression-gate queries name
+       * (sweep reopen rate, auth resume choice ratio, count + reachedFinal
+       * + median time-to-recovery per failure class) plus the N most-recent
+       * rows for the inspector's "recent activity" list.
+       *
+       * `recentLimit` is opt-in; the server defaults to 100 when absent.
+       * Values are clamped server-side to [1, 100] so a buggy/malicious
+       * client can't pull every row in one request. Pagination is left
+       * for a future cursor field — the Phase 8b inspector renders one
+       * page only.
+       *
+       * No auth gate — `recovery_log` is local-operator forensics.
+       */
+      type: 'get_recovery_log_snapshot';
+      recentLimit?: number;
     };
 
 // ---- Server → Browser ----
@@ -1833,6 +1853,43 @@ export type ServerMsg =
       reason: 'already_running' | 'spawn_failed';
       existingRunId?: string;
       error?: string;
+    }
+  | {
+      /**
+       * Cluster D Phase 8a (spec §8.5): reply to `get_recovery_log_snapshot`.
+       * Composes the three named regression-gate queries + the recent
+       * activity log into one envelope so the Phase 8b inspector renders
+       * the full panel without a second round-trip.
+       *
+       * `aggregates` — one entry per failure_class observed; classes that
+       * have never been recorded are absent (callers render a "no data
+       * yet" placeholder rather than 0). `count` includes still-running
+       * rows; `reachedFinalRate` excludes them from BOTH numerator and
+       * denominator.
+       *
+       * `sweepReopenRate` — null when no `failure_class='sweep'` rows
+       * exist. `rate` is `reopens / sweeps`; `sweeps` is the absolute
+       * denominator so the UI can show "47% reopened (×6 of ×13)".
+       *
+       * `authResumeChoiceRatio` — null when no `failure_class='auth_expired'`
+       * rows exist. Phase 6 doesn't yet write these (the in-session resume
+       * path is wired Phase 6+ but operator_action='in_session_resume' is
+       * not emitted today); the field is reserved + always-present so the
+       * Phase 8b inspector can render the placeholder uniformly.
+       *
+       * `recent` — newest-first, capped at the request's `recentLimit`
+       * (server-clamped to [1, 100]; defaults to 100). Includes every
+       * column the inspector renders: failure class, operator action,
+       * outcome, time-to-recovery, session lineage, operator id.
+       *
+       * Always succeeds — the table is local SQLite and read errors
+       * surface as `wrapper_error` instead.
+       */
+      type: 'recovery_log_snapshot';
+      aggregates: RecoveryClassAggregate[];
+      sweepReopenRate: { rate: number; sweeps: number } | null;
+      authResumeChoiceRatio: { inSessionRate: number; inSession: number; newSession: number } | null;
+      recent: RecoveryLogEntry[];
     };
 
 /**
@@ -2524,3 +2581,89 @@ export const MULTI_AGENT_EVENT_KINDS: ReadonlySet<MultiAgentEventKind> = new Set
 export function isMultiAgentEventKind(v: unknown): v is MultiAgentEventKind {
   return typeof v === 'string' && MULTI_AGENT_EVENT_KINDS.has(v as MultiAgentEventKind);
 }
+
+/**
+ * Cluster D Phase 8a (spec §8.5): enumerated failure_class column for the
+ * recovery_log table. Restated on the wire so the Phase 8b client doesn't
+ * have to import the server repo to discriminate the categories.
+ *
+ *   - 'rate_limit'   — upstream rate-limit retry (bus auto or single-agent)
+ *   - 'auth_expired' — operator chose to refresh auth then resume / start new
+ *   - 'sweep'        — operator archived or reopened a swept iteration
+ *   - 'chain_crash'  — chain mode crash that couldn't be reconstructed (Phase 7)
+ *   - 'other'        — escape hatch; new writers should bias toward extending
+ *                      this union rather than reusing 'other' silently.
+ */
+export type RecoveryFailureClass =
+  | 'rate_limit'
+  | 'auth_expired'
+  | 'sweep'
+  | 'chain_crash'
+  | 'other';
+
+/**
+ * Cluster D Phase 8a: enumerated operator_action column. Mirrors the
+ * server repo's union — see `server/src/repo/recovery_log.ts` for the
+ * write-site semantics of each one.
+ */
+export type RecoveryOperatorAction =
+  | 'auto_retry'
+  | 'manual_retry'
+  | 'new_session'
+  | 'in_session_resume'
+  | 'archive'
+  | 'reopen'
+  | 'resume_from_hop'
+  | 'abort';
+
+/**
+ * Cluster D Phase 8a: nullable outcome column. The row lands with
+ * `outcome=null` then later code backfills via `updateRecoveryOutcome`
+ * once the session reaches a terminal state. The wire entry carries the
+ * null faithfully so the inspector can render "still running" distinct
+ * from "we never recorded an outcome".
+ */
+export type RecoveryOutcomeStatus = 'reached_final' | 'failed_again' | 'still_running';
+
+/**
+ * Cluster D Phase 8a: single `recovery_log` row in wire form. CamelCase
+ * column names; null preserved where the column is nullable. The Phase 8b
+ * inspector renders one of these per row in the activity timeline.
+ *
+ * `invariantResultsJson` is reserved for Phase 8's invariants pipeline
+ * (spec §8.4) and renders as opaque JSON for now; no writer populates it
+ * yet so it will typically be null in current snapshots.
+ */
+export type RecoveryLogEntry = {
+  id: number;
+  ts: number;
+  sessionId: string | null;
+  parentSessionId: string | null;
+  operatorId: string;
+  failureClass: RecoveryFailureClass;
+  operatorAction: RecoveryOperatorAction;
+  timeToRecoveryMs: number | null;
+  outcome: RecoveryOutcomeStatus | null;
+  forensicsId: number | null;
+  invariantResultsJson: string | null;
+};
+
+/**
+ * Cluster D Phase 8a: per-failure-class rollup carried by
+ * `recovery_log_snapshot`. Mirrors the server-side `ClassAggregate`
+ * returned by `repo/recovery_log.aggregateByClass()` so the inspector
+ * can render the regression-gate aggregates the spec §8.5 names without
+ * doing its own math.
+ *
+ * `count` includes still-running rows; `reachedFinalRate` and
+ * `medianTimeToRecoveryMs` exclude them (the rate denominator is
+ * "rows with a non-null outcome"; the median only sees rows with a
+ * non-null time-to-recovery). Both inner fields are nullable when the
+ * filtered subset is empty.
+ */
+export type RecoveryClassAggregate = {
+  failureClass: RecoveryFailureClass;
+  count: number;
+  reachedFinalRate: number | null;
+  medianTimeToRecoveryMs: number | null;
+};

@@ -1894,6 +1894,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // ship the spawn directly via wsRef.send from the banner action.
       return state;
 
+    case 'recovery_log_snapshot':
+      // Cluster D Phase 8a: the RecoveryLogInspector (Phase 8b) will own
+      // this via a sibling context (the snapshot is short-lived inspector
+      // state — no need to live in the main store and churn the whole
+      // tree on every refresh). Same pattern as inbox_snapshot above.
+      // Reducer no-op keeps the union exhaustive until that context
+      // lands; the matching ClientMsg (get_recovery_log_snapshot) ships
+      // the request directly via wsRef.send from the inspector button.
+      return state;
+
     case 'inbox_snapshot':
       // Cluster A Phase 5: the inbox panel (`<NotificationInbox/>`) owns
       // this state via a sibling context (`InboxContext`) so the main

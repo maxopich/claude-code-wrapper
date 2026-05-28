@@ -156,6 +156,30 @@ export function listForSession(sessionId: string): RecoveryLogRow[] {
 }
 
 /**
+ * Cluster D Phase 8a (spec §8.5): newest-first page of recovery rows for
+ * the RecoveryLogInspector. Different from `listForSession` two ways:
+ *
+ *   1. Not session-scoped — returns rows across every session, including
+ *      process-level rows with `session_id=null`.
+ *   2. Descending by `ts` so the inspector sees the most recent activity
+ *      first; capped at `limit` (caller is responsible for clamping the
+ *      value passed in to a sane upper bound — the handler does the
+ *      [1, 100] clamp, not the repo).
+ *
+ * Ties on `ts` (sub-ms inserts in tests, mostly) break on `id DESC` so
+ * the order is total — never returns the same row at different positions
+ * across calls with the same args.
+ */
+export function listRecent(limit: number): RecoveryLogRow[] {
+  return getDb()
+    .prepare<
+      [number],
+      RecoveryLogRow
+    >('SELECT * FROM recovery_log ORDER BY ts DESC, id DESC LIMIT ?')
+    .all(limit);
+}
+
+/**
  * Aggregate roll-up keyed by failure_class — the at-a-glance numbers
  * the spec's regression-gate queries consume:
  *
