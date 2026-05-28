@@ -7,10 +7,12 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { addParticipant, createMultiAgentSession } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
+import type { PauseExpiryAction } from '@cebab/shared/protocol';
 import {
   buildParticipantKickedMsg,
   buildParticipantMuteChangedMsg,
   buildParticipantPauseChangedMsg,
+  executeExpireParticipant,
   executeKickParticipant,
   executeMuteParticipant,
   executePauseParticipant,
@@ -866,5 +868,244 @@ describe('buildParticipantKickedMsg', () => {
       ts: 1,
     });
     expect('reasonText' in env).toBe(false);
+  });
+});
+
+// ===== Cluster C Phase 4c2: pause expiry executor =====
+
+function makeFakeExpireHandle() {
+  const resumed = new Set<string>();
+  const kicked = new Set<string>();
+  return {
+    resumeAgent: vi.fn((name: string) => {
+      if (resumed.has(name)) return false;
+      resumed.add(name);
+      return true;
+    }),
+    kickAgent: vi.fn((name: string) => {
+      if (kicked.has(name)) return false;
+      kicked.add(name);
+      return true;
+    }),
+  };
+}
+
+function buildExpireEntry(
+  workerId: number,
+  overrides: Partial<{
+    pausedUntil: number;
+    expiryAction: PauseExpiryAction;
+    reasonCode: 'off_task' | 'runaway_loop' | 'cost_ceiling' | 'topology_repair' | 'other';
+    reasonText: string | null;
+  }> = {},
+) {
+  return {
+    sessionId: 'sess-1',
+    projectId: workerId,
+    agentName: 'worker-slug',
+    pausedUntil: Date.now() + 60_000,
+    expiryAction: 'auto_resume' as PauseExpiryAction,
+    reasonCode: 'off_task' as const,
+    reasonText: null as string | null,
+    ...overrides,
+  };
+}
+
+describe('executeExpireParticipant — auto_resume', () => {
+  test('writes pause.expired_without_resume audit + clears DB + calls handle.resumeAgent', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_resume');
+    const handle = makeFakeExpireHandle();
+    const entry = buildExpireEntry(workerId, { expiryAction: 'auto_resume' });
+    const result = executeExpireParticipant({
+      entry,
+      orchestratorHandle: handle,
+      now: () => 1_700_000_000_000,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('auto_resume');
+    expect(result.kickAuditId).toBeUndefined();
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+    expect(handle.resumeAgent).toHaveBeenCalledWith('worker-slug');
+    const audit = getDb()
+      .prepare<
+        [],
+        { kind: string; reason_code: string; payload_json: string; agent_id: string }
+      >("SELECT kind, reason_code, payload_json, agent_id FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+      .get();
+    expect(audit?.kind).toBe('pause.expired_without_resume');
+    expect(audit?.reason_code).toBe('off_task');
+    expect(audit?.agent_id).toBe('worker-slug');
+    const payload = JSON.parse(audit!.payload_json) as {
+      expiryAction: string;
+      pausedUntil: number;
+      divergedState?: string;
+    };
+    expect(payload.expiryAction).toBe('auto_resume');
+    expect(payload.divergedState).toBeUndefined(); // state wasn't diverged
+  });
+
+  test('reasonText carried into the audit payload when set', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_resume');
+    const entry = buildExpireEntry(workerId, {
+      reasonText: 'tokens hitting ceiling',
+      reasonCode: 'cost_ceiling',
+    });
+    executeExpireParticipant({
+      entry,
+      orchestratorHandle: makeFakeExpireHandle(),
+    });
+    const audit = getDb()
+      .prepare<
+        [],
+        { payload_json: string }
+      >("SELECT payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+      .get();
+    const payload = JSON.parse(audit!.payload_json) as { reasonText: string };
+    expect(payload.reasonText).toBe('tokens hitting ceiling');
+  });
+});
+
+describe('executeExpireParticipant — auto_kick', () => {
+  test('writes BOTH trigger audit + agent_control.kicked audit; flips DB + router', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_kick');
+    const handle = makeFakeExpireHandle();
+    const entry = buildExpireEntry(workerId, {
+      expiryAction: 'auto_kick',
+      reasonCode: 'runaway_loop',
+      reasonText: 'still emitting after pause',
+    });
+    const result = executeExpireParticipant({
+      entry,
+      orchestratorHandle: handle,
+      now: () => 1_700_000_000_000,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('auto_kick');
+    expect(result.kickedAt).toBe(1_700_000_000_000);
+    expect(result.kickAuditId).toBeDefined();
+    expect(result.kickAuditId).not.toBe(result.triggerAuditId);
+
+    expect(getControlState('sess-1', workerId)?.kickedAt).toBe(1_700_000_000_000);
+    expect(getControlState('sess-1', workerId)?.kickedMode).toBe('drain');
+    // Pause column also cleared as part of the kick escalation.
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+    expect(handle.kickAgent).toHaveBeenCalledWith('worker-slug');
+    expect(handle.resumeAgent).not.toHaveBeenCalled();
+
+    // Two safety_audit rows: the trigger + the resulting kick.
+    const audits = getDb()
+      .prepare<
+        [],
+        { kind: string; reason_code: string; payload_json: string }
+      >("SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked' ORDER BY ts ASC")
+      .all();
+    expect(audits.map((r) => r.kind)).toEqual([
+      'pause.expired_without_resume',
+      'agent_control.kicked',
+    ]);
+    // Kick audit's payload tags the trigger so forensic queries can
+    // distinguish operator-kicked rows from expiry-escalated rows.
+    const kickPayload = JSON.parse(audits[1]!.payload_json) as {
+      triggerKind: string;
+      triggerAuditId: string;
+      mode: string;
+    };
+    expect(kickPayload.triggerKind).toBe('pause.expired_without_resume');
+    expect(kickPayload.triggerAuditId).toBe(result.triggerAuditId);
+    expect(kickPayload.mode).toBe('drain');
+  });
+});
+
+describe('executeExpireParticipant — diverged state (defense-in-depth)', () => {
+  test('participant resumed between schedule + fire → noop_diverged + audit only', () => {
+    const { workerId } = seedSession();
+    // Pause was scheduled, but operator already resumed (paused_until is NULL).
+    const handle = makeFakeExpireHandle();
+    const entry = buildExpireEntry(workerId);
+    const result = executeExpireParticipant({
+      entry,
+      orchestratorHandle: handle,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('noop_diverged');
+    expect(result.divergedState).toBe('resumed');
+    expect(handle.resumeAgent).not.toHaveBeenCalled();
+    expect(handle.kickAgent).not.toHaveBeenCalled();
+    // Trigger audit STILL wrote so the forensic trail captures the
+    // timer fire (even though no state changed).
+    const audit = getDb()
+      .prepare<
+        [],
+        { payload_json: string }
+      >("SELECT payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+      .get();
+    const payload = JSON.parse(audit!.payload_json) as { divergedState: string };
+    expect(payload.divergedState).toBe('resumed');
+  });
+
+  test('participant kicked between schedule + fire → noop_diverged kicked', () => {
+    const { workerId } = seedSession();
+    setParticipantKicked('sess-1', workerId, Date.now() - 1_000, 'drain');
+    const handle = makeFakeExpireHandle();
+    const entry = buildExpireEntry(workerId, { expiryAction: 'auto_kick' });
+    const result = executeExpireParticipant({
+      entry,
+      orchestratorHandle: handle,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('noop_diverged');
+    expect(result.divergedState).toBe('kicked');
+    expect(handle.kickAgent).not.toHaveBeenCalled();
+  });
+
+  test('participant deleted between schedule + fire → noop_diverged participant_missing', () => {
+    const handle = makeFakeExpireHandle();
+    // No seeded participant — getControlState returns undefined.
+    const entry = buildExpireEntry(99_999);
+    const result = executeExpireParticipant({
+      entry,
+      orchestratorHandle: handle,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.divergedState).toBe('participant_missing');
+    expect(handle.kickAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeExpireParticipant — missing live handle', () => {
+  test('auto_resume still writes audit + clears DB; warn logged about handle', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_resume');
+    const result = executeExpireParticipant({
+      entry: buildExpireEntry(workerId),
+      orchestratorHandle: undefined,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('auto_resume');
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  test('auto_kick still flips DB + writes both audits; warn logged about handle', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_kick');
+    const result = executeExpireParticipant({
+      entry: buildExpireEntry(workerId, { expiryAction: 'auto_kick' }),
+      orchestratorHandle: undefined,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.action).toBe('auto_kick');
+    expect(getControlState('sess-1', workerId)?.kickedAt).not.toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
   });
 });
