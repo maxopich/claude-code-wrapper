@@ -1151,6 +1151,36 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
+    case 'iteration_archived': {
+      // Cluster D Phase 5 (spec §6.4 / BE-D22): reply to
+      // `archive_session`. The server already flipped `archived = 1`
+      // on the row and writes a `recovery_log` entry; the client just
+      // needs to drop the row from the iterations cache so the
+      // IterationsList no longer renders it. `list_archived_iterations`
+      // (later phase) will provide an opt-in surface for browsing
+      // archived rows.
+      //
+      // Defensive on `iterations === null` (the cache hasn't been
+      // populated yet, possible if the operator archives via the toast
+      // before opening the iterations panel) — nothing to drop, no-op.
+      //
+      // `removedArtifacts` from the envelope is intentionally ignored
+      // here: the iteration cache doesn't surface disk state, so the
+      // boolean is purely confirmation for the operator (logged via
+      // the dispatcher's normal envelope flow if/when a future phase
+      // wires a follow-up toast).
+      const existing = state.multiAgent.iterations;
+      if (existing === null) return state;
+      const next = existing.filter((it) => it.sessionId !== msg.sessionId);
+      // Identity-preserve when nothing matched — keeps useReducer from
+      // forcing a no-op re-render in the IterationsList children.
+      if (next.length === existing.length) return state;
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, iterations: next },
+      };
+    }
+
     case 'templates':
       // Reply to list/save/delete_template. Replace wholesale — the
       // server is the source of truth (same contract as `iterations`).

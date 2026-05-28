@@ -346,11 +346,17 @@ function markCrashedAndAnnounceSuperseded(
   // would require another `attemptResumeMultiAgent` to find the same
   // orphan still in activeRows, which it wouldn't after the crash mark)
   // collapses. Sticky=true so a reload still shows it from the inbox
-  // replay (the dispatcher persists sticky operational per BE-4). The
-  // `reopen` action references the orphan id — UX-6 wires the dock CTA
-  // to a `resume_multi_agent` ClientMsg (already supported by the WS
-  // layer) which the operator may choose to fire after acknowledging the
-  // supplant.
+  // replay (the dispatcher persists sticky operational per BE-4).
+  //
+  // Cluster D Phase 5: the action is `archive` (one-click acknowledge
+  // that removes the row from the iterations list) rather than the
+  // spec's eventual `reopen` (workspace-diff modal, BE-D19/BE-D21).
+  // Reopen requires the confirmation modal + typed "reopen" gate that
+  // Phase 5b adds; until then a `reopen` button on this toast would be
+  // a dead-end. Archive is the strictly-safer default per the spec's
+  // risk-graded ordering (`Archive primary` in §6.5), so making it the
+  // toast's single-action choice is a clean partial implementation
+  // rather than a regression.
   if (callbacks.sendServerMsg) {
     const result = emitNotification(
       {
@@ -360,7 +366,7 @@ function markCrashedAndAnnounceSuperseded(
         title: 'A prior session was superseded',
         message: `Session ${orphanSessionId.slice(0, 8)} was marked crashed because a newer iteration started.`,
         sessionId: orphanSessionId,
-        action: { kind: 'reopen', sessionId: orphanSessionId },
+        action: { kind: 'archive', sessionId: orphanSessionId },
         sticky: true,
         // Cluster A Phase 6: §7 floor sub-code label so the inbox panel's
         // SessionRecoveredReasonCode filter chip can group this row with

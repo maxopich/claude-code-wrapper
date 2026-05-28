@@ -415,6 +415,47 @@ export type ClientMsg =
     }
   | {
       /**
+       * Cluster D Phase 5 (spec §6.4 / BE-D22): archive a single
+       * multi-agent session so it no longer appears in the default
+       * iterations browser. The row is preserved (`archived = 1` on
+       * `multi_agent_sessions`); a later `list_archived_iterations`
+       * surface (not in v1) can resurface it on demand. The dispatcher's
+       * `session_superseded` toast carries an Archive action that fires
+       * this exact verb — the operator's one-click "yes, I'm aware the
+       * older row was crashed because a newer iteration took over;
+       * stop reminding me" affordance.
+       *
+       * `removeArtifacts` is opt-in: default false leaves the per-session
+       * folder on disk for post-mortem inspection (consistent with
+       * `clear_iterations` which never touches disk). Setting it to true
+       * rm-rfs the folder after the row flip succeeds — useful when the
+       * operator wants to drop a swept temp session entirely. Per BE-D23
+       * the handler honors the flag only when the field is explicitly
+       * `true`; any other value (including absent) is treated as false.
+       *
+       * Rejects with `wrapper_error` when:
+       *   - the session id doesn't exist (no row to flip),
+       *   - the session is still `running` (active sessions are not
+       *     archivable — operator must Stop or End first).
+       * Already-archived rows return success silently (the UPDATE matches
+       * 0 rows, but the operator's intent is satisfied — idempotent).
+       *
+       * Server replies with `iteration_archived` carrying the flipped
+       * `sessionId` + a `removedArtifacts: boolean` confirming whether
+       * disk artifacts were actually wiped. The reducer uses that to
+       * drop the row from the iterations cache without a second
+       * round-trip.
+       *
+       * Writes one `recovery_log` row per call (BE-D24):
+       *   { failure_class: 'sweep', operator_action: 'archive' }.
+       */
+      type: 'archive_session';
+      sessionId: string;
+      /** Default false; true rm-rfs the per-session folder after the flip. */
+      removeArtifacts?: boolean;
+    }
+  | {
+      /**
        * Mutate the lifecycle of a running multi-agent session
        * (`persistent` ↔ `temp`). Only affects teardown behavior — the
        * session keeps running unchanged; on End/Stop the new value
@@ -1112,6 +1153,31 @@ export type ServerMsg =
        */
       type: 'iterations';
       items: IterationSummary[];
+    }
+  | {
+      /**
+       * Cluster D Phase 5 (spec §6.4 / BE-D22, BE-D23): reply to
+       * `archive_session`. Carries the flipped `sessionId` so the client
+       * reducer can drop the matching `iterations` cache entry without a
+       * second `list_iterations` round-trip, and `removedArtifacts` to
+       * confirm whether disk wipe was actually executed (the operator
+       * asked for `removeArtifacts: true` AND the folder existed and
+       * was deletable).
+       *
+       * Always fires on a successful archive — including the idempotent
+       * "already archived" case (the client treats both the same: drop
+       * from cache). Failures (running session, unknown id) come back as
+       * `wrapper_error` instead, never this envelope.
+       *
+       * Forward-compat note: when reopen/unarchive lands in Phase 5b,
+       * the unarchive surface will get its own paired ServerMsg
+       * (`iteration_unarchived`) — these stay distinct so a single
+       * dispatch table entry can't mishandle one as the other.
+       */
+      type: 'iteration_archived';
+      sessionId: string;
+      /** True iff the per-session folder was actually rm-rf'd. */
+      removedArtifacts: boolean;
     }
   | {
       /**

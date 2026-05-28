@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { promises as fsp } from 'node:fs';
 import type { IncomingMessage, Server as HttpServer } from 'node:http';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -94,6 +95,7 @@ import {
   type ResumeCallbacks,
 } from '../bus/resume.js';
 import {
+  archiveMultiAgentSession,
   clearFinishedMultiAgentSessions,
   computeRecoveryContext,
   getLastRunForTemplate,
@@ -327,6 +329,81 @@ export function resolveRetryRateLimited(
   if (!captured) return { kind: 'no-held-prompt' };
   if (inFlight.has(sessionId)) return { kind: 'in-flight' };
   return { kind: 'ok', text: captured.text, projectId: captured.projectId };
+}
+
+/**
+ * Cluster D Phase 5 (spec §6.4 / BE-D22, BE-D23, BE-D24): pure-ish
+ * implementation of the `archive_session` ClientMsg handler — exported so
+ * the test surface can exercise it against a real DB without standing up
+ * the WS scaffold. The case body in `processClientMsg` just calls this
+ * with a `send` callback bound to `conn.ws`.
+ *
+ * Side effects:
+ *   - DB: `archiveMultiAgentSession(sessionId)` flips `archived` 0→1.
+ *   - DB: `appendRecoveryLog({failureClass:'sweep', operatorAction:'archive'})`
+ *     (best-effort; a log failure doesn't block the success reply).
+ *   - Filesystem (opt-in): `fsp.rm(session_folder, {recursive, force})`
+ *     when `removeArtifacts === true`. Best-effort; log + continue on
+ *     failure so a permission glitch can't strand the row half-archived.
+ *   - WS: replies with `iteration_archived` on success, `wrapper_error`
+ *     on guard violation (unknown id, still running).
+ *
+ * Ordering rationale: row flip BEFORE rm so a filesystem failure leaves
+ * "row archived, folder still on disk" (operator can `rm -rf` by hand)
+ * rather than "folder gone, row not archived" (confusing zombie).
+ */
+export async function executeArchiveSession(args: {
+  sessionId: string;
+  removeArtifacts: boolean;
+  send: (msg: ServerMsg) => void;
+}): Promise<void> {
+  const { sessionId, removeArtifacts, send } = args;
+  const row = getMultiAgentSession(sessionId);
+  if (!row) {
+    send({
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: `archive_session: no such multi-agent session ${sessionId}`,
+    });
+    return;
+  }
+  if (row.status === 'running') {
+    send({
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: `archive_session: session is still running — Stop or End it first`,
+    });
+    return;
+  }
+
+  // Flip the row first (idempotent — repeat archive is a 0-row UPDATE,
+  // returns false; caller still gets a success envelope so a duplicated
+  // click from a stale toast resolves cleanly).
+  archiveMultiAgentSession(sessionId);
+
+  let removedArtifacts = false;
+  if (removeArtifacts && row.session_folder) {
+    try {
+      await fsp.rm(row.session_folder, { recursive: true, force: true });
+      removedArtifacts = true;
+    } catch (err) {
+      console.error(`[archive_session] rm ${row.session_folder} for ${sessionId} failed`, err);
+    }
+  }
+
+  try {
+    appendRecoveryLog({
+      sessionId,
+      failureClass: 'sweep',
+      operatorAction: 'archive',
+    });
+  } catch (err) {
+    console.error(`[archive_session] recovery_log append failed for ${sessionId}`, err);
+  }
+
+  send({ type: 'iteration_archived', sessionId, removedArtifacts });
 }
 
 function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
@@ -2209,6 +2286,19 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // here), and a server restart already ended every prior run.
       clearFinishedMultiAgentSessions();
       send(conn.ws, { type: 'iterations', items: await buildIterationsList() });
+      return;
+    }
+    case 'archive_session': {
+      // Cluster D Phase 5: see `executeArchiveSession` below — the case
+      // body is intentionally thin so the validation + side-effects
+      // (DB row flip, optional rm, recovery_log row, reply envelope)
+      // can be unit-tested without standing up a WS server. Same
+      // refactor pattern as `resolveRetryRateLimited` above.
+      await executeArchiveSession({
+        sessionId: msg.sessionId,
+        removeArtifacts: msg.removeArtifacts === true,
+        send: (m) => send(conn.ws, m),
+      });
       return;
     }
     case 'list_templates': {
