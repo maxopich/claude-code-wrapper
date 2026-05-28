@@ -604,6 +604,7 @@ describe('store / eventDefaultCollapsed', () => {
       pendingMutation: null,
       recoveryContext: null,
       routerDrops: [],
+      participantControls: {},
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {
@@ -1380,5 +1381,316 @@ describe('store / router_drop accumulation (Phase 6d)', () => {
       },
     });
     expect(after).toBe(before);
+  });
+});
+
+// ---- Cluster C Phase 4g1: per-participant control state reducer cases ----
+//
+// The three envelopes (`participant_mute_changed`, `participant_pause_changed`,
+// `participant_kicked`) update an in-memory map keyed by projectId on the
+// active MultiAgentRun. Tests cover:
+//   - row creation on first echo
+//   - subsequent echo overwrites the slice fields
+//   - sessionId mismatch is ignored
+//   - kick supersedes pause (pausedUntil cleared)
+//   - resume clears pausedUntil without touching muted
+//   - countControlledParticipants honors expired pause via `now` arg
+
+describe('store / participant control reducer cases', () => {
+  function seedRunningRun(): {
+    state: ReturnType<typeof reduce>;
+    sessionId: string;
+  } {
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_started',
+        sessionId: 'bus-1',
+        mode: 'orchestrator',
+        participants: [PID, 42, 9, 7],
+        participantAgentNames: ['orchestrator', 'worker-a'],
+        lifecycle: 'persistent',
+        sessionFolder: '/tmp/.cebab/bus-1',
+        hopBudget: 30,
+        pauseOnMutation: false,
+        mutationsAcknowledged: false,
+        mutations: [],
+      },
+    });
+    return { state: s, sessionId: 'bus-1' };
+  }
+
+  test('participant_mute_changed creates a control row for the projectId', () => {
+    const { state, sessionId } = seedRunningRun();
+    const after = reduce(state, {
+      type: 'server',
+      msg: {
+        type: 'participant_mute_changed',
+        sessionId,
+        projectId: 42,
+        muted: true,
+        reasonCode: 'forensics',
+        reasonText: 'pending operator review',
+        actor: 'operator',
+        ts: 1000,
+      },
+    });
+    const ctrl = after.multiAgent.active?.participantControls[42];
+    expect(ctrl).toBeDefined();
+    expect(ctrl?.muted).toBe(true);
+    expect(ctrl?.mutedReasonCode).toBe('forensics');
+    expect(ctrl?.mutedReasonText).toBe('pending operator review');
+    expect(ctrl?.pausedUntil).toBeNull();
+    expect(ctrl?.kickedAt).toBeNull();
+  });
+
+  test('participant_mute_changed unmute leaves prior pause alone', () => {
+    let s = seedRunningRun().state;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId: 'bus-1',
+        projectId: 42,
+        pausedUntil: 5000,
+        expiryAction: 'auto_resume',
+        reasonCode: 'topology_repair',
+        actor: 'operator',
+        ts: 1000,
+        queuedDeliveries: 0,
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_mute_changed',
+        sessionId: 'bus-1',
+        projectId: 42,
+        muted: false,
+        reasonCode: 'topology_repair',
+        actor: 'operator',
+        ts: 2000,
+      },
+    });
+    const ctrl = s.multiAgent.active!.participantControls[42];
+    expect(ctrl.muted).toBe(false);
+    expect(ctrl.pausedUntil).toBe(5000);
+  });
+
+  test('participant_pause_changed populates pausedUntil + expiryAction + queuedDeliveries', () => {
+    const { state, sessionId } = seedRunningRun();
+    const after = reduce(state, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId,
+        projectId: 7,
+        pausedUntil: 10_000,
+        expiryAction: 'auto_kick',
+        reasonCode: 'forensics',
+        reasonText: 'awaiting check',
+        actor: 'operator',
+        ts: 500,
+        queuedDeliveries: 3,
+      },
+    });
+    const ctrl = after.multiAgent.active!.participantControls[7];
+    expect(ctrl.pausedUntil).toBe(10_000);
+    expect(ctrl.pauseExpiryAction).toBe('auto_kick');
+    expect(ctrl.queuedDeliveries).toBe(3);
+    expect(ctrl.pauseReasonText).toBe('awaiting check');
+  });
+
+  test('participant_pause_changed resume clears pausedUntil', () => {
+    let s = seedRunningRun().state;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId: 'bus-1',
+        projectId: 7,
+        pausedUntil: 10_000,
+        expiryAction: 'auto_resume',
+        reasonCode: 'topology_repair',
+        actor: 'operator',
+        ts: 500,
+        queuedDeliveries: 1,
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId: 'bus-1',
+        projectId: 7,
+        pausedUntil: null,
+        expiryAction: null,
+        reasonCode: 'topology_repair',
+        actor: 'operator',
+        ts: 800,
+        queuedDeliveries: 0,
+      },
+    });
+    expect(s.multiAgent.active!.participantControls[7].pausedUntil).toBeNull();
+  });
+
+  test('participant_kicked sets kickedAt and clears pausedUntil', () => {
+    let s = seedRunningRun().state;
+    // First pause, then kick.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId: 'bus-1',
+        projectId: 9,
+        pausedUntil: 5000,
+        expiryAction: 'auto_kick',
+        reasonCode: 'tool_misuse',
+        actor: 'operator',
+        ts: 500,
+        queuedDeliveries: 0,
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_kicked',
+        sessionId: 'bus-1',
+        projectId: 9,
+        mode: 'drain',
+        reasonCode: 'tool_misuse',
+        reasonText: 'leaked credential',
+        actor: 'operator',
+        ts: 2000,
+      },
+    });
+    const ctrl = s.multiAgent.active!.participantControls[9];
+    expect(ctrl.kickedAt).toBe(2000);
+    expect(ctrl.kickMode).toBe('drain');
+    expect(ctrl.pausedUntil).toBeNull();
+    expect(ctrl.kickReasonText).toBe('leaked credential');
+  });
+
+  test('control envelope on a stale sessionId is ignored', () => {
+    const { state } = seedRunningRun();
+    const after = reduce(state, {
+      type: 'server',
+      msg: {
+        type: 'participant_mute_changed',
+        sessionId: 'some-other-session',
+        projectId: 42,
+        muted: true,
+        reasonCode: 'forensics',
+        actor: 'operator',
+        ts: 1000,
+      },
+    });
+    // Object identity preserved: no-op reducer
+    expect(after).toBe(state);
+  });
+});
+
+describe('store / countControlledParticipants', () => {
+  test('returns 0 for null run and for an empty map', async () => {
+    const { countControlledParticipants } = await import('./store');
+    expect(countControlledParticipants(null)).toBe(0);
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_started',
+        sessionId: 'bus-2',
+        mode: 'chain',
+        participants: [PID],
+        participantAgentNames: ['a', 'b'],
+        lifecycle: 'persistent',
+        sessionFolder: '/tmp/.cebab/bus-2',
+        hopBudget: 30,
+        pauseOnMutation: false,
+        mutationsAcknowledged: false,
+        mutations: [],
+      },
+    });
+    expect(countControlledParticipants(s.multiAgent.active)).toBe(0);
+  });
+
+  test('counts muted + paused-alive + kicked, ignores expired pause', async () => {
+    const { countControlledParticipants } = await import('./store');
+    const now = 10_000;
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_started',
+        sessionId: 'bus-3',
+        mode: 'orchestrator',
+        participants: [PID, 1, 2, 3, 4],
+        participantAgentNames: ['orchestrator', 'a', 'b', 'c', 'd'],
+        lifecycle: 'persistent',
+        sessionFolder: '/tmp/.cebab/bus-3',
+        hopBudget: 30,
+        pauseOnMutation: false,
+        mutationsAcknowledged: false,
+        mutations: [],
+      },
+    });
+    // 1 muted
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_mute_changed',
+        sessionId: 'bus-3',
+        projectId: 1,
+        muted: true,
+        reasonCode: 'forensics',
+        actor: 'operator',
+        ts: 0,
+      },
+    });
+    // 1 paused alive (future deadline)
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId: 'bus-3',
+        projectId: 2,
+        pausedUntil: now + 1000,
+        expiryAction: 'auto_resume',
+        reasonCode: 'topology_repair',
+        actor: 'operator',
+        ts: 0,
+        queuedDeliveries: 0,
+      },
+    });
+    // 1 paused EXPIRED (deadline in the past wrt the test's now)
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId: 'bus-3',
+        projectId: 3,
+        pausedUntil: now - 1000,
+        expiryAction: 'auto_resume',
+        reasonCode: 'topology_repair',
+        actor: 'operator',
+        ts: 0,
+        queuedDeliveries: 0,
+      },
+    });
+    // 1 kicked
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'participant_kicked',
+        sessionId: 'bus-3',
+        projectId: 4,
+        mode: 'drain',
+        reasonCode: 'tool_misuse',
+        actor: 'operator',
+        ts: 0,
+      },
+    });
+    expect(countControlledParticipants(s.multiAgent.active, now)).toBe(3);
   });
 });

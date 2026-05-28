@@ -151,6 +151,7 @@ function run(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
     pendingMutation: null,
     recoveryContext: null,
     routerDrops: [],
+    participantControls: {},
     ...over,
   };
 }

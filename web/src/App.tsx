@@ -1406,7 +1406,9 @@ function AppShell({
                 />
               )}
             </div>
-            {view !== 'chat' && <MultiAgentActivityBar run={state.multiAgent.active} />}
+            {view !== 'chat' && (
+              <MultiAgentActivityBar run={state.multiAgent.active} projects={state.projects} />
+            )}
             {view === 'chat' ? (
               <>
                 {session && !isSessionPending(session.id) && (

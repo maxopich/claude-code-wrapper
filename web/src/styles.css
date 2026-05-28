@@ -7820,3 +7820,72 @@ pre {
   outline: none;
   border-color: var(--accent);
 }
+
+/* ---- Cluster C Phase 4g1: ParticipantControlsCounter chip + StatePills -- */
+
+/* Aggregate "N controlled" chip — same render seam as .ma-router-drops-chip
+ * and .ma-mutations-chip. Default tint is --info (operator-initiated
+ * controls are informational); upgrades to --warn when any participant in
+ * the count is kicked (terminal action). */
+.ma-participant-controls-chip {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
+  color: var(--info);
+  background: var(--info-soft);
+  margin-left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.ma-participant-controls-chip.has-kicked {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  color: var(--warn);
+  background: var(--warn-soft);
+  font-weight: 600;
+}
+
+/* Per-participant pills cluster — tighter geometry than the chip; renders
+ * inline next to the active agent name in the activity bar. */
+.ma-control-pills {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  align-items: center;
+}
+.ma-control-pill {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.ma-control-pill.is-muted {
+  color: var(--info);
+  background: var(--info-soft);
+  border-color: color-mix(in srgb, var(--info) 30%, var(--border));
+}
+.ma-control-pill.is-paused {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--border));
+}
+.ma-control-pill.is-kicked {
+  color: var(--err);
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 40%, var(--border));
+  font-weight: 600;
+}

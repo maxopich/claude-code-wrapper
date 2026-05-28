@@ -24,6 +24,8 @@ import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
 import { RouterDropsCounter } from './authority/RouterDropsCounter';
+import { ParticipantControlsCounter } from './agentControl/ParticipantControlsCounter';
+import { ParticipantStatePills } from './agentControl/ParticipantStatePills';
 import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
 import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
@@ -2110,7 +2112,17 @@ export function TopRunBar(props: {
  * Renders nothing unless a run is genuinely computing — hidden for the draft
  * view, finished runs, and R-B read-only recovered runs (awaitingContinue).
  */
-export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
+export function MultiAgentActivityBar(props: {
+  run: MultiAgentRun | null;
+  /**
+   * Cluster C Phase 4g1: projects list, used to map the active agent's
+   * bus slug back to its `projectId` so we can render its
+   * ParticipantStatePills (control envelopes are keyed by projectId).
+   * Optional — when omitted (e.g. legacy call sites or tests), the pills
+   * are simply not rendered; the chip + rest of the bar still work.
+   */
+  projects?: readonly Project[];
+}) {
   const run = props.run;
   // Prefer the ephemeral heartbeat; fall back to the inferred active agent
   // (e.g. a live re-attach where `agent_activity` didn't reach this socket —
@@ -2136,6 +2148,20 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
   const hops = run.events.length;
   const budget = run.hopBudget;
   const budgetWarn = budget > 0 && hops / budget >= 0.8;
+
+  // Cluster C Phase 4g1: resolve the active agent's per-participant control
+  // state for the inline ParticipantStatePills mount. Wire-side envelopes
+  // key by projectId, but the activity bar identifies the active agent by
+  // bus slug — projects.busAgentName is the join key. Returns undefined
+  // when no project matches (orchestrator, off-roster agent, or
+  // `projects` not provided), in which case the pills component renders
+  // null anyway.
+  const activeAgentControl = (() => {
+    if (!props.projects || agentName === '') return undefined;
+    const proj = props.projects.find((p) => p.busAgentName === agentName);
+    if (!proj) return undefined;
+    return run.participantControls[proj.id];
+  })();
 
   return (
     <div
@@ -2183,6 +2209,11 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
           </>
         )}
       </span>
+      {/* Cluster C Phase 4g1: inline state pills for the currently active
+       *  agent, when it has any control state. Sits right after the agent
+       *  name so the operator's eye lands on "agent X is muted / paused /
+       *  kicked" alongside the working indicator. */}
+      <ParticipantStatePills control={activeAgentControl} />
       <span
         className={`ma-hop-budget-chip${budgetWarn ? ' is-warn' : ''}`}
         aria-label={`hop budget: ${hops} of ${budget}`}
@@ -2198,6 +2229,10 @@ export function MultiAgentActivityBar(props: { run: MultiAgentRun | null }) {
       {/* Cluster B Phase 6d (UI-B24): router-drops counter, hidden when
        *  count = 0. Sits after MutationsCounterChip per spec §6.2. */}
       <RouterDropsCounter drops={run.routerDrops} sessionId={run.sessionId} />
+      {/* Cluster C Phase 4g1: aggregate per-participant control counter.
+       *  Self-hides when count = 0. Sits after RouterDropsCounter so the
+       *  "controls and constraints" cluster reads together. */}
+      <ParticipantControlsCounter run={run} />
     </div>
   );
 }

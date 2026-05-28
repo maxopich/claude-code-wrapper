@@ -1,11 +1,14 @@
 import type {
   AgentActivityPhase,
   ContentBlock,
+  ControlReasonCode,
   IterationSummary,
+  KickMode,
   MultiAgentEventKind,
   MultiAgentLifecycle,
   MultiAgentMutationView,
   MultiAgentTemplate,
+  PauseExpiryAction,
   PendingRetryDescriptor,
   Project,
   RecoveryContextView,
@@ -286,6 +289,22 @@ export type MultiAgentRun = {
    *  Deduped by `auditRowId` — the only stable id on the wire. */
   routerDrops: RouterDropView[];
   /**
+   * Cluster C Phase 4g1: per-participant control state map (mute/pause/kick),
+   * keyed by `projectId`. Populated from `participant_mute_changed` /
+   * `participant_pause_changed` / `participant_kicked` ServerMsgs the
+   * server already emits after the per_agent_control DB write succeeds.
+   * The reducer overwrites the per-projectId row on each echo so the map
+   * is always "current state" (last-writer-wins), matching how the server
+   * treats per_agent_control as the source of truth.
+   *
+   * Empty `{}` on session start. NOT replayed across WS reconnect today —
+   * a future R-A enhancement could push a snapshot. For now, R-B reseeds
+   * the SERVER's in-memory mute/kick mirrors (Phase 4e) but the client
+   * loses control state on reload; the operator's mental model is "what
+   * I see is what's controlled SINCE my socket attached".
+   */
+  participantControls: Record<number, ParticipantControlView>;
+  /**
    * Cluster D Phase 4d (B2 / spec §4.2): the bus's most recent in-flight
    * auto-retry attempt. Populated by `auto_retry` ServerMsg fired from
    * `bus/runner.ts`'s `isTransientOverload(err)` branch (see chain.ts +
@@ -347,6 +366,64 @@ export type RouterDropView = {
   destination: string;
   kind: string;
   receivedAt: number;
+};
+
+/**
+ * Cluster C Phase 4g1: per-participant control state aggregated client-side
+ * from the `participant_mute_changed` / `participant_pause_changed` /
+ * `participant_kicked` ServerMsg envelopes. Keyed by `projectId` because
+ * that is what the wire envelopes carry — `MultiAgentRun.participantAgentNames`
+ * carries the bus slug per agent, and the consumer (activity bar, draft
+ * cards) does the slug↔projectId join via `state.projects` when it wants
+ * to render pills for a named agent.
+ *
+ * Fields mirror the union of state expressible across the three echoes:
+ *   - `muted`: latest boolean from `participant_mute_changed`.
+ *   - `pausedUntil`: epoch ms when the pause expires; `null` once `pause_changed`
+ *     reports `pausedUntil: null` (resume) or once `participant_kicked` lands
+ *     (kick supersedes pause).
+ *   - `kickedAt`: timestamp once `participant_kicked` lands; never cleared
+ *     (there is no "unkick" verb in v1).
+ *
+ * One row per participant; presence of a row indicates "this participant
+ * has had at least one control verb applied this session". Absence means
+ * "no controls touched". Selectors (`countControlled`, etc.) MUST treat a
+ * row with `muted=false && pausedUntil=null && kickedAt=null` as "clear" —
+ * a resume after a pause leaves a row behind with all flags clear.
+ */
+export type ParticipantControlView = {
+  /** Project id this control state belongs to. Matches the projectId on
+   *  every `participant_*_changed` envelope. Stored redundantly so a
+   *  consumer holding only the value can identify its key. */
+  projectId: number;
+  /** Latest mute state. `true` while muted, `false` after unmute. */
+  muted: boolean;
+  /** Reason code from the most recent mute/unmute echo. Surfaces in the
+   *  pill tooltip and the (future) detail panel. */
+  mutedReasonCode?: ControlReasonCode;
+  mutedReasonText?: string;
+  /** Wall-clock ms of the last mute/unmute echo. */
+  mutedTs?: number;
+  /** Absolute epoch ms when the pause auto-expires. `null` when not paused
+   *  (initial state or after a resume / kick supersedes). */
+  pausedUntil: number | null;
+  /** Action that will fire on pause expiry. Matches the wire enum. */
+  pauseExpiryAction?: PauseExpiryAction;
+  /** Reason code from the most recent pause echo. */
+  pauseReasonCode?: ControlReasonCode;
+  pauseReasonText?: string;
+  /** AE-5 [security]: count of `deliverTurn` calls queued behind the pause
+   *  gate. Surfaces "operator forgot they paused this" growth. */
+  queuedDeliveries?: number;
+  /** Wall-clock ms of the last pause/resume echo. */
+  pausedTs?: number;
+  /** Set once `participant_kicked` lands; never cleared (no unkick verb). */
+  kickedAt: number | null;
+  /** Kick mode (drain in v1; hard is forward-compat). */
+  kickMode?: KickMode;
+  /** Reason code from the kick echo. */
+  kickReasonCode?: ControlReasonCode;
+  kickReasonText?: string;
 };
 
 /**
@@ -1124,6 +1201,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // A future R-A enhancement could rehydrate from the server's
             // safety_audit table.
             routerDrops: [],
+            // Phase 4g1: per-participant control state accumulates from
+            // the three `participant_*_changed` ServerMsgs. Empty at
+            // start; a future R-A enhancement could rehydrate by reading
+            // back from the server's per_agent_control table.
+            participantControls: {},
           },
         },
       };
@@ -2050,18 +2132,156 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case 'participant_mute_changed':
-    case 'participant_pause_changed':
-    case 'participant_kicked':
-      // Cluster C Phase 4a (Part 2 backend foundation): the per-agent
-      // control verbs (mute/pause/kick) ship their state-change echoes
-      // here. The client UI lands in Phase 4d (the ⋮ menu, KickModal,
-      // state pills, ActivityBar aggregate chip) and will own these
-      // via a sibling context — same pattern as inbox_snapshot /
-      // recovery_log_snapshot above. Reducer no-op keeps the union
-      // exhaustive until that context lands.
-      return state;
+    case 'participant_mute_changed': {
+      // Cluster C Phase 4g1: route the per-agent mute echo onto the
+      // active MultiAgentRun's participantControls map. Server has
+      // already written per_agent_control + the safety_audit row by
+      // the time this lands; the echo is the canonical "this state is
+      // now true" signal.
+      //
+      // Only accumulates when the envelope's sessionId matches the
+      // active run — drops on stale/dismissed sessions are ignored
+      // (same guard as router_drop / mutations above).
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      const prior = active.participantControls[msg.projectId];
+      const next: ParticipantControlView = {
+        ...(prior ?? {
+          projectId: msg.projectId,
+          muted: false,
+          pausedUntil: null,
+          kickedAt: null,
+        }),
+        muted: msg.muted,
+        mutedReasonCode: msg.reasonCode,
+        mutedReasonText: msg.reasonText,
+        mutedTs: msg.ts,
+      };
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: {
+            ...active,
+            participantControls: {
+              ...active.participantControls,
+              [msg.projectId]: next,
+            },
+          },
+        },
+      };
+    }
+
+    case 'participant_pause_changed': {
+      // Cluster C Phase 4g1: route the pause/resume echo onto
+      // participantControls. `pausedUntil: null` = resume (clears the
+      // pause but leaves any prior mute alone); `pausedUntil: <ts>` =
+      // active pause with expiryAction telling us what fires at the
+      // deadline.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      const prior = active.participantControls[msg.projectId];
+      const next: ParticipantControlView = {
+        ...(prior ?? {
+          projectId: msg.projectId,
+          muted: false,
+          pausedUntil: null,
+          kickedAt: null,
+        }),
+        pausedUntil: msg.pausedUntil,
+        pauseExpiryAction: msg.expiryAction ?? undefined,
+        pauseReasonCode: msg.reasonCode,
+        pauseReasonText: msg.reasonText,
+        queuedDeliveries: msg.queuedDeliveries,
+        pausedTs: msg.ts,
+      };
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: {
+            ...active,
+            participantControls: {
+              ...active.participantControls,
+              [msg.projectId]: next,
+            },
+          },
+        },
+      };
+    }
+
+    case 'participant_kicked': {
+      // Cluster C Phase 4g1: kick is terminal (no unkick verb in v1).
+      // Sets kickedAt and clears pausedUntil because the server treats
+      // kick as a superseding action (see executeExpireParticipant's
+      // auto_kick branch and Phase 4d's drain semantics).
+      // The mute flag is preserved so the UI can show the prior reason
+      // alongside the kick pill if both were set.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      const prior = active.participantControls[msg.projectId];
+      const next: ParticipantControlView = {
+        ...(prior ?? {
+          projectId: msg.projectId,
+          muted: false,
+          pausedUntil: null,
+          kickedAt: null,
+        }),
+        pausedUntil: null,
+        kickedAt: msg.ts,
+        kickMode: msg.mode,
+        kickReasonCode: msg.reasonCode,
+        kickReasonText: msg.reasonText,
+      };
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: {
+            ...active,
+            participantControls: {
+              ...active.participantControls,
+              [msg.projectId]: next,
+            },
+          },
+        },
+      };
+    }
   }
+}
+
+/**
+ * Cluster C Phase 4g1: derive an active-control count from a
+ * MultiAgentRun's participantControls map. A participant is counted as
+ * "controlled" if they are currently muted OR currently paused OR have
+ * been kicked. Returns 0 when `run` is null (caller shouldn't render the
+ * chip in that case anyway).
+ *
+ * The `now` arg lets callers pass a consistent timestamp across multiple
+ * derivations in the same render; default is `Date.now()`. We compare
+ * `pausedUntil > now` so an expired pause that hasn't yet been echoed
+ * back as `pausedUntil: null` doesn't inflate the count.
+ */
+export function countControlledParticipants(
+  run: MultiAgentRun | null,
+  now: number = Date.now(),
+): number {
+  if (!run) return 0;
+  let n = 0;
+  for (const ctrl of Object.values(run.participantControls)) {
+    if (ctrl.muted) {
+      n += 1;
+      continue;
+    }
+    if (ctrl.kickedAt !== null) {
+      n += 1;
+      continue;
+    }
+    if (ctrl.pausedUntil !== null && ctrl.pausedUntil > now) {
+      n += 1;
+    }
+  }
+  return n;
 }
 
 function summarizeSystemEvent(subtype: string, payload: unknown): string {
