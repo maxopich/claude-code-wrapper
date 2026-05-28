@@ -1910,6 +1910,7 @@ function SessionSettingsPanel(props: {
                   {props.canEdit && isOrchestrator && proj && (
                     <ParticipantControlMenu
                       projectId={proj.id}
+                      sessionId={run.sessionId}
                       agentLabel={slug}
                       sessionMode={run.mode}
                       control={control}

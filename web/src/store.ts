@@ -2044,6 +2044,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // the request directly via wsRef.send from the inspector button.
       return state;
 
+    case 'kick_forensics_snapshot':
+      // Cluster C Phase 4g4: the KickForensicsModal owns this via a
+      // sibling context (ForensicViewerContext) — same pattern as
+      // recovery_log_snapshot. Snapshot is short-lived inspector state;
+      // no need to live in the main store. The matching ClientMsg
+      // (get_kick_forensics) ships from the View forensics… menu item.
+      return state;
+
     case 'session_interrupted': {
       // Cluster C Phase 2: stash the latest Stop metadata on the
       // session so the reason-for-stop prompt + Stopped marker can

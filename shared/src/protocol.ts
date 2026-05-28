@@ -1099,6 +1099,32 @@ export type ClientMsg =
     }
   | {
       /**
+       * Cluster C Phase 4g4 (spec §5.5, §6.4): operator request for the
+       * forensic bundle captured at the moment a specific agent was kicked
+       * in a specific session. The reply (`kick_forensics_snapshot`) carries
+       * the parsed bundle ready for the KickForensicsModal — no second
+       * round-trip needed.
+       *
+       * Resolution: server runs `getLatestForensicsForAgent(sessionId,
+       * agentSlug)`; for live sessions where kick is terminal, this returns
+       * the kick-time bundle. The companion safety_audit row's reason is
+       * looked up + included so the modal can render "kicked: tool_misuse —
+       * leaked credential" without a second query.
+       *
+       * Returns `kick_forensics_snapshot { found: false }` when no bundle
+       * exists (e.g. the operator opens the viewer before kick completes
+       * the forensic write, or the row was lost in a server crash before
+       * persist).
+       *
+       * No auth gate — local-operator forensics, same posture as
+       * `recovery_log_snapshot`.
+       */
+      type: 'get_kick_forensics';
+      sessionId: string;
+      agentSlug: string;
+    }
+  | {
+      /**
        * Cluster C Phase 2 (spec §4.2, §4.5): operator's after-the-fact
        * categorisation of why they Stopped a single-agent turn. The
        * UI's inline non-blocking prompt under the Stopped marker
@@ -2192,6 +2218,24 @@ export type ServerMsg =
     }
   | {
       /**
+       * Cluster C Phase 4g4: reply to `get_kick_forensics`. Found+snapshot
+       * shape so the modal can distinguish "no bundle yet — try again" from
+       * "bundle empty/error — show the meta + snapshotFailedReason".
+       *
+       * When `found: false`, the modal renders a placeholder with the
+       * requested (sessionId, agentSlug) and a hint that capture may still
+       * be in flight or the row was never persisted.
+       *
+       * No auth gate — local-operator forensics.
+       */
+      type: 'kick_forensics_snapshot';
+      sessionId: string;
+      agentSlug: string;
+      found: boolean;
+      snapshot: KickForensicsSnapshot | null;
+    }
+  | {
+      /**
        * Cluster C Phase 1 (spec §4.5): server acknowledgment that the
        * operator's `interrupt` ClientMsg was processed and the runner's
        * cancellation handle resolved. Fired AFTER `runner.interrupt()`
@@ -3071,4 +3115,82 @@ export type RecoveryClassAggregate = {
   count: number;
   reachedFinalRate: number | null;
   medianTimeToRecoveryMs: number | null;
+};
+
+/**
+ * Cluster C Phase 4g4 (spec §5.5, §6.4): wire shape for one bus event in
+ * the forensic bundle. Mirrors the server-side `MultiAgentBusEvent` from
+ * `server/src/notifications/forensic_snapshot.ts` so the KickForensicsModal
+ * can render the per-event row without extra mapping.
+ *
+ * `textPreview` is truncated server-side to 240 chars + ellipsis when
+ * longer; clients render verbatim.
+ */
+export type ForensicBusEvent = {
+  id: number;
+  ts: number;
+  source: string;
+  destination: string;
+  kind: string;
+  textPreview: string;
+};
+
+/**
+ * Cluster C Phase 4g4: wire shape for one mutation attributed to the
+ * agent in the forensic bundle. Mirrors `MultiAgentMutationSummary`.
+ *
+ * `confirmed` is `true` once the operator clicked through the pause-on-
+ * mutation pre-flight (or the session ran with no pre-flight enabled
+ * and the mutation auto-confirmed). `filePath` is the affected path
+ * when the classifier resolved one.
+ */
+export type ForensicMutation = {
+  id: number;
+  ts: number;
+  toolName: string;
+  category: MutationCategory;
+  summary: string;
+  filePath: string | null;
+  confirmed: boolean;
+};
+
+/**
+ * Cluster C Phase 4g4: parsed bundle reply for `get_kick_forensics`.
+ * Server JSON-parses the persisted columns (`effective_prompt_json`,
+ * `events_last_n_json`, `mutation_rationale_json`) so the client
+ * doesn't need a parser. NULL-able fields stay nullable on the wire.
+ *
+ * `kickReasonCode` + `kickReasonText` are joined from the companion
+ * `safety_audit` row at fetch time so the modal can render the kick
+ * provenance ("kicked: tool_misuse — leaked credential") without a
+ * second round-trip. `kickMode` is also joined.
+ *
+ * `pendingToolCalls`, `activePermissions`, `workdirTreeHash`, and
+ * `parentSessionId` are exposed for inspector parity with the single-
+ * agent Stop bundle viewer (a future surface); the kick modal renders
+ * them only when present (NULL for multi-agent bus kicks today —
+ * documented in C4f as out-of-scope for the initial helper).
+ *
+ * `snapshotFailedReason` is non-null when the capture itself threw
+ * (the audit row still exists; the bundle is a "we tried" placeholder).
+ * The modal renders an error banner in that case rather than the
+ * normal sections.
+ */
+export type KickForensicsSnapshot = {
+  auditId: string;
+  ts: number;
+  sessionId: string;
+  agentSlug: string;
+  operatorId: string;
+  parentSessionId: string | null;
+  kickReasonCode: ControlReasonCode | null;
+  kickReasonText: string | null;
+  kickMode: KickMode | null;
+  effectivePrompt: unknown;
+  busEvents: ForensicBusEvent[];
+  mutations: ForensicMutation[];
+  pendingToolCalls: unknown;
+  activePermissions: unknown;
+  workdirTreeHash: string | null;
+  snapshotFailedReason: string | null;
 };

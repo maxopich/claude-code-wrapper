@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ParticipantControlView } from '../../store';
 import type { ControlReasonCode, KickMode, PauseExpiryAction } from '@cebab/shared/protocol';
 import { KickModal } from './KickModal';
+import { useForensicViewerActions } from './ForensicViewerContext';
 
 // Cluster C Phase 4g2: ⋮ menu on each participant row in the active-run
 // Session info panel. First *interactive* slice for the control verbs —
@@ -32,7 +33,19 @@ const DEFAULT_EXPIRY_ACTION: PauseExpiryAction = 'auto_resume';
 
 export type ParticipantControlMenuProps = {
   projectId: number;
-  /** Display label (typically the agent slug) used for aria + tooltips. */
+  /**
+   * Cluster C Phase 4g4: bus session id, required for opening the
+   * KickForensicsModal (which fetches by sessionId + agentSlug). Not
+   * needed for the C4g2 mute/pause/kick path because the parent binds
+   * sessionId into the callbacks; the forensic viewer opens via a
+   * sibling context, so we need it here.
+   */
+  sessionId: string;
+  /**
+   * Display label AND the bus agent slug used to identify this
+   * participant on the wire. Phase 4g4's forensic fetch keys on this
+   * value; Phases 4g1-4g3 only used it for display.
+   */
   agentLabel: string;
   /** Active mode of the bus session; gates mute/unmute visibility. */
   sessionMode: 'chain' | 'orchestrator';
@@ -71,6 +84,7 @@ export type ParticipantControlMenuProps = {
 
 export function ParticipantControlMenu({
   projectId,
+  sessionId,
   agentLabel,
   sessionMode,
   control,
@@ -87,6 +101,11 @@ export function ParticipantControlMenu({
   // onKick + closes both.
   const [kickModalOpen, setKickModalOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // C4g4: forensic viewer context for the "View forensics…" item that
+  // shows up on a kicked participant. The viewer is mounted globally
+  // under <ForensicViewerProvider> in App.tsx; this component just
+  // pokes the open action.
+  const forensicActions = useForensicViewerActions();
 
   // Click-outside + Escape dismissal. Both attached only while open to
   // avoid the always-on listener footprint when no menu is on screen.
@@ -141,6 +160,10 @@ export function ParticipantControlMenu({
     setOpen(false);
     setKickModalOpen(true);
   }
+  function openForensicsViewer() {
+    setOpen(false);
+    forensicActions.open(sessionId, agentLabel);
+  }
   function handleKickSubmit(
     pid: number,
     reasonCode: ControlReasonCode,
@@ -168,13 +191,38 @@ export function ParticipantControlMenu({
         className="ma-control-menu-trigger"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={`Controls for ${agentLabel}`}
-        title={`Mute / pause / resume controls for ${agentLabel}`}
+        aria-label={
+          isKicked ? `View forensics for ${agentLabel}` : `Controls for ${agentLabel}`
+        }
+        title={
+          isKicked
+            ? `View kick forensics for ${agentLabel}.`
+            : `Mute / pause / resume controls for ${agentLabel}`
+        }
         onClick={() => setOpen((cur) => !cur)}
-        disabled={isKicked}
       >
         ⋮
       </button>
+      {open && isKicked && (
+        <div
+          role="menu"
+          className="ma-control-menu-panel"
+          aria-label={`${agentLabel} controls`}
+        >
+          {/* C4g4: kicked participants get only the forensic viewer
+           *  affordance — every other verb is unavailable for a kicked
+           *  agent (no unmute / unpause / unkick in v1). */}
+          <button
+            type="button"
+            role="menuitem"
+            className="ma-control-menu-item"
+            onClick={openForensicsViewer}
+            title={`Open the captured forensic bundle for ${agentLabel} (recent bus events, attributed mutations, audit lineage).`}
+          >
+            <span aria-hidden="true">🔍</span> View forensics…
+          </button>
+        </div>
+      )}
       {open && !isKicked && (
         <div role="menu" className="ma-control-menu-panel" aria-label={`${agentLabel} controls`}>
           {muteAvailable && !isMuted && (

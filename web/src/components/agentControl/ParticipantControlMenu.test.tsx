@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { ParticipantControlView } from '../../store';
 import { ParticipantControlMenu } from './ParticipantControlMenu';
+import { ForensicViewerProvider } from './ForensicViewerContext';
 
 // Cluster C Phase 4g2 — ParticipantControlMenu contract:
 //   - Trigger button opens/closes the panel; aria-expanded reflects state.
@@ -49,9 +50,13 @@ function ctrl(over: Partial<ParticipantControlView>): ParticipantControlView {
 
 function noop() {}
 
-function render(over: Partial<React.ComponentProps<typeof ParticipantControlMenu>> = {}) {
+function render(
+  over: Partial<React.ComponentProps<typeof ParticipantControlMenu>> = {},
+  send: (msg: unknown) => void = noop,
+) {
   const props: React.ComponentProps<typeof ParticipantControlMenu> = {
     projectId: 7,
+    sessionId: 'bus-1',
     agentLabel: 'worker-a',
     sessionMode: 'orchestrator',
     control: undefined,
@@ -63,7 +68,11 @@ function render(over: Partial<React.ComponentProps<typeof ParticipantControlMenu
     ...over,
   };
   act(() => {
-    root.render(<ParticipantControlMenu {...props} />);
+    root.render(
+      <ForensicViewerProvider send={send as never}>
+        <ParticipantControlMenu {...props} />
+      </ForensicViewerProvider>,
+    );
   });
   return props;
 }
@@ -99,10 +108,14 @@ describe('ParticipantControlMenu — trigger', () => {
     expect(container.querySelector('.ma-control-menu-panel')).toBeNull();
   });
 
-  test('trigger is disabled when kicked', () => {
+  test('trigger stays enabled when kicked (C4g4 forensic viewer access)', () => {
     render({ control: ctrl({ kickedAt: Date.now() }) });
     const trigger = container.querySelector('.ma-control-menu-trigger') as HTMLButtonElement;
-    expect(trigger.disabled).toBe(true);
+    // C4g4: kicked participants still need the ⋮ trigger so operators can
+    // open the KickForensicsModal. The menu shows only "View forensics…"
+    // in that state — no other verbs are valid for a kicked agent.
+    expect(trigger.disabled).toBe(false);
+    expect(trigger.getAttribute('aria-label')).toMatch(/forensics/i);
   });
 });
 
@@ -317,11 +330,19 @@ describe('ParticipantControlMenu — Kick item (C4g3)', () => {
     expect(document.querySelector('.kick-modal')).toBeNull();
   });
 
-  test('Kick… item hidden when participant is already kicked', () => {
+  test('kicked participant menu shows ONLY View forensics… item', () => {
     render({ control: { projectId: 7, muted: false, pausedUntil: null, kickedAt: Date.now() } });
-    // Trigger button is disabled in this case, so we can't openMenu(). Verify
-    // trigger state directly + no Kick… item is even possible.
-    const trigger = container.querySelector('.ma-control-menu-trigger') as HTMLButtonElement;
-    expect(trigger.disabled).toBe(true);
+    openMenu();
+    const items = Array.from(container.querySelectorAll('.ma-control-menu-item')).map(
+      (i) => i.textContent?.trim() ?? '',
+    );
+    expect(items.some((t) => t.includes('View forensics'))).toBe(true);
+    // C4g4: no mute/pause/kick affordances on a kicked participant —
+    // there's nothing valid to do other than inspect what they did.
+    expect(items.some((t) => t.includes('Mute'))).toBe(false);
+    expect(items.some((t) => t.includes('Pause'))).toBe(false);
+    expect(items.some((t) => t.includes('Resume'))).toBe(false);
+    // The Kick… item is also hidden — already kicked.
+    expect(items.some((t) => t.startsWith('⨯'))).toBe(false);
   });
 });

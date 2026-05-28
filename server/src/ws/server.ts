@@ -80,7 +80,18 @@ import {
   HIGHEST_SUBCODES,
 } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
-import { appendForensics } from '../repo/controllability_forensics.js';
+import {
+  appendForensics,
+  getLatestForensicsForAgent,
+} from '../repo/controllability_forensics.js';
+import { _getSafetyAuditRow } from '../notifications/safety_audit.js';
+import {
+  isControlReasonCode,
+  isKickMode,
+  type ForensicBusEvent,
+  type ForensicMutation,
+  type KickForensicsSnapshot,
+} from '@cebab/shared/protocol';
 import {
   captureSingleAgentForensics,
   type CapturedPromptEntry,
@@ -844,6 +855,187 @@ export function executeRecoveryLogSnapshot(args: {
     authResumeChoiceRatio: authResumeChoiceRatio(),
     recent,
   });
+}
+
+/**
+ * Cluster C Phase 4g4 (spec §5.5, §6.4): executor for `get_kick_forensics`.
+ * Reads the most-recent forensics row for (sessionId, agentSlug), parses
+ * the JSON columns, joins kick provenance from the companion safety_audit
+ * row, and sends `kick_forensics_snapshot`.
+ *
+ * Extracted from the WS handler for the same testability reason as
+ * `executeRecoveryLogSnapshot`: the parser is the interesting bit
+ * (mode/reason recovery from `payload_json`, defensive JSON parse with
+ * undefined fallback) and the conn/ws plumbing is the boring bit.
+ *
+ * Always replies — `found: false` for the no-bundle case rather than
+ * silence so the modal's loading state can resolve.
+ */
+export function executeKickForensicsSnapshot(args: {
+  sessionId: string;
+  agentSlug: string;
+  send: (msg: ServerMsg) => void;
+}): void {
+  const { sessionId, agentSlug, send } = args;
+  const row = getLatestForensicsForAgent(sessionId, agentSlug);
+  if (!row) {
+    send({
+      type: 'kick_forensics_snapshot',
+      sessionId,
+      agentSlug,
+      found: false,
+      snapshot: null,
+    });
+    return;
+  }
+
+  // Join the companion safety_audit row for kick provenance. The
+  // forensics FK guarantees the row exists; we still guard with
+  // optional chaining + defensive parse because the payload shape is
+  // by-convention, not schema-enforced.
+  const auditRow = _getSafetyAuditRow(row.safety_audit_id);
+  let kickReasonText: string | null = null;
+  let kickMode: KickForensicsSnapshot['kickMode'] = null;
+  let kickReasonCode: KickForensicsSnapshot['kickReasonCode'] = null;
+  if (auditRow) {
+    kickReasonCode = isControlReasonCode(auditRow.reason_code)
+      ? auditRow.reason_code
+      : null;
+    try {
+      const payload = JSON.parse(auditRow.payload_json) as Record<string, unknown>;
+      if (typeof payload.reasonText === 'string') kickReasonText = payload.reasonText;
+      if (isKickMode(payload.mode)) kickMode = payload.mode;
+    } catch {
+      // Malformed payload — leave fields null; the audit-row reasonCode
+      // above already provides the safer of the two surfaces.
+    }
+  }
+
+  const snapshot: KickForensicsSnapshot = {
+    auditId: row.safety_audit_id,
+    ts: row.ts,
+    sessionId: row.session_id ?? sessionId,
+    agentSlug: row.agent_slug ?? agentSlug,
+    operatorId: row.operator_id,
+    parentSessionId: row.parent_session_id,
+    kickReasonCode,
+    kickReasonText,
+    kickMode,
+    effectivePrompt: parseJsonOrUndefined(row.effective_prompt_json),
+    busEvents: parseBusEvents(row.bus_inbox_outbox_json),
+    mutations: parseMutations(row.mutation_rationale_json),
+    pendingToolCalls: row.pending_tool_calls_json
+      ? parseJsonOrUndefined(row.pending_tool_calls_json)
+      : null,
+    activePermissions: row.active_permissions_json
+      ? parseJsonOrUndefined(row.active_permissions_json)
+      : null,
+    workdirTreeHash: row.workdir_tree_hash,
+    snapshotFailedReason: row.snapshot_failed_reason,
+  };
+
+  send({
+    type: 'kick_forensics_snapshot',
+    sessionId,
+    agentSlug,
+    found: true,
+    snapshot,
+  });
+}
+
+// Defensive JSON parse — returns undefined on any throw so the caller
+// can render an "unparseable" placeholder rather than crashing the WS
+// turn. JSON.parse is fast enough that no caching is needed.
+function parseJsonOrUndefined(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
+// Bus-event partition shape lives on the wire as a typed array; the
+// stored column may be either `null` or a JSON array of objects with
+// the captureMultiAgentForensics shape. We accept anything that looks
+// like an array and validate each element; anything malformed becomes
+// an empty array so the modal renders a "no events captured" hint
+// rather than a JSON error.
+function parseBusEvents(s: string | null): ForensicBusEvent[] {
+  if (!s) return [];
+  try {
+    const parsed = JSON.parse(s);
+    if (!Array.isArray(parsed)) return [];
+    const out: ForensicBusEvent[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const ev = item as Record<string, unknown>;
+      if (
+        typeof ev.id !== 'number' ||
+        typeof ev.ts !== 'number' ||
+        typeof ev.source !== 'string' ||
+        typeof ev.destination !== 'string' ||
+        typeof ev.kind !== 'string' ||
+        typeof ev.textPreview !== 'string'
+      ) {
+        continue;
+      }
+      out.push({
+        id: ev.id,
+        ts: ev.ts,
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        textPreview: ev.textPreview,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+// Same defensive-validate shape as parseBusEvents. mutation_rationale_json
+// is wrapped in `{ recentMutations, totalMutations }` per C4f's
+// captureMultiAgentForensics; we extract `recentMutations` and validate
+// each row.
+function parseMutations(s: string | null): ForensicMutation[] {
+  if (!s) return [];
+  try {
+    const parsed = JSON.parse(s);
+    if (!parsed || typeof parsed !== 'object') return [];
+    const recent = (parsed as Record<string, unknown>).recentMutations;
+    if (!Array.isArray(recent)) return [];
+    const out: ForensicMutation[] = [];
+    for (const item of recent) {
+      if (!item || typeof item !== 'object') continue;
+      const m = item as Record<string, unknown>;
+      if (
+        typeof m.id !== 'number' ||
+        typeof m.ts !== 'number' ||
+        typeof m.toolName !== 'string' ||
+        typeof m.category !== 'string' ||
+        typeof m.summary !== 'string' ||
+        typeof m.confirmed !== 'boolean'
+      ) {
+        continue;
+      }
+      out.push({
+        id: m.id,
+        ts: m.ts,
+        toolName: m.toolName,
+        // Trust the category string — protocol's MutationCategory is open
+        // enough that any string is forward-compat; client renders
+        // unknowns as the raw label.
+        category: m.category as ForensicMutation['category'],
+        summary: m.summary,
+        filePath: typeof m.filePath === 'string' ? m.filePath : null,
+        confirmed: m.confirmed,
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -3392,6 +3584,20 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // executeRecoveryLogSnapshot.
       executeRecoveryLogSnapshot({
         recentLimit: msg.recentLimit,
+        send: (m) => send(conn.ws, m),
+      });
+      return;
+    }
+    case 'get_kick_forensics': {
+      // Cluster C Phase 4g4 (spec §5.5, §6.4): fetch the multi-agent
+      // forensic bundle captured at kick time for (sessionId, agentSlug)
+      // and reply with `kick_forensics_snapshot`. Executor JSON-parses
+      // the persisted columns + joins kick provenance from the
+      // companion safety_audit row so the modal can render the full
+      // bundle without a second round-trip.
+      executeKickForensicsSnapshot({
+        sessionId: msg.sessionId,
+        agentSlug: msg.agentSlug,
         send: (m) => send(conn.ws, m),
       });
       return;

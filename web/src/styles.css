@@ -8096,3 +8096,199 @@ pre {
   outline: none;
   border-color: var(--accent);
 }
+
+/* ---- Cluster C Phase 4g4: KickForensicsModal ----------------------- */
+
+/* Inherits .gate-modal + .modal-surface base sizing; widens to fit the
+ * sectioned bundle view (meta, prompt, bus events, mutations). */
+.kick-forensics-modal {
+  max-width: 720px;
+  width: min(720px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.kick-forensics-status {
+  font-style: italic;
+  color: var(--fg-2, var(--fg));
+}
+.kick-forensics-status.is-error {
+  color: var(--err);
+  font-style: normal;
+}
+
+/* Meta dl — two-column key/value layout. */
+.kick-forensics-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: var(--s-2) 0 var(--s-3);
+  padding: var(--s-2);
+  background: var(--bg-3);
+  border-radius: var(--r-sm, 4px);
+  border: 1px solid var(--line-3, var(--border));
+}
+.kick-forensics-meta-row {
+  display: contents;
+}
+.kick-forensics-meta dt {
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0;
+  align-self: center;
+}
+.kick-forensics-meta dd {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+  word-break: break-word;
+  align-self: center;
+}
+.kick-forensics-hash {
+  font-size: var(--t-xs, 11px);
+  word-break: break-all;
+}
+
+/* Sections — header rhythm matches other authority panels. */
+.kick-forensics-section {
+  margin: var(--s-3) 0;
+}
+.kick-forensics-section-title {
+  font-size: var(--t-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  color: var(--fg-2, var(--fg));
+  margin: 0 0 var(--s-2);
+}
+.kick-forensics-count {
+  font-weight: 400;
+  color: var(--fg-3, var(--fg-2));
+}
+.kick-forensics-empty {
+  margin: 0;
+  font-style: italic;
+  color: var(--fg-3, var(--fg-2));
+  font-size: var(--t-sm);
+}
+
+/* Effective prompt — `<pre>` with monospace + wrap. */
+.kick-forensics-prompt {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs, 11px);
+  background: var(--bg-3);
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+  padding: var(--s-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.kick-forensics-prompt-meta {
+  margin: 0 0 4px;
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+}
+
+/* Bus events list — one row per envelope, source → dest header + body
+ * preview. */
+.kick-forensics-event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.kick-forensics-event {
+  padding: var(--s-1) var(--s-2);
+  background: var(--bg-3);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+}
+.kick-forensics-event-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+}
+.kick-forensics-event-kind {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-4, var(--bg-3));
+  border: 1px solid var(--line-3, var(--border));
+  color: var(--fg-2, var(--fg));
+}
+.kick-forensics-event-ts {
+  margin-left: auto;
+  color: var(--fg-3, var(--fg-2));
+}
+.kick-forensics-event-text {
+  margin: 4px 0 0;
+  font-family: var(--font-mono);
+  font-size: var(--t-xs, 11px);
+  color: var(--ink, inherit);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Mutation list — similar shape with category tint. */
+.kick-forensics-mutation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.kick-forensics-mutation {
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+  background: var(--bg-3);
+}
+.kick-forensics-mutation-dangerous {
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+}
+.kick-forensics-mutation-write {
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+.kick-forensics-mutation-meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: var(--t-xs, 11px);
+}
+.kick-forensics-mutation-category {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-4, var(--bg-3));
+  border: 1px solid var(--line-3, var(--border));
+  color: var(--fg-2, var(--fg));
+}
+.kick-forensics-mutation-unconfirmed {
+  color: var(--warn);
+  font-weight: 600;
+}
+.kick-forensics-mutation-summary {
+  margin: 4px 0 0;
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+}
+.kick-forensics-mutation-path {
+  margin: 2px 0 0;
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+  word-break: break-all;
+}
