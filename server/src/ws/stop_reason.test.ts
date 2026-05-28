@@ -6,6 +6,7 @@ import type { ClientMsg } from '@cebab/shared';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { executeStopReason } from './server.js';
+import { appendSafetyAudit } from '../notifications/safety_audit.js';
 
 // Cluster C Phase 2 (spec §4.2 / §4.5): server-side coverage for
 // `executeStopReason`. Tests run against a real SQLite under a tmp
@@ -203,5 +204,73 @@ describe('executeStopReason — testability seams', () => {
       }),
     ).not.toThrow();
     expect(errSpy).toHaveBeenCalled();
+  });
+});
+
+describe('executeStopReason — parent session.stopped join (C3)', () => {
+  test('embeds parentAuditId in payload when lookup succeeds', () => {
+    const appendAudit = vi.fn<typeof import('../notifications/safety_audit.js').appendSafetyAudit>(
+      () => ({ id: 'reason-row', hash_self: Buffer.alloc(32) }),
+    );
+    const lookupParentAuditId = vi.fn(() => 'parent-audit-7');
+    executeStopReason({
+      msg: stopReasonMsg(),
+      latestAckId: 'ack-1',
+      appendAudit,
+      lookupParentAuditId,
+    });
+    expect(lookupParentAuditId).toHaveBeenCalledWith('sess-1', 'ack-1');
+    expect(appendAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'session.stop_reason',
+        payload: expect.objectContaining({
+          interruptAckId: 'ack-1',
+          parentAuditId: 'parent-audit-7',
+        }),
+      }),
+    );
+  });
+
+  test('parentAuditId is null in payload when lookup returns undefined', () => {
+    const appendAudit = vi.fn<typeof import('../notifications/safety_audit.js').appendSafetyAudit>(
+      () => ({ id: 'reason-row', hash_self: Buffer.alloc(32) }),
+    );
+    const lookupParentAuditId = vi.fn(() => undefined);
+    executeStopReason({
+      msg: stopReasonMsg(),
+      latestAckId: 'ack-1',
+      appendAudit,
+      lookupParentAuditId,
+    });
+    expect(appendAudit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ parentAuditId: null }),
+      }),
+    );
+  });
+
+  test('default lookup hits the real DB and resolves the parent across both rows', () => {
+    // No seam overrides: write the parent session.stopped row through the
+    // production append API so the hash chain stays valid, then call
+    // executeStopReason and assert the resulting stop_reason row carries
+    // the parentAuditId pointer it discovered via the JSON-extract lookup.
+    const parent = appendSafetyAudit({
+      ts: 1_700_000_000_000,
+      sessionId: 'sess-1',
+      kind: 'session.stopped',
+      reasonCode: 'operator',
+      payload: { interruptAckId: 'ack-1', source: 'single_agent_stop' },
+    });
+    executeStopReason({
+      msg: stopReasonMsg({ reasonCode: 'runaway_loop' }),
+      latestAckId: 'ack-1',
+    });
+    const row = getDb()
+      .prepare<[string], { payload_json: string }>(
+        "SELECT payload_json FROM safety_audit WHERE kind = 'session.stop_reason' AND session_id = ?",
+      )
+      .get('sess-1');
+    const payload = JSON.parse(row!.payload_json) as { parentAuditId: string | null };
+    expect(payload.parentAuditId).toBe(parent.id);
   });
 });

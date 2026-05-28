@@ -47,3 +47,21 @@ export function countEvents(sessionId: string): number {
       .get(sessionId)?.c ?? 0
   );
 }
+
+/**
+ * Cluster C Phase 3: tail of the events table for a session, in seq order
+ * (oldest → newest), capped to the most-recent `limit` rows. Used by the
+ * forensic-snapshot capture on single-agent Stop. Returned in ascending
+ * order so a renderer can show the trail chronologically without sorting.
+ */
+export function listEventsTail(sessionId: string, limit: number): EventRow[] {
+  if (limit <= 0) return [];
+  const recent = getDb()
+    .prepare<
+      [string, number],
+      EventRow
+    >('SELECT * FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT ?')
+    .all(sessionId, limit);
+  // Flip back to ascending — the DESC query was just to LIMIT the tail.
+  return recent.reverse();
+}
