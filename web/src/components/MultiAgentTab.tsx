@@ -107,22 +107,28 @@ export function MultiAgentTab(props: {
   onSetActiveLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddActiveParticipant: (sessionId: string, projectId: number) => void;
   /**
-   * Cluster C Phase 4g2: per-participant control verb dispatch. Each forwards
-   * to a typed ClientMsg via wsRef in App.tsx. ReasonCode is plumbed even
-   * though Phase 4g2's ⋮ menu pins it to `'topology_repair'` — the next
-   * slice (4g3) introduces the reason picker without needing to widen the
-   * surface again.
+   * Cluster C Phase 4g2 → 4g5: per-participant control verb dispatch. Each
+   * forwards to a typed ClientMsg via wsRef in App.tsx. C4g5 added the
+   * `reasonText` field so the modal-collected free-text notes reach the
+   * safety_audit payload.
    */
-  onMuteParticipant: (sessionId: string, projectId: number, reasonCode: ControlReasonCode) => void;
+  onMuteParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
   onUnmuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
   ) => void;
   onPauseParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
   ) => void;
@@ -130,6 +136,7 @@ export function MultiAgentTab(props: {
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
   ) => void;
   /**
    * Cluster C Phase 4g3: kick dispatch — bound to the KickModal's
@@ -1349,20 +1356,29 @@ function ActiveRunView(props: {
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (sessionId: string, projectId: number) => void;
   /**
-   * Cluster C Phase 4g2: per-participant control verbs from the ⋮ menu in
-   * SessionSettingsPanel. SessionId is bound here so the menu only needs
-   * (projectId, reasonCode, ...) at the leaf.
+   * Cluster C Phase 4g2 → 4g5: per-participant control verbs from the ⋮
+   * menu in SessionSettingsPanel. SessionId is bound here so the menu
+   * only needs (projectId, reasonCode, reasonText, …) at the leaf.
+   * C4g5 added reasonText for every action — collected by MuteReason/
+   * PauseReasonModal.
    */
-  onMuteParticipant: (sessionId: string, projectId: number, reasonCode: ControlReasonCode) => void;
+  onMuteParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
   onUnmuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
   ) => void;
   onPauseParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
   ) => void;
@@ -1370,6 +1386,7 @@ function ActiveRunView(props: {
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
   ) => void;
   /** Cluster C Phase 4g3: kick dispatch — bound to KickModal's onSubmit. */
   onKickParticipant: (
@@ -1459,23 +1476,24 @@ function ActiveRunView(props: {
         }
         onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
         onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
-        onMuteParticipant={(projectId, reasonCode) =>
-          props.onMuteParticipant(run.sessionId, projectId, reasonCode)
+        onMuteParticipant={(projectId, reasonCode, reasonText) =>
+          props.onMuteParticipant(run.sessionId, projectId, reasonCode, reasonText)
         }
-        onUnmuteParticipant={(projectId, reasonCode) =>
-          props.onUnmuteParticipant(run.sessionId, projectId, reasonCode)
+        onUnmuteParticipant={(projectId, reasonCode, reasonText) =>
+          props.onUnmuteParticipant(run.sessionId, projectId, reasonCode, reasonText)
         }
-        onPauseParticipant={(projectId, reasonCode, timeoutMs, expiryAction) =>
+        onPauseParticipant={(projectId, reasonCode, reasonText, timeoutMs, expiryAction) =>
           props.onPauseParticipant(
             run.sessionId,
             projectId,
             reasonCode,
+            reasonText,
             timeoutMs,
             expiryAction,
           )
         }
-        onResumeParticipant={(projectId, reasonCode) =>
-          props.onResumeParticipant(run.sessionId, projectId, reasonCode)
+        onResumeParticipant={(projectId, reasonCode, reasonText) =>
+          props.onResumeParticipant(run.sessionId, projectId, reasonCode, reasonText)
         }
         onKickParticipant={(projectId, reasonCode, reasonText, mode) =>
           props.onKickParticipant(run.sessionId, projectId, reasonCode, reasonText, mode)
@@ -1754,20 +1772,33 @@ function SessionSettingsPanel(props: {
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
   /**
-   * Cluster C Phase 4g2: per-participant control verbs from the ⋮ menu in
-   * each participant row. SessionId is already bound by the caller; the
-   * menu provides projectId + reasonCode (and pause-specific timeout +
-   * expiryAction).
+   * Cluster C Phase 4g2 → 4g5: per-participant control verbs from the ⋮
+   * menu in each participant row. SessionId is already bound by the caller;
+   * the menu provides (projectId, reasonCode, reasonText, …pauseExtras)
+   * at the leaf. C4g5: reasonText collected by MuteReason/PauseReasonModal.
    */
-  onMuteParticipant: (projectId: number, reasonCode: ControlReasonCode) => void;
-  onUnmuteParticipant: (projectId: number, reasonCode: ControlReasonCode) => void;
+  onMuteParticipant: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
+  onUnmuteParticipant: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
   onPauseParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
   ) => void;
-  onResumeParticipant: (projectId: number, reasonCode: ControlReasonCode) => void;
+  onResumeParticipant: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
   /**
    * Cluster C Phase 4g3: kick dispatch. The ⋮ menu opens KickModal; the
    * modal collects reasonCode + reasonText and calls back here with

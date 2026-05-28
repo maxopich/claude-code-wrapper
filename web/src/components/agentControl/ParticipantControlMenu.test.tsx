@@ -6,17 +6,20 @@ import type { ParticipantControlView } from '../../store';
 import { ParticipantControlMenu } from './ParticipantControlMenu';
 import { ForensicViewerProvider } from './ForensicViewerContext';
 
-// Cluster C Phase 4g2 — ParticipantControlMenu contract:
-//   - Trigger button opens/closes the panel; aria-expanded reflects state.
+// Cluster C Phase 4g2 → 4g5 — ParticipantControlMenu contract:
+//   - Trigger ⋮ button opens/closes the panel; aria-expanded reflects state.
 //   - When closed: no menuitem rendered.
-//   - When open: menu items render conditionally on the control state:
-//       * undefined / clear → Mute, Pause 5m, Pause 15m
-//       * muted=true        → Unmute (instead of Mute), Pause 5m/15m
-//       * paused (alive)    → Resume (only)
-//       * kicked            → trigger disabled, no menu
+//   - When open: items rendered conditionally on the control state:
+//       * undefined / clear → Mute…, Pause…
+//       * muted=true        → Unmute…, Pause…
+//       * paused (alive)    → Resume… (only)
+//       * kicked            → trigger stays enabled; menu shows only
+//                             "View forensics…" (C4g4 affordance)
 //   - Chain mode hides Mute/Unmute (replaced by a hint line).
-//   - Clicking an item invokes the right callback with reasonCode 'topology_repair'
-//     and closes the menu.
+//   - Clicking any non-kicked item opens the corresponding reason modal
+//     (C4g5 — direct dispatch was removed in favor of a reason picker).
+//   - Submitting the modal invokes the right callback with the right shape
+//     and closes the modal.
 //   - Escape closes the menu.
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -84,6 +87,16 @@ function openMenu() {
   });
 }
 
+function clickItemContaining(text: string) {
+  const item = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'),
+  ).find((b) => b.textContent?.includes(text));
+  expect(item, `menu item matching "${text}"`).toBeDefined();
+  act(() => {
+    item!.click();
+  });
+}
+
 describe('ParticipantControlMenu — trigger', () => {
   test('renders the ⋮ trigger', () => {
     render();
@@ -111,9 +124,6 @@ describe('ParticipantControlMenu — trigger', () => {
   test('trigger stays enabled when kicked (C4g4 forensic viewer access)', () => {
     render({ control: ctrl({ kickedAt: Date.now() }) });
     const trigger = container.querySelector('.ma-control-menu-trigger') as HTMLButtonElement;
-    // C4g4: kicked participants still need the ⋮ trigger so operators can
-    // open the KickForensicsModal. The menu shows only "View forensics…"
-    // in that state — no other verbs are valid for a kicked agent.
     expect(trigger.disabled).toBe(false);
     expect(trigger.getAttribute('aria-label')).toMatch(/forensics/i);
   });
@@ -126,47 +136,45 @@ describe('ParticipantControlMenu — items by state', () => {
     );
   }
 
-  test('undefined control: Mute + both Pause durations', () => {
+  test('undefined control: Mute… + Pause…', () => {
     render();
     openMenu();
     const texts = itemTexts();
-    expect(texts.some((t) => t.includes('Mute'))).toBe(true);
-    expect(texts.some((t) => t.includes('Pause for 5m'))).toBe(true);
-    expect(texts.some((t) => t.includes('Pause for 15m'))).toBe(true);
+    expect(texts.some((t) => t.includes('Mute…'))).toBe(true);
+    expect(texts.some((t) => t.includes('Pause…'))).toBe(true);
     expect(texts.some((t) => t.includes('Unmute'))).toBe(false);
     expect(texts.some((t) => t.includes('Resume'))).toBe(false);
   });
 
-  test('muted=true: Unmute replaces Mute', () => {
+  test('muted=true: Unmute… replaces Mute…', () => {
     render({ control: ctrl({ muted: true }) });
     openMenu();
     const texts = itemTexts();
-    expect(texts.some((t) => t.includes('Unmute'))).toBe(true);
-    expect(texts.some((t) => t.includes('Mute') && !t.includes('Unmute'))).toBe(false);
-    // Pause variants still available (muted + paused are independent verbs).
-    expect(texts.some((t) => t.includes('Pause for 5m'))).toBe(true);
+    expect(texts.some((t) => t.includes('Unmute…'))).toBe(true);
+    expect(texts.some((t) => t.includes('Mute…') && !t.includes('Unmute'))).toBe(false);
+    // Pause… still available (muted + paused are independent verbs).
+    expect(texts.some((t) => t.includes('Pause…'))).toBe(true);
   });
 
-  test('paused alive: only Resume rendered (no Pause variants)', () => {
+  test('paused alive: only Resume… rendered (no Pause… variant)', () => {
     render({ control: ctrl({ pausedUntil: Date.now() + 60_000 }) });
     openMenu();
     const texts = itemTexts();
-    expect(texts.some((t) => t.includes('Resume'))).toBe(true);
-    expect(texts.some((t) => t.includes('Pause for 5m'))).toBe(false);
-    expect(texts.some((t) => t.includes('Pause for 15m'))).toBe(false);
+    expect(texts.some((t) => t.includes('Resume…'))).toBe(true);
+    expect(texts.some((t) => t.includes('Pause…'))).toBe(false);
   });
 
-  test('expired pause: Pause variants reappear (deadline in past)', () => {
+  test('expired pause: Pause… reappears (deadline in past)', () => {
     render({ control: ctrl({ pausedUntil: Date.now() - 5000 }) });
     openMenu();
     const texts = itemTexts();
-    expect(texts.some((t) => t.includes('Pause for 5m'))).toBe(true);
-    expect(texts.some((t) => t.includes('Resume'))).toBe(false);
+    expect(texts.some((t) => t.includes('Pause…'))).toBe(true);
+    expect(texts.some((t) => t.includes('Resume…'))).toBe(false);
   });
 });
 
 describe('ParticipantControlMenu — chain mode hides Mute/Unmute', () => {
-  test('chain mode renders the hint instead of Mute', () => {
+  test('chain mode renders the hint instead of Mute…', () => {
     render({ sessionMode: 'chain' });
     openMenu();
     expect(container.querySelector('.ma-control-menu-hint')).not.toBeNull();
@@ -174,72 +182,109 @@ describe('ParticipantControlMenu — chain mode hides Mute/Unmute', () => {
       (i) => i.textContent?.trim() ?? '',
     );
     expect(texts.some((t) => t.includes('Mute') || t.includes('Unmute'))).toBe(false);
-    // Pause is still available in chain mode.
-    expect(texts.some((t) => t.includes('Pause for 5m'))).toBe(true);
+    // Pause… is still available in chain mode.
+    expect(texts.some((t) => t.includes('Pause…'))).toBe(true);
   });
 });
 
-describe('ParticipantControlMenu — dispatch', () => {
-  test('Mute click calls onMute(projectId, "topology_repair") and closes', () => {
-    const onMute = vi.fn();
-    render({ onMute });
+describe('ParticipantControlMenu — modal open + dispatch (C4g5)', () => {
+  test('Mute… click opens MuteReasonModal (action=mute)', () => {
+    render();
     openMenu();
-    const item = Array.from(container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'))
-      .find((b) => b.textContent?.includes('Mute'));
-    expect(item).toBeDefined();
-    act(() => {
-      item!.click();
-    });
-    expect(onMute).toHaveBeenCalledWith(7, 'topology_repair');
+    expect(document.querySelector('.mute-reason-modal')).toBeNull();
+    clickItemContaining('Mute…');
+    const modal = document.querySelector('.mute-reason-modal');
+    expect(modal).not.toBeNull();
+    expect(modal?.classList.contains('mute-reason-modal-mute')).toBe(true);
+    // Dropdown closes the moment a modal takes over.
     expect(container.querySelector('.ma-control-menu-panel')).toBeNull();
   });
 
-  test('Pause for 5m click calls onPause with 300000ms + auto_resume', () => {
-    const onPause = vi.fn();
-    render({ onPause });
+  test('submitting the Mute modal calls onMute(projectId, reasonCode, reasonText|undefined)', () => {
+    const onMute = vi.fn();
+    render({ onMute });
     openMenu();
-    const item = Array.from(container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'))
-      .find((b) => b.textContent?.includes('Pause for 5m'));
+    clickItemContaining('Mute…');
+    const submit = document.querySelector(
+      '.mute-reason-modal .gate-modal-btn-primary',
+    ) as HTMLButtonElement;
     act(() => {
-      item!.click();
+      submit.click();
     });
-    expect(onPause).toHaveBeenCalledWith(7, 'topology_repair', 5 * 60 * 1000, 'auto_resume');
+    expect(onMute).toHaveBeenCalledWith(7, 'topology_repair', undefined);
+    expect(document.querySelector('.mute-reason-modal')).toBeNull();
   });
 
-  test('Pause for 15m uses 900000ms', () => {
-    const onPause = vi.fn();
-    render({ onPause });
+  test('Unmute… click opens MuteReasonModal (action=unmute)', () => {
+    render({ control: ctrl({ muted: true }) });
     openMenu();
-    const item = Array.from(container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'))
-      .find((b) => b.textContent?.includes('Pause for 15m'));
-    act(() => {
-      item!.click();
-    });
-    expect(onPause).toHaveBeenCalledWith(7, 'topology_repair', 15 * 60 * 1000, 'auto_resume');
+    clickItemContaining('Unmute…');
+    const modal = document.querySelector('.mute-reason-modal');
+    expect(modal?.classList.contains('mute-reason-modal-unmute')).toBe(true);
   });
 
-  test('Resume click calls onResume + closes', () => {
-    const onResume = vi.fn();
-    render({ control: ctrl({ pausedUntil: Date.now() + 60_000 }), onResume });
-    openMenu();
-    const item = Array.from(container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'))
-      .find((b) => b.textContent?.includes('Resume'));
-    act(() => {
-      item!.click();
-    });
-    expect(onResume).toHaveBeenCalledWith(7, 'topology_repair');
-  });
-
-  test('Unmute click calls onUnmute', () => {
+  test('submitting the Unmute modal calls onUnmute', () => {
     const onUnmute = vi.fn();
     render({ control: ctrl({ muted: true }), onUnmute });
     openMenu();
-    const item = Array.from(container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'))
-      .find((b) => b.textContent?.includes('Unmute'));
+    clickItemContaining('Unmute…');
+    const submit = document.querySelector(
+      '.mute-reason-modal .gate-modal-btn-primary',
+    ) as HTMLButtonElement;
     act(() => {
-      item!.click();
+      submit.click();
     });
-    expect(onUnmute).toHaveBeenCalledWith(7, 'topology_repair');
+    expect(onUnmute).toHaveBeenCalledWith(7, 'topology_repair', undefined);
+  });
+
+  test('Pause… click opens PauseReasonModal', () => {
+    render();
+    openMenu();
+    expect(document.querySelector('.pause-reason-modal')).toBeNull();
+    clickItemContaining('Pause…');
+    expect(document.querySelector('.pause-reason-modal')).not.toBeNull();
+  });
+
+  test('submitting the Pause modal calls onPause with default 15m / auto_resume', () => {
+    const onPause = vi.fn();
+    render({ onPause });
+    openMenu();
+    clickItemContaining('Pause…');
+    const submit = document.querySelector(
+      '.pause-reason-modal .gate-modal-btn-primary',
+    ) as HTMLButtonElement;
+    act(() => {
+      submit.click();
+    });
+    expect(onPause).toHaveBeenCalledWith(
+      7,
+      'topology_repair',
+      undefined,
+      15 * 60 * 1000,
+      'auto_resume',
+    );
+  });
+
+  test('Resume… click opens MuteReasonModal (action=resume)', () => {
+    render({ control: ctrl({ pausedUntil: Date.now() + 60_000 }) });
+    openMenu();
+    clickItemContaining('Resume…');
+    const modal = document.querySelector('.mute-reason-modal');
+    expect(modal?.classList.contains('mute-reason-modal-resume')).toBe(true);
+  });
+
+  test('submitting the Resume modal calls onResume', () => {
+    const onResume = vi.fn();
+    render({ control: ctrl({ pausedUntil: Date.now() + 60_000 }), onResume });
+    openMenu();
+    clickItemContaining('Resume…');
+    const submit = document.querySelector(
+      '.mute-reason-modal .gate-modal-btn-primary',
+    ) as HTMLButtonElement;
+    act(() => {
+      submit.click();
+    });
+    expect(onResume).toHaveBeenCalledWith(7, 'topology_repair', undefined);
   });
 });
 
@@ -299,33 +344,22 @@ describe('ParticipantControlMenu — Kick item (C4g3)', () => {
     render();
     openMenu();
     expect(document.querySelector('.kick-modal')).toBeNull();
-    const kickItem = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'),
-    ).find((b) => b.textContent?.includes('Kick'));
-    expect(kickItem).toBeDefined();
-    act(() => {
-      kickItem!.click();
-    });
+    clickItemContaining('Kick');
     expect(document.querySelector('.kick-modal')).not.toBeNull();
-    // Dropdown should close once the modal takes over.
     expect(container.querySelector('.ma-control-menu-panel')).toBeNull();
   });
 
-  test('submitting the modal calls onKick + closes the modal', () => {
+  test('submitting the Kick modal calls onKick + closes the modal', () => {
     const onKick = vi.fn();
     render({ onKick });
     openMenu();
-    const kickItem = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'),
-    ).find((b) => b.textContent?.includes('Kick'));
-    act(() => {
-      kickItem!.click();
-    });
-    const submit = document.querySelector('.kick-modal .gate-modal-btn-danger') as HTMLButtonElement;
+    clickItemContaining('Kick');
+    const submit = document.querySelector(
+      '.kick-modal .gate-modal-btn-danger',
+    ) as HTMLButtonElement;
     act(() => {
       submit.click();
     });
-    // Default reason topology_repair + no notes → undefined reasonText, drain mode.
     expect(onKick).toHaveBeenCalledWith(7, 'topology_repair', undefined, 'drain');
     expect(document.querySelector('.kick-modal')).toBeNull();
   });
@@ -337,12 +371,10 @@ describe('ParticipantControlMenu — Kick item (C4g3)', () => {
       (i) => i.textContent?.trim() ?? '',
     );
     expect(items.some((t) => t.includes('View forensics'))).toBe(true);
-    // C4g4: no mute/pause/kick affordances on a kicked participant —
-    // there's nothing valid to do other than inspect what they did.
+    // C4g4: no mute/pause/kick affordances on a kicked participant.
     expect(items.some((t) => t.includes('Mute'))).toBe(false);
     expect(items.some((t) => t.includes('Pause'))).toBe(false);
     expect(items.some((t) => t.includes('Resume'))).toBe(false);
-    // The Kick… item is also hidden — already kicked.
     expect(items.some((t) => t.startsWith('⨯'))).toBe(false);
   });
 });

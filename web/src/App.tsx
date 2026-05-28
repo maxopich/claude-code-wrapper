@@ -967,26 +967,43 @@ function AppShell({
   // thin wrapper around the typed ClientMsg shapes in shared/src/protocol.ts;
   // the server's executors live in server/src/ws/control_verbs.ts and
   // dual-write a per_agent_control row + safety_audit row before echoing.
-  // ReasonCode is plumbed through but Phase 4g2's UI pins it to
-  // 'topology_repair' — the reason picker lands in Phase 4g3.
+  // C4g5: each sender now forwards `reasonText` (collected by MuteReason/
+  // PauseReasonModal) — the optional `reasonText?` field on each ClientMsg
+  // shape. Undefined means the operator left the notes blank; we elide
+  // the field entirely so the on-wire shape stays clean.
   function muteParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
   ) {
-    wsRef.current?.send({ type: 'mute_participant', sessionId, projectId, reasonCode });
+    wsRef.current?.send({
+      type: 'mute_participant',
+      sessionId,
+      projectId,
+      reasonCode,
+      ...(reasonText !== undefined ? { reasonText } : {}),
+    });
   }
   function unmuteParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
   ) {
-    wsRef.current?.send({ type: 'unmute_participant', sessionId, projectId, reasonCode });
+    wsRef.current?.send({
+      type: 'unmute_participant',
+      sessionId,
+      projectId,
+      reasonCode,
+      ...(reasonText !== undefined ? { reasonText } : {}),
+    });
   }
   function pauseParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
   ) {
@@ -995,6 +1012,7 @@ function AppShell({
       sessionId,
       projectId,
       reasonCode,
+      ...(reasonText !== undefined ? { reasonText } : {}),
       timeoutMs,
       expiryAction,
     });
@@ -1003,8 +1021,15 @@ function AppShell({
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
   ) {
-    wsRef.current?.send({ type: 'resume_participant', sessionId, projectId, reasonCode });
+    wsRef.current?.send({
+      type: 'resume_participant',
+      sessionId,
+      projectId,
+      reasonCode,
+      ...(reasonText !== undefined ? { reasonText } : {}),
+    });
   }
   // Cluster C Phase 4g3: kick sender. Mode is currently always 'drain'
   // (server rejects 'hard' with `hard_kill_unsupported_v1`); KickModal
