@@ -46,6 +46,8 @@ import {
 import { ReopenProvider, useReopenActions } from './components/reopen';
 import { AuthRefreshProvider, useAuthRefreshActions } from './components/authRefresh';
 import { RecoveryLogButton, RecoveryLogProvider } from './components/recoveryLog';
+import { ForensicViewerProvider } from './components/agentControl/ForensicViewerContext';
+import { KickForensicsModal } from './components/agentControl/KickForensicsModal';
 import { HELD_MESSAGES_CAP } from './store';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
@@ -143,6 +145,12 @@ export function App() {
   // provider's reducer. No `requestRef` companion: the RecoveryLogButton
   // owns its trigger (no notification-action plumbing required).
   const recoveryLogHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  // Cluster C Phase 4g4: bridge for the ForensicViewerProvider.
+  // App.tsx routes `kick_forensics_snapshot` through this ref into the
+  // viewer's reducer. The ⋮ menu's "View forensics…" item ships the
+  // matching `get_kick_forensics` request via the provider's open
+  // action; no requestRef needed.
+  const forensicViewerHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -177,6 +185,11 @@ export function App() {
   // Ships `get_recovery_log_snapshot` onto the active WS — same
   // wsRef indirection so a reconnect doesn't strand the request.
   const recoveryLogSend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
+  // Cluster C Phase 4g4: ClientMsg sink for the ForensicViewerProvider.
+  // Ships `get_kick_forensics` onto the active WS — same indirection.
+  const forensicViewerSend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
 
@@ -232,20 +245,27 @@ export function App() {
               <AuthRefreshProvider send={authRefreshSend} handlerRef={authRefreshHandlerRef}>
                 <AuthRefreshBridge requestRef={authRefreshRequestRef} />
                 <RecoveryLogProvider send={recoveryLogSend} handlerRef={recoveryLogHandlerRef}>
-                  <AppShell
-                    wsRef={wsRef}
-                    notifPushRef={notifPushRef}
-                    notifDismissRef={notifDismissRef}
-                    inboxHandlerRef={inboxHandlerRef}
-                    gateHandlerRef={gateHandlerRef}
-                    authorityHandlerRef={authorityHandlerRef}
-                    reopenHandlerRef={reopenHandlerRef}
-                    authRefreshHandlerRef={authRefreshHandlerRef}
-                    authRefreshRequestRef={authRefreshRequestRef}
-                    recoveryLogHandlerRef={recoveryLogHandlerRef}
-                    onAck={handleAck}
-                  />
-                  <NotificationStack onAction={onNotificationAction} />
+                  <ForensicViewerProvider
+                    send={forensicViewerSend}
+                    handlerRef={forensicViewerHandlerRef}
+                  >
+                    <AppShell
+                      wsRef={wsRef}
+                      notifPushRef={notifPushRef}
+                      notifDismissRef={notifDismissRef}
+                      inboxHandlerRef={inboxHandlerRef}
+                      gateHandlerRef={gateHandlerRef}
+                      authorityHandlerRef={authorityHandlerRef}
+                      reopenHandlerRef={reopenHandlerRef}
+                      authRefreshHandlerRef={authRefreshHandlerRef}
+                      authRefreshRequestRef={authRefreshRequestRef}
+                      recoveryLogHandlerRef={recoveryLogHandlerRef}
+                      forensicViewerHandlerRef={forensicViewerHandlerRef}
+                      onAck={handleAck}
+                    />
+                    <NotificationStack onAction={onNotificationAction} />
+                    <KickForensicsModal />
+                  </ForensicViewerProvider>
                 </RecoveryLogProvider>
               </AuthRefreshProvider>
             </ReopenProvider>
@@ -378,6 +398,13 @@ type AppShellProps = {
    * recent rows on open.
    */
   recoveryLogHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cluster C Phase 4g4: bridge ref the ForensicViewerProvider populates.
+   * onMessage routes typed `kick_forensics_snapshot` through this into
+   * the viewer reducer so the KickForensicsModal renders the snapshot
+   * fresh on each open.
+   */
+  forensicViewerHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
@@ -393,6 +420,7 @@ function AppShell({
   authRefreshHandlerRef,
   authRefreshRequestRef,
   recoveryLogHandlerRef,
+  forensicViewerHandlerRef,
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -679,6 +707,15 @@ function AppShell({
             recoveryLogHandlerRef.current?.(msg);
           } catch (err) {
             console.error('[recovery_log] handler threw', err);
+          }
+          // Cluster C Phase 4g4: hand to the ForensicViewerProvider
+          // bridge so `kick_forensics_snapshot` envelopes resolve the
+          // KickForensicsModal's loading state. Same posture as above —
+          // provider filters by msg.type internally.
+          try {
+            forensicViewerHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[forensic_viewer] handler threw', err);
           }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a

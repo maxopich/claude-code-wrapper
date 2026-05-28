@@ -9,6 +9,7 @@ import {
   appendForensics,
   getForensicsByAuditId,
   getForensicsBySessionId,
+  getLatestForensicsForAgent,
 } from './controllability_forensics.js';
 
 // Cluster C Phase 3: controllability_forensics repository + migration 019.
@@ -228,5 +229,81 @@ describe('getForensicsBySessionId — chronological queries', () => {
     });
     expect(getForensicsBySessionId('sess-a')).toHaveLength(1);
     expect(getForensicsBySessionId('sess-b')).toHaveLength(1);
+  });
+});
+
+describe('getLatestForensicsForAgent — C4g4 kick viewer lookup', () => {
+  test('returns undefined when no row matches (session,slug)', () => {
+    expect(getLatestForensicsForAgent('sess-none', 'worker-a')).toBeUndefined();
+  });
+
+  test('returns the most-recent row for the (session, slug) pair', () => {
+    const a1 = seedParentAudit('sess-k', 'ack-k1');
+    const a2 = seedParentAudit('sess-k', 'ack-k2');
+    appendForensics({
+      safetyAuditId: a1,
+      ts: 1000,
+      sessionId: 'sess-k',
+      agentSlug: 'worker-a',
+      effectivePrompt: { source: 'none' },
+      eventsLastN: [],
+    });
+    appendForensics({
+      safetyAuditId: a2,
+      ts: 2000,
+      sessionId: 'sess-k',
+      agentSlug: 'worker-a',
+      effectivePrompt: { source: 'none' },
+      eventsLastN: [],
+    });
+    const row = getLatestForensicsForAgent('sess-k', 'worker-a');
+    expect(row?.ts).toBe(2000);
+    expect(row?.safety_audit_id).toBe(a2);
+  });
+
+  test('filters by agentSlug — sibling agents in same session do not bleed', () => {
+    const a = seedParentAudit('sess-mix', 'ack-mix-a');
+    const b = seedParentAudit('sess-mix', 'ack-mix-b');
+    appendForensics({
+      safetyAuditId: a,
+      ts: 100,
+      sessionId: 'sess-mix',
+      agentSlug: 'worker-a',
+      effectivePrompt: { source: 'none' },
+      eventsLastN: [],
+    });
+    appendForensics({
+      safetyAuditId: b,
+      ts: 200,
+      sessionId: 'sess-mix',
+      agentSlug: 'worker-b',
+      effectivePrompt: { source: 'none' },
+      eventsLastN: [],
+    });
+    expect(getLatestForensicsForAgent('sess-mix', 'worker-a')?.ts).toBe(100);
+    expect(getLatestForensicsForAgent('sess-mix', 'worker-b')?.ts).toBe(200);
+  });
+
+  test('filters by sessionId — same slug in different session is invisible', () => {
+    const a = seedParentAudit('sess-x', 'ack-x');
+    const b = seedParentAudit('sess-y', 'ack-y');
+    appendForensics({
+      safetyAuditId: a,
+      ts: 100,
+      sessionId: 'sess-x',
+      agentSlug: 'worker',
+      effectivePrompt: { source: 'none' },
+      eventsLastN: [],
+    });
+    appendForensics({
+      safetyAuditId: b,
+      ts: 200,
+      sessionId: 'sess-y',
+      agentSlug: 'worker',
+      effectivePrompt: { source: 'none' },
+      eventsLastN: [],
+    });
+    expect(getLatestForensicsForAgent('sess-x', 'worker')?.ts).toBe(100);
+    expect(getLatestForensicsForAgent('sess-y', 'worker')?.ts).toBe(200);
   });
 });

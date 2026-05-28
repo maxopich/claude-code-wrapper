@@ -131,3 +131,37 @@ export function getForensicsBySessionId(sessionId: string, limit = 20): Forensic
     )
     .all(sessionId, limit);
 }
+
+/**
+ * Cluster C Phase 4g4: most-recent forensic bundle captured for a specific
+ * agent in a specific session. Used by the KickForensicsModal — the client
+ * holds (sessionId, agentSlug) from the kicked-pill click and asks the
+ * server to fetch the bundle.
+ *
+ * Returns undefined when no forensic row exists for the (sessionId,
+ * agentSlug) pair. Multi-agent kick (C4f) writes one bundle per kick; this
+ * returns the latest, which for a given live session is the kick bundle
+ * (kick is terminal — there's no later capture for the same agent in the
+ * same session).
+ *
+ * The (session_id, ts) index covers the WHERE+ORDER; the trailing agent_slug
+ * filter is in-memory on the small result set. If sessions grow many
+ * forensics rows per session this is fine — kick is rare per agent.
+ */
+export function getLatestForensicsForAgent(
+  sessionId: string,
+  agentSlug: string,
+): ForensicsRow | undefined {
+  return getDb()
+    .prepare<[string, string], ForensicsRow>(
+      `SELECT id, safety_audit_id, ts, session_id, parent_session_id, operator_id, agent_slug,
+              effective_prompt_json, events_last_n_json, pending_tool_calls_json,
+              workdir_tree_hash, active_permissions_json, bus_inbox_outbox_json,
+              mutation_rationale_json, snapshot_failed_reason
+       FROM controllability_forensics
+       WHERE session_id = ? AND agent_slug = ?
+       ORDER BY ts DESC
+       LIMIT 1`,
+    )
+    .get(sessionId, agentSlug);
+}
