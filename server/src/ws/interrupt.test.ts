@@ -35,7 +35,7 @@ describe('executeInterrupt', () => {
     expect(sent).toEqual([]);
   });
 
-  test('runner.interrupt path → emits session_interrupted with measured ackLatencyMs', async () => {
+  test('runner.interrupt path → emits session_interrupted with measured ackLatencyMs + ackId', async () => {
     const sent: ServerMsg[] = [];
     let resolveInterrupt: () => void;
     const interruptPromise = new Promise<void>((resolve) => {
@@ -48,12 +48,16 @@ describe('executeInterrupt', () => {
     // and runner.interrupt() resolution.
     let ts = 1_000_000;
     const now = vi.fn(() => ts);
+    // Phase 2: deterministic ackId for assertion. Real path uses
+    // randomUUID; test seam injects a fixed string.
+    const generateAckId = vi.fn(() => 'ack-fixed');
 
     executeInterrupt({
       inFlight,
       sessionId: 'sess-1',
       send: (m) => sent.push(m),
       now,
+      generateAckId,
     });
 
     expect(interrupt).toHaveBeenCalledTimes(1);
@@ -67,10 +71,37 @@ describe('executeInterrupt', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(sent).toEqual([
-      { type: 'session_interrupted', sessionId: 'sess-1', ackLatencyMs: 42 },
+      {
+        type: 'session_interrupted',
+        sessionId: 'sess-1',
+        ackLatencyMs: 42,
+        interruptAckId: 'ack-fixed',
+      },
     ]);
     // The ac.abort was NOT called when runner.interrupt succeeds.
     expect(inFlight.ac.signal.aborted).toBe(false);
+  });
+
+  test('trackAckId is invoked synchronously with the generated id', () => {
+    const sent: ServerMsg[] = [];
+    const interrupt = vi.fn(() => new Promise<void>(() => {})); // never resolves
+    const inFlight = makeInFlight(interrupt);
+    const tracked: Array<{ sessionId: string; ackId: string }> = [];
+    const generateAckId = () => 'ack-tracked-1';
+
+    executeInterrupt({
+      inFlight,
+      sessionId: 'sess-track',
+      send: (m) => sent.push(m),
+      trackAckId: (sessionId, ackId) => tracked.push({ sessionId, ackId }),
+      generateAckId,
+    });
+
+    // trackAckId fires synchronously even though the envelope hasn't
+    // shipped yet — important so a concurrent stop_reason has the id
+    // available immediately.
+    expect(tracked).toEqual([{ sessionId: 'sess-track', ackId: 'ack-tracked-1' }]);
+    expect(sent).toEqual([]); // envelope still pending on runner.interrupt
   });
 
   test('runner without interrupt → uses ac.abort and still emits envelope', async () => {

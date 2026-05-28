@@ -74,7 +74,11 @@ import {
   markNotificationAcked,
 } from '../notifications/dispatcher.js';
 import { getScrubbedEnvVars } from '../runner/claude.js';
-import { appendSafetyAuditAck, HIGHEST_SUBCODES } from '../notifications/safety_audit.js';
+import {
+  appendSafetyAudit,
+  appendSafetyAuditAck,
+  HIGHEST_SUBCODES,
+} from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import {
   aggregateByClass,
@@ -211,15 +215,41 @@ export function executeInterrupt(args: {
   inFlight: InterruptInFlight | undefined;
   sessionId: string;
   send: (msg: ServerMsg) => void;
+  /**
+   * Cluster C Phase 2: store the freshly-minted `interruptAckId` so the
+   * later `stop_reason` handler can validate it. Per-session — last id
+   * wins for that session (Stops happen one-at-a-time per session in
+   * the single-agent path; a fresh Stop invalidates a pending reason
+   * for a previous Stop, which is the right semantics).
+   *
+   * Required when there IS an inFlight session — passed by the case
+   * body wired to `conn.lastInterruptIds`. Tests can pass an own Map
+   * or omit entirely (skip the side effect).
+   */
+  trackAckId?: (sessionId: string, ackId: string) => void;
   /** Test seam: clock override for deterministic ackLatencyMs assertions. */
   now?: () => number;
+  /** Test seam: ackId override for deterministic assertions. */
+  generateAckId?: () => string;
 }): void {
   const { inFlight, sessionId, send } = args;
   const now = args.now ?? Date.now;
+  const generateAckId = args.generateAckId ?? randomUUID;
   if (!inFlight) return;
   const interruptStartedAt = now();
+  // Mint the ack id eagerly so a fast-path emit (no runner.interrupt
+  // exposed) still has a stable id to ship. Track it before the await
+  // so a concurrent stop_reason that races the runner.interrupt
+  // resolution doesn't see a stale id.
+  const interruptAckId = generateAckId();
+  args.trackAckId?.(sessionId, interruptAckId);
   const emitAck = () => {
-    send({ type: 'session_interrupted', sessionId, ackLatencyMs: now() - interruptStartedAt });
+    send({
+      type: 'session_interrupted',
+      sessionId,
+      ackLatencyMs: now() - interruptStartedAt,
+      interruptAckId,
+    });
   };
   if (inFlight.runner.interrupt) {
     inFlight.runner.interrupt().then(emitAck, (err) => {
@@ -230,6 +260,71 @@ export function executeInterrupt(args: {
   } else {
     inFlight.ac.abort();
     emitAck();
+  }
+}
+
+/**
+ * Cluster C Phase 2 (spec §4.2 / §4.5): persist the operator's free-eval
+ * reason for a Stop. Validates the inbound `interruptAckId` matches the
+ * latest tracked id for the session, enforces the `'other' + reasonText`
+ * pairing, and writes a `safety_audit` row.
+ *
+ * Drops (no-op + console log) instead of returning a `wrapper_error` —
+ * the reason is post-hoc and Skip is the spec's "I don't want to
+ * categorise" path, so a noisy rejection wouldn't be useful. The two
+ * drop reasons (mismatched ack id, missing 'other' text) are diagnostic-
+ * logged so a confused client can find the cause without firing a
+ * generic error toast at the operator.
+ *
+ * Exported for testability — the unit test exercises the validator +
+ * the audit-write side effect against a real SQLite under a tmp dir.
+ */
+export type ExecuteStopReasonInput = {
+  msg: Extract<ClientMsg, { type: 'stop_reason' }>;
+  /** The most recent `interruptAckId` for this session, or undefined if none tracked. */
+  latestAckId: string | undefined;
+  /** Test seam: override the audit append for hermetic tests. */
+  appendAudit?: typeof appendSafetyAudit;
+  /** Test seam: override Date.now() for deterministic ts assertions. */
+  now?: () => number;
+};
+
+export function executeStopReason(input: ExecuteStopReasonInput): void {
+  const { msg, latestAckId } = input;
+  const append = input.appendAudit ?? appendSafetyAudit;
+  const now = input.now ?? Date.now;
+  // Validation 1: id binding. A stale reason (operator clicked the
+  // prompt 30s after a fresh Stop already started) must not bind to
+  // the new Stop's audit row. Silently drop.
+  if (!latestAckId || latestAckId !== msg.interruptAckId) {
+    console.log(
+      `[stop_reason] dropping stale reason for ${msg.sessionId} (latest=${latestAckId ?? 'none'}, got=${msg.interruptAckId})`,
+    );
+    return;
+  }
+  // Validation 2: 'other' requires non-empty text. The client UI
+  // enforces this, but a misbehaving client shouldn't be able to file
+  // 'other' rows with no detail — they're useless for eval.
+  if (msg.reasonCode === 'other') {
+    const text = msg.reasonText?.trim();
+    if (!text) {
+      console.log(`[stop_reason] dropping 'other' reason without text for ${msg.sessionId}`);
+      return;
+    }
+  }
+  try {
+    append({
+      ts: now(),
+      sessionId: msg.sessionId,
+      kind: 'session.stop_reason',
+      reasonCode: msg.reasonCode,
+      payload: {
+        interruptAckId: msg.interruptAckId,
+        reasonText: msg.reasonText ?? null,
+      },
+    });
+  } catch (err) {
+    console.error(`[stop_reason] safety_audit append failed for ${msg.sessionId}`, err);
   }
 }
 
@@ -971,6 +1066,15 @@ type Conn = {
    * indicator that gates `runOneTurn`'s finally-block status flip.
    */
   capturedPrompts: Map<string, { text: string; projectId: number }>;
+  /**
+   * Cluster C Phase 2 (spec §4.5): most-recent `interruptAckId` per
+   * session. The `stop_reason` handler reads this to validate that the
+   * operator's reason binds to the latest Stop (a late reason for a
+   * previous Stop is silently dropped). Last id wins per session: a
+   * second Stop invalidates the pending reason for the first.
+   * Cleared on disconnect via Conn drop; no cross-connection state.
+   */
+  lastInterruptIds: Map<string, string>;
 };
 
 export function startWsServer(server: HttpServer): WebSocketServer {
@@ -1111,6 +1215,7 @@ function onConnection(ws: WebSocket): void {
     trustGate: makeTrustGateState(),
     startGate: makeStartGateState(),
     capturedPrompts: new Map(),
+    lastInterruptIds: new Map(),
   };
 
   // Cluster A Phase 3 (E1, BE-10): tell the operator which auth-precedence
@@ -2055,11 +2160,33 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // helper takes only what it needs — no Conn type — so the test
       // can pass synthetic runner shapes without standing up a full
       // WS server.
+      //
+      // Cluster C Phase 2: thread `trackAckId` so the freshly-minted
+      // `interruptAckId` lands in `conn.lastInterruptIds` synchronously
+      // — the operator's later `stop_reason` message binds against
+      // this latest id.
       cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId);
       executeInterrupt({
         inFlight: conn.inFlight.get(msg.sessionId),
         sessionId: msg.sessionId,
         send: (m) => send(conn.ws, m),
+        trackAckId: (sessionId, ackId) => conn.lastInterruptIds.set(sessionId, ackId),
+      });
+      return;
+    }
+    case 'stop_reason': {
+      // Cluster C Phase 2 (spec §4.2 / §4.5): operator's free-eval
+      // categorisation of why they Stopped. Validated against the
+      // latest tracked `interruptAckId` for the session; mismatches
+      // are silently dropped (a stale reason from a previous Stop
+      // shouldn't bind to a fresher one). 'other' requires a
+      // non-empty reasonText; mismatched pairs are also dropped.
+      // Persisted as a standalone `safety_audit` row keyed by
+      // (sessionId + interruptAckId) so C3's session.stopped
+      // dual-write can later join them into a single audit history.
+      executeStopReason({
+        msg,
+        latestAckId: conn.lastInterruptIds.get(msg.sessionId),
       });
       return;
     }

@@ -7728,3 +7728,95 @@ pre {
 .recovery-log-recent-row-session {
   font-family: var(--font-mono, monospace);
 }
+
+/* -------------------------------------------------------------------------
+ * Cluster C Phase 2 (spec §4.2): scrollback Stopped marker + inline
+ * reason-for-stop prompt.
+ *
+ * Sits inside .chat as the last item (after messages + streaming/thinking
+ * indicator). Marker line is err-tinted; the prompt below uses the
+ * existing secondary-btn family. All tokens are reused; no new color
+ * tokens added.
+ * ------------------------------------------------------------------------- */
+
+.stopped-marker {
+  margin: var(--s-2, 8px) 0;
+  padding: var(--s-2, 8px) var(--s-3, 12px);
+  border-left: 3px solid var(--err);
+  background: var(--err-soft);
+  border-radius: 0 var(--r-md, 8px) var(--r-md, 8px) 0;
+  font-size: var(--t-sm);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2, 8px);
+}
+
+.stopped-marker-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--err);
+  font-weight: 500;
+}
+.stopped-marker-glyph {
+  font-size: 0.9em;
+}
+.stopped-marker-text {
+  font-variant-numeric: tabular-nums;
+}
+
+.stopped-marker-prompt {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2, 8px);
+  color: var(--ink, inherit);
+  font-weight: 400;
+}
+.stopped-marker-prompt-label {
+  font-size: var(--t-xs, 11px);
+  color: var(--ink-dim, var(--fg-3, inherit));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.stopped-marker-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.stopped-marker-btn {
+  font-size: var(--t-xs, 11px);
+  padding: 2px 8px;
+  height: auto;
+}
+.stopped-marker-btn.is-active {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
+.stopped-marker-skip {
+  margin-left: auto;
+  /* Visually demote — Skip is the no-data path, not the primary action. */
+  opacity: 0.65;
+}
+.stopped-marker-skip:hover {
+  opacity: 1;
+}
+.stopped-marker-other {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.stopped-marker-other-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: var(--t-sm);
+  background: var(--bg-4, var(--bg-3));
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+}
+.stopped-marker-other-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

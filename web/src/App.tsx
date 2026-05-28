@@ -7,6 +7,7 @@ import type {
   NotificationEnvelope,
   ServerMsg,
   SessionPermissionMode,
+  StopReasonCode,
 } from '@cebab/shared/protocol';
 import { connectWs, type WsHandle } from './ws';
 import { activeSession, initialState, isSessionPending, reduce } from './store';
@@ -765,6 +766,33 @@ function AppShell({
     wsRef.current?.send({ type: 'interrupt', sessionId });
   }
 
+  // Cluster C Phase 2: ship the operator's reason-for-stop. Server
+  // validates the interruptAckId binds to the most recent Stop and
+  // drops mismatched messages — we still locally flip
+  // reasonSubmitted so the prompt unmounts immediately (the operator
+  // already made their choice; refreshing would be noise). The
+  // server's silent drop on stale id is the right behavior: a late
+  // reason for a stale Stop becomes a no-op on both sides.
+  const submitStopReason = useCallback(
+    (
+      sessionId: string,
+      interruptAckId: string,
+      reasonCode: StopReasonCode,
+      reasonText?: string,
+    ) => {
+      wsRef.current?.send({ type: 'stop_reason', sessionId, interruptAckId, reasonCode, reasonText });
+      dispatch({ type: 'stop_reason_dismissed', sessionId });
+    },
+    [],
+  );
+
+  const skipStopReason = useCallback((sessionId: string) => {
+    // Skip ships nothing — the absence of a stop_reason event is
+    // the spec's "reason=unspecified" outcome. Just dismiss the
+    // prompt locally so it doesn't keep nagging.
+    dispatch({ type: 'stop_reason_dismissed', sessionId });
+  }, []);
+
   function sendMessage(text: string) {
     if (!state.activeProjectId) return;
     // Cluster D Phase 4c (UI-D7): when this session is rate-limited, the
@@ -1438,6 +1466,8 @@ function AppShell({
                   session={session}
                   isLive={sessionIsLive}
                   onPermissionDecide={decidePermission}
+                  onSubmitStopReason={submitStopReason}
+                  onSkipStopReason={skipStopReason}
                 />
                 <InputBox
                   /* Cluster C Phase 1: structural disable only (no
