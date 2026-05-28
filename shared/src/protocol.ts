@@ -102,7 +102,17 @@ export type RouterDropReasonCode =
   | 'forged_source'
   | 'worker_to_user'
   | 'worker_to_worker'
-  | 'unknown_source';
+  | 'unknown_source'
+  /**
+   * Cluster C Phase 4b: operator muted this participant; router drops every
+   * BusEvent where `ev.source === <agent>`. This is the spec's §3 invariant 1
+   * enforcement point — mute MUST drop at the router, not UI-only, otherwise
+   * the agent's outbound still reaches its recipient and the "silent safety"
+   * regression returns. The mute itself wrote the parent safety_audit row at
+   * handler time; the per-event router_drop addendum keeps the operator's
+   * "what did the muted agent try to say?" forensics view populated.
+   */
+  | 'muted_source';
 
 /**
  * Cluster A Phase 6 — extended §7 vocabulary (subset that has source sites
