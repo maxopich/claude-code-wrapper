@@ -1050,6 +1050,12 @@ pre {
   font-size: var(--t-sm);
   font-weight: 500;
   box-shadow: 0 6px 16px var(--accent-glow);
+  /* Cluster C Phase 1: opacity-only cross-fade between Send/Stop
+   * variants (UI-1: same DOM node, focus survives the swap, but the
+   * visual switch shouldn't pop). prefers-reduced-motion override
+   * below kills the transition for accessibility (UI-8). */
+  transition: opacity var(--dur-1, 120ms) ease,
+              background-color var(--dur-1, 120ms) ease;
 }
 .input-box button:hover:not(:disabled) {
   background: var(--accent-2);
@@ -1060,6 +1066,57 @@ pre {
   color: var(--fg-3);
   box-shadow: none;
   cursor: not-allowed;
+}
+
+/* Cluster C Phase 1 (UI-2): Stop variant uses --err + --err-soft, no
+ * hex literals. Visually distinct from Send so the operator can't
+ * miss the state flip mid-stream. The disabled state (during the
+ * 2s ack window) keeps the err tint dimmed but readable. */
+.input-box-btn-stop {
+  background: var(--err);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--err) 35%, transparent);
+}
+.input-box-btn-stop:hover:not(:disabled) {
+  /* Slightly darker err on hover — same posture as accent-2 vs accent. */
+  background: color-mix(in srgb, var(--err) 85%, #000);
+}
+.input-box-btn-stop:disabled {
+  /* Override the gray "disabled" baseline so the stopping state still
+   * reads as the Stop button — operator knows the press registered. */
+  background: var(--err-soft);
+  color: var(--err);
+  box-shadow: none;
+  cursor: progress;
+}
+.input-box-btn-stop.is-stopping::after {
+  /* Spinner appended via ::after so the icon stays in flow. The
+   * `btn-spinner` keyframe is defined globally; we just hook into it. */
+  content: '';
+  width: 12px;
+  height: 12px;
+  margin-left: 4px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .input-box button {
+    transition: none;
+  }
+  .input-box-btn-stop.is-stopping::after {
+    animation: none;
+    /* Replace with a static dot so the busy state is still readable. */
+    border: 2px solid currentColor;
+    border-radius: 50%;
+  }
 }
 
 /* ---- Mode toggle ---- */

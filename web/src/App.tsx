@@ -754,6 +754,17 @@ function AppShell({
     ? (state.projects.find((p) => p.id === session.projectId) ?? null)
     : null;
 
+  // Cluster C Phase 1 (spec §4.4): ship `interrupt` ClientMsg to the
+  // single-agent runner. Server handler cleans pending permissions,
+  // calls `runner.interrupt()`, and emits the new `session_interrupted`
+  // envelope once cancellation resolves. Idempotent on the server
+  // (BE-3), so double-clicks are harmless.
+  function interruptSession() {
+    const sessionId = session?.id;
+    if (!sessionId) return;
+    wsRef.current?.send({ type: 'interrupt', sessionId });
+  }
+
   function sendMessage(text: string) {
     if (!state.activeProjectId) return;
     // Cluster D Phase 4c (UI-D7): when this session is rate-limited, the
@@ -1167,7 +1178,15 @@ function AppShell({
 
   const running = session?.status === 'running';
   const workspaceReady = state.settings?.workspaceRootValid ?? false;
-  const inputDisabled = !state.activeProjectId || running || !workspaceReady;
+  // Cluster C Phase 1: `running` no longer hard-disables the composer —
+  // the InputBox now flips its button to Stop + leaves the textarea
+  // usable (UI-6 lets the operator draft the next message while the
+  // current turn is in flight). `disabled` is reserved for true
+  // structural blocks (no project, workspace bad). SlashCommandButtons
+  // keep the old "off while running" semantics since their actions
+  // are themselves new prompts.
+  const composerStructurallyDisabled = !state.activeProjectId || !workspaceReady;
+  const inputDisabled = composerStructurallyDisabled || running;
   const view = state.multiAgent.view;
 
   return (
@@ -1421,17 +1440,20 @@ function AppShell({
                   onPermissionDecide={decidePermission}
                 />
                 <InputBox
-                  disabled={inputDisabled}
+                  /* Cluster C Phase 1: structural disable only (no
+                   * project, workspace bad). `running` no longer hard-
+                   * disables the composer — InputBox owns the running-
+                   * state UI now (Send→Stop swap, textarea stays usable
+                   * for the next prompt). */
+                  disabled={
+                    composerStructurallyDisabled ||
+                    (session?.rateLimit && session.heldMessages.length >= HELD_MESSAGES_CAP
+                      ? true
+                      : false)
+                  }
+                  isRunning={running}
                   onSend={sendMessage}
-                  /* Phase 4c: when rate-limited, the composer is still
-                   * enabled (so the operator can queue follow-up messages
-                   * via the held-queue) — but past the cap it disables
-                   * itself to avoid silent drops. The InputBox doesn't
-                   * know about rate-limit; the parent enforces by
-                   * passing `disabled` when the queue is full. */
-                  {...(session?.rateLimit && session.heldMessages.length >= HELD_MESSAGES_CAP
-                    ? { disabled: true }
-                    : {})}
+                  onStop={interruptSession}
                 />
               </>
             ) : (

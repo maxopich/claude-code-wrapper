@@ -1904,6 +1904,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // the request directly via wsRef.send from the inspector button.
       return state;
 
+    case 'session_interrupted':
+      // Cluster C Phase 1: server's typed ack that the operator's Stop
+      // ClientMsg landed and the runner's cancellation resolved. The
+      // InputBox already flips back from Stop→Send once
+      // `session_running { running: false }` arrives (which always
+      // follows this envelope), so the reducer can stay no-op for
+      // Phase 1. A future scrollback marker ("Stopped by you · 42 ms")
+      // will consume the ackLatencyMs once the reason-for-stop UI
+      // lands (Phase C2).
+      return state;
+
     case 'inbox_snapshot':
       // Cluster A Phase 5: the inbox panel (`<NotificationInbox/>`) owns
       // this state via a sibling context (`InboxContext`) so the main
