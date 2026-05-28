@@ -2,34 +2,36 @@ import { useEffect, useRef, useState } from 'react';
 import type { ParticipantControlView } from '../../store';
 import type { ControlReasonCode, KickMode, PauseExpiryAction } from '@cebab/shared/protocol';
 import { KickModal } from './KickModal';
+import { MuteReasonModal, type MuteAction } from './MuteReasonModal';
+import { PauseReasonModal } from './PauseReasonModal';
 import { useForensicViewerActions } from './ForensicViewerContext';
 
-// Cluster C Phase 4g2: ⋮ menu on each participant row in the active-run
-// Session info panel. First *interactive* slice for the control verbs —
-// surfaces Mute / Unmute / Pause (5m + 15m, auto-resume default) / Resume
-// as direct actions. Kick lands in Phase 4g3 with the reason-code modal.
+// Cluster C Phase 4g2 → 4g5: ⋮ menu on each participant row in the
+// active-run Session info panel.
 //
-// Reason-code policy for Phase 4g2: every dispatch uses `'topology_repair'`
-// as a placeholder reasonCode — the safest neutral default in the
-// ControlReasonCode enum that doesn't imply misbehavior on the part of
-// the agent. Phase 4g3 introduces a proper reason picker for both mute
-// and kick; this PR's job is making the verbs accessible at all.
+// History of this menu:
+//   - 4g2: Mute / Unmute / Pause 5m / Pause 15m / Resume as direct
+//     dispatches; reasonCode pinned to 'topology_repair'.
+//   - 4g3: Kick… opens KickModal (reason picker + optional text).
+//   - 4g4: Kicked-state row shows only "View forensics…".
+//   - 4g5 (this file): every action goes through a reason-picker modal.
+//     Mute/Unmute/Resume open MuteReasonModal (shared component);
+//     Pause opens PauseReasonModal (adds duration + expiry pickers).
+//     The Pause-5m / Pause-15m quick presets disappear from the menu
+//     because they're now inside the modal as default selections.
 //
 // Conditional rendering:
-//   - kicked → render only a disabled stub note ("kicked"); no actions.
-//   - paused (alive) → show Resume (primary); hide Pause variants.
-//   - muted → show Unmute; hide Mute.
+//   - kicked → render only "View forensics…" (C4g4 forensic-viewer
+//     affordance; no other verbs apply to a kicked agent).
+//   - paused (alive) → show Resume… only; hide Pause… (one pause per
+//     participant at a time).
+//   - muted → show Unmute… instead of Mute….
 //   - chain mode → hide Mute/Unmute entirely (server returns
 //     `chain_mute_unsupported`; ship-side guard saves the round-trip).
 //
 // Closing: click-outside the panel closes via document mousedown handler;
-// Escape closes via keydown. Pattern mirrors how the ProjectList kebab
-// (and similar dropdowns elsewhere) would behave when they land.
-
-const DEFAULT_REASON_CODE: ControlReasonCode = 'topology_repair';
-const PAUSE_5M_MS = 5 * 60 * 1000;
-const PAUSE_15M_MS = 15 * 60 * 1000;
-const DEFAULT_EXPIRY_ACTION: PauseExpiryAction = 'auto_resume';
+// Escape closes via keydown. Modals own their own dismissal via
+// useModalSurface — once a modal opens, the dropdown is already closed.
 
 export type ParticipantControlMenuProps = {
   projectId: number;
@@ -52,22 +54,34 @@ export type ParticipantControlMenuProps = {
   /** Current control row for this participant (or undefined if untouched). */
   control: ParticipantControlView | undefined;
   /**
-   * Operator-driven dispatchers. Each is a thin wrapper around
-   * `wsRef.current?.send({type: '...', ...})` in App.tsx. Mute/Unmute/
-   * Pause/Resume pin reasonCode to `'topology_repair'` from the menu
-   * directly (the reason picker for those lands in C4g4). Kick goes
-   * through KickModal (C4g3), which is the first surface to expose the
-   * full ControlReasonCode vocabulary.
+   * Operator-driven dispatchers. C4g5: every callback now carries the
+   * `reasonText` field that the reason-picker modals collect (matches
+   * the `reasonText?` field in each ClientMsg shape). Undefined means
+   * the operator left the notes blank — the safety_audit row's
+   * `payload_json` simply lacks that field.
    */
-  onMute: (projectId: number, reasonCode: ControlReasonCode) => void;
-  onUnmute: (projectId: number, reasonCode: ControlReasonCode) => void;
+  onMute: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
+  onUnmute: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
   onPause: (
     projectId: number,
     reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
   ) => void;
-  onResume: (projectId: number, reasonCode: ControlReasonCode) => void;
+  onResume: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) => void;
   /**
    * Cluster C Phase 4g3: kick dispatch. The menu opens the KickModal;
    * the modal collects reasonCode + reasonText and calls back here.
@@ -82,6 +96,8 @@ export type ParticipantControlMenuProps = {
   ) => void;
 };
 
+type ModalKind = null | 'mute' | 'unmute' | 'pause' | 'resume' | 'kick';
+
 export function ParticipantControlMenu({
   projectId,
   sessionId,
@@ -95,11 +111,11 @@ export function ParticipantControlMenu({
   onKick,
 }: ParticipantControlMenuProps) {
   const [open, setOpen] = useState(false);
-  // C4g3: separate flag from the dropdown — the modal lives in its own
-  // surface (portal-style via .gate-modal-overlay) and outlives the
-  // dropdown closing on "Kick…" click. Submitting the modal calls
-  // onKick + closes both.
-  const [kickModalOpen, setKickModalOpen] = useState(false);
+  // C4g5: one modal slot per menu. The dropdown closes the moment any
+  // modal opens (single-handed: operator clicks an item, modal takes
+  // over, dropdown is gone). Only one modal can be open at a time
+  // because each item path sets this state.
+  const [activeModal, setActiveModal] = useState<ModalKind>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   // C4g4: forensic viewer context for the "View forensics…" item that
   // shows up on a kicked participant. The viewer is mounted globally
@@ -136,33 +152,55 @@ export function ParticipantControlMenu({
     control.pausedUntil > Date.now();
   const muteAvailable = sessionMode === 'orchestrator';
 
-  function close() {
+  function openModal(kind: Exclude<ModalKind, null>) {
     setOpen(false);
+    setActiveModal(kind);
   }
-  function handleMute() {
-    onMute(projectId, DEFAULT_REASON_CODE);
-    close();
-  }
-  function handleUnmute() {
-    onUnmute(projectId, DEFAULT_REASON_CODE);
-    close();
-  }
-  function handlePause(timeoutMs: number) {
-    onPause(projectId, DEFAULT_REASON_CODE, timeoutMs, DEFAULT_EXPIRY_ACTION);
-    close();
-  }
-  function handleResume() {
-    onResume(projectId, DEFAULT_REASON_CODE);
-    close();
-  }
-  function openKickModal() {
-    // Close the dropdown — the modal owns the next interaction.
-    setOpen(false);
-    setKickModalOpen(true);
+  function closeModal() {
+    setActiveModal(null);
   }
   function openForensicsViewer() {
     setOpen(false);
     forensicActions.open(sessionId, agentLabel);
+  }
+
+  // Each handle* wraps the modal's onSubmit; it forwards to the parent
+  // callback and closes the modal. The modal's own onClose runs after
+  // onSubmit returns (see KickModal pattern), which sets activeModal to
+  // null on the same render — closeModal() here is just defensive.
+  function handleMuteSubmit(
+    pid: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) {
+    onMute(pid, reasonCode, reasonText);
+    closeModal();
+  }
+  function handleUnmuteSubmit(
+    pid: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) {
+    onUnmute(pid, reasonCode, reasonText);
+    closeModal();
+  }
+  function handlePauseSubmit(
+    pid: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+    timeoutMs: number,
+    expiryAction: PauseExpiryAction,
+  ) {
+    onPause(pid, reasonCode, reasonText, timeoutMs, expiryAction);
+    closeModal();
+  }
+  function handleResumeSubmit(
+    pid: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+  ) {
+    onResume(pid, reasonCode, reasonText);
+    closeModal();
   }
   function handleKickSubmit(
     pid: number,
@@ -171,18 +209,27 @@ export function ParticipantControlMenu({
     mode: KickMode,
   ) {
     onKick(pid, reasonCode, reasonText, mode);
-    // KickModal calls its own onClose after onSubmit; the flag here
-    // matches so the modal unmounts when the parent re-renders.
-    setKickModalOpen(false);
+    closeModal();
   }
 
   // Kick available in orchestrator mode only; chain-mode kick of a
   // middle participant returns `chain_topology_broken`, and a kick of
   // the first/last participant is technically valid but would tear the
   // chain — surfacing the affordance asks the operator to think more
-  // carefully than this v1 menu can support. C4g4+ can re-enable
-  // chain-mode kick once the topology guards have proper UI feedback.
+  // carefully than this v1 menu can support.
   const kickAvailable = sessionMode === 'orchestrator' && !isKicked;
+
+  // Map the kind → action label/component for the shared MuteReasonModal.
+  const muteModalActionFor: Record<'mute' | 'unmute' | 'resume', MuteAction> = {
+    mute: 'mute',
+    unmute: 'unmute',
+    resume: 'resume',
+  };
+  const muteModalSubmitFor = {
+    mute: handleMuteSubmit,
+    unmute: handleUnmuteSubmit,
+    resume: handleResumeSubmit,
+  } as const;
 
   return (
     <div className="ma-control-menu" ref={containerRef}>
@@ -230,10 +277,10 @@ export function ParticipantControlMenu({
               type="button"
               role="menuitem"
               className="ma-control-menu-item"
-              onClick={handleMute}
+              onClick={() => openModal('mute')}
               title="Drop all outbound bus events from this participant at the router. The agent isn't told — its bus_send returns success regardless."
             >
-              <span aria-hidden="true">⊘</span> Mute
+              <span aria-hidden="true">⊘</span> Mute…
             </button>
           )}
           {muteAvailable && isMuted && (
@@ -241,43 +288,32 @@ export function ParticipantControlMenu({
               type="button"
               role="menuitem"
               className="ma-control-menu-item"
-              onClick={handleUnmute}
+              onClick={() => openModal('unmute')}
               title="Stop dropping this participant's outbound bus events. Routing resumes immediately."
             >
-              <span aria-hidden="true">⊙</span> Unmute
+              <span aria-hidden="true">⊙</span> Unmute…
             </button>
           )}
           {!isPaused && (
-            <>
-              <button
-                type="button"
-                role="menuitem"
-                className="ma-control-menu-item"
-                onClick={() => handlePause(PAUSE_5M_MS)}
-                title="Hold incoming deliverTurn calls behind a pause gate for 5 minutes. On expiry: auto-resume."
-              >
-                <span aria-hidden="true">⏸</span> Pause for 5m
-              </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="ma-control-menu-item"
-                onClick={() => handlePause(PAUSE_15M_MS)}
-                title="Hold incoming deliverTurn calls behind a pause gate for 15 minutes. On expiry: auto-resume."
-              >
-                <span aria-hidden="true">⏸</span> Pause for 15m
-              </button>
-            </>
+            <button
+              type="button"
+              role="menuitem"
+              className="ma-control-menu-item"
+              onClick={() => openModal('pause')}
+              title="Hold incoming deliverTurn calls behind a pause gate. Choose duration and on-expiry behavior in the modal."
+            >
+              <span aria-hidden="true">⏸</span> Pause…
+            </button>
           )}
           {isPaused && (
             <button
               type="button"
               role="menuitem"
               className="ma-control-menu-item is-primary"
-              onClick={handleResume}
+              onClick={() => openModal('resume')}
               title="Drain the pause gate; queued deliverTurn calls fire in order."
             >
-              <span aria-hidden="true">▶</span> Resume
+              <span aria-hidden="true">▶</span> Resume…
             </button>
           )}
           {!muteAvailable && (
@@ -292,7 +328,7 @@ export function ParticipantControlMenu({
                 type="button"
                 role="menuitem"
                 className="ma-control-menu-item is-danger"
-                onClick={openKickModal}
+                onClick={() => openModal('kick')}
                 title="Open the kick confirmation modal. Kick is terminal — there is no unkick verb in v1."
               >
                 <span aria-hidden="true">⨯</span> Kick…
@@ -301,11 +337,46 @@ export function ParticipantControlMenu({
           )}
         </div>
       )}
-      {kickModalOpen && (
+      {activeModal === 'mute' && (
+        <MuteReasonModal
+          action={muteModalActionFor.mute}
+          projectId={projectId}
+          agentLabel={agentLabel}
+          onClose={closeModal}
+          onSubmit={muteModalSubmitFor.mute}
+        />
+      )}
+      {activeModal === 'unmute' && (
+        <MuteReasonModal
+          action={muteModalActionFor.unmute}
+          projectId={projectId}
+          agentLabel={agentLabel}
+          onClose={closeModal}
+          onSubmit={muteModalSubmitFor.unmute}
+        />
+      )}
+      {activeModal === 'resume' && (
+        <MuteReasonModal
+          action={muteModalActionFor.resume}
+          projectId={projectId}
+          agentLabel={agentLabel}
+          onClose={closeModal}
+          onSubmit={muteModalSubmitFor.resume}
+        />
+      )}
+      {activeModal === 'pause' && (
+        <PauseReasonModal
+          projectId={projectId}
+          agentLabel={agentLabel}
+          onClose={closeModal}
+          onSubmit={handlePauseSubmit}
+        />
+      )}
+      {activeModal === 'kick' && (
         <KickModal
           projectId={projectId}
           agentLabel={agentLabel}
-          onClose={() => setKickModalOpen(false)}
+          onClose={closeModal}
           onSubmit={handleKickSubmit}
         />
       )}

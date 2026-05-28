@@ -8097,6 +8097,276 @@ pre {
   border-color: var(--accent);
 }
 
+/* ---- Cluster C Phase 4g5: MuteReasonModal + PauseReasonModal ------- */
+
+/* The non-destructive reason-picker modals share the same structural
+ * scaffolding as KickModal (.gate-modal + .modal-surface + fieldset +
+ * reason radio list). We mirror the KickModal selectors with new
+ * namespaces so the destructive accent color (--err) stays scoped to
+ * KickModal and the non-destructive variants pick up the neutral
+ * accent. The duplication is deliberate — if/when KickModal styles
+ * fork (e.g. a danger gradient), the mute/pause copies stay tame.
+ */
+
+.mute-reason-modal {
+  max-width: 540px;
+  width: min(540px, 92vw);
+}
+.mute-reason-modal-fieldset {
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-md, 8px);
+  padding: var(--s-2);
+  margin: var(--s-3) 0 var(--s-2);
+}
+.mute-reason-modal-legend {
+  padding: 0 var(--s-1);
+  font-size: var(--t-sm);
+  color: var(--fg-2, var(--fg));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.mute-reason-modal-reason-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mute-reason-modal-reason-row {
+  margin: 0;
+}
+.mute-reason-modal-reason-label {
+  display: flex;
+  gap: var(--s-2);
+  align-items: flex-start;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-sm, 4px);
+  cursor: pointer;
+}
+.mute-reason-modal-reason-label:hover {
+  background: var(--bg-3);
+}
+.mute-reason-modal-reason-input {
+  margin: 2px 0 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.mute-reason-modal-reason-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+.mute-reason-modal-reason-label-text {
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+  font-weight: 500;
+}
+.mute-reason-modal-reason-help {
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+}
+.mute-reason-modal-text-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin: var(--s-2) 0;
+}
+.mute-reason-modal-text-label-text {
+  font-size: var(--t-sm);
+  color: var(--fg-2, var(--fg));
+}
+.mute-reason-modal-text-label-text em {
+  font-style: italic;
+  margin-left: 4px;
+  color: var(--fg-3, var(--fg-2));
+}
+.mute-reason-modal-text-input {
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-1) var(--s-2);
+  background: var(--bg-4, var(--bg-3));
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+  resize: vertical;
+  min-height: 60px;
+}
+.mute-reason-modal-text-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* PauseReasonModal: same picker scaffolding plus duration + expiry
+ * fieldsets. The duration list is inline (compact horizontal radios)
+ * because four short labels fit on one line at modal width. */
+.pause-reason-modal {
+  max-width: 580px;
+  width: min(580px, 92vw);
+}
+.pause-reason-modal-fieldset {
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-md, 8px);
+  padding: var(--s-2);
+  margin: var(--s-3) 0 var(--s-2);
+}
+.pause-reason-modal-legend {
+  padding: 0 var(--s-1);
+  font-size: var(--t-sm);
+  color: var(--fg-2, var(--fg));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.pause-reason-modal-reason-list,
+.pause-reason-modal-expiry-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pause-reason-modal-reason-row,
+.pause-reason-modal-expiry-row {
+  margin: 0;
+}
+.pause-reason-modal-reason-label,
+.pause-reason-modal-expiry-label {
+  display: flex;
+  gap: var(--s-2);
+  align-items: flex-start;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-sm, 4px);
+  cursor: pointer;
+}
+.pause-reason-modal-reason-label:hover,
+.pause-reason-modal-expiry-label:hover {
+  background: var(--bg-3);
+}
+.pause-reason-modal-reason-input,
+.pause-reason-modal-expiry-input,
+.pause-reason-modal-duration-input {
+  margin: 2px 0 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.pause-reason-modal-reason-text,
+.pause-reason-modal-expiry-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+.pause-reason-modal-reason-label-text,
+.pause-reason-modal-expiry-label-text {
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+  font-weight: 500;
+}
+.pause-reason-modal-reason-help,
+.pause-reason-modal-expiry-help {
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+}
+
+/* Duration radios — inline because the labels are short. */
+.pause-reason-modal-duration-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+.pause-reason-modal-duration-row {
+  margin: 0;
+}
+.pause-reason-modal-duration-label {
+  display: inline-flex;
+  gap: var(--s-1);
+  align-items: center;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-sm, 4px);
+  cursor: pointer;
+  font-size: var(--t-sm);
+}
+.pause-reason-modal-duration-label:hover {
+  background: var(--bg-3);
+}
+.pause-reason-modal-duration-text {
+  color: var(--ink, inherit);
+}
+
+/* Custom-minutes input — appears only when "Custom…" is selected. */
+.pause-reason-modal-custom-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: var(--s-2);
+  padding: 0 var(--s-2);
+}
+.pause-reason-modal-custom-label {
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pause-reason-modal-custom-input {
+  width: 8ch;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-1) var(--s-2);
+  background: var(--bg-4, var(--bg-3));
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+}
+.pause-reason-modal-custom-input[aria-invalid='true'] {
+  border-color: var(--err);
+}
+.pause-reason-modal-custom-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.pause-reason-modal-custom-error {
+  font-size: var(--t-xs, 11px);
+  color: var(--err);
+}
+
+.pause-reason-modal-text-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin: var(--s-2) 0;
+}
+.pause-reason-modal-text-label-text {
+  font-size: var(--t-sm);
+  color: var(--fg-2, var(--fg));
+}
+.pause-reason-modal-text-label-text em {
+  font-style: italic;
+  margin-left: 4px;
+  color: var(--fg-3, var(--fg-2));
+}
+.pause-reason-modal-text-input {
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-1) var(--s-2);
+  background: var(--bg-4, var(--bg-3));
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+  resize: vertical;
+  min-height: 60px;
+}
+.pause-reason-modal-text-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* ---- Cluster C Phase 4g4: KickForensicsModal ----------------------- */
 
 /* Inherits .gate-modal + .modal-surface base sizing; widens to fit the
