@@ -179,6 +179,15 @@ export type MultiAgentParticipantRow = {
   project_id: number;
   role: string; // ParticipantRole
   chain_order: number | null;
+  // Cluster C Phase 4a (Part 2 backend foundation): per-agent control state.
+  // Added in migration 020. All fields default to "no control state ever
+  // applied" so legacy rows + freshly-inserted participants both come out
+  // active + unmuted + unpaused + not-kicked.
+  muted: number; // 0 | 1
+  paused_until: number | null; // epoch ms; NULL when not paused
+  pause_expiry_action: string | null; // 'auto_resume' | 'auto_kick'
+  kicked_at: number | null; // epoch ms; NULL when not kicked
+  kicked_mode: string | null; // 'drain' | 'hard'
 };
 
 export type MultiAgentEventRow = {

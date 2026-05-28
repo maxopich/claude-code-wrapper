@@ -2038,6 +2038,18 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         authExpired: nextAuthExpired,
       };
     }
+
+    case 'participant_mute_changed':
+    case 'participant_pause_changed':
+    case 'participant_kicked':
+      // Cluster C Phase 4a (Part 2 backend foundation): the per-agent
+      // control verbs (mute/pause/kick) ship their state-change echoes
+      // here. The client UI lands in Phase 4d (the ⋮ menu, KickModal,
+      // state pills, ActivityBar aggregate chip) and will own these
+      // via a sibling context — same pattern as inbox_snapshot /
+      // recovery_log_snapshot above. Reducer no-op keeps the union
+      // exhaustive until that context lands.
+      return state;
   }
 }
 
