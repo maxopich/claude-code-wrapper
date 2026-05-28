@@ -880,6 +880,16 @@ function AppShell({
     // and also clears `pendingRetry` so the banner disappears).
     wsRef.current?.send({ type: 'abandon_session', sessionId });
   }
+  function archiveSession(sessionId: string) {
+    // Cluster D Phase 5e (UI-D17): in-session SweptSessionBanner's
+    // Archive button. Identical ClientMsg to the toast notification's
+    // Archive action — the reducer's `iteration_archived` handler
+    // removes the row from the iterations list. The active view stays
+    // on this iteration until the operator navigates away (no auto-
+    // redirect; the scrollback is still useful after archiving for
+    // post-mortem). Idempotent server-side (Phase 5).
+    wsRef.current?.send({ type: 'archive_session', sessionId });
+  }
   function continueThroughMutation(sessionId: string) {
     // Item #5: operator clicked Continue on the pause-on-first-mutation
     // banner. Optimistically clear the slot + flip ack so the UI doesn't
@@ -1288,6 +1298,7 @@ function AppShell({
                 onContinueMultiAgent={continueMultiAgent}
                 onRetryWorker={retryWorker}
                 onAbandonSession={abandonSession}
+                onArchiveSession={archiveSession}
                 onContinueThroughMutation={continueThroughMutation}
                 onClearAutoRetry={clearAutoRetry}
                 onSetDraftPauseOnMutation={setDraftPauseOnMutation}
