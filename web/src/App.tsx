@@ -41,6 +41,7 @@ import {
 } from './components/banners';
 import { ReopenProvider, useReopenActions } from './components/reopen';
 import { AuthRefreshProvider, useAuthRefreshActions } from './components/authRefresh';
+import { RecoveryLogButton, RecoveryLogProvider } from './components/recoveryLog';
 import { HELD_MESSAGES_CAP } from './store';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
@@ -132,6 +133,12 @@ export function App() {
   //     layers.
   const authRefreshHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const authRefreshRequestRef = useRef<(() => void) | null>(null);
+  // Cluster D Phase 8b: bridge for the RecoveryLogProvider. Same shape
+  // as inbox / gate / authority handlers — App.tsx routes the
+  // `recovery_log_snapshot` ServerMsg through this ref into the
+  // provider's reducer. No `requestRef` companion: the RecoveryLogButton
+  // owns its trigger (no notification-action plumbing required).
+  const recoveryLogHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -160,6 +167,12 @@ export function App() {
   // Ships `start_auth_refresh` / `cancel_auth_refresh` onto the active
   // WS — same indirection so a reconnect doesn't strand the spawn.
   const authRefreshSend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
+  // Cluster D Phase 8b: ClientMsg sink for the RecoveryLogProvider.
+  // Ships `get_recovery_log_snapshot` onto the active WS — same
+  // wsRef indirection so a reconnect doesn't strand the request.
+  const recoveryLogSend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
 
@@ -214,19 +227,22 @@ export function App() {
               <ReopenBridge requestRef={reopenRequestRef} />
               <AuthRefreshProvider send={authRefreshSend} handlerRef={authRefreshHandlerRef}>
                 <AuthRefreshBridge requestRef={authRefreshRequestRef} />
-                <AppShell
-                  wsRef={wsRef}
-                  notifPushRef={notifPushRef}
-                  notifDismissRef={notifDismissRef}
-                  inboxHandlerRef={inboxHandlerRef}
-                  gateHandlerRef={gateHandlerRef}
-                  authorityHandlerRef={authorityHandlerRef}
-                  reopenHandlerRef={reopenHandlerRef}
-                  authRefreshHandlerRef={authRefreshHandlerRef}
-                  authRefreshRequestRef={authRefreshRequestRef}
-                  onAck={handleAck}
-                />
-                <NotificationStack onAction={onNotificationAction} />
+                <RecoveryLogProvider send={recoveryLogSend} handlerRef={recoveryLogHandlerRef}>
+                  <AppShell
+                    wsRef={wsRef}
+                    notifPushRef={notifPushRef}
+                    notifDismissRef={notifDismissRef}
+                    inboxHandlerRef={inboxHandlerRef}
+                    gateHandlerRef={gateHandlerRef}
+                    authorityHandlerRef={authorityHandlerRef}
+                    reopenHandlerRef={reopenHandlerRef}
+                    authRefreshHandlerRef={authRefreshHandlerRef}
+                    authRefreshRequestRef={authRefreshRequestRef}
+                    recoveryLogHandlerRef={recoveryLogHandlerRef}
+                    onAck={handleAck}
+                  />
+                  <NotificationStack onAction={onNotificationAction} />
+                </RecoveryLogProvider>
               </AuthRefreshProvider>
             </ReopenProvider>
           </AuthorityProvider>
@@ -351,6 +367,13 @@ type AppShellProps = {
    * strand the action — same pattern as reopenRequestRef.
    */
   authRefreshRequestRef: React.MutableRefObject<(() => void) | null>;
+  /**
+   * Cluster D Phase 8b: bridge ref the RecoveryLogProvider populates.
+   * Routes `recovery_log_snapshot` envelopes into the provider's
+   * reducer so the RecoveryLogInspector renders fresh aggregates +
+   * recent rows on open.
+   */
+  recoveryLogHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
@@ -365,6 +388,7 @@ function AppShell({
   reopenHandlerRef,
   authRefreshHandlerRef,
   authRefreshRequestRef,
+  recoveryLogHandlerRef,
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -642,6 +666,15 @@ function AppShell({
             authRefreshHandlerRef.current?.(msg);
           } catch (err) {
             console.error('[auth_refresh] handler threw', err);
+          }
+          // Cluster D Phase 8b: hand to the RecoveryLogProvider bridge
+          // so `recovery_log_snapshot` envelopes update the inspector
+          // panel state. Narrow filter — non-snapshot messages are
+          // silently dropped. Same posture as inboxHandlerRef.
+          try {
+            recoveryLogHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[recovery_log] handler threw', err);
           }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
@@ -1169,6 +1202,14 @@ function AppShell({
               ConnectionDot (state) → Bell (events).
             */}
             <NotificationBell onAck={onAck} />
+            {/*
+              Cluster D Phase 8b: recovery_log inspector trigger. Same
+              chrome placement as the bell (XCT-3 fallback — no app-
+              shell header yet). The button surfaces an opaque history
+              of every recovery action; unlike the bell it has no
+              badge because the log isn't unread/acked.
+            */}
+            <RecoveryLogButton />
             <button
               className="icon-btn sidebar-collapse-btn"
               title="Hide sidebar"
