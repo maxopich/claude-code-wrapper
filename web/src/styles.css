@@ -7889,3 +7889,94 @@ pre {
   border-color: color-mix(in srgb, var(--err) 40%, var(--border));
   font-weight: 600;
 }
+
+/* ---- Cluster C Phase 4g2: ParticipantControlMenu (⋮ dropdown) ----------- */
+
+/* Container — positioned so the popover anchors to the trigger button. */
+.ma-control-menu {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+}
+
+/* Trigger: small square button with the ⋮ glyph. Inherits the ghost-btn
+ * look but tighter to fit next to the agent slug + trust chip. */
+.ma-control-menu-trigger {
+  background: transparent;
+  color: var(--fg-2, var(--fg));
+  border: 1px solid transparent;
+  border-radius: var(--r-sm, 4px);
+  padding: 2px 6px;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+.ma-control-menu-trigger:hover:not(:disabled),
+.ma-control-menu-trigger[aria-expanded='true'] {
+  background: var(--bg-3);
+  border-color: var(--line-3, var(--border));
+  color: var(--ink, inherit);
+}
+.ma-control-menu-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ma-control-menu-trigger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Popover panel — anchored to the trigger's right edge so it doesn't
+ * spill off the end of a wide participants list. Reuses the modal/popover
+ * surface tokens used elsewhere (recovery log inspector, gate modals). */
+.ma-control-menu-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  background: var(--bg-4, var(--bg-3));
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-md, 8px);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 50;
+}
+
+.ma-control-menu-item {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm, 4px);
+  text-align: left;
+  padding: 6px 10px;
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+  cursor: pointer;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.ma-control-menu-item:hover,
+.ma-control-menu-item:focus-visible {
+  outline: none;
+  background: var(--bg-3);
+  border-color: var(--line-3, var(--border));
+}
+.ma-control-menu-item.is-primary {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.ma-control-menu-hint {
+  padding: 6px 10px;
+  margin: 0;
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+  font-style: italic;
+}
