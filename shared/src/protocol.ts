@@ -1890,6 +1890,39 @@ export type ServerMsg =
       sweepReopenRate: { rate: number; sweeps: number } | null;
       authResumeChoiceRatio: { inSessionRate: number; inSession: number; newSession: number } | null;
       recent: RecoveryLogEntry[];
+    }
+  | {
+      /**
+       * Cluster C Phase 1 (spec §4.5): server acknowledgment that the
+       * operator's `interrupt` ClientMsg was processed and the runner's
+       * cancellation handle resolved. Fired AFTER `runner.interrupt()`
+       * (or the fallback `ac.abort()`) returns; carries the elapsed
+       * delta so the client can render a precise "Stopped (in 42ms)"
+       * marker rather than guessing from the absence of a `result`.
+       *
+       * Why a separate envelope (not just `session_running { running:
+       * false }`): the running-false signal fires for every turn
+       * terminal — natural completion, crash, AND operator stop — so
+       * the UI can't distinguish "I asked for this" from "it finished
+       * on its own" without a heuristic. This envelope lets the toast
+       * + scrollback marker render "Stopped by you" verbatim.
+       *
+       * Always paired with a subsequent `session_running { running:
+       * false }`; the order is: `session_interrupted` first (when the
+       * runner's cancel resolves) → `session_running { running: false }`
+       * (when the runOneTurn loop's `finally` cleanup runs). A client
+       * that misses one and sees the other is safe — both indicate
+       * the turn is terminating.
+       *
+       * No safety_audit dual-write yet (Phase C2 wires that with the
+       * full audit forensic bundle). The envelope is purely a UI
+       * affordance; treating it as authoritative for forensics would
+       * be a regression once the audit row lands.
+       */
+      type: 'session_interrupted';
+      sessionId: string;
+      /** Milliseconds from interrupt handler entry to runner.interrupt() resolution. */
+      ackLatencyMs: number;
     };
 
 /**

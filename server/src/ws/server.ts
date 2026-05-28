@@ -171,6 +171,68 @@ export function cleanupPendingPermissionsForSession(
   }
 }
 
+/**
+ * Cluster C Phase 1 (spec §4.4 + §4.5): operator-initiated interrupt.
+ *
+ * Pulled out of the `case 'interrupt'` body so the side-effect-rich path
+ * (runner.interrupt OR ac.abort fallback, plus the new
+ * `session_interrupted` envelope emit) can be unit-tested without
+ * standing up a WS server. Same testability pattern as
+ * `executeArchiveSession`.
+ *
+ * Invariants:
+ *   - Unknown sessionId (no inFlight) → silent no-op, no envelope.
+ *     The handler ALSO ran `cleanupPendingPermissionsForSession`
+ *     before calling us; that cleanup is safe even when there's no
+ *     active turn to cancel (it's a filter over an unrelated map).
+ *   - Either path (runner.interrupt OR ac.abort) emits exactly one
+ *     `session_interrupted` envelope. `ackLatencyMs` is the wall-clock
+ *     delta from the helper's entry to runner.interrupt() resolution
+ *     (or to the synchronous abort if no runner.interrupt is exposed).
+ *   - `runner.interrupt` rejection falls back to ac.abort + still
+ *     emits the envelope — the operator's stop request was honored
+ *     either way; the client gets a typed signal regardless.
+ *   - Returns synchronously even if runner.interrupt() is async; the
+ *     envelope ships on the .then continuation. Caller (case body)
+ *     does not await this — it's fire-and-forget so the WS message
+ *     queue doesn't back up while the runner tears down.
+ *
+ * The cleanupPendingPermissionsForSession call stays in the case body
+ * (above this helper) so it runs synchronously before we yield to the
+ * async runner cancel — F12's guarantee is that the permission map
+ * doesn't leak even if the runner cancellation hangs.
+ */
+type InterruptInFlight = {
+  runner: { interrupt?: () => Promise<void> };
+  ac: AbortController;
+};
+
+export function executeInterrupt(args: {
+  inFlight: InterruptInFlight | undefined;
+  sessionId: string;
+  send: (msg: ServerMsg) => void;
+  /** Test seam: clock override for deterministic ackLatencyMs assertions. */
+  now?: () => number;
+}): void {
+  const { inFlight, sessionId, send } = args;
+  const now = args.now ?? Date.now;
+  if (!inFlight) return;
+  const interruptStartedAt = now();
+  const emitAck = () => {
+    send({ type: 'session_interrupted', sessionId, ackLatencyMs: now() - interruptStartedAt });
+  };
+  if (inFlight.runner.interrupt) {
+    inFlight.runner.interrupt().then(emitAck, (err) => {
+      console.warn('[ws] runner.interrupt failed; falling back to abort', err);
+      inFlight.ac.abort();
+      emitAck();
+    });
+  } else {
+    inFlight.ac.abort();
+    emitAck();
+  }
+}
+
 type InFlight = {
   ac: AbortController;
   projectId: number;
@@ -1988,21 +2050,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'interrupt': {
-      const f = conn.inFlight.get(msg.sessionId);
-      if (!f) return;
-      // F12 cleanup. Pure-function helper defined above for testability.
+      // Cluster C Phase 1: case body delegated to executeInterrupt
+      // for testability (same pattern as executeArchiveSession). The
+      // helper takes only what it needs — no Conn type — so the test
+      // can pass synthetic runner shapes without standing up a full
+      // WS server.
       cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId);
-      // Don't await — `runner.interrupt()` can take a second or two and we
-      // shouldn't back up the WS message queue. The for-await loop in
-      // runOneTurn will exit and clean up via finally.
-      if (f.runner.interrupt) {
-        f.runner.interrupt().catch((err) => {
-          console.warn('[ws] runner.interrupt failed; falling back to abort', err);
-          f.ac.abort();
-        });
-      } else {
-        f.ac.abort();
-      }
+      executeInterrupt({
+        inFlight: conn.inFlight.get(msg.sessionId),
+        sessionId: msg.sessionId,
+        send: (m) => send(conn.ws, m),
+      });
       return;
     }
     case 'install_bus_integration': {
