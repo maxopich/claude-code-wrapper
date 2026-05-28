@@ -1944,6 +1944,8 @@ function emitSettings(conn: Conn): void {
     workspaceRoot: typeof stored === 'string' && stored.length > 0 ? stored : null,
     workspaceRootValid: workspaceRootValid(),
     defaultWorkspaceRoot: config.workspaceRootDefault,
+    // Cluster E Phase 3 (A4): provenance of the fallback path.
+    defaultWorkspaceRootSource: config.workspaceRootDefaultSource,
     defaultHopBudget: resolveHopBudget(),
   });
 }

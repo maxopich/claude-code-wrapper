@@ -1490,6 +1490,25 @@ function AppShell({
           <div className="chat empty">
             <div>
               <p>No workspace folder set yet.</p>
+              {/* Cluster E Phase 3 (A4): the fallback path resolves
+                * client-side from the settings ServerMsg. When the
+                * stored workspace is null but the default resolves to
+                * a valid directory, runs would land in
+                * `defaultWorkspaceRoot` until the operator sets one.
+                * Surface that landing location explicitly so "Choose a
+                * folder" isn't the only signal of what happens if they
+                * skip it. */}
+              {state.settings?.defaultWorkspaceRoot && (
+                <p className="hint">
+                  Until you set one, runs and logs would land in{' '}
+                  <code>{state.settings.defaultWorkspaceRoot}</code>
+                  {state.settings.defaultWorkspaceRootSource === 'env'
+                    ? ' (from your WORKSPACE_ROOT env var).'
+                    : state.settings.defaultWorkspaceRootSource === 'builtin'
+                      ? " (Cebab's built-in default)."
+                      : '.'}
+                </p>
+              )}
               <button className="primary-btn" onClick={() => setSettingsOpen(true)}>
                 Choose a folder
               </button>
