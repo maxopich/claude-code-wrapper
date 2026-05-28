@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { GrowTextarea } from './GrowTextarea';
 import { Icon } from './Icon';
+import { SlashCommandPalette } from './SlashCommandPalette';
 
 /**
  * Cluster C Phase 1 (spec §4.1-4.3): single-agent message composer.
@@ -25,6 +26,15 @@ import { Icon } from './Icon';
  * intent ("stop this turn") only makes sense when the composer or
  * scrollback has focus, and scoping to the composer wrapper keeps
  * the binding from leaking into modals or other inputs.
+ *
+ * Cluster E Phase 1 (E1): slash command palette overlay.
+ *   - `/` at cursor 0 + empty textarea → open palette (the `/` keypress
+ *     is suppressed so it doesn't land in the textarea).
+ *   - `Cmd/Ctrl+K` from any caret position → open palette.
+ *   - When palette is open, Esc closes it (precedence over Esc-to-stop;
+ *     see spec §H1-6: open palette > open modal > top banner > Stop).
+ *   - On select: replace textarea with `<command>` + space. The
+ *     operator presses Send when ready (no auto-send).
  */
 
 export function InputBox(props: {
@@ -32,6 +42,14 @@ export function InputBox(props: {
   isRunning?: boolean;
   onSend: (text: string) => void;
   onStop?: () => void;
+  /**
+   * Cluster E Phase 1: SDK-discovered slash commands from
+   * `session_started.slashCommands[]` (Cluster B Phase 2 forwarded
+   * this on every init). Passed verbatim into the palette as the
+   * "Discovered from session" group. Undefined or empty array =
+   * palette shows only the Cebab-local section.
+   */
+  sdkSlashCommands?: readonly string[];
 }) {
   const [text, setText] = useState('');
   // Cluster C Phase 1: once Stop is clicked we flip into a local
@@ -41,6 +59,10 @@ export function InputBox(props: {
   // disabled attribute. Server is idempotent on duplicate interrupts
   // anyway (BE-3), so this is purely a UI affordance.
   const [stopping, setStopping] = useState(false);
+  // Cluster E Phase 1: palette open/closed state. Owned here because
+  // the trigger keys are detected at the textarea level and the
+  // palette is rendered above the textarea (inside `.input-box`).
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
   // Reset stopping flag whenever the parent reports the turn has
@@ -72,6 +94,10 @@ export function InputBox(props: {
   // Inline closure so we capture the latest `stopping` state on every
   // render — re-binding only when the running/callback identity
   // changes. `wrapRef.current` resolves at effect time.
+  //
+  // Cluster E Phase 1: the palette has Esc-precedence (spec §H1-6),
+  // so the Esc-to-stop handler short-circuits when the palette is
+  // open — the palette owns Esc dismissal in that state.
   const isRunning = props.isRunning;
   const onStop = props.onStop;
   useEffect(() => {
@@ -79,6 +105,8 @@ export function InputBox(props: {
     if (!wrap || !isRunning || !onStop) return;
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape' && onStop) {
+        // Palette is the higher-precedence Esc handler — leave it alone.
+        if (paletteOpen) return;
         e.preventDefault();
         if (!stopping) {
           setStopping(true);
@@ -88,7 +116,72 @@ export function InputBox(props: {
     }
     wrap.addEventListener('keydown', onKey);
     return () => wrap.removeEventListener('keydown', onKey);
-  }, [isRunning, onStop, stopping]);
+  }, [isRunning, onStop, stopping, paletteOpen]);
+
+  // Cluster E Phase 1: trigger detection for the palette. We attach to
+  // the wrap (not the textarea) so the listener survives GrowTextarea
+  // not exposing its internal textarea ref. The keydown bubbles up
+  // from the textarea. We open the palette on:
+  //   - `/` when the typed text is empty AND selectionStart === 0
+  //   - `Cmd/Ctrl+K` from any caret position
+  // We preventDefault on both so the keypress doesn't also land in the
+  // textarea (otherwise `/` would type `/` into an empty box, leaving
+  // the operator confused when they Esc out and the `/` is still there).
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    function onKey(e: KeyboardEvent) {
+      // Don't fire while the palette is already open — palette owns
+      // its own keyboard.
+      if (paletteOpen) return;
+      // Cmd/Ctrl+K from any position → open palette.
+      if (e.key === 'k' && (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        setPaletteOpen(true);
+        return;
+      }
+      // `/` at cursor 0 + empty textarea → open palette.
+      if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const target = e.target as HTMLElement | null;
+        if (!(target instanceof HTMLTextAreaElement)) return;
+        // selectionStart === selectionEnd === 0 + value empty = "fresh empty composer"
+        if (target.value.length === 0 && target.selectionStart === 0) {
+          e.preventDefault();
+          setPaletteOpen(true);
+          return;
+        }
+      }
+    }
+    wrap.addEventListener('keydown', onKey);
+    return () => wrap.removeEventListener('keydown', onKey);
+  }, [paletteOpen]);
+
+  // Click-outside closes the palette. Attached on the document so we
+  // catch clicks anywhere outside the InputBox wrap.
+  useEffect(() => {
+    if (!paletteOpen) return;
+    function onMouseDown(ev: MouseEvent) {
+      const root = wrapRef.current;
+      if (!root) return;
+      const target = ev.target as Node | null;
+      if (target && !root.contains(target)) setPaletteOpen(false);
+    }
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [paletteOpen]);
+
+  // Cluster E Phase 1: palette selection. Replace the textarea content
+  // with the command + a trailing space (operator continues typing
+  // context or hits Send immediately). We don't auto-send — the
+  // operator decides when the prompt is ready.
+  function handlePaletteSelect(command: string) {
+    setText(`${command} `);
+    setPaletteOpen(false);
+  }
+
+  function handlePaletteClose() {
+    setPaletteOpen(false);
+  }
 
   // Button state machine:
   //   - disabled (project not picked / workspace bad) → disabled Send
@@ -101,6 +194,13 @@ export function InputBox(props: {
 
   return (
     <div className="input-box" ref={wrapRef}>
+      {paletteOpen && (
+        <SlashCommandPalette
+          sdkCommands={props.sdkSlashCommands}
+          onSelect={handlePaletteSelect}
+          onClose={handlePaletteClose}
+        />
+      )}
       <GrowTextarea
         value={text}
         onChange={setText}

@@ -230,3 +230,151 @@ describe('InputBox — isRunning flip handling', () => {
     expect(btn4.disabled).toBe(false);
   });
 });
+
+// Cluster E Phase 1 — slash-command palette wiring:
+//   - `/` key with empty textarea + cursor 0 opens the palette
+//   - `/` key with non-empty textarea does NOT open the palette
+//   - `/` key when cursor is past position 0 does NOT open the palette
+//     (the operator typed something else first then a slash mid-text)
+//   - `Cmd+K` (and `Ctrl+K`) opens the palette regardless of text/cursor
+//   - On open, the `/` keypress itself is preventDefaulted so the
+//     textarea stays empty
+//   - Selecting from the palette replaces the textarea with `<cmd> ` and
+//     closes the palette
+//   - Esc while palette is open closes the palette (and does NOT fire
+//     onStop even when isRunning — palette has Esc precedence)
+
+describe('InputBox — slash command palette (E1)', () => {
+  function pressKeyOnTextarea(ta: HTMLTextAreaElement, init: KeyboardEventInit) {
+    // Use the wrap's keydown listener — events bubble from the textarea.
+    ta.dispatchEvent(new KeyboardEvent('keydown', { ...init, bubbles: true }));
+  }
+
+  test('`/` with empty textarea at cursor 0 opens the palette', () => {
+    act(() => {
+      root.render(<InputBox onSend={() => {}} />);
+    });
+    const ta = getTextarea();
+    // Empty + cursor 0 are the defaults; just dispatch the keypress.
+    act(() => {
+      ta.focus();
+      pressKeyOnTextarea(ta, { key: '/' });
+    });
+    expect(document.querySelector('.slash-palette')).not.toBeNull();
+  });
+
+  test('`/` is NOT opened when textarea has content', () => {
+    act(() => {
+      root.render(<InputBox onSend={() => {}} />);
+    });
+    const ta = getTextarea();
+    // Type into the textarea first.
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(ta, 'already typed');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      ta.focus();
+      pressKeyOnTextarea(ta, { key: '/' });
+    });
+    expect(document.querySelector('.slash-palette')).toBeNull();
+  });
+
+  test('Cmd+K opens the palette regardless of text/cursor', () => {
+    act(() => {
+      root.render(<InputBox onSend={() => {}} />);
+    });
+    const ta = getTextarea();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(ta, 'some text');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      ta.focus();
+      pressKeyOnTextarea(ta, { key: 'k', metaKey: true });
+    });
+    expect(document.querySelector('.slash-palette')).not.toBeNull();
+  });
+
+  test('Ctrl+K (Linux/Win path) also opens the palette', () => {
+    act(() => {
+      root.render(<InputBox onSend={() => {}} />);
+    });
+    const ta = getTextarea();
+    act(() => {
+      ta.focus();
+      pressKeyOnTextarea(ta, { key: 'k', ctrlKey: true });
+    });
+    expect(document.querySelector('.slash-palette')).not.toBeNull();
+  });
+
+  test('selecting from palette replaces textarea with `<cmd> ` and closes', () => {
+    act(() => {
+      root.render(<InputBox onSend={() => {}} />);
+    });
+    const ta = getTextarea();
+    act(() => {
+      ta.focus();
+      pressKeyOnTextarea(ta, { key: '/' });
+    });
+    expect(document.querySelector('.slash-palette')).not.toBeNull();
+    // Click the /compact row.
+    const compactRow = Array.from(
+      document.querySelectorAll<HTMLLIElement>('.slash-palette-row'),
+    ).find((r) => r.querySelector('code')?.textContent === '/compact');
+    expect(compactRow).toBeDefined();
+    act(() => {
+      compactRow!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(document.querySelector('.slash-palette')).toBeNull();
+    expect(getTextarea().value).toBe('/compact ');
+  });
+
+  test('Esc closes the palette and does not fire onStop while running', () => {
+    const onStop = vi.fn();
+    act(() => {
+      root.render(<InputBox onSend={() => {}} isRunning onStop={onStop} />);
+    });
+    const ta = getTextarea();
+    act(() => {
+      ta.focus();
+      pressKeyOnTextarea(ta, { key: 'k', metaKey: true });
+    });
+    expect(document.querySelector('.slash-palette')).not.toBeNull();
+    // Esc dispatched on the palette's input — the palette owns it.
+    const input = document.querySelector('.slash-palette-input') as HTMLInputElement;
+    act(() => {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(document.querySelector('.slash-palette')).toBeNull();
+    expect(onStop).not.toHaveBeenCalled();
+  });
+
+  test('sdkSlashCommands prop surfaces the Discovered from session group', () => {
+    act(() => {
+      root.render(<InputBox onSend={() => {}} sdkSlashCommands={['/ide', '/init']} />);
+    });
+    const ta = getTextarea();
+    act(() => {
+      ta.focus();
+      pressKeyOnTextarea(ta, { key: 'k', metaKey: true });
+    });
+    const sectionTitles = Array.from(
+      document.querySelectorAll('.slash-palette-section-title'),
+    ).map((e) => e.textContent);
+    expect(sectionTitles).toContain('Discovered from session');
+    const cmds = Array.from(document.querySelectorAll('.slash-palette-row code')).map(
+      (e) => e.textContent,
+    );
+    expect(cmds).toContain('/ide');
+    expect(cmds).toContain('/init');
+  });
+});
