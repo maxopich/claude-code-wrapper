@@ -7246,3 +7246,120 @@ pre {
   padding: 4px 10px;
 }
 
+/* Cluster D Phase 5d: swept-session reopen modal. Inherits all the
+ * chrome from .gate-modal + .gate-modal-overlay; this adds only the
+ * elements unique to the reopen surface:
+ *
+ *   - spinner row for probing/committing states
+ *   - workspace-diff fact rows (clean / no-git / dirty variants)
+ *   - sample-paths list (capped at 10 server-side; bullet-less + scrollable)
+ *   - acknowledgment checkbox row + typed-input row
+ *   - inline error banner above the form when a commit attempt failed
+ *     validation (e.g. typed-gate mismatch).
+ *
+ * Token reuse is strict — no new color tokens, all spacing follows the
+ * existing 8px rhythm. */
+.reopen-modal {
+  /* Slightly wider than the default gate modal so the project path +
+   * sample-paths list don't crowd. Same max-vh ceiling. */
+  width: min(560px, 95vw);
+  max-height: 90vh;
+}
+.reopen-modal-spinner {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px 0;
+  gap: 8px;
+}
+.reopen-modal-facts {
+  /* The diff facts can get tall (10 sample paths); make them scrollable
+   * inside the modal so the footer buttons stay visible. */
+  max-height: 280px;
+  overflow-y: auto;
+}
+.reopen-modal-clean {
+  color: var(--ok);
+}
+.reopen-modal-no-git {
+  color: var(--warn);
+}
+.reopen-modal-dirty {
+  /* Bold count is on `strong` inline; ambient color stays neutral so the
+   * count itself reads as the data point. */
+  color: var(--ink);
+}
+.reopen-modal-detail {
+  color: var(--ink-dim);
+  font-size: var(--t-xs);
+}
+.reopen-modal-samples {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.reopen-modal-samples > li > code {
+  font-size: var(--t-xs);
+  color: var(--ink-dim);
+}
+.reopen-modal-error {
+  /* Inline validation error above the form (typed-gate / ack mismatch).
+   * Tighter padding than the help paragraph so it reads as a callout. */
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: color-mix(in oklab, var(--err) 12%, transparent);
+  border: 1px solid color-mix(in oklab, var(--err) 35%, transparent);
+  border-radius: var(--r-sm);
+  color: var(--err);
+  font-size: var(--t-sm);
+}
+.reopen-modal-ack {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: var(--t-sm);
+  color: var(--ink-dim);
+  cursor: pointer;
+}
+.reopen-modal-ack > input {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.reopen-modal-typed {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+}
+.reopen-modal-typed-prompt {
+  font-size: var(--t-sm);
+  color: var(--ink-dim);
+}
+.reopen-modal-typed > input {
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  padding: 6px 8px;
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  color: var(--ink);
+}
+.reopen-modal-typed > input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.reopen-modal-failed-reason {
+  /* The reason chip on the failed-state header reuses the gate-modal-reason
+   * shape but with a warn-tier background since the reason is "what went
+   * wrong" rather than the McpTofu-style policy chip. */
+  background: color-mix(in oklab, var(--warn) 18%, transparent);
+  color: var(--warn);
+  border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
+}
+
