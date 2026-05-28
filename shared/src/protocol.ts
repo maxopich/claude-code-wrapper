@@ -456,6 +456,36 @@ export type ClientMsg =
     }
   | {
       /**
+       * Cluster D Phase 5b (spec §6.3 / BE-D19): step 1 of the swept-session
+       * reopen flow. The operator clicks "Reopen" on a SweptSessionBanner
+       * (Phase 5c web) — Cebab needs to surface a workspace-diff confirmation
+       * before doing anything destructive, so this ClientMsg is a PROBE:
+       * the server validates the target session is finalizable + computes a
+       * workspace diff for the operator to acknowledge, and replies with
+       * `reopen_session_confirm_required` carrying the diff payload.
+       *
+       * It does NOT swap the active session or reactivate the swept one —
+       * that's `reopen_session_confirmed` (Phase 5c). Splitting probe vs
+       * commit lets the modal render the diff before risking any state
+       * change; the typed "reopen" gate (BE-D21) lives entirely client-side
+       * in the modal, since the modal is the only surface that sees the diff.
+       *
+       * Rejects with `reopen_session_failed` when:
+       *   - the session id doesn't exist,
+       *   - the session is still `running` (only finalized rows can be
+       *     reopened — the operator would never reopen a live session),
+       *   - the session has no resolvable participant project (orphan;
+       *     can't compute a diff path).
+       *
+       * Archived rows ARE allowed to reopen (the operator can change their
+       * mind after archiving); Phase 5c's confirmed handler will also
+       * unarchive them as part of the swap.
+       */
+      type: 'reopen_session';
+      sessionId: string;
+    }
+  | {
+      /**
        * Mutate the lifecycle of a running multi-agent session
        * (`persistent` ↔ `temp`). Only affects teardown behavior — the
        * session keeps running unchanged; on End/Stop the new value
@@ -1178,6 +1208,53 @@ export type ServerMsg =
       sessionId: string;
       /** True iff the per-session folder was actually rm-rf'd. */
       removedArtifacts: boolean;
+    }
+  | {
+      /**
+       * Cluster D Phase 5b (spec §6.3): reply to `reopen_session`. Carries
+       * a workspace diff for the operator to acknowledge — Phase 5c's
+       * ReopenSessionModal renders the changes + gates the "Reopen"
+       * button behind a typed confirmation when `workspaceDiff.filesChanged > 0`
+       * (BE-D21).
+       *
+       * The `workspaceDiff` is computed from a `git status --porcelain`
+       * over the resolved participant's project path; when the path
+       * isn't a git repo OR git isn't on PATH, `fullDiffAvailable: false`
+       * is set and the counts are 0. The modal handles that as "we
+       * couldn't enumerate changes — assume the worst and require typed
+       * confirmation" (spec OQ resolution: prefer safe-by-default over
+       * silently-disabled gate).
+       *
+       * Sample paths are capped at 10 (per spec §6.3) so a noisy
+       * workspace can't blow up the envelope size.
+       */
+      type: 'reopen_session_confirm_required';
+      sessionId: string;
+      /**
+       * The path the diff was computed against — surfaced so the modal
+       * can show "comparing against <path>" and the operator isn't
+       * confused if multi-participant sessions trail other workspaces.
+       */
+      projectPath: string;
+      workspaceDiff: WorkspaceDiff;
+    }
+  | {
+      /**
+       * Cluster D Phase 5b (spec §6.3): reply when `reopen_session`
+       * can't even ship the diff — the request is rejected up-front
+       * (unknown id, still-running, no resolvable participant). Distinct
+       * from `wrapper_error` so the modal can render a specific message
+       * + dismiss itself cleanly instead of falling through to the
+       * generic error toast surface.
+       *
+       * `reason` is a narrow enumeration so the client can switch over
+       * it for tailored copy without parsing free text.
+       */
+      type: 'reopen_session_failed';
+      sessionId: string;
+      reason: ReopenSessionFailureReason;
+      /** Human-readable explanation; copy hint for the modal. */
+      message: string;
     }
   | {
       /**
@@ -1909,6 +1986,42 @@ export type IterationSummary = {
    */
   resumable: boolean;
 };
+
+/**
+ * Cluster D Phase 5b (spec §6.3): workspace-diff payload carried by
+ * `reopen_session_confirm_required`. Surfaces "what's different about
+ * this project since the swept session last ran" so the operator can
+ * decide whether reopening is safe.
+ *
+ * Computed server-side via `git status --porcelain` over the resolved
+ * participant's project path; non-git repos OR missing git get
+ * `fullDiffAvailable: false` + zeroed counts. The modal interprets
+ * `!fullDiffAvailable` as "we couldn't enumerate — require typed
+ * confirmation anyway" (safe-by-default).
+ *
+ * `sampleChanges` is capped at 10 paths to keep the envelope bounded;
+ * the operator can `cd` to `projectPath` for the full diff if needed.
+ */
+export type WorkspaceDiff = {
+  /** Modified-since-HEAD file count (M, A, D, R, etc. in porcelain output). */
+  filesChanged: number;
+  /** Added (untracked or staged-as-added). */
+  filesAdded: number;
+  /** Deleted (D in porcelain). */
+  filesDeleted: number;
+  /** Up to 10 file paths from the porcelain output, useful for "looks like…". */
+  sampleChanges: string[];
+  /** False when we couldn't run git in this path; counts are 0 in that case. */
+  fullDiffAvailable: boolean;
+};
+
+/**
+ * Cluster D Phase 5b: enumerated reason codes for `reopen_session_failed`.
+ * Kept narrow so the modal's switch over them stays exhaustive (the union
+ * doubles as the client-side i18n key). New reasons must add a matching
+ * UI branch.
+ */
+export type ReopenSessionFailureReason = 'not_found' | 'still_running' | 'no_participant';
 
 /**
  * Phase H: discriminator for `LogRow.kind`. Each row in the merged session
