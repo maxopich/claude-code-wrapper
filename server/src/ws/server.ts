@@ -76,7 +76,13 @@ import {
 import { getScrubbedEnvVars } from '../runner/claude.js';
 import { appendSafetyAuditAck, HIGHEST_SUBCODES } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
-import { appendRecoveryLog } from '../repo/recovery_log.js';
+import {
+  aggregateByClass,
+  appendRecoveryLog,
+  authResumeChoiceRatio,
+  listRecent,
+  sweepReopenRate,
+} from '../repo/recovery_log.js';
 import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
@@ -422,6 +428,81 @@ export async function executeArchiveSession(args: {
   }
 
   send({ type: 'iteration_archived', sessionId, removedArtifacts });
+}
+
+/**
+ * Cluster D Phase 8a (spec §8.5): pure-ish implementation of the
+ * `get_recovery_log_snapshot` ClientMsg handler — exported so the test
+ * surface can exercise it against a real DB without standing up the WS
+ * scaffold. Same testability pattern as `executeArchiveSession`.
+ *
+ * Composes three named regression-gate queries + a recent-rows page into
+ * one envelope (`recovery_log_snapshot`):
+ *
+ *   - `aggregateByClass()` — per-failure-class counts + reachedFinalRate
+ *     + medianTimeToRecoveryMs. Classes that have never been recorded
+ *     are absent (callers render "no data yet" rather than 0).
+ *   - `sweepReopenRate()` — the spec-named "what fraction of swept rows
+ *     get reopened" gauge; null when no sweeps have ever fired.
+ *   - `authResumeChoiceRatio()` — paired "in-session-resume vs
+ *     new-session" choice ratio for auth_expired recoveries; null
+ *     when no auth_expired rows exist (which is always today —
+ *     the writers for `auth_expired` land in a later phase).
+ *   - `listRecent(clampedLimit)` — newest-first page sized by the
+ *     request's `recentLimit` (clamped to [1, 100]).
+ *
+ * Read-only — no DB mutations, no events emitted aside from the reply.
+ */
+const RECOVERY_LOG_RECENT_LIMIT_MAX = 100;
+const RECOVERY_LOG_RECENT_LIMIT_DEFAULT = 100;
+
+export function executeRecoveryLogSnapshot(args: {
+  recentLimit?: number;
+  send: (msg: ServerMsg) => void;
+}): void {
+  const { send } = args;
+  // Clamp: NaN / negative / non-finite / oversize all fall back to the
+  // default. The handler is read-only but a malicious request asking for
+  // limit=10_000_000 would still pull every row into memory — small
+  // table today, but the discipline is the same as inbox_snapshot.
+  let recentLimit = args.recentLimit ?? RECOVERY_LOG_RECENT_LIMIT_DEFAULT;
+  if (!Number.isFinite(recentLimit) || recentLimit < 1) {
+    recentLimit = RECOVERY_LOG_RECENT_LIMIT_DEFAULT;
+  }
+  if (recentLimit > RECOVERY_LOG_RECENT_LIMIT_MAX) {
+    recentLimit = RECOVERY_LOG_RECENT_LIMIT_MAX;
+  }
+  // Integer-cast: SQLite's bound `?` parameter for LIMIT expects an
+  // integer; the repo prepares with a `number` type but a fractional
+  // value (e.g. 17.5) silently truncates. Make it explicit.
+  recentLimit = Math.floor(recentLimit);
+
+  const recent = listRecent(recentLimit).map((row) => ({
+    id: row.id,
+    ts: row.ts,
+    sessionId: row.session_id,
+    parentSessionId: row.parent_session_id,
+    operatorId: row.operator_id,
+    failureClass: row.failure_class,
+    operatorAction: row.operator_action,
+    timeToRecoveryMs: row.time_to_recovery_ms,
+    outcome: row.outcome,
+    forensicsId: row.forensics_id,
+    invariantResultsJson: row.invariant_results_json,
+  }));
+
+  send({
+    type: 'recovery_log_snapshot',
+    aggregates: aggregateByClass().map((a) => ({
+      failureClass: a.failureClass,
+      count: a.count,
+      reachedFinalRate: a.reachedFinalRate,
+      medianTimeToRecoveryMs: a.medianTimeToRecoveryMs,
+    })),
+    sweepReopenRate: sweepReopenRate(),
+    authResumeChoiceRatio: authResumeChoiceRatio(),
+    recent,
+  });
 }
 
 /**
@@ -2627,6 +2708,19 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       await executeArchiveSession({
         sessionId: msg.sessionId,
         removeArtifacts: msg.removeArtifacts === true,
+        send: (m) => send(conn.ws, m),
+      });
+      return;
+    }
+    case 'get_recovery_log_snapshot': {
+      // Cluster D Phase 8a (spec §8.5): read-only snapshot of the
+      // recovery_log table for the Phase 8b RecoveryLogInspector. The
+      // executor lives next to executeArchiveSession for the same
+      // testability reason — the handler is thin, the side-effect-free
+      // composition (aggregates + named gauges + recent page) is in
+      // executeRecoveryLogSnapshot.
+      executeRecoveryLogSnapshot({
+        recentLimit: msg.recentLimit,
         send: (m) => send(conn.ws, m),
       });
       return;

@@ -9,6 +9,7 @@ import {
   appendRecoveryLog,
   authResumeChoiceRatio,
   listForSession,
+  listRecent,
   sweepReopenRate,
   updateRecoveryOutcome,
 } from './recovery_log.js';
@@ -271,6 +272,85 @@ describe('authResumeChoiceRatio', () => {
   test('ignores auth recoveries with non-resume actions (e.g. abort)', () => {
     appendRecoveryLog({ failureClass: 'auth_expired', operatorAction: 'abort' });
     expect(authResumeChoiceRatio()).toBeNull();
+  });
+});
+
+describe('listRecent', () => {
+  test('returns empty list when table has no rows', () => {
+    expect(listRecent(50)).toEqual([]);
+  });
+
+  test('returns rows in newest-first order (ts DESC)', () => {
+    // Three rows with explicit ts overrides so ordering is deterministic.
+    const r1 = appendRecoveryLog({
+      sessionId: 's-old',
+      failureClass: 'rate_limit',
+      operatorAction: 'auto_retry',
+      tsOverride: 1000,
+    });
+    const r2 = appendRecoveryLog({
+      sessionId: 's-mid',
+      failureClass: 'sweep',
+      operatorAction: 'archive',
+      tsOverride: 2000,
+    });
+    const r3 = appendRecoveryLog({
+      sessionId: 's-new',
+      failureClass: 'chain_crash',
+      operatorAction: 'archive',
+      tsOverride: 3000,
+    });
+    const rows = listRecent(50);
+    expect(rows.map((r) => r.id)).toEqual([r3.id, r2.id, r1.id]);
+  });
+
+  test('honours the limit cap', () => {
+    for (let i = 0; i < 5; i++) {
+      appendRecoveryLog({
+        sessionId: `s-${i}`,
+        failureClass: 'other',
+        operatorAction: 'abort',
+        tsOverride: i,
+      });
+    }
+    expect(listRecent(3)).toHaveLength(3);
+    expect(listRecent(1)).toHaveLength(1);
+  });
+
+  test('includes process-level rows (session_id=null)', () => {
+    appendRecoveryLog({
+      // No sessionId — repo writes null
+      failureClass: 'other',
+      operatorAction: 'abort',
+      tsOverride: 1000,
+    });
+    appendRecoveryLog({
+      sessionId: 's-bound',
+      failureClass: 'sweep',
+      operatorAction: 'archive',
+      tsOverride: 2000,
+    });
+    const rows = listRecent(50);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.session_id === null)).toBeDefined();
+    expect(rows.find((r) => r.session_id === 's-bound')).toBeDefined();
+  });
+
+  test('ties on ts break on id DESC (total order)', () => {
+    // Two rows inserted with the same ts override — listRecent must
+    // still return them in a deterministic order (newer id first).
+    const r1 = appendRecoveryLog({
+      failureClass: 'sweep',
+      operatorAction: 'archive',
+      tsOverride: 1234,
+    });
+    const r2 = appendRecoveryLog({
+      failureClass: 'sweep',
+      operatorAction: 'archive',
+      tsOverride: 1234,
+    });
+    const rows = listRecent(10);
+    expect(rows.map((r) => r.id)).toEqual([r2.id, r1.id]);
   });
 });
 
