@@ -47,6 +47,7 @@ import type {
   WrapperErrorKind,
 } from '@cebab/shared/protocol';
 import { computeWorkspaceDiff } from '../workspace_diff.js';
+import { cancelAuthRefresh, startAuthRefresh, type AuthRefreshCallbacks } from '../auth_refresh.js';
 import { translate } from './translate.js';
 import { resolveProjectAuthority } from '../repo/project_authority.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
@@ -2863,6 +2864,62 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           ...(head ? { claudeMdHead: head.head, claudeMdSizeLabel: head.sizeLabel } : {}),
         },
       });
+      return;
+    }
+    case 'start_auth_refresh': {
+      // Cluster D Phase 6b: spawn `claude login`. Module guarantees
+      // single-flight process-wide; concurrent requests get
+      // `auth_refresh_failed { reason: 'already_running' }` with the
+      // existing runId so a second tab can re-attach its modal.
+      //
+      // We don't await the spawn — `startAuthRefresh` is synchronous
+      // (returns immediately after spawn), and the subprocess streams
+      // output via the callbacks we register here. The callbacks
+      // capture `conn.ws` by reference; if the WS disconnects mid-
+      // flow, `send()` becomes a no-op (it checks readyState ===
+      // OPEN) so we don't accidentally write to a closed socket.
+      // The subprocess itself continues running because the operator
+      // may still complete OAuth in their browser.
+      const callbacks: AuthRefreshCallbacks = {
+        onStarted: ({ runId, pid }) => {
+          send(conn.ws, { type: 'auth_refresh_started', runId, pid });
+        },
+        onOutput: ({ runId, stream, text }) => {
+          send(conn.ws, { type: 'auth_refresh_output', runId, stream, text });
+        },
+        onCompleted: ({ runId, exitCode, success }) => {
+          send(conn.ws, { type: 'auth_refresh_completed', runId, exitCode, success });
+        },
+      };
+      const result = startAuthRefresh(callbacks);
+      if (!result.ok) {
+        if (result.reason === 'already_running') {
+          send(conn.ws, {
+            type: 'auth_refresh_failed',
+            reason: 'already_running',
+            existingRunId: result.existingRunId,
+          });
+        } else {
+          send(conn.ws, {
+            type: 'auth_refresh_failed',
+            reason: 'spawn_failed',
+            error: result.error,
+          });
+        }
+      }
+      return;
+    }
+    case 'cancel_auth_refresh': {
+      // Cluster D Phase 6b: operator clicked Cancel in the modal. The
+      // module kills the subprocess; child.on('exit') fires
+      // onCompleted which sends the auth_refresh_completed envelope.
+      // No reply needed for the cancel itself — the completed
+      // envelope is the signal.
+      //
+      // Mismatched runId is a silent no-op (race-defense: a stale
+      // Cancel after natural completion shouldn't kill a freshly-
+      // started run).
+      cancelAuthRefresh(msg.runId);
       return;
     }
   }

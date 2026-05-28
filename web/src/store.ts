@@ -1881,6 +1881,19 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // exhaustiveness check honest until that context lands.
       return state;
 
+    case 'auth_refresh_started':
+    case 'auth_refresh_output':
+    case 'auth_refresh_completed':
+    case 'auth_refresh_failed':
+      // Cluster D Phase 6b: the AuthRefreshModal (Phase 6c, follow-up)
+      // will own these via a sibling AuthRefreshContext — the modal
+      // shows live `claude login` subprocess output. Same pattern as
+      // the McpTofu / EnvInjection / Reopen gates above. Reducer no-op
+      // keeps the union exhaustive until the context lands; the
+      // matching ClientMsgs (start_auth_refresh / cancel_auth_refresh)
+      // ship the spawn directly via wsRef.send from the banner action.
+      return state;
+
     case 'inbox_snapshot':
       // Cluster A Phase 5: the inbox panel (`<NotificationInbox/>`) owns
       // this state via a sibling context (`InboxContext`) so the main

@@ -851,6 +851,47 @@ export type ClientMsg =
       sessionId: string;
       /** Client-scheduled auto-fire (default false = operator click). */
       auto?: boolean;
+    }
+  | {
+      /**
+       * Cluster D Phase 6b (spec §6.4 / UI-D22 follow-up): operator
+       * clicked the AuthRefreshModal's "Re-authenticate" primary
+       * action. Server spawns `claude login` as a subprocess (the
+       * official auth flow — opens a browser to OAuth, listens on a
+       * local port for the callback, writes new credentials to
+       * `~/.claude/.credentials.json`).
+       *
+       * Process-wide single-flight: only one `claude login` runs at a
+       * time. A concurrent request gets `auth_refresh_failed` with
+       * reason `'already_running'`. The credentials file is global
+       * shared state; racing spawns would produce undefined behavior.
+       *
+       * Subscription-only env applies (same `subscriptionOnlyEnv()`
+       * helper as the runner's main spawn path) so a stray
+       * `ANTHROPIC_API_KEY` in the operator's shell rc can't poison
+       * the OAuth flow.
+       *
+       * Reply pattern: `auth_refresh_started` (on successful spawn) →
+       * many `auth_refresh_output` (stdout/stderr chunks) →
+       * `auth_refresh_completed` (terminal). On start-time failure
+       * (already_running / spawn_failed): single `auth_refresh_failed`.
+       */
+      type: 'start_auth_refresh';
+    }
+  | {
+      /**
+       * Cluster D Phase 6b: operator clicked Cancel inside the live
+       * AuthRefreshModal. Server kills the active subprocess (if it
+       * matches `runId`); a synthetic `auth_refresh_completed` follows
+       * with `success: false` so the modal exits its running state.
+       *
+       * `runId` is the same opaque uuid the server emitted in
+       * `auth_refresh_started` — mismatches are silent no-ops
+       * (defensive race-guard: a second cancel-after-completion
+       * shouldn't kill a freshly-started run).
+       */
+      type: 'cancel_auth_refresh';
+      runId: string;
     };
 
 // ---- Server → Browser ----
@@ -1721,6 +1762,77 @@ export type ServerMsg =
       projectId: number;
       reason: 'env_injection_detected';
       detectedInjections: EnvInjection[];
+    }
+  | {
+      /**
+       * Cluster D Phase 6b: server successfully spawned `claude login`.
+       * Sent once at the start of the flow. The `runId` is an opaque
+       * uuid the client uses to correlate subsequent `auth_refresh_
+       * output` and `auth_refresh_completed` envelopes — and to pass
+       * to `cancel_auth_refresh` if the operator clicks Cancel.
+       *
+       * `pid` is informational only (operator may want to inspect it
+       * via `ps`). The client should not use it for any flow control.
+       */
+      type: 'auth_refresh_started';
+      runId: string;
+      pid: number;
+    }
+  | {
+      /**
+       * Cluster D Phase 6b: a chunk of output from the running
+       * `claude login` subprocess. `stream` distinguishes stdout vs
+       * stderr so the modal can colorize accordingly (`claude login`
+       * prints the auth URL to stdout; warnings/errors to stderr).
+       *
+       * `text` is the raw chunk as received from the pipe (already
+       * decoded as UTF-8). Multiple envelopes per logical line are
+       * possible — the modal should concatenate and let line wrapping
+       * happen naturally in the terminal-style display.
+       */
+      type: 'auth_refresh_output';
+      runId: string;
+      stream: 'stdout' | 'stderr';
+      text: string;
+    }
+  | {
+      /**
+       * Cluster D Phase 6b: `claude login` subprocess exited.
+       *
+       * `success: true` means `exitCode === 0` — credentials were
+       * (presumably) written; the operator's next session_started
+       * should clear the AuthExpiredBanner's slice.
+       *
+       * `success: false` covers: non-zero exit code (auth failed or
+       * cancelled by user), operator-initiated cancel (`cancel_auth_
+       * refresh` ClientMsg), or timeout (5 min default — long enough
+       * for the operator to complete OAuth in their browser).
+       *
+       * `exitCode` is null when the subprocess was killed before
+       * exiting normally (cancel or timeout).
+       */
+      type: 'auth_refresh_completed';
+      runId: string;
+      exitCode: number | null;
+      success: boolean;
+    }
+  | {
+      /**
+       * Cluster D Phase 6b: `start_auth_refresh` failed before a
+       * subprocess could be spawned. The reason discriminates:
+       *
+       *   - `'already_running'` — another `claude login` is in
+       *     flight. `existingRunId` is set so the client can re-
+       *     attach its modal to the existing run if it has lost the
+       *     prior `auth_refresh_started` envelope (e.g. tab reload).
+       *   - `'spawn_failed'` — the OS rejected the spawn (binary
+       *     not found, permission denied, etc.). `error` carries
+       *     the Node `child_process` error message verbatim.
+       */
+      type: 'auth_refresh_failed';
+      reason: 'already_running' | 'spawn_failed';
+      existingRunId?: string;
+      error?: string;
     };
 
 /**
