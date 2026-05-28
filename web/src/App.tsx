@@ -40,6 +40,7 @@ import {
   type BannerStackItem,
 } from './components/banners';
 import { ReopenProvider, useReopenActions } from './components/reopen';
+import { AuthRefreshProvider, useAuthRefreshActions } from './components/authRefresh';
 import { HELD_MESSAGES_CAP } from './store';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
@@ -121,6 +122,16 @@ export function App() {
   //     call. Populated by a NotificationsBridge-style inner component.
   const reopenHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const reopenRequestRef = useRef<((sessionId: string) => void) | null>(null);
+  // Cluster D Phase 6c: bridges for the AuthRefreshProvider.
+  //   - `authRefreshHandlerRef` — App.tsx routes
+  //     auth_refresh_{started,output,completed,failed} ServerMsgs
+  //     into the provider's reducer.
+  //   - `authRefreshRequestRef` — populated by AuthRefreshBridge so the
+  //     AuthExpiredBanner's onReauthenticate callback can fire the
+  //     start without prop-drilling the provider's action through 6
+  //     layers.
+  const authRefreshHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  const authRefreshRequestRef = useRef<(() => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -143,6 +154,12 @@ export function App() {
   // Cluster D Phase 5d: ClientMsg sink for the ReopenProvider. Same wsRef
   // indirection as the others — keeps the provider WS-agnostic.
   const reopenSend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
+  // Cluster D Phase 6c: ClientMsg sink for the AuthRefreshProvider.
+  // Ships `start_auth_refresh` / `cancel_auth_refresh` onto the active
+  // WS — same indirection so a reconnect doesn't strand the spawn.
+  const authRefreshSend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
 
@@ -170,10 +187,17 @@ export function App() {
       case 'reopen':
         reopenRequestRef.current?.(action.sessionId);
         return;
+      case 'reauth':
+        // Cluster D Phase 6c: the dispatcher emits a notification with
+        // action.kind='reauth' alongside every wrapper_error{kind:
+        // 'auth_expired'}. Route it to the same AuthRefreshModal the
+        // banner uses so the operator has a one-click path from the
+        // transient toast (parallel to the durable banner).
+        authRefreshRequestRef.current?.();
+        return;
       case 'open_session':
       case 'open_logs':
       case 'open_settings':
-      case 'reauth':
       case 'resume':
       case 'restart_agent':
         return;
@@ -188,17 +212,22 @@ export function App() {
           <AuthorityProvider send={authoritySend} handlerRef={authorityHandlerRef}>
             <ReopenProvider send={reopenSend} handlerRef={reopenHandlerRef}>
               <ReopenBridge requestRef={reopenRequestRef} />
-              <AppShell
-                wsRef={wsRef}
-                notifPushRef={notifPushRef}
-                notifDismissRef={notifDismissRef}
-                inboxHandlerRef={inboxHandlerRef}
-                gateHandlerRef={gateHandlerRef}
-                authorityHandlerRef={authorityHandlerRef}
-                reopenHandlerRef={reopenHandlerRef}
-                onAck={handleAck}
-              />
-              <NotificationStack onAction={onNotificationAction} />
+              <AuthRefreshProvider send={authRefreshSend} handlerRef={authRefreshHandlerRef}>
+                <AuthRefreshBridge requestRef={authRefreshRequestRef} />
+                <AppShell
+                  wsRef={wsRef}
+                  notifPushRef={notifPushRef}
+                  notifDismissRef={notifDismissRef}
+                  inboxHandlerRef={inboxHandlerRef}
+                  gateHandlerRef={gateHandlerRef}
+                  authorityHandlerRef={authorityHandlerRef}
+                  reopenHandlerRef={reopenHandlerRef}
+                  authRefreshHandlerRef={authRefreshHandlerRef}
+                  authRefreshRequestRef={authRefreshRequestRef}
+                  onAck={handleAck}
+                />
+                <NotificationStack onAction={onNotificationAction} />
+              </AuthRefreshProvider>
             </ReopenProvider>
           </AuthorityProvider>
         </GateModalsProvider>
@@ -226,6 +255,27 @@ function ReopenBridge({
       requestRef.current = null;
     };
   }, [requestReopen, requestRef]);
+  return null;
+}
+
+/**
+ * Cluster D Phase 6c: bridge component that captures the
+ * AuthRefreshProvider's `requestStart` action into a ref so the
+ * AuthExpiredBanner's `onReauthenticate` callback can fire it without
+ * prop-drilling. Same pattern as ReopenBridge / NotificationsBridge.
+ */
+function AuthRefreshBridge({
+  requestRef,
+}: {
+  requestRef: React.MutableRefObject<(() => void) | null>;
+}) {
+  const { requestStart } = useAuthRefreshActions();
+  useEffect(() => {
+    requestRef.current = requestStart;
+    return () => {
+      requestRef.current = null;
+    };
+  }, [requestStart, requestRef]);
   return null;
 }
 
@@ -285,6 +335,22 @@ type AppShellProps = {
    * surface error states).
    */
   reopenHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cluster D Phase 6c: bridge ref the AuthRefreshProvider populates.
+   * Routes auth_refresh_{started,output,completed,failed} envelopes
+   * into the provider's reducer so the AuthRefreshModal can transition
+   * through spawning → running → completed/failed.
+   */
+  authRefreshHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cluster D Phase 6c: ref the AuthRefreshBridge populates with the
+   * provider's `requestStart` action. AppShell wires this into the
+   * AuthExpiredBanner's `onReauthenticate` callback so clicking the
+   * banner button opens the modal + ships start_auth_refresh in one
+   * call. Pinned ref (not captured at mount) so a reconnect doesn't
+   * strand the action — same pattern as reopenRequestRef.
+   */
+  authRefreshRequestRef: React.MutableRefObject<(() => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
@@ -297,6 +363,8 @@ function AppShell({
   gateHandlerRef,
   authorityHandlerRef,
   reopenHandlerRef,
+  authRefreshHandlerRef,
+  authRefreshRequestRef,
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -564,6 +632,16 @@ function AppShell({
             reopenHandlerRef.current?.(msg);
           } catch (err) {
             console.error('[reopen] handler threw', err);
+          }
+          // Cluster D Phase 6c: hand to the AuthRefreshProvider bridge
+          // so auth_refresh_{started,output,completed,failed} envelopes
+          // drive the modal's state machine. Narrow filter — the
+          // reducer drops anything that doesn't match its kind/runId
+          // guards.
+          try {
+            authRefreshHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[auth_refresh] handler threw', err);
           }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
@@ -1181,6 +1259,13 @@ function AppShell({
               state: state.authExpired,
               callbacks: {
                 onDismiss: () => dispatch({ type: 'auth_expired_dismissed' }),
+                // Cluster D Phase 6c: clicking Re-authenticate opens
+                // the AuthRefreshModal + spawns `claude login` server-
+                // side. The pin-via-ref pattern keeps AppShell out of
+                // the AuthRefreshProvider context (the provider wraps
+                // AppShell from outside in App.tsx's JSX) — same
+                // posture as reopenRequestRef for the reopen flow.
+                onReauthenticate: () => authRefreshRequestRef.current?.(),
               },
             })}
           />
