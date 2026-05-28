@@ -400,9 +400,21 @@ export async function executeArchiveSession(args: {
   }
 
   try {
+    // Cluster D Phase 7: distinguish chain-mode crash archives from the
+    // common sweep-archive case. The Iterations list's "chain session
+    // couldn't be resumed" toast also routes through this handler (it
+    // ships `archive_session` ClientMsg via App.tsx's notification
+    // action handler), so the same operator action covers both failure
+    // classes — but spec §8.5's aggregateByClass needs them tallied
+    // separately. The mode + crashed-status pair is the cleanest
+    // signal: chain-mode rows that were never auto-swept (no superseder)
+    // and ended in crashed status are by definition chain_crash. Other
+    // status combinations stay 'sweep' (the default for orchestrator
+    // crashes too, since the operator may archive any crashed row).
+    const failureClass = row.mode === 'chain' && row.status === 'crashed' ? 'chain_crash' : 'sweep';
     appendRecoveryLog({
       sessionId,
-      failureClass: 'sweep',
+      failureClass,
       operatorAction: 'archive',
     });
   } catch (err) {

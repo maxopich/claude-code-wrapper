@@ -68,8 +68,11 @@ describe('executeArchiveSession — happy path', () => {
     ]);
   });
 
-  test('writes a recovery_log row with failure_class=sweep, operator_action=archive', async () => {
-    createMultiAgentSession('sweep-2', 'chain', '002');
+  test('orchestrator-mode crash archive writes recovery_log with failure_class=sweep', async () => {
+    // Phase 7: the failure_class branch is mode-aware. An orchestrator
+    // row in crashed status reads as "sweep-driven archive" — the
+    // common case where a newer iteration auto-swept the older one.
+    createMultiAgentSession('sweep-2', 'orchestrator', '002');
     endMultiAgentSession('sweep-2', 'crashed');
 
     await executeArchiveSession({
@@ -82,6 +85,55 @@ describe('executeArchiveSession — happy path', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       session_id: 'sweep-2',
+      failure_class: 'sweep',
+      operator_action: 'archive',
+    });
+  });
+
+  test('chain-mode crash archive writes recovery_log with failure_class=chain_crash', async () => {
+    // Cluster D Phase 7: archiving a chain-mode row that ended in
+    // 'crashed' status is by definition a chain-reconstruction-failure
+    // archive (the operator hit Resume on a swept-restart chain row,
+    // got the chain_not_reconstructed toast, and clicked its Archive
+    // action). The recovery_log row uses failure_class='chain_crash'
+    // so spec §8.5's aggregateByClass tallies chain crashes separately
+    // from the common sweep-archive flow. The mode + crashed pair is
+    // the cleanest signal — no protocol additions needed.
+    createMultiAgentSession('chain-1', 'chain', '003');
+    endMultiAgentSession('chain-1', 'crashed');
+
+    await executeArchiveSession({
+      sessionId: 'chain-1',
+      removeArtifacts: false,
+      send: captureSend,
+    });
+
+    const rows = listForSession('chain-1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session_id: 'chain-1',
+      failure_class: 'chain_crash',
+      operator_action: 'archive',
+    });
+  });
+
+  test('chain-mode but COMPLETED status uses failure_class=sweep (not a crash)', async () => {
+    // Defensive: the chain_crash discriminant is the (mode='chain' AND
+    // status='crashed') AND. A chain that finished cleanly and the
+    // operator just wants to archive doesn't count as a chain crash.
+    createMultiAgentSession('chain-done', 'chain', '004');
+    endMultiAgentSession('chain-done', 'completed');
+
+    await executeArchiveSession({
+      sessionId: 'chain-done',
+      removeArtifacts: false,
+      send: captureSend,
+    });
+
+    const rows = listForSession('chain-done');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session_id: 'chain-done',
       failure_class: 'sweep',
       operator_action: 'archive',
     });
