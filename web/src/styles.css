@@ -1411,6 +1411,123 @@ pre {
   gap: 8px;
 }
 
+/* ---- Cluster E Phase 4 (H1): KeyboardShortcutsModal cheatsheet ----
+ *
+ * Sectioned list + searchable filter. Reuses the .modal scaffolding so
+ * the surface matches SettingsModal; the modal-specific tweaks below
+ * give the filter input more breathing room and the .kbd chips their
+ * monospaced terminal-key look.
+ */
+.keyboard-shortcuts-modal {
+  max-width: 620px;
+  width: min(620px, 92vw);
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+}
+.keyboard-shortcuts-modal-filter-section {
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line-1);
+}
+.keyboard-shortcuts-modal-filter {
+  width: 100%;
+  font: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-2) var(--s-3);
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.keyboard-shortcuts-modal-filter:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.keyboard-shortcuts-modal-body {
+  padding: 12px 18px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+}
+.keyboard-shortcuts-modal-empty {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  text-align: center;
+  padding: var(--s-4) 0;
+}
+.keyboard-shortcuts-modal-empty code {
+  background: var(--bg-3);
+  padding: 1px 5px;
+  border-radius: var(--r-sm);
+  font-size: var(--t-xs, 11px);
+}
+.keyboard-shortcuts-modal-section + .keyboard-shortcuts-modal-section {
+  margin-top: var(--s-4);
+}
+.keyboard-shortcuts-modal-section-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.keyboard-shortcuts-modal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.keyboard-shortcuts-modal-row {
+  display: grid;
+  grid-template-columns: minmax(140px, auto) 1fr;
+  gap: var(--s-3);
+  align-items: baseline;
+}
+.keyboard-shortcuts-modal-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.keyboard-shortcuts-modal-plus {
+  color: var(--fg-3);
+  font-size: var(--t-xs, 11px);
+  margin: 0 2px;
+}
+.keyboard-shortcuts-modal-description {
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+}
+.keyboard-shortcuts-modal-footer {
+  padding: 12px 18px;
+  border-top: 1px solid var(--line-1);
+}
+.keyboard-shortcuts-modal-footer .hint {
+  margin: 0;
+  font-size: var(--t-xs, 11px);
+}
+
+/* Shared .kbd chip — keycap styling used by the cheatsheet and (later)
+ * any inline shortcut hint in tooltips/banners. Monospace + a subtle
+ * 1px bottom inset so it reads like a physical key. */
+.kbd {
+  display: inline-block;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-1, var(--ink, inherit));
+  background: var(--bg-5, var(--bg-3));
+  border: 1px solid var(--line-3, var(--border));
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm, 4px);
+  padding: 1px 6px;
+  min-width: 16px;
+  text-align: center;
+  white-space: nowrap;
+}
+
 /* ---------- Top-level Chat / Multi-agent tab nav ---------- */
 /* Wraps `.main-tabs` on the left and the active-run identity strip + actions
  * (`TopRunBar`) on the right. Lets Logs/Stop ride alongside the tabs instead
