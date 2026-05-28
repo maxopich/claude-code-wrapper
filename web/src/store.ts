@@ -1806,6 +1806,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // The pattern matches inbox_snapshot. Exhaustiveness no-op for now.
       return state;
 
+    case 'reopen_session_confirm_required':
+    case 'reopen_session_failed':
+      // Cluster D Phase 5b: ReopenSessionModal (Phase 5c) will own these
+      // via a sibling context — same modal-triggered pattern as the
+      // McpTofu/EnvInjection gates above. The handler echoes the
+      // workspace-diff envelope; the modal mounts to render it and
+      // collect the typed "reopen" confirmation. Reducer no-op keeps the
+      // exhaustiveness check honest until that context lands.
+      return state;
+
     case 'inbox_snapshot':
       // Cluster A Phase 5: the inbox panel (`<NotificationInbox/>`) owns
       // this state via a sibling context (`InboxContext`) so the main

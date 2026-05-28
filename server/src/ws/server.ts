@@ -42,8 +42,10 @@ import type {
   NotificationSeverity,
   RouterDropReasonCode,
   SessionCrashedReasonCode,
+  WorkspaceDiff,
   WrapperErrorKind,
 } from '@cebab/shared/protocol';
+import { computeWorkspaceDiff } from '../workspace_diff.js';
 import { translate } from './translate.js';
 import { resolveProjectAuthority } from '../repo/project_authority.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
@@ -404,6 +406,92 @@ export async function executeArchiveSession(args: {
   }
 
   send({ type: 'iteration_archived', sessionId, removedArtifacts });
+}
+
+/**
+ * Cluster D Phase 5b (spec §6.3 / BE-D19): probe step of the swept-
+ * session reopen flow. Validates the target is finalizable + has a
+ * resolvable participant project, computes a workspace diff for that
+ * project, replies with `reopen_session_confirm_required` for Phase 5c's
+ * ReopenSessionModal to render.
+ *
+ * Does NOT swap the active session or reactivate the swept one — those
+ * side effects belong to the `reopen_session_confirmed` handler that
+ * lands in Phase 5c (where the modal's typed "reopen" confirmation
+ * gates the commit).
+ *
+ * Project-path resolution: uses the lowest-chain_order participant for
+ * chain mode, or the lowest-project_id participant for orchestrator
+ * mode (the orchestrator agent itself isn't a participant row — only
+ * workers are). This is one consistent diff per session even when the
+ * session has multiple participants; if multi-participant diffs become
+ * a UX requirement, Phase 5c can extend with a per-participant list.
+ *
+ * Archived rows ARE allowed — the operator can change their mind after
+ * archiving, and Phase 5c's confirmed handler will unarchive as part
+ * of the swap.
+ */
+export async function executeReopenSessionProbe(args: {
+  sessionId: string;
+  send: (msg: ServerMsg) => void;
+  /** Test seam: override the diff computer for hermetic tests. */
+  computeDiff?: (projectPath: string) => Promise<WorkspaceDiff>;
+}): Promise<void> {
+  const { sessionId, send } = args;
+  const diff = args.computeDiff ?? computeWorkspaceDiff;
+
+  const row = getMultiAgentSession(sessionId);
+  if (!row) {
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'not_found',
+      message: `No such multi-agent session ${sessionId}`,
+    });
+    return;
+  }
+  if (row.status === 'running') {
+    // Reopening a live session would be a no-op at best, a swap-with-
+    // self at worst. Reject explicitly so the modal can render
+    // "session is already live" without falling through to a generic
+    // error.
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'still_running',
+      message: 'This session is still running — there is nothing to reopen.',
+    });
+    return;
+  }
+
+  const participants = listResolvedParticipants(sessionId);
+  if (participants.length === 0) {
+    // Either the session predates participant tracking (very old row)
+    // OR every participant project has been deleted between session
+    // start and now. Either way, we can't compute a meaningful diff —
+    // surface as `no_participant` so the modal can prompt the operator
+    // to archive instead.
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'no_participant',
+      message: 'This session has no resolvable participant project to diff against.',
+    });
+    return;
+  }
+
+  // listResolvedParticipants already orders by (chain_order IS NULL)
+  // ASC, chain_order ASC, project_id ASC — so participants[0] is the
+  // canonical "first" project for both chain and orchestrator modes.
+  const projectPath = participants[0]!.project_path;
+  const workspaceDiff = await diff(projectPath);
+
+  send({
+    type: 'reopen_session_confirm_required',
+    sessionId,
+    projectPath,
+    workspaceDiff,
+  });
 }
 
 function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
@@ -2297,6 +2385,20 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       await executeArchiveSession({
         sessionId: msg.sessionId,
         removeArtifacts: msg.removeArtifacts === true,
+        send: (m) => send(conn.ws, m),
+      });
+      return;
+    }
+    case 'reopen_session': {
+      // Cluster D Phase 5b (spec §6.3): probe handler — validates the
+      // target session is finalizable + has a resolvable participant
+      // path, computes a workspace diff against that path, and replies
+      // with `reopen_session_confirm_required` for the modal to render.
+      // Does NOT swap or reconstruct — that's Phase 5c's confirmed
+      // handler. Extracted into a testable async function for the same
+      // reason as `executeArchiveSession`.
+      await executeReopenSessionProbe({
+        sessionId: msg.sessionId,
         send: (m) => send(conn.ws, m),
       });
       return;
