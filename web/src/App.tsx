@@ -22,6 +22,9 @@ import { ChatHeaderChip } from './components/ChatHeaderChip';
 import { ModelChip } from './components/ModelChip';
 import { SlashCommandButtons } from './components/SlashCommandButtons';
 import { SettingsModal } from './components/SettingsModal';
+import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
+import { SHORTCUTS } from './shortcutRegistry';
+import { findShortcut, useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
 import { Icon } from './components/Icon';
@@ -446,6 +449,10 @@ function AppShell({
    */
   const msgSubscribersRef = useRef<Set<(msg: ServerMsg) => void>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Cluster E Phase 4 (H1): keyboard shortcuts cheatsheet. `?` opens
+  // from outside an input; Cmd/Ctrl+/ opens from anywhere (including
+  // inside a composer/input). Esc closes.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     readStored('cebab.sidebarCollapsed', false, (r) => r === 'true'),
@@ -806,6 +813,35 @@ function AppShell({
     if (!sessionId) return;
     wsRef.current?.send({ type: 'interrupt', sessionId });
   }
+
+  // Cluster E Phase 4 (H1): global keyboard bindings driven by the
+  // central shortcut registry. Per-component bindings (modal Esc,
+  // composer Enter, slash-palette `/` trigger) stay where they are;
+  // this is the additive layer for cross-cutting shortcuts.
+  //
+  // The cheatsheet bindings work whether or not a session is active —
+  // they're help, not actions. The Cmd/Ctrl+. Stop alternative
+  // dispatches `interrupt` unconditionally; the server is idempotent
+  // (BE-3, same as InputBox's Esc handler) and `interruptSession`
+  // short-circuits when there's no active session id.
+  useKeyboardShortcuts([
+    [
+      findShortcut(SHORTCUTS, 'help.openCheatsheet.questionMark'),
+      () => setShortcutsOpen(true),
+    ],
+    [
+      findShortcut(SHORTCUTS, 'help.openCheatsheet.slash'),
+      () => setShortcutsOpen((cur) => !cur),
+    ],
+    [
+      findShortcut(SHORTCUTS, 'session.stop.cmdPeriod'),
+      // Same payload as the composer-scoped Esc-to-stop: fire
+      // `interrupt` for the active session if any. interruptSession
+      // is a no-op when session?.id is undefined, so this is safe
+      // when no session is active.
+      () => interruptSession(),
+    ],
+  ]);
 
   // Cluster C Phase 2: ship the operator's reason-for-stop. Server
   // validates the interruptAckId binds to the most recent Stop and
@@ -1701,6 +1737,7 @@ function AppShell({
           onSave={saveSettings}
         />
       )}
+      {shortcutsOpen && <KeyboardShortcutsModal onClose={() => setShortcutsOpen(false)} />}
     </div>
   );
 }
