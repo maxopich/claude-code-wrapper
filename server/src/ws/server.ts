@@ -20,7 +20,7 @@ import {
   setSessionPermissionMode,
   setSessionTitle,
 } from '../repo/sessions.js';
-import { listEvents } from '../repo/events.js';
+import { listEvents, listEventsTail } from '../repo/events.js';
 import { persistMessage } from '../runner/orchestrator.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
@@ -80,6 +80,14 @@ import {
   HIGHEST_SUBCODES,
 } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
+import { appendForensics } from '../repo/controllability_forensics.js';
+import {
+  captureSingleAgentForensics,
+  type CapturedPromptEntry,
+  type PendingPermissionSummary,
+  type SingleAgentEventRow,
+} from '../notifications/forensic_snapshot.js';
+import { findStoppedAuditIdForAckId } from '../repo/safety_audit_lookup.js';
 import {
   aggregateByClass,
   appendRecoveryLog,
@@ -227,6 +235,24 @@ export function executeInterrupt(args: {
    * or omit entirely (skip the side effect).
    */
   trackAckId?: (sessionId: string, ackId: string) => void;
+  /**
+   * Cluster C Phase 3 (spec §3 invariant 2 + BE-5 + BE-6): write parent
+   * `session.stopped` safety_audit row + capture the forensic bundle
+   * BEFORE the wire envelope ships. Invoked synchronously right after
+   * the ack id is minted and tracked — that ordering is what guarantees
+   * "every control action dual-writes to safety_audit before the wire
+   * ack lands" (spec invariant 2): we run the persist step before the
+   * runner.interrupt then-callback enqueues `emitAck`. The case body
+   * passes a bound implementation that pulls conn state + db; tests can
+   * omit (no audit row, just the wire envelope) or pass a spy.
+   *
+   * onStop is allowed to throw — caller wraps in try/catch + logs so a
+   * forensics-write outage doesn't block the operator's Stop from
+   * cancelling the runner (audit row IS the obligation; forensics is
+   * evidence on top — see executeStoppedAudit for the split-failure
+   * handling).
+   */
+  onStop?: (sessionId: string, interruptAckId: string) => void;
   /** Test seam: clock override for deterministic ackLatencyMs assertions. */
   now?: () => number;
   /** Test seam: ackId override for deterministic assertions. */
@@ -243,6 +269,20 @@ export function executeInterrupt(args: {
   // resolution doesn't see a stale id.
   const interruptAckId = generateAckId();
   args.trackAckId?.(sessionId, interruptAckId);
+  // Cluster C Phase 3: persist the safety_audit + forensics BEFORE we
+  // schedule the wire envelope. Synchronous on purpose — the
+  // runner.interrupt().then(emitAck) is async, so this finishes first
+  // even though emitAck is enqueued in the same tick.
+  if (args.onStop) {
+    try {
+      args.onStop(sessionId, interruptAckId);
+    } catch (err) {
+      console.warn(
+        `[ws] executeInterrupt: onStop hook threw for ${sessionId}; continuing with runner cancel`,
+        err,
+      );
+    }
+  }
   const emitAck = () => {
     send({
       type: 'session_interrupted',
@@ -261,6 +301,122 @@ export function executeInterrupt(args: {
     inFlight.ac.abort();
     emitAck();
   }
+}
+
+/**
+ * Cluster C Phase 3 (spec §4.6 + BE-5/BE-6): for single-agent Stop, write
+ * the parent `safety_audit { kind: 'session.stopped', reasonCode:
+ * 'operator' }` row and the matched `controllability_forensics` bundle.
+ *
+ * Split-failure semantics: the audit row is the OBLIGATION (spec
+ * invariant 2). If audit append throws, we re-throw to the caller so
+ * executeInterrupt's try/catch can decide whether to surface — Phase 3
+ * just logs (the runner cancel still completes; safety-log-unavailable
+ * banner is BE-1 territory, deferred until Phase 1's caller refusal
+ * pattern extends to the Stop path in a later phase). If audit succeeds
+ * but forensics insert throws, we keep the audit row and log the
+ * forensics failure — the bundle is best-effort evidence, not a gate.
+ *
+ * Exported for direct testability — the test surface exercises the audit
+ * + forensics ordering against a real SQLite under a tmp dir, including
+ * the partial-failure paths.
+ */
+export type ExecuteStoppedAuditInput = {
+  sessionId: string;
+  interruptAckId: string;
+  capture: ReturnType<typeof captureSingleAgentForensics>;
+  appendAudit?: typeof appendSafetyAudit;
+  appendForensicsRow?: typeof appendForensics;
+  now?: () => number;
+};
+
+export type ExecuteStoppedAuditResult = {
+  auditId: string;
+  /** True if the forensics bundle was persisted; false on a non-fatal forensics-write failure. */
+  forensicsPersisted: boolean;
+};
+
+export function executeStoppedAudit(input: ExecuteStoppedAuditInput): ExecuteStoppedAuditResult {
+  const appendAudit = input.appendAudit ?? appendSafetyAudit;
+  const appendForensicsRow = input.appendForensicsRow ?? appendForensics;
+  const now = input.now ?? Date.now;
+  const ts = now();
+  const auditResult = appendAudit({
+    ts,
+    sessionId: input.sessionId,
+    kind: 'session.stopped',
+    reasonCode: 'operator',
+    payload: {
+      interruptAckId: input.interruptAckId,
+      source: 'single_agent_stop',
+    },
+  });
+  let forensicsPersisted = true;
+  try {
+    appendForensicsRow({
+      ...input.capture,
+      safetyAuditId: auditResult.id,
+    });
+  } catch (err) {
+    forensicsPersisted = false;
+    console.warn(
+      `[ws] executeStoppedAudit: forensics insert failed for audit ${auditResult.id}`,
+      err,
+    );
+  }
+  return { auditId: auditResult.id, forensicsPersisted };
+}
+
+/**
+ * Cluster C Phase 3: assemble the inputs for the single-agent forensic
+ * bundle from conn + db state, then call the pure capture helper. Lives
+ * here (not in forensic_snapshot.ts) because it pulls multiple
+ * server-side resolvers (sessions, projects, events) that the pure
+ * capture helper deliberately stays free of.
+ *
+ * Returns undefined when the session-to-project resolve fails — that
+ * happens for unknown / racing-cleanup session ids; the caller then
+ * skips the audit + forensics step (the Stop itself still runs).
+ */
+export function buildSingleAgentForensicsInput(args: {
+  sessionId: string;
+  pendingPermissions: Map<string, PendingPermission>;
+  capturedPrompts: Map<string, CapturedPromptEntry>;
+  /** Test seams: optional fetchers so the orchestration is hermetic. */
+  fetchEventsTail?: (sessionId: string, limit: number) => SingleAgentEventRow[];
+  fetchSession?: (sessionId: string) => { project_id: number } | undefined;
+  fetchProject?: (projectId: number) => { path: string; trusted: number } | undefined;
+  fetchPermissionMode?: (sessionId: string) => SessionPermissionMode | null;
+  now?: () => number;
+}): ReturnType<typeof captureSingleAgentForensics> | undefined {
+  const fetchEventsTail = args.fetchEventsTail ?? listEventsTail;
+  const fetchSession = args.fetchSession ?? getSession;
+  const fetchProject = args.fetchProject ?? getProject;
+  const fetchPermissionMode = args.fetchPermissionMode ?? getSessionPermissionMode;
+
+  const session = fetchSession(args.sessionId);
+  if (!session) return undefined;
+  const project = fetchProject(session.project_id);
+  if (!project) return undefined;
+
+  const pending: PendingPermissionSummary[] = [];
+  for (const [requestId, p] of args.pendingPermissions) {
+    if (p.sessionId !== args.sessionId) continue;
+    pending.push({ requestId, toolName: p.toolName, toolInput: p.toolInput });
+  }
+
+  return captureSingleAgentForensics({
+    sessionId: args.sessionId,
+    recentEvents: fetchEventsTail(args.sessionId, 50),
+    pendingPermissions: pending,
+    capturedPrompt: args.capturedPrompts.get(args.sessionId),
+    activePermissions: {
+      trusted: project.trusted === 1,
+      permissionMode: fetchPermissionMode(args.sessionId),
+    },
+    projectCwd: project.path,
+    now: args.now,
+  });
 }
 
 /**
@@ -285,6 +441,14 @@ export type ExecuteStopReasonInput = {
   latestAckId: string | undefined;
   /** Test seam: override the audit append for hermetic tests. */
   appendAudit?: typeof appendSafetyAudit;
+  /**
+   * Cluster C Phase 3: test seam for the parent-row lookup. Returns the
+   * parent `session.stopped` audit row's id for a given (sessionId,
+   * interruptAckId) pair, or undefined when no parent exists (e.g. the
+   * Stop was emitted before C3 wired the parent-row write, or the audit
+   * write transiently failed). Defaults to the real DB lookup.
+   */
+  lookupParentAuditId?: (sessionId: string, interruptAckId: string) => string | undefined;
   /** Test seam: override Date.now() for deterministic ts assertions. */
   now?: () => number;
 };
@@ -292,6 +456,7 @@ export type ExecuteStopReasonInput = {
 export function executeStopReason(input: ExecuteStopReasonInput): void {
   const { msg, latestAckId } = input;
   const append = input.appendAudit ?? appendSafetyAudit;
+  const lookupParentAuditId = input.lookupParentAuditId ?? findStoppedAuditIdForAckId;
   const now = input.now ?? Date.now;
   // Validation 1: id binding. A stale reason (operator clicked the
   // prompt 30s after a fresh Stop already started) must not bind to
@@ -312,6 +477,12 @@ export function executeStopReason(input: ExecuteStopReasonInput): void {
       return;
     }
   }
+  // Cluster C Phase 3: retroactive join — look up the parent session.stopped
+  // row by interruptAckId so the reason addendum carries an explicit
+  // reference back. parentAuditId may be undefined for legacy Stops or
+  // when the parent-row write transiently failed; we still write the
+  // addendum (operator's eval signal stays useful even without the join).
+  const parentAuditId = lookupParentAuditId(msg.sessionId, msg.interruptAckId);
   try {
     append({
       ts: now(),
@@ -321,6 +492,7 @@ export function executeStopReason(input: ExecuteStopReasonInput): void {
       payload: {
         interruptAckId: msg.interruptAckId,
         reasonText: msg.reasonText ?? null,
+        parentAuditId: parentAuditId ?? null,
       },
     });
   } catch (err) {
@@ -2165,12 +2337,35 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // `interruptAckId` lands in `conn.lastInterruptIds` synchronously
       // — the operator's later `stop_reason` message binds against
       // this latest id.
+      //
+      // Cluster C Phase 3: thread `onStop` for the parent safety_audit
+      // row + controllability_forensics bundle (spec invariant 2 +
+      // BE-5 + BE-6). The hook runs synchronously inside
+      // executeInterrupt right after the ack id is tracked, so the
+      // audit row + bundle land BEFORE the wire envelope ships. Any
+      // failure in here just logs — the runner.interrupt + ack
+      // envelope still happen so the operator's Stop isn't blocked by
+      // a forensics outage.
       cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId);
       executeInterrupt({
         inFlight: conn.inFlight.get(msg.sessionId),
         sessionId: msg.sessionId,
         send: (m) => send(conn.ws, m),
         trackAckId: (sessionId, ackId) => conn.lastInterruptIds.set(sessionId, ackId),
+        onStop: (sessionId, interruptAckId) => {
+          const capture = buildSingleAgentForensicsInput({
+            sessionId,
+            pendingPermissions: conn.pendingPermissions,
+            capturedPrompts: conn.capturedPrompts,
+          });
+          if (!capture) {
+            console.warn(
+              `[ws] interrupt onStop: no session/project for ${sessionId}; skipping audit+forensics`,
+            );
+            return;
+          }
+          executeStoppedAudit({ sessionId, interruptAckId, capture });
+        },
       });
       return;
     }
