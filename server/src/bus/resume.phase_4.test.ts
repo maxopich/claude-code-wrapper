@@ -165,6 +165,11 @@ describe('[BE-11 / D2 precursor] attemptResumeMultiAgent emits chain_not_reconst
       sessionId: CHAIN_SID,
       sticky: true,
       dedupeKey: `chain_not_reconstructed:${CHAIN_SID}`,
+      // Cluster D Phase 7: the notification now carries an `archive`
+      // action so the operator can clear the dead chain row from the
+      // Iterations list without dropping to the panel. Same shape as
+      // the swept-session toast (Phase 5).
+      action: { kind: 'archive', sessionId: CHAIN_SID },
     });
   });
 

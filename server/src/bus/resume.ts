@@ -390,6 +390,24 @@ function markCrashedAndAnnounceSuperseded(
  * restart. Chain R-B is intentionally deferred — Cluster D's wider
  * session-recovery surface will replace this with a proper recovery flow;
  * Phase 4 just stops the silence.
+ *
+ * Cluster D Phase 7: attach an `archive` action to the toast so the
+ * operator has a one-click path out of the dead chain iteration.
+ * Mirrors the swept-session toast pattern (Phase 5) — same
+ * NotificationAction discriminant, same App.tsx routing through
+ * `wsRef.send({type:'archive_session', ...})`. Without this, the
+ * operator's only recourse was to dismiss the toast and let the orphan
+ * chain row clutter the Iterations list.
+ *
+ * Why not a Reopen action: Phase 5c's ReopenSessionModal flow returns
+ * `chain_reconstruction_unsupported` for chain mode (surfaced as a
+ * tailored failed-state in the modal). Offering Reopen here too would
+ * just route to the same failure path with extra clicks. Archive is
+ * the only honest action today; the forensics record (recovery_log
+ * row) lands when the operator clicks it, with `failureClass:
+ * 'chain_crash'` so spec §8.5's aggregateByClass tallies chain crashes
+ * separately from sweep-driven archives. See the mode-aware switch
+ * in `executeArchiveSession` (server/src/ws/server.ts).
  */
 function announceChainNotReconstructed(
   sessionId: string,
@@ -410,9 +428,10 @@ function announceChainNotReconstructed(
         severity: 'warn',
         dedupeKey: `chain_not_reconstructed:${sessionId}`,
         title: 'Chain session could not be resumed',
-        message: `Session ${sessionId.slice(0, 8)} ran in chain mode; chain reconstruction is not yet supported across server restarts.`,
+        message: `Session ${sessionId.slice(0, 8)} ran in chain mode; chain reconstruction is not yet supported across server restarts. Archive to clear it from the Iterations list.`,
         sessionId,
         sticky: true,
+        action: { kind: 'archive', sessionId },
       },
       callbacks.sendServerMsg,
     );
