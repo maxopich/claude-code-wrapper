@@ -32,7 +32,13 @@ import {
 import { GateModalsProvider } from './components/authority/GateModalsContext';
 import { AuthorityProvider } from './components/authority/AuthorityContext';
 import { AuthorityPanel } from './components/authority/AuthorityPanel';
-import { BannerStack, buildRateLimitBannerItem, type BannerStackItem } from './components/banners';
+import {
+  BannerStack,
+  SessionBanner,
+  buildAuthExpiredBannerItem,
+  buildRateLimitBannerItem,
+  type BannerStackItem,
+} from './components/banners';
 import { ReopenProvider, useReopenActions } from './components/reopen';
 import { HELD_MESSAGES_CAP } from './store';
 
@@ -1155,6 +1161,30 @@ function AppShell({
         </button>
       )}
       <main className="main">
+        {/* Cluster D Phase 6 (UI-D22): app-wide auth-expired banner.
+         *  Mounted as the first child of <main> so it sits above
+         *  whichever view (chat / chained / multi-agent) is currently
+         *  rendering and is visible regardless of session state — the
+         *  subscription is process-level, not per-session. The reducer
+         *  populates `state.authExpired` on wrapper_error{kind:'auth_expired'}
+         *  and clears it on the next session_started (positive signal).
+         *  Dismissal is a soft hide that re-surfaces on the next
+         *  observation, so the operator can't permanently silence a
+         *  real expiry. Mounted as a direct <SessionBanner /> rather
+         *  than via <BannerStack> since it's the sole top-level banner
+         *  today (the rate-limit / swept banners live in per-session
+         *  containers below). When more app-wide banners ship, this
+         *  becomes a BannerStack of its own. */}
+        {state.authExpired && !state.authExpired.dismissed && (
+          <SessionBanner
+            {...buildAuthExpiredBannerItem({
+              state: state.authExpired,
+              callbacks: {
+                onDismiss: () => dispatch({ type: 'auth_expired_dismissed' }),
+              },
+            })}
+          />
+        )}
         {!workspaceReady ? (
           <div className="chat empty">
             <div>

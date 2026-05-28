@@ -38,3 +38,14 @@ export type {
   BuildSweptSessionBannerItemArgs,
   SweptSessionBannerCallbacks,
 } from './SweptSessionBanner.js';
+
+// Cluster D Phase 6: auth-expired danger-tier banner factory. App-wide
+// (mounted at the top of <main> in App.tsx); reads the top-level
+// authExpired slice in store.ts. The slice is populated on every
+// wrapper_error { kind: 'auth_expired' } and cleared on the next
+// session_started (positive auth signal).
+export { buildAuthExpiredBannerItem, authExpiredBannerTitle } from './AuthExpiredBanner.js';
+export type {
+  BuildAuthExpiredBannerItemArgs,
+  AuthExpiredBannerCallbacks,
+} from './AuthExpiredBanner.js';
