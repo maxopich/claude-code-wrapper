@@ -137,8 +137,10 @@ import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { getLiveSession, hasLiveSession } from '../bus/session_registry.js';
 import {
+  buildParticipantKickedMsg,
   buildParticipantMuteChangedMsg,
   buildParticipantPauseChangedMsg,
+  executeKickParticipant,
   executeMuteParticipant,
   executePauseParticipant,
   executeResumeParticipant,
@@ -2526,15 +2528,51 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'kick_participant': {
-      // Cluster C Phase 4d ships kick. Stub for now — explicit reject
-      // keeps a misbehaving client (or smoke harness sending the verb
-      // early) from silently no-op'ing.
-      send(conn.ws, {
-        type: 'wrapper_error',
-        sessionId: msg.sessionId,
-        kind: 'process_crashed',
-        message: `kick_participant is not yet implemented (lands in Cluster C Phase 4d)`,
+      // Cluster C Phase 4d (spec §5.1 kick semantics + §5.3 topology
+      // guards): orchestrator-mode per-agent kick (drain mode only).
+      // Validates the kick (mode, reasonCode, topology, participant
+      // exists, not orchestrator, not already kicked), flips the DB
+      // column (per_agent_control), updates the router's in-memory
+      // kickedSet so the next BusEvent involving the agent in either
+      // direction is dropped (handle.kickAgent), writes safety_audit,
+      // then emits `participant_kicked`. Hard-mode kick is rejected
+      // with `hard_kill_unsupported_v1` until the per-agent
+      // AbortController refactor lands (v1.1).
+      //
+      // The drain happens by-construction at the router: the in-flight
+      // turn's bus_send calls become `kicked_source` drops and no
+      // peer reply ever re-engages the agent (`kicked_destination`
+      // drops). No AgentRunner interaction is needed for drain mode.
+      const live = getLiveSession(msg.sessionId);
+      const orchestratorHandle =
+        live?.mode === 'orchestrator'
+          ? (live.handle as unknown as OrchestratorSessionHandle)
+          : undefined;
+      const result = executeKickParticipant({
+        msg,
+        orchestratorHandle,
+        sessionMode: live?.mode ?? null,
       });
+      if (!result.ok) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `${result.failureCode}: ${result.message}`,
+        });
+        return;
+      }
+      send(
+        conn.ws,
+        buildParticipantKickedMsg({
+          sessionId: msg.sessionId,
+          projectId: msg.projectId,
+          mode: result.mode,
+          reasonCode: msg.reasonCode,
+          reasonText: msg.reasonText,
+          ts: result.kickedAt,
+        }),
+      );
       return;
     }
     case 'install_bus_integration': {

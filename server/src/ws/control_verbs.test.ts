@@ -8,8 +8,10 @@ import { closeDb, getDb } from '../db.js';
 import { addParticipant, createMultiAgentSession } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import {
+  buildParticipantKickedMsg,
   buildParticipantMuteChangedMsg,
   buildParticipantPauseChangedMsg,
+  executeKickParticipant,
   executeMuteParticipant,
   executePauseParticipant,
   executeResumeParticipant,
@@ -17,6 +19,7 @@ import {
 } from './control_verbs.js';
 import {
   getControlState,
+  setParticipantKicked,
   setParticipantMuted,
   setParticipantPause,
 } from '../repo/per_agent_control.js';
@@ -105,9 +108,10 @@ describe('executeMuteParticipant — happy path', () => {
     expect(handle.setMute).toHaveBeenCalledWith('worker-slug', true);
     // safety_audit row written with kind='agent_control.muted'
     const audit = getDb()
-      .prepare<[string], { kind: string; reason_code: string; agent_id: string }>(
-        'SELECT kind, reason_code, agent_id FROM safety_audit WHERE kind = ?',
-      )
+      .prepare<
+        [string],
+        { kind: string; reason_code: string; agent_id: string }
+      >('SELECT kind, reason_code, agent_id FROM safety_audit WHERE kind = ?')
       .get('agent_control.muted');
     expect(audit?.kind).toBe('agent_control.muted');
     expect(audit?.reason_code).toBe('runaway_loop');
@@ -122,9 +126,10 @@ describe('executeMuteParticipant — happy path', () => {
       sessionMode: 'orchestrator',
     });
     const audit = getDb()
-      .prepare<[], { payload_json: string }>(
-        "SELECT payload_json FROM safety_audit WHERE kind = 'agent_control.muted'",
-      )
+      .prepare<
+        [],
+        { payload_json: string }
+      >("SELECT payload_json FROM safety_audit WHERE kind = 'agent_control.muted'")
       .get();
     const payload = JSON.parse(audit!.payload_json) as { reasonText: string };
     expect(payload.reasonText).toBe('spammy outbound');
@@ -230,9 +235,7 @@ describe('executeMuteParticipant — failure codes', () => {
       orchestratorHandle: handle,
       sessionMode: 'orchestrator',
     });
-    expect(result).toEqual(
-      expect.objectContaining({ ok: false, failureCode: 'already_in_state' }),
-    );
+    expect(result).toEqual(expect.objectContaining({ ok: false, failureCode: 'already_in_state' }));
     // Router not poked for a no-op
     expect(handle.setMute).not.toHaveBeenCalled();
   });
@@ -260,9 +263,10 @@ describe('executeUnmuteParticipant', () => {
     expect(getControlState('sess-1', workerId)?.muted).toBe(false);
     expect(handle.setMute).toHaveBeenLastCalledWith('worker-slug', false);
     const audit = getDb()
-      .prepare<[], { reason_code: string }>(
-        "SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.unmuted'",
-      )
+      .prepare<
+        [],
+        { reason_code: string }
+      >("SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.unmuted'")
       .get();
     expect(audit?.reason_code).toBe('topology_repair');
   });
@@ -279,9 +283,7 @@ describe('executeUnmuteParticipant', () => {
       orchestratorHandle: makeFakeOrchestratorHandle(),
       sessionMode: 'orchestrator',
     });
-    expect(result).toEqual(
-      expect.objectContaining({ ok: false, failureCode: 'already_in_state' }),
-    );
+    expect(result).toEqual(expect.objectContaining({ ok: false, failureCode: 'already_in_state' }));
   });
 });
 
@@ -393,14 +395,13 @@ describe('executePauseParticipant — happy path', () => {
     if (!result.ok) return; // type guard
     expect(result.pausedUntil).toBe(1_700_000_000_000 + 5 * 60_000);
     expect(result.queuedDeliveries).toBe(3);
-    expect(getControlState('sess-1', workerId)?.pausedUntil).toBe(
-      1_700_000_000_000 + 5 * 60_000,
-    );
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBe(1_700_000_000_000 + 5 * 60_000);
     expect(handle.pauseAgent).toHaveBeenCalledWith('worker-slug');
     const audit = getDb()
-      .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
-        "SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'agent_control.paused'",
-      )
+      .prepare<
+        [],
+        { kind: string; reason_code: string; payload_json: string }
+      >("SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'agent_control.paused'")
       .get();
     expect(audit?.kind).toBe('agent_control.paused');
     const payload = JSON.parse(audit!.payload_json) as { timeoutMs: number; expiryAction: string };
@@ -511,9 +512,7 @@ describe('executePauseParticipant — wire validation', () => {
       orchestratorHandle: handle,
       sessionMode: 'orchestrator',
     });
-    expect(result).toEqual(
-      expect.objectContaining({ ok: false, failureCode: 'already_in_state' }),
-    );
+    expect(result).toEqual(expect.objectContaining({ ok: false, failureCode: 'already_in_state' }));
     expect(handle.pauseAgent).not.toHaveBeenCalled();
   });
 });
@@ -534,9 +533,10 @@ describe('executeResumeParticipant', () => {
     expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
     expect(handle.resumeAgent).toHaveBeenCalledWith('worker-slug');
     const audit = getDb()
-      .prepare<[], { reason_code: string }>(
-        "SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.resumed'",
-      )
+      .prepare<
+        [],
+        { reason_code: string }
+      >("SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.resumed'")
       .get();
     expect(audit?.reason_code).toBe('topology_repair');
   });
@@ -548,9 +548,7 @@ describe('executeResumeParticipant', () => {
       orchestratorHandle: makeFakePauseHandle(),
       sessionMode: 'orchestrator',
     });
-    expect(result).toEqual(
-      expect.objectContaining({ ok: false, failureCode: 'already_in_state' }),
-    );
+    expect(result).toEqual(expect.objectContaining({ ok: false, failureCode: 'already_in_state' }));
   });
 });
 
@@ -607,6 +605,266 @@ describe('buildParticipantPauseChangedMsg', () => {
     expect(env.pausedUntil).toBeNull();
     expect(env.expiryAction).toBeNull();
     expect(env.queuedDeliveries).toBe(0);
+    expect('reasonText' in env).toBe(false);
+  });
+});
+
+// ===== Cluster C Phase 4d: kick handler =====
+
+function kickMsg(
+  overrides: Partial<Extract<ClientMsg, { type: 'kick_participant' }>> = {},
+): Extract<ClientMsg, { type: 'kick_participant' }> {
+  return {
+    type: 'kick_participant',
+    sessionId: 'sess-1',
+    projectId: 0, // overridden by callers
+    reasonCode: 'off_task',
+    mode: 'drain',
+    ...overrides,
+  };
+}
+
+function makeFakeKickHandle() {
+  const kicked = new Set<string>();
+  return {
+    kickAgent: vi.fn((name: string) => {
+      if (kicked.has(name)) return false;
+      kicked.add(name);
+      return true;
+    }),
+    isKicked: vi.fn((name: string) => kicked.has(name)),
+  };
+}
+
+describe('executeKickParticipant — happy path (drain mode)', () => {
+  test('flips DB column, calls handle.kickAgent, writes safety_audit, returns ok', () => {
+    const { workerId } = seedSession();
+    const handle = makeFakeKickHandle();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId, reasonCode: 'runaway_loop' }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+      now: () => 1_700_000_000_000,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.mode).toBe('drain');
+    expect(result.kickedAt).toBe(1_700_000_000_000);
+    expect(getControlState('sess-1', workerId)?.kickedAt).toBe(1_700_000_000_000);
+    expect(getControlState('sess-1', workerId)?.kickedMode).toBe('drain');
+    expect(handle.kickAgent).toHaveBeenCalledWith('worker-slug');
+    const audit = getDb()
+      .prepare<
+        [],
+        { kind: string; reason_code: string; payload_json: string; agent_id: string }
+      >("SELECT kind, reason_code, payload_json, agent_id FROM safety_audit WHERE kind = 'agent_control.kicked'")
+      .get();
+    expect(audit?.kind).toBe('agent_control.kicked');
+    expect(audit?.reason_code).toBe('runaway_loop');
+    expect(audit?.agent_id).toBe('worker-slug');
+    const payload = JSON.parse(audit!.payload_json) as {
+      projectId: number;
+      agentSlug: string;
+      mode: string;
+      kickedAt: number;
+    };
+    expect(payload.mode).toBe('drain');
+    expect(payload.kickedAt).toBe(1_700_000_000_000);
+    expect(payload.agentSlug).toBe('worker-slug');
+  });
+
+  test('reasonText (when provided) lands in the audit payload', () => {
+    const { workerId } = seedSession();
+    executeKickParticipant({
+      msg: kickMsg({
+        projectId: workerId,
+        reasonCode: 'other',
+        reasonText: 'persistent off-task replies after pause',
+      }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    const audit = getDb()
+      .prepare<
+        [],
+        { payload_json: string }
+      >("SELECT payload_json FROM safety_audit WHERE kind = 'agent_control.kicked'")
+      .get();
+    const payload = JSON.parse(audit!.payload_json) as { reasonText: string };
+    expect(payload.reasonText).toBe('persistent off-task replies after pause');
+  });
+});
+
+describe('executeKickParticipant — wire validation', () => {
+  test("reasonCode='other' without reasonText → already_in_state misuse", () => {
+    const { workerId } = seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId, reasonCode: 'other' }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toMatch(/'other' requires non-empty reasonText/);
+    }
+    // No DB flip
+    expect(getControlState('sess-1', workerId)?.kickedAt).toBeNull();
+  });
+
+  test('mode=hard → hard_kill_unsupported_v1 (rejected before session lookup)', () => {
+    // hard-mode kick rejected with the dedicated v1 code so the operator UI
+    // can phrase the rejection cleanly. The check runs BEFORE session
+    // lookup so a misbehaving client gets the more-accurate code.
+    const result = executeKickParticipant({
+      msg: kickMsg({ sessionId: 'sess-nope', projectId: 1, mode: 'hard' }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: null,
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'hard_kill_unsupported_v1' }),
+    );
+  });
+
+  test('unknown mode → already_in_state misuse', () => {
+    const { workerId } = seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId, mode: 'shutdown' as unknown as 'drain' }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toMatch(/invalid kick mode/);
+    }
+    // DB not mutated
+    expect(getControlState('sess-1', workerId)?.kickedAt).toBeNull();
+  });
+});
+
+describe('executeKickParticipant — topology + participant guards', () => {
+  test('unknown session → participant_not_found', () => {
+    const result = executeKickParticipant({
+      msg: kickMsg({ sessionId: 'sess-nope', projectId: 1 }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: null,
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'participant_not_found' }),
+    );
+  });
+
+  test('chain mode → chain_topology_broken (every chain kick rejected in v1)', () => {
+    const { workerId } = seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: undefined,
+      sessionMode: 'chain',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'chain_topology_broken' }),
+    );
+    // DB not mutated
+    expect(getControlState('sess-1', workerId)?.kickedAt).toBeNull();
+  });
+
+  test('orchestrator role → orchestrator_cannot_kick', () => {
+    const { orchestratorId } = seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: orchestratorId }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'orchestrator_cannot_kick' }),
+    );
+  });
+
+  test('unknown participant project → participant_not_found', () => {
+    seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: 99_999 }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'participant_not_found' }),
+    );
+  });
+
+  test('participant without bus_agent_name → participant_not_found', () => {
+    const { workerId } = seedSession();
+    getDb().prepare('UPDATE projects SET bus_agent_name = NULL WHERE id = ?').run(workerId);
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'participant_not_found' }),
+    );
+  });
+
+  test('re-kick (already kicked) → participant_already_kicked', () => {
+    const { workerId } = seedSession();
+    setParticipantKicked('sess-1', workerId, Date.now() - 1000, 'drain'); // pre-kick via repo
+    const handle = makeFakeKickHandle();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'participant_already_kicked' }),
+    );
+    // Router not poked for the idempotent no-op
+    expect(handle.kickAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeKickParticipant — missing live handle (live session torn down)', () => {
+  test('DB is still flipped + audit written; warn logged about missing handle', () => {
+    const { workerId } = seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: undefined, // simulates between-tick teardown
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+    expect(getControlState('sess-1', workerId)?.kickedAt).not.toBeNull();
+    expect(warnSpy).toHaveBeenCalled();
+  });
+});
+
+describe('buildParticipantKickedMsg', () => {
+  test('shapes the wire envelope with actor=operator + supplied fields', () => {
+    const env = buildParticipantKickedMsg({
+      sessionId: 'sess-x',
+      projectId: 42,
+      mode: 'drain',
+      reasonCode: 'cost_ceiling',
+      reasonText: 'tokens too high',
+      ts: 1_700_000_000_000,
+    });
+    expect(env).toEqual({
+      type: 'participant_kicked',
+      sessionId: 'sess-x',
+      projectId: 42,
+      mode: 'drain',
+      reasonCode: 'cost_ceiling',
+      reasonText: 'tokens too high',
+      actor: 'operator',
+      ts: 1_700_000_000_000,
+    });
+  });
+
+  test('omits reasonText when undefined (not the literal "undefined")', () => {
+    const env = buildParticipantKickedMsg({
+      sessionId: 'sess-x',
+      projectId: 42,
+      mode: 'drain',
+      reasonCode: 'topology_repair',
+      ts: 1,
+    });
     expect('reasonText' in env).toBe(false);
   });
 });

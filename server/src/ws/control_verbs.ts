@@ -2,18 +2,17 @@ import type {
   ClientMsg,
   ControlReasonCode,
   ControllabilityFailureCode,
+  KickMode,
   PauseExpiryAction,
   ServerMsg,
 } from '@cebab/shared/protocol';
-import { isControlReasonCode, isPauseExpiryAction } from '@cebab/shared/protocol';
-import {
-  appendSafetyAudit,
-  type SafetyAuditInput,
-} from '../notifications/safety_audit.js';
+import { isControlReasonCode, isKickMode, isPauseExpiryAction } from '@cebab/shared/protocol';
+import { appendSafetyAudit, type SafetyAuditInput } from '../notifications/safety_audit.js';
 import { getMultiAgentSession, listResolvedParticipants } from '../repo/multi_agent.js';
 import {
   clearParticipantPause,
   getControlState,
+  setParticipantKicked,
   setParticipantMuted,
   setParticipantPause,
 } from '../repo/per_agent_control.js';
@@ -83,7 +82,10 @@ export type ExecuteMuteInput = {
    * truth.
    */
   orchestratorHandle:
-    | { setMute: (agentName: string, muted: boolean) => boolean; isMuted: (agentName: string) => boolean }
+    | {
+        setMute: (agentName: string, muted: boolean) => boolean;
+        isMuted: (agentName: string) => boolean;
+      }
     | undefined;
   /**
    * Mode of the live session for `chain_mute_unsupported` detection. Null
@@ -265,10 +267,7 @@ export function buildParticipantMuteChangedMsg(args: {
  * surfacing a "dropped" status back into the tool result) fails the
  * AE-3 [security] test.
  */
-export function probeIsMuted(args: {
-  sessionId: string;
-  projectId: number;
-}): boolean {
+export function probeIsMuted(args: { sessionId: string; projectId: number }): boolean {
   return getControlState(args.sessionId, args.projectId)?.muted === true;
 }
 
@@ -592,5 +591,257 @@ export function buildParticipantPauseChangedMsg(args: {
     actor: 'operator',
     ts: args.ts,
     queuedDeliveries: args.queuedDeliveries,
+  };
+}
+
+// ---------- Cluster C Phase 4d: kick (drain) ----------
+//
+// Kick removes a participant from active routing. The drain semantics for
+// v1 are:
+//   - In-flight turn at kick time keeps running (the AgentRunner is NOT
+//     told to abort). It's not surfaced to the operator as "still
+//     running" though, because the router-side drops (orchestrator.ts
+//     kickedSet check, both directions) make sure none of its outbound
+//     bus_send calls reach a peer and none of the peers' replies wake a
+//     new turn for it. The drain happens by-construction: the in-flight
+//     turn's bus_send calls land in the router as `kicked_source` drops
+//     (forensically visible), and no new turn ever starts because all
+//     `ev.destination === <kicked>` events become `kicked_destination`
+//     drops.
+//   - Hard mode (per-agent AbortController to actively cancel the
+//     in-flight turn) is deferred to v1.1 — the handler returns
+//     `hard_kill_unsupported_v1` on `mode: 'hard'`.
+//
+// Topology guards (per spec §5.3 + §5.1 — Phase 4b's mute reused the
+// `orchestrator_cannot_kick` failure code; kick's name is literal):
+//   - Orchestrator target → `orchestrator_cannot_kick` (kicking the
+//     orchestrator silently ends the whole session).
+//   - Chain mode → `chain_topology_broken` (any chain participant
+//     kicked orphans every downstream hop; v1 rejects all chain kicks).
+//   - Already kicked → `participant_already_kicked` (idempotent ack
+//     for a double-click; the DB column flip is irreversible so the
+//     UPDATE WHERE kicked_at IS NULL returns 0 rows).
+//   - Hard mode → `hard_kill_unsupported_v1`.
+//   - Unknown participant or missing bus_agent_name →
+//     `participant_not_found` (matches mute's posture).
+//
+// Like mute + pause, kick is dual-classed: writes a safety_audit row
+// (`kind='agent_control.kicked'`) before the wire ack. The audit
+// payload carries `mode` so a future hard-kick rollout can be
+// distinguished forensically from the v1 drain rows.
+
+export type ExecuteKickInput = {
+  msg: Extract<ClientMsg, { type: 'kick_participant' }>;
+  /**
+   * Live orchestrator handle. Chain mode short-circuits with
+   * `chain_topology_broken` before we ever consult the handle, so
+   * `orchestratorHandle` may legitimately be undefined for orchestrator-
+   * mode sessions that were torn down between resolving the live
+   * registry and reaching this executor — we still write the DB column
+   * + audit row but log the router-sync miss. R-A/R-B reconstruct
+   * would later re-seed the in-memory mirror via the factory's
+   * `initialKickedAgents` param.
+   */
+  orchestratorHandle:
+    | { kickAgent: (agentName: string) => boolean; isKicked: (agentName: string) => boolean }
+    | undefined;
+  sessionMode: 'orchestrator' | 'chain' | null;
+  appendAudit?: typeof appendSafetyAudit;
+  now?: () => number;
+};
+
+export type ExecuteKickResult =
+  | { ok: true; auditId: string; mode: KickMode; kickedAt: number }
+  | { ok: false; failureCode: ControllabilityFailureCode; message: string };
+
+export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResult {
+  const { msg } = input;
+  const appendAudit = input.appendAudit ?? appendSafetyAudit;
+  const now = input.now ?? Date.now;
+
+  // Wire validation: reasonCode + 'other' pairing. (Same shape as
+  // mute/pause/resume; we don't share the helper because each verb's
+  // failure-code fallback varies — kick's would prefer
+  // `participant_already_kicked` for "bad reasonCode" if the enum had
+  // a dedicated slot; in its absence we reuse `already_in_state` like
+  // the sibling verbs.)
+  if (!isControlReasonCode(msg.reasonCode)) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `invalid reasonCode: ${JSON.stringify(msg.reasonCode)}`,
+    };
+  }
+  if (msg.reasonCode === 'other' && !msg.reasonText?.trim()) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: "reasonCode='other' requires non-empty reasonText",
+    };
+  }
+  // Mode validation — runs BEFORE session lookup so a misbehaving client
+  // sending `mode='hard'` against an unknown session sees the more
+  // accurate `hard_kill_unsupported_v1` rather than a misleading
+  // `participant_not_found`. The check serves two purposes:
+  //   (1) reject unknown wire values defensively, and
+  //   (2) reject the valid-but-unsupported `'hard'` with the dedicated
+  //       v1 code so the operator UI can phrase its rejection cleanly.
+  if (!isKickMode(msg.mode)) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `invalid kick mode: ${JSON.stringify(msg.mode)}`,
+    };
+  }
+  if (msg.mode === 'hard') {
+    return {
+      ok: false,
+      failureCode: 'hard_kill_unsupported_v1',
+      message:
+        "kick mode='hard' is not supported in v1 (per-agent AbortController refactor required); use mode='drain'",
+    };
+  }
+
+  // Session existence.
+  const sessionRow = getMultiAgentSession(msg.sessionId);
+  if (!sessionRow) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `unknown multi-agent session ${msg.sessionId}`,
+    };
+  }
+  // Chain mode: reject every kick. v1 chain ordering is baked at start
+  // and the pipeline depends on each hop having a downstream target —
+  // removing ANY chain participant orphans every hop after it. A future
+  // v1.x slice could carve out a "tail kick" affordance (drop the last
+  // hop with no cascade), but until that lands the broad rejection is
+  // the only safe stance. The handler uses `chain_topology_broken`
+  // even though strictly that name says "middle" — the underlying
+  // intent ("this kick would break the chain") covers head/tail too.
+  if (input.sessionMode === 'chain') {
+    return {
+      ok: false,
+      failureCode: 'chain_topology_broken',
+      message: 'kick is not supported in chain mode in v1 (would orphan downstream hops)',
+    };
+  }
+
+  // Participant existence + role guard. Orchestrator self-kick is
+  // rejected for the obvious reason: kicking the orchestrator removes
+  // the only routing brain from the active set and silently ends the
+  // session. The operator's intent is almost certainly "end the
+  // session" — they should use Stop, not kick.
+  const participants = listResolvedParticipants(msg.sessionId);
+  const participant = participants.find((p) => p.project_id === msg.projectId);
+  if (!participant) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `project ${msg.projectId} is not a participant of session ${msg.sessionId}`,
+    };
+  }
+  if (participant.role === 'orchestrator') {
+    return {
+      ok: false,
+      failureCode: 'orchestrator_cannot_kick',
+      message: 'cannot kick the orchestrator — use Stop to end the session',
+    };
+  }
+  if (!participant.bus_agent_name) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `participant ${msg.projectId} has no bus_agent_name — install bus integration first`,
+    };
+  }
+
+  // DB flip — `setParticipantKicked` returns false when the row is
+  // already kicked (UPDATE WHERE kicked_at IS NULL matches 0 rows).
+  // Kick is irreversible per spec §5.1, so the handler's posture on a
+  // double-click is "idempotent ack with the dedicated failure code"
+  // — the operator's intent has already been honored; the second
+  // click should not surface as a hard error.
+  const kickedAt = now();
+  const dbChanged = setParticipantKicked(msg.sessionId, msg.projectId, kickedAt, msg.mode);
+  if (!dbChanged) {
+    return {
+      ok: false,
+      failureCode: 'participant_already_kicked',
+      message: `${participant.bus_agent_name} is already kicked`,
+    };
+  }
+
+  // Sync the orchestrator router's in-memory kickedSet. Missing handle
+  // (orchestrator-mode session torn down between live-registry read +
+  // here): the DB column is the source of truth, R-B reconstruct
+  // would re-seed via `initialKickedAgents` — log the divergence so
+  // the operator can audit it.
+  if (input.orchestratorHandle) {
+    input.orchestratorHandle.kickAgent(participant.bus_agent_name);
+  } else {
+    console.warn(
+      `[ws] executeKick(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to update router kickedSet`,
+    );
+  }
+
+  // safety_audit dual-write. Kind='agent_control.kicked'. The payload
+  // carries `mode` so a future hard-mode rollout can be distinguished
+  // forensically without schema migration.
+  const auditInput: SafetyAuditInput = {
+    ts: kickedAt,
+    sessionId: msg.sessionId,
+    agentId: participant.bus_agent_name,
+    kind: 'agent_control.kicked',
+    reasonCode: msg.reasonCode,
+    payload: {
+      projectId: msg.projectId,
+      agentSlug: participant.bus_agent_name,
+      reasonText: msg.reasonText ?? null,
+      mode: msg.mode,
+      kickedAt,
+    },
+  };
+  let auditId: string;
+  try {
+    auditId = appendAudit(auditInput).id;
+  } catch (err) {
+    console.error(`[ws] executeKick safety_audit append failed for ${msg.sessionId}`, err);
+    // DB + router are already aligned with the kicked state (irreversibly).
+    // We surface the audit failure but don't roll back — same posture as
+    // mute. A retry's `participant_already_kicked` short-circuit would skip
+    // the DB step and only re-attempt the audit.
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `safety_audit append failed: ${(err as Error).message}`,
+    };
+  }
+  return { ok: true, auditId, mode: msg.mode, kickedAt };
+}
+
+/**
+ * Build the wire-shape state-change echo for a successful kick. Kept
+ * separate from the executor (mirroring the mute/pause builders) so
+ * the WS dispatch site can build it after threading sessionId +
+ * projectId + reasonCode through.
+ */
+export function buildParticipantKickedMsg(args: {
+  sessionId: string;
+  projectId: number;
+  mode: KickMode;
+  reasonCode: ControlReasonCode;
+  reasonText?: string;
+  ts: number;
+}): Extract<ServerMsg, { type: 'participant_kicked' }> {
+  return {
+    type: 'participant_kicked',
+    sessionId: args.sessionId,
+    projectId: args.projectId,
+    mode: args.mode,
+    reasonCode: args.reasonCode,
+    ...(args.reasonText !== undefined ? { reasonText: args.reasonText } : {}),
+    actor: 'operator',
+    ts: args.ts,
   };
 }

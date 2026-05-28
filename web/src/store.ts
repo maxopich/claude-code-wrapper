@@ -331,15 +331,18 @@ export type MultiAgentAutoRetry = {
  */
 export type RouterDropView = {
   auditRowId: string;
-  // Cluster C Phase 4b adds `muted_source` — keep this in sync with the
-  // server's RouterDropReasonCode in shared/src/protocol.ts. Inline-list rather
+  // Cluster C Phase 4b adds `muted_source`; Phase 4d adds `kicked_source`
+  // and `kicked_destination`. Keep this in sync with the server's
+  // RouterDropReasonCode in shared/src/protocol.ts. Inline-list rather
   // than `import type` to keep the type fully local for the reducer.
   reasonCode:
     | 'forged_source'
     | 'worker_to_user'
     | 'worker_to_worker'
     | 'unknown_source'
-    | 'muted_source';
+    | 'muted_source'
+    | 'kicked_source'
+    | 'kicked_destination';
   source: string;
   destination: string;
   kind: string;
