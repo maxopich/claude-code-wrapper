@@ -2018,3 +2018,70 @@ describe('store / draftHopBudget + source (F-D9)', () => {
     expect(s.multiAgent.draftHopBudgetSource).toBe('user');
   });
 });
+
+// Cluster F Phase A1a — settings reducer carries defaultMaxTurns.
+// Same forward-compat pattern as defaultWorkspaceRootSource: when the
+// server omits the field (older payloads), SettingsView leaves it
+// undefined rather than coercing to a default. The F-A1b SettingsModal
+// numeric input degrades to placeholder-only when undefined.
+describe('store / settings reducer carries defaultMaxTurns (F-A1a)', () => {
+  test('forwards defaultMaxTurns when server sets it', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        defaultMaxTurns: 75,
+      },
+    });
+    expect(s.settings?.defaultMaxTurns).toBe(75);
+  });
+
+  test('older server omits defaultMaxTurns → SettingsView leaves it undefined', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        // defaultMaxTurns omitted
+      },
+    });
+    expect(s.settings?.defaultMaxTurns).toBeUndefined();
+  });
+
+  test('subsequent settings update with a new defaultMaxTurns replaces the prior value', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        defaultMaxTurns: 50,
+      },
+    });
+    expect(s.settings?.defaultMaxTurns).toBe(50);
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        defaultMaxTurns: 125,
+      },
+    });
+    expect(s.settings?.defaultMaxTurns).toBe(125);
+  });
+});

@@ -1933,6 +1933,32 @@ function resolveHopBudget(): number {
   return DEFAULT_HOP_BUDGET;
 }
 
+/**
+ * Cluster F Phase A1a (UI-A1): resolve the effective MAX_TURNS for a
+ * single-agent SDK spawn. Mirrors `resolveHopBudget` exactly — DB
+ * setting > env > built-in — with one addition: an optional `override`
+ * (the per-turn `send_message.maxTurns`) wins above everything when
+ * present and >= 1. The override is the same value the client sends
+ * for the "Extend +N" affordance: re-issue the prior user message
+ * with a higher cap, where N is the bump amount the operator picked.
+ *
+ * Always returns a finite integer ≥ 1. Re-read on every send so a
+ * Settings-modal change between turns takes effect immediately.
+ *
+ * **Exported** so tests can verify the precedence chain without
+ * round-tripping through `emitSettings` or a WS connection.
+ */
+export function resolveMaxTurns(override?: number): number {
+  if (typeof override === 'number' && Number.isFinite(override) && override >= 1) {
+    return Math.floor(override);
+  }
+  const stored = getSetting<number>('max_turns');
+  if (typeof stored === 'number' && Number.isFinite(stored) && stored >= 1) {
+    return Math.floor(stored);
+  }
+  return config.maxTurns;
+}
+
 function emitSettings(conn: Conn): void {
   // Return the *raw* setting so the client can distinguish "user hasn't set
   // anything yet" (null) from "set, but pointing at a missing folder" (string
@@ -1947,6 +1973,10 @@ function emitSettings(conn: Conn): void {
     // Cluster E Phase 3 (A4): provenance of the fallback path.
     defaultWorkspaceRootSource: config.workspaceRootDefaultSource,
     defaultHopBudget: resolveHopBudget(),
+    // Cluster F Phase A1a (UI-A1): surfaces the effective MAX_TURNS
+    // so the F-A1b SettingsModal input and the future DraftView
+    // Advanced expander can seed from server-truth.
+    defaultMaxTurns: resolveMaxTurns(),
   });
 }
 
@@ -2114,6 +2144,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // the UI re-syncs" contract.
       if (Number.isFinite(msg.value) && msg.value >= 1) {
         setSetting('hop_budget', Math.floor(msg.value));
+      }
+      emitSettings(conn);
+      return;
+    }
+    case 'set_default_max_turns': {
+      // Cluster F Phase A1a (UI-A1): mirrors `set_default_hop_budget`
+      // verbatim. Silent clamp + emitSettings re-sync on every call so
+      // the SettingsModal stays consistent with server truth even when
+      // the input is rejected.
+      if (Number.isFinite(msg.value) && msg.value >= 1) {
+        setSetting('max_turns', Math.floor(msg.value));
       }
       emitSettings(conn);
       return;
@@ -4045,7 +4086,11 @@ async function runOneTurn(
     settingSources: [...settingSources],
     canUseTool,
     abortController: ac,
-    maxTurns: config.maxTurns,
+    // Cluster F Phase A1a (UI-A1): resolver picks the per-turn
+    // override (msg.maxTurns) over the persisted setting over the env
+    // default. Re-read on every send so a SettingsModal change between
+    // turns takes effect immediately.
+    maxTurns: resolveMaxTurns(msg.maxTurns),
   });
   const unregister = registerQuery(runner);
 

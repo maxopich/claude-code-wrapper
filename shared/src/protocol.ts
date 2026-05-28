@@ -367,7 +367,27 @@ export function isSessionPermissionMode(v: unknown): v is SessionPermissionMode 
 export type ClientMsg =
   | { type: 'list_projects' }
   | { type: 'open_project'; projectId: number }
-  | { type: 'send_message'; projectId: number; sessionId?: string; text: string }
+  | {
+      type: 'send_message';
+      projectId: number;
+      sessionId?: string;
+      text: string;
+      /**
+       * Cluster F Phase A1a (UI-A1): per-turn MAX_TURNS override. When
+       * present, the server's resolver uses this value instead of the
+       * stored `max_turns` setting (or the env / built-in default).
+       *
+       * Used today by the (future) Extend +N affordance: an `error_max_turns`
+       * result lets the operator re-issue the same prompt with a higher
+       * cap. The SDK has no mid-turn cap-raise — the "extend" is structurally
+       * a continuation send_message with a higher maxTurns. v1 keeps the
+       * per-turn override optional; the UI's number input lands in F-A1b.
+       *
+       * Server-side semantics: any positive integer is accepted; clamped to
+       * >= 1; non-finite values are ignored (resolver falls through).
+       */
+      maxTurns?: number;
+    }
   | { type: 'interrupt'; sessionId: string }
   | {
       type: 'permission_decision';
@@ -391,6 +411,21 @@ export type ClientMsg =
        * R-B reconstruction); active sessions keep their resolved value.
        */
       type: 'set_default_hop_budget';
+      value: number;
+    }
+  | {
+      /**
+       * Cluster F Phase A1a (UI-A1): persist a new default MAX_TURNS cap
+       * for single-agent runs. Stored in `settings` keyed by `max_turns`.
+       * Mirrors `set_default_hop_budget` semantics exactly: clamp to
+       * `value >= 1`, ignore non-finite. Takes effect on the next
+       * `send_message` that doesn't carry its own `maxTurns` override;
+       * active in-flight turns keep their resolved value.
+       *
+       * The full server resolver precedence: per-turn `send_message.maxTurns`
+       * > this DB setting > `MAX_TURNS` env > built-in default (50).
+       */
+      type: 'set_default_max_turns';
       value: number;
     }
   | { type: 'set_permission_mode'; sessionId: string; mode: SessionPermissionMode }
@@ -1408,6 +1443,19 @@ export type ServerMsg =
        *  built-in `DEFAULT_HOP_BUDGET`). Always present; the Settings modal
        *  seeds its input from this value. */
       defaultHopBudget: number;
+      /**
+       * Cluster F Phase A1a (UI-A1): resolved default MAX_TURNS for
+       * single-agent runs. Precedence mirrors `defaultHopBudget`:
+       * DB setting (`max_turns`) > `MAX_TURNS` env > built-in `50`.
+       * Optional for forward-compat — older clients ignore the field
+       * and continue running unaware that a default exists.
+       *
+       * Surfaced by the F-A1b SettingsModal numeric input + by the
+       * future DraftView Advanced expander. Per-turn override on
+       * `send_message.maxTurns` (also added in F-A1a) takes precedence
+       * over this value for the in-flight turn.
+       */
+      defaultMaxTurns?: number;
     }
   | {
       /**
