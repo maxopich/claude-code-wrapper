@@ -7980,3 +7980,119 @@ pre {
   color: var(--fg-2, var(--fg));
   font-style: italic;
 }
+
+/* Cluster C Phase 4g2: divider between the everyday actions (mute/pause)
+ * and the destructive Kick… item; visual separation reduces foot-guns. */
+.ma-control-menu-divider {
+  height: 1px;
+  background: var(--line-3, var(--border));
+  margin: 4px 0;
+}
+
+.ma-control-menu-item.is-danger {
+  color: var(--err);
+}
+.ma-control-menu-item.is-danger:hover,
+.ma-control-menu-item.is-danger:focus-visible {
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+}
+
+/* ---- Cluster C Phase 4g3: KickModal -------------------------------- */
+
+/* Inherits .gate-modal + .modal-surface base sizing; add a max-width that
+ * keeps the reason list readable without spanning the viewport. */
+.kick-modal {
+  max-width: 540px;
+  width: min(540px, 92vw);
+}
+
+/* Reason picker fieldset — flat radio list with a visible focus ring. */
+.kick-modal-fieldset {
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-md, 8px);
+  padding: var(--s-2);
+  margin: var(--s-3) 0 var(--s-2);
+}
+.kick-modal-legend {
+  padding: 0 var(--s-1);
+  font-size: var(--t-sm);
+  color: var(--fg-2, var(--fg));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
+.kick-modal-reason-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kick-modal-reason-row {
+  margin: 0;
+}
+.kick-modal-reason-label {
+  display: flex;
+  gap: var(--s-2);
+  align-items: flex-start;
+  padding: var(--s-1) var(--s-2);
+  border-radius: var(--r-sm, 4px);
+  cursor: pointer;
+}
+.kick-modal-reason-label:hover {
+  background: var(--bg-3);
+}
+.kick-modal-reason-input {
+  margin: 2px 0 0 0;
+  flex: 0 0 auto;
+  accent-color: var(--err);
+}
+.kick-modal-reason-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+}
+.kick-modal-reason-label-text {
+  font-size: var(--t-sm);
+  color: var(--ink, inherit);
+  font-weight: 500;
+}
+.kick-modal-reason-help {
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+}
+
+/* Free-text notes input. */
+.kick-modal-text-label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin: var(--s-2) 0;
+}
+.kick-modal-text-label-text {
+  font-size: var(--t-sm);
+  color: var(--fg-2, var(--fg));
+}
+.kick-modal-text-label-text em {
+  font-style: italic;
+  margin-left: 4px;
+  color: var(--fg-3, var(--fg-2));
+}
+.kick-modal-text-input {
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: var(--s-1) var(--s-2);
+  background: var(--bg-4, var(--bg-3));
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+  resize: vertical;
+  min-height: 60px;
+}
+.kick-modal-text-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}

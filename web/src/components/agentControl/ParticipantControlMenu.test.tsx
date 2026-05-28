@@ -59,6 +59,7 @@ function render(over: Partial<React.ComponentProps<typeof ParticipantControlMenu
     onUnmute: noop,
     onPause: noop,
     onResume: noop,
+    onKick: noop,
     ...over,
   };
   act(() => {
@@ -259,5 +260,68 @@ describe('ParticipantControlMenu — dismissal', () => {
       panel.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     });
     expect(container.querySelector('.ma-control-menu-panel')).not.toBeNull();
+  });
+});
+
+describe('ParticipantControlMenu — Kick item (C4g3)', () => {
+  test('Kick… item shown in orchestrator mode', () => {
+    render({ sessionMode: 'orchestrator' });
+    openMenu();
+    const items = Array.from(container.querySelectorAll('.ma-control-menu-item')).map(
+      (i) => i.textContent?.trim() ?? '',
+    );
+    expect(items.some((t) => t.includes('Kick'))).toBe(true);
+  });
+
+  test('Kick… item hidden in chain mode', () => {
+    render({ sessionMode: 'chain' });
+    openMenu();
+    const items = Array.from(container.querySelectorAll('.ma-control-menu-item')).map(
+      (i) => i.textContent?.trim() ?? '',
+    );
+    expect(items.some((t) => t.includes('Kick'))).toBe(false);
+  });
+
+  test('Kick… click opens KickModal', () => {
+    render();
+    openMenu();
+    expect(document.querySelector('.kick-modal')).toBeNull();
+    const kickItem = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'),
+    ).find((b) => b.textContent?.includes('Kick'));
+    expect(kickItem).toBeDefined();
+    act(() => {
+      kickItem!.click();
+    });
+    expect(document.querySelector('.kick-modal')).not.toBeNull();
+    // Dropdown should close once the modal takes over.
+    expect(container.querySelector('.ma-control-menu-panel')).toBeNull();
+  });
+
+  test('submitting the modal calls onKick + closes the modal', () => {
+    const onKick = vi.fn();
+    render({ onKick });
+    openMenu();
+    const kickItem = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.ma-control-menu-item'),
+    ).find((b) => b.textContent?.includes('Kick'));
+    act(() => {
+      kickItem!.click();
+    });
+    const submit = document.querySelector('.kick-modal .gate-modal-btn-danger') as HTMLButtonElement;
+    act(() => {
+      submit.click();
+    });
+    // Default reason topology_repair + no notes → undefined reasonText, drain mode.
+    expect(onKick).toHaveBeenCalledWith(7, 'topology_repair', undefined, 'drain');
+    expect(document.querySelector('.kick-modal')).toBeNull();
+  });
+
+  test('Kick… item hidden when participant is already kicked', () => {
+    render({ control: { projectId: 7, muted: false, pausedUntil: null, kickedAt: Date.now() } });
+    // Trigger button is disabled in this case, so we can't openMenu(). Verify
+    // trigger state directly + no Kick… item is even possible.
+    const trigger = container.querySelector('.ma-control-menu-trigger') as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
   });
 });
