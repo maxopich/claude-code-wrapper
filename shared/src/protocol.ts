@@ -167,6 +167,42 @@ export type SessionRecoveredReasonCode =
 
 export type RateLimitReasonCode = 'hit' | 'cleared';
 
+/**
+ * Cluster C Phase 2 (spec §4.2 / §4.5): enumerated reason for a
+ * single-agent Stop. Captured via the inline non-blocking prompt
+ * after the Stopped marker; the operator may also Skip (no
+ * `stop_reason` message ships in that case). `'other'` is the
+ * escape hatch and REQUIRES a non-empty `reasonText`; the server
+ * rejects mismatched pairs (no-op + logs).
+ *
+ * Kept narrow on purpose. Bus-side mute/pause/kick reasons (spec
+ * §3 "reason code enum") share the same identifier space but cover
+ * more states (`forensics`, `topology_repair`, etc.); those are
+ * defined alongside the Part 2 ClientMsgs in a later cluster phase.
+ * For single-agent Stop these six codes suffice and map to the
+ * agentic-reviewer recommendation in §4.2.
+ */
+export type StopReasonCode =
+  | 'incorrect_output'
+  | 'runaway_loop'
+  | 'off_task'
+  | 'cost'
+  | 'done_early'
+  | 'other';
+
+export const STOP_REASON_CODES: ReadonlySet<StopReasonCode> = new Set([
+  'incorrect_output',
+  'runaway_loop',
+  'off_task',
+  'cost',
+  'done_early',
+  'other',
+]);
+
+export function isStopReasonCode(v: unknown): v is StopReasonCode {
+  return typeof v === 'string' && STOP_REASON_CODES.has(v as StopReasonCode);
+}
+
 /** Per-session permission mode the wrapper exposes to the UI. */
 export type SessionPermissionMode = 'default' | 'acceptEdits';
 
@@ -912,6 +948,40 @@ export type ClientMsg =
        */
       type: 'get_recovery_log_snapshot';
       recentLimit?: number;
+    }
+  | {
+      /**
+       * Cluster C Phase 2 (spec §4.2, §4.5): operator's after-the-fact
+       * categorisation of why they Stopped a single-agent turn. The
+       * UI's inline non-blocking prompt under the Stopped marker
+       * dispatches this ClientMsg on submit; Skip is allowed and ships
+       * nothing (no `stop_reason` message in that case — the
+       * "unspecified" outcome is the absence of an event).
+       *
+       * Bound to a specific Stop via `interruptAckId`, which the
+       * server emitted in the matching `session_interrupted` envelope.
+       * The server validates the id against the latest tracked Stop
+       * for the session and silently drops mismatched messages — a
+       * late reason from a previous Stop should not bind to a fresher
+       * one. The drop is logged but not surfaced to the operator;
+       * the reason was lost-to-time, not malicious.
+       *
+       * `reasonCode = 'other'` REQUIRES a non-empty `reasonText`. The
+       * server logs + drops a mismatched pair; the client's prompt
+       * also enforces this client-side via a required text input that
+       * appears when "Other" is selected.
+       *
+       * Server side-effect: writes a `safety_audit` row with
+       * `kind = 'session.stop_reason'`. Phase C3 will convert this
+       * standalone row into an addendum to the parent
+       * `session.stopped` audit row (which lands in C3 alongside the
+       * full forensic bundle).
+       */
+      type: 'stop_reason';
+      sessionId: string;
+      interruptAckId: string;
+      reasonCode: StopReasonCode;
+      reasonText?: string;
     };
 
 // ---- Server → Browser ----
@@ -1914,15 +1984,29 @@ export type ServerMsg =
        * that misses one and sees the other is safe — both indicate
        * the turn is terminating.
        *
-       * No safety_audit dual-write yet (Phase C2 wires that with the
-       * full audit forensic bundle). The envelope is purely a UI
-       * affordance; treating it as authoritative for forensics would
-       * be a regression once the audit row lands.
+       * No `session.stopped` safety_audit dual-write yet (Phase C3
+       * wires that with the full forensic bundle). Phase C2 added the
+       * `interruptAckId` so the operator's free-eval reason
+       * (`stop_reason` ClientMsg) can bind unambiguously to THIS stop;
+       * a late reason from a previous stop won't be applied to the
+       * wrong audit row when the dual-write lands. C2 records the
+       * reason as a standalone safety_audit row keyed by this id; C3
+       * converts it to an addendum to the parent stop row.
        */
       type: 'session_interrupted';
       sessionId: string;
       /** Milliseconds from interrupt handler entry to runner.interrupt() resolution. */
       ackLatencyMs: number;
+      /**
+       * Cluster C Phase 2 (spec §4.5): server-generated UUID that
+       * uniquely identifies this specific Stop. The companion
+       * `stop_reason` ClientMsg echoes it back so late reasons (the
+       * operator clicked Skip then changed their mind 30s later)
+       * can't bind to a different Stop. The server tracks the latest
+       * id per session in `Conn.lastInterruptIds` and rejects
+       * `stop_reason` messages with a mismatched id.
+       */
+      interruptAckId: string;
     };
 
 /**

@@ -145,6 +145,23 @@ export type SessionView = {
    * rate-limit state. Absence ⇔ "no banner, no countdown".
    */
   rateLimit?: RateLimitState;
+  /**
+   * Cluster C Phase 2 (spec §4.2): metadata for the most recent Stop
+   * the operator initiated on this session. Drives the inline
+   * "Stopped by you · 42 ms" marker in scrollback + the non-blocking
+   * reason-for-stop prompt that follows it. Cleared on the next
+   * user_send (operator moved on) and on session_started (fresh
+   * session). The `reasonSubmitted` flag flips when the prompt is
+   * dismissed (submit OR skip both flip it so the prompt doesn't
+   * re-appear after the operator chose not to categorise).
+   */
+  lastInterrupt?: {
+    interruptAckId: string;
+    ackLatencyMs: number;
+    /** Epoch ms when the session_interrupted ServerMsg landed. */
+    ts: number;
+    reasonSubmitted: boolean;
+  };
 };
 
 /** Max number of messages the held-queue accepts before refusing new ones.
@@ -600,7 +617,16 @@ export type Action =
    *  last timestamps remain useful for tooltips). The next `wrapper_error
    *  { kind: 'auth_expired' }` observation flips dismissed back to false
    *  so a fresh failure re-surfaces the banner. */
-  | { type: 'auth_expired_dismissed' };
+  | { type: 'auth_expired_dismissed' }
+  /**
+   * Cluster C Phase 2: operator submitted OR skipped the reason-for-stop
+   * prompt. Either way the prompt should disappear (skip ⇒ ship nothing
+   * but the inline UI is dismissed). Flips `lastInterrupt.reasonSubmitted`
+   * to true. The full `lastInterrupt` slice is cleared on next user_send
+   * / session_started; this action just removes the prompt without
+   * losing the marker metadata (the "■ Stopped by you" line stays).
+   */
+  | { type: 'stop_reason_dismissed'; sessionId: string };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -666,6 +692,10 @@ export function reduce(state: AppState, action: Action): AppState {
         // counts the full wait, including the pre-first-token gap.
         runStartedAt: Date.now(),
         messages: [...session.messages, { kind: 'user', id: nextId(), text: action.text }],
+        // Cluster C Phase 2: operator moved on — the previous Stop's
+        // marker + reason prompt should no longer hang around in the
+        // scrollback once a fresh turn starts.
+        lastInterrupt: undefined,
       };
 
       let s: AppState = putSession(state, projectId, sessionId!, next);
@@ -872,6 +902,23 @@ export function reduce(state: AppState, action: Action): AppState {
         ...state,
         authExpired: { ...state.authExpired, dismissed: true },
       };
+    }
+
+    case 'stop_reason_dismissed': {
+      // Cluster C Phase 2: flip lastInterrupt.reasonSubmitted so the
+      // inline prompt unmounts. The marker metadata (interruptAckId,
+      // ackLatencyMs, ts) stays so the "■ Stopped by you · 42 ms"
+      // line remains visible until the next user_send. No-op when
+      // there's nothing to dismiss (no lastInterrupt OR already
+      // submitted).
+      const projectId = projectFor(state, action.sessionId);
+      if (projectId === null) return state;
+      const existing = state.sessionsByProject[projectId]?.[action.sessionId];
+      if (!existing?.lastInterrupt || existing.lastInterrupt.reasonSubmitted) return state;
+      return putSession(state, projectId, action.sessionId, {
+        ...existing,
+        lastInterrupt: { ...existing.lastInterrupt, reasonSubmitted: true },
+      });
     }
 
     case 'ma_clear_auto_retry': {
@@ -1904,16 +1951,27 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // the request directly via wsRef.send from the inspector button.
       return state;
 
-    case 'session_interrupted':
-      // Cluster C Phase 1: server's typed ack that the operator's Stop
-      // ClientMsg landed and the runner's cancellation resolved. The
-      // InputBox already flips back from Stop→Send once
-      // `session_running { running: false }` arrives (which always
-      // follows this envelope), so the reducer can stay no-op for
-      // Phase 1. A future scrollback marker ("Stopped by you · 42 ms")
-      // will consume the ackLatencyMs once the reason-for-stop UI
-      // lands (Phase C2).
-      return state;
+    case 'session_interrupted': {
+      // Cluster C Phase 2: stash the latest Stop metadata on the
+      // session so the reason-for-stop prompt + Stopped marker can
+      // render. The companion stop_reason_dismissed action below
+      // flips reasonSubmitted; user_send + session_started clear the
+      // whole field. Unknown session → silent no-op (could happen if
+      // the session is being recovered or just unmounted; harmless).
+      const projectId = projectFor(state, msg.sessionId);
+      if (projectId === null) return state;
+      const existing = state.sessionsByProject[projectId]?.[msg.sessionId];
+      if (!existing) return state;
+      return putSession(state, projectId, msg.sessionId, {
+        ...existing,
+        lastInterrupt: {
+          interruptAckId: msg.interruptAckId,
+          ackLatencyMs: msg.ackLatencyMs,
+          ts: Date.now(),
+          reasonSubmitted: false,
+        },
+      });
+    }
 
     case 'inbox_snapshot':
       // Cluster A Phase 5: the inbox panel (`<NotificationInbox/>`) owns
