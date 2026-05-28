@@ -256,6 +256,19 @@ export type OrchestratorSessionHandle = {
    * paused worker's last captured prompt. No-op when no pause is active.
    */
   continueThroughMutation: () => Promise<void>;
+  /**
+   * Cluster C Phase 4b: flip the orchestrator router's in-memory mute set
+   * for an agent. Returns the router's `setMute` result — true iff the
+   * set changed. The WS handler calls this AFTER persisting the DB flip
+   * (per_agent_control.setParticipantMuted) so the durable source of
+   * truth and the hot-path mirror stay aligned.
+   *
+   * isMuted is a read-only probe — used by the bus_send oracle-suppression
+   * branch (`bus/runner.ts`) to decide whether to short-circuit with the
+   * "delivered to <recipient>" white lie.
+   */
+  setMute: (agentName: string, muted: boolean) => boolean;
+  isMuted: (agentName: string) => boolean;
 };
 
 type OrchestratorRouter = {
@@ -275,6 +288,20 @@ type OrchestratorRouter = {
    *  the pending-retry slot, and emits `onPendingRetry`. Does NOT teardown
    *  — the session stays `running` waiting for Retry or Abandon. */
   onWorkerFailed: (agentName: string, prompt: string, err: unknown) => void;
+  /**
+   * Cluster C Phase 4b: flip the in-memory mute set. Returns true iff the
+   * set changed (re-mute / re-unmute are no-ops returning false — handler
+   * uses this to decide whether to fan the state-change ServerMsg).
+   *
+   * Caller MUST have already flipped `multi_agent_participants.muted` (the
+   * source of truth) before invoking this — the in-memory set is a hot-
+   * path mirror. R-A/R-B reconstruct passes the seed via the factory's
+   * `initialMutedAgents` param instead of calling setMute per agent.
+   */
+  setMute: (agentName: string, muted: boolean) => boolean;
+  /** Snapshot of currently muted agent slugs. Used by tests + the
+   *  forensic-bundle multi-agent path (a future C4f slice). */
+  isMuted: (agentName: string) => boolean;
 };
 
 /**
@@ -320,6 +347,14 @@ export function createOrchestratorRouter(params: {
    *  `BusSink.sendServerMsg` so the rebound sink keeps shipping the
    *  dangerous-mutation safety toast + future bus-runtime events. */
   sendServerMsg?: BusSink['sendServerMsg'];
+  /**
+   * Cluster C Phase 4b: seed the in-memory `mutedSet` from durable state.
+   * Used by R-A (browser reattach) + R-B (server restart) so a muted
+   * worker stays muted across resumption. The WS handler is responsible
+   * for keeping the DB column + this set in sync at mute/unmute time
+   * via `setMute()`; this param is the one-shot reseed.
+   */
+  initialMutedAgents?: readonly string[];
 }): OrchestratorRouter {
   const {
     sessionId,
@@ -334,6 +369,20 @@ export function createOrchestratorRouter(params: {
   const workerNamesMut: string[] = [...workerNames];
   const workerSet = new Set(workerNamesMut);
   let lifecycleRef: MultiAgentLifecycle = params.lifecycle;
+  /**
+   * Cluster C Phase 4b (spec §3 invariant 1 + AE-1): set of agent slugs the
+   * operator has muted. Router drops every BusEvent where `ev.source` is
+   * a member; `ev.destination` traffic still routes through (mute is a
+   * one-way authority change — the muted agent keeps receiving, just
+   * can't be heard). Per spec §5.4 the source of truth is the
+   * `multi_agent_participants.muted` column; this in-memory set is the
+   * hot-path mirror so the router doesn't hit SQLite per event. The
+   * caller (WS handler) flips the column FIRST, then calls `setMute`
+   * to update this set — so a server restart followed by R-B
+   * reconstruction can reseed from the DB without losing operator
+   * intent.
+   */
+  const mutedSet: Set<string> = new Set(params.initialMutedAgents ?? []);
 
   let sink: BusSink = {
     onEvent: params.onEvent,
@@ -565,6 +614,34 @@ export function createOrchestratorRouter(params: {
       });
       return;
     }
+    // Cluster C Phase 4b (spec §3 invariant 1 + AE-1): mute drop. Runs
+    // AFTER the F2/F3 forgery + topology checks (those are defense-in-
+    // depth that should fire on any pathological event regardless of
+    // mute state) and BEFORE the persist + sink.onEvent below — a muted
+    // event is conceptually "as if it never happened" from the routing
+    // perspective, so it doesn't bump hopsCount and doesn't render in
+    // the operator's transcript. The router_drop dispatch + safety_audit
+    // addendum DO fire so the operator can still see "muted X tried to
+    // emit a kind=reply" in the forensics view, but the muted agent's
+    // bus_send call returns the "delivered to <recipient>" white lie
+    // (oracle suppression — spec AE-3 [security]) so the agent itself
+    // has no signal that its outbound was dropped. That separation
+    // lives in `bus/runner.ts`'s bus_send wiring — this handler is just
+    // the routing-layer drop point.
+    if (mutedSet.has(ev.source)) {
+      console.warn(
+        `[orchestrator] drop muted source=${ev.source} dest=${ev.destination} kind=${ev.kind}`,
+      );
+      dispatchRouterDrop({
+        reasonCode: 'muted_source',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: `Muted ${ev.source} tried to emit ${ev.kind}`,
+        message: `${ev.source} → ${ev.destination}: ${ev.text.slice(0, 80)}`,
+      });
+      return;
+    }
 
     let dbId = 0;
     try {
@@ -753,6 +830,18 @@ export function createOrchestratorRouter(params: {
     }
   };
 
+  const setMute = (agentName: string, muted: boolean): boolean => {
+    const was = mutedSet.has(agentName);
+    if (muted === was) return false;
+    if (muted) {
+      mutedSet.add(agentName);
+    } else {
+      mutedSet.delete(agentName);
+    }
+    return true;
+  };
+  const isMuted = (agentName: string): boolean => mutedSet.has(agentName);
+
   return {
     teardown,
     handleEvent,
@@ -765,6 +854,8 @@ export function createOrchestratorRouter(params: {
     setLifecycle,
     getLifecycle,
     onWorkerFailed,
+    setMute,
+    isMuted,
   };
 }
 
@@ -1277,6 +1368,8 @@ export function wireOrchestratorSession(p: {
       // `onMutationHook`.
       deliver(pending.agentName, replayPrompt);
     },
+    setMute: (agentName, muted) => router.setMute(agentName, muted),
+    isMuted: (agentName) => router.isMuted(agentName),
   };
 
   registerLiveSession({

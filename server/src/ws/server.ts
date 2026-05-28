@@ -135,7 +135,12 @@ import {
 } from '../repo/multi_agent.js';
 import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
-import { hasLiveSession } from '../bus/session_registry.js';
+import { getLiveSession, hasLiveSession } from '../bus/session_registry.js';
+import {
+  buildParticipantMuteChangedMsg,
+  executeMuteParticipant,
+  executeUnmuteParticipant,
+} from './control_verbs.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type {
   IterationSummary,
@@ -2382,6 +2387,69 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       executeStopReason({
         msg,
         latestAckId: conn.lastInterruptIds.get(msg.sessionId),
+      });
+      return;
+    }
+    case 'mute_participant':
+    case 'unmute_participant': {
+      // Cluster C Phase 4b (spec §5.2 + §5.10 + AE-1): orchestrator-mode
+      // per-agent mute / unmute. Phase 4b ships mute only; pause + kick
+      // get dedicated handler slices (4c, 4d). The handler validates,
+      // flips the DB column (per_agent_control), updates the router's
+      // in-memory mutedSet (handle.setMute), writes safety_audit, then
+      // emits the participant_mute_changed state-change echo. Topology
+      // failures (chain-mode, orchestrator target, unknown participant,
+      // already-in-state) return as wrapper_error with a typed
+      // ControllabilityFailureCode in the `message` field so the client
+      // reducer can roll back the optimistic flip cleanly.
+      const live = getLiveSession(msg.sessionId);
+      const orchestratorHandle =
+        live?.mode === 'orchestrator'
+          ? (live.handle as unknown as OrchestratorSessionHandle)
+          : undefined;
+      const runner =
+        msg.type === 'mute_participant' ? executeMuteParticipant : executeUnmuteParticipant;
+      const result = runner({
+        msg,
+        orchestratorHandle,
+        sessionMode: live?.mode ?? null,
+      });
+      if (!result.ok) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `${result.failureCode}: ${result.message}`,
+        });
+        return;
+      }
+      send(
+        conn.ws,
+        buildParticipantMuteChangedMsg({
+          sessionId: msg.sessionId,
+          projectId: msg.projectId,
+          muted: msg.type === 'mute_participant',
+          reasonCode: msg.reasonCode,
+          reasonText: msg.reasonText,
+          ts: Date.now(),
+        }),
+      );
+      return;
+    }
+    case 'pause_participant':
+    case 'resume_participant':
+    case 'kick_participant': {
+      // Cluster C Phase 4b ships mute only. pause/resume/kick are wired in
+      // dedicated follow-up slices (4c, 4d) — explicit reject here keeps a
+      // misbehaving client (or a smoke harness sending the new verbs early)
+      // from silently no-op'ing. The Phase 4a ClientMsg shapes are defined
+      // so the client + tests can already round-trip the wire format; only
+      // the SERVER-side enforcement is staged.
+      send(conn.ws, {
+        type: 'wrapper_error',
+        sessionId: msg.sessionId,
+        kind: 'process_crashed',
+        message: `${msg.type} is not yet implemented (Phase C4b ships mute only; pause + kick land in C4c + C4d)`,
       });
       return;
     }

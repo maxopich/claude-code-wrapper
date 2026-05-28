@@ -18,17 +18,23 @@ import type { RouterDropView } from '../../store';
 //   - worker_to_user      — warn (F2, wrong recipient)
 //   - worker_to_worker    — warn (F2, bypass orchestrator)
 //   - unknown_source      — warn (F2, source not in roster)
+//   - muted_source        — info (Cluster C Phase 4b: operator muted
+//                                 this agent; drop is intended, not a
+//                                 security violation, so it tints info
+//                                 not warn)
 //
-// All four are real security signals — forged_source is the worst (it's
-// a spoof attempt) so it gets the danger tint; the F2 variants are routing
-// violations and tint warn. This matches the dispatcher's safety_audit
-// classification.
+// Forged-source is the only danger tier — it's a spoof attempt. F2 routing
+// violations tint warn. Operator-driven mute drops tint info because the
+// operator explicitly asked for them; they belong in the log as forensics
+// (so "what did the muted agent try to say?" is recoverable) but are
+// expected, not alarming.
 
 const REASON_TINT: Record<RouterDropView['reasonCode'], string> = {
   forged_source: 'router-drops-reason-danger',
   worker_to_user: 'router-drops-reason-warn',
   worker_to_worker: 'router-drops-reason-warn',
   unknown_source: 'router-drops-reason-warn',
+  muted_source: 'router-drops-reason-info',
 };
 
 const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
@@ -36,6 +42,7 @@ const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
   worker_to_user: 'worker → user (F2)',
   worker_to_worker: 'worker → worker (F2)',
   unknown_source: 'unknown source (F2)',
+  muted_source: 'muted source',
 };
 
 function formatTime(ts: number): string {
