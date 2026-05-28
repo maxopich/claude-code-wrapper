@@ -140,12 +140,14 @@ import {
   buildParticipantKickedMsg,
   buildParticipantMuteChangedMsg,
   buildParticipantPauseChangedMsg,
+  executeExpireParticipant,
   executeKickParticipant,
   executeMuteParticipant,
   executePauseParticipant,
   executeResumeParticipant,
   executeUnmuteParticipant,
 } from './control_verbs.js';
+import { getPauseExpiryRegistry } from './pause_expiry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type {
   IterationSummary,
@@ -1526,6 +1528,12 @@ function resumeCallbacks(
       });
     },
     onEnded: (sessionId, reason, iterationId) => {
+      // Cluster C Phase 4c2: cancel every pause-expiry timer for the
+      // ending session. Any timer that fires after this point would
+      // try to flip state on a row whose live session is gone; the
+      // executor's defensive re-check would catch it (no-op-diverged),
+      // but cancelling here is cheaper + cleaner.
+      getPauseExpiryRegistry().clearSession(sessionId);
       send(conn.ws, { type: 'multi_agent_ended', sessionId, reason, iterationId });
       if (conn.multiAgent?.sessionId === sessionId) {
         conn.multiAgent = null;
@@ -2449,10 +2457,13 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // operator sees the pending-queue size growing while the agent is
       // paused (AE-5 [security] observability for runaway buildup).
       //
-      // Pause expiry timer (spec §5.6 — auto_resume / auto_kick on
-      // timeoutMs elapse) lands in C4c2; this slice persists the
-      // intended `pausedUntil` + `pauseExpiryAction` but doesn't schedule
-      // the timer yet.
+      // Cluster C Phase 4c2: after a successful pause, schedule the
+      // expiry timer in the process-wide registry. Timer's fire
+      // callback (built below) runs `executeExpireParticipant` to
+      // either auto-resume or auto-kick per the operator's choice; we
+      // then fan the appropriate `participant_pause_changed` /
+      // `participant_kicked` envelope so the operator's UI reconciles
+      // without needing a fresh round-trip.
       const live = getLiveSession(msg.sessionId);
       const orchestratorHandle =
         live?.mode === 'orchestrator'
@@ -2472,6 +2483,85 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         });
         return;
       }
+      // Phase 4c2: register the expiry timer. The fire callback is
+      // captured-by-closure so it can call back into the handler's
+      // `conn.ws` for the state-change envelope. If the connection has
+      // closed by fire time, `send(conn.ws, ...)` is a no-op — the DB
+      // + audit writes still land (durable trail survives).
+      getPauseExpiryRegistry().schedule(
+        {
+          sessionId: msg.sessionId,
+          projectId: msg.projectId,
+          agentName: result.agentName,
+          pausedUntil: result.pausedUntil,
+          expiryAction: msg.expiryAction,
+          reasonCode: msg.reasonCode,
+          reasonText: msg.reasonText ?? null,
+        },
+        (entry) => {
+          // The fire-time orchestrator handle may differ from the
+          // schedule-time one (R-A reattach swapped the live session
+          // between bind and fire) — re-read at fire time.
+          const liveAtFire = getLiveSession(entry.sessionId);
+          const handleAtFire =
+            liveAtFire?.mode === 'orchestrator'
+              ? (liveAtFire.handle as unknown as OrchestratorSessionHandle)
+              : undefined;
+          const expireResult = executeExpireParticipant({
+            entry,
+            orchestratorHandle: handleAtFire,
+          });
+          if (!expireResult.ok) {
+            console.error(
+              `[ws] pause-expiry executor failed for ${entry.sessionId}/${entry.projectId}`,
+              expireResult.error,
+            );
+            return;
+          }
+          // Diverged state (operator resumed/kicked between schedule +
+          // fire): the trigger audit captured it; no state-change
+          // envelope ships because the state had already moved on
+          // and the operator's UI is already reconciled to the
+          // post-move state from the prior verb's echo.
+          if (expireResult.action === 'noop_diverged') return;
+          const fireTs = entry.pausedUntil; // approximate; the audit row's ts is the authoritative
+          if (expireResult.action === 'auto_resume') {
+            send(
+              conn.ws,
+              buildParticipantPauseChangedMsg({
+                sessionId: entry.sessionId,
+                projectId: entry.projectId,
+                pausedUntil: null,
+                expiryAction: null,
+                reasonCode: entry.reasonCode,
+                ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
+                // No queued deliveries: the gate released, runner
+                // drained the count to zero. Reporting 0 keeps the
+                // wire shape consistent without re-querying the runner
+                // (which the executor doesn't hold a handle to).
+                queuedDeliveries: handleAtFire?.getPendingDeliveries(entry.agentName) ?? 0,
+                ts: fireTs,
+              }),
+            );
+            return;
+          }
+          // auto_kick: fan a `participant_kicked` envelope. The
+          // operator's UI dispatches on the same type the operator-
+          // kick path uses; the reasonCode is carried forward from
+          // the pause.
+          send(
+            conn.ws,
+            buildParticipantKickedMsg({
+              sessionId: entry.sessionId,
+              projectId: entry.projectId,
+              mode: 'drain',
+              reasonCode: entry.reasonCode,
+              ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
+              ts: expireResult.kickedAt ?? fireTs,
+            }),
+          );
+        },
+      );
       send(
         conn.ws,
         buildParticipantPauseChangedMsg({
@@ -2493,6 +2583,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // deliverTurn calls (registered while paused) fire in FIFO order
       // in the next microtask — the runner's existing turn-serialization
       // (tail chaining) preserves order.
+      //
+      // Phase 4c2: also cancel any scheduled expiry timer so the
+      // operator's manual resume short-circuits the auto-action. A
+      // false return from cancel just means no timer was scheduled
+      // (e.g. resume without prior pause, or pause already expired)
+      // — either is fine.
       const live = getLiveSession(msg.sessionId);
       const orchestratorHandle =
         live?.mode === 'orchestrator'
@@ -2512,6 +2608,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         });
         return;
       }
+      getPauseExpiryRegistry().cancel(msg.sessionId, msg.projectId);
       send(
         conn.ws,
         buildParticipantPauseChangedMsg({
@@ -2562,6 +2659,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         });
         return;
       }
+      // Phase 4c2: kick supersedes any standing pause-expiry timer.
+      // Cancel before emitting so a freshly-fired timer can't race in
+      // and double-emit a participant_kicked envelope.
+      getPauseExpiryRegistry().cancel(msg.sessionId, msg.projectId);
       send(
         conn.ws,
         buildParticipantKickedMsg({

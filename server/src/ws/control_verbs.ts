@@ -327,11 +327,29 @@ export type ExecuteResumeInput = {
 };
 
 export type ExecutePauseResult =
-  | { ok: true; auditId: string; pausedUntil: number; queuedDeliveries: number }
+  | {
+      ok: true;
+      auditId: string;
+      pausedUntil: number;
+      queuedDeliveries: number;
+      /** Resolved bus agent slug — Phase 4c2 timer scheduling needs this
+       *  without re-running listResolvedParticipants in the WS handler. */
+      agentName: string;
+    }
   | { ok: false; failureCode: ControllabilityFailureCode; message: string };
 
 export type ExecuteResumeResult =
-  | { ok: true; auditId: string; queuedDeliveries: number }
+  | {
+      ok: true;
+      auditId: string;
+      queuedDeliveries: number;
+      /** Resolved bus agent slug — Phase 4c2 timer cancellation uses this
+       *  for the singleton registry's cancel(sessionId, projectId) call
+       *  (the projectId alone is sufficient for the key, but exposing the
+       *  agent name keeps the executor's return shape symmetric with
+       *  pause + kick). */
+      agentName: string;
+    }
   | { ok: false; failureCode: ControllabilityFailureCode; message: string };
 
 export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseResult {
@@ -477,7 +495,13 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
 
   const queuedDeliveries =
     input.orchestratorHandle?.getPendingDeliveries(participant.bus_agent_name) ?? 0;
-  return { ok: true, auditId, pausedUntil, queuedDeliveries };
+  return {
+    ok: true,
+    auditId,
+    pausedUntil,
+    queuedDeliveries,
+    agentName: participant.bus_agent_name,
+  };
 }
 
 export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResumeResult {
@@ -566,7 +590,7 @@ export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResu
   }
   const queuedDeliveries =
     input.orchestratorHandle?.getPendingDeliveries(participant.bus_agent_name) ?? 0;
-  return { ok: true, auditId, queuedDeliveries };
+  return { ok: true, auditId, queuedDeliveries, agentName: participant.bus_agent_name };
 }
 
 export function buildParticipantPauseChangedMsg(args: {
@@ -844,4 +868,233 @@ export function buildParticipantKickedMsg(args: {
     actor: 'operator',
     ts: args.ts,
   };
+}
+
+// ---------- Cluster C Phase 4c2: pause expiry executor ----------
+//
+// When a pause's deadline elapses, the registered timer (in
+// `ws/pause_expiry.ts`) fires this executor with the snapshot of the
+// original pause. It does the safety-class audit + the action-specific
+// side effect (auto_resume or auto_kick) inline, then returns a result
+// the timer callback uses to drive the wire ServerMsg fan-out.
+//
+// Why a pure executor rather than putting the body inline in the timer
+// callback:
+//   - Testability: the timer callback is small (re-read DB, call this
+//     executor, fan ServerMsgs). The complex branch logic lives here and
+//     is unit-testable against a real SQLite + mocked router handle,
+//     same shape as the sibling executors (mute/pause/resume/kick).
+//   - Defensive re-check: the executor re-reads the per_agent_control
+//     row so a race where the operator resumed/kicked between the
+//     timer's scheduling and its fire is a clean no-op — the executor
+//     returns `{ ok: false, divergedState: 'resumed' | 'kicked' }`
+//     instead of redundantly trying to flip state that's already
+//     converged.
+//   - Single audit-write point: the safety `pause.expired_without_resume`
+//     row writes here unconditionally (it's the trigger event,
+//     forensically valuable even when the action no-ops on diverged
+//     state) — so the operator can see "the pause WOULD have fired but
+//     state had moved on" in the audit log.
+//
+// Audit shape (every expiry, regardless of action or diverged state):
+//   safety_audit row with kind='pause.expired_without_resume',
+//   reasonCode carried from original pause, payload includes
+//   { expiryAction, pausedUntil, divergedState? } so the forensic
+//   trail captures both the trigger and what actually happened.
+//
+// auto_resume branch:
+//   - clearParticipantPause()
+//   - handle.resumeAgent() (releases the AgentRunner pause gate)
+//   - returns shape so the timer callback can emit
+//     `participant_pause_changed` with pausedUntil=null
+//
+// auto_kick branch (escalation):
+//   - setParticipantKicked(mode='drain') — same DB write as the operator-
+//     kick path
+//   - handle.kickAgent() — same router flip
+//   - writes ADDITIONAL `agent_control.kicked` audit row so the kick
+//     path's forensic shape stays consistent (the expiry audit is the
+//     trigger; the kick audit is the resulting state change)
+//   - returns shape so the timer callback can emit
+//     `participant_kicked`
+//
+// Note: clearParticipantPause is called on the auto_kick path too —
+// the DB layer's invariant is "pause and kick are orthogonal" but a
+// kick should clear any standing pause so the row's state is
+// consistent ("not paused, kicked").
+
+export type ExecuteExpireInput = {
+  /** Snapshot captured at schedule time; what the timer was scheduled for. */
+  entry: {
+    sessionId: string;
+    projectId: number;
+    agentName: string;
+    pausedUntil: number;
+    expiryAction: PauseExpiryAction;
+    reasonCode: ControlReasonCode;
+    reasonText: string | null;
+  };
+  /** Live orchestrator handle. Missing handle = session torn down
+   *  between schedule and fire; the executor still writes audits +
+   *  flips DB state (R-B reconstruct would consult those on next
+   *  start), but can't update the router's in-memory mirror. */
+  orchestratorHandle:
+    | {
+        resumeAgent: (agentName: string) => boolean;
+        kickAgent: (agentName: string) => boolean;
+      }
+    | undefined;
+  appendAudit?: typeof appendSafetyAudit;
+  now?: () => number;
+};
+
+export type ExecuteExpireResult =
+  | {
+      ok: true;
+      /** Which expiry path actually ran. May be 'noop_diverged' when
+       *  the DB state moved on (resumed/kicked) between schedule and
+       *  fire — in that case the trigger audit still wrote but no
+       *  state-flipping side effect ran. */
+      action: 'auto_resume' | 'auto_kick' | 'noop_diverged';
+      triggerAuditId: string;
+      /** Set only for `'auto_kick'` — the additional `agent_control.kicked`
+       *  audit row, mirroring `executeKickParticipant`'s return shape. */
+      kickAuditId?: string;
+      kickedAt?: number;
+      /** Why the trigger audit recorded a no-op, if applicable. */
+      divergedState?: 'resumed' | 'kicked' | 'participant_missing';
+    }
+  | { ok: false; error: string };
+
+export function executeExpireParticipant(input: ExecuteExpireInput): ExecuteExpireResult {
+  const { entry } = input;
+  const appendAudit = input.appendAudit ?? appendSafetyAudit;
+  const now = input.now ?? Date.now;
+  const ts = now();
+
+  // Re-read durable state. This is the defense-in-depth re-check: the
+  // operator may have resumed/kicked between schedule + fire (the
+  // registry's cancel path catches the common case via clearTimeout,
+  // but a fresh-server-restart that reseeds timers from the column
+  // would never have seen the cancel; same for any future R-A reattach
+  // path that imports timer state from durable storage).
+  const state = getControlState(entry.sessionId, entry.projectId);
+  let divergedState: 'resumed' | 'kicked' | 'participant_missing' | undefined;
+  if (!state) {
+    divergedState = 'participant_missing';
+  } else if (state.kickedAt !== null) {
+    divergedState = 'kicked';
+  } else if (state.pausedUntil === null) {
+    divergedState = 'resumed';
+  }
+
+  // Always write the trigger audit — it captures "the timer fired" as a
+  // standalone event, regardless of what (if anything) the executor
+  // does next.
+  const triggerPayload = {
+    projectId: entry.projectId,
+    agentSlug: entry.agentName,
+    reasonText: entry.reasonText,
+    expiryAction: entry.expiryAction,
+    pausedUntil: entry.pausedUntil,
+    ...(divergedState !== undefined ? { divergedState } : {}),
+  };
+  let triggerAuditId: string;
+  try {
+    triggerAuditId = appendAudit({
+      ts,
+      sessionId: entry.sessionId,
+      agentId: entry.agentName,
+      kind: 'pause.expired_without_resume',
+      reasonCode: entry.reasonCode,
+      payload: triggerPayload,
+    }).id;
+  } catch (err) {
+    console.error(
+      `[ws] executeExpire trigger audit failed for ${entry.sessionId}/${entry.projectId}`,
+      err,
+    );
+    return { ok: false, error: `trigger audit failed: ${(err as Error).message}` };
+  }
+
+  // Diverged state: trigger audit written; no further side effect.
+  if (divergedState !== undefined) {
+    return { ok: true, action: 'noop_diverged', triggerAuditId, divergedState };
+  }
+
+  if (entry.expiryAction === 'auto_resume') {
+    // Clear the pause column + release the AgentRunner gate. We don't
+    // also write `agent_control.resumed` here — the spec models
+    // operator-initiated resume + auto-resume as the same logical
+    // event for forensics (the trigger audit's `expiryAction` payload
+    // disambiguates), and a second audit would double-count the
+    // outcome.
+    clearParticipantPause(entry.sessionId, entry.projectId);
+    if (input.orchestratorHandle) {
+      input.orchestratorHandle.resumeAgent(entry.agentName);
+    } else {
+      console.warn(
+        `[ws] executeExpire(${entry.sessionId}/${entry.projectId}): no live orchestrator handle to release pause gate`,
+      );
+    }
+    return { ok: true, action: 'auto_resume', triggerAuditId };
+  }
+
+  // auto_kick: irreversible escalation. Clear pause column FIRST so
+  // the DB row is consistent ("not paused, kicked") before the kick
+  // flag lands. Then mark kicked + sync router + write the kick audit.
+  clearParticipantPause(entry.sessionId, entry.projectId);
+  const kickedChanged = setParticipantKicked(entry.sessionId, entry.projectId, ts, 'drain');
+  // kickedChanged should always be true here (we verified above that
+  // kickedAt was NULL); the defensive false-branch covers a hard race
+  // where another caller kicked between our state read + setParticipantKicked.
+  if (!kickedChanged) {
+    return {
+      ok: true,
+      action: 'noop_diverged',
+      triggerAuditId,
+      divergedState: 'kicked',
+    };
+  }
+  if (input.orchestratorHandle) {
+    input.orchestratorHandle.kickAgent(entry.agentName);
+  } else {
+    console.warn(
+      `[ws] executeExpire(${entry.sessionId}/${entry.projectId}): no live orchestrator handle to apply auto-kick`,
+    );
+  }
+  let kickAuditId: string;
+  try {
+    kickAuditId = appendAudit({
+      ts,
+      sessionId: entry.sessionId,
+      agentId: entry.agentName,
+      kind: 'agent_control.kicked',
+      reasonCode: entry.reasonCode,
+      payload: {
+        projectId: entry.projectId,
+        agentSlug: entry.agentName,
+        reasonText: entry.reasonText,
+        mode: 'drain',
+        kickedAt: ts,
+        // Marker so a forensic-trail query can distinguish operator-
+        // kicked from expiry-auto-kicked rows without a JOIN against
+        // the trigger audit.
+        triggerKind: 'pause.expired_without_resume',
+        triggerAuditId,
+      },
+    }).id;
+  } catch (err) {
+    console.error(
+      `[ws] executeExpire kick audit failed for ${entry.sessionId}/${entry.projectId}`,
+      err,
+    );
+    // DB + router are already aligned with the kicked state; the
+    // operator can audit the divergence via the trigger row + the
+    // missing kick row pair. Surface the failure to the caller so
+    // they don't emit a participant_kicked envelope that has no audit
+    // backing it.
+    return { ok: false, error: `kick audit failed: ${(err as Error).message}` };
+  }
+  return { ok: true, action: 'auto_kick', triggerAuditId, kickAuditId, kickedAt: ts };
 }
