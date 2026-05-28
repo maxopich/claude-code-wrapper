@@ -40,7 +40,11 @@ import {
 // and the operator gets the tier→a11y mapping + focus-steal contract
 // for free.
 import { SessionBanner } from './banners/SessionBanner';
-import { buildBusAutoRetryBannerItem } from './banners';
+import { buildBusAutoRetryBannerItem, buildSweptSessionBannerItem } from './banners';
+// Cluster D Phase 5e (UI-D17): in-session SweptSessionBanner reads the
+// ReopenContext directly (Reopen action) — same context the toast
+// notification uses, so the modal flow stays unified.
+import { useReopenActions, useReopenState } from './reopen';
 
 /**
  * Multi-Agent tab.
@@ -81,6 +85,11 @@ export function MultiAgentTab(props: {
   onContinueMultiAgent: (sessionId: string) => void;
   onRetryWorker: (sessionId: string) => void;
   onAbandonSession: (sessionId: string) => void;
+  /** Cluster D Phase 5e (UI-D17): SweptSessionBanner Archive button.
+   *  Ships `archive_session` ClientMsg — same as the toast
+   *  notification's Archive action. The reducer's `iteration_archived`
+   *  handler drops the row from the iterations list. */
+  onArchiveSession: (sessionId: string) => void;
   /** Item #5: operator clicked Continue on the pause-on-first-mutation banner. */
   onContinueThroughMutation: (sessionId: string) => void;
   /** Cluster D Phase 4d: CountdownChip onElapsed sink — clears the bus
@@ -139,6 +148,7 @@ export function MultiAgentTab(props: {
         onContinue={props.onContinueMultiAgent}
         onRetryWorker={props.onRetryWorker}
         onAbandonSession={props.onAbandonSession}
+        onArchiveSession={props.onArchiveSession}
         onContinueThroughMutation={props.onContinueThroughMutation}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
@@ -1297,6 +1307,11 @@ function ActiveRunView(props: {
    *  `'stopped'`. Same teardown as Stop, distinct verb so analytics can
    *  differentiate "stopped a healthy run" from "abandoned after failure". */
   onAbandonSession: (sessionId: string) => void;
+  /** Cluster D Phase 5e (UI-D17): SweptSessionBanner Archive button.
+   *  Sends `archive_session` ClientMsg — identical to the toast
+   *  notification's Archive action. Server idempotency means double-
+   *  clicks are benign. */
+  onArchiveSession: (sessionId: string) => void;
   /** Item #5: operator clicked Continue on the pause-on-first-mutation
    *  banner. Stateless from the client's POV — server reads the slot. */
   onContinueThroughMutation: (sessionId: string) => void;
@@ -1307,6 +1322,25 @@ function ActiveRunView(props: {
   const crossTab = run.mode !== props.tabMode;
   const isRunning = run.status === 'running';
   const isOrchestrator = run.mode === 'orchestrator';
+
+  // Cluster D Phase 5e (UI-D17): swept session = a multi_agent_sessions
+  // row whose status was flipped to 'crashed' by Phase 4's auto-sweep
+  // (when a newer iteration took the active slot) or Phase 5c's
+  // operator-initiated reopen swap. Both surface the same `session_
+  // superseded` ServerMsg server-side; here the operator is viewing
+  // the displaced iteration after the fact (clicking it in the
+  // Iterations list, or landing here from a notification action).
+  //
+  // We don't try to distinguish "crashed because swept" from "crashed
+  // because the runner segfaulted" — Reopen + Archive are valid
+  // operator actions for any crashed iteration. Reopen will fail with
+  // a tailored failure reason if reactivation can't proceed (chain
+  // mode → `chain_reconstruction_unsupported`); Archive is always
+  // valid. The banner's body copy generalizes safely.
+  const isSwept = run.status === 'crashed';
+  const reopenState = useReopenState();
+  const { requestReopen } = useReopenActions();
+  const reopenInFlight = reopenState.kind !== 'idle';
   // Transient highlight target for spine→scrollback jumps. Cleared after a
   // short pulse so it reads as "this is the row I just jumped to".
   const [highlightedEventId, setHighlightedEventId] = useState<number | null>(null);
@@ -1373,6 +1407,34 @@ function ActiveRunView(props: {
         )}
       </section>
 
+      {/* Cluster D Phase 5e (UI-D17): swept-session danger-tier banner.
+       * Mounted only when the iteration row is `status === 'crashed'`
+       * — i.e. the operator landed here after a sweep (Phase 4 auto-
+       * sweep or Phase 5c operator-reopen swap) and the iteration is
+       * no longer the project's active session.
+       *
+       * Sits above the running-state banners in JSX order so a future
+       * BannerStack migration keeps it visually first (danger > warn
+       * in priority). At runtime the running banners are gated on
+       * `isRunning` and this on `isSwept` — mutually exclusive — so
+       * ordering is purely declarative posture.
+       *
+       * Direct <SessionBanner /> mount (not via BannerStack) matches
+       * the autoRetry / multi-agent-warning pattern below. The factory
+       * returns BannerStackItem props which are a superset of
+       * SessionBannerProps; spreading is safe. */}
+      {isSwept && (
+        <SessionBanner
+          {...buildSweptSessionBannerItem({
+            sessionId: run.sessionId,
+            reopenInFlight,
+            callbacks: {
+              onReopen: () => requestReopen(run.sessionId),
+              onArchive: () => props.onArchiveSession(run.sessionId),
+            },
+          })}
+        />
+      )}
       {/* Cluster D Phase 4d: bus auto-retry banner. Observe-only — the
        * bus runner owns the retry loop server-side, so the operator
        * sees countdown + agent + reason but no Retry/Pause buttons (a

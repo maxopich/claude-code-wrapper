@@ -28,3 +28,13 @@ export type {
   BuildBusAutoRetryBannerItemArgs,
   BusAutoRetryBannerCallbacks,
 } from './RateLimitBanner.js';
+
+// Cluster D Phase 5e: swept-session danger-tier banner factory. The
+// in-session counterpart to the swept-session toast — surfaces Reopen
+// + Archive whenever the operator views an iteration whose row has
+// been displaced to status = 'crashed' (auto-sweep or operator-reopen).
+export { buildSweptSessionBannerItem, sweptSessionBannerTitle } from './SweptSessionBanner.js';
+export type {
+  BuildSweptSessionBannerItemArgs,
+  SweptSessionBannerCallbacks,
+} from './SweptSessionBanner.js';
