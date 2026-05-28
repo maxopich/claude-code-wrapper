@@ -48,6 +48,13 @@ export type AuthExpiredBannerCallbacks = {
    *  The next `wrapper_error { kind: 'auth_expired' }` observation
    *  re-surfaces the banner so a fresh failure is honest. */
   onDismiss: () => void;
+  /** Cluster D Phase 6c: operator clicked Re-authenticate. The
+   *  handler should call `requestStart()` on the AuthRefreshContext,
+   *  which opens the AuthRefreshModal and ships `start_auth_refresh`
+   *  to the server. Optional — when omitted, the primary action is
+   *  hidden and only Dismiss is shown (the Phase 6 manual-fix path).
+   *  Once Phase 6c lands app-wide this should always be supplied. */
+  onReauthenticate?: () => void;
 };
 
 export type BuildAuthExpiredBannerItemArgs = {
@@ -57,6 +64,12 @@ export type BuildAuthExpiredBannerItemArgs = {
    *  "last seen" relative-time prose inside the banner body. */
   now?: () => number;
   arrivedAt?: number;
+  /** When true, the Re-authenticate action renders disabled — an
+   *  AuthRefreshModal is already in flight. Mirrors the
+   *  SweptSessionBanner's `reopenInFlight` pattern: the context also
+   *  guards on `state.kind !== 'idle'` (a stray click is a no-op),
+   *  but visually communicating the busy state is honest UX. */
+  reauthInFlight?: boolean;
 };
 
 export function authExpiredBannerTitle(): string {
@@ -82,12 +95,17 @@ function formatRelativeMs(diffMs: number): string {
 }
 
 export function buildAuthExpiredBannerItem(args: BuildAuthExpiredBannerItemArgs): BannerStackItem {
-  const { state, callbacks, arrivedAt } = args;
+  const { state, callbacks, arrivedAt, reauthInFlight } = args;
   const now = args.now ?? Date.now;
   const relTime = formatRelativeMs(now() - state.lastSeenMs);
   // Pluralize honestly — "1 turn" vs "3 turns" — so the message reads
   // naturally for both first observation and a repeating fail.
   const countLabel = state.count === 1 ? 'a turn' : `${state.count} turns`;
+
+  // Cluster D Phase 6c: when the operator can re-auth in-modal, the
+  // body copy points there instead of describing the manual terminal
+  // step (which still works but is no longer the recommended path).
+  const hasReauthAction = typeof callbacks.onReauthenticate === 'function';
 
   const body = (
     <>
@@ -97,9 +115,19 @@ export function buildAuthExpiredBannerItem(args: BuildAuthExpiredBannerItemArgs)
         ).
       </p>
       <p>
-        Run <code>claude login</code> in a terminal to renew them. Any messages you send before
-        re-authenticating will fail with the same error — the banner clears itself the first time a
-        session starts successfully.
+        {hasReauthAction ? (
+          <>
+            Click <strong>Re-authenticate</strong> to spawn <code>claude login</code> right here —
+            its output streams into a modal you can watch. The banner clears the first time a
+            session starts successfully (proof the new credentials work).
+          </>
+        ) : (
+          <>
+            Run <code>claude login</code> in a terminal to renew them. Any messages you send before
+            re-authenticating will fail with the same error — the banner clears itself the first
+            time a session starts successfully.
+          </>
+        )}
       </p>
     </>
   );
@@ -107,6 +135,29 @@ export function buildAuthExpiredBannerItem(args: BuildAuthExpiredBannerItemArgs)
   const detail = state.lastMessage ? (
     <pre className="auth-expired-banner-detail-message">{state.lastMessage}</pre>
   ) : null;
+
+  // Action ordering: Re-authenticate (primary) first when present so
+  // it gets the focus-steal (danger tier on first-mount), then Dismiss
+  // (ghost). Without the Re-auth action, Dismiss is the only one.
+  const actions = [];
+  if (callbacks.onReauthenticate) {
+    actions.push({
+      label: 'Re-authenticate',
+      variant: 'primary' as const,
+      onClick: callbacks.onReauthenticate,
+      disabled: reauthInFlight,
+      title: reauthInFlight
+        ? 'A re-authentication is already in progress — finish or cancel it first.'
+        : 'Spawn `claude login` in a Cebab-managed subprocess. Output streams to a modal here.',
+    });
+  }
+  actions.push({
+    label: 'Dismiss',
+    variant: 'ghost' as const,
+    onClick: callbacks.onDismiss,
+    title:
+      'Hide the banner. It will re-appear on the next failed message until you re-authenticate.',
+  });
 
   return {
     id: 'auth-expired',
@@ -116,15 +167,7 @@ export function buildAuthExpiredBannerItem(args: BuildAuthExpiredBannerItemArgs)
     body,
     detail,
     detailLabel: 'Last error message',
-    actions: [
-      {
-        label: 'Dismiss',
-        variant: 'ghost',
-        onClick: callbacks.onDismiss,
-        title:
-          'Hide the banner. It will re-appear on the next failed message until you re-authenticate.',
-      },
-    ],
+    actions,
     arrivedAt,
   };
 }

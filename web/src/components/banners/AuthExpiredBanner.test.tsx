@@ -120,6 +120,79 @@ describe('buildAuthExpiredBannerItem — shape', () => {
   });
 });
 
+describe('buildAuthExpiredBannerItem — Re-authenticate action (Phase 6c)', () => {
+  test('adds Re-authenticate primary action when onReauthenticate is supplied', () => {
+    const onReauth = vi.fn();
+    const item = buildAuthExpiredBannerItem({
+      state: baseState,
+      callbacks: { ...mkCallbacks(), onReauthenticate: onReauth },
+      now: stableNow,
+    });
+    expect(item.actions).toBeDefined();
+    expect(item.actions!.length).toBe(2);
+    expect(item.actions![0].label).toBe('Re-authenticate');
+    expect(item.actions![0].variant).toBe('primary');
+    expect(item.actions![1].label).toBe('Dismiss');
+    expect(item.actions![1].variant).toBe('ghost');
+    // Click wiring
+    item.actions![0].onClick?.();
+    expect(onReauth).toHaveBeenCalledTimes(1);
+  });
+
+  test('reauthInFlight disables the Re-authenticate action with busy tooltip', () => {
+    const item = buildAuthExpiredBannerItem({
+      state: baseState,
+      callbacks: { ...mkCallbacks(), onReauthenticate: vi.fn() },
+      reauthInFlight: true,
+      now: stableNow,
+    });
+    const reauth = item.actions![0];
+    expect(reauth.disabled).toBe(true);
+    expect(reauth.title).toContain('already in progress');
+  });
+
+  test('body copy points at the modal when Re-authenticate is available', () => {
+    const itemWith = buildAuthExpiredBannerItem({
+      state: baseState,
+      callbacks: { ...mkCallbacks(), onReauthenticate: vi.fn() },
+      now: stableNow,
+    });
+    const itemWithout = buildAuthExpiredBannerItem({
+      state: baseState,
+      callbacks: mkCallbacks(),
+      now: stableNow,
+    });
+    // Both bodies are React elements — render and compare textContent
+    // via a real Root mount.
+    const c1 = document.createElement('div');
+    document.body.appendChild(c1);
+    const r1 = createRoot(c1);
+    act(() => {
+      r1.render(<>{itemWith.body}</>);
+    });
+    expect(c1.textContent).toContain('Click');
+    expect(c1.textContent).toContain('Re-authenticate');
+    expect(c1.textContent).toContain('streams into a modal');
+    act(() => {
+      r1.unmount();
+    });
+    c1.remove();
+
+    const c2 = document.createElement('div');
+    document.body.appendChild(c2);
+    const r2 = createRoot(c2);
+    act(() => {
+      r2.render(<>{itemWithout.body}</>);
+    });
+    expect(c2.textContent).toContain('Run');
+    expect(c2.textContent).toContain('in a terminal');
+    act(() => {
+      r2.unmount();
+    });
+    c2.remove();
+  });
+});
+
 describe('buildAuthExpiredBannerItem — render integration', () => {
   function renderItem(args: Parameters<typeof buildAuthExpiredBannerItem>[0]) {
     const item = buildAuthExpiredBannerItem(args);

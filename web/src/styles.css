@@ -7363,3 +7363,74 @@ pre {
   border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
 }
 
+/* ---- Cluster D Phase 6c — AuthRefreshModal -------------------------
+ *
+ * Modal that drives the `claude login` subprocess. Reuses the existing
+ * .gate-modal-* chrome (overlay, header, help, buttons) and adds a
+ * terminal-style <pre> output area for streaming subprocess output.
+ * The spinner sits on the spawning-state body; the output <pre> is
+ * the running / completed bodies' main visual element.
+ */
+.auth-refresh-modal {
+  /* Slightly wider than the reopen modal — terminal output benefits
+   * from more horizontal space (auth URLs are long). */
+  min-width: min(560px, 90vw);
+  max-width: min(680px, 92vw);
+}
+.auth-refresh-modal-spinner {
+  display: flex;
+  justify-content: center;
+  padding: 24px 0;
+}
+.auth-refresh-modal-output {
+  /* Terminal-style: monospace, dark background, soft border. Fixed
+   * height with overflow-auto so the modal doesn't grow unbounded as
+   * output accumulates; the auto-scroll-to-bottom effect in
+   * RunningBody keeps the latest line visible. */
+  font-family: var(--font-mono);
+  font-size: var(--t-sm);
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--bg-1);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  margin: 8px 0 12px;
+  max-height: 280px;
+  overflow: auto;
+  white-space: pre-wrap;
+  /* Wrap long URLs cleanly. */
+  word-break: break-word;
+}
+.auth-refresh-modal-output-placeholder {
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.auth-refresh-modal-pid {
+  /* Subprocess PID chip — info tier (this is metadata, not a warning). */
+  background: color-mix(in oklab, var(--info) 18%, transparent);
+  color: var(--info);
+  border: 1px solid color-mix(in oklab, var(--info) 35%, transparent);
+}
+.auth-refresh-modal-exit-success {
+  background: color-mix(in oklab, var(--ok) 18%, transparent);
+  color: var(--ok);
+  border: 1px solid color-mix(in oklab, var(--ok) 35%, transparent);
+}
+.auth-refresh-modal-exit-failed {
+  background: color-mix(in oklab, var(--err) 18%, transparent);
+  color: var(--err);
+  border: 1px solid color-mix(in oklab, var(--err) 35%, transparent);
+}
+.auth-refresh-modal-failed-reason {
+  /* Start-time failure (already_running / spawn_failed). Same warn tier
+   * as the reopen modal's failed-reason chip. */
+  background: color-mix(in oklab, var(--warn) 18%, transparent);
+  color: var(--warn);
+  border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
+}
+.auth-refresh-modal-existing-run-id,
+.auth-refresh-modal-error-detail {
+  color: var(--ink-dim);
+  font-size: var(--t-sm);
+}
