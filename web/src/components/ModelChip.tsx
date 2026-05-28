@@ -61,9 +61,14 @@ export type ModelChipProps = {
  *   `claude-haiku-4-5-20251001`  → `haiku 4-5`
  * Anything else (already-short alias, unknown shape) passes through
  * verbatim so the operator sees what the SDK actually reports.
+ *
+ * Cluster E Phase 2.x: the literal sentinel `'various'` is the
+ * multi-agent summary value for "participants disagree" and renders
+ * verbatim — bypasses the claude-* trimming so it stays readable.
  */
 export function shortModelLabel(model: string | undefined): string {
   if (!model || model.length === 0) return 'default';
+  if (model === 'various') return 'various';
   // Drop `claude-` prefix if present.
   const stripped = model.startsWith('claude-') ? model.slice('claude-'.length) : model;
   // Drop trailing `-YYYYMMDD` (8 digits).
@@ -75,6 +80,29 @@ export function shortModelLabel(model: string | undefined): string {
   const firstDash = withoutDate.indexOf('-');
   if (firstDash === -1) return withoutDate;
   return `${withoutDate.slice(0, firstDash)} ${withoutDate.slice(firstDash + 1)}`;
+}
+
+/**
+ * Cluster E Phase 2.x — summarize a multi-agent run's per-participant
+ * models for the TopRunBar ModelChip.
+ *
+ * Returns:
+ *   - the common model string if every entry matches (and at least one is present)
+ *   - the literal `'various'` if multiple distinct values are present
+ *   - `undefined` if the map is empty (no session_started has landed yet)
+ *
+ * The map keys (project ids) are irrelevant to the summary — only the
+ * set of values matters.
+ */
+export function summarizeBusModel(
+  modelsByProject: Record<number, string> | undefined,
+): string | undefined {
+  if (!modelsByProject) return undefined;
+  const values = Object.values(modelsByProject).filter((v) => v.length > 0);
+  if (values.length === 0) return undefined;
+  const distinct = new Set(values);
+  if (distinct.size === 1) return values[0];
+  return 'various';
 }
 
 export function ModelChip({ model, selectedModel, tooltipExtra }: ModelChipProps) {

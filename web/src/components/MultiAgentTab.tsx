@@ -26,6 +26,7 @@ import { AgentTag } from './AgentTag';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
+import { ModelChip, summarizeBusModel } from './ModelChip';
 import { RouterDropsCounter } from './authority/RouterDropsCounter';
 import { ParticipantControlsCounter } from './agentControl/ParticipantControlsCounter';
 import { ParticipantStatePills } from './agentControl/ParticipantStatePills';
@@ -2239,6 +2240,13 @@ export function TopRunBar(props: {
     }
   }
 
+  // Cluster E Phase 2.x (B4-1): summarize per-participant models for the
+  // ModelChip. The reducer aggregates each session_started.model into
+  // run.modelsByProject keyed by participant projectId; the helper
+  // returns the common model if all entries match, 'various' if mixed,
+  // or undefined if no participants have inited yet (chip falls back
+  // to "default").
+  const busModel = summarizeBusModel(run.modelsByProject);
   return (
     <div className="main-top-bar-right">
       <span className="main-top-bar-title">
@@ -2248,6 +2256,14 @@ export function TopRunBar(props: {
           {run.status}
         </span>
       </span>
+      <ModelChip
+        model={busModel}
+        tooltipExtra={
+          busModel === 'various'
+            ? 'Participants reported different models — open Authority to inspect per-agent.'
+            : undefined
+        }
+      />
       <LogsButton
         sessionId={run.sessionId}
         dangerousCount={

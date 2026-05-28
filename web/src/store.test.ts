@@ -583,6 +583,200 @@ describe('store / multi-agent reducer (PR 2)', () => {
   });
 });
 
+// Cluster E Phase 2.x — session_started aggregates participant models
+// into MultiAgentRun.modelsByProject when:
+//   - there's an active bus session
+//   - the projectId belongs to a project whose busAgentName matches
+//     one of the run's participantAgentNames
+describe('store / session_started aggregates bus models (E2.x)', () => {
+  function seedBusSession() {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 10,
+            name: 'Orchestrator',
+            path: '/ws/orchestrator',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: true,
+            busAgentName: 'orchestrator',
+          },
+          {
+            id: 20,
+            name: 'WorkerA',
+            path: '/ws/worker-a',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: true,
+            busAgentName: 'worker-a',
+          },
+          {
+            id: 30,
+            name: 'NotParticipant',
+            path: '/ws/notpart',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
+          },
+        ],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_started',
+        sessionId: 'bus-1',
+        mode: 'orchestrator',
+        participants: [10, 20],
+        participantAgentNames: ['orchestrator', 'worker-a'],
+        lifecycle: 'persistent',
+        sessionFolder: '/ws/.cebab/bus-1',
+        hopBudget: 30,
+        pauseOnMutation: false,
+        mutationsAcknowledged: false,
+        mutations: [],
+      },
+    });
+    return s;
+  }
+
+  test('session_started for a participant project writes into modelsByProject', () => {
+    let s = seedBusSession();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sa-orch',
+        projectId: 10,
+        model: 'claude-sonnet-4-5-20250929',
+        tools: [],
+      },
+    });
+    expect(s.multiAgent.active?.modelsByProject).toEqual({
+      10: 'claude-sonnet-4-5-20250929',
+    });
+  });
+
+  test('multiple participants aggregate into the map', () => {
+    let s = seedBusSession();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sa-orch',
+        projectId: 10,
+        model: 'claude-sonnet-4-5-20250929',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sa-worker',
+        projectId: 20,
+        model: 'claude-opus-4-1',
+        tools: [],
+      },
+    });
+    expect(s.multiAgent.active?.modelsByProject).toEqual({
+      10: 'claude-sonnet-4-5-20250929',
+      20: 'claude-opus-4-1',
+    });
+  });
+
+  test('session_started for a non-participant project does not affect modelsByProject', () => {
+    let s = seedBusSession();
+    const before = s.multiAgent.active?.modelsByProject;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sa-other',
+        projectId: 30,
+        model: 'claude-haiku-4-5',
+        tools: [],
+      },
+    });
+    // Reference equality preserved when the bus state didn't need to change.
+    expect(s.multiAgent.active?.modelsByProject).toBe(before);
+    expect(s.multiAgent.active?.modelsByProject).toEqual({});
+  });
+
+  test('session_started without an active bus session is a no-op on modelsByProject', () => {
+    // Set up projects + active SessionView but no bus run.
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 10,
+            name: 'Solo',
+            path: '/ws/solo',
+            trusted: false,
+            lastUsedAt: null,
+            hasClaudeMd: true,
+            busInstalled: false,
+            busAgentName: null,
+          },
+        ],
+      },
+    });
+    expect(s.multiAgent.active).toBeNull();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sa-solo',
+        projectId: 10,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    // Single-agent SessionView captures the model.
+    expect(s.sessionsByProject[10]?.['sa-solo']?.model).toBe('claude-sonnet-4-5');
+    // No bus → no aggregation, active still null.
+    expect(s.multiAgent.active).toBeNull();
+  });
+
+  test('re-emitting same model on a subsequent session_started is identity-preserving', () => {
+    let s = seedBusSession();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sa-orch',
+        projectId: 10,
+        model: 'claude-sonnet-4-5-20250929',
+        tools: [],
+      },
+    });
+    const firstMap = s.multiAgent.active?.modelsByProject;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sa-orch-2',
+        projectId: 10,
+        model: 'claude-sonnet-4-5-20250929',
+        tools: [],
+      },
+    });
+    // Same value → skip the spread, identity preserved.
+    expect(s.multiAgent.active?.modelsByProject).toBe(firstMap);
+  });
+});
+
 describe('store / eventDefaultCollapsed', () => {
   function makeRun(mode: 'chain' | 'orchestrator'): MultiAgentRun {
     return {
@@ -605,6 +799,7 @@ describe('store / eventDefaultCollapsed', () => {
       recoveryContext: null,
       routerDrops: [],
       participantControls: {},
+      modelsByProject: {},
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {

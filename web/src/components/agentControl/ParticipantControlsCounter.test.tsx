@@ -62,6 +62,7 @@ function mkRun(participantControls: Record<number, ParticipantControlView>): Mul
     recoveryContext: null,
     routerDrops: [],
     participantControls,
+    modelsByProject: {},
   };
 }
 
