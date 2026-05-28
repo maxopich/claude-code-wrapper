@@ -2247,6 +2247,17 @@ export type ServerMsg =
       reasonText?: string;
       actor: 'operator';
       ts: number;
+      /**
+       * Cluster C Phase 4c (spec AE-5 [security]): observability for the
+       * pause-queue growth signal. Count of `deliverTurn` calls the agent
+       * has queued but not yet started — includes both the queue parked
+       * behind the pause gate and the queue behind a slow in-flight turn.
+       * Operator's mental model is "how many calls are stuck behind this
+       * agent right now"; the spec calls this out as a security signal
+       * because unbounded queue growth on a paused agent is the
+       * "operator forgot they paused this" failure mode.
+       */
+      queuedDeliveries: number;
     }
   | {
       type: 'participant_kicked';

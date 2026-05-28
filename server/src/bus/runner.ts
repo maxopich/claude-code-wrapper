@@ -282,6 +282,37 @@ export class AgentRunner {
    * turn just checkpointed. Different agents stay fully parallel.
    */
   private readonly turnTails = new Map<string, Promise<void>>();
+  /**
+   * Cluster C Phase 4c (spec §5.2 + AE-4 + AE-5): per-agent pause gate.
+   * `pause(name)` overwrites `turnTails.get(name)` with a never-resolving
+   * promise so the NEXT `deliverTurn` chains off it and parks until
+   * `resume(name)` flips the gate. The IN-FLIGHT turn (whose runOneTurn
+   * promise was already in progress when pause arrived) is unaffected —
+   * it completes naturally per the spec's "current in-flight turn NOT
+   * cancelled" guarantee.
+   *
+   * Resume calls `release()` to fulfill the gate promise; queued
+   * deliverTurn calls then proceed in FIFO order, each waiting for the
+   * one before it to finish (the chained `turnTails.set` pattern that
+   * predates pause already gives us that). Re-pause / re-resume return
+   * false without state change — caller (WS handler) surfaces as
+   * `already_in_state`.
+   */
+  private readonly pauseGates = new Map<
+    string,
+    { promise: Promise<void>; release: () => void }
+  >();
+  /**
+   * Cluster C Phase 4c (spec AE-5 [security]): count of deliverTurn calls
+   * the agent has queued but not yet started (i.e. waiting on the tail).
+   * Reported on `participant_pause_changed.queuedDeliveries` so the
+   * operator can see "this paused worker is sitting on N pending
+   * inbound messages — growth is the runaway-buildup signal." Includes
+   * the queue parked behind a pause gate AND the queue behind a slow
+   * in-flight turn — operator's mental model is "how many calls are
+   * stuck behind this agent right now."
+   */
+  private readonly pendingDeliveries = new Map<string, number>();
 
   constructor(private readonly deps: AgentRunnerDeps) {}
 
@@ -325,8 +356,22 @@ export class AgentRunner {
     if (!this.specs.has(agentName)) {
       return Promise.reject(new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`));
     }
+    // Cluster C Phase 4c: bump the queue counter on entry, decrement just
+    // before runOneTurn fires. The window between bump + decrement is
+    // exactly "queued but not running" — which matches the operator's
+    // "stuck behind this agent" mental model for AE-5's queuedDeliveries.
+    this.pendingDeliveries.set(
+      agentName,
+      (this.pendingDeliveries.get(agentName) ?? 0) + 1,
+    );
     const tail = this.turnTails.get(agentName) ?? Promise.resolve();
-    const result = tail.then(() => this.runOneTurn(agentName, promptText));
+    const result = tail.then(() => {
+      this.pendingDeliveries.set(
+        agentName,
+        Math.max(0, (this.pendingDeliveries.get(agentName) ?? 1) - 1),
+      );
+      return this.runOneTurn(agentName, promptText);
+    });
     // Advance the tail regardless of this turn's outcome so one failed or
     // aborted turn never wedges the agent's queue; the real result (incl.
     // rejection) still propagates to this call's own caller via `result`.
@@ -338,6 +383,81 @@ export class AgentRunner {
       ),
     );
     return result;
+  }
+
+  /**
+   * Cluster C Phase 4c: install a never-resolving gate at the head of
+   * `agentName`'s turn queue. Returns true if a fresh gate was installed,
+   * false if the agent was already paused (idempotent re-pause is a no-op
+   * so the WS handler can surface `already_in_state`).
+   *
+   * Semantics:
+   *   - In-flight turn (the one whose `runOneTurn` is already executing
+   *     when pause arrives) is NOT cancelled. The spec's §5.2 model is
+   *     "current in-flight finishes; inbound queues" — `pause` here only
+   *     installs the gate for the NEXT delivery onward.
+   *   - The gate is composed via `tail.then(() => gatePromise)` so it
+   *     waits for any currently-pending tail before the gate itself
+   *     takes effect. That preserves the runner's serialization
+   *     invariant (no two `--resume` subprocesses for the same agent at
+   *     once).
+   *   - `resume(agentName)` resolves the gate and clears the map entry,
+   *     unblocking every queued delivery in FIFO order. The
+   *     `turnTails`-chain pattern guarantees order.
+   *
+   * Caller responsibility: the WS handler MUST persist the pause to
+   * `multi_agent_participants.paused_until` BEFORE calling
+   * `runner.pause()`. The DB is the durable source-of-truth; this
+   * in-memory gate is the hot-path mirror. Without that order, a
+   * server-restart between the two would lose the operator's intent.
+   */
+  pause(agentName: string): boolean {
+    if (!this.specs.has(agentName)) return false;
+    if (this.pauseGates.has(agentName)) return false;
+    let release!: () => void;
+    const promise = new Promise<void>((res) => {
+      release = res;
+    });
+    this.pauseGates.set(agentName, { promise, release });
+    const prevTail = this.turnTails.get(agentName) ?? Promise.resolve();
+    // Chain the gate AFTER the existing tail so the in-flight turn (if
+    // any) completes first, then the gate parks subsequent calls.
+    this.turnTails.set(
+      agentName,
+      prevTail.then(() => promise),
+    );
+    return true;
+  }
+
+  /**
+   * Cluster C Phase 4c: release the pause gate for `agentName`. Returns
+   * true iff a gate was actually cleared (`false` on re-resume / not-
+   * paused). The release is synchronous from the gate's POV: queued
+   * `deliverTurn` calls' `.then()` fire in the next microtask.
+   */
+  resume(agentName: string): boolean {
+    const gate = this.pauseGates.get(agentName);
+    if (!gate) return false;
+    this.pauseGates.delete(agentName);
+    gate.release();
+    return true;
+  }
+
+  /**
+   * Cluster C Phase 4c (AE-5): observability hook for the WS handler's
+   * `participant_pause_changed.queuedDeliveries` field. Returns the
+   * current "queued but not started" count for the agent. Includes calls
+   * waiting on a pause gate AND calls waiting on a slow in-flight turn —
+   * the operator's mental model doesn't distinguish (and shouldn't have
+   * to).
+   */
+  getPendingDeliveries(agentName: string): number {
+    return this.pendingDeliveries.get(agentName) ?? 0;
+  }
+
+  /** Test-only probe: is the gate currently installed? */
+  isPaused(agentName: string): boolean {
+    return this.pauseGates.has(agentName);
   }
 
   private async runOneTurn(agentName: string, promptText: string): Promise<void> {

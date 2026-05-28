@@ -138,7 +138,10 @@ import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { getLiveSession, hasLiveSession } from '../bus/session_registry.js';
 import {
   buildParticipantMuteChangedMsg,
+  buildParticipantPauseChangedMsg,
   executeMuteParticipant,
+  executePauseParticipant,
+  executeResumeParticipant,
   executeUnmuteParticipant,
 } from './control_verbs.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
@@ -2436,20 +2439,101 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       );
       return;
     }
-    case 'pause_participant':
-    case 'resume_participant':
+    case 'pause_participant': {
+      // Cluster C Phase 4c (spec §5.2 + §5.6 + AE-4/5/6): orchestrator-mode
+      // per-agent pause. Same orchestration shape as mute (validate → DB
+      // flip → AgentRunner gate install → safety_audit dual-write →
+      // state-change echo) but the echo carries `queuedDeliveries` so the
+      // operator sees the pending-queue size growing while the agent is
+      // paused (AE-5 [security] observability for runaway buildup).
+      //
+      // Pause expiry timer (spec §5.6 — auto_resume / auto_kick on
+      // timeoutMs elapse) lands in C4c2; this slice persists the
+      // intended `pausedUntil` + `pauseExpiryAction` but doesn't schedule
+      // the timer yet.
+      const live = getLiveSession(msg.sessionId);
+      const orchestratorHandle =
+        live?.mode === 'orchestrator'
+          ? (live.handle as unknown as OrchestratorSessionHandle)
+          : undefined;
+      const result = executePauseParticipant({
+        msg,
+        orchestratorHandle,
+        sessionMode: live?.mode ?? null,
+      });
+      if (!result.ok) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `${result.failureCode}: ${result.message}`,
+        });
+        return;
+      }
+      send(
+        conn.ws,
+        buildParticipantPauseChangedMsg({
+          sessionId: msg.sessionId,
+          projectId: msg.projectId,
+          pausedUntil: result.pausedUntil,
+          expiryAction: msg.expiryAction,
+          reasonCode: msg.reasonCode,
+          reasonText: msg.reasonText,
+          queuedDeliveries: result.queuedDeliveries,
+          ts: Date.now(),
+        }),
+      );
+      return;
+    }
+    case 'resume_participant': {
+      // Cluster C Phase 4c: clear the AgentRunner pause gate + flip
+      // paused_until/pause_expiry_action back to NULL. Queued
+      // deliverTurn calls (registered while paused) fire in FIFO order
+      // in the next microtask — the runner's existing turn-serialization
+      // (tail chaining) preserves order.
+      const live = getLiveSession(msg.sessionId);
+      const orchestratorHandle =
+        live?.mode === 'orchestrator'
+          ? (live.handle as unknown as OrchestratorSessionHandle)
+          : undefined;
+      const result = executeResumeParticipant({
+        msg,
+        orchestratorHandle,
+        sessionMode: live?.mode ?? null,
+      });
+      if (!result.ok) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `${result.failureCode}: ${result.message}`,
+        });
+        return;
+      }
+      send(
+        conn.ws,
+        buildParticipantPauseChangedMsg({
+          sessionId: msg.sessionId,
+          projectId: msg.projectId,
+          pausedUntil: null,
+          expiryAction: null,
+          reasonCode: msg.reasonCode,
+          reasonText: msg.reasonText,
+          queuedDeliveries: result.queuedDeliveries,
+          ts: Date.now(),
+        }),
+      );
+      return;
+    }
     case 'kick_participant': {
-      // Cluster C Phase 4b ships mute only. pause/resume/kick are wired in
-      // dedicated follow-up slices (4c, 4d) — explicit reject here keeps a
-      // misbehaving client (or a smoke harness sending the new verbs early)
-      // from silently no-op'ing. The Phase 4a ClientMsg shapes are defined
-      // so the client + tests can already round-trip the wire format; only
-      // the SERVER-side enforcement is staged.
+      // Cluster C Phase 4d ships kick. Stub for now — explicit reject
+      // keeps a misbehaving client (or smoke harness sending the verb
+      // early) from silently no-op'ing.
       send(conn.ws, {
         type: 'wrapper_error',
         sessionId: msg.sessionId,
         kind: 'process_crashed',
-        message: `${msg.type} is not yet implemented (Phase C4b ships mute only; pause + kick land in C4c + C4d)`,
+        message: `kick_participant is not yet implemented (lands in Cluster C Phase 4d)`,
       });
       return;
     }

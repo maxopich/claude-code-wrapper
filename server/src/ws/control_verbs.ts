@@ -2,17 +2,20 @@ import type {
   ClientMsg,
   ControlReasonCode,
   ControllabilityFailureCode,
+  PauseExpiryAction,
   ServerMsg,
 } from '@cebab/shared/protocol';
-import { isControlReasonCode } from '@cebab/shared/protocol';
+import { isControlReasonCode, isPauseExpiryAction } from '@cebab/shared/protocol';
 import {
   appendSafetyAudit,
   type SafetyAuditInput,
 } from '../notifications/safety_audit.js';
 import { getMultiAgentSession, listResolvedParticipants } from '../repo/multi_agent.js';
 import {
+  clearParticipantPause,
   getControlState,
   setParticipantMuted,
+  setParticipantPause,
 } from '../repo/per_agent_control.js';
 
 /**
@@ -267,4 +270,327 @@ export function probeIsMuted(args: {
   projectId: number;
 }): boolean {
   return getControlState(args.sessionId, args.projectId)?.muted === true;
+}
+
+// ---------- Cluster C Phase 4c: pause + resume ----------
+//
+// Pause/resume share the same orchestration shape as mute/unmute but with
+// these differences:
+//   - Pause REQUIRES a positive `timeoutMs` and a valid `expiryAction` on
+//     the wire (spec §5.6 AE-6). Missing or non-positive timeout →
+//     `pause_timeout_required`. Unknown expiryAction →
+//     `pause_expiry_action_invalid`.
+//   - Pause + resume are OPERATIONAL class (not safety). The spec §3
+//     classifies the pause itself as operational; only the expiry timer's
+//     `pause.expired_without_resume` event is safety class (lands with the
+//     C4c2 expiry timer slice).
+//   - Chain mode IS allowed (spec §5.3 — chain stalls at paused hop). For
+//     Phase 4c, however, only orchestrator-mode handles expose the pause
+//     wire — chain handle exposure lands in a follow-up. Chain attempts
+//     return `participant_not_found` until that wires up.
+//   - State-change echo carries `queuedDeliveries` (AE-5) so the operator
+//     can see the pending-queue size growing while the agent is paused.
+
+const HARD_TIMEOUT_FLOOR_MS = 1; // any positive value; spec §5.6 doesn't mandate a max
+const HARD_TIMEOUT_CEILING_MS = 24 * 60 * 60 * 1000; // 24h — past this is clearly a misuse
+
+export type ExecutePauseInput = {
+  msg: Extract<ClientMsg, { type: 'pause_participant' }>;
+  /**
+   * Live orchestrator handle. Phase 4c is orchestrator-only on the wire;
+   * chain handle exposure of pause is a follow-up. When the active session
+   * is chain (or torn down), `orchestratorHandle` is undefined and the
+   * handler returns `participant_not_found` — same code mute uses for
+   * "no live target" so the client reducer can fold both cases.
+   */
+  orchestratorHandle:
+    | {
+        pauseAgent: (agentName: string) => boolean;
+        getPendingDeliveries: (agentName: string) => number;
+      }
+    | undefined;
+  sessionMode: 'orchestrator' | 'chain' | null;
+  appendAudit?: typeof appendSafetyAudit;
+  now?: () => number;
+};
+
+export type ExecuteResumeInput = {
+  msg: Extract<ClientMsg, { type: 'resume_participant' }>;
+  orchestratorHandle:
+    | {
+        resumeAgent: (agentName: string) => boolean;
+        getPendingDeliveries: (agentName: string) => number;
+      }
+    | undefined;
+  sessionMode: 'orchestrator' | 'chain' | null;
+  appendAudit?: typeof appendSafetyAudit;
+  now?: () => number;
+};
+
+export type ExecutePauseResult =
+  | { ok: true; auditId: string; pausedUntil: number; queuedDeliveries: number }
+  | { ok: false; failureCode: ControllabilityFailureCode; message: string };
+
+export type ExecuteResumeResult =
+  | { ok: true; auditId: string; queuedDeliveries: number }
+  | { ok: false; failureCode: ControllabilityFailureCode; message: string };
+
+export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseResult {
+  const { msg } = input;
+  const appendAudit = input.appendAudit ?? appendSafetyAudit;
+  const now = input.now ?? Date.now;
+
+  // Wire validation: reasonCode + 'other' pairing.
+  if (!isControlReasonCode(msg.reasonCode)) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `invalid reasonCode: ${JSON.stringify(msg.reasonCode)}`,
+    };
+  }
+  if (msg.reasonCode === 'other' && !msg.reasonText?.trim()) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: "reasonCode='other' requires non-empty reasonText",
+    };
+  }
+  // Spec §5.6 AE-6: pause without positive timeoutMs is rejected at the
+  // wire. A missing/non-positive value is the schema's NOT NULL contract
+  // applied at the handler layer (the column itself is nullable because
+  // "not paused" is also a valid state).
+  if (
+    typeof msg.timeoutMs !== 'number' ||
+    !Number.isFinite(msg.timeoutMs) ||
+    msg.timeoutMs < HARD_TIMEOUT_FLOOR_MS ||
+    msg.timeoutMs > HARD_TIMEOUT_CEILING_MS
+  ) {
+    return {
+      ok: false,
+      failureCode: 'pause_timeout_required',
+      message: `pause requires a positive timeoutMs in (${HARD_TIMEOUT_FLOOR_MS}, ${HARD_TIMEOUT_CEILING_MS}]; got ${JSON.stringify(msg.timeoutMs)}`,
+    };
+  }
+  if (!isPauseExpiryAction(msg.expiryAction)) {
+    return {
+      ok: false,
+      failureCode: 'pause_expiry_action_invalid',
+      message: `expiryAction must be 'auto_resume' or 'auto_kick'; got ${JSON.stringify(msg.expiryAction)}`,
+    };
+  }
+
+  // Session existence — same shape as mute.
+  const sessionRow = getMultiAgentSession(msg.sessionId);
+  if (!sessionRow) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `unknown multi-agent session ${msg.sessionId}`,
+    };
+  }
+
+  // Participant existence + role guard. Orchestrator self-pause is
+  // rejected for the same reason as orchestrator self-mute: pausing the
+  // orchestrator would silently stall the whole session.
+  const participants = listResolvedParticipants(msg.sessionId);
+  const participant = participants.find((p) => p.project_id === msg.projectId);
+  if (!participant) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `project ${msg.projectId} is not a participant of session ${msg.sessionId}`,
+    };
+  }
+  if (participant.role === 'orchestrator') {
+    return {
+      ok: false,
+      failureCode: 'orchestrator_cannot_kick',
+      message: 'cannot pause the orchestrator — it would stall the whole session',
+    };
+  }
+  if (!participant.bus_agent_name) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `participant ${msg.projectId} has no bus_agent_name — install bus integration first`,
+    };
+  }
+
+  // DB flip — repo returns false if already paused (idempotency).
+  const pausedUntil = now() + msg.timeoutMs;
+  const dbChanged = setParticipantPause(
+    msg.sessionId,
+    msg.projectId,
+    pausedUntil,
+    msg.expiryAction,
+  );
+  if (!dbChanged) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `${participant.bus_agent_name} is already paused`,
+    };
+  }
+
+  // Sync the AgentRunner pause gate. Missing handle: log + still write
+  // the audit so the operator's intent survives. Chain sessions land
+  // here too (Phase 4c chain exposure isn't wired); a later phase
+  // attaches the chain handle's pauseAgent.
+  if (input.orchestratorHandle) {
+    input.orchestratorHandle.pauseAgent(participant.bus_agent_name);
+  } else {
+    console.warn(
+      `[ws] executePause(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to install pause gate`,
+    );
+  }
+
+  // safety_audit dual-write — kind='agent_control.paused'. Operational
+  // class per spec §3, but pause STILL writes to safety_audit because
+  // it's an operator action with forensic value. The expiry timer's
+  // `pause.expired_without_resume` event (C4c2) is the safety-class
+  // variant.
+  const auditInput: SafetyAuditInput = {
+    ts: now(),
+    sessionId: msg.sessionId,
+    agentId: participant.bus_agent_name,
+    kind: 'agent_control.paused',
+    reasonCode: msg.reasonCode,
+    payload: {
+      projectId: msg.projectId,
+      agentSlug: participant.bus_agent_name,
+      reasonText: msg.reasonText ?? null,
+      timeoutMs: msg.timeoutMs,
+      expiryAction: msg.expiryAction,
+      pausedUntil,
+    },
+  };
+  let auditId: string;
+  try {
+    auditId = appendAudit(auditInput).id;
+  } catch (err) {
+    console.error(`[ws] executePause safety_audit append failed for ${msg.sessionId}`, err);
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `safety_audit append failed: ${(err as Error).message}`,
+    };
+  }
+
+  const queuedDeliveries =
+    input.orchestratorHandle?.getPendingDeliveries(participant.bus_agent_name) ?? 0;
+  return { ok: true, auditId, pausedUntil, queuedDeliveries };
+}
+
+export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResumeResult {
+  const { msg } = input;
+  const appendAudit = input.appendAudit ?? appendSafetyAudit;
+  const now = input.now ?? Date.now;
+
+  if (!isControlReasonCode(msg.reasonCode)) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `invalid reasonCode: ${JSON.stringify(msg.reasonCode)}`,
+    };
+  }
+  if (msg.reasonCode === 'other' && !msg.reasonText?.trim()) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: "reasonCode='other' requires non-empty reasonText",
+    };
+  }
+
+  const sessionRow = getMultiAgentSession(msg.sessionId);
+  if (!sessionRow) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `unknown multi-agent session ${msg.sessionId}`,
+    };
+  }
+
+  const participants = listResolvedParticipants(msg.sessionId);
+  const participant = participants.find((p) => p.project_id === msg.projectId);
+  if (!participant) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `project ${msg.projectId} is not a participant of session ${msg.sessionId}`,
+    };
+  }
+  if (!participant.bus_agent_name) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `participant ${msg.projectId} has no bus_agent_name — install bus integration first`,
+    };
+  }
+
+  const dbChanged = clearParticipantPause(msg.sessionId, msg.projectId);
+  if (!dbChanged) {
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `${participant.bus_agent_name} is not currently paused`,
+    };
+  }
+  if (input.orchestratorHandle) {
+    input.orchestratorHandle.resumeAgent(participant.bus_agent_name);
+  } else {
+    console.warn(
+      `[ws] executeResume(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to release pause gate`,
+    );
+  }
+  const auditInput: SafetyAuditInput = {
+    ts: now(),
+    sessionId: msg.sessionId,
+    agentId: participant.bus_agent_name,
+    kind: 'agent_control.resumed',
+    reasonCode: msg.reasonCode,
+    payload: {
+      projectId: msg.projectId,
+      agentSlug: participant.bus_agent_name,
+      reasonText: msg.reasonText ?? null,
+    },
+  };
+  let auditId: string;
+  try {
+    auditId = appendAudit(auditInput).id;
+  } catch (err) {
+    console.error(`[ws] executeResume safety_audit append failed for ${msg.sessionId}`, err);
+    return {
+      ok: false,
+      failureCode: 'already_in_state',
+      message: `safety_audit append failed: ${(err as Error).message}`,
+    };
+  }
+  const queuedDeliveries =
+    input.orchestratorHandle?.getPendingDeliveries(participant.bus_agent_name) ?? 0;
+  return { ok: true, auditId, queuedDeliveries };
+}
+
+export function buildParticipantPauseChangedMsg(args: {
+  sessionId: string;
+  projectId: number;
+  pausedUntil: number | null;
+  expiryAction: PauseExpiryAction | null;
+  reasonCode: ControlReasonCode;
+  reasonText?: string;
+  /** AE-5 [security]: observability for the "paused-queue growth" signal. */
+  queuedDeliveries: number;
+  ts: number;
+}): Extract<ServerMsg, { type: 'participant_pause_changed' }> {
+  return {
+    type: 'participant_pause_changed',
+    sessionId: args.sessionId,
+    projectId: args.projectId,
+    pausedUntil: args.pausedUntil,
+    expiryAction: args.expiryAction,
+    reasonCode: args.reasonCode,
+    ...(args.reasonText !== undefined ? { reasonText: args.reasonText } : {}),
+    actor: 'operator',
+    ts: args.ts,
+    queuedDeliveries: args.queuedDeliveries,
+  };
 }

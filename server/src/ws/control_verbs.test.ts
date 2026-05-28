@@ -8,11 +8,18 @@ import { closeDb, getDb } from '../db.js';
 import { addParticipant, createMultiAgentSession } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import {
-  executeMuteParticipant,
-  executeUnmuteParticipant,
   buildParticipantMuteChangedMsg,
+  buildParticipantPauseChangedMsg,
+  executeMuteParticipant,
+  executePauseParticipant,
+  executeResumeParticipant,
+  executeUnmuteParticipant,
 } from './control_verbs.js';
-import { getControlState, setParticipantMuted } from '../repo/per_agent_control.js';
+import {
+  getControlState,
+  setParticipantMuted,
+  setParticipantPause,
+} from '../repo/per_agent_control.js';
 
 // Cluster C Phase 4b: WS handler-level tests for executeMuteParticipant /
 // executeUnmuteParticipant. Exercises the full validation chain (reason
@@ -322,6 +329,284 @@ describe('buildParticipantMuteChangedMsg', () => {
       reasonCode: 'topology_repair',
       ts: 1,
     });
+    expect('reasonText' in env).toBe(false);
+  });
+});
+
+// ===== Cluster C Phase 4c: pause + resume handlers =====
+
+function pauseMsg(
+  overrides: Partial<Extract<ClientMsg, { type: 'pause_participant' }>> = {},
+): Extract<ClientMsg, { type: 'pause_participant' }> {
+  return {
+    type: 'pause_participant',
+    sessionId: 'sess-1',
+    projectId: 0, // overridden by callers
+    reasonCode: 'off_task',
+    timeoutMs: 60_000,
+    expiryAction: 'auto_resume',
+    ...overrides,
+  };
+}
+
+function resumeMsgFor(
+  overrides: Partial<Extract<ClientMsg, { type: 'resume_participant' }>> = {},
+): Extract<ClientMsg, { type: 'resume_participant' }> {
+  return {
+    type: 'resume_participant',
+    sessionId: 'sess-1',
+    projectId: 0,
+    reasonCode: 'topology_repair',
+    ...overrides,
+  };
+}
+
+function makeFakePauseHandle() {
+  const paused = new Set<string>();
+  return {
+    pauseAgent: vi.fn((name: string) => {
+      if (paused.has(name)) return false;
+      paused.add(name);
+      return true;
+    }),
+    resumeAgent: vi.fn((name: string) => {
+      if (!paused.has(name)) return false;
+      paused.delete(name);
+      return true;
+    }),
+    getPendingDeliveries: vi.fn(() => 0),
+  };
+}
+
+describe('executePauseParticipant — happy path', () => {
+  test('flips DB column, calls handle.pauseAgent, writes safety_audit, returns ok', () => {
+    const { workerId } = seedSession();
+    const handle = makeFakePauseHandle();
+    handle.getPendingDeliveries.mockReturnValue(3);
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId, reasonCode: 'runaway_loop', timeoutMs: 5 * 60_000 }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+      now: () => 1_700_000_000_000,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return; // type guard
+    expect(result.pausedUntil).toBe(1_700_000_000_000 + 5 * 60_000);
+    expect(result.queuedDeliveries).toBe(3);
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBe(
+      1_700_000_000_000 + 5 * 60_000,
+    );
+    expect(handle.pauseAgent).toHaveBeenCalledWith('worker-slug');
+    const audit = getDb()
+      .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
+        "SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'agent_control.paused'",
+      )
+      .get();
+    expect(audit?.kind).toBe('agent_control.paused');
+    const payload = JSON.parse(audit!.payload_json) as { timeoutMs: number; expiryAction: string };
+    expect(payload.timeoutMs).toBe(5 * 60_000);
+    expect(payload.expiryAction).toBe('auto_resume');
+  });
+
+  test('expiryAction=auto_kick is accepted', () => {
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId, expiryAction: 'auto_kick' }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+describe('executePauseParticipant — wire validation', () => {
+  test('missing timeoutMs → pause_timeout_required', () => {
+    const { workerId } = seedSession();
+    const msgNoTimeout = pauseMsg({ projectId: workerId });
+    // Synthesize the wire-shape failure by clearing the field on the
+    // already-typed message.
+    const result = executePauseParticipant({
+      msg: { ...msgNoTimeout, timeoutMs: undefined as unknown as number },
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'pause_timeout_required' }),
+    );
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+  });
+
+  test('zero or negative timeoutMs → pause_timeout_required', () => {
+    const { workerId } = seedSession();
+    for (const bad of [0, -1, -100, NaN, Infinity]) {
+      const result = executePauseParticipant({
+        msg: pauseMsg({ projectId: workerId, timeoutMs: bad }),
+        orchestratorHandle: makeFakePauseHandle(),
+        sessionMode: 'orchestrator',
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.failureCode).toBe('pause_timeout_required');
+      }
+    }
+  });
+
+  test('timeout beyond 24h ceiling → pause_timeout_required', () => {
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId, timeoutMs: 25 * 60 * 60 * 1000 }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'pause_timeout_required' }),
+    );
+  });
+
+  test('invalid expiryAction → pause_expiry_action_invalid', () => {
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({
+        projectId: workerId,
+        expiryAction: 'escalate' as unknown as 'auto_resume',
+      }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'pause_expiry_action_invalid' }),
+    );
+  });
+
+  test('orchestrator role → orchestrator_cannot_kick', () => {
+    const { orchestratorId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: orchestratorId }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'orchestrator_cannot_kick' }),
+    );
+  });
+
+  test('unknown participant → participant_not_found', () => {
+    seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: 99_999 }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'participant_not_found' }),
+    );
+  });
+
+  test('re-pause (already paused) → already_in_state', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_resume');
+    const handle = makeFakePauseHandle();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'already_in_state' }),
+    );
+    expect(handle.pauseAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe('executeResumeParticipant', () => {
+  test('flips paused → unpaused; writes agent_control.resumed audit', () => {
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_resume');
+    const handle = makeFakePauseHandle();
+    handle.pauseAgent('worker-slug'); // pre-sync the fake to "paused"
+
+    const result = executeResumeParticipant({
+      msg: resumeMsgFor({ projectId: workerId, reasonCode: 'topology_repair' }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+    expect(handle.resumeAgent).toHaveBeenCalledWith('worker-slug');
+    const audit = getDb()
+      .prepare<[], { reason_code: string }>(
+        "SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.resumed'",
+      )
+      .get();
+    expect(audit?.reason_code).toBe('topology_repair');
+  });
+
+  test('re-resume (not paused) → already_in_state', () => {
+    const { workerId } = seedSession();
+    const result = executeResumeParticipant({
+      msg: resumeMsgFor({ projectId: workerId }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toEqual(
+      expect.objectContaining({ ok: false, failureCode: 'already_in_state' }),
+    );
+  });
+});
+
+describe('executePauseParticipant — missing live handle', () => {
+  test('DB is still flipped + audit written; warn logged', () => {
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
+      orchestratorHandle: undefined,
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeGreaterThan(0);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+});
+
+describe('buildParticipantPauseChangedMsg', () => {
+  test('shapes the wire envelope with pausedUntil + expiryAction + queuedDeliveries', () => {
+    const env = buildParticipantPauseChangedMsg({
+      sessionId: 'sess-x',
+      projectId: 42,
+      pausedUntil: 1_700_000_000_000 + 60_000,
+      expiryAction: 'auto_resume',
+      reasonCode: 'cost_ceiling',
+      reasonText: 'tokens too high',
+      queuedDeliveries: 5,
+      ts: 1_700_000_000_000,
+    });
+    expect(env).toEqual({
+      type: 'participant_pause_changed',
+      sessionId: 'sess-x',
+      projectId: 42,
+      pausedUntil: 1_700_000_000_000 + 60_000,
+      expiryAction: 'auto_resume',
+      reasonCode: 'cost_ceiling',
+      reasonText: 'tokens too high',
+      actor: 'operator',
+      ts: 1_700_000_000_000,
+      queuedDeliveries: 5,
+    });
+  });
+
+  test('resume shape: pausedUntil=null, expiryAction=null, queuedDeliveries reported', () => {
+    const env = buildParticipantPauseChangedMsg({
+      sessionId: 'sess-x',
+      projectId: 42,
+      pausedUntil: null,
+      expiryAction: null,
+      reasonCode: 'topology_repair',
+      queuedDeliveries: 0,
+      ts: 1,
+    });
+    expect(env.pausedUntil).toBeNull();
+    expect(env.expiryAction).toBeNull();
+    expect(env.queuedDeliveries).toBe(0);
     expect('reasonText' in env).toBe(false);
   });
 });

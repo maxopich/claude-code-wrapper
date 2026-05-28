@@ -269,6 +269,24 @@ export type OrchestratorSessionHandle = {
    */
   setMute: (agentName: string, muted: boolean) => boolean;
   isMuted: (agentName: string) => boolean;
+  /**
+   * Cluster C Phase 4c: install / release the per-agent pause gate in
+   * the AgentRunner. The WS handler calls these AFTER persisting the
+   * pause to `multi_agent_participants.paused_until` so the durable
+   * source-of-truth is in place if the process dies mid-pause (R-B
+   * reconstruct rehydrates from the column).
+   *
+   * Returns true iff the gate state changed (re-pause / re-resume return
+   * false). The handler surfaces false as `already_in_state`.
+   *
+   * `getPendingDeliveries` is the AE-5 observability hook — the
+   * `participant_pause_changed` ServerMsg carries this count so the
+   * operator can see "this paused worker is sitting on N pending
+   * inbound messages."
+   */
+  pauseAgent: (agentName: string) => boolean;
+  resumeAgent: (agentName: string) => boolean;
+  getPendingDeliveries: (agentName: string) => number;
 };
 
 type OrchestratorRouter = {
@@ -1370,6 +1388,9 @@ export function wireOrchestratorSession(p: {
     },
     setMute: (agentName, muted) => router.setMute(agentName, muted),
     isMuted: (agentName) => router.isMuted(agentName),
+    pauseAgent: (agentName) => runner.pause(agentName),
+    resumeAgent: (agentName) => runner.resume(agentName),
+    getPendingDeliveries: (agentName) => runner.getPendingDeliveries(agentName),
   };
 
   registerLiveSession({
