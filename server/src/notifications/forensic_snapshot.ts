@@ -174,6 +174,273 @@ function buildEffectivePrompt(
   return { source: 'none' };
 }
 
+// ---------- Cluster C Phase 4f: multi-agent forensic capture ----------
+//
+// Per-participant forensic snapshot for a multi-agent control action
+// (operator kick + auto-kick via pause expiry). Populates the
+// `agentSlug`, `busInboxOutbox`, and `mutationRationale` fields that
+// `captureSingleAgentForensics` intentionally left NULL — they only
+// have content when the action targets a bus participant.
+//
+// The single-agent vs multi-agent split is on capture shape, not on
+// the persistence model: both call `appendForensics` with the same
+// `ForensicsInput` shape (minus the safetyAuditId stamped after the
+// audit row's append). The audit-viewer (post-v1 surface) reads the
+// JSON columns generically and renders whichever fields are populated.
+//
+// What the multi-agent capture pulls in (per spec §5.5 + the kick path
+// needing forensic state at moment of kick):
+//
+//   - `agentSlug`             — bus_agent_name of the target participant
+//   - `effectivePrompt`       — { source: 'last-bus-event', ... } when the
+//                               agent's most recent inbox message exists;
+//                               { source: 'none' } when freshly added /
+//                               never delivered to. Bus participants
+//                               don't have a "captured prompt" the way
+//                               single-agent's rate-limit hold does, so
+//                               we look at the bus inbox tail instead.
+//   - `eventsLastN`           — recent BusEvents the participant SAW
+//                               (destination = agent slug), capped at 50.
+//                               Lets a forensic viewer see "what was
+//                               this agent reacting to right before the
+//                               action."
+//   - `busInboxOutbox`        — separated inbox + outbox tails for the
+//                               agent. Different from eventsLastN: this
+//                               surfaces the bidirectional view ("agent
+//                               was sending X while receiving Y") that's
+//                               only meaningful in a bus setting.
+//   - `mutationRationale`     — recent mutations the agent's recent
+//                               turns performed, each with toolName +
+//                               category + summary + filePath +
+//                               confirmed-status. Lets an operator
+//                               answer "was this kick justified — what
+//                               was the agent about to do?"
+//   - `workdirTreeHash`       — same shape as single-agent, computed
+//                               against the participant's project cwd.
+//   - `activePermissions`     — kept undefined for multi-agent: a
+//                               participant's permissionMode is
+//                               session-wide (`bypassPermissions` for
+//                               bus turns per CLAUDE.md), not
+//                               per-participant. Surfacing it would
+//                               be redundant across the per-agent rows.
+//   - `pendingToolCalls`      — null for multi-agent: bus turns run
+//                               headless with bypassPermissions, so no
+//                               pending `canUseTool` requests exist.
+//
+// The action-specific metadata (kick mode, reasonCode, trigger ref for
+// auto-kick) lives in the parent safety_audit row's payload — the
+// forensic bundle complements it with the state-at-action-time, not
+// the action itself.
+
+export type MultiAgentBusEvent = {
+  id: number;
+  ts: number;
+  source: string;
+  destination: string;
+  kind: string;
+  textPreview: string;
+};
+
+export type MultiAgentMutationSummary = {
+  id: number;
+  ts: number;
+  toolName: string;
+  category: 'mutate' | 'dangerous';
+  summary: string;
+  filePath: string | null;
+  confirmed: boolean;
+};
+
+export type CaptureMultiAgentForensicsInput = {
+  sessionId: string;
+  /** Bus agent slug — the router's key and what shows up on
+   *  `safety_audit.agent_id` for this row. */
+  agentSlug: string;
+  /** Absolute path to the participant's project cwd. Used for the
+   *  shallow workdir hash. */
+  projectCwd: string | undefined;
+  /**
+   * All BusEvents involving this agent in EITHER direction
+   * (source = slug OR destination = slug), most recent last. Caller
+   * (the kick handler) filters from `listMultiAgentEvents` to avoid
+   * a per-call repo query inside this helper. Cap at 50 here so a
+   * test that passes too many doesn't bloat the row.
+   */
+  agentBusEvents: MultiAgentBusEvent[];
+  /** All mutations by this agent for the session, ascending ts.
+   *  Capped at 50 most-recent inside the helper. */
+  agentMutations: MultiAgentMutationSummary[];
+  /** Total count of bus events in the session (any source/destination)
+   *  so the forensic viewer can show "agent's slice / total" context. */
+  totalSessionEvents: number;
+  /** Clock injection for deterministic ts in tests. */
+  now?: () => number;
+};
+
+const MULTI_AGENT_EVENTS_CAP = 50;
+const MULTI_AGENT_MUTATIONS_CAP = 50;
+const BUS_EVENT_TEXT_PREVIEW_CHARS = 240;
+
+/**
+ * Build a ForensicsInput-shaped bundle for a multi-agent control action
+ * targeting one participant. Returns the bundle minus `safetyAuditId`
+ * — the caller (executeKickParticipant / executeExpireParticipant)
+ * stamps that in after appending the parent audit row.
+ *
+ * Pure-ish: workdir read is the only side effect, wrapped same way as
+ * the single-agent path so a flaky mount degrades to
+ * `workdirTreeHash: null` + `snapshotFailedReason` populated.
+ */
+export function captureMultiAgentForensics(
+  input: CaptureMultiAgentForensicsInput,
+): Omit<ForensicsInput, 'safetyAuditId'> {
+  const now = input.now ?? Date.now;
+  const ts = now();
+
+  // Cap the event window inside the helper too (caller already filtered,
+  // but a too-generous caller shouldn't blow the row size).
+  const events = input.agentBusEvents.slice(-MULTI_AGENT_EVENTS_CAP);
+  const mutations = input.agentMutations.slice(-MULTI_AGENT_MUTATIONS_CAP);
+
+  // Effective prompt: scan the agent's bus events newest-first for the
+  // last message ADDRESSED TO IT (destination = agent slug). That's the
+  // semantic equivalent of single-agent's "last user message" — the
+  // most recent thing the agent was asked to act on.
+  const effectivePrompt = buildMultiAgentEffectivePrompt(input.agentSlug, events);
+
+  // Wire-shape last-N events: the single-agent shape is { seq, ts, type,
+  // subtype, raw }, the multi-agent shape is keyed on bus event fields.
+  // We use the BusEvent fields directly so the JSON column captures
+  // routing context (source/destination) — without those, the forensic
+  // viewer couldn't tell whether the agent was talking or listening.
+  const eventsLastN = events.map((e) => ({
+    id: e.id,
+    ts: e.ts,
+    source: e.source,
+    destination: e.destination,
+    kind: e.kind,
+    textPreview: e.textPreview,
+  }));
+
+  // Inbox / outbox split: same source events but partitioned. The
+  // forensic viewer can render two columns; eventsLastN is the
+  // flattened chronological view used by simpler renderers.
+  const busInboxOutbox = {
+    inbox: events
+      .filter((e) => e.destination === input.agentSlug)
+      .map((e) => ({
+        id: e.id,
+        ts: e.ts,
+        source: e.source,
+        kind: e.kind,
+        textPreview: e.textPreview,
+      })),
+    outbox: events
+      .filter((e) => e.source === input.agentSlug)
+      .map((e) => ({
+        id: e.id,
+        ts: e.ts,
+        destination: e.destination,
+        kind: e.kind,
+        textPreview: e.textPreview,
+      })),
+    totalSessionEvents: input.totalSessionEvents,
+  };
+
+  // Mutation rationale: list of recent mutations attributed to this
+  // agent, ordered ts ASC (matches the persistence order so a viewer
+  // sees the action sequence directly). Each row carries enough
+  // identifying info for cross-reference with the multi_agent_mutations
+  // table without re-querying.
+  const mutationRationale = {
+    recentMutations: mutations.map((m) => ({
+      id: m.id,
+      ts: m.ts,
+      toolName: m.toolName,
+      category: m.category,
+      summary: m.summary,
+      filePath: m.filePath,
+      confirmed: m.confirmed,
+    })),
+    totalMutations: input.agentMutations.length,
+  };
+
+  // Workdir hash — same wrapping as single-agent. NULL when cwd
+  // missing (chain mode or pathological state); reason logged on
+  // snapshotFailedReason if the read throws.
+  let workdirTreeHash: string | null = null;
+  let snapshotFailedReason: string | null = null;
+  if (input.projectCwd) {
+    try {
+      workdirTreeHash = computeShallowWorkdirHash(input.projectCwd);
+    } catch (err) {
+      snapshotFailedReason = `workdir_hash_failed: ${(err as Error).message}`;
+    }
+  }
+
+  return {
+    ts,
+    sessionId: input.sessionId,
+    agentSlug: input.agentSlug,
+    effectivePrompt,
+    eventsLastN,
+    pendingToolCalls: null, // bus turns run headless; no pending canUseTool
+    workdirTreeHash,
+    activePermissions: undefined, // session-wide for bus, not per-participant
+    busInboxOutbox,
+    mutationRationale,
+    snapshotFailedReason,
+  };
+}
+
+type MultiAgentEffectivePromptShape =
+  | { source: 'last-bus-inbox'; text: string; eventId: number; from: string }
+  | { source: 'none' };
+
+function buildMultiAgentEffectivePrompt(
+  agentSlug: string,
+  events: readonly MultiAgentBusEvent[],
+): MultiAgentEffectivePromptShape {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i]!;
+    if (ev.destination === agentSlug) {
+      return {
+        source: 'last-bus-inbox',
+        text: ev.textPreview,
+        eventId: ev.id,
+        from: ev.source,
+      };
+    }
+  }
+  return { source: 'none' };
+}
+
+/**
+ * Helper: turn a raw BusEvent (full text, no preview) into the
+ * preview-trimmed shape `captureMultiAgentForensics` expects. Lives
+ * here so the caller doesn't have to know the preview char cap.
+ */
+export function toBusEventPreview(ev: {
+  id: number;
+  ts: number;
+  source: string;
+  destination: string;
+  kind: string;
+  text: string;
+}): MultiAgentBusEvent {
+  return {
+    id: ev.id,
+    ts: ev.ts,
+    source: ev.source,
+    destination: ev.destination,
+    kind: ev.kind,
+    textPreview:
+      ev.text.length > BUS_EVENT_TEXT_PREVIEW_CHARS
+        ? ev.text.slice(0, BUS_EVENT_TEXT_PREVIEW_CHARS) + '…'
+        : ev.text,
+  };
+}
+
 /**
  * Shallow workdir hash. Walks the cwd one level deep, skipping
  * WORKDIR_HASH_SKIP_DIRS, sorts entries by name, takes the first

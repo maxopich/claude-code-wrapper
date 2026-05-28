@@ -3,8 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
+  captureMultiAgentForensics,
   captureSingleAgentForensics,
   computeShallowWorkdirHash,
+  toBusEventPreview,
+  type MultiAgentBusEvent,
+  type MultiAgentMutationSummary,
   type SingleAgentEventRow,
 } from './forensic_snapshot.js';
 
@@ -263,5 +267,237 @@ describe('captureSingleAgentForensics — single-agent invariants', () => {
       now: () => 1,
     });
     expect(out.activePermissions).toEqual({ trusted: true, permissionMode: 'acceptEdits' });
+  });
+});
+
+// ===== Cluster C Phase 4f: captureMultiAgentForensics =====
+
+function busEv(over: Partial<MultiAgentBusEvent> = {}): MultiAgentBusEvent {
+  return {
+    id: 1,
+    ts: 1_700_000_000_000,
+    source: 'alpha',
+    destination: 'orchestrator',
+    kind: 'reply',
+    textPreview: 'hello',
+    ...over,
+  };
+}
+
+function mut(over: Partial<MultiAgentMutationSummary> = {}): MultiAgentMutationSummary {
+  return {
+    id: 1,
+    ts: 1_700_000_000_000,
+    toolName: 'Write',
+    category: 'mutate',
+    summary: 'wrote /tmp/file',
+    filePath: '/tmp/file',
+    confirmed: true,
+    ...over,
+  };
+}
+
+describe('captureMultiAgentForensics — bundle shape', () => {
+  test('populates agentSlug + eventsLastN + busInboxOutbox + mutationRationale', () => {
+    const events = [
+      busEv({
+        id: 1,
+        source: 'orchestrator',
+        destination: 'alpha',
+        kind: 'prompt',
+        textPreview: 'do thing',
+      }),
+      busEv({
+        id: 2,
+        source: 'alpha',
+        destination: 'orchestrator',
+        kind: 'reply',
+        textPreview: 'on it',
+      }),
+      busEv({
+        id: 3,
+        source: 'orchestrator',
+        destination: 'alpha',
+        kind: 'prompt',
+        textPreview: 'more',
+      }),
+    ];
+    const mutations = [mut({ id: 100, toolName: 'Write' }), mut({ id: 101, toolName: 'Edit' })];
+
+    const out = captureMultiAgentForensics({
+      sessionId: 'sess-1',
+      agentSlug: 'alpha',
+      projectCwd: undefined,
+      agentBusEvents: events,
+      agentMutations: mutations,
+      totalSessionEvents: 10,
+      now: () => 1_700_000_001_000,
+    });
+
+    expect(out.ts).toBe(1_700_000_001_000);
+    expect(out.sessionId).toBe('sess-1');
+    expect(out.agentSlug).toBe('alpha');
+    expect(out.eventsLastN).toHaveLength(3);
+    expect(out.pendingToolCalls).toBeNull();
+    expect(out.activePermissions).toBeUndefined();
+    expect(out.snapshotFailedReason).toBeNull();
+
+    // busInboxOutbox split by direction (inbox: destination=slug, outbox: source=slug)
+    const bio = out.busInboxOutbox as {
+      inbox: Array<{ id: number; source: string }>;
+      outbox: Array<{ id: number; destination: string }>;
+      totalSessionEvents: number;
+    };
+    expect(bio.inbox.map((e) => e.id)).toEqual([1, 3]);
+    expect(bio.outbox.map((e) => e.id)).toEqual([2]);
+    expect(bio.totalSessionEvents).toBe(10);
+
+    // mutationRationale captures every mutation
+    const mr = out.mutationRationale as {
+      recentMutations: Array<{ id: number; toolName: string }>;
+      totalMutations: number;
+    };
+    expect(mr.recentMutations.map((m) => m.id)).toEqual([100, 101]);
+    expect(mr.totalMutations).toBe(2);
+  });
+
+  test('effectivePrompt picks the LAST event whose destination = agent slug (inbox tail)', () => {
+    const events = [
+      busEv({ id: 1, source: 'orchestrator', destination: 'alpha', textPreview: 'first ask' }),
+      busEv({ id: 2, source: 'alpha', destination: 'orchestrator', textPreview: 'reply' }),
+      busEv({ id: 3, source: 'orchestrator', destination: 'alpha', textPreview: 'second ask' }),
+      busEv({ id: 4, source: 'alpha', destination: 'orchestrator', textPreview: 'reply 2' }),
+    ];
+    const out = captureMultiAgentForensics({
+      sessionId: 'sess-1',
+      agentSlug: 'alpha',
+      projectCwd: undefined,
+      agentBusEvents: events,
+      agentMutations: [],
+      totalSessionEvents: 4,
+    });
+    const ep = out.effectivePrompt as {
+      source: string;
+      text: string;
+      eventId: number;
+      from: string;
+    };
+    expect(ep.source).toBe('last-bus-inbox');
+    expect(ep.text).toBe('second ask');
+    expect(ep.eventId).toBe(3);
+    expect(ep.from).toBe('orchestrator');
+  });
+
+  test('effectivePrompt = "none" when the agent has only outbound events (never addressed)', () => {
+    const events = [busEv({ id: 1, source: 'alpha', destination: 'orchestrator' })];
+    const out = captureMultiAgentForensics({
+      sessionId: 'sess-1',
+      agentSlug: 'alpha',
+      projectCwd: undefined,
+      agentBusEvents: events,
+      agentMutations: [],
+      totalSessionEvents: 1,
+    });
+    expect((out.effectivePrompt as { source: string }).source).toBe('none');
+  });
+
+  test('eventsLastN capped at 50 inside the helper (defense if caller passes more)', () => {
+    const events = Array.from({ length: 75 }, (_, i) =>
+      busEv({
+        id: i + 1,
+        source: i % 2 === 0 ? 'orchestrator' : 'alpha',
+        destination: i % 2 === 0 ? 'alpha' : 'orchestrator',
+      }),
+    );
+    const out = captureMultiAgentForensics({
+      sessionId: 'sess-1',
+      agentSlug: 'alpha',
+      projectCwd: undefined,
+      agentBusEvents: events,
+      agentMutations: [],
+      totalSessionEvents: 75,
+    });
+    const events50 = out.eventsLastN as Array<{ id: number }>;
+    expect(events50).toHaveLength(50);
+    // Window is the last 50 — first id should be 26.
+    expect(events50[0]?.id).toBe(26);
+    expect(events50.at(-1)?.id).toBe(75);
+  });
+
+  test('mutationRationale capped at 50 inside the helper but totalMutations reflects full count', () => {
+    const mutations = Array.from({ length: 80 }, (_, i) => mut({ id: i + 1 }));
+    const out = captureMultiAgentForensics({
+      sessionId: 'sess-1',
+      agentSlug: 'alpha',
+      projectCwd: undefined,
+      agentBusEvents: [],
+      agentMutations: mutations,
+      totalSessionEvents: 0,
+    });
+    const mr = out.mutationRationale as {
+      recentMutations: Array<{ id: number }>;
+      totalMutations: number;
+    };
+    expect(mr.recentMutations).toHaveLength(50);
+    expect(mr.recentMutations[0]?.id).toBe(31);
+    expect(mr.totalMutations).toBe(80);
+  });
+
+  test('workdir hash populated when projectCwd points at a real dir', () => {
+    fs.writeFileSync(path.join(tmpRoot, 'a.ts'), 'a');
+    fs.writeFileSync(path.join(tmpRoot, 'b.ts'), 'b');
+    const out = captureMultiAgentForensics({
+      sessionId: 'sess-1',
+      agentSlug: 'alpha',
+      projectCwd: tmpRoot,
+      agentBusEvents: [],
+      agentMutations: [],
+      totalSessionEvents: 0,
+    });
+    expect(typeof out.workdirTreeHash).toBe('string');
+    expect(out.workdirTreeHash).toHaveLength(64); // sha256 hex
+    expect(out.snapshotFailedReason).toBeNull();
+  });
+
+  test('workdir hash failure populates snapshotFailedReason', () => {
+    const missing = path.join(tmpRoot, 'does-not-exist');
+    const out = captureMultiAgentForensics({
+      sessionId: 'sess-1',
+      agentSlug: 'alpha',
+      projectCwd: missing,
+      agentBusEvents: [],
+      agentMutations: [],
+      totalSessionEvents: 0,
+    });
+    expect(out.workdirTreeHash).toBeNull();
+    expect(out.snapshotFailedReason).toMatch(/workdir_hash_failed:/);
+  });
+});
+
+describe('toBusEventPreview', () => {
+  test('preserves short text verbatim', () => {
+    const out = toBusEventPreview({
+      id: 1,
+      ts: 1,
+      source: 'a',
+      destination: 'b',
+      kind: 'reply',
+      text: 'short',
+    });
+    expect(out.textPreview).toBe('short');
+  });
+
+  test('truncates long text with an ellipsis', () => {
+    const big = 'x'.repeat(500);
+    const out = toBusEventPreview({
+      id: 1,
+      ts: 1,
+      source: 'a',
+      destination: 'b',
+      kind: 'reply',
+      text: big,
+    });
+    expect(out.textPreview.length).toBeLessThan(big.length);
+    expect(out.textPreview.endsWith('…')).toBe(true);
   });
 });

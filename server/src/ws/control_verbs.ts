@@ -8,7 +8,17 @@ import type {
 } from '@cebab/shared/protocol';
 import { isControlReasonCode, isKickMode, isPauseExpiryAction } from '@cebab/shared/protocol';
 import { appendSafetyAudit, type SafetyAuditInput } from '../notifications/safety_audit.js';
-import { getMultiAgentSession, listResolvedParticipants } from '../repo/multi_agent.js';
+import { appendForensics } from '../repo/controllability_forensics.js';
+import {
+  captureMultiAgentForensics,
+  toBusEventPreview,
+} from '../notifications/forensic_snapshot.js';
+import {
+  getMultiAgentSession,
+  listMultiAgentEvents,
+  listMultiAgentMutations,
+  listResolvedParticipants,
+} from '../repo/multi_agent.js';
 import {
   clearParticipantPause,
   getControlState,
@@ -671,6 +681,9 @@ export type ExecuteKickInput = {
     | undefined;
   sessionMode: 'orchestrator' | 'chain' | null;
   appendAudit?: typeof appendSafetyAudit;
+  /** Phase 4f: forensic-row writer seam. Production default = the real
+   *  appendForensics from the repo. Tests inject a spy. */
+  appendForensicsRow?: typeof appendForensics;
   now?: () => number;
 };
 
@@ -841,7 +854,82 @@ export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResu
       message: `safety_audit append failed: ${(err as Error).message}`,
     };
   }
+
+  // Cluster C Phase 4f: per-participant forensic bundle for the kick.
+  // Best-effort: a failure inside the capture path is logged but
+  // doesn't propagate — the audit row (the obligation) is already
+  // written, and the operator's kick took effect. Skipping the bundle
+  // is a loss of evidence depth, not a correctness break.
+  persistKickForensics({
+    sessionId: msg.sessionId,
+    agentSlug: participant.bus_agent_name,
+    projectCwd: participant.project_path,
+    safetyAuditId: auditId,
+    appendForensicsFn: input.appendForensicsRow ?? appendForensics,
+    now,
+  });
+
   return { ok: true, auditId, mode: msg.mode, kickedAt };
+}
+
+/**
+ * Cluster C Phase 4f: capture per-participant forensic state + write a
+ * `controllability_forensics` row keyed to the kick's safety_audit_id.
+ * Shared between `executeKickParticipant` (operator-initiated kick) and
+ * `executeExpireParticipant`'s `auto_kick` branch (expiry escalation).
+ *
+ * Best-effort by design (matching the C3 single-agent forensic
+ * posture): a failure here is logged + swallowed so the audit row
+ * stays intact. The forensic bundle is supplemental evidence; the
+ * audit row is the operator's binding obligation.
+ *
+ * The bus event + mutation reads are filtered to the kicked agent's
+ * slug — events where source OR destination matches the slug, all
+ * mutations attributed to the slug. The forensic snapshot helper
+ * caps both at 50 rows so a long-running session doesn't bloat the
+ * persisted bundle.
+ */
+function persistKickForensics(args: {
+  sessionId: string;
+  agentSlug: string;
+  projectCwd: string;
+  safetyAuditId: string;
+  appendForensicsFn: typeof appendForensics;
+  now: () => number;
+}): void {
+  try {
+    const allEvents = listMultiAgentEvents(args.sessionId);
+    const agentEvents = allEvents
+      .filter((e) => e.source === args.agentSlug || e.destination === args.agentSlug)
+      .map(toBusEventPreview);
+    const allMutations = listMultiAgentMutations(args.sessionId);
+    const agentMutations = allMutations
+      .filter((m) => m.agentName === args.agentSlug)
+      .map((m) => ({
+        id: m.id,
+        ts: m.ts,
+        toolName: m.toolName,
+        category: m.category,
+        summary: m.summary,
+        filePath: m.filePath,
+        confirmed: m.confirmedAt !== null,
+      }));
+    const bundle = captureMultiAgentForensics({
+      sessionId: args.sessionId,
+      agentSlug: args.agentSlug,
+      projectCwd: args.projectCwd,
+      agentBusEvents: agentEvents,
+      agentMutations,
+      totalSessionEvents: allEvents.length,
+      now: args.now,
+    });
+    args.appendForensicsFn({
+      ...bundle,
+      safetyAuditId: args.safetyAuditId,
+    });
+  } catch (err) {
+    console.error(`[ws] persistKickForensics failed for ${args.sessionId}/${args.agentSlug}`, err);
+  }
 }
 
 /**
@@ -945,6 +1033,10 @@ export type ExecuteExpireInput = {
       }
     | undefined;
   appendAudit?: typeof appendSafetyAudit;
+  /** Phase 4f: forensic-row writer seam — only consulted on the
+   *  `auto_kick` branch (auto_resume doesn't capture forensics, same
+   *  as operator-resume). */
+  appendForensicsRow?: typeof appendForensics;
   now?: () => number;
 };
 
@@ -1096,5 +1188,39 @@ export function executeExpireParticipant(input: ExecuteExpireInput): ExecuteExpi
     // backing it.
     return { ok: false, error: `kick audit failed: ${(err as Error).message}` };
   }
+
+  // Cluster C Phase 4f: capture forensics for the auto-kicked
+  // participant, keyed to the kick audit row's id (NOT the trigger
+  // audit — the forensic bundle describes the state at the moment of
+  // the state-changing action). The expire executor doesn't carry
+  // `project_path` on its entry; look it up here (single query, only
+  // fires on auto_kick) so the bundle's workdir hash + cwd context
+  // are populated. Best-effort: a missing participant row (race with
+  // teardown) skips the forensic write but the audit stays.
+  try {
+    const participant = listResolvedParticipants(entry.sessionId).find(
+      (p) => p.project_id === entry.projectId,
+    );
+    if (participant) {
+      persistKickForensics({
+        sessionId: entry.sessionId,
+        agentSlug: entry.agentName,
+        projectCwd: participant.project_path,
+        safetyAuditId: kickAuditId,
+        appendForensicsFn: input.appendForensicsRow ?? appendForensics,
+        now,
+      });
+    } else {
+      console.warn(
+        `[ws] executeExpire forensics: no participant row for ${entry.sessionId}/${entry.projectId}; skipping bundle`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[ws] executeExpire forensics lookup failed for ${entry.sessionId}/${entry.projectId}`,
+      err,
+    );
+  }
+
   return { ok: true, action: 'auto_kick', triggerAuditId, kickAuditId, kickedAt: ts };
 }
