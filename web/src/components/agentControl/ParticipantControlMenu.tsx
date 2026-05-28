@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ParticipantControlView } from '../../store';
-import type { ControlReasonCode, PauseExpiryAction } from '@cebab/shared/protocol';
+import type { ControlReasonCode, KickMode, PauseExpiryAction } from '@cebab/shared/protocol';
+import { KickModal } from './KickModal';
 
 // Cluster C Phase 4g2: ⋮ menu on each participant row in the active-run
 // Session info panel. First *interactive* slice for the control verbs —
@@ -39,9 +40,11 @@ export type ParticipantControlMenuProps = {
   control: ParticipantControlView | undefined;
   /**
    * Operator-driven dispatchers. Each is a thin wrapper around
-   * `wsRef.current?.send({type: '...', ...})` in App.tsx; supplying the
-   * reason picker is C4g3's job, so for v1 we pin reasonCode to
-   * `'topology_repair'` and skip reasonText.
+   * `wsRef.current?.send({type: '...', ...})` in App.tsx. Mute/Unmute/
+   * Pause/Resume pin reasonCode to `'topology_repair'` from the menu
+   * directly (the reason picker for those lands in C4g4). Kick goes
+   * through KickModal (C4g3), which is the first surface to expose the
+   * full ControlReasonCode vocabulary.
    */
   onMute: (projectId: number, reasonCode: ControlReasonCode) => void;
   onUnmute: (projectId: number, reasonCode: ControlReasonCode) => void;
@@ -52,6 +55,18 @@ export type ParticipantControlMenuProps = {
     expiryAction: PauseExpiryAction,
   ) => void;
   onResume: (projectId: number, reasonCode: ControlReasonCode) => void;
+  /**
+   * Cluster C Phase 4g3: kick dispatch. The menu opens the KickModal;
+   * the modal collects reasonCode + reasonText and calls back here.
+   * Mode is pinned to 'drain' in v1 (server rejects 'hard' with
+   * `hard_kill_unsupported_v1`).
+   */
+  onKick: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+    mode: KickMode,
+  ) => void;
 };
 
 export function ParticipantControlMenu({
@@ -63,8 +78,14 @@ export function ParticipantControlMenu({
   onUnmute,
   onPause,
   onResume,
+  onKick,
 }: ParticipantControlMenuProps) {
   const [open, setOpen] = useState(false);
+  // C4g3: separate flag from the dropdown — the modal lives in its own
+  // surface (portal-style via .gate-modal-overlay) and outlives the
+  // dropdown closing on "Kick…" click. Submitting the modal calls
+  // onKick + closes both.
+  const [kickModalOpen, setKickModalOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // Click-outside + Escape dismissal. Both attached only while open to
@@ -115,6 +136,30 @@ export function ParticipantControlMenu({
     onResume(projectId, DEFAULT_REASON_CODE);
     close();
   }
+  function openKickModal() {
+    // Close the dropdown — the modal owns the next interaction.
+    setOpen(false);
+    setKickModalOpen(true);
+  }
+  function handleKickSubmit(
+    pid: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+    mode: KickMode,
+  ) {
+    onKick(pid, reasonCode, reasonText, mode);
+    // KickModal calls its own onClose after onSubmit; the flag here
+    // matches so the modal unmounts when the parent re-renders.
+    setKickModalOpen(false);
+  }
+
+  // Kick available in orchestrator mode only; chain-mode kick of a
+  // middle participant returns `chain_topology_broken`, and a kick of
+  // the first/last participant is technically valid but would tear the
+  // chain — surfacing the affordance asks the operator to think more
+  // carefully than this v1 menu can support. C4g4+ can re-enable
+  // chain-mode kick once the topology guards have proper UI feedback.
+  const kickAvailable = sessionMode === 'orchestrator' && !isKicked;
 
   return (
     <div className="ma-control-menu" ref={containerRef}>
@@ -192,7 +237,29 @@ export function ParticipantControlMenu({
               Mute disabled in chain mode (would break the topology).
             </p>
           )}
+          {kickAvailable && (
+            <>
+              <div className="ma-control-menu-divider" aria-hidden="true" />
+              <button
+                type="button"
+                role="menuitem"
+                className="ma-control-menu-item is-danger"
+                onClick={openKickModal}
+                title="Open the kick confirmation modal. Kick is terminal — there is no unkick verb in v1."
+              >
+                <span aria-hidden="true">⨯</span> Kick…
+              </button>
+            </>
+          )}
         </div>
+      )}
+      {kickModalOpen && (
+        <KickModal
+          projectId={projectId}
+          agentLabel={agentLabel}
+          onClose={() => setKickModalOpen(false)}
+          onSubmit={handleKickSubmit}
+        />
       )}
     </div>
   );

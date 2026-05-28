@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
   ClientMsg,
   ControlReasonCode,
+  KickMode,
   MultiAgentLifecycle,
   MultiAgentTemplate,
   NotificationAction,
@@ -968,6 +969,25 @@ function AppShell({
   ) {
     wsRef.current?.send({ type: 'resume_participant', sessionId, projectId, reasonCode });
   }
+  // Cluster C Phase 4g3: kick sender. Mode is currently always 'drain'
+  // (server rejects 'hard' with `hard_kill_unsupported_v1`); KickModal
+  // doesn't surface the toggle until the AbortController refactor.
+  function kickParticipant(
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+    mode: KickMode,
+  ) {
+    wsRef.current?.send({
+      type: 'kick_participant',
+      sessionId,
+      projectId,
+      reasonCode,
+      ...(reasonText !== undefined ? { reasonText } : {}),
+      mode,
+    });
+  }
   function removeParticipant(projectId: number) {
     dispatch({ type: 'ma_remove_participant', projectId });
   }
@@ -1563,6 +1583,7 @@ function AppShell({
                 onUnmuteParticipant={unmuteParticipant}
                 onPauseParticipant={pauseParticipant}
                 onResumeParticipant={resumeParticipant}
+                onKickParticipant={kickParticipant}
                 onDismissActive={dismissActiveRun}
                 onRefreshIterations={refreshIterations}
                 onClearIterations={clearIterations}

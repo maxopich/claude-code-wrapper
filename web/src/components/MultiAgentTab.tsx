@@ -3,6 +3,7 @@ import type { CSSProperties } from 'react';
 import type {
   ControlReasonCode,
   IterationSummary,
+  KickMode,
   MultiAgentEventKind,
   MultiAgentLifecycle,
   MultiAgentMutationView,
@@ -130,6 +131,18 @@ export function MultiAgentTab(props: {
     projectId: number,
     reasonCode: ControlReasonCode,
   ) => void;
+  /**
+   * Cluster C Phase 4g3: kick dispatch — bound to the KickModal's
+   * onSubmit callback via the ⋮ menu. Mode is currently always 'drain'
+   * (server rejects 'hard' with `hard_kill_unsupported_v1`).
+   */
+  onKickParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+    mode: KickMode,
+  ) => void;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
@@ -186,6 +199,7 @@ export function MultiAgentTab(props: {
         onUnmuteParticipant={props.onUnmuteParticipant}
         onPauseParticipant={props.onPauseParticipant}
         onResumeParticipant={props.onResumeParticipant}
+        onKickParticipant={props.onKickParticipant}
         onClearAutoRetry={props.onClearAutoRetry}
       />
     );
@@ -1357,6 +1371,14 @@ function ActiveRunView(props: {
     projectId: number,
     reasonCode: ControlReasonCode,
   ) => void;
+  /** Cluster C Phase 4g3: kick dispatch — bound to KickModal's onSubmit. */
+  onKickParticipant: (
+    sessionId: string,
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+    mode: KickMode,
+  ) => void;
   /** Item #4: Retry the worker named in this session's pending-retry slot.
    *  The slot is server-authoritative — no agentName/prompt args. */
   onRetryWorker: (sessionId: string) => void;
@@ -1454,6 +1476,9 @@ function ActiveRunView(props: {
         }
         onResumeParticipant={(projectId, reasonCode) =>
           props.onResumeParticipant(run.sessionId, projectId, reasonCode)
+        }
+        onKickParticipant={(projectId, reasonCode, reasonText, mode) =>
+          props.onKickParticipant(run.sessionId, projectId, reasonCode, reasonText, mode)
         }
         highlightedEventId={highlightedEventId}
         onJump={jumpToEvent}
@@ -1743,6 +1768,17 @@ function SessionSettingsPanel(props: {
     expiryAction: PauseExpiryAction,
   ) => void;
   onResumeParticipant: (projectId: number, reasonCode: ControlReasonCode) => void;
+  /**
+   * Cluster C Phase 4g3: kick dispatch. The ⋮ menu opens KickModal; the
+   * modal collects reasonCode + reasonText and calls back here with
+   * mode pinned to 'drain'.
+   */
+  onKickParticipant: (
+    projectId: number,
+    reasonCode: ControlReasonCode,
+    reasonText: string | undefined,
+    mode: KickMode,
+  ) => void;
   /** Drives the (collapsed-by-default) routing-trail disclosure: the
    *  spine→scrollback jump highlight lives in ActiveRunView and is passed
    *  through so the trail can stay tucked inside this panel. */
@@ -1881,6 +1917,7 @@ function SessionSettingsPanel(props: {
                       onUnmute={props.onUnmuteParticipant}
                       onPause={props.onPauseParticipant}
                       onResume={props.onResumeParticipant}
+                      onKick={props.onKickParticipant}
                     />
                   )}
                   {!isOrchestrator && i < workerSlugs.length - 1 && (
