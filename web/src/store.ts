@@ -536,6 +536,24 @@ export type MultiAgentState = {
    * built by hand.
    */
   draftHopBudget: number | null;
+  /**
+   * Cluster F Phase D9: provenance of the current `draftHopBudget`.
+   *   - `'template'` — populated by `ma_apply_template` from
+   *     `template.hopBudget`; the DraftView input shows a
+   *     "(from template)" annotation so the operator knows the
+   *     value isn't theirs.
+   *   - `'user'` — operator typed a value into the DraftView input
+   *     (overrides any prior template-sourced value); annotation
+   *     hidden so they don't see misleading attribution after they
+   *     edited.
+   *   - `null` — input is empty; server resolver falls back through
+   *     DB setting → CEBAB_HOP_BUDGET → DEFAULT_HOP_BUDGET.
+   *
+   * Tracked on the store rather than in component state so the
+   * provenance survives DraftView remounts (e.g. when tab switching).
+   * Reset alongside `draftHopBudget` by the same manual-edit signals.
+   */
+  draftHopBudgetSource: 'template' | 'user' | null;
 };
 
 /**
@@ -656,6 +674,7 @@ export const initialState: AppState = {
     lastAppliedDropped: 0,
     draftTemplateId: null,
     draftHopBudget: null,
+    draftHopBudgetSource: null,
   },
 };
 
@@ -719,6 +738,13 @@ export type Action =
   | { type: 'ma_reorder_participant'; projectId: number; direction: 'up' | 'down' }
   | { type: 'ma_set_draft_prompt'; text: string }
   | { type: 'ma_set_draft_pause_on_mutation'; value: boolean }
+  /**
+   * Cluster F Phase D9 (D9-1..D9-4): operator sets the hop budget override
+   * for the next start. `value === null` clears it (input cleared → server
+   * default applies). Action is the only path that flips
+   * `draftHopBudgetSource` to `'user'`.
+   */
+  | { type: 'ma_set_draft_hop_budget'; value: number | null }
   | { type: 'ma_apply_template'; template: MultiAgentTemplate }
   | { type: 'ma_dismiss_active' }
   | { type: 'ma_clear_awaiting' }
@@ -863,6 +889,7 @@ export function reduce(state: AppState, action: Action): AppState {
           // run with the operator's settings, not the template's.
           draftTemplateId: null,
           draftHopBudget: null,
+          draftHopBudgetSource: null,
         },
       };
 
@@ -883,6 +910,7 @@ export function reduce(state: AppState, action: Action): AppState {
           // PR-7: same dissociation rationale as ma_set_lifecycle above.
           draftTemplateId: null,
           draftHopBudget: null,
+          draftHopBudgetSource: null,
         },
       };
     }
@@ -898,6 +926,7 @@ export function reduce(state: AppState, action: Action): AppState {
           lastAppliedDropped: 0,
           draftTemplateId: null,
           draftHopBudget: null,
+          draftHopBudgetSource: null,
         },
       };
 
@@ -918,6 +947,7 @@ export function reduce(state: AppState, action: Action): AppState {
           // PR-7: a reorder is a manual edit → drop template provenance.
           draftTemplateId: null,
           draftHopBudget: null,
+          draftHopBudgetSource: null,
         },
       };
     }
@@ -958,6 +988,35 @@ export function reduce(state: AppState, action: Action): AppState {
             action.template.hopBudget >= 1
               ? Math.floor(action.template.hopBudget)
               : null,
+          // Cluster F Phase D9: tag the source so the DraftView input can
+          // render "(from template)" attribution. Null when the template
+          // has no hopBudget override; 'template' when populated.
+          draftHopBudgetSource:
+            typeof action.template.hopBudget === 'number' &&
+            Number.isFinite(action.template.hopBudget) &&
+            action.template.hopBudget >= 1
+              ? 'template'
+              : null,
+        },
+      };
+    }
+
+    case 'ma_set_draft_hop_budget': {
+      // Cluster F Phase D9: user-typed value from the DraftView Run options
+      // hop-budget input. `value === null` means the input is empty — the
+      // server resolver falls back through DB > env > built-in. Any positive
+      // integer is forwarded verbatim; the server re-clamps to >= 1.
+      //
+      // Setting source='user' (even when the value happens to match the
+      // template's) means the DraftView annotation hides — the operator
+      // touched the input, so attributing the value to the template would
+      // be misleading.
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          draftHopBudget: action.value,
+          draftHopBudgetSource: action.value === null ? null : 'user',
         },
       };
     }

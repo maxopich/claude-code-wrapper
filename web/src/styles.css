@@ -1846,6 +1846,57 @@ pre {
   cursor: pointer;
 }
 
+/* ---- Cluster F Phase D9 (UI-D9): HopBudgetInput in DraftView ----
+ *
+ * Sits below the pause-on-mutation checkbox in the same setup section.
+ * The label vertically stacks: heading + input + hint paragraph.
+ * Number input borrows .modal input[type='text'] chrome but narrower —
+ * a hop budget is a small integer; a 12ch input is enough for any
+ * sensible value plus the "100 (server default)" placeholder text.
+ * No new tokens.
+ */
+.ma-hop-budget-input-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.ma-hop-budget-input-label-text {
+  font-weight: 500;
+}
+.ma-hop-budget-input-source-tag {
+  font-weight: 400;
+  color: var(--fg-3);
+  font-style: italic;
+}
+.ma-hop-budget-input {
+  width: 22ch;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: 4px 8px;
+  background: var(--bg-3);
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+}
+.ma-hop-budget-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.ma-hop-budget-input[aria-invalid='true'] {
+  border-color: var(--err);
+}
+.ma-hop-budget-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.ma-hop-budget-input-hint {
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-3);
+}
+
 /* Single-agent permission-card per-tool body styling (Item #5). The card
  * frame (`.msg.permission`) is unchanged; these style the inner subcomponents. */
 .msg.permission .role {
