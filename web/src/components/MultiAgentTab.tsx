@@ -43,6 +43,7 @@ import {
   CustomModeNotice,
 } from './templatePreview/TemplatePreviewBanners';
 import { ConsultantModeChip } from './ConsultantModeChip';
+import { MockBadge } from './MockBadge';
 // Cluster D Phase 3: the 3 inline multi-agent warnings below (awaiting-
 // continue, pending-retry, pending-mutation) now render through the
 // unified SessionBanner with `classStem="multi-agent-warning"` so the
@@ -2304,6 +2305,14 @@ export function TopRunBar(props: {
             : undefined
         }
       />
+      {/* Cluster G Phase 2c (UI-A3): per-run MOCK chip — sits beside the
+       *  ModelChip because both qualify "what's running" (which model, and
+       *  whether responses are real). Strict `=== true` so pre-G2c servers
+       *  and live sessions both render nothing. Stays visible across R-A
+       *  re-attach and R-B reconstruct: the row's `mock` column is locked
+       *  at session creation, so a bus session created in mock keeps the
+       *  badge even after the operator restarts Cebab in live mode. */}
+      {run.mock === true && <MockBadge variant="inline" />}
       <LogsButton
         sessionId={run.sessionId}
         dangerousCount={
@@ -2455,6 +2464,11 @@ export function MultiAgentActivityBar(props: {
        *  name so the operator's eye lands on "agent X is muted / paused /
        *  kicked" alongside the working indicator. */}
       <ParticipantStatePills control={activeAgentControl} />
+      {/* Cluster G Phase 2c (UI-A3): per-run MOCK chip — placed right after
+       *  the participant pills so the persistent posture cluster reads
+       *  "agent X is muted/paused/kicked AND the run is MOCK" alongside
+       *  the working indicator. Strict `=== true` mount predicate. */}
+      {run.mock === true && <MockBadge variant="inline" />}
       <span
         className={`ma-hop-budget-chip${budgetWarn ? ' is-warn' : ''}`}
         aria-label={`hop budget: ${hops} of ${budget}`}
@@ -2775,8 +2789,7 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
                               `${m.category.toUpperCase()} — classifier rule '${m.classifierReason.rule}'` +
                               ` matched '${m.classifierReason.matched}'.\n` +
                               `${m.classifierReason.detail}`,
-                            'aria-label':
-                              `${m.category} (rule ${m.classifierReason.rule}, matched ${m.classifierReason.matched})`,
+                            'aria-label': `${m.category} (rule ${m.classifierReason.rule}, matched ${m.classifierReason.matched})`,
                           }
                         : {})}
                     >

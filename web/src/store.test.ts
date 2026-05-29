@@ -2226,7 +2226,21 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
     let s = initialState;
     s = reduce(s, {
       type: 'server',
-      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 1,
+            name: 'p',
+            path: '/tmp/p',
+            trusted: false,
+            busInstalled: false,
+            busAgentName: null,
+            lastUsedAt: null,
+            hasClaudeMd: false,
+          },
+        ],
+      },
     });
     s = reduce(s, {
       type: 'server',
@@ -2251,7 +2265,21 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
     let s = initialState;
     s = reduce(s, {
       type: 'server',
-      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 1,
+            name: 'p',
+            path: '/tmp/p',
+            trusted: false,
+            busInstalled: false,
+            busAgentName: null,
+            lastUsedAt: null,
+            hasClaudeMd: false,
+          },
+        ],
+      },
     });
     s = reduce(s, {
       type: 'server',
@@ -2281,7 +2309,21 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
     let s = initialState;
     s = reduce(s, {
       type: 'server',
-      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 1,
+            name: 'p',
+            path: '/tmp/p',
+            trusted: false,
+            busInstalled: false,
+            busAgentName: null,
+            lastUsedAt: null,
+            hasClaudeMd: false,
+          },
+        ],
+      },
     });
     s = reduce(s, {
       type: 'server',
@@ -2311,7 +2353,21 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
     let s = initialState;
     s = reduce(s, {
       type: 'server',
-      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+      msg: {
+        type: 'projects',
+        projects: [
+          {
+            id: 1,
+            name: 'p',
+            path: '/tmp/p',
+            trusted: false,
+            busInstalled: false,
+            busAgentName: null,
+            lastUsedAt: null,
+            hasClaudeMd: false,
+          },
+        ],
+      },
     });
     s = reduce(s, {
       type: 'server',
@@ -2328,5 +2384,77 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
     const known = s.knownSessions[1] ?? [];
     expect(known.find((k) => k.id === 'sess-a')?.mock).toBe(true);
     expect(known.find((k) => k.id === 'sess-b')?.mock).toBeUndefined();
+  });
+});
+
+// Cluster G Phase 2c (UI-A3): the bus analog of the single-agent
+// session_started.mock projection. `multi_agent_started.mock` is optional
+// on the wire (server omits when 0/missing) and the reducer threads strict
+// equality into MultiAgentRun.mock so downstream mounts (TopRunBar +
+// MultiAgentActivityBar) can gate `<MockBadge variant="inline" />` with
+// `run.mock === true`.
+describe('store / multi_agent_started.mock projection (Phase 2c)', () => {
+  const baseStarted = {
+    type: 'multi_agent_started' as const,
+    sessionId: 'bus-m',
+    mode: 'orchestrator' as const,
+    participants: [1],
+    participantAgentNames: ['orchestrator', 'workerA'],
+    lifecycle: 'persistent' as const,
+    sessionFolder: '/ws/.cebab/bus-m',
+    hopBudget: 30,
+    pauseOnMutation: false,
+    mutationsAcknowledged: false,
+    mutations: [],
+  };
+
+  test('multi_agent_started.mock=true → MultiAgentRun.mock=true', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, mock: true },
+    });
+    expect(s.multiAgent.active?.mock).toBe(true);
+  });
+
+  test('multi_agent_started without mock → run.mock is undefined (live session, pre-G2c server)', () => {
+    // Additive-optional contract: server omits the field on the wire for
+    // live sessions and pre-G2c builds. Reducer spreads with omit so the
+    // run state mirrors the wire, leaving `mock` literally absent (not
+    // forced to false). Mount predicates use strict `=== true`, so
+    // {undefined, false} both collapse to "no badge" — but keeping the
+    // distinction lets a future "tri-state" UI (mock / live / unknown)
+    // surface "unknown" without a protocol change.
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: baseStarted,
+    });
+    expect(s.multiAgent.active?.mock).toBeUndefined();
+  });
+
+  test('chain mode also threads mock=true (same projection rule)', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, mode: 'chain' as const, sessionId: 'chain-m', mock: true },
+    });
+    expect(s.multiAgent.active?.mode).toBe('chain');
+    expect(s.multiAgent.active?.mock).toBe(true);
+  });
+
+  test('multi_agent_started overwrites prior run posture (Start replaces the slice)', () => {
+    // The reducer wholesale replaces multiAgent.active on each
+    // multi_agent_started; this pins the "fresh start clears prior mock
+    // posture" behavior — a live session opened after a mock session does
+    // NOT inherit the badge from the prior run's residual state.
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, mock: true },
+    });
+    expect(s.multiAgent.active?.mock).toBe(true);
+    s = reduce(s, {
+      type: 'server',
+      msg: { ...baseStarted, sessionId: 'bus-live-after' /* no mock field */ },
+    });
+    expect(s.multiAgent.active?.sessionId).toBe('bus-live-after');
+    expect(s.multiAgent.active?.mock).toBeUndefined();
   });
 });

@@ -1633,6 +1633,20 @@ export type ServerMsg =
        * and on resumes that don't need the disclosure.
        */
       recoveryContext?: RecoveryContextView;
+      /**
+       * Cluster G Phase 2c (UI-A3): true iff this bus session was created
+       * under MOCK runtime mode (`multi_agent_sessions.mock = 1`). Mirrors
+       * the per-session truth that single-agent `session_started.mock`
+       * carries — locked at CREATE time, so a session started in MOCK keeps
+       * the badge even after the operator restarts Cebab in live mode.
+       *
+       * Surfaced so the multi-agent `TopRunBar` and `MultiAgentActivityBar`
+       * mount their `<MockBadge variant="inline" />` chips. The mount
+       * predicate uses strict `=== true` so pre-G2c servers (omit) and
+       * live sessions (omit on the wire — additive-optional contract)
+       * both render nothing.
+       */
+      mock?: boolean;
     }
   | {
       /**
