@@ -120,6 +120,52 @@ describe('Cmd/Ctrl+. Stop keyMatch', () => {
   });
 });
 
+// Cluster H C3 UI — Cmd/Ctrl+Shift+L opens the raw-event Logs inspector for
+// the active single-agent session. Pins the keyMatch contract for the new
+// `session.logs.cmdShiftL` registry entry.
+describe('Cmd/Ctrl+Shift+L Logs inspector keyMatch', () => {
+  const sc = SHORTCUTS.find((s) => s.id === 'session.logs.cmdShiftL')!;
+
+  test('matches Cmd+Shift+L (upper-case L from native shift)', () => {
+    const e = new KeyboardEvent('keydown', { key: 'L', metaKey: true, shiftKey: true });
+    expect(sc.keyMatch(e)).toBe(true);
+  });
+
+  test('matches Cmd+Shift+l (lower-case fallback)', () => {
+    const e = new KeyboardEvent('keydown', { key: 'l', metaKey: true, shiftKey: true });
+    expect(sc.keyMatch(e)).toBe(true);
+  });
+
+  test('matches Ctrl+Shift+L', () => {
+    const e = new KeyboardEvent('keydown', { key: 'L', ctrlKey: true, shiftKey: true });
+    expect(sc.keyMatch(e)).toBe(true);
+  });
+
+  test('does NOT match Cmd+L (no Shift)', () => {
+    const e = new KeyboardEvent('keydown', { key: 'l', metaKey: true });
+    expect(sc.keyMatch(e)).toBe(false);
+  });
+
+  test('does NOT match bare Shift+L', () => {
+    const e = new KeyboardEvent('keydown', { key: 'L', shiftKey: true });
+    expect(sc.keyMatch(e)).toBe(false);
+  });
+
+  test('does NOT match Cmd+Shift+Alt+L (Alt is reserved)', () => {
+    const e = new KeyboardEvent('keydown', {
+      key: 'L',
+      metaKey: true,
+      shiftKey: true,
+      altKey: true,
+    });
+    expect(sc.keyMatch(e)).toBe(false);
+  });
+
+  test('is not documentation-only (real handler lives in App.tsx)', () => {
+    expect(sc.documentationOnly).toBe(false);
+  });
+});
+
 describe('isInTextInput', () => {
   test('returns true for a textarea target', () => {
     const ta = document.createElement('textarea');

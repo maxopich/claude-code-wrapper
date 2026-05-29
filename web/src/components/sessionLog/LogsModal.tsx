@@ -13,7 +13,7 @@
  * client state, no Redux.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { LogRow, ServerMsg } from '@cebab/shared/protocol';
+import type { LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
 import { useLogStream } from './useLogStream';
 import { applyLogFilters, useLogFilters } from './useLogFilters';
@@ -23,12 +23,21 @@ import { parseLogsRowAnchor } from './logsHash';
 
 export function LogsModal(props: {
   sessionId: string;
+  /**
+   * Cluster H C3 UI: which projector branch the server should run. Optional —
+   * omit (or pass undefined) to keep the historical multi-agent behavior. Pass
+   * `'single'` from the single-agent ChatHeader mount so the server reads the
+   * per-session `events` table and the Agent multi-select hides (there's only
+   * one agent in a single-agent run).
+   */
+  scope?: SessionLogScope;
   onClose: () => void;
   onLoadSessionLog: (
     sessionId: string,
     offset: number,
     limit: number,
     revealSensitive: boolean,
+    scope?: SessionLogScope,
   ) => void;
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
@@ -36,6 +45,7 @@ export function LogsModal(props: {
 
   const stream = useLogStream({
     sessionId: props.sessionId,
+    scope: props.scope,
     onLoadSessionLog: props.onLoadSessionLog,
     subscribeServerMsg: props.subscribeServerMsg,
   });
@@ -120,6 +130,7 @@ export function LogsModal(props: {
         <LogToolbar
           filters={filters}
           agents={agents}
+          scope={props.scope}
           revealedSensitive={stream.revealedSensitive}
           loading={stream.loading}
           onRevealSensitive={() => requestReveal(stream, filtered)}

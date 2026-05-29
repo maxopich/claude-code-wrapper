@@ -11,7 +11,7 @@
  * `log_row_appended` ServerMsg here.
  */
 import { useEffect, useRef, useState } from 'react';
-import type { ServerMsg } from '@cebab/shared/protocol';
+import type { ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
 import { LogsModal } from './LogsModal';
 import { hashIsLogsFor, logsHashFor } from './logsHash';
 
@@ -21,11 +21,20 @@ export function LogsButton(props: {
    *  the button label becomes `Logs · ⚠ N` and the tooltip carries the
    *  review-before-granting prompt. */
   dangerousCount?: number;
+  /**
+   * Cluster H C3 UI: scope discriminator forwarded verbatim into the
+   * `LogsModal`. Optional — omit for the historical multi-agent button
+   * (mounted by MultiAgentTab.tsx / TopRunBar); pass `'single'` from the
+   * single-agent ChatHeader mount in App.tsx so the modal pulls
+   * events-table rows and the toolbar hides the Agent multi-select.
+   */
+  scope?: SessionLogScope;
   onLoadSessionLog: (
     sessionId: string,
     offset: number,
     limit: number,
     revealSensitive: boolean,
+    scope?: SessionLogScope,
   ) => void;
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
@@ -104,6 +113,7 @@ export function LogsButton(props: {
       {open && (
         <LogsModal
           sessionId={sessionId}
+          scope={props.scope}
           onClose={closeModal}
           onLoadSessionLog={props.onLoadSessionLog}
           subscribeServerMsg={props.subscribeServerMsg}
