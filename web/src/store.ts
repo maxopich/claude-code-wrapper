@@ -2609,17 +2609,78 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // keeps the discriminated union exhaustive until that wiring lands.
       return state;
 
-    case 'bulk_session_op_result':
-      // Cluster I Phase C5 backend: the sidebar's Select-mode UI (C5
-      // UI slice, follow-up) will own this via a sibling reducer arm
-      // that drops the `succeededSessionIds` from `knownSessions` +
-      // pushes a notification carrying `failed[]`. Backend-only slice
-      // doesn't fan the response into the store yet; the matching
-      // ClientMsg (`bulk_session_op`) won't ship from any UI surface
-      // until the next slice. Reducer no-op keeps the discriminated
-      // union exhaustive in the meantime — same pattern as
-      // recovery_log_snapshot above.
-      return state;
+    case 'bulk_session_op_result': {
+      // Cluster I Phase C5 UI: the server has archived or soft-deleted the
+      // `succeededSessionIds`. Drop them from every per-project cache so the
+      // sidebar rows vanish immediately (the same posture as
+      // `iteration_archived` for the bus iteration browser). Both archive
+      // and delete remove the row from the DEFAULT listing — archived rows
+      // would need the (not-yet-built) "Include archived" toggle to
+      // resurface, and soft-deleted rows are never re-listed — so for the
+      // sidebar's purposes both ops mean "stop showing this row".
+      //
+      // The `failed[]` entries are surfaced by the toast (notifyFromServerMsg),
+      // not the reducer — those rows simply stay put, which is correct.
+      const dropped = new Set(msg.succeededSessionIds);
+      if (dropped.size === 0) return state;
+
+      // knownSessions: filter each project's summary list.
+      let knownChanged = false;
+      const knownSessions: Record<number, SessionSummary[]> = {};
+      for (const [pidStr, list] of Object.entries(state.knownSessions)) {
+        const next = list.filter((s) => !dropped.has(s.id));
+        if (next.length !== list.length) knownChanged = true;
+        knownSessions[Number(pidStr)] = next;
+      }
+
+      // sessionsByProject: drop the hydrated SessionView entries.
+      let sbpChanged = false;
+      const sessionsByProject: Record<number, Record<string, SessionView>> = {};
+      for (const [pidStr, map] of Object.entries(state.sessionsByProject)) {
+        let mapChanged = false;
+        const nextMap: Record<string, SessionView> = {};
+        for (const [sid, view] of Object.entries(map)) {
+          if (dropped.has(sid)) {
+            mapChanged = true;
+            continue;
+          }
+          nextMap[sid] = view;
+        }
+        sessionsByProject[Number(pidStr)] = mapChanged ? nextMap : map;
+        if (mapChanged) sbpChanged = true;
+      }
+
+      // sessionToProject: drop the routing entries.
+      let stpChanged = false;
+      const sessionToProject = { ...state.sessionToProject };
+      for (const sid of dropped) {
+        if (sid in sessionToProject) {
+          delete sessionToProject[sid];
+          stpChanged = true;
+        }
+      }
+
+      // activeSessionByProject: if the currently-shown session in a project
+      // was dropped, clear it so the chat pane falls back to the empty /
+      // new-chat state rather than rendering an orphaned session.
+      let asbpChanged = false;
+      const activeSessionByProject = { ...state.activeSessionByProject };
+      for (const [pidStr, activeSid] of Object.entries(state.activeSessionByProject)) {
+        if (activeSid && dropped.has(activeSid)) {
+          activeSessionByProject[Number(pidStr)] = undefined;
+          asbpChanged = true;
+        }
+      }
+
+      if (!knownChanged && !sbpChanged && !stpChanged && !asbpChanged) return state;
+      return {
+        ...state,
+        knownSessions: knownChanged ? knownSessions : state.knownSessions,
+        sessionsByProject: sbpChanged ? sessionsByProject : state.sessionsByProject,
+        sessionToProject: stpChanged ? sessionToProject : state.sessionToProject,
+        activeSessionByProject: asbpChanged ? activeSessionByProject : state.activeSessionByProject,
+      };
+    }
 
     case 'wrapper_error': {
       const projectId = msg.sessionId

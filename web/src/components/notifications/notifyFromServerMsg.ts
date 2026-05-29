@@ -146,6 +146,70 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
       return;
     }
 
+    case 'bulk_session_op_result': {
+      // Cluster I Phase C5 UI: summarize the bulk archive/delete outcome
+      // as a single toast (never one-per-session — that would be hostile
+      // for a 50-row bulk op). The reducer already dropped the succeeded
+      // rows from the sidebar; this toast is the operator's confirmation
+      // + the only surface that reports the `failed[]` entries.
+      //
+      // Severity ladder:
+      //   - all succeeded            → success
+      //   - some succeeded, some not → success, with a "N couldn't be …"
+      //     tail in the message (the failures are the secondary signal)
+      //   - none succeeded (all failed) → warn (nothing happened; the
+      //     operator needs to know why — e.g. a running session)
+      //   - nothing at all (empty)   → no toast
+      const okCount = msg.succeededSessionIds.length;
+      const failCount = msg.failed.length;
+      if (okCount === 0 && failCount === 0) return;
+
+      const verb = msg.op === 'archive' ? 'Archived' : 'Soft-deleted';
+      const noun = (n: number) => (n === 1 ? 'session' : 'sessions');
+
+      if (okCount === 0) {
+        // Every id was rejected. Lead with the most common failure reason
+        // so the operator gets an actionable hint without opening details.
+        const runningCount = msg.failed.filter((f) => f.reason === 'running').length;
+        const hint =
+          runningCount > 0
+            ? `${runningCount} still running — Stop or End first.`
+            : (msg.failed[0]?.message ?? 'See server logs for details.');
+        ctx.push({
+          id: mintId(),
+          ts: now,
+          severity: 'warn',
+          class: 'operational',
+          dedupeKey: `bulk_session_op:${msg.op}:none`,
+          title: `Couldn't ${msg.op} ${failCount} ${noun(failCount)}`,
+          message: hint,
+          sticky: false,
+        });
+        return;
+      }
+
+      // At least one succeeded.
+      const removedTail = msg.op === 'delete' && msg.removedArtifacts ? ' · logs removed' : '';
+      const failTail =
+        failCount > 0 ? ` · ${failCount} couldn't be processed (e.g. still running)` : '';
+      ctx.push({
+        id: mintId(),
+        ts: now,
+        severity: 'success',
+        class: 'operational',
+        dedupeKey: `bulk_session_op:${msg.op}:ok`,
+        title: `${verb} ${okCount} ${noun(okCount)}${removedTail}`,
+        message:
+          msg.op === 'delete'
+            ? `Recoverable for 7 days, then purged.${failTail}`
+            : failTail
+              ? failTail.replace(/^ · /, '')
+              : 'Hidden from the session list.',
+        sticky: false,
+      });
+      return;
+    }
+
     case 'wrapper_error': {
       // UI-14: a wrapper_error not pinned to a chat session pushes an error
       // toast. Session-scoped wrapper_errors are already rendered as a

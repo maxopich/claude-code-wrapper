@@ -82,6 +82,126 @@ describe('notifyFromServerMsg', () => {
   });
 });
 
+// Cluster I Phase C5 UI: bulk_session_op_result → single summary toast.
+describe('notifyFromServerMsg — Cluster I C5 bulk_session_op_result', () => {
+  function bulkResult(overrides: Record<string, unknown>): ServerMsg {
+    return {
+      type: 'bulk_session_op_result',
+      op: 'archive',
+      succeededSessionIds: [],
+      failed: [],
+      removedArtifacts: false,
+      ...overrides,
+    } as ServerMsg;
+  }
+
+  test('all-succeeded archive → success toast with count', () => {
+    const r = recorder();
+    notifyFromServerMsg(bulkResult({ op: 'archive', succeededSessionIds: ['a', 'b', 'c'] }), {
+      push: r.push,
+      mintId: () => 'm',
+      now: () => 1,
+    });
+    expect(r.pushed).toHaveLength(1);
+    expect(r.pushed[0]).toMatchObject({
+      severity: 'success',
+      dedupeKey: 'bulk_session_op:archive:ok',
+      title: 'Archived 3 sessions',
+    });
+  });
+
+  test('singular noun when exactly one succeeded', () => {
+    const r = recorder();
+    notifyFromServerMsg(bulkResult({ op: 'archive', succeededSessionIds: ['only'] }), {
+      push: r.push,
+    });
+    expect(r.pushed[0]?.title).toBe('Archived 1 session');
+  });
+
+  test('delete success copy mentions the 7-day recovery window', () => {
+    const r = recorder();
+    notifyFromServerMsg(bulkResult({ op: 'delete', succeededSessionIds: ['x', 'y'] }), {
+      push: r.push,
+    });
+    expect(r.pushed[0]).toMatchObject({ severity: 'success', title: 'Soft-deleted 2 sessions' });
+    expect(r.pushed[0]?.message).toContain('7 days');
+  });
+
+  test('delete with removedArtifacts appends "· logs removed" to the title', () => {
+    const r = recorder();
+    notifyFromServerMsg(
+      bulkResult({ op: 'delete', succeededSessionIds: ['x'], removedArtifacts: true }),
+      { push: r.push },
+    );
+    expect(r.pushed[0]?.title).toBe('Soft-deleted 1 session · logs removed');
+  });
+
+  test('removedArtifacts is ignored for archive (never touches disk)', () => {
+    const r = recorder();
+    notifyFromServerMsg(
+      bulkResult({ op: 'archive', succeededSessionIds: ['x'], removedArtifacts: true }),
+      { push: r.push },
+    );
+    expect(r.pushed[0]?.title).toBe('Archived 1 session');
+  });
+
+  test('partial success → success toast noting the failures', () => {
+    const r = recorder();
+    notifyFromServerMsg(
+      bulkResult({
+        op: 'archive',
+        succeededSessionIds: ['ok'],
+        failed: [{ sessionId: 'busy', reason: 'running', message: 'busy' }],
+      }),
+      { push: r.push },
+    );
+    expect(r.pushed[0]).toMatchObject({ severity: 'success', title: 'Archived 1 session' });
+    expect(r.pushed[0]?.message).toContain("couldn't be processed");
+  });
+
+  test('all-failed (running) → warn toast with a Stop/End hint', () => {
+    const r = recorder();
+    notifyFromServerMsg(
+      bulkResult({
+        op: 'delete',
+        succeededSessionIds: [],
+        failed: [
+          { sessionId: 'r1', reason: 'running', message: 'busy' },
+          { sessionId: 'r2', reason: 'running', message: 'busy' },
+        ],
+      }),
+      { push: r.push },
+    );
+    expect(r.pushed).toHaveLength(1);
+    expect(r.pushed[0]).toMatchObject({
+      severity: 'warn',
+      dedupeKey: 'bulk_session_op:delete:none',
+      title: "Couldn't delete 2 sessions",
+    });
+    expect(r.pushed[0]?.message).toContain('still running');
+  });
+
+  test('all-failed with a non-running reason surfaces the first message', () => {
+    const r = recorder();
+    notifyFromServerMsg(
+      bulkResult({
+        op: 'archive',
+        succeededSessionIds: [],
+        failed: [{ sessionId: 'gone', reason: 'unknown', message: 'No such session.' }],
+      }),
+      { push: r.push },
+    );
+    expect(r.pushed[0]).toMatchObject({ severity: 'warn' });
+    expect(r.pushed[0]?.message).toBe('No such session.');
+  });
+
+  test('empty result (nothing succeeded or failed) → no toast', () => {
+    const r = recorder();
+    notifyFromServerMsg(bulkResult({ succeededSessionIds: [], failed: [] }), { push: r.push });
+    expect(r.pushed).toHaveLength(0);
+  });
+});
+
 // Cluster D Phase 4c (UI-D6): banner ↔ toast dedup. When a rate-limit
 // banner is mounted for a session, the dispatcher's parallel `notification`
 // envelope (the toast) should be suppressed so the operator doesn't see

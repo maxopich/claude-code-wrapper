@@ -634,6 +634,135 @@ pre {
 .session-download-btn:disabled {
   cursor: progress;
 }
+
+/* Cluster I C5 UI: bulk session management — Select-mode toggle (project
+ * header), per-row checkbox marker, and the bottom-anchored action bar.
+ * Token reuse only; no new palette entries. */
+.session-select-toggle {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+.session-select-toggle:hover {
+  color: var(--fg);
+  border-color: var(--line-3);
+}
+.session-select-toggle.on {
+  color: var(--accent-ink, var(--accent));
+  border-color: var(--accent-soft);
+  background: var(--accent-glow);
+}
+/* The checkbox is a read-only visual mirror — the row owns the click
+ * (pointer-events:none keeps a stray checkbox click from double-toggling). */
+.session-select-checkbox {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--accent);
+  pointer-events: none;
+}
+.session-row.selected {
+  background: var(--accent-glow);
+  color: var(--fg);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.bulk-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  list-style: none;
+  padding: 6px 12px;
+  margin: 1px 6px 4px;
+  border-radius: 5px;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+}
+.bulk-action-bar.has-selection {
+  border-color: var(--accent-soft);
+}
+.bulk-action-bar.confirming {
+  border-color: var(--err-soft);
+  background: var(--err-soft);
+}
+.bulk-action-count,
+.bulk-action-confirm-prompt {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  margin-right: auto;
+}
+.bulk-action-count {
+  font-family: var(--font-mono);
+}
+.bulk-action-confirm-prompt strong {
+  color: var(--fg);
+  font-family: var(--font-mono);
+}
+.bulk-action-btn {
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font-size: var(--t-xs);
+  border-radius: var(--r-sm);
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+.bulk-action-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--line-3);
+  background: var(--bg-4);
+}
+.bulk-action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.bulk-action-btn.danger {
+  color: var(--err);
+  border-color: var(--err-soft);
+}
+.bulk-action-btn.danger:hover:not(:disabled) {
+  border-color: var(--err);
+  background: var(--err-soft);
+}
+.bulk-action-confirm-input {
+  width: 48px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--accent-2, var(--accent));
+  border-radius: 3px;
+  padding: 2px 5px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+  flex-shrink: 0;
+}
+.bulk-action-confirm-input:focus {
+  border-color: var(--accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .session-select-toggle,
+  .bulk-action-btn {
+    transition: none;
+  }
+}
+
 .session-row.editing {
   background: var(--bg-3);
   cursor: default;
