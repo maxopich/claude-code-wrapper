@@ -44,9 +44,23 @@ jobs:
           # user-controlled-bypass / log-injection — they're false positives
           # in this context (we control both ends, server is bound to 127.0.0.1
           # with Origin gating). Skip the smoke harnesses from analysis.
+          #
+          # The `js/missing-rate-limiting` query flags Express route handlers
+          # that perform "expensive" ops (file reads, DB queries) without an
+          # express-rate-limit-style middleware. For Cebab this is the wrong
+          # threat model: the HTTP server binds to 127.0.0.1, every route is
+          # gated on Origin+Host AND a per-launch random token written to
+          # ~/.cebab/auth-token (mode 0600), and the only legitimate caller
+          # is the operator themselves on the same machine. A "rate limit"
+          # against the operator pulling their own data is theater. If the
+          # day comes that Cebab gates a non-operator caller (multi-user,
+          # remote, OAuth-3rd-party), drop this exclude and revisit.
           config: |
             paths-ignore:
               - 'server/src/*_smoke.ts'
+            query-filters:
+              - exclude:
+                  id: js/missing-rate-limiting
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
