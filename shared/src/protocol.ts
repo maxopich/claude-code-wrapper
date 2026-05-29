@@ -433,6 +433,29 @@ export type SearchResult = {
   redactedFields?: string[];
 };
 
+/**
+ * Cluster I Phase H3 (UI_Findings spec §4.4): why a `get_artifact_content`
+ * read could not complete. Present on the `artifact_content` reply ONLY when
+ * the content could not be produced — the UI renders an inline "couldn't load"
+ * affordance keyed on `mutationId` rather than a broken empty preview.
+ *
+ *   - `mutation_not_found` — no `multi_agent_mutations` row for that id (stale
+ *                            client, or the session was purged).
+ *   - `no_file_path`       — the mutation has no single target file (e.g. a
+ *                            `Bash`/`Agent`/`Task` mutation, or a pre-012 row);
+ *                            there is nothing to preview.
+ *   - `not_a_file`         — the path resolved to a directory / device / FIFO,
+ *                            not a regular file (the agent's write target was
+ *                            swapped, or the path was never a file).
+ *   - `read_failed`        — open/read errored (deleted since the mutation,
+ *                            EACCES, ELOOP, …). The preview is unavailable.
+ */
+export type ArtifactContentError =
+  | 'mutation_not_found'
+  | 'no_file_path'
+  | 'not_a_file'
+  | 'read_failed';
+
 // ---- Browser → Server ----
 export type ClientMsg =
   | { type: 'list_projects' }
@@ -1488,6 +1511,35 @@ export type ClientMsg =
       raw?: boolean;
       /** Max hits to return; clamped to [1, 100] server-side (default 30). */
       limit?: number;
+    }
+  | {
+      /**
+       * Cluster I Phase H3 (UI_Findings spec §4.4): lazily fetch the CURRENT
+       * on-disk content of the file a bus mutation touched, for the
+       * `ArtifactsView` "▸ View latest content" disclosure. Opt-in: the client
+       * sends this only when the operator opens the disclosure (preserves the
+       * lazy posture R-I6 / H3-2 — content is never auto-fetched on row select).
+       *
+       * Server behavior (`server/src/repo/artifact_content.ts` +
+       * `executeGetArtifactContent`):
+       *   - Resolves the file at `<mutation.cwd>/<mutation.filePath>` and reads
+       *     it TOCTOU-safely (open once, fstat the fd, bounded read — the
+       *     `bus/runtime.ts` `readProjectClaudeMd` pattern).
+       *   - Caps the read at 1 MB; `artifact_content.truncated` flags an
+       *     oversized file (H3-4) so the UI can show "showing first 1 MB".
+       *   - Redacts the body via the SAME machinery the per-session log view
+       *     uses (H3-3): a sensitive-path file (`.env`, credentials, …) is
+       *     masked wholesale; otherwise only lines carrying inline secrets are
+       *     masked. There is NO raw/unredacted path for H3 (unlike C2/C4) —
+       *     artifact previews are always redacted.
+       *
+       * `mutationId` is the `multi_agent_mutations.id` (a NUMBER, matching
+       * `MultiAgentMutationView.id` / `LogRow.artifactId`). The spec §4.4 sketch
+       * typed it `string`, but every id the client holds for a mutation is
+       * numeric — using `number` avoids a lossy round-trip.
+       */
+      type: 'get_artifact_content';
+      mutationId: number;
     };
 
 // ---- Server → Browser ----
@@ -2947,6 +2999,37 @@ export type ServerMsg =
       results: SearchResult[];
       raw: boolean;
       truncated: boolean;
+    }
+  | {
+      /**
+       * Cluster I Phase H3 (UI_Findings spec §4.4): reply to
+       * `get_artifact_content`. One envelope per request — never streamed. The
+       * client (H3 UI slice) renders `content` inside the matching
+       * `ArtifactsView` disclosure, keyed on `mutationId`.
+       *
+       * The reply ALWAYS carries `mutationId` (so a late reply for a since-
+       * collapsed disclosure can be ignored) plus EITHER a successful read OR
+       * an `error`. On error, `content` is `''`, `size`/`mtime` are `0`, and
+       * `error` names why (the UI shows "couldn't load" inline). On success:
+       *   - `content` is the redacted body (H3-3): always redacted — there is
+       *     no raw path for artifact previews.
+       *   - `mtime` is the file's last-modified time (ms epoch).
+       *   - `size` is the byte length actually read (post-cap), NOT the on-disk
+       *     size — bounded by the 1 MB cap.
+       *   - `truncated === true` when the on-disk file exceeded the cap and the
+       *     content is the first 1 MB only (H3-4).
+       *   - `redactedFields` lists what the redactor masked (`['content']` when
+       *     the whole file was masked for a sensitive path, or `['line:N', …]`
+       *     for per-line inline-secret masking); absent when nothing was masked.
+       */
+      type: 'artifact_content';
+      mutationId: number;
+      content: string;
+      mtime: number;
+      size: number;
+      truncated?: boolean;
+      redactedFields?: string[];
+      error?: ArtifactContentError;
     };
 
 /**

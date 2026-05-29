@@ -118,6 +118,7 @@ import {
 import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
 import { executeBulkSessionOp } from '../bulk_session_op.js';
 import { executeSearchSessions } from '../search_sessions.js';
+import { executeGetArtifactContent } from '../get_artifact_content.js';
 import { maybeDispatchGuardrailViolation } from '../notifications/guardrail_violation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
@@ -4018,6 +4019,18 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // audit gate and `repo/search.ts` owns the LIKE scan + containment-
       // preserving redaction, so neither needs a Conn to unit-test.
       executeSearchSessions({
+        msg,
+        send: (m) => send(conn.ws, m),
+      });
+      return;
+    }
+    case 'get_artifact_content': {
+      // Cluster I Phase H3 (UI_Findings spec §4.4): lazily read the current
+      // on-disk content of a bus mutation's file. Thin delegate —
+      // `executeGetArtifactContent` maps the read outcome onto the reply and
+      // `repo/artifact_content.ts` owns the TOCTOU-safe bounded read + the
+      // always-on redaction, so neither needs a Conn to unit-test.
+      executeGetArtifactContent({
         msg,
         send: (m) => send(conn.ws, m),
       });
