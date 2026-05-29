@@ -117,6 +117,7 @@ import {
 } from '../repo/recovery_log.js';
 import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
 import { executeBulkSessionOp } from '../bulk_session_op.js';
+import { executeSearchSessions } from '../search_sessions.js';
 import { maybeDispatchGuardrailViolation } from '../notifications/guardrail_violation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
@@ -4006,6 +4007,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // a thin delegate so `executeBulkSessionOp` (in `bulk_session_op.ts`)
       // stays unit-testable without standing up a Conn.
       await executeBulkSessionOp({
+        msg,
+        send: (m) => send(conn.ws, m),
+      });
+      return;
+    }
+    case 'search_sessions': {
+      // Cluster I Phase C4 (UI_Findings spec §4.2): cross-session content
+      // search. Thin delegate — `executeSearchSessions` owns the raw-opt-in
+      // audit gate and `repo/search.ts` owns the LIKE scan + containment-
+      // preserving redaction, so neither needs a Conn to unit-test.
+      executeSearchSessions({
         msg,
         send: (m) => send(conn.ws, m),
       });
