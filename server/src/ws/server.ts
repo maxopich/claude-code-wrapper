@@ -70,6 +70,12 @@ import { shouldAutoAllow } from './permission.js';
 import { buildSessionLogChunk } from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
 import {
+  awaitBusTrustDecision,
+  type BusTrustGateState,
+  makeBusTrustGateState,
+  resolveBusTrustPending,
+} from '../bus/install_trust_gate.js';
+import {
   emit as emitNotification,
   getNotification,
   markNotificationAcked,
@@ -1436,6 +1442,13 @@ type Conn = {
    */
   trustGate: TrustGateState;
   /**
+   * Cluster G Phase 4 (D6/D11): bus-install TOFU gate state. Holds parked
+   * `pendingId` promises (one per emitted `bus_auto_install_pending`) and
+   * the per-Conn `deny_once` set keyed by projectId. Cleared implicitly on
+   * disconnect via Conn drop.
+   */
+  busTrustGate: BusTrustGateState;
+  /**
    * Cluster B Phase 5: env-injection start-gate state. Holds parked
    * `pendingStartId` promises (one per emitted `session_start_gated`).
    * Cleared implicitly on disconnect.
@@ -1636,6 +1649,7 @@ function onConnection(ws: WebSocket): void {
     multiAgent: null,
     authorityCache: new Map(),
     trustGate: makeTrustGateState(),
+    busTrustGate: makeBusTrustGateState(),
     startGate: makeStartGateState(),
     capturedPrompts: new Map(),
     lastInterruptIds: new Map(),
@@ -2652,6 +2666,29 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // automatic re-fetch alongside the inspector.
       return;
     }
+    case 'bus_trust_decision': {
+      // Cluster G Phase 4 (D6/D11): operator's TOFU decision for a parked
+      // bus install. Always gate-driven (the bus has no Authority-Panel
+      // free-decision path today), so `pendingId` is required by the
+      // protocol and a stale/unknown id is a no-op (mirrors mcp_trust's
+      // path A short-circuit). The gate's `resolveBusTrustPending` walks
+      // the per-Conn pending Map, deletes the entry, and resolves the
+      // awaiting `installBusForProject` caller — which then performs the
+      // dual-write (projects.bus_trust_decision + safety_audit) before
+      // proceeding (`trust`) or surfacing the denial (`deny_once` /
+      // `deny_remember`).
+      const matched = resolveBusTrustPending(conn.busTrustGate, msg.pendingId, msg.decision);
+      if (!matched) {
+        // Stale reply (gate already resolved, or operator's client retried
+        // after WS reconnect blew away the pending Map). The operator's
+        // install attempt either succeeded or is sitting at a fresh
+        // first-seen prompt; either way no UI-visible action needed.
+        console.log(
+          `[bus_trust] decision for unknown pendingId=${msg.pendingId} (project=${msg.projectId}) — no-op`,
+        );
+      }
+      return;
+    }
     case 'acknowledge_and_start': {
       // Cluster B Phase 5 (§4.5): operator's typed-acknowledgment reply to
       // a parked `session_start_gated`. Three guards before unblocking:
@@ -3095,6 +3132,33 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
     }
     case 'install_bus_integration': {
       try {
+        // Cluster G Phase 4 (D6/D11): TOFU gate. For first-seen projects
+        // this emits `bus_auto_install_pending` and blocks; the operator's
+        // `bus_trust_decision` reply resolves the awaited promise. For
+        // projects with a persisted decision (`trusted` / `denied`) or a
+        // per-Conn `deny_once`, the gate short-circuits without prompting.
+        // Migration 024 backfills `trusted` for projects that were
+        // already bus_installed before the gate existed, so pre-gate
+        // operators see a silent pass on re-installs.
+        const gateOutcome = await awaitBusTrustDecision({
+          projectId: msg.projectId,
+          contextSessionId: null,
+          gate: conn.busTrustGate,
+          send: (m) => send(conn.ws, m),
+        });
+        if (!gateOutcome.approved) {
+          // Surface the denial as a typed wrapper_error so the operator's
+          // click has visible feedback. The audit row is already in
+          // safety_audit (`bus.install_denied` / `bus.trust_decided`),
+          // and the projects row carries the persisted decision for
+          // future attempts.
+          send(conn.ws, {
+            type: 'wrapper_error',
+            kind: 'process_crashed',
+            message: `bus install refused (${gateOutcome.reason})`,
+          });
+          return;
+        }
         const result = await installBusForProject(msg.projectId);
         send(conn.ws, {
           type: 'bus_integration_changed',
@@ -3725,6 +3789,29 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         return;
       }
       try {
+        // Cluster G Phase 4 (D6/D11): TOFU gate for the auto-install
+        // side effect inside addWorker. addWorker reads the bus state,
+        // and if `bus_installed=0` it calls `installBusForProject` — so
+        // we run the gate FIRST and refuse to invoke addWorker on a
+        // denial. The gate is only consequential when this is a
+        // first-seen install: if `bus_installed=1` (migration 024
+        // backfills `bus_trust_decision='trusted'` for those) the gate
+        // short-circuits silently with `approved:true`.
+        const gateOutcome = await awaitBusTrustDecision({
+          projectId: msg.projectId,
+          contextSessionId: msg.sessionId,
+          gate: conn.busTrustGate,
+          send: (m) => send(conn.ws, m),
+        });
+        if (!gateOutcome.approved) {
+          send(conn.ws, {
+            type: 'wrapper_error',
+            sessionId: msg.sessionId,
+            kind: 'process_crashed',
+            message: `add_multi_agent_participant: bus install refused (${gateOutcome.reason})`,
+          });
+          return;
+        }
         const result = await active.addWorker(msg.projectId);
         send(conn.ws, {
           type: 'multi_agent_participant_added',

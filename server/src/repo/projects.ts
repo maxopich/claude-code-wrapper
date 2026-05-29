@@ -13,7 +13,25 @@ export type ProjectRow = {
   bus_installed: number;
   /** Filesystem-safe agent slug captured at install time. NULL if not installed. */
   bus_agent_name: string | null;
+  /**
+   * Cluster G Phase 4 (D6/D11): one-shot TOFU decision for the bus
+   * install. NULL means "never asked" (first-seen path emits
+   * `bus_auto_install_pending` and blocks). 'trusted' / 'denied' are
+   * persistent; revocation back to NULL is operator action through the
+   * Authority Panel (parallel to mcp_trust revocation). Migration 024
+   * backfills 'trusted' for any project that was already
+   * `bus_installed=1` at the time the gate was added, so pre-gate users
+   * aren't re-prompted for a bus that has been running for them.
+   */
+  bus_trust_decision: BusTrustDecision | null;
 };
+
+/**
+ * The two decisions the operator can persist for the bus install gate.
+ * 'deny_once' is in-memory only (cleared on WS disconnect), so it never
+ * appears as a column value.
+ */
+export type BusTrustDecision = 'trusted' | 'denied';
 
 export function upsertProject(name: string, path: string): ProjectRow {
   const db = getDb();
@@ -76,4 +94,34 @@ export function setProjectTrusted(id: number, trusted: boolean): void {
 
 export function touchProject(id: number, db: Database.Database = getDb()): void {
   db.prepare('UPDATE projects SET last_used_at = ? WHERE id = ?').run(Date.now(), id);
+}
+
+/**
+ * Cluster G Phase 4 (D6/D11): read the persisted bus-install trust decision.
+ * Returns `null` for unknown projects (so callers don't need a second
+ * existence check; a missing project will fail at the install step
+ * anyway) and for projects that have never been asked.
+ */
+export function getProjectBusTrust(id: number): BusTrustDecision | null {
+  const row = getDb()
+    .prepare<[number], { bus_trust_decision: string | null }>(
+      'SELECT bus_trust_decision FROM projects WHERE id = ?',
+    )
+    .get(id);
+  if (!row) return null;
+  if (row.bus_trust_decision === 'trusted' || row.bus_trust_decision === 'denied') {
+    return row.bus_trust_decision;
+  }
+  return null;
+}
+
+/**
+ * Cluster G Phase 4 (D6/D11): write the persisted bus-install trust decision.
+ * Pass `null` to clear (operator revocation via the Authority Panel).
+ * No-op for missing projects — the UPDATE silently matches 0 rows.
+ */
+export function setProjectBusTrust(id: number, decision: BusTrustDecision | null): void {
+  getDb()
+    .prepare('UPDATE projects SET bus_trust_decision = ? WHERE id = ?')
+    .run(decision, id);
 }

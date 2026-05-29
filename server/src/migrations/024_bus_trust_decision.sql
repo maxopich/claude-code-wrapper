@@ -1,0 +1,77 @@
+-- Cluster G Phase 4 (D6/D11): persistence for the bus-install TOFU gate.
+--
+-- The bus is a Cebab-injected in-process MCP closure
+-- (`bus/runner.ts:makeBusToolServer` + `bus/install.ts`). "Installing" a
+-- project for the bus is pure DB metadata — no binary executes and no
+-- file is written into the project. That makes it tempting to flip the
+-- flag silently on every `add_multi_agent_participant`, but per the
+-- agentic-reviewer correction:
+--
+--   The bus is the enforcement point for D4 router drops, and the slug
+--   it pins is the identity surface for every later message that worker
+--   sends. In-process makes the trust decision MORE consequential, not
+--   less — post-action confirmation ("we just installed the bus for
+--   this project") is the silent-safety anti-pattern in another form.
+--
+-- So this migration adds a one-column trust register on `projects`:
+--
+--   - `bus_trust_decision`        NULL   → never asked (first-seen path);
+--                                          the WS handler emits a
+--                                          `bus_auto_install_pending`
+--                                          envelope and blocks the
+--                                          install until the operator
+--                                          decides.
+--                                'trusted' → silent pass; the install
+--                                          proceeds.
+--                                'denied'  → silent refusal + a
+--                                          `safety_audit { kind:
+--                                          'bus.install_denied' }`
+--                                          row; the install does NOT
+--                                          proceed.
+--
+-- Per-project (not per-agent-slug, not per-cebab-install) is per OQ-G5
+-- of high/G-run-awareness §9 — the only relevant identity here is the
+-- project, since the bus is the project's authority surface and the
+-- agent slug is derived from the project name (changing the slug
+-- doesn't change which workspace the worker can mutate). Revocation
+-- (back to NULL) is operator action through the Authority Panel UI,
+-- to be added in Cluster B's parallel mcp_trust editor.
+--
+-- Why a column on projects, not a separate `bus_trust` table:
+--
+--   - One decision per project. There's nothing to JOIN against — the
+--     decision IS the project's. A sibling table is the right shape
+--     when there's a many-to-one fanout (mcp_trust has multiple
+--     per-server rows per project); for bus install there is exactly
+--     one row by construction.
+--
+--   - Resolver simplicity. `getProjectBusTrust(projectId)` reads the
+--     same row `getProject(projectId)` already pulls.
+--
+--   - Per cebab-1's leaner-shape validation (high/G-run-awareness §4.4):
+--     the column form is the recommended one for this slice. A future
+--     v1.1 Authority Panel editor reads it through the same path.
+--
+-- NULL is the historically-correct default for existing rows: any
+-- project that already has `bus_installed=1` from before this migration
+-- IS implicitly trusted (the operator opted in by clicking install or
+-- adding the participant before this gate existed). To avoid spurious
+-- re-prompts on the next add-participant click for those projects, the
+-- migration backfills `bus_trust_decision='trusted'` for every existing
+-- `bus_installed=1` row. Projects with `bus_installed=0` keep
+-- `bus_trust_decision=NULL` (first-seen on the first add).
+--
+-- safety_audit columns are untouched, so no chain-reset marker is
+-- required — verifyChain continues to anchor at migration 023's marker
+-- (the most recent column-set change to safety_audit).
+
+ALTER TABLE projects
+  ADD COLUMN bus_trust_decision TEXT;
+
+-- Backfill: projects that were installed before this gate existed are
+-- treated as already-trusted. Otherwise their next add-participant
+-- click would prompt for trust on a bus that has been running for them
+-- for weeks.
+UPDATE projects
+SET    bus_trust_decision = 'trusted'
+WHERE  bus_installed = 1;

@@ -2448,8 +2448,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'project_authority':
     case 'mcp_auto_install_pending':
     case 'session_start_gated':
-      // Cluster B Phase 3+4+5: AuthorityPanel + McpTofuModal +
-      // EnvInjectionGateModal (Phase 6+ UI) will own their own context-like
+    case 'bus_auto_install_pending':
+      // Cluster B Phase 3+4+5 + Cluster G Phase 4 (D6/D11): AuthorityPanel +
+      // McpTofuModal + EnvInjectionGateModal + BusTofuModal (the latter
+      // ships in the next D6/D11 UI slice) will own their own context-like
       // slices for these — all are project-scoped + modal-triggered, and
       // the main store shouldn't re-render on every refresh / pending.
       // The pattern matches inbox_snapshot. Exhaustiveness no-op for now.
