@@ -1175,6 +1175,12 @@ export function wireOrchestratorSession(p: {
         filePath: cls.filePath ?? null,
         cwd,
         toolUseId: cls.toolUseId ?? null,
+        // Cluster F Phase D5+: persist the guardrail-violation verdict
+        // alongside the mutation so R-A/R-B replays show the badge.
+        // Both fields are NULL when in-scope — `?? null` on both keeps
+        // the column write symmetric.
+        guardrailViolationPath: cls.guardrailViolation?.violatedPath ?? null,
+        guardrailReason: cls.guardrailViolation?.reasonCode ?? null,
       });
     } catch (err) {
       console.error('[orchestrator] persist mutation failed', err);

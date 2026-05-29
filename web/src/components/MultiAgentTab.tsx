@@ -2747,7 +2747,12 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
               </div>
               <ul>
                 {list.map((m) => (
-                  <li key={m.id} className={`mutation-row mutation-${m.category}`}>
+                  <li
+                    key={m.id}
+                    className={`mutation-row mutation-${m.category}${
+                      m.guardrailViolation ? ' has-guardrail-violation' : ''
+                    }`}
+                  >
                     <span className="mutation-icon" aria-hidden="true">
                       {m.category === 'dangerous' ? '⚠' : '✎'}
                     </span>
@@ -2756,6 +2761,32 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
                     </span>
                     <span className="mutation-tool">{m.toolName}</span>
                     <span className="mutation-summary">{m.summary}</span>
+                    {/* Cluster F Phase D5+ (UI-D5+): orthogonal scope-violation
+                     *  badge. Renders when the server's path classifier flagged
+                     *  this mutation as targeting a file outside the agent's
+                     *  project folder (the consultant-mode guardrail). The
+                     *  tooltip names the resolved path so the operator can
+                     *  judge whether their prompt actually authorized the
+                     *  change. Independent of `category` — both axes can fire
+                     *  on the same row (a dangerous Bash that wrote to /tmp
+                     *  badges both ways). */}
+                    {m.guardrailViolation && (
+                      <span
+                        className="mutation-guardrail-badge"
+                        data-testid="mutation-guardrail-badge"
+                        aria-label={`Out of scope: ${m.guardrailViolation.violatedPath}`}
+                        title={
+                          `Out-of-scope mutation: agent attempted to write to ${m.guardrailViolation.violatedPath}, ` +
+                          `which is outside its project folder${
+                            m.guardrailViolation.agentCwd
+                              ? ` (${m.guardrailViolation.agentCwd})`
+                              : ''
+                          }. The consultant-mode prompt forbids mutations outside an agent's own folder unless your request explicitly directs it; this is advisory (no server-side enforcement). The safety_audit row carries the full forensic record.`
+                        }
+                      >
+                        <span aria-hidden="true">↗</span> out of scope
+                      </span>
+                    )}
                     <span className="mutation-ts">{formatTs(m.ts)}</span>
                   </li>
                 ))}

@@ -104,6 +104,7 @@ import {
   sweepReopenRate,
 } from '../repo/recovery_log.js';
 import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
+import { maybeDispatchGuardrailViolation } from '../notifications/guardrail_violation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
   resolveChainParticipants,
@@ -1358,6 +1359,19 @@ function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
     cwd: m.cwd,
     confirmedAt: m.confirmedAt,
     promoted: m.promoted,
+    // Cluster F Phase D5+: omit the field entirely when in-scope so the
+    // wire stays narrow for the common case + the optional `?:` in the
+    // type contract is honoured (forward-compat with older clients that
+    // ignore unknown fields anyway, but stricter is cleaner).
+    ...(m.guardrailViolationPath !== null
+      ? {
+          guardrailViolation: {
+            violatedPath: m.guardrailViolationPath,
+            agentCwd: m.cwd,
+            reasonCode: m.guardrailReason ?? 'path_outside_cwd',
+          },
+        }
+      : {}),
   };
 }
 
@@ -1740,6 +1754,12 @@ function resumeCallbacks(
       // LogsButton cumulative-count chip is unchanged — this toast is
       // point-in-time (additive).
       dispatchDangerousMutationForConn(sessionId, mutation, conn);
+      // Cluster F Phase D5+: orthogonal safety signal — a mutation
+      // whose resolved target path falls outside the agent's project
+      // folder gets its own audit row + toast. Independent of severity
+      // category; both signals can fire on the same row (e.g., an
+      // out-of-scope `Write` to /tmp/foo is `mutate` + violation).
+      dispatchGuardrailViolationForConn(sessionId, mutation, conn);
     },
     onPendingMutation: (sessionId, pending) => {
       send(conn.ws, {
@@ -1787,6 +1807,31 @@ function dispatchDangerousMutationForConn(
     // safety-log gap is logged for post-mortem. The wider mutation event
     // already shipped on the wire; only the safety toast is missing.
     console.error('[ws] dangerous mutation dispatcher.emit failed', result.error);
+  }
+}
+
+/**
+ * Cluster F Phase D5+: adapter for the `maybeDispatchGuardrailViolation`
+ * helper — owns the WS send coupling for this Conn and the
+ * audit-write-failure logging policy. Mirrors `dispatchDangerousMutationForConn`
+ * — the orthogonal safety signal (path-scope violation) gets its own
+ * audit row + dedicated notification toast independent of the mutation's
+ * severity category. Both fan-out wrappers run on the same mutation row
+ * sequentially, so a mutation that is both `dangerous` AND out-of-scope
+ * surfaces both signals.
+ */
+function dispatchGuardrailViolationForConn(
+  sessionId: string,
+  mutation: MutationRecord,
+  conn: Conn,
+): void {
+  const result = maybeDispatchGuardrailViolation(sessionId, mutation, (msg) => send(conn.ws, msg));
+  if (result && !result.ok) {
+    // BE-1: the dispatcher refused (audit write failed). The mutation
+    // row itself still carries `guardrail_violation_path` so the UI
+    // badge survives — only the notification toast is missing. Logged
+    // for post-mortem; not fatal to the run.
+    console.error('[ws] guardrail violation dispatcher.emit failed', result.error);
   }
 }
 
@@ -3055,6 +3100,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           mutation: mutationRecordToView(mutation),
         });
         dispatchDangerousMutationForConn(sessionId, mutation, conn);
+        // Cluster F Phase D5+: see the matching call in the start path
+        // — orthogonal scope-violation signal fires its own audit row +
+        // toast independent of the dangerous-category dispatch.
+        dispatchGuardrailViolationForConn(sessionId, mutation, conn);
       };
       // Item #5: pause-on-mutation slot set/clear → wire. Fresh starts never
       // carry a pending slot on `multi_agent_started`; this is the delta.

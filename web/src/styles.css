@@ -9059,3 +9059,38 @@ pre {
    * the tooltip-only affordance and matches the chip family for status. */
   cursor: help;
 }
+
+/* ---- Cluster F Phase D5+: guardrail-violation badge in MutationsDisclosure ---- */
+
+/* Background tint on the mutation-row when an out-of-scope violation
+ * is flagged. Layered with `.mutation-dangerous` (a `mutate`-category
+ * out-of-scope write keeps the neutral row background plus the warn
+ * tint here; a `dangerous` row that's also out-of-scope shows both the
+ * err-soft row tint and this warn-soft layer, signalling "two axes of
+ * concern" simultaneously without competing colors). */
+.mutation-row.has-guardrail-violation {
+  background: color-mix(in srgb, var(--warn-soft) 50%, transparent);
+}
+/* The badge sits inline next to the mutation-summary text. Geometry +
+ * font ramp mirror `.mutation-badge` (the existing MUTATE/DANGEROUS
+ * label badge) so the row reads as a coherent strip rather than
+ * jumping styles. Warn palette since the violation is advisory (the
+ * worker may have been legitimately directed by the operator's prompt
+ * — we can't tell). */
+.mutation-guardrail-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+  border-radius: var(--r-sm);
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  color: var(--warn);
+  background: var(--warn-soft);
+  /* Tooltip is the affordance — the badge isn't a button. */
+  cursor: help;
+  white-space: nowrap;
+}

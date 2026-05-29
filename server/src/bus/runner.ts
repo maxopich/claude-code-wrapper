@@ -25,6 +25,7 @@ import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../r
 import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusRecipient } from './paths.js';
+import { classifyMutationScope } from './guardrail.js';
 
 /** Message kinds the bus understands. Cebab writes `intro`/`prompt`;
  *  agents emit `reply`/`final`. Mirrors the old `--kind` values. */
@@ -193,6 +194,16 @@ export type AgentRunnerDeps = {
       summary: string;
       filePath?: string;
       toolUseId?: string;
+      /** Cluster F Phase D5+: server-side path classifier verdict. Set
+       *  when the mutation's resolved target path falls outside the
+       *  agent's project folder (consultant-mode guardrail violation).
+       *  Undefined for in-scope mutations and for tools with no
+       *  canonical file path (Bash, Task). The hook routes this into
+       *  the persisted mutation row + the safety_audit dispatcher. */
+      guardrailViolation?: {
+        violatedPath: string;
+        reasonCode: string;
+      };
     },
   ) => Promise<void> | void;
   /**
@@ -584,6 +595,23 @@ export class AgentRunner {
               const cls = classifyToolCall(toolName, block.input);
               if (cls.category === 'read') continue;
               const toolUseId = typeof block.id === 'string' ? block.id : undefined;
+              // Cluster F Phase D5+: classify path scope vs agent cwd. The
+              // consultant-mode prompt forbids out-of-scope mutations; this
+              // surfaces violations post-hoc (workers run with
+              // bypassPermissions, so we can't deny at the SDK gate). The
+              // verdict rides on the hook payload — the orchestrator/chain
+              // sink persists it on the mutation row and the WS broadcast
+              // fan-out fires the safety_audit dispatcher. In-scope
+              // mutations (the common case) carry no `guardrailViolation`
+              // field, so existing tests / sinks that don't look at the
+              // field continue to behave identically.
+              const scope = classifyMutationScope({
+                agentCwd: spec.cwd,
+                filePath: cls.filePath,
+              });
+              const guardrailViolation = scope.inScope
+                ? undefined
+                : { violatedPath: scope.resolvedPath, reasonCode: scope.reasonCode };
               // Awaited so the gate can persist + emit + throw before the
               // loop yields back to the SDK. A throw propagates.
               await this.deps.onMutation(agentName, toolName, spec.cwd, {
@@ -591,6 +619,7 @@ export class AgentRunner {
                 summary: cls.summary,
                 ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
                 ...(toolUseId !== undefined ? { toolUseId } : {}),
+                ...(guardrailViolation ? { guardrailViolation } : {}),
               });
             }
           }
