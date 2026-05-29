@@ -1332,6 +1332,61 @@ export type ClientMsg =
       reasonCode: ControlReasonCode;
       reasonText?: string;
       mode: KickMode;
+    }
+  | {
+      /**
+       * Cluster I Phase C5 (UI_Findings spec §4.3): bulk archive or
+       * soft-delete operator's single-agent sessions from the sidebar's
+       * "Select…" mode. The C5 UI slice will be the only producer; this
+       * envelope exists today so the UI can ship a single ClientMsg per
+       * operator action regardless of how many rows are selected.
+       *
+       * Server behavior per spec §4.3:
+       *   - `op: 'archive'` flips `sessions.archived = 1` for every id
+       *     that isn't currently running. Idempotent on already-archived.
+       *   - `op: 'delete'` stamps `sessions.deleted_at = Date.now()` for
+       *     every id that isn't currently running (soft-delete; the
+       *     7-day purge cron hard-deletes after the undo window). When
+       *     `removeArtifacts === true` the per-session JSONL log at
+       *     `~/.cebab/logs/<sid>.jsonl` is rm-rf'd immediately (the
+       *     operator's "I'm sure" affordance — the row sticks in
+       *     soft-delete but the on-disk content is gone). Default
+       *     false leaves the log on disk for forensic inspection.
+       *
+       * Running-session guard: matches the existing `clear_iterations`
+       * invariant — the server REFUSES to operate on any sessionId whose
+       * id appears in the in-flight lifecycle registry. Refused ids come
+       * back as per-session errors in `bulk_session_op_result` (the
+       * non-running ids in the same request DO succeed — partial-success
+       * by design, so a single stale running id doesn't block the
+       * operator's bulk action).
+       *
+       * Per-session audit: one safety_audit row written per sessionId
+       * via the Cluster A dispatcher (class: 'safety', kind:
+       * 'session.bulk_op', reason_code: 'archive' | 'delete'). The bulk
+       * operation is an operator-authority action, so even a 50-session
+       * delete writes 50 audit rows — the spec §7 audit-preservation
+       * invariant means those rows survive even after the soft-delete
+       * window expires and the cron hard-deletes the session itself.
+       *
+       * Export-as-bulk is NOT in this envelope. The C5 UI slice will
+       * loop through the existing `GET /session-log/:sid` HTTP endpoint
+       * (Cluster I C2 backend) per-session rather than introducing a
+       * bulk-export server path. A v1.1 zip-export endpoint can land
+       * separately.
+       */
+      type: 'bulk_session_op';
+      sessionIds: string[];
+      op: 'archive' | 'delete';
+      /**
+       * Default false. When true on `op: 'delete'`, the server rm-rf's
+       * the per-session JSONL log under `~/.cebab/logs/<sid>.jsonl`
+       * after the row update succeeds. The row itself still soft-deletes
+       * (the operator can recover the metadata for the 7-day window
+       * even though the chat content is gone). Ignored for `op: 'archive'`
+       * — archive never touches disk artifacts.
+       */
+      removeArtifacts?: boolean;
     };
 
 // ---- Server → Browser ----
@@ -2733,6 +2788,41 @@ export type ServerMsg =
       reasonText?: string;
       actor: 'operator';
       ts: number;
+    }
+  | {
+      /**
+       * Cluster I Phase C5 (UI_Findings spec §4.3): reply to
+       * `bulk_session_op`. Partial-success by design: a single rejected
+       * id (still running, unknown, or write failure) doesn't block the
+       * remaining ids. The client reducer (C5 UI slice) flips each
+       * succeeded sessionId out of the per-project cache + raises an
+       * info toast carrying the count; failed ids drive a per-row error
+       * indicator so the operator knows which selection was rejected.
+       *
+       * One envelope per `bulk_session_op` call — never streamed.
+       * Always fires (even when zero ids succeed), so the client's UI
+       * transition out of Select mode happens on the single round-trip.
+       */
+      type: 'bulk_session_op_result';
+      op: 'archive' | 'delete';
+      /** Sessions that succeeded; same order as the request. */
+      succeededSessionIds: string[];
+      /** Per-rejection detail. Empty array when nothing failed. */
+      failed: Array<{
+        sessionId: string;
+        /** Enumerated; client switches on this for tailored copy. */
+        reason: 'running' | 'unknown' | 'already_archived' | 'already_deleted' | 'write_failed';
+        /** Free-text detail; e.g. running session displays "stop or end first". */
+        message: string;
+      }>;
+      /**
+       * True iff `op === 'delete'` AND `removeArtifacts` was honored for
+       * at least one succeeded id (the on-disk JSONL was rm-rf'd). The
+       * client uses this to nudge toast copy from "Soft-deleted N
+       * sessions" to "Soft-deleted N sessions · logs removed". Always
+       * false for `op: 'archive'`.
+       */
+      removedArtifacts: boolean;
     };
 
 /**

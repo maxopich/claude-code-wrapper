@@ -13,6 +13,7 @@ import { recordRejection } from './notifications/origin_rejections.js';
 import { mountSessionLogExport } from './session_log_export.js';
 import { getSession } from './repo/sessions.js';
 import { getMultiAgentSession } from './repo/multi_agent.js';
+import { startSessionPurgeCron } from './bulk_session_op.js';
 
 function main(): void {
   console.log(`[cebab] starting on ${config.host}:${config.port} (mock=${config.mock})`);
@@ -139,12 +140,20 @@ function main(): void {
   const server = http.createServer(app);
   const wss = startWsServer(server);
 
+  // Cluster I Phase C5 (UI_Findings spec §4.3): boot the 7-day soft-delete
+  // purge cron. Fires once now, then every 6h. The cron is `.unref()`'d
+  // inside startSessionPurgeCron so it won't keep the process alive if
+  // everything else has shut down, but we still hold the disposer so the
+  // graceful shutdown path can stop it cleanly.
+  const stopSessionPurgeCron = startSessionPurgeCron();
+
   server.listen(config.port, config.host, () => {
     console.log(`[cebab] listening at http://${config.host}:${config.port}`);
   });
 
   const shutdown = (signal: string) => {
     console.log(`[cebab] received ${signal}, shutting down`);
+    stopSessionPurgeCron();
     closeAllQueries();
     wss.clients.forEach((c) => c.terminate());
     wss.close();

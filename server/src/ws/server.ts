@@ -116,6 +116,7 @@ import {
   sweepReopenRate,
 } from '../repo/recovery_log.js';
 import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutation.js';
+import { executeBulkSessionOp } from '../bulk_session_op.js';
 import { maybeDispatchGuardrailViolation } from '../notifications/guardrail_violation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
@@ -3994,6 +3995,18 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       await executeArchiveSession({
         sessionId: msg.sessionId,
         removeArtifacts: msg.removeArtifacts === true,
+        send: (m) => send(conn.ws, m),
+      });
+      return;
+    }
+    case 'bulk_session_op': {
+      // Cluster I Phase C5 (UI_Findings spec §4.3): bulk archive or
+      // soft-delete of single-agent sessions from the sidebar's Select
+      // mode. The case body mirrors the `archive_session` pattern —
+      // a thin delegate so `executeBulkSessionOp` (in `bulk_session_op.ts`)
+      // stays unit-testable without standing up a Conn.
+      await executeBulkSessionOp({
+        msg,
         send: (m) => send(conn.ws, m),
       });
       return;

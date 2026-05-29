@@ -2609,6 +2609,18 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // keeps the discriminated union exhaustive until that wiring lands.
       return state;
 
+    case 'bulk_session_op_result':
+      // Cluster I Phase C5 backend: the sidebar's Select-mode UI (C5
+      // UI slice, follow-up) will own this via a sibling reducer arm
+      // that drops the `succeededSessionIds` from `knownSessions` +
+      // pushes a notification carrying `failed[]`. Backend-only slice
+      // doesn't fan the response into the store yet; the matching
+      // ClientMsg (`bulk_session_op`) won't ship from any UI surface
+      // until the next slice. Reducer no-op keeps the discriminated
+      // union exhaustive in the meantime — same pattern as
+      // recovery_log_snapshot above.
+      return state;
+
     case 'wrapper_error': {
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
