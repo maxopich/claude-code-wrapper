@@ -2458,3 +2458,204 @@ describe('store / multi_agent_started.mock projection (Phase 2c)', () => {
     expect(s.multiAgent.active?.mock).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cluster G Phase 3b (G1 UI): `active_runs` ServerMsg → `state.activeRuns`
+// reducer slice. The dispatcher's contract is "full snapshot each time"; the
+// reducer's contract is "wire shape becomes state shape verbatim, with the
+// spread-omit pattern preserved so `'projectId' in row` returns false when
+// the wire omitted it." These tests pin both contracts at the seam.
+// ---------------------------------------------------------------------------
+
+describe('store / active_runs reducer (Phase 3b)', () => {
+  test('initial state has empty activeRuns (badge mount predicate uses .length > 0)', () => {
+    expect(initialState.activeRuns).toEqual([]);
+  });
+
+  test('first snapshot replaces empty slice with verbatim run rows', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          {
+            sessionId: 's-a',
+            projectId: 1,
+            projectName: 'reviewer',
+            kind: 'single',
+            startedAt: 1_700_000_000_000,
+            elapsedMs: 3_000,
+          },
+        ],
+      },
+    });
+    expect(s.activeRuns).toHaveLength(1);
+    expect(s.activeRuns[0]).toEqual({
+      sessionId: 's-a',
+      projectId: 1,
+      projectName: 'reviewer',
+      kind: 'single',
+      startedAt: 1_700_000_000_000,
+      elapsedMs: 3_000,
+    });
+  });
+
+  test('subsequent snapshot REPLACES (not merges) — no leftover rows from prior emit', () => {
+    // The dispatcher emits a fresh snapshot on every change; merging
+    // would leak terminated runs forever. Pin replacement.
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          {
+            sessionId: 's-old',
+            projectId: 1,
+            kind: 'single',
+            startedAt: 0,
+            elapsedMs: 1_000,
+          },
+        ],
+      },
+    });
+    expect(s.activeRuns.map((r) => r.sessionId)).toEqual(['s-old']);
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          {
+            sessionId: 's-new',
+            projectId: 2,
+            kind: 'bus-worker',
+            startedAt: 100,
+            elapsedMs: 50,
+          },
+        ],
+      },
+    });
+    expect(s.activeRuns.map((r) => r.sessionId)).toEqual(['s-new']);
+  });
+
+  test('empty snapshot clears the slice (drain-to-zero is wire-driven, not state-derived)', () => {
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          {
+            sessionId: 's-x',
+            projectId: 1,
+            kind: 'single',
+            startedAt: 0,
+            elapsedMs: 0,
+          },
+        ],
+      },
+    });
+    expect(s.activeRuns).toHaveLength(1);
+    s = reduce(s, { type: 'server', msg: { type: 'active_runs', runs: [] } });
+    expect(s.activeRuns).toEqual([]);
+  });
+
+  test('spread-omit preserved — wire-absent fields stay absent in state (not `undefined`)', () => {
+    // The dispatcher's `buildActiveRunsMsg` projects with
+    // `...(x !== undefined ? { x } : {})`. If the reducer accidentally
+    // re-introduces `projectId: undefined`, the dropdown's strict
+    // `in`-checks break and a transient `(no project)` fallback flickers.
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          {
+            sessionId: 's-orphan',
+            kind: 'single',
+            startedAt: 0,
+            elapsedMs: 0,
+            // projectId, projectName, activeAgentName, currentActivity
+            // ALL omitted on the wire.
+          },
+        ],
+      },
+    });
+    const row = s.activeRuns[0]!;
+    expect('projectId' in row).toBe(false);
+    expect('projectName' in row).toBe(false);
+    expect('activeAgentName' in row).toBe(false);
+    expect('currentActivity' in row).toBe(false);
+  });
+
+  test('all optional fields populate when wire carries them (bus-worker happy path)', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          {
+            sessionId: 'bus-1',
+            projectId: 7,
+            projectName: 'planner',
+            kind: 'bus-worker',
+            startedAt: 1_700_000_000_000,
+            elapsedMs: 1_500,
+            activeAgentName: 'planner-1',
+            currentActivity: 'Read(README.md)',
+          },
+        ],
+      },
+    });
+    expect(s.activeRuns[0]).toEqual({
+      sessionId: 'bus-1',
+      projectId: 7,
+      projectName: 'planner',
+      kind: 'bus-worker',
+      startedAt: 1_700_000_000_000,
+      elapsedMs: 1_500,
+      activeAgentName: 'planner-1',
+      currentActivity: 'Read(README.md)',
+    });
+  });
+
+  test('order preserved from wire (matches lifecycle Map iteration contract)', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          { sessionId: 'first', kind: 'single', startedAt: 1, elapsedMs: 10 },
+          { sessionId: 'second', kind: 'bus-worker', startedAt: 2, elapsedMs: 20 },
+          { sessionId: 'third', kind: 'orchestrator', startedAt: 3, elapsedMs: 30 },
+        ],
+      },
+    });
+    expect(s.activeRuns.map((r) => r.sessionId)).toEqual(['first', 'second', 'third']);
+  });
+
+  test('ws_close clears activeRuns alongside liveSessions (snapshot is per-connection)', () => {
+    // The dispatcher emits a fresh snapshot on every WS attach (even
+    // empty). On disconnect we drop the snapshot so a stale dropdown
+    // doesn't pretend the runs are still alive in another tab.
+    let s = reduce(initialState, { type: 'ws_open' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'active_runs',
+        runs: [
+          {
+            sessionId: 's-live',
+            projectId: 1,
+            kind: 'single',
+            startedAt: 0,
+            elapsedMs: 0,
+          },
+        ],
+      },
+    });
+    expect(s.activeRuns).toHaveLength(1);
+    s = reduce(s, { type: 'ws_close' });
+    expect(s.activeRuns).toEqual([]);
+    expect(s.connected).toBe(false);
+    expect(s.liveSessions).toEqual({});
+  });
+});

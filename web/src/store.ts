@@ -631,6 +631,30 @@ export type AuthExpiredState = {
   dismissed?: boolean;
 };
 
+/**
+ * Cluster G Phase 3 (G1): a single row of the active-runs snapshot. The
+ * wire shape (`shared/src/protocol.ts` → `active_runs` arm) is mirrored
+ * 1:1 here so the dropdown can render straight from the slice with no
+ * intermediate transform; optional fields stay optional and use the
+ * spread-omit pattern from the wire (the reducer never re-introduces
+ * `undefined` for absent fields).
+ *
+ * `elapsedMs` is server-computed at emit time; the dropdown advances it
+ * with the browser's wall clock from `startedAt`. That's why we keep
+ * `startedAt` even though `elapsedMs` is also present — without it a
+ * stale snapshot would show a frozen number.
+ */
+export type ActiveRunView = {
+  sessionId: string;
+  projectId?: number;
+  projectName?: string;
+  kind: 'single' | 'bus-worker' | 'orchestrator';
+  startedAt: number;
+  elapsedMs: number;
+  activeAgentName?: string;
+  currentActivity?: string;
+};
+
 export type AppState = {
   connected: boolean;
   projects: Project[];
@@ -669,6 +693,19 @@ export type AppState = {
    *  JSDoc for the lifecycle. Undefined when no auth lapse has been
    *  observed this process lifetime. */
   authExpired?: AuthExpiredState;
+  /**
+   * Cluster G Phase 3b (G1 UI): app-wide active-runs snapshot. Sourced
+   * entirely from server `active_runs` ServerMsg envelopes — initial
+   * snapshot on WS attach, 200ms-debounced after lifecycle mutations,
+   * 10s heartbeat. The reducer replaces the array verbatim on each
+   * envelope (full snapshot, not incremental), which is also what
+   * clears the slice on disconnect (the connection-lost handler
+   * resets it to [] alongside `liveSessions`).
+   *
+   * Default `[]` so the RunsBadge mount predicate (`length > 0`)
+   * never sees `undefined`.
+   */
+  activeRuns: ActiveRunView[];
 };
 
 export type SettingsView = {
@@ -727,6 +764,11 @@ export const initialState: AppState = {
   // Cluster D Phase 6: starts undefined; populated when wrapper_error
   // with kind='auth_expired' lands. Cleared on next session_started.
   authExpired: undefined,
+  // Cluster G Phase 3b (G1 UI): empty until the first `active_runs`
+  // ServerMsg lands (the dispatcher emits one on every WS attach,
+  // even when the snapshot is empty, so the badge clears stale state
+  // from a prior connection).
+  activeRuns: [],
   multiAgent: {
     view: 'chat',
     draftLifecycle: 'persistent',
@@ -858,7 +900,11 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, connected: true };
     case 'ws_close':
       // Disconnect wipes liveness — any "running on this WS" claim is gone now.
-      return { ...state, connected: false, liveSessions: {} };
+      // Cluster G Phase 3b (G1 UI): also clear `activeRuns`. The snapshot is
+      // per-connection (the dispatcher re-emits on the next attach), so a
+      // stale dropdown would mislead the operator into thinking runs are
+      // still alive when they're really just orphaned in the prior session.
+      return { ...state, connected: false, liveSessions: {}, activeRuns: [] };
 
     case 'select_project':
       return { ...state, activeProjectId: action.projectId };
@@ -2243,20 +2289,38 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       });
     }
 
+    case 'active_runs':
+      // Cluster G Phase 3b (G1 UI): replace the slice with the server's
+      // snapshot verbatim. The wire is the full set of in-flight runs
+      // each time — no incremental merge, no per-row reconciliation — so
+      // a stale row from a previously-seen snapshot can't survive. The
+      // spread-omit pattern from the wire (`projectId?`, `projectName?`,
+      // `activeAgentName?`, `currentActivity?`) is preserved by copying
+      // only the fields the message carries; this matches Cluster G
+      // Phase 2c's `multi_agent_started.mock` precedent and keeps the
+      // state shape identical to the wire shape for the snapshot test.
+      return {
+        ...state,
+        activeRuns: msg.runs.map(
+          (r): ActiveRunView => ({
+            sessionId: r.sessionId,
+            ...(r.projectId !== undefined ? { projectId: r.projectId } : {}),
+            ...(r.projectName !== undefined ? { projectName: r.projectName } : {}),
+            kind: r.kind,
+            startedAt: r.startedAt,
+            elapsedMs: r.elapsedMs,
+            ...(r.activeAgentName !== undefined ? { activeAgentName: r.activeAgentName } : {}),
+            ...(r.currentActivity !== undefined ? { currentActivity: r.currentActivity } : {}),
+          }),
+        ),
+      };
+
     case 'env_scrubbed':
     case 'session_superseded':
     case 'chain_not_reconstructed':
     case 'bus_auto_installed':
     case 'tool_denied':
     case 'session_reconstructed':
-    case 'active_runs':
-      // Cluster G Phase 3 (G1): backend-only slice. The dispatcher pushes
-      // `active_runs` snapshots on attach + every 200ms-debounced lifecycle
-      // mutation + a 10s heartbeat, but the UI side (RunsBadge +
-      // RunsDropdown) lands in the next phase. Until then the wire envelope
-      // is received and discarded — the protocol slot exists so a future
-      // reducer arm can drop in without a server-side change.
-      //
       // Cluster A Phase 3+4+6: the dispatcher fans every one of these into a
       // matching `notification` envelope (see `server/src/notifications/
       // dispatcher.ts`); the dock owns the operator-facing surface. The
