@@ -20,6 +20,8 @@ import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
 import { ChatHeaderChip } from './components/ChatHeaderChip';
 import { ModelChip } from './components/ModelChip';
+import { MaxTurnsInput } from './components/MaxTurnsInput';
+import { TurnCounterChip } from './components/TurnCounterChip';
 import { SlashCommandButtons } from './components/SlashCommandButtons';
 import { SettingsModal } from './components/SettingsModal';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
@@ -453,6 +455,23 @@ function AppShell({
   // from outside an input; Cmd/Ctrl+/ opens from anywhere (including
   // inside a composer/input). Esc closes.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  // Cluster F Phase A1b (UI-A1): per-turn MAX_TURNS override for the
+  // single-agent composer. Lives at App level (not in the InputBox)
+  // because (a) `sendMessage` reads it inline when shipping the
+  // ClientMsg, (b) the chat-header MaxTurnsInput renders next to the
+  // model/trust chips (not inside InputBox), and (c) we want to clear
+  // it after each successful send so it doesn't carry into the next
+  // turn unexpectedly. `null` = no override; resolver falls through
+  // to DB setting / env / built-in.
+  const [draftMaxTurns, setDraftMaxTurns] = useState<number | null>(null);
+  // Cluster F Phase A1b (UI-A1): per-session counter of how many times
+  // the operator has clicked Extend on a max-turns result card. Drives
+  // the MaxTurnsResultCard's soft-cap warning copy. Keyed by sessionId;
+  // reset on each fresh user_send for that session (a new prompt is a
+  // fresh exploration, not a continuation of an extension chain).
+  const [extensionsUsedBySession, setExtensionsUsedBySession] = useState<Record<string, number>>(
+    {},
+  );
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     readStored('cebab.sidebarCollapsed', false, (r) => r === 'true'),
@@ -825,14 +844,8 @@ function AppShell({
   // (BE-3, same as InputBox's Esc handler) and `interruptSession`
   // short-circuits when there's no active session id.
   useKeyboardShortcuts([
-    [
-      findShortcut(SHORTCUTS, 'help.openCheatsheet.questionMark'),
-      () => setShortcutsOpen(true),
-    ],
-    [
-      findShortcut(SHORTCUTS, 'help.openCheatsheet.slash'),
-      () => setShortcutsOpen((cur) => !cur),
-    ],
+    [findShortcut(SHORTCUTS, 'help.openCheatsheet.questionMark'), () => setShortcutsOpen(true)],
+    [findShortcut(SHORTCUTS, 'help.openCheatsheet.slash'), () => setShortcutsOpen((cur) => !cur)],
     [
       findShortcut(SHORTCUTS, 'session.stop.cmdPeriod'),
       // Same payload as the composer-scoped Esc-to-stop: fire
@@ -857,7 +870,13 @@ function AppShell({
       reasonCode: StopReasonCode,
       reasonText?: string,
     ) => {
-      wsRef.current?.send({ type: 'stop_reason', sessionId, interruptAckId, reasonCode, reasonText });
+      wsRef.current?.send({
+        type: 'stop_reason',
+        sessionId,
+        interruptAckId,
+        reasonCode,
+        reasonText,
+      });
       dispatch({ type: 'stop_reason_dismissed', sessionId });
     },
     [],
@@ -885,12 +904,90 @@ function AppShell({
       return;
     }
     dispatch({ type: 'user_send', text });
+    // Cluster F Phase A1b (UI-A1): include the per-turn maxTurns override
+    // only when explicitly set. The server's resolver omits gracefully
+    // for `undefined` (falls through DB → env → built-in). Snapshot the
+    // value before the WS send so clearing the input state below doesn't
+    // race the post.
+    const maxTurnsOverride = draftMaxTurns ?? undefined;
     wsRef.current?.send({
       type: 'send_message',
       projectId: state.activeProjectId,
       sessionId: resumeSessionId,
       text,
+      ...(maxTurnsOverride !== undefined ? { maxTurns: maxTurnsOverride } : {}),
     });
+    // Per-turn override is single-use by design — the operator typed it
+    // for this turn. Clear so the next message uses the default again.
+    if (draftMaxTurns !== null) setDraftMaxTurns(null);
+    // Cluster F Phase A1b (UI-A1): a fresh user prompt resets the
+    // extensions counter for the session — extensions are tied to
+    // continuing a turn that hit the cap, not to operator-initiated
+    // new exploration. Use resumeSessionId since the freshly-created
+    // pending session id is what's actually being sent to the server.
+    if (resumeSessionId && extensionsUsedBySession[resumeSessionId]) {
+      setExtensionsUsedBySession((prev) => {
+        const next = { ...prev };
+        delete next[resumeSessionId];
+        return next;
+      });
+    }
+  }
+
+  // Cluster F Phase A1b (UI-A1): "Extend +N" click handler for the
+  // MaxTurnsResultCard. The SDK has no mid-conversation cap-raise verb
+  // — we re-issue `send_message` against the same session with a
+  // continuation prompt and a bumped `maxTurns`. `Continue.` is the
+  // minimal nudge: the model resumes via `--resume <sessionId>` and
+  // picks up where it left off. We do NOT route through `sendMessage`
+  // because it would clear `draftMaxTurns` (which is unrelated here)
+  // and reset the extension counter (which would break the soft cap).
+  function extendMaxTurns(sessionId: string, bumpBy: number) {
+    if (!state.activeProjectId) return;
+    const sess = state.sessionsByProject[state.activeProjectId]?.[sessionId];
+    if (!sess) return;
+    // Find the most recent result message and read its effectiveMaxTurns
+    // so the bump starts from the actual cap that tripped, not the
+    // current settings (which may have changed mid-session).
+    let lastEffective: number | undefined;
+    for (let i = sess.messages.length - 1; i >= 0; i--) {
+      const m = sess.messages[i];
+      if (m && m.kind === 'result' && m.effectiveMaxTurns !== undefined) {
+        lastEffective = m.effectiveMaxTurns;
+        break;
+      }
+    }
+    const base = lastEffective ?? state.settings?.defaultMaxTurns ?? 50;
+    const newCap = base + bumpBy;
+    dispatch({ type: 'user_send', text: 'Continue.' });
+    wsRef.current?.send({
+      type: 'send_message',
+      projectId: state.activeProjectId,
+      sessionId,
+      text: 'Continue.',
+      maxTurns: newCap,
+    });
+    setExtensionsUsedBySession((prev) => ({
+      ...prev,
+      [sessionId]: (prev[sessionId] ?? 0) + 1,
+    }));
+  }
+
+  // Cluster F Phase A1b (UI-A1): "End session" click handler for the
+  // MaxTurnsResultCard. The session is already done (SDK already wrote
+  // result.error_max_turns); this is purely a UI dismiss + counter
+  // reset. We don't strip the card from the message log — keeping it
+  // visible is useful forensics ("yes, you hit the cap, you chose to
+  // end"). A future refinement could add a `cardDismissed` flag and
+  // hide the buttons.
+  function endMaxTurnsSession(sessionId: string) {
+    if (extensionsUsedBySession[sessionId]) {
+      setExtensionsUsedBySession((prev) => {
+        const next = { ...prev };
+        delete next[sessionId];
+        return next;
+      });
+    }
   }
 
   // Cluster D Phase 4c: rate-limit operator callbacks. Encapsulated here
@@ -981,7 +1078,16 @@ function AppShell({
     });
   }
 
-  function saveSettings(payload: { workspaceRoot: string; defaultHopBudget: number }) {
+  function saveSettings(payload: {
+    workspaceRoot: string;
+    defaultHopBudget: number;
+    /**
+     * Cluster F Phase A1b (UI-A1): the modal always supplies a value;
+     * we only fire `set_default_max_turns` when it actually changed
+     * (consistent with the workspace-root + hop-budget treatment above).
+     */
+    defaultMaxTurns: number;
+  }) {
     // Fire only the messages whose field actually changed so unrelated
     // settings stay untouched (e.g. saving a hop-budget tweak doesn't
     // re-trigger the workspace-root sync which re-scans the filesystem).
@@ -990,6 +1096,9 @@ function AppShell({
     }
     if (state.settings && payload.defaultHopBudget !== state.settings.defaultHopBudget) {
       wsRef.current?.send({ type: 'set_default_hop_budget', value: payload.defaultHopBudget });
+    }
+    if (state.settings && payload.defaultMaxTurns !== state.settings.defaultMaxTurns) {
+      wsRef.current?.send({ type: 'set_default_max_turns', value: payload.defaultMaxTurns });
     }
     setSettingsOpen(false);
   }
@@ -1534,13 +1643,13 @@ function AppShell({
             <div>
               <p>No workspace folder set yet.</p>
               {/* Cluster E Phase 3 (A4): the fallback path resolves
-                * client-side from the settings ServerMsg. When the
-                * stored workspace is null but the default resolves to
-                * a valid directory, runs would land in
-                * `defaultWorkspaceRoot` until the operator sets one.
-                * Surface that landing location explicitly so "Choose a
-                * folder" isn't the only signal of what happens if they
-                * skip it. */}
+               * client-side from the settings ServerMsg. When the
+               * stored workspace is null but the default resolves to
+               * a valid directory, runs would land in
+               * `defaultWorkspaceRoot` until the operator sets one.
+               * Surface that landing location explicitly so "Choose a
+               * folder" isn't the only signal of what happens if they
+               * skip it. */}
               {state.settings?.defaultWorkspaceRoot && (
                 <p className="hint">
                   Until you set one, runs and logs would land in{' '}
@@ -1621,6 +1730,22 @@ function AppShell({
                       disabled={!sessionIsLive}
                       onChange={setPermissionMode}
                     />
+                    {/* Cluster F Phase A1b (UI-A1): per-turn max-turns
+                     *  override. Empty = use default (settings.defaultMaxTurns
+                     *  > MAX_TURNS env > 50). Cleared after each send. */}
+                    <MaxTurnsInput
+                      value={draftMaxTurns}
+                      defaultValue={state.settings?.defaultMaxTurns}
+                      onChange={setDraftMaxTurns}
+                      disabled={inputDisabled}
+                    />
+                    {/* Cluster F Phase A1b (UI-A1): post-hoc turn-counter.
+                     *  Shows "Turns N/M" from the last result; warns at
+                     *  ≥80% so the operator can raise the cap before the
+                     *  next turn runs out. Renders nothing when no
+                     *  result has landed yet (or older server payloads
+                     *  lacking numTurns/effectiveMaxTurns). */}
+                    <TurnCounterChip messages={session.messages} />
                     <SlashCommandButtons disabled={inputDisabled} onSend={sendMessage} />
                   </div>
                 )}
@@ -1666,6 +1791,13 @@ function AppShell({
                   onPermissionDecide={decidePermission}
                   onSubmitStopReason={submitStopReason}
                   onSkipStopReason={skipStopReason}
+                  /* Cluster F Phase A1b (UI-A1): max-turns result card
+                   * affordances — extend the cap or end the session. The
+                   * extensionsUsed counter drives the soft-cap warning
+                   * tooltip when >= EXTENSION_SOFT_CAP (3). */
+                  extensionsUsed={session ? (extensionsUsedBySession[session.id] ?? 0) : 0}
+                  onExtendMaxTurns={extendMaxTurns}
+                  onEndMaxTurnsSession={endMaxTurnsSession}
                 />
                 <InputBox
                   /* Cluster C Phase 1: structural disable only (no

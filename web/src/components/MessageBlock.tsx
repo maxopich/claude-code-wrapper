@@ -4,10 +4,34 @@ import type { MessageView } from '../store';
 import { Markdown } from './Markdown';
 import { ClaudeMark } from './ClaudeMark';
 import { badgeTooltip, renderPermissionBody } from './PermissionCards';
+import { MaxTurnsResultCard } from './MaxTurnsResultCard';
 
 export function MessageBlock(props: {
   message: MessageView;
   onPermissionDecide?: (requestId: string, decision: 'allow' | 'deny') => void;
+  /**
+   * Cluster F Phase A1b (UI-A1): how many times the operator has clicked
+   * Extend in this session. Threaded through so MaxTurnsResultCard can
+   * render the soft-cap warning at >= EXTENSION_SOFT_CAP. Optional —
+   * MessageBlock callers that don't render result cards (e.g. multi-
+   * agent transcripts) can omit it.
+   */
+  extensionsUsed?: number;
+  /**
+   * Cluster F Phase A1b (UI-A1): handler for the Extend +N buttons. The
+   * parent computes the new cap (current + bumpBy) and re-issues
+   * `send_message` with the bumped maxTurns. Optional so callers that
+   * don't show error_max_turns cards (e.g. replays without the
+   * resolver) don't need to wire a no-op.
+   */
+  onExtendMaxTurns?: (bumpBy: number) => void;
+  /**
+   * Cluster F Phase A1b (UI-A1): handler for the "End session" button
+   * on the max-turns card. Default no-op = dismiss visually only; App
+   * can hook teardown (clearing the per-session extensions counter,
+   * scrolling away, etc.).
+   */
+  onEndMaxTurnsSession?: () => void;
 }) {
   const { message: m, onPermissionDecide } = props;
 
@@ -61,6 +85,22 @@ export function MessageBlock(props: {
   }
 
   if (m.kind === 'result') {
+    // Cluster F Phase A1b (UI-A1): error_max_turns gets its own card
+    // with Extend +N actions. The generic card below stays for all
+    // other subtypes (success / error_during_execution / error_max_budget_usd
+    // / error_max_structured_output_retries). The Extend handlers are
+    // optional so a context that doesn't surface them (e.g. read-only
+    // replay) degrades to just the body copy without buttons.
+    if (m.subtype === 'error_max_turns' && props.onExtendMaxTurns && props.onEndMaxTurnsSession) {
+      return (
+        <MaxTurnsResultCard
+          message={m}
+          extensionsUsed={props.extensionsUsed ?? 0}
+          onExtend={props.onExtendMaxTurns}
+          onEnd={props.onEndMaxTurnsSession}
+        />
+      );
+    }
     return (
       <div className={`msg result msg-group ${m.subtype === 'success' ? 'ok' : 'err'}`}>
         <div className="avatar tool" aria-hidden="true">

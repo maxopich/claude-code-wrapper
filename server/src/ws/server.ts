@@ -80,10 +80,7 @@ import {
   HIGHEST_SUBCODES,
 } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
-import {
-  appendForensics,
-  getLatestForensicsForAgent,
-} from '../repo/controllability_forensics.js';
+import { appendForensics, getLatestForensicsForAgent } from '../repo/controllability_forensics.js';
 import { _getSafetyAuditRow } from '../notifications/safety_audit.js';
 import {
   isControlReasonCode,
@@ -898,9 +895,7 @@ export function executeKickForensicsSnapshot(args: {
   let kickMode: KickForensicsSnapshot['kickMode'] = null;
   let kickReasonCode: KickForensicsSnapshot['kickReasonCode'] = null;
   if (auditRow) {
-    kickReasonCode = isControlReasonCode(auditRow.reason_code)
-      ? auditRow.reason_code
-      : null;
+    kickReasonCode = isControlReasonCode(auditRow.reason_code) ? auditRow.reason_code : null;
     try {
       const payload = JSON.parse(auditRow.payload_json) as Record<string, unknown>;
       if (typeof payload.reasonText === 'string') kickReasonText = payload.reasonText;
@@ -4076,6 +4071,17 @@ async function runOneTurn(
   // moving past a held rate-limit on their own.
   conn.capturedPrompts.set(sessionId, { text: msg.text, projectId: project.id });
 
+  // Cluster F Phase A1b (UI-A1): capture the resolved cap + whether the
+  // caller passed an explicit per-turn override. Both feed the result-
+  // envelope decoration (`effectiveMaxTurns`) AND the safety_audit row
+  // we emit on cap hit — `actor=operator` when the override was set
+  // (the operator made this call themselves), `actor=system` when the
+  // run fell back to the resolver's lower precedence steps.
+  const effectiveMaxTurns = resolveMaxTurns(msg.maxTurns);
+  const maxTurnsActor: 'operator' | 'system' =
+    typeof msg.maxTurns === 'number' && Number.isFinite(msg.maxTurns) && msg.maxTurns >= 1
+      ? 'operator'
+      : 'system';
   const runner = pickRunner({
     cwd: project.path,
     prompt: msg.text,
@@ -4090,7 +4096,7 @@ async function runOneTurn(
     // override (msg.maxTurns) over the persisted setting over the env
     // default. Re-read on every send so a SettingsModal change between
     // turns takes effect immediately.
-    maxTurns: resolveMaxTurns(msg.maxTurns),
+    maxTurns: effectiveMaxTurns,
   });
   const unregister = registerQuery(runner);
 
@@ -4122,10 +4128,53 @@ async function runOneTurn(
   try {
     for await (const sdkMsg of runner) {
       await persistMessage(sessionId, sdkMsg);
-      const out = translate(sdkMsg, project.id);
+      // Cluster F Phase A1b (UI-A1): `out` is `let` (was `const`) so the
+      // result-envelope decoration below can re-bind it with the
+      // server-side `effectiveMaxTurns` snapshot. Every other branch
+      // continues to use the translated envelope verbatim.
+      let out = translate(sdkMsg, project.id);
       if (out) {
         cacheSessionStartedIfNeeded(conn, out);
+        // Cluster F Phase A1b (UI-A1): decorate result envelopes with the
+        // effective cap so the client doesn't have to guess (a SettingsModal
+        // change mid-turn would otherwise produce a stale denominator on
+        // the turn-counter chip / MaxTurnsResultCard).
+        if (out.type === 'result') {
+          out = { ...out, effectiveMaxTurns };
+        }
         send(conn.ws, out);
+        // Cluster F Phase A1b (UI-A1): dual-write safety_audit on cap hit
+        // (BE-1: safety class). The audit row records WHO chose the cap
+        // (`actor=operator` if msg.maxTurns was explicit, `'system'` if the
+        // run fell through to the DB/env/built-in default) so post-hoc
+        // analysis can distinguish "operator deliberately throttled and
+        // hit it" from "no one chose this number and it tripped". The
+        // operator-facing toast is fanned out by the dispatcher as a
+        // sticky safety notification.
+        if (out.type === 'result' && out.subtype === 'error_max_turns') {
+          emitNotification(
+            {
+              class: 'safety',
+              severity: 'warn',
+              dedupeKey: `max_turns.hit:${sessionId}`,
+              title: `Reached max-turns cap (${effectiveMaxTurns})`,
+              message:
+                maxTurnsActor === 'operator'
+                  ? `The per-turn override of ${effectiveMaxTurns} was reached. Extend the cap or end the session.`
+                  : `The default cap of ${effectiveMaxTurns} was reached. Extend the cap or raise the default in Settings.`,
+              sessionId,
+              reasonCode: 'max_turns_exceeded',
+              auditKind: 'max_turns.hit',
+              auditPayload: {
+                effectiveMaxTurns,
+                actor: maxTurnsActor,
+                numTurns: out.numTurns ?? null,
+                hadOverride: maxTurnsActor === 'operator',
+              },
+            },
+            (m) => send(conn.ws, m),
+          );
+        }
         // Cluster A Phase 3 (B2): typed `rate_limit_event` also fans out as
         // an operational warn toast via the dispatcher. We do this only on
         // the live stream — `replaySession` deliberately doesn't toast

@@ -8896,3 +8896,135 @@ pre {
   color: var(--fg-2, var(--fg));
   word-break: break-all;
 }
+
+/* ---------------------------------------------------------------------------
+ * Cluster F Phase A1b (UI-A1) — MaxTurnsInput, TurnCounterChip, MaxTurnsResultCard
+ *
+ * `.max-turns-input-*` mirrors the hop-budget input geometry but compresses
+ * horizontally so it fits inline in the chat header (next to the model chip
+ * and trust chip). `.turn-counter-chip` reuses the model-chip pill shape to
+ * stay visually consistent with the other header chips. `.max-turns-card-*`
+ * extends the existing `.msg.result.err` card with action buttons. No new
+ * tokens — everything reuses --bg-3, --line-3, --accent, --warn, --warn-soft.
+ * --------------------------------------------------------------------------- */
+
+.max-turns-input-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.max-turns-input-label-text {
+  font-weight: 500;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-3, var(--fg-2));
+}
+.max-turns-input {
+  width: 6ch;
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: 2px 6px;
+  background: var(--bg-3);
+  color: var(--ink, inherit);
+  border: 1px solid var(--line-3, var(--border));
+  border-radius: var(--r-sm, 4px);
+}
+.max-turns-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.max-turns-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+/* Remove number input spinners in WebKit so the 6ch width isn't dominated
+ * by the up/down arrows. Operators can still tab/arrow-key on focus. */
+.max-turns-input::-webkit-outer-spin-button,
+.max-turns-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.max-turns-input {
+  -moz-appearance: textfield;
+}
+
+.turn-counter-chip {
+  font-size: 10px;
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2, var(--border));
+  color: var(--fg-2);
+  background: var(--bg-5, var(--bg-3));
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.turn-counter-chip.is-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+  background: var(--warn-soft);
+}
+.turn-counter-chip-label {
+  color: var(--fg-3, var(--fg-2));
+  opacity: 0.7;
+}
+.turn-counter-chip.is-warn .turn-counter-chip-label {
+  opacity: 1;
+  color: inherit;
+}
+.turn-counter-chip-value {
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+}
+.turn-counter-chip-sep {
+  opacity: 0.55;
+  margin: 0 1px;
+}
+
+/* MaxTurnsResultCard — extends `.msg.result.err` chrome. The base card
+ * already provides the layout (avatar + body + role line); we add a body
+ * paragraph, an actions row, and an optional soft-cap warning. */
+.max-turns-card .max-turns-card-body {
+  margin: 4px 0 8px;
+  color: var(--ink, inherit);
+  font-size: var(--t-sm);
+}
+.max-turns-card .max-turns-card-errors {
+  margin: 0 0 8px;
+  font-size: var(--t-xs, 11px);
+  color: var(--fg-2, var(--fg));
+}
+.max-turns-card .max-turns-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+.max-turns-card-extend {
+  font-family: inherit;
+  font-size: var(--t-sm);
+  padding: 4px 10px;
+}
+.max-turns-card-target {
+  opacity: 0.8;
+  font-weight: 400;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.max-turns-card-soft-cap {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  font-size: var(--t-xs, 11px);
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+  border-radius: var(--r-sm, 4px);
+}
