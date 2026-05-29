@@ -1036,6 +1036,92 @@ function AppShell({
     }
   }
 
+  /**
+   * Cluster I C5 UI: archive or soft-delete a batch of sessions. Pure
+   * dispatch — the server replies with `bulk_session_op_result`, the
+   * reducer drops the succeeded rows, and `notifyFromServerMsg` toasts
+   * the outcome (incl. any `failed[]`). We send via `wsRef.current` so a
+   * transient reconnect doesn't strand the request against a stale socket.
+   *
+   * `removeArtifacts` is intentionally omitted (defaults false server-
+   * side): a soft-delete keeps the on-disk JSONL log for the 7-day undo
+   * window. A "also wipe logs now" opt-in is a sharper-edged affordance
+   * that deserves its own typed acknowledgment (like the raw-export
+   * gate) — deferred as a follow-up.
+   */
+  function bulkSessionOp(op: 'archive' | 'delete', sessionIds: string[]): void {
+    if (sessionIds.length === 0) return;
+    wsRef.current?.send({ type: 'bulk_session_op', sessionIds, op });
+  }
+
+  /**
+   * Cluster I C5 UI: export a batch of sessions. There is no bulk-export
+   * server envelope — we loop the existing C2 `GET /session-log/:sid`
+   * endpoint once per session (sequentially, so each blob-download dance
+   * completes before the next `<a>` click fires; parallel would race the
+   * browser's download handling). Always redacted, same posture as the
+   * single-row `⤓`. NEVER throws — a per-session failure is counted and
+   * the summary toast reports it.
+   */
+  async function bulkExportSessions(sessionIds: string[]): Promise<void> {
+    const push = notifPushRef.current;
+    const token = authTokenRef.current;
+    if (sessionIds.length === 0) return;
+    if (!token) {
+      push?.({
+        id: mintNotificationId(),
+        ts: Date.now(),
+        severity: 'error',
+        class: 'operational',
+        dedupeKey: 'bulk_session_export:no_token',
+        title: 'Export failed',
+        message: 'Not connected — reconnect and try again.',
+        sticky: false,
+      });
+      return;
+    }
+    let ok = 0;
+    let failed = 0;
+    for (const sessionId of sessionIds) {
+      try {
+        await downloadSessionLog({ baseUrl: HTTP_BASE, sessionId, token, format: 'redacted' });
+        ok += 1;
+      } catch {
+        // Per-session failure (404 no-log, 403 stale token, network) is
+        // tolerated — keep going so one missing log doesn't abort the
+        // batch. The summary toast carries the failure count.
+        failed += 1;
+      }
+    }
+    const noun = (n: number) => (n === 1 ? 'session' : 'sessions');
+    if (failed === 0) {
+      push?.({
+        id: mintNotificationId(),
+        ts: Date.now(),
+        severity: 'success',
+        class: 'operational',
+        dedupeKey: 'bulk_session_export:ok',
+        title: `Exported ${ok} ${noun(ok)}`,
+        message: 'Each session log downloaded as a .jsonl file.',
+        sticky: false,
+      });
+    } else {
+      push?.({
+        id: mintNotificationId(),
+        ts: Date.now(),
+        severity: ok > 0 ? 'warn' : 'error',
+        class: 'operational',
+        dedupeKey: 'bulk_session_export:partial',
+        title: ok > 0 ? `Exported ${ok} of ${ok + failed} ${noun(ok + failed)}` : 'Export failed',
+        message:
+          ok > 0
+            ? `${failed} couldn't be downloaded (no log on disk, or token expired).`
+            : 'No session logs could be downloaded — check the connection and retry.',
+        sticky: false,
+      });
+    }
+  }
+
   function renameSession(sessionId: string, title: string | null) {
     const projectId = state.sessionToProject[sessionId];
     if (projectId === undefined) return;
@@ -1866,6 +1952,8 @@ function AppShell({
           onToggleTrust={toggleTrust}
           onRenameSession={renameSession}
           onDownloadSession={downloadSession}
+          onBulkSessionOp={bulkSessionOp}
+          onBulkExportSessions={bulkExportSessions}
         />
         <footer className="sidebar-footer">
           <button
