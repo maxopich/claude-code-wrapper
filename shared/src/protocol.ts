@@ -843,12 +843,23 @@ export type ClientMsg =
     }
   | {
       /**
-       * Phase H: request a paginated chunk of the merged session log for a
-       * multi-agent run. The server projects rows from `multi_agent_events`
-       * (bus hops), `multi_agent_mutations` (classified writes), and the
-       * per-agent SDK `events` table (joined via `multi_agent_agent_sessions`)
-       * into a unified `LogRow[]` ordered by `ts ASC`. Reply: one or more
-       * `session_log_chunk` ServerMsg messages.
+       * Phase H: request a paginated chunk of the session log. The server
+       * projects rows into a unified `LogRow[]` ordered by `ts ASC` and replies
+       * with one or more `session_log_chunk` ServerMsg messages.
+       *
+       * Scope (Cluster H C3 backend, spec §4.1):
+       *   - `'multi_agent'` (default for back-compat): the original projector —
+       *     joins `multi_agent_events` (bus hops) + `multi_agent_mutations`
+       *     (classified writes). Rows are `LogRowKind` of `bus | error | tool |
+       *     artifact`.
+       *   - `'single'`: NEW. Single-agent ("non-bus") sessions are projected
+       *     from the per-session `events` table instead. Rows are classified
+       *     into `LogRowKind` of `tool | llm | error` — `tool` for assistant
+       *     messages carrying `tool_use` blocks (or user messages carrying
+       *     `tool_result` blocks), `llm` for plain assistant/result/system
+       *     rows, `error` for the `wrapper.<kind>` rows that get persisted on
+       *     wrapper-error paths. Redaction (`redactSensitive`) and the byte
+       *     budget reuse the multi-agent path verbatim. No schema migration.
        *
        * Pagination contract:
        *   - `offset`: skip the first N rows in the merged stream (after
@@ -865,6 +876,12 @@ export type ClientMsg =
        */
       type: 'load_session_log';
       sessionId: string;
+      /**
+       * Cluster H C3: which projector branch the server should run. Optional
+       * for back-compat — older clients that omit this still get the
+       * multi-agent projector that has always answered `load_session_log`.
+       */
+      scope?: SessionLogScope;
       offset: number;
       limit: number;
       revealSensitive?: boolean;
@@ -3065,6 +3082,21 @@ export type ReopenSessionFailureReason =
  * stream-json oddity not covered above projects as `llm` (the catch-all).
  */
 export type LogRowKind = 'tool' | 'bus' | 'llm' | 'error' | 'artifact';
+
+/**
+ * Cluster H C3: which projector branch the server should run for a
+ * `load_session_log` request. Two values:
+ *   - `'multi_agent'` (default): bus-mode sessions — merges multi_agent_events
+ *     + multi_agent_mutations. Rows produced: `bus | error | tool | artifact`.
+ *   - `'single'`: single-agent sessions — reads the per-session `events`
+ *     table. Rows produced: `tool | llm | error` (no `bus`/`artifact` since
+ *     single-agent runs have no inter-agent hops and no mutation lane).
+ *
+ * Carried on `load_session_log` as an optional field — older clients that
+ * omit it still get the multi-agent projector, which is what they were
+ * always asking for.
+ */
+export type SessionLogScope = 'multi_agent' | 'single';
 
 export const LOG_ROW_KINDS: ReadonlySet<LogRowKind> = new Set([
   'tool',
