@@ -4308,6 +4308,100 @@ pre {
   background: var(--err-soft);
 }
 
+/* ---- Cluster H D8: scrollback kind filter ------------------------
+ *
+ * One row of toggle chips above the .event-list — one chip per
+ * MultiAgentEventKind ('intro' | 'prompt' | 'reply' | 'final' | 'error').
+ * Active chip = kind currently visible in the scrollback below; inactive
+ * chip = kind hidden. State is owned by ActiveRunView and resets on
+ * sessionId change. Per-kind tints match `.event-row.event-kind-*` rules
+ * so the chip color and the row color align without any new tokens. */
+.ma-scrollback-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 11.5px;
+}
+.ma-scrollback-filter-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-3);
+  margin-right: 2px;
+}
+.ma-scrollback-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-3);
+  color: var(--fg-2);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    opacity 0.08s ease,
+    background 0.08s ease,
+    border-color 0.08s ease;
+}
+.ma-scrollback-filter-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.ma-scrollback-filter-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ma-scrollback-filter-chip.is-hidden {
+  /* Inactive (kind currently filtered out of the scrollback). Dim the
+   * whole chip so the operator sees at-a-glance which kinds are off. */
+  opacity: 0.5;
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--fg-3) 60%, transparent);
+}
+/* Per-kind accent on active chips. Echoes the .event-row.event-kind-*
+ * tints so the chip color matches the row it controls. Inactive chips
+ * keep the neutral background — they're "off" regardless of kind. */
+.ma-scrollback-filter-chip.is-visible.ma-scrollback-filter-chip--final {
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+}
+.ma-scrollback-filter-chip.is-visible.ma-scrollback-filter-chip--error {
+  background: var(--err-soft);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+  color: var(--err);
+}
+.ma-scrollback-filter-chip.is-visible.ma-scrollback-filter-chip--intro {
+  background: var(--bg-1);
+  border-color: var(--line-3);
+}
+.ma-scrollback-filter-mark {
+  font-size: 12px;
+  line-height: 1;
+}
+.ma-scrollback-filter-kind {
+  font-weight: 500;
+}
+.ma-scrollback-filter-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-3);
+  font-size: 10.5px;
+  padding-left: 1px;
+}
+.ma-scrollback-filter-chip.is-visible .ma-scrollback-filter-count {
+  /* Stays muted on active chips too — the count is reference info, not
+   * the primary signal (the kind label is). */
+  color: var(--fg-3);
+}
+.ma-scrollback-filter-clear {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+
 /* Event scrollback */
 .event-list {
   list-style: none;
