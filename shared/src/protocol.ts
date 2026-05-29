@@ -2037,6 +2037,85 @@ export type ServerMsg =
     }
   | {
       /**
+       * Cluster G Phase 3 (G1): snapshot of in-flight runs spending tokens
+       * for THIS Cebab process — surfaced so the sidebar `RunsBadge` /
+       * dropdown can show "▶ N active" without the operator scrolling the
+       * ProjectList.
+       *
+       * Emitted on:
+       *   - WS attach (initial snapshot, even if `runs` is empty so the
+       *     client clears stale state from a prior connection).
+       *   - 200ms-debounced after any add/remove in `runner/lifecycle.ts`'s
+       *     in-flight registry (collapses bursts during chain hops).
+       *   - 10s heartbeat (catches the rare desync where a listener was
+       *     dropped or a meta-less query is the only inhabitant).
+       *
+       * Cross-tab: per-connection in v1 — each WS Conn gets its own
+       * snapshot. Cluster A §5's broadcast plan moves this to fan-out in
+       * v1.1 multi-window.
+       *
+       * Persistence: none. The registry is in-memory; a Cebab restart
+       * empties it (and the bus reconstruction path doesn't re-register the
+       * recovered sessions until the operator clicks Continue). The
+       * envelope is purely a real-time signal.
+       */
+      type: 'active_runs';
+      runs: Array<{
+        /**
+         * The OPERATOR-facing session id (single-agent's `session.id` or
+         * `multi_agent_sessions.id`), NOT the per-hop CLI session that the
+         * bus participant happens to be on. The client uses this to dedupe
+         * and to wire the "[Jump to session]" row action.
+         */
+        sessionId: string;
+        /**
+         * Optional: the project the run is rooted in. Single-agent always
+         * has this; bus-worker has it when the runner thread can resolve
+         * the participant's project. Absent for runs that don't yet have a
+         * resolved project (rare; defensive).
+         */
+        projectId?: number;
+        /**
+         * Optional: cache of the project name at WS emit time so the
+         * dropdown can render without a second round-trip. Computed
+         * server-side from `projects.name` keyed by `projectId`.
+         */
+        projectName?: string;
+        /**
+         * `'single'` for a single-agent runOneTurn; `'bus-worker'` for any
+         * bus participant per-hop query; `'orchestrator'` is reserved for
+         * the orchestrator's own per-hop query when the runner site is
+         * refined to distinguish it (Phase 4 work; the protocol carries
+         * the slot now so the client doesn't need a re-handshake later).
+         */
+        kind: 'single' | 'bus-worker' | 'orchestrator';
+        /** Wall-clock ms when the query was registered. */
+        startedAt: number;
+        /**
+         * Server-computed elapsed-since-startedAt at emit time. Sent so
+         * the UI can render the initial "running for Ns" without a clock
+         * skew between server and browser. The client's countdown ticker
+         * then advances from this value using its own clock.
+         */
+        elapsedMs: number;
+        /**
+         * Multi-agent only: the currently-active participant's bus slug,
+         * when known. Absent for single-agent runs and for bus runs where
+         * the active agent hasn't been resolved yet (between hops).
+         */
+        activeAgentName?: string;
+        /**
+         * Reserved for v1.x: short label for the in-flight tool call (e.g.
+         * `"Read(README.md)"`). Currently always absent — the snapshot is
+         * coarse-grained per-run, not per-tool. The slot is in the
+         * protocol so a future tap on `agent_activity` can populate it
+         * without a client re-handshake.
+         */
+        currentActivity?: string;
+      }>;
+    }
+  | {
+      /**
        * Cluster A Phase 4 (D3): inverts the silent `markCrashedSilent` sweep
        * at `bus/resume.ts:117` — when a newer multi-agent session became
        * active while an older one was still marked `running` (e.g. a

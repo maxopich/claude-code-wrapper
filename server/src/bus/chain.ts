@@ -821,6 +821,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   };
 
   const runner = new AgentRunner({
+    // Cluster G Phase 3 (G1): bus session id for the lifecycle registry's
+    // per-hop snapshot. Same value every hop of this chain run.
+    sessionId,
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);
@@ -873,6 +876,10 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       name: p.agentName,
       cwd: p.cwd,
       settingSources: ['user', 'project', 'local'],
+      // Cluster G Phase 3 (G1): thread the participant project so the
+      // lifecycle registry's per-hop snapshot can name it for the
+      // active-runs sidebar dropdown.
+      projectId: p.projectId,
     });
   }
 
