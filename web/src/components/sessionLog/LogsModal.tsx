@@ -114,6 +114,19 @@ export function LogsModal(props: {
                   : `${filtered.length} of ${stream.total} entries`}
               </span>
               {stream.hasMore && <span className="logs-modal-more"> · more available</span>}
+              {/* Cluster H D12 client: live-edge counter. Shows the running
+               *  tail-mode arrival count since the last refresh so the
+               *  operator sees the feed growing even when the scroll position
+               *  hasn't moved. Suppressed at 0 to avoid chrome noise. */}
+              {stream.tailAppendedCount > 0 && (
+                <span
+                  className="logs-modal-live"
+                  aria-label={`${stream.tailAppendedCount} new since last refresh`}
+                >
+                  {' · +'}
+                  {stream.tailAppendedCount} live
+                </span>
+              )}
             </p>
           </div>
           <button
@@ -142,6 +155,28 @@ export function LogsModal(props: {
           <p className="logs-modal-error" role="alert">
             {stream.error}
           </p>
+        )}
+
+        {/* Cluster H D12 client agentic-safety: the live-tail subscriber
+         *  capped at `tailSafetyCap` (default 2000) and stopped appending.
+         *  Surface a polite live-region notice so screen readers announce
+         *  the pause too, and a Refresh shortcut button on the visible chip
+         *  so the operator can re-arm the feed without hunting for the
+         *  toolbar's Refresh. The flag clears on refresh() automatically. */}
+        {stream.tailSafetyTripped && (
+          <div
+            className="logs-modal-tail-paused"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <span>
+              Live feed paused — safety cap reached. Refresh to fetch fresh rows and resume.
+            </span>
+            <button type="button" className="ghost-btn" onClick={stream.refresh}>
+              Refresh
+            </button>
+          </div>
         )}
 
         <LogTable
