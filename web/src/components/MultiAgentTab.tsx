@@ -38,9 +38,11 @@ import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
 import type { ModalOrigin } from './templatePreview/TemplatePreviewModal';
 import {
   BypassPermissionsBanner,
+  ConsultantModeBanner,
   CustomModeBanner,
   CustomModeNotice,
 } from './templatePreview/TemplatePreviewBanners';
+import { ConsultantModeChip } from './ConsultantModeChip';
 // Cluster D Phase 3: the 3 inline multi-agent warnings below (awaiting-
 // continue, pending-retry, pending-mutation) now render through the
 // unified SessionBanner with `classStem="multi-agent-warning"` so the
@@ -338,6 +340,14 @@ function DraftView(props: {
             posture that's baked into server/src/bus/runner.ts but is
             otherwise invisible in the UI. Non-dismissible. */}
         <BypassPermissionsBanner />
+        {/* Cluster F Phase D5 (UI-D5): pair with the bypass banner for
+            orchestrator drafts. The consultant-mode guardrail is baked
+            into runtime.ts's renderRosterPrompt + renderWorkerBriefing
+            and applies for every orchestrator-mode bus session. Chain
+            mode's renderChainBriefing has no equivalent constraint, so
+            we don't render the banner there — surfacing it would mislead
+            operators about a guardrail that doesn't exist. */}
+        {isOrch && <ConsultantModeBanner />}
         <header className="multi-agent-header">
           <h2>{isOrch ? 'Multi-Agent' : 'Chained Chat'}</h2>
           <p className="multi-agent-subtitle">
@@ -2464,6 +2474,15 @@ export function MultiAgentActivityBar(props: {
        *  Self-hides when count = 0. Sits after RouterDropsCounter so the
        *  "controls and constraints" cluster reads together. */}
       <ParticipantControlsCounter run={run} />
+      {/* Cluster F Phase D5 (UI-D5): always-on "Consultant" reminder for
+       *  orchestrator-mode runs only. Pairs with the ConsultantModeBanner
+       *  in DraftView/TemplatePreviewModal; this chip is the at-a-glance
+       *  reminder visible while the operator scrolls the scrollback. Chain
+       *  runs have no consultant-mode prompt in `renderChainBriefing`, so
+       *  surfacing the chip there would misrepresent agent posture. Trails
+       *  the controls counter so the bar reads capacity → activity →
+       *  exceptions → controls → guardrail. */}
+      {run.mode === 'orchestrator' && <ConsultantModeChip />}
     </div>
   );
 }

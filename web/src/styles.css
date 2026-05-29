@@ -9028,3 +9028,34 @@ pre {
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
   border-radius: var(--r-sm, 4px);
 }
+
+/* ---- Cluster F Phase D5: ConsultantModeChip --------------------------- */
+
+/* Activity-bar reminder chip for orchestrator-mode bus sessions. Geometry
+ * mirrors `.ma-hop-budget-chip` (same pill shape, same font ramp); palette
+ * uses the `--info` token family — informational, not a warning. The
+ * paired `<ConsultantModeBanner />` at the top of the surface owns the
+ * detailed explanation; the chip is the at-a-glance reminder the operator
+ * sees while scrolling. Non-interactive: caret pointer would imply a
+ * click, but there's nothing to click — the tooltip carries the detail. */
+.ma-consultant-chip {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
+  color: var(--info);
+  background: var(--info-soft);
+  margin-left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  /* Reading cursor — the chip is non-interactive (no onClick, no role).
+   * Default cursor would feel "clickable but inert"; help cursor matches
+   * the tooltip-only affordance and matches the chip family for status. */
+  cursor: help;
+}

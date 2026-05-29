@@ -28,7 +28,7 @@ import type { MultiAgentTemplate, Project, ServerMsg } from '@cebab/shared/proto
 import { useModalSurface } from '../../useModalSurface';
 import { AgentDiagram } from './AgentDiagram';
 import { SplitViewPanel } from './SplitViewPanel';
-import { BypassPermissionsBanner } from './TemplatePreviewBanners';
+import { BypassPermissionsBanner, ConsultantModeBanner } from './TemplatePreviewBanners';
 
 export const SPLIT_VIEW_PREF_KEY = 'cebab.tpl.splitView';
 /** N at which split-view defaults to ON when the user has no stored pref. */
@@ -171,6 +171,14 @@ export function TemplatePreviewModal(props: {
             focus, especially when launched directly from a saved template. */}
         <div className="tpl-modal-banners">
           <BypassPermissionsBanner />
+          {/* Cluster F Phase D5 (UI-D5): pair with the bypass banner for
+              orchestrator templates. Custom templates render via the
+              orchestrator path (`layoutCustomGrid` delegates there), so the
+              consultant-mode guardrail applies to them too; chain templates
+              run under `renderChainBriefing` which has no consultant text. */}
+          {(template.mode === 'orchestrator' || template.mode === 'custom') && (
+            <ConsultantModeBanner />
+          )}
         </div>
 
         <div className={`tpl-modal-body${splitView ? ' tpl-modal-body--split' : ''}`}>
