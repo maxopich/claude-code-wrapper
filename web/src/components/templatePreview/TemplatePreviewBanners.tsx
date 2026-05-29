@@ -1,7 +1,7 @@
 /**
  * PR-1 / PR-2: Honesty surfaces for the multi-agent settings.
  *
- * Three exports, all non-dismissible:
+ * Four exports, all non-dismissible:
  *
  *  1. `<BypassPermissionsBanner />` (warning) — always-on whenever
  *     multi-agent UI is visible. Surfaces the load-bearing safety
@@ -23,6 +23,18 @@
  *     orchestrator routing. Two surfaces because the audiences differ:
  *     the banner is the screen-reader cue, the notice is the operator's
  *     "why does this template look like an orchestrator" answer.
+ *
+ *  4. `<ConsultantModeBanner />` (info, Cluster F Phase D5) — fires in
+ *     **orchestrator-mode contexts only**. Surfaces the consultant-mode
+ *     guardrail baked into `server/src/bus/runtime.ts`'s `renderRosterPrompt`
+ *     and `renderWorkerBriefing` — every orchestrator + worker in the
+ *     session must read/analyze/advise unless the operator's relayed
+ *     request explicitly directs a specific change. The constraint is
+ *     purely advisory (model interprets the prompt text); no server-side
+ *     parsing of operator intent. Chain-mode runtime has no equivalent
+ *     constraint in `renderChainBriefing`, so this banner MUST NOT render
+ *     for chain-mode contexts — surfacing it there would mislead operators
+ *     about a guardrail that doesn't exist.
  *
  * Cluster D Phase 3 migration (spec §8.1): the two banners now render
  * through `<SessionBanner>` with `classStem="tpl-banner"` so the DOM
@@ -111,6 +123,53 @@ export function CustomModeBanner() {
       // Existing markup used role="status" for status-like info; preserve
       // that for operators relying on it. (The tier default for info
       // would have been role="region".)
+      role="status"
+      ariaLive="off"
+      classStem="tpl-banner"
+      compatClass="is-info"
+      stealsFocus={false}
+    />
+  );
+}
+
+/**
+ * Cluster F Phase D5 (UI-D5): surfaces the consultant-mode guardrail that
+ * `server/src/bus/runtime.ts`'s `renderRosterPrompt` (orchestrator) and
+ * `renderWorkerBriefing` (workers) bake into every orchestrator-mode bus
+ * session. The constraint is **purely advisory** — there is no server-side
+ * detection of explicit-mutation prompts. The model reads the prompt text
+ * and decides whether to honour it.
+ *
+ * **Caller-gated to orchestrator mode.** This component does not check the
+ * surrounding mode itself; the caller (DraftView / TemplatePreviewModal /
+ * MultiAgentActivityBar) must wrap the mount in a `mode === 'orchestrator'`
+ * (or template.mode === 'orchestrator' | 'custom' — custom renders as
+ * orchestrator) conditional. Chain-mode runtime has no consultant-mode
+ * text in `renderChainBriefing`, so rendering this banner there would
+ * mislead operators about a guardrail that doesn't exist.
+ *
+ * Tier `info` / glyph `ⓘ` — informational, not a warning. Paired in the
+ * banner stack with `<BypassPermissionsBanner />` (the warn-tier bypass
+ * banner sits below in the stack since it's the higher-severity signal).
+ * Non-dismissible — the guardrail is always-on for the entire session.
+ */
+export function ConsultantModeBanner() {
+  return (
+    <SessionBanner
+      id="consultant-mode-banner"
+      tier="info"
+      glyph="ⓘ"
+      title="Consultant mode"
+      body={
+        <>
+          Every agent in this orchestrator session acts as a consultant: read, analyze, advise.
+          Workers may write scratch/notes inside their own project folder, but they must{' '}
+          <strong>not</strong> modify, create, or delete files in any other directory, and must{' '}
+          <strong>not</strong> produce deliverable changes — unless your prompt explicitly directs
+          that specific change. The constraint is advisory (relayed in the prompt to each agent);
+          there's no server-side enforcement.
+        </>
+      }
       role="status"
       ariaLive="off"
       classStem="tpl-banner"

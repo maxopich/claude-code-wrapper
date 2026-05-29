@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import {
   BypassPermissionsBanner,
+  ConsultantModeBanner,
   CustomModeBanner,
   CustomModeNotice,
 } from './TemplatePreviewBanners';
@@ -147,5 +148,66 @@ describe('CustomModeNotice (PR-2)', () => {
     act(() => root.render(<CustomModeNotice />));
     const el = container.querySelector('.tpl-preview-note');
     expect(el?.textContent).toMatch(/orchestrator routing/i);
+  });
+});
+
+// Cluster F Phase D5 (UI-D5): the new always-on consultant-mode banner for
+// orchestrator-mode bus sessions. Mode-gating itself lives at the call site
+// (DraftView / TemplatePreviewModal / MultiAgentActivityBar) — these tests
+// only assert the banner's intrinsic shape + copy.
+describe('ConsultantModeBanner', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  test('renders with role="status" and the info class (matches CustomModeBanner posture)', () => {
+    act(() => root.render(<ConsultantModeBanner />));
+    const el = container.querySelector('.tpl-banner');
+    expect(el).not.toBeNull();
+    expect(el!.getAttribute('role')).toBe('status');
+    expect(el!.classList.contains('is-info')).toBe(true);
+  });
+
+  test('uses the ⓘ glyph (shape-coded, decorative)', () => {
+    act(() => root.render(<ConsultantModeBanner />));
+    const glyph = container.querySelector('.tpl-banner-glyph');
+    expect(glyph?.textContent).toBe('ⓘ');
+    expect(glyph?.getAttribute('aria-hidden')).toBe('true');
+  });
+
+  test('title is "Consultant mode"', () => {
+    act(() => root.render(<ConsultantModeBanner />));
+    const title = container.querySelector('.tpl-banner-title');
+    expect(title?.textContent).toBe('Consultant mode');
+  });
+
+  test('body explains the read/analyze/advise rule + the advisory caveat', () => {
+    act(() => root.render(<ConsultantModeBanner />));
+    const body = container.querySelector('.tpl-banner-body');
+    expect(body?.textContent).toMatch(/read, analyze, advise/i);
+    // Names the carve-out so the operator knows what would unlock mutations.
+    expect(body?.textContent).toMatch(/unless your prompt explicitly directs/i);
+    // Honesty: the constraint is advisory, not enforced server-side.
+    expect(body?.textContent).toMatch(/advisory/i);
+    // The opposite verbs are surfaced so the operator can grep for them.
+    expect(body?.textContent).toMatch(/modify, create, or delete/i);
+  });
+
+  test('id is stable so multiple mounts dedupe in BannerStack', () => {
+    act(() => root.render(<ConsultantModeBanner />));
+    const el = container.querySelector('.tpl-banner');
+    // Existing banner stack pattern uses the id for de-duplication; the
+    // SessionBanner wrapper attaches it on the root. This pins the value.
+    expect(el?.id).toBe('consultant-mode-banner');
   });
 });
