@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
+import { triggerBlobDownload } from '../../exports';
 import { useLogStream } from './useLogStream';
 import { applyLogFilters, useLogFilters } from './useLogFilters';
 import { LogToolbar } from './LogToolbar';
@@ -312,17 +313,15 @@ function requestReveal(
  * Triggered by clicking Download in the toolbar; pure client-side blob.
  * The .ndjson format is one JSON-encoded LogRow per line — easy to grep
  * and re-import into a viewer.
+ *
+ * Cluster I C2 UI: the blob-download mechanics now live in `exports.ts`
+ * (`triggerBlobDownload`), shared with the new per-session JSONL export
+ * path. This wrapper just builds the NDJSON payload + filename.
  */
 function downloadNdjson(sessionId: string, rows: readonly LogRow[]): void {
-  const lines = rows.map((r) => JSON.stringify(r)).join('\n');
-  const blob = new Blob([lines], { type: 'application/x-ndjson' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `cebab-session-${sessionId.slice(0, 8)}.ndjson`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  // Defer revoke to next tick so the browser has time to start the download.
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  triggerBlobDownload({
+    data: rows.map((r) => JSON.stringify(r)).join('\n'),
+    mimeType: 'application/x-ndjson',
+    filename: `cebab-session-${sessionId.slice(0, 8)}.ndjson`,
+  });
 }

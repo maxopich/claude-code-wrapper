@@ -66,6 +66,7 @@ import {
 } from './components/connectionLost';
 import { HELD_MESSAGES_CAP } from './store';
 import type { ActiveRunView } from './store';
+import { downloadSessionLog, isDownloadError } from './exports';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -121,6 +122,13 @@ export function App() {
   const wsRef = useRef<WsHandle | null>(null);
   const notifPushRef = useRef<((n: NotificationEnvelope) => void) | null>(null);
   const notifDismissRef = useRef<((id: string) => void) | null>(null);
+  // Cluster I C2 UI: the per-launch WS auth token. App fetches it once at
+  // mount (the same call that gates the WS upgrade) and stashes it here so
+  // the per-session `⤓` Download icon — and any other future HTTP fetch
+  // against the gated endpoints — can read it without re-fetching. Set
+  // inside the auth-token-fetch effect; cleared on disconnect so a stale
+  // token can't be used after the server has rotated it on its next boot.
+  const authTokenRef = useRef<string | null>(null);
   // Cluster A Phase 5: bridge for the inbox provider. Same pattern as
   // notifPushRef/notifDismissRef from Phase 2 — App.tsx's onMessage
   // pipes `inbox_snapshot` ServerMsgs through this ref into the
@@ -271,6 +279,7 @@ export function App() {
                       wsRef={wsRef}
                       notifPushRef={notifPushRef}
                       notifDismissRef={notifDismissRef}
+                      authTokenRef={authTokenRef}
                       inboxHandlerRef={inboxHandlerRef}
                       gateHandlerRef={gateHandlerRef}
                       authorityHandlerRef={authorityHandlerRef}
@@ -367,6 +376,14 @@ type AppShellProps = {
   notifPushRef: React.MutableRefObject<((n: NotificationEnvelope) => void) | null>;
   notifDismissRef: React.MutableRefObject<((id: string) => void) | null>;
   /**
+   * Cluster I C2 UI: the per-launch WS auth token, populated by the
+   * auth-token fetch inside AppShell's WS connect effect. Read by the
+   * per-session `⤓` Download handler to gate `GET /session-log/:sid`.
+   * Null whenever the WS isn't open (no token = no download attempt;
+   * the icon-btn is itself gated on a session existing AND a live WS).
+   */
+  authTokenRef: React.MutableRefObject<string | null>;
+  /**
    * Cluster A Phase 5: bridge ref the InboxProvider populates with its
    * own ServerMsg handler. AppShell's onMessage calls this AFTER the
    * main reducer dispatch so the inbox state and the store stay in
@@ -431,6 +448,7 @@ function AppShell({
   wsRef,
   notifPushRef,
   notifDismissRef,
+  authTokenRef,
   inboxHandlerRef,
   gateHandlerRef,
   authorityHandlerRef,
@@ -675,6 +693,12 @@ function AppShell({
           throw new Error(`status ${r.status}`);
         }
         token = (await r.text()).trim();
+        // Cluster I C2 UI: stash the token so the `⤓` Download icon
+        // in ProjectList can gate its `GET /session-log/:sid` fetch.
+        // The WS connect path also embeds it in the upgrade URL below;
+        // both reads land off the same `r.text()` value, so they can't
+        // disagree mid-flight.
+        authTokenRef.current = token;
       } catch (err) {
         console.error('[ws] failed to fetch auth token', err);
         // `fetch` itself threw (network error) — no response object to
@@ -721,6 +745,11 @@ function AppShell({
         },
         onClose: (info) => {
           dispatch({ type: 'ws_close' });
+          // Cluster I C2 UI: drop the cached auth token on close. The
+          // server rotates tokens on every boot, so reusing a stale
+          // value after a reconnect would 403 against the new token's
+          // launch. The reopened WS-connect path re-fetches.
+          authTokenRef.current = null;
           // Cluster G E3 UI: route the close info into the
           // ConnectionLostOverlay. The reason resolver maps close
           // codes (4001/4002 → structured; 1006 → server_unreachable;
@@ -939,6 +968,72 @@ function AppShell({
 
   function toggleTrust(projectId: number, trusted: boolean) {
     wsRef.current?.send({ type: 'set_trusted', projectId, trusted });
+  }
+
+  /**
+   * Cluster I C2 UI: invoke the per-session JSONL export endpoint and
+   * push a success/error toast. Called by ProjectList's `⤓` icon-btn
+   * (this slice) and, in a later slice, by the SessionSettingsPanel
+   * "Data" entry. Wraps the shared `exports.ts` helper.
+   *
+   * v1 ships the redacted form only — no surface yet collects the
+   * typed-acknowledgment that flips the X-Cebab-Acknowledge-Raw header.
+   * The Reveal-in-Finder action that the spec mentions (§5) is also
+   * deferred — it needs a server-side path-open endpoint that doesn't
+   * exist yet. Both are tracked as follow-ups.
+   */
+  async function downloadSession(sessionId: string): Promise<void> {
+    const push = notifPushRef.current;
+    const token = authTokenRef.current;
+    if (!token) {
+      push?.({
+        id: mintNotificationId(),
+        ts: Date.now(),
+        severity: 'error',
+        class: 'operational',
+        dedupeKey: `session_log_export:no_token:${sessionId}`,
+        title: 'Download failed',
+        message: 'Not connected — reconnect and try again.',
+        sticky: false,
+      });
+      return;
+    }
+    try {
+      const result = await downloadSessionLog({
+        baseUrl: HTTP_BASE,
+        sessionId,
+        token,
+        format: 'redacted',
+      });
+      push?.({
+        id: mintNotificationId(),
+        ts: Date.now(),
+        severity: 'success',
+        class: 'operational',
+        dedupeKey: `session_log_export:ok:${sessionId}`,
+        title: 'Session log downloaded',
+        message: result.filename,
+        sticky: false,
+      });
+    } catch (err) {
+      const message = isDownloadError(err)
+        ? err.kind === 'http' && err.status === 404
+          ? 'No log file on disk for this session.'
+          : err.kind === 'http' && err.status === 403
+            ? 'Server rejected the request — check that the auth token is current.'
+            : err.message
+        : 'Unexpected error during download.';
+      push?.({
+        id: mintNotificationId(),
+        ts: Date.now(),
+        severity: 'error',
+        class: 'operational',
+        dedupeKey: `session_log_export:err:${sessionId}`,
+        title: 'Download failed',
+        message,
+        sticky: false,
+      });
+    }
   }
 
   function renameSession(sessionId: string, title: string | null) {
@@ -1770,6 +1865,7 @@ function AppShell({
           onNewSession={newSession}
           onToggleTrust={toggleTrust}
           onRenameSession={renameSession}
+          onDownloadSession={downloadSession}
         />
         <footer className="sidebar-footer">
           <button
