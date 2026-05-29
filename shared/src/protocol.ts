@@ -1025,6 +1025,40 @@ export type ClientMsg =
     }
   | {
       /**
+       * Cluster G Phase 4 (D6/D11): operator's decision on a parked
+       * bus-install TOFU prompt. Sent in reply to a `bus_auto_install_pending`
+       * envelope; the server matches by `pendingId` and resolves the
+       * parked install promise.
+       *
+       * Decisions persisted:
+       *   - `trust`         → `projects.bus_trust_decision='trusted'` +
+       *                       safety_audit `{kind:'bus.trust_decided'}`.
+       *                       Install proceeds.
+       *   - `deny_remember` → `projects.bus_trust_decision='denied'` +
+       *                       safety_audit. Install does NOT proceed; future
+       *                       add-participant calls are silently refused until
+       *                       the operator revokes via the Authority Panel.
+       *   - `deny_once`     → NO row write; per-Conn in-memory deny set so
+       *                       the operator is re-prompted on the next
+       *                       connection (clean per-session semantics
+       *                       mirroring the MCP gate). Install does NOT
+       *                       proceed.
+       *
+       * Operator identity is resolved server-side via `getOperatorId()` — same
+       * convention as the MCP and Cluster A ack paths.
+       *
+       * Unlike `mcp_trust_decision`, this message is always gate-initiated:
+       * the bus has no Authority-Panel-driven free decision today (revocation
+       * is a separate handler not in scope for this slice). So `pendingId` is
+       * required.
+       */
+      type: 'bus_trust_decision';
+      pendingId: string;
+      projectId: number;
+      decision: 'trust' | 'deny_once' | 'deny_remember';
+    }
+  | {
+      /**
        * Cluster B Phase 5 (§4.5): operator's typed-acknowledgment reply to a
        * parked `session_start_gated`. The server validates
        * `typedAcknowledgment === 'inject'` (case-sensitive) BEFORE resolving
@@ -2225,6 +2259,45 @@ export type ServerMsg =
       sessionId: string;
       projectId: number;
       agentName: string;
+    }
+  | {
+      /**
+       * Cluster G Phase 4 (D6/D11): TOFU gate ServerMsg. Fires BEFORE
+       * `installBusForProject` flips the `projects.bus_installed` flag —
+       * either at the explicit `install_bus_integration` handler or
+       * implicitly during `add_multi_agent_participant` when the worker's
+       * project has never been bus-installed before.
+       *
+       * The server parks the install promise keyed by `pendingId` and waits
+       * for a `bus_trust_decision` ClientMsg with the matching id.
+       *
+       * Why a TOFU gate for an in-process closure (no binary executes):
+       * the bus pins a routing-identity slug for the worker. Every later
+       * `bus_send` carries that slug as its `source`; the orchestrator
+       * trusts it for delivery. The trust decision is therefore at least as
+       * consequential as an MCP server install — possibly more, because the
+       * bus is the enforcement point for D4 router-drop filters.
+       * Post-action confirmation is the silent-safety anti-pattern in
+       * another form (the agentic-reviewer's framing — see
+       * high/G-run-awareness §4.4 + §7).
+       *
+       * `agentName` is the slug Cebab WILL pin if the operator trusts the
+       * install — derived from the project name via `chooseAgentName`
+       * (`bus/install.ts`). Surfacing it in the prompt lets the operator
+       * see the exact identity the bus would adopt before they commit.
+       *
+       * `contextSessionId` is the multi-agent sessionId the request was
+       * raised from (`add_multi_agent_participant`), or `null` for the
+       * explicit `install_bus_integration` click. The UI uses it to thread
+       * the modal back to a specific session view; the audit row uses it
+       * for forensic context.
+       */
+      type: 'bus_auto_install_pending';
+      pendingId: string;
+      projectId: number;
+      projectName: string;
+      agentName: string;
+      contextSessionId: string | null;
     }
   | {
       /**
