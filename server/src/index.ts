@@ -9,6 +9,7 @@ import { startWsServer } from './ws/server.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
 import { authTokenPath, getAuthToken, initAuthToken } from './auth.js';
 import { buildAllowedOrigins, isAllowedHost } from './origin.js';
+import { recordRejection } from './notifications/origin_rejections.js';
 
 function main(): void {
   console.log(`[cebab] starting on ${config.host}:${config.port} (mock=${config.mock})`);
@@ -59,11 +60,30 @@ function main(): void {
     const host = String(req.headers.host ?? '');
     if (origin && !allowedOrigins.has(origin)) {
       console.warn(`[http] /auth-token reject: bad origin ${JSON.stringify(origin)}`);
+      // Cluster G E3 (server-side): dual-write to the diagnostic ring +
+      // disk log. The X-Cebab-Reject-Reason response header lets a
+      // debugging operator see the reason in the browser's Network tab
+      // without spelunking the server log. recordRejection is sync so
+      // the disk line lands before the 403 leaves.
+      recordRejection({
+        origin: origin || null,
+        host: host || null,
+        reason: 'origin_not_allowed',
+        channel: 'http',
+      });
+      res.setHeader('X-Cebab-Reject-Reason', 'origin_not_allowed');
       res.status(403).end();
       return;
     }
     if (!isAllowedHost(host)) {
       console.warn(`[http] /auth-token reject: bad host ${JSON.stringify(host)}`);
+      recordRejection({
+        origin: origin || null,
+        host: host || null,
+        reason: 'host_not_allowed',
+        channel: 'http',
+      });
+      res.setHeader('X-Cebab-Reject-Reason', 'host_not_allowed');
       res.status(403).end();
       return;
     }

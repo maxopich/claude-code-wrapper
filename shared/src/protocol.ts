@@ -2116,6 +2116,60 @@ export type ServerMsg =
     }
   | {
       /**
+       * Cluster G E3 (server-side diagnostic): snapshot of recent
+       * Origin/Host gate rejections — Channel A in spec §4.3. Emitted on
+       * every WS attach when the in-process ring has at least one
+       * rejection within the 5-min visible window. The dispatcher fans
+       * this into a single warning toast: "N origin-rejected attempts
+       * in the last 5 min — possible misconfigured client."
+       *
+       * Why per-attach + not push: the ring is mutated by HTTP requests
+       * that have nothing to do with any specific WS connection (an
+       * Express `/auth-token` reject doesn't open a socket to push
+       * over). The newly-attached client is the soonest *guaranteed*
+       * delivery surface, and the rejection record is interesting
+       * mostly when the operator is starting a fresh session anyway.
+       *
+       * Channel B (auth-token failure, session revoked) is NOT carried
+       * here — those use structured WS close codes (4001/4002) instead,
+       * since the socket is already up. This envelope is exclusively
+       * for pre-connection HTTP-layer rejections.
+       *
+       * `recent` is a defensive copy of the ring's window; the client
+       * MUST treat it as a snapshot, not a stream. Mutating any entry
+       * has no effect on subsequent emits.
+       */
+      type: 'recent_rejections';
+      /** Total count in the visible window — usually equals
+       *  `recent.length` but allowed to diverge if a future cap
+       *  truncates the wire payload while preserving the count for
+       *  display. Phase 1 ships the full window every time. */
+      count: number;
+      recent: Array<{
+        /** Wall-clock ms at the rejection. */
+        ts: number;
+        /** The submitted `Origin` header. `null` for non-browser
+         *  clients (smoke tests, curl) which would never reach the
+         *  origin gate via a browser anyway — kept in the shape for
+         *  forward-compat when host-only rejections need to log
+         *  origin=null. */
+        origin: string | null;
+        /** The submitted `Host` header. `null` only if the request
+         *  arrived header-less (malformed client) — defensive. */
+        host: string | null;
+        /** Which rejection rule fired. `'origin_not_allowed'` =
+         *  Origin not in the allow-list; `'host_not_allowed'` = Host
+         *  not 127.0.0.1/localhost:port. */
+        reason: 'origin_not_allowed' | 'host_not_allowed';
+        /** Which gate fired: `'ws'` = WebSocket upgrade verifyClient;
+         *  `'http'` = Express `/auth-token` GET. Same rejection can
+         *  appear on both within ms if the operator's browser is
+         *  retrying both endpoints. */
+        channel: 'ws' | 'http';
+      }>;
+    }
+  | {
+      /**
        * Cluster A Phase 4 (D3): inverts the silent `markCrashedSilent` sweep
        * at `bus/resume.ts:117` — when a newer multi-agent session became
        * active while an older one was still marked `running` (e.g. a
