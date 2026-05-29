@@ -55,7 +55,9 @@ import { AuthRefreshProvider, useAuthRefreshActions } from './components/authRef
 import { RecoveryLogButton, RecoveryLogProvider } from './components/recoveryLog';
 import { ForensicViewerProvider } from './components/agentControl/ForensicViewerContext';
 import { KickForensicsModal } from './components/agentControl/KickForensicsModal';
+import { RunsBadge } from './components/runs';
 import { HELD_MESSAGES_CAP } from './store';
+import type { ActiveRunView } from './store';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -826,6 +828,46 @@ function AppShell({
     }
   }
 
+  /**
+   * Cluster G Phase 3b (G1 UI / G1-3): RunsBadge dropdown row click. The
+   * "jump" intent is twofold per spec §5: select the session AND switch
+   * the main tab so the operator lands ON the run rather than next to
+   * it. Concretely:
+   *
+   * - `kind === 'single'` + projectId known + project still present:
+   *   call `selectSession` (which loads the session if needed) and flip
+   *   the multi-agent slice's view to `'chat'`. The chat tab then
+   *   renders the just-selected session.
+   *
+   * - Any bus kind (`'bus-worker'` / `'orchestrator'`): we can't tell
+   *   chain from orchestrator from the wire alone (the lifecycle meta
+   *   doesn't carry the topology) — both share the same active-slot
+   *   reducer slice. Switching the tab to `'multi-agent'` (the default
+   *   multi-agent tab) is a best-effort jump; the operator may need to
+   *   pick the iteration manually if multiple bus sessions are in
+   *   flight. Phase 4+ may refine this once `orchestrator` kind is
+   *   actually emitted distinctly.
+   *
+   * - Defensive: if the project the descriptor references is gone (rare;
+   *   only between a deletion and the next snapshot), drop the session
+   *   selection but still switch tabs so the click isn't a silent no-op.
+   */
+  function onJumpToRun(run: ActiveRunView) {
+    if (run.kind === 'single') {
+      const knownProject =
+        run.projectId !== undefined && state.projects.some((p) => p.id === run.projectId);
+      if (knownProject && run.projectId !== undefined) {
+        selectSession(run.projectId, run.sessionId);
+      }
+      dispatch({ type: 'ma_set_view', view: 'chat' });
+      return;
+    }
+    // bus-worker / orchestrator → multi-agent tab. Phase 4 may split
+    // chain vs orchestrator into distinct views once the lifecycle meta
+    // carries the topology.
+    dispatch({ type: 'ma_set_view', view: 'multi-agent' });
+  }
+
   function newSession(projectId: number) {
     dispatch({ type: 'new_session', projectId });
   }
@@ -1567,6 +1609,26 @@ function AppShell({
           */}
           {state.settings?.mockMode === true && <MockBadge />}
           <div className="sidebar-header-controls">
+            {/*
+              Cluster G Phase 3b (G1 UI): "▶ N active" pill. Mount predicate
+              is `state.activeRuns.length > 0` (hidden silently when
+              nothing is running); the spec (§5 G1) places it between
+              brand and connection dot so it reads left-to-right as
+              "what's running here? → is the link up? → events". Each
+              chip in the controls strip stands alone and unmounts when
+              irrelevant — matches MockBadge / NotificationBell.
+
+              `onJumpToRun` is defined just below `selectSession` so it
+              can reuse the same project-bucket reconciliation path; if
+              the descriptor is single-agent and the project is known,
+              it both selects the session and flips to the chat tab. For
+              bus/orchestrator descriptors it can't disambiguate
+              orchestrator-vs-chain from the wire alone, so it lands the
+              operator on the multi-agent tab (the live run will be
+              visible there iff it's the active session — chain & orch
+              currently share the same active-slot reducer slice).
+            */}
+            <RunsBadge runs={state.activeRuns} onJump={onJumpToRun} />
             <span
               className={state.connected ? 'dot on' : 'dot off'}
               title={state.connected ? 'connected' : 'disconnected'}

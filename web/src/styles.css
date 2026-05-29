@@ -9171,3 +9171,158 @@ pre {
   margin-left: 4px;
   opacity: 0.7;
 }
+
+/* -----------------------------------------------------------------------
+ * Cluster G Phase 3b (G1 UI): RunsBadge + RunsDropdown.
+ *
+ * RunsBadge geometry reuses `.ma-hop-budget-chip` (pill, uppercase, 10px,
+ * --r-pill); `.runs-badge` overlays the active-running accent colour
+ * vocabulary from `.run-status-running` so the chip reads as "this is
+ * live activity" rather than the neutral hop-budget grey. Margins are
+ * lifted because the chip lives in the sidebar-header-controls flex
+ * strip — `.ma-hop-budget-chip`'s built-in `margin-left: 4px` would
+ * have pushed it away from the strip's gap-based spacing.
+ *
+ * The popover geometry mirrors `.recovery-log-popover` verbatim (same
+ * shadow, line, z-index) so the three sidebar-header surfaces — runs,
+ * notif inbox, recovery log — look like the same family.
+ * ------------------------------------------------------------------- */
+.runs-badge {
+  margin-left: 0;
+  cursor: pointer;
+  color: var(--accent-ink);
+  border-color: rgba(139, 92, 246, 0.35);
+  background: rgba(139, 92, 246, 0.12);
+  font-weight: 600;
+}
+.runs-badge:hover,
+.runs-badge:focus-visible {
+  outline: none;
+  border-color: rgba(139, 92, 246, 0.55);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.runs-badge[aria-expanded='true'] {
+  border-color: rgba(139, 92, 246, 0.55);
+}
+
+.runs-dropdown-popover {
+  position: absolute;
+  top: 48px;
+  left: var(--s-3);
+  right: var(--s-3);
+  max-width: 440px;
+  max-height: min(70vh, 600px);
+  background: var(--bg-4);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  z-index: var(--notif-stack-z);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: notif-in var(--dur-2) var(--ease-out);
+}
+
+.runs-dropdown {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.runs-dropdown-empty {
+  margin: 0;
+  padding: var(--s-3);
+  color: var(--fg-2);
+  font-size: 12px;
+}
+
+.runs-dropdown-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-1) 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.runs-dropdown-row {
+  margin: 0;
+}
+
+.runs-dropdown-row-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line-3) 60%, transparent);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+}
+.runs-dropdown-list > li:last-child .runs-dropdown-row-btn {
+  border-bottom: 0;
+}
+.runs-dropdown-row-btn:hover,
+.runs-dropdown-row-btn:focus-visible {
+  background: var(--bg-3);
+  outline: none;
+}
+
+.runs-dropdown-row-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.runs-dropdown-row-project {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.runs-dropdown-row-agent {
+  font-size: 11px;
+  color: var(--fg-2);
+  font-family: var(--font-mono, monospace);
+}
+
+.runs-dropdown-row-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-shrink: 0;
+}
+
+.runs-dropdown-row-kind {
+  /* Reuses .run-status / .run-status-running base via className; this
+   * only adjusts spacing of the glyph + label inside the pill. */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.runs-dropdown-row-elapsed {
+  font-size: 11px;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+  min-width: 40px;
+  text-align: right;
+}
+
+.runs-dropdown-overflow {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  font-size: 11px;
+  color: var(--fg-2);
+  text-align: center;
+  border-top: 1px solid var(--line-3);
+}
