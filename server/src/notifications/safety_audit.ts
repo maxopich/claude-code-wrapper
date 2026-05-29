@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { config } from '../config.js';
 import { getDb } from '../db.js';
 import { getOperatorId } from './operator.js';
 
@@ -44,6 +45,18 @@ export const HIGHEST_SUBCODES: ReadonlySet<string> = new Set([
   'audit.tamper_detected',
 ]);
 
+/**
+ * Runtime mode tagged on every audit row (Cluster G Phase 1 / migration
+ * 023). 'live' for normal Cebab runs; 'mock' iff `config.mock === true`
+ * at append time (operator launched with `MOCK=1`).
+ *
+ * Default forensics queries filter `WHERE mode='live'` so a misconfigured
+ * demo doesn't pollute eval signal — but mock rows are still WRITTEN, so
+ * the same demo can't pretend nothing happened. Callers do not pass this;
+ * it's derived inside `appendSafetyAudit` from `config.mock`.
+ */
+export type SafetyAuditMode = 'live' | 'mock';
+
 export type SafetyAuditInput = {
   ts: number;
   sessionId?: string | null;
@@ -66,16 +79,32 @@ export type SafetyAuditRow = {
   payload_json: string;
   hash_prev: Buffer | null;
   hash_self: Buffer;
+  /** Cluster G Phase 1 (A3, migration 023): runtime-mode tag. */
+  mode: SafetyAuditMode;
 };
 
 export type VerifyChainResult = { ok: true; rowsChecked: number } | { ok: false; brokenAt: string };
 
 /**
  * Canonical byte representation of a row for hashing. Fields are in
- * declaration order from migration 015; NULLs become empty strings; the
- * NUL byte (0x00) is the field delimiter (safe because operator-supplied
- * strings — username, UUIDs, enumerated kinds, payload JSON — cannot
- * contain unescaped NUL).
+ * declaration order from migration 015 + the migration 023 `mode` column
+ * appended at the end; NULLs become empty strings; the NUL byte (0x00) is
+ * the field delimiter (safe because operator-supplied strings — username,
+ * UUIDs, enumerated kinds, payload JSON — cannot contain unescaped NUL).
+ *
+ * The `mode` column is appended to the parts array rather than inserted
+ * mid-list because:
+ *   - Migration 023 introduced a fresh chain-reset marker; verifyChain
+ *     only walks rows AFTER that marker, all of which are written with
+ *     the post-023 canonicalization (including `mode`). Pre-023 rows are
+ *     bounded by the 015 reset marker and never re-canonicalized.
+ *   - Appending keeps the diff against pre-023 canonicalization minimal,
+ *     making the chain-reset contract auditable at review time.
+ *
+ * Any future ALTER that adds another column MUST follow the same pattern:
+ * append the new field to the end of `parts` AND insert a fresh
+ * `audit.chain_reset` marker in the same migration. See migration 015's
+ * header for the full contract.
  */
 function canonicalRowBytes(row: {
   id: string;
@@ -87,6 +116,7 @@ function canonicalRowBytes(row: {
   kind: string;
   reason_code: string;
   payload_json: string;
+  mode: SafetyAuditMode;
 }): Buffer {
   const parts = [
     row.id,
@@ -98,6 +128,7 @@ function canonicalRowBytes(row: {
     row.kind,
     row.reason_code,
     row.payload_json,
+    row.mode,
   ];
   return Buffer.from(parts.join('\x00'), 'utf8');
 }
@@ -131,6 +162,12 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
   const sessionId = input.sessionId ?? null;
   const parentSessionId = input.parentSessionId ?? null;
   const agentId = input.agentId ?? null;
+  // Cluster G Phase 1 (A3): runtime-mode tag, derived from `config.mock`
+  // at append time. NOT a caller parameter — the caller doesn't know (or
+  // shouldn't need to know) whether the runner that produced this event
+  // is mock or live, but the audit row must record it for forensics. See
+  // SafetyAuditMode comment for filter semantics.
+  const mode: SafetyAuditMode = config.mock ? 'mock' : 'live';
 
   const insert = db.transaction((): { id: string; hash_self: Buffer } => {
     const tip = db
@@ -150,12 +187,13 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
       kind: input.kind,
       reason_code: input.reasonCode,
       payload_json: payloadJson,
+      mode,
     };
     const hashSelf = computeHashSelf(row, hashPrev);
     db.prepare(
       `INSERT INTO safety_audit
-        (id, ts, session_id, parent_session_id, operator_id, agent_id, kind, reason_code, payload_json, hash_prev, hash_self)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, ts, session_id, parent_session_id, operator_id, agent_id, kind, reason_code, payload_json, hash_prev, hash_self, mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       row.id,
       row.ts,
@@ -168,6 +206,7 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
       row.payload_json,
       hashPrev,
       hashSelf,
+      row.mode,
     );
     return { id: row.id, hash_self: hashSelf };
   });
@@ -222,7 +261,7 @@ export function verifyChain(): VerifyChainResult {
   const rows = db
     .prepare<[number], SafetyAuditRow>(
       `SELECT id, ts, session_id, parent_session_id, operator_id, agent_id, kind, reason_code,
-              payload_json, hash_prev, hash_self
+              payload_json, hash_prev, hash_self, mode
        FROM safety_audit
        WHERE rowid > ?
        ORDER BY rowid ASC`,
@@ -252,7 +291,7 @@ export function _getSafetyAuditRow(id: string): SafetyAuditRow | undefined {
   return getDb()
     .prepare<[string], SafetyAuditRow>(
       `SELECT id, ts, session_id, parent_session_id, operator_id, agent_id, kind, reason_code,
-              payload_json, hash_prev, hash_self
+              payload_json, hash_prev, hash_self, mode
        FROM safety_audit WHERE id = ?`,
     )
     .get(id);

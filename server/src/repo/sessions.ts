@@ -1,5 +1,6 @@
 import type { SessionPermissionMode } from '@cebab/shared/protocol';
 import { isSessionPermissionMode } from '@cebab/shared/protocol';
+import { config } from '../config.js';
 import { getDb } from '../db.js';
 
 export type SessionRow = {
@@ -10,6 +11,12 @@ export type SessionRow = {
   last_event_at: number;
   total_cost_usd: number;
   permission_mode: string | null;
+  /** Cluster G Phase 1 (A3): 1 iff this session was created under MOCK
+   *  runtime mode. Stamped at INSERT time from `config.mock`; immutable
+   *  after creation. The UI's MockBadge variants (deferred to Phase 2)
+   *  read this so a historical session still shows the MOCK tag long
+   *  after the server has been restarted under live mode. */
+  mock: number;
 };
 
 export function createSession(
@@ -18,11 +25,16 @@ export function createSession(
   title: string | null = null,
 ): SessionRow {
   const now = Date.now();
+  // Read `config.mock` once at INSERT time. The flag is fixed at server
+  // boot per R-G2 (we don't honor mid-process MOCK flips), so reading it
+  // here is equivalent to reading at module load — but doing it here keeps
+  // tests that mutate `config.mock` between `createSession` calls honest.
+  const mock = config.mock ? 1 : 0;
   getDb()
     .prepare(
-      'INSERT INTO sessions (id, project_id, title, created_at, last_event_at, total_cost_usd) VALUES (?, ?, ?, ?, ?, 0)',
+      'INSERT INTO sessions (id, project_id, title, created_at, last_event_at, total_cost_usd, mock) VALUES (?, ?, ?, ?, ?, 0, ?)',
     )
-    .run(id, projectId, title, now, now);
+    .run(id, projectId, title, now, now, mock);
   return getSession(id)!;
 }
 

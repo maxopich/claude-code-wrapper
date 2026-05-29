@@ -11,6 +11,7 @@
  */
 import type { RecoveryAgentEntry, RecoveryContextView } from '@cebab/shared/protocol';
 import type { BashClassifierReason } from '@cebab/shared';
+import { config } from '../config.js';
 import { getDb } from '../db.js';
 
 export type MultiAgentMode = 'chain' | 'orchestrator';
@@ -99,6 +100,14 @@ export type MultiAgentSessionRow = {
    *  `archiveMultiAgentSession`; `list_archived_iterations` (later phase
    *  ClientMsg) is the only path that includes archived rows. */
   archived: number;
+  /** Cluster G Phase 1 (A3, migration 023): 1 iff this session was created
+   *  under MOCK runtime mode. Stamped at INSERT time from `config.mock`;
+   *  immutable after creation. 0 for every pre-023 row (correct — MOCK
+   *  had no audit-tag dimension before this phase) and every live
+   *  session. The UI's MockBadge variants (deferred to Phase 2) read this
+   *  so a historical bus session still carries the MOCK tag long after
+   *  the server has been restarted under live mode. */
+  mock: number;
 };
 
 /**
@@ -239,12 +248,19 @@ export function createMultiAgentSession(
   opts: { templateId?: string | null; hopBudget?: number | null } = {},
 ): MultiAgentSessionRow {
   const now = Date.now();
+  // Cluster G Phase 1 (A3): stamp the runtime MOCK flag at INSERT time so
+  // the bus session row is forever tagged with the mode it was created
+  // under (see `MultiAgentSessionRow.mock` comment for the why). Reading
+  // `config.mock` inside the function — rather than at module load —
+  // keeps tests that mutate `config.mock` between `createMultiAgentSession`
+  // calls honest.
+  const mock = config.mock ? 1 : 0;
   getDb()
     .prepare(
       `INSERT INTO multi_agent_sessions
          (id, mode, started_at, ended_at, status, iteration_id, session_folder, lifecycle,
-          template_id, hop_budget)
-       VALUES (?, ?, ?, NULL, 'running', ?, ?, ?, ?, ?)`,
+          template_id, hop_budget, mock)
+       VALUES (?, ?, ?, NULL, 'running', ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -255,6 +271,7 @@ export function createMultiAgentSession(
       lifecycle,
       opts.templateId ?? null,
       opts.hopBudget ?? null,
+      mock,
     );
   return getMultiAgentSession(id)!;
 }

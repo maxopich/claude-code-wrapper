@@ -1472,6 +1472,32 @@ export type ServerMsg =
        * over this value for the in-flight turn.
        */
       defaultMaxTurns?: number;
+      /**
+       * Cluster G Phase 1 (A3): MOCK runtime mode. `true` iff the server
+       * was launched with `MOCK=1` (read once at boot from `process.env`;
+       * the flag does not flip mid-process — see R-G2). Surfaced on every
+       * `settings` emission so the client doesn't need to side-channel a
+       * separate query.
+       *
+       * Optional for forward-compat — older clients ignore it; the
+       * (deferred) MockBadge UI host treats `undefined` as `false`.
+       *
+       * The audit-tag dimension (`safety_audit.mode='mock'|'live'`) is the
+       * forensics counterpart of this UI signal; the spec requires both —
+       * visual presence in 4 surfaces + persisted audit tag — because a
+       * misconfigured demo identical to a real session in scrollback is
+       * the failure mode this guards against.
+       */
+      mockMode?: boolean;
+      /**
+       * Optional name of the default MOCK fixture replayed when no
+       * per-session fixture is specified. Reserved for forward-compat —
+       * the runner doesn't read it yet (`runner/mock.ts` derives its
+       * fixture from per-session metadata); broadcasting it now means
+       * future "which replay am I watching" UI doesn't need a new
+       * settings round-trip.
+       */
+      mockFixture?: string;
     }
   | {
       /**
