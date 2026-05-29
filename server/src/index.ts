@@ -10,6 +10,9 @@ import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
 import { authTokenPath, getAuthToken, initAuthToken } from './auth.js';
 import { buildAllowedOrigins, isAllowedHost } from './origin.js';
 import { recordRejection } from './notifications/origin_rejections.js';
+import { mountSessionLogExport } from './session_log_export.js';
+import { getSession } from './repo/sessions.js';
+import { getMultiAgentSession } from './repo/multi_agent.js';
 
 function main(): void {
   console.log(`[cebab] starting on ${config.host}:${config.port} (mock=${config.mock})`);
@@ -107,6 +110,30 @@ function main(): void {
       res.setHeader('Vary', 'Origin');
     }
     res.type('text/plain').send(getAuthToken());
+  });
+
+  // Cluster I C2 backend: per-session JSONL download. Reads the on-disk
+  // log written by runner/logger.ts, applies LogsModal redaction line by
+  // line (default), and serves with Content-Disposition: attachment.
+  // Gated on the same Origin+Host+token as /auth-token; raw exports
+  // additionally require an X-Cebab-Acknowledge-Raw header set by the
+  // operator-facing typed-confirmation modal (slice 2). Every export
+  // writes a forensic safety_audit row before the body streams.
+  mountSessionLogExport(app, {
+    getSessionStartMs: (sid: string): number | null => {
+      // Single-agent sessions: sessions.created_at. Multi-agent: their
+      // own table. Either one is fine for the export filename label;
+      // we check single first because that's where logger.ts writes
+      // JSONLs today (multi-agent rows live in the DB, not on disk —
+      // so the lookup for a multi-agent sid lands on a missing file
+      // before the filename matters). Falling back to null lets
+      // exportFilename use Date.now() as a last resort.
+      const s = getSession(sid);
+      if (s) return s.created_at;
+      const m = getMultiAgentSession(sid);
+      if (m) return m.started_at;
+      return null;
+    },
   });
 
   const server = http.createServer(app);
