@@ -5259,6 +5259,34 @@ pre {
   color: var(--accent);
 }
 
+/* Cluster H D12 client: live-edge counter in the subtitle. Same tint as
+ * `.logs-modal-more` (operator-positive "the feed is growing") but with
+ * tabular-nums so the count column doesn't jitter as it climbs. */
+.logs-modal-live {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cluster H D12 client agentic-safety: tail-paused notice. Warn-tier
+ * because the operator's live view is now stale relative to the durable
+ * log, but recoverable in a single click. Token reuse only — no new
+ * variables. */
+.logs-modal-tail-paused {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin: 0;
+  padding: var(--s-2) var(--s-4);
+  background: var(--warn-soft);
+  color: var(--fg-0);
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line-2));
+  font-size: var(--t-sm);
+}
+.logs-modal-tail-paused .ghost-btn {
+  margin-left: auto;
+  font-size: var(--t-sm);
+}
+
 .logs-modal-error {
   margin: 0;
   padding: var(--s-2) var(--s-4);
