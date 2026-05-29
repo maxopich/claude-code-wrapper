@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { sep } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { classifyMutationScope } from './guardrail.js';
 
@@ -16,12 +16,12 @@ import { classifyMutationScope } from './guardrail.js';
  * right (especially around the platform separator) is load-bearing.
  */
 
-// The test paths are absolute-shaped for Posix so they round-trip the
-// `node:path.resolve` behaviour on macOS/Linux. The Windows CI runner
-// is the cross-platform check — `sep` is `'\\'` there; the
-// `resolve('/workspace/foo', 'bar')` invocation still normalizes via
-// the platform's path module, so a constant Posix string is fine as
-// the test's intent.
+// The test paths look Posix-shaped for readability, but every
+// expected `resolvedPath` is computed via `node:path.resolve` so the
+// fixture matches the implementation's actual output on every
+// platform. On Windows `resolve('/workspace/x', '/etc/passwd')` becomes
+// `C:\etc\passwd` (or whatever drive is current), not `/etc/passwd` —
+// hard-coding the expected value would cross-platform-break the test.
 const POSIX_CWD = '/workspace/my-project';
 
 describe('classifyMutationScope — in-scope cases', () => {
@@ -81,25 +81,25 @@ describe('classifyMutationScope — in-scope cases', () => {
 
 describe('classifyMutationScope — out-of-scope cases', () => {
   test('absolute path in a sibling project → out-of-scope', () => {
-    const out = classifyMutationScope({
-      agentCwd: POSIX_CWD,
-      filePath: '/workspace/other-project/src/foo.ts',
-    });
+    const filePath = '/workspace/other-project/src/foo.ts';
+    const out = classifyMutationScope({ agentCwd: POSIX_CWD, filePath });
     expect(out).toEqual({
       inScope: false,
-      resolvedPath: `/workspace/other-project/src${sep}foo.ts`.replace(/\//g, sep),
+      // Compute via the same resolver the implementation uses so the
+      // test passes on both Posix (where this stays `/workspace/...`)
+      // and Windows (where the leading `/` becomes drive-relative —
+      // e.g. `C:\workspace\other-project\src\foo.ts`).
+      resolvedPath: resolve(POSIX_CWD, filePath),
       reasonCode: 'path_outside_cwd',
     });
   });
 
   test('absolute system path → out-of-scope', () => {
-    const out = classifyMutationScope({
-      agentCwd: POSIX_CWD,
-      filePath: '/etc/passwd',
-    });
+    const filePath = '/etc/passwd';
+    const out = classifyMutationScope({ agentCwd: POSIX_CWD, filePath });
     expect(out).toEqual({
       inScope: false,
-      resolvedPath: `${sep}etc${sep}passwd`,
+      resolvedPath: resolve(POSIX_CWD, filePath),
       reasonCode: 'path_outside_cwd',
     });
   });
