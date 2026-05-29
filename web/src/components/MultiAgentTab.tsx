@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type {
   ControlReasonCode,
@@ -45,6 +45,7 @@ import {
 } from './templatePreview/TemplatePreviewBanners';
 import { ConsultantModeChip } from './ConsultantModeChip';
 import { MockBadge } from './MockBadge';
+import { MultiAgentScrollbackFilter, countByKind } from './MultiAgentScrollbackFilter';
 // Cluster D Phase 3: the 3 inline multi-agent warnings below (awaiting-
 // continue, pending-retry, pending-mutation) now render through the
 // unified SessionBanner with `classStem="multi-agent-warning"` so the
@@ -445,12 +446,12 @@ function DraftView(props: {
                             bus: {p.busAgentName}
                           </span>
                           {/* Cluster G Phase 4 (D6/D11): 30-second post-install
-                            * highlight. Reads the timestamp from the store's
-                            * `lastBusInstallAt` map; the badge auto-hides
-                            * 30s after the install. A `bus: <name>` chip
-                            * with no entry in the map (pre-existing install
-                            * from before page load) gets no badge — the
-                            * anti-pattern guard is structural. */}
+                           * highlight. Reads the timestamp from the store's
+                           * `lastBusInstallAt` map; the badge auto-hides
+                           * 30s after the install. A `bus: <name>` chip
+                           * with no entry in the map (pre-existing install
+                           * from before page load) gets no badge — the
+                           * anti-pattern guard is structural. */}
                           <BusInstalledBadge installedAt={props.lastBusInstallAt[p.id]} />
                         </>
                       ) : (
@@ -1512,6 +1513,37 @@ function ActiveRunView(props: {
   // short pulse so it reads as "this is the row I just jumped to".
   const [highlightedEventId, setHighlightedEventId] = useState<number | null>(null);
 
+  // Cluster H D8: client-only kind filter for the scrollback. State holds the
+  // currently *hidden* kinds (empty = everything visible) — matches the
+  // useLogFilters convention so the same mental model applies to both the
+  // scrollback chips and the Logs modal's Kinds dropdown.
+  //
+  // Resets when the active run flips (sessionId change). ActiveRunView does
+  // not re-mount across run swaps within the same tab — the parent only
+  // updates props — so an explicit effect is needed to keep stale filters
+  // from carrying into a fresh run's scrollback.
+  const [hiddenKinds, setHiddenKinds] = useState<Set<MultiAgentEventKind>>(() => new Set());
+  useEffect(() => {
+    setHiddenKinds(new Set());
+  }, [run.sessionId]);
+  const kindCounts = useMemo(() => countByKind(run.events), [run.events]);
+  const visibleEvents = useMemo(
+    () =>
+      hiddenKinds.size === 0 ? run.events : run.events.filter((ev) => !hiddenKinds.has(ev.kind)),
+    [run.events, hiddenKinds],
+  );
+  function toggleHiddenKind(kind: MultiAgentEventKind) {
+    setHiddenKinds((prev) => {
+      const next = new Set(prev);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+  }
+  function resetHiddenKinds() {
+    setHiddenKinds(new Set());
+  }
+
   function jumpToEvent(eventId: number) {
     setHighlightedEventId(eventId);
     // The row's metadata header is always rendered (collapsed only hides the
@@ -1583,16 +1615,35 @@ function ActiveRunView(props: {
               : 'The first participant agent is starting up.'}
           </p>
         ) : (
-          <ol className="event-list">
-            {run.events.map((ev) => (
-              <EventRow
-                key={ev.eventId}
-                event={ev}
-                defaultCollapsed={eventDefaultCollapsed(run, ev)}
-                highlighted={highlightedEventId === ev.eventId}
-              />
-            ))}
-          </ol>
+          <>
+            {/* Cluster H D8: scrollback kind-filter chips. Client-only —
+             *  every `multi_agent_event` already carries `kind`, no backend
+             *  involvement needed. Hides chip kinds from the scrollback below
+             *  while leaving the underlying events untouched (so the spine,
+             *  exports, and Logs modal still see them all). */}
+            <MultiAgentScrollbackFilter
+              hiddenKinds={hiddenKinds}
+              counts={kindCounts}
+              onToggle={toggleHiddenKind}
+              onReset={resetHiddenKinds}
+            />
+            {visibleEvents.length === 0 ? (
+              <p className="iterations-empty">
+                All event kinds are hidden. Click a chip above or Clear to show events.
+              </p>
+            ) : (
+              <ol className="event-list">
+                {visibleEvents.map((ev) => (
+                  <EventRow
+                    key={ev.eventId}
+                    event={ev}
+                    defaultCollapsed={eventDefaultCollapsed(run, ev)}
+                    highlighted={highlightedEventId === ev.eventId}
+                  />
+                ))}
+              </ol>
+            )}
+          </>
         )}
       </section>
 
