@@ -399,19 +399,25 @@ describe('classifyBashCommand — Phase F3 rationale (reason.rule)', () => {
     const r = classifyBashCommand('echo $(cat /etc/passwd)');
     expect(r.category).toBe('dangerous');
     expect(r.reason?.rule).toBe('shell_substitution');
-    expect(r.reason?.matched).toContain('$(');
+    // `matched` is the trigger marker only (not the full `$(...)` fragment)
+    // — the classifier deliberately doesn't try to scan for the closing
+    // `)` because that pushed CodeQL into a polynomial-ReDoS warning on
+    // adversarial input. Operators read the full command from `summary`.
+    expect(r.reason?.matched).toBe('$(');
   });
 
   it('shell_substitution: backticks', () => {
     const r = classifyBashCommand('echo `whoami`');
     expect(r.reason?.rule).toBe('shell_substitution');
-    expect(r.reason?.matched).toMatch(/^`.*`$/);
+    expect(r.reason?.matched).toBe('`');
   });
 
   it('process_substitution: <(...)', () => {
     const r = classifyBashCommand('diff <(ls a) <(ls b)');
     expect(r.category).toBe('dangerous');
     expect(r.reason?.rule).toBe('process_substitution');
+    // Same marker-only convention as shell_substitution above.
+    expect(r.reason?.matched).toBe('<(');
   });
 
   it('redirect_system_path: /etc/passwd', () => {

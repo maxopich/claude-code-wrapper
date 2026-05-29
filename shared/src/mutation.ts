@@ -457,7 +457,14 @@ export function classifyBashCommand(command: string): ToolClassification {
   }
 
   // Shell-substitution: don't try to parse what's inside; mark dangerous.
-  const subMatch = /(?<![\\$])\$\([^)]*\)|`[^`]*`/.exec(trimmed);
+  // Detection patterns are deliberately marker-only (no `[^)]*\)` body
+  // match) to keep the regex O(N) on adversarial input — see r-A1 in the
+  // F3 plan. CodeQL flagged the previous body-matching pattern as
+  // polynomial-ReDoS on inputs like `<(<(<(<(...` with no closing `)`.
+  // The operator reads the offending substring from `summary` (which
+  // carries the full command verbatim); `matched` is just the trigger
+  // marker for "this is the bit that fired".
+  const subMatch = /(?<![\\$])\$\(|`/.exec(trimmed);
   if (subMatch) {
     return {
       category: 'dangerous',
@@ -472,7 +479,10 @@ export function classifyBashCommand(command: string): ToolClassification {
   }
 
   // Process-substitution: `<(curl ...)` etc. — also unparseable; dangerous.
-  const procMatch = /<\([^)]*\)|>\([^)]*\)/.exec(trimmed);
+  // Same marker-only detection as shell-substitution above (CodeQL
+  // `js/polynomial-redos`); the operator inspects `summary` for the
+  // full fragment.
+  const procMatch = /<\(|>\(/.exec(trimmed);
   if (procMatch) {
     return {
       category: 'dangerous',
