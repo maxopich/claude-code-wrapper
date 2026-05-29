@@ -1920,6 +1920,13 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     mutations,
     ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
     ...(recoveryContext ? { recoveryContext } : {}),
+    // Cluster G Phase 2c (UI-A3): per-session MOCK posture projection. The
+    // row's `mock` column is locked at CREATE time (migration 023), so a
+    // session created under MOCK keeps `mock=true` on R-A re-attach AND on
+    // R-B reconstruct — even after the operator restarted Cebab in live
+    // mode. Spread-omit on `0` / missing row so live + pre-G2c rows ship
+    // a minimal wire envelope (additive-optional contract).
+    ...(sessionRow?.mock === 1 ? { mock: true } : {}),
   });
   for (const ev of resumed.replayEvents) {
     const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
@@ -3247,6 +3254,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
           });
           conn.multiAgent = handle;
+          // Cluster G Phase 2c (UI-A3): read the freshly-inserted session
+          // row to project the `mock` column onto the wire. `createMultiAgentSession`
+          // (called inside `startOrchestratorSession`) stamps `mock` from
+          // `config.mock` at INSERT time, so by the time we get here the
+          // row exists and reflects the current runtime mode.
+          const orchestratorRow = getMultiAgentSession(handle.sessionId);
           send(conn.ws, {
             type: 'multi_agent_started',
             sessionId: handle.sessionId,
@@ -3262,6 +3275,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             pauseOnMutation: handle.pauseOnMutation,
             mutationsAcknowledged: false,
             mutations: [],
+            ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -3312,6 +3326,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
         });
         conn.multiAgent = handle;
+        // Cluster G Phase 2c (UI-A3): same per-session MOCK projection as
+        // the orchestrator path — chain sessions also stamp `mock` at row
+        // INSERT (via `createMultiAgentSession` inside `startChainSession`).
+        const chainRow = getMultiAgentSession(handle.sessionId);
         send(conn.ws, {
           type: 'multi_agent_started',
           sessionId: handle.sessionId,
@@ -3324,6 +3342,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           pauseOnMutation: handle.pauseOnMutation,
           mutationsAcknowledged: false,
           mutations: [],
+          ...(chainRow?.mock === 1 ? { mock: true } : {}),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

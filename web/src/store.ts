@@ -396,6 +396,18 @@ export type MultiAgentRun = {
    *     fails the next auto_retry repopulates this slice)
    */
   autoRetry?: MultiAgentAutoRetry;
+  /**
+   * Cluster G Phase 2c (UI-A3): true iff this bus session was created
+   * under MOCK runtime mode. Mirrors the wire's optional `multi_agent_started.mock`
+   * field (locked at CREATE time, server-side projection from
+   * `multi_agent_sessions.mock`). When true, the TopRunBar + ActivityBar
+   * mount their `<MockBadge variant="inline" />` chips.
+   *
+   * Optional + strict-equality at the call site: pre-G2c servers omit the
+   * field, and the live path's wire envelope also omits (additive-optional
+   * contract) — both render nothing.
+   */
+  mock?: boolean;
 };
 
 /** Cluster D Phase 4d: bus auto-retry info (sub-slice of MultiAgentRun).
@@ -1368,6 +1380,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // Same R-A caveat — empty until at least one participant's
             // SDK init arrives post-attach.
             modelsByProject: {},
+            // Cluster G Phase 2c (UI-A3): per-session MOCK posture, projected
+            // from `multi_agent_sessions.mock` server-side. Spread-omit when
+            // the wire field is absent (pre-G2c server, or a live session)
+            // so the run state mirrors the wire — strict `=== true` mount
+            // predicates downstream then collapse {undefined, false} to "no".
+            ...(msg.mock !== undefined ? { mock: msg.mock } : {}),
           },
         },
       };
