@@ -8,6 +8,7 @@ import type {
   NotificationAction,
   NotificationEnvelope,
   PauseExpiryAction,
+  SearchResult,
   ServerMsg,
   SessionLogScope,
   SessionPermissionMode,
@@ -28,6 +29,7 @@ import { LogsButton } from './components/sessionLog';
 import { logsHashFor } from './components/sessionLog/logsHash';
 import { SettingsModal } from './components/SettingsModal';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
+import { SessionSearchModal } from './components/SessionSearchModal';
 import { SHORTCUTS } from './shortcutRegistry';
 import { findShortcut, useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
@@ -485,6 +487,10 @@ function AppShell({
   // from outside an input; Cmd/Ctrl+/ opens from anywhere (including
   // inside a composer/input). Esc closes.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  // Cluster I C4 UI: the Cmd/Ctrl+P cross-session search modal. Open state
+  // lives here (App-level) the same way `shortcutsOpen` does; the shortcut
+  // toggles it and Esc closes it (via the modal's useModalSurface).
+  const [searchOpen, setSearchOpen] = useState(false);
   // Cluster F Phase A1b (UI-A1): per-turn MAX_TURNS override for the
   // single-agent composer. Lives at App level (not in the InputBox)
   // because (a) `sendMessage` reads it inline when shipping the
@@ -962,6 +968,29 @@ function AppShell({
     dispatch({ type: 'ma_set_view', view: 'multi-agent' });
   }
 
+  /**
+   * Cluster I C4 UI (spec C4-4): navigate to a cross-session search hit.
+   *
+   *   - Single-agent hit (carries `projectId`): open the project if it isn't
+   *     the active one, then select the session — `select_project` +
+   *     `select_session`, exactly as the spec prescribes.
+   *   - Multi-agent hit (`multi_agent_events.text`, no single owning project):
+   *     a bus session spans projects, so we can't select a single-agent
+   *     session row — switch to the multi-agent tab (best-effort, mirrors
+   *     `onJumpToRun`'s bus branch). Selecting the exact iteration is a
+   *     follow-up once bus-run deep-linking lands.
+   */
+  function navigateToSearchResult(r: SearchResult) {
+    if (r.matchedField === 'multi_agent_events.text') {
+      dispatch({ type: 'ma_set_view', view: 'multi-agent' });
+      return;
+    }
+    if (r.projectId !== undefined) {
+      if (r.projectId !== state.activeProjectId) selectProject(r.projectId);
+      selectSession(r.projectId, r.sessionId);
+    }
+  }
+
   function newSession(projectId: number) {
     dispatch({ type: 'new_session', projectId });
   }
@@ -1207,6 +1236,12 @@ function AppShell({
           window.dispatchEvent(new HashChangeEvent('hashchange'));
         }
       },
+    ],
+    [
+      // Cluster I C4 UI: open the cross-session search modal. Toggle so a
+      // second Cmd/Ctrl+P closes it (parity with the `/` cheatsheet toggle).
+      findShortcut(SHORTCUTS, 'session.search.cmdP'),
+      () => setSearchOpen((cur) => !cur),
     ],
   ]);
 
@@ -2299,6 +2334,15 @@ function AppShell({
         />
       )}
       {shortcutsOpen && <KeyboardShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+      {searchOpen && (
+        <SessionSearchModal
+          onClose={() => setSearchOpen(false)}
+          send={(m) => wsRef.current?.send(m)}
+          subscribeServerMsg={subscribeServerMsg}
+          activeProjectId={state.activeProjectId}
+          onNavigate={navigateToSearchResult}
+        />
+      )}
       {/*
         Cluster G E3 UI: connection-lost overlay. Mounts iff the slice
         is populated (a recent WS close or initial fetch failure that

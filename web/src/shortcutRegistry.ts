@@ -150,6 +150,21 @@ export const SHORTCUTS: ReadonlyArray<ShortcutDescriptor> = [
       (e.key === 'L' || e.key === 'l') && e.shiftKey && (e.metaKey || e.ctrlKey) && !e.altKey,
     documentationOnly: false,
   },
+  {
+    id: 'session.search.cmdP',
+    section: 'Session',
+    keyDisplay: ['Cmd/Ctrl', 'P'],
+    description: 'Search across all sessions by content (cross-session search)',
+    // Cluster I C4 UI: opens the SessionSearchModal. Global handler in
+    // App.tsx toggles it. We intentionally do NOT gate on isInTextInput —
+    // a modifier shortcut should fire even while the composer is focused
+    // (same as the OS Cmd+P it overrides). The hook calls preventDefault on
+    // match, so the browser's native Print dialog never opens. Letter keys
+    // arrive uppercase under Caps Lock; match both cases.
+    keyMatch: (e) =>
+      (e.key === 'p' || e.key === 'P') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey,
+    documentationOnly: false,
+  },
 
   // ----- Composer -----
   {
