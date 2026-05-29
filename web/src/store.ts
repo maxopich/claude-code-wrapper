@@ -2321,6 +2321,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'bus_auto_installed':
     case 'tool_denied':
     case 'session_reconstructed':
+    case 'recent_rejections':
+      // Cluster G E3 (server-side): `recent_rejections` lands as a no-op
+      // here in this PR — the UI overlay + Cluster A toast wiring ships in
+      // the next slice. The server emits the envelope on every WS attach
+      // when the in-process ring has entries within the 5-min window;
+      // dropping it on the client side keeps the wire shape stable and
+      // observed-by-the-typed-reducer exhaustiveness check until the
+      // ConnectionLostOverlay PR consumes it.
+      //
       // Cluster A Phase 3+4+6: the dispatcher fans every one of these into a
       // matching `notification` envelope (see `server/src/notifications/
       // dispatcher.ts`); the dock owns the operator-facing surface. The

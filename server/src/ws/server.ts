@@ -166,6 +166,7 @@ import type {
 } from '@cebab/shared/protocol';
 import { type MultiAgentEventKind, isMultiAgentEventKind } from '@cebab/shared/protocol';
 import { buildAllowedOrigins, isAllowedHost } from '../origin.js';
+import { recentRejections, recordRejection } from '../notifications/origin_rejections.js';
 import { verifyToken } from '../auth.js';
 
 export type PendingPermission = {
@@ -1492,12 +1493,34 @@ export function startWsServer(server: HttpServer): WebSocketServer {
       // Origin/Host are kept as a cheap label and early reject.
       if (origin && !allowedOrigins.has(origin)) {
         console.warn(`[ws] reject: bad origin ${JSON.stringify(origin)}`);
-        cb(false, 403, 'forbidden origin');
+        // Cluster G E3 (server-side): dual-write to the diagnostic ring +
+        // disk log + pass the reason as an X-Cebab-Reject-Reason response
+        // header. The `ws` library's verifyClient cb supports a 4th
+        // headers param (typed as OutgoingHttpHeaders) so the 403
+        // response carries the diagnostic without us having to reach
+        // into the underlying http server's `upgrade` event.
+        recordRejection({
+          origin: origin || null,
+          host: host || null,
+          reason: 'origin_not_allowed',
+          channel: 'ws',
+        });
+        cb(false, 403, 'forbidden origin', {
+          'X-Cebab-Reject-Reason': 'origin_not_allowed',
+        });
         return;
       }
       if (!isAllowedHost(host)) {
         console.warn(`[ws] reject: bad host ${JSON.stringify(host)}`);
-        cb(false, 403, 'forbidden host');
+        recordRejection({
+          origin: origin || null,
+          host: host || null,
+          reason: 'host_not_allowed',
+          channel: 'ws',
+        });
+        cb(false, 403, 'forbidden host', {
+          'X-Cebab-Reject-Reason': 'host_not_allowed',
+        });
         return;
       }
       // F4: per-launch auth token. Workers under bypassPermissions can
@@ -1689,6 +1712,36 @@ function onConnection(ws: WebSocket): void {
   // state from a prior connection. The debounce timer is only used for
   // post-attach mutations; the attach emit fires synchronously.
   emitActiveRuns();
+
+  // Cluster G E3 (server-side): if the in-process rejection ring has at
+  // least one entry within the 5-minute visible window, emit a
+  // `recent_rejections` envelope so the freshly-attached client can
+  // surface a single warning toast ("3 origin-rejected attempts in the
+  // last 5 min — possible misconfigured client"). This is one-shot at
+  // attach (no debounce, no heartbeat) — the dispatcher's mental model
+  // is "tell the operator what they missed before this socket existed"
+  // rather than a live stream. Rejections that happen AFTER attach
+  // can't be pushed over THIS socket (they're failed-to-attach by
+  // definition), so the next successful attach picks them up.
+  const rejections = recentRejections();
+  if (rejections.length > 0) {
+    if (ws.readyState === WebSocket.OPEN) {
+      send(ws, {
+        type: 'recent_rejections',
+        count: rejections.length,
+        // Defensive shape-copy: the ring's RejectionRecord type and the
+        // wire shape are kept identical, but if they diverge later this
+        // explicit projection localizes the break.
+        recent: rejections.map((r) => ({
+          ts: r.ts,
+          origin: r.origin,
+          host: r.host,
+          reason: r.reason,
+          channel: r.channel,
+        })),
+      });
+    }
+  }
   // Debounce wrapper for the change listener. 200ms matches the spec
   // budget for "live but burst-tolerant"; faster makes a chain hop's
   // unregister-then-register thrash the wire, slower hides genuine
