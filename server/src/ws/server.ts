@@ -67,7 +67,12 @@ import {
 } from '../repo/session_start_gate.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
-import { buildSessionLogChunk, buildSingleAgentSessionLogChunk } from './session_log.js';
+import {
+  buildSessionLogChunk,
+  buildSingleAgentSessionLogChunk,
+  multiAgentEventToLogRow,
+  multiAgentMutationToLogRow,
+} from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
 import {
   awaitBusTrustDecision,
@@ -147,6 +152,7 @@ import {
   listResolvedParticipants,
   setAwaitingContinue,
   unarchiveMultiAgentSession,
+  type MultiAgentEventRow,
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { canReconstruct } from '../bus/reconstruct.js';
@@ -1862,6 +1868,11 @@ function resumeCallbacks(
         kind,
         text: ev.text,
       });
+      // Cluster H D12 backend (site 1/4): re-attach + live bus events on a
+      // resumed session. The same hop projects into the merged log; emit the
+      // tail envelope so a Logs inspector opened against this session updates
+      // without re-fetching a chunk.
+      emitLogRowAppendedForMultiAgentEvent(conn, sessionId, dbEventId, ev);
     },
     onEnded: (sessionId, reason, iterationId) => {
       // Cluster C Phase 4c2: cancel every pause-expiry timer for the
@@ -1884,6 +1895,11 @@ function resumeCallbacks(
         sessionId,
         mutation: mutationRecordToView(mutation),
       });
+      // Cluster H D12 backend (site 2/4): re-attach + live bus mutation on a
+      // resumed session. Skipped silently for provisional mutations — the
+      // confirm transition emits its own log row (the converter returns null
+      // until `confirmedAt` is set).
+      emitLogRowAppendedForMutation(conn, sessionId, mutation);
       // Cluster A Phase 4 (UI-15): a `dangerous`-class mutation also fans a
       // sticky safety notification with an Open-in-Logs CTA. NR-2: the
       // LogsButton cumulative-count chip is unchanged — this toast is
@@ -1921,6 +1937,76 @@ function resumeCallbacks(
       send(conn.ws, msg);
     },
   };
+}
+
+/**
+ * Cluster H D12 backend: live `log_row_appended` emitter for bus events.
+ *
+ * Constructs the same `MultiAgentEventRow` shape `appendMultiAgentEvent`
+ * returns from the (sessionId, dbEventId, ev) tuple already on hand at
+ * each emit site, projects it through the shared `multiAgentEventToLogRow`
+ * converter, and emits a `log_row_appended` ServerMsg right after the
+ * matching `multi_agent_event` broadcast. Always uses `revealSensitive: false`
+ * — toggling reveal still requires the existing `load_session_log` round-trip.
+ *
+ * Defensive: a thrown projection error is logged and swallowed so the
+ * primary bus broadcast above is never blocked by the tail signal.
+ */
+function emitLogRowAppendedForMultiAgentEvent(
+  conn: Conn,
+  sessionId: string,
+  dbEventId: number,
+  ev: { ts: number; source: string; destination: string; kind: string; text: string },
+): void {
+  try {
+    const row: MultiAgentEventRow = {
+      id: dbEventId,
+      session_id: sessionId,
+      ts: ev.ts,
+      source: ev.source,
+      destination: ev.destination,
+      kind: ev.kind,
+      text: ev.text,
+    };
+    const logRow = multiAgentEventToLogRow(row, false);
+    send(conn.ws, {
+      type: 'log_row_appended',
+      sessionId,
+      scope: 'multi_agent',
+      row: logRow,
+    });
+  } catch (err) {
+    // Tail emit is observability — never let a projection bug block the
+    // primary multi_agent_event broadcast that already fired above.
+    console.warn('[ws] log_row_appended (event) projection failed:', err);
+  }
+}
+
+/**
+ * Cluster H D12 backend: live `log_row_appended` emitter for bus mutations.
+ *
+ * Mirrors the event variant for `MutationRecord`. Skips silently when the
+ * converter returns null (provisional mutation — the projector skips those
+ * too, and the confirm transition will fire a fresh emit at the same site
+ * via the corresponding `multi_agent_mutation` re-broadcast).
+ */
+function emitLogRowAppendedForMutation(
+  conn: Conn,
+  sessionId: string,
+  mutation: MutationRecord,
+): void {
+  try {
+    const logRow = multiAgentMutationToLogRow(mutation, false);
+    if (logRow === null) return;
+    send(conn.ws, {
+      type: 'log_row_appended',
+      sessionId,
+      scope: 'multi_agent',
+      row: logRow,
+    });
+  } catch (err) {
+    console.warn('[ws] log_row_appended (mutation) projection failed:', err);
+  }
 }
 
 /**
@@ -3254,6 +3340,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           kind,
           text: ev.text,
         });
+        // Cluster H D12 backend (site 3/4): fresh-start bus event. Same
+        // hop landed in `multi_agent_events`; project it into a LogRow
+        // and tail-emit so an open LogsModal updates in real time.
+        emitLogRowAppendedForMultiAgentEvent(conn, sessionId, dbEventId, ev);
       };
       const onEnded = (
         sessionId: string,
@@ -3305,6 +3395,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           sessionId,
           mutation: mutationRecordToView(mutation),
         });
+        // Cluster H D12 backend (site 4/4): fresh-start bus mutation. Same
+        // guard as the resume path — provisional rows (`confirmedAt === null`)
+        // are skipped by the converter so the tail only carries rows the
+        // chunk projector would also include.
+        emitLogRowAppendedForMutation(conn, sessionId, mutation);
         dispatchDangerousMutationForConn(sessionId, mutation, conn);
         // Cluster F Phase D5+: see the matching call in the start path
         // — orthogonal scope-violation signal fires its own audit row +

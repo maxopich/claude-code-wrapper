@@ -107,6 +107,32 @@ export function buildSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
   return { rows: sliced, total, hasMore, revealedSensitive: revealSensitive };
 }
 
+/**
+ * Cluster H D12 backend: shared converter. Public so the live `log_row_appended`
+ * emitters in `ws/server.ts` can build a tail row from the same `MultiAgentEventRow`
+ * shape `appendMultiAgentEvent` returns — keeping the projection between the
+ * initial chunk fetch and the streaming tail byte-equivalent. Tail emits always
+ * pass `revealSensitive: false`; a Reveal toggle still requires re-fetching via
+ * `load_session_log`, matching the chunk contract.
+ */
+export function multiAgentEventToLogRow(ev: MultiAgentEventRow, revealSensitive: boolean): LogRow {
+  return eventRowToLogRow(ev, revealSensitive);
+}
+
+/**
+ * Cluster H D12 backend: shared converter — same purpose as
+ * `multiAgentEventToLogRow` but for mutation rows. Returns `null` for
+ * provisional mutations (`confirmedAt === null`) to match the chunk projector's
+ * skip rule; the tail emitter falls back to no-op when null is returned.
+ */
+export function multiAgentMutationToLogRow(
+  m: MutationRecord,
+  revealSensitive: boolean,
+): LogRow | null {
+  if (m.confirmedAt === null) return null;
+  return mutationToLogRow(m, revealSensitive);
+}
+
 function eventRowToLogRow(ev: MultiAgentEventRow, revealSensitive: boolean): LogRow {
   const kind: 'bus' | 'error' = ev.kind === 'error' ? 'error' : 'bus';
   const summary = summarizeEvent(ev);
