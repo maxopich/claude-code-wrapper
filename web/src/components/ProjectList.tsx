@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Project, SessionSummary } from '@cebab/shared/protocol';
 import { ClaudeMark } from './ClaudeMark';
+import { MockBadge } from './MockBadge';
 import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
 
 export function ProjectList(props: {
@@ -220,6 +221,15 @@ function SessionRow(props: {
         </button>
       )}
       {!editing && <span className="session-meta">{formatRelative(s.lastEventAt)}</span>}
+      {/* Cluster G Phase 2b (UI-A3): per-row MOCK chip when this
+       *  session was created under MOCK runtime mode. Stays visible
+       *  AFTER the operator restarts Cebab in live mode — the row is
+       *  historical, the badge is its record. Strict equality on
+       *  === true: undefined (pre-G2 server) and false both render
+       *  nothing. Mounted last in the row so it sits at the rightmost
+       *  edge; the `history` variant carries lower opacity since the
+       *  row is a list item, not a live announcement. */}
+      {!editing && s.mock === true && <MockBadge variant="history" />}
     </li>
   );
 }

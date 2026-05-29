@@ -2215,3 +2215,118 @@ describe('store / settings reducer carries mockMode (G2a)', () => {
     expect(s.settings?.mockMode).toBeUndefined();
   });
 });
+
+// Cluster G Phase 2b (UI-A3): session_started reducer threads the
+// per-session `mock` flag (server projects from sessions.mock column)
+// into both SessionView and the synthetic knownSessions entry. The
+// ChatHeader's MockBadge reads SessionView.mock; the ProjectList row
+// reads SessionSummary.mock from knownSessions.
+describe('store / session_started threads mock onto SessionView + knownSessions (G2b)', () => {
+  test('mock=true populates SessionView.mock', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'project_opened', projectId: 1, sessions: [], runningSessionIds: [] },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-mock',
+        projectId: 1,
+        model: 'claude-sonnet-4',
+        tools: [],
+        mock: true,
+      },
+    });
+    const sv = s.sessionsByProject[1]?.['sess-mock'];
+    expect(sv?.mock).toBe(true);
+  });
+
+  test('mock omitted (pre-G2 server payload) → SessionView.mock stays undefined', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'project_opened', projectId: 1, sessions: [], runningSessionIds: [] },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-live',
+        projectId: 1,
+        model: 'claude-sonnet-4',
+        tools: [],
+        // mock field intentionally absent — old server, live runtime
+      },
+    });
+    const sv = s.sessionsByProject[1]?.['sess-live'];
+    expect(sv?.mock).toBeUndefined();
+  });
+
+  test('mock=true also stamps the synthesized knownSessions entry', () => {
+    // When session_started fires for a session that ISN'T yet in
+    // knownSessions (the common flow: pending session → real session id
+    // → reducer synthesizes a SessionSummary), the synthesized entry
+    // must also carry mock so the ProjectList row badge appears
+    // immediately without a full open_project re-sync.
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'project_opened', projectId: 1, sessions: [], runningSessionIds: [] },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-mock',
+        projectId: 1,
+        model: 'claude-sonnet-4',
+        tools: [],
+        mock: true,
+      },
+    });
+    const known = s.knownSessions[1] ?? [];
+    const entry = known.find((k) => k.id === 'sess-mock');
+    expect(entry?.mock).toBe(true);
+  });
+
+  test('project_opened.sessions carries mock through to knownSessions', () => {
+    // Server projects sessions.mock from the DB row into the wire
+    // payload's SessionSummary.mock. The reducer's project_opened arm
+    // replaces knownSessions[projectId] verbatim, so this round-trips
+    // by definition — but the assertion locks in the contract.
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'projects', projects: [{ id: 1, name: 'p', path: '/tmp/p', trusted: false, busInstalled: false, busAgentName: null, lastUsedAt: null, hasClaudeMd: false }] },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'project_opened',
+        projectId: 1,
+        sessions: [
+          { id: 'sess-a', title: null, createdAt: 1, lastEventAt: 2, totalCostUsd: 0, mock: true },
+          { id: 'sess-b', title: null, createdAt: 3, lastEventAt: 4, totalCostUsd: 0 },
+        ],
+        runningSessionIds: [],
+      },
+    });
+    const known = s.knownSessions[1] ?? [];
+    expect(known.find((k) => k.id === 'sess-a')?.mock).toBe(true);
+    expect(known.find((k) => k.id === 'sess-b')?.mock).toBeUndefined();
+  });
+});

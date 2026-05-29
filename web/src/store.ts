@@ -198,6 +198,20 @@ export type SessionView = {
    * payloads omit it; the chip renders "model: default" in that case.
    */
   model?: string;
+  /**
+   * Cluster G Phase 2b (UI-A3): per-session MOCK tag from
+   * `session_started.mock` (server side projects from
+   * `sessions.mock`). True iff this specific session was created
+   * under MOCK runtime mode — survives independently of the global
+   * `settings.mockMode` so a historical mock session opened under a
+   * now-live process still carries the badge.
+   *
+   * Undefined while no `session_started` has landed yet AND for pre-G2
+   * server payloads that omit the field. The ChatHeader's
+   * `MockBadge` mount predicate uses strict `=== true` equality so
+   * undefined/false both render nothing.
+   */
+  mock?: boolean;
 };
 
 /** Max number of messages the held-queue accepts before refusing new ones.
@@ -1809,6 +1823,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // we always store it — undefined-checks guard against future
         // protocol changes that make it optional.
         ...(msg.model !== undefined ? { model: msg.model } : {}),
+        // Cluster G Phase 2b (UI-A3): capture the per-session MOCK
+        // flag so the ChatHeader's `MockBadge` (mounted after ModelChip)
+        // mirrors the sidebar chip whenever the operator is in a
+        // mock-era session — even when the global runtime is now live.
+        // Spread-omit when absent so undefined stays as undefined
+        // (avoids re-overwriting a previously-stamped true with undefined
+        // if a later session_started for the same id omits the field).
+        ...(msg.mock !== undefined ? { mock: msg.mock } : {}),
       };
       nextProjectMap[msg.sessionId] = session;
 
@@ -1823,6 +1845,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
               createdAt: Date.now(),
               lastEventAt: Date.now(),
               totalCostUsd: 0,
+              // Cluster G Phase 2b (UI-A3): stamp MOCK on the freshly-
+              // synthesized known-sessions entry too, so the ProjectList
+              // row badge appears immediately for a session whose first
+              // ServerMsg we just observed (no full `open_project`
+              // refresh needed).
+              ...(msg.mock !== undefined ? { mock: msg.mock } : {}),
             },
             ...knownList,
           ];
