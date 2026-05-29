@@ -9771,3 +9771,220 @@ pre {
   }
 }
 
+
+/* ── Cluster I C4 UI: SessionSearchModal (Cmd/Ctrl+P) ──────────────────────
+   Command-palette-style overlay: top-aligned (not centered) so the input sits
+   under the operator's gaze on open. Token reuse only; surface mirrors the
+   logs/gate modal chrome. */
+.session-search-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  z-index: 100;
+  padding: var(--s-4);
+  padding-top: 10vh;
+}
+.session-search-modal {
+  background: var(--bg-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-lg);
+  width: min(720px, 100%);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.session-search-header {
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--line-2);
+}
+.session-search-input {
+  width: 100%;
+  background: var(--bg-1);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-md);
+  color: var(--fg-1);
+  font-size: var(--t-md);
+  padding: var(--s-2) var(--s-3);
+  outline: none;
+}
+.session-search-input:focus {
+  border-color: var(--accent);
+}
+.session-search-scopes {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--line-2);
+}
+.session-search-chip {
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  padding: 2px var(--s-2);
+  cursor: pointer;
+}
+.session-search-chip.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--fg-1);
+}
+.session-search-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.session-search-archived {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  margin-left: auto;
+}
+.session-search-raw {
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--line-2);
+  font-size: var(--t-sm);
+}
+.session-search-raw-link {
+  background: none;
+  border: none;
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+.session-search-raw-warn {
+  color: var(--fg-2);
+  margin: 0 0 var(--s-2);
+}
+.session-search-raw-warn code {
+  background: var(--bg-1);
+  border-radius: var(--r-sm);
+  padding: 0 4px;
+}
+.session-search-raw-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.session-search-raw-ack {
+  background: var(--bg-1);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  color: var(--fg-1);
+  font-size: var(--t-sm);
+  padding: 2px var(--s-2);
+  outline: none;
+}
+.session-search-raw-confirm {
+  background: var(--err-soft);
+  border: 1px solid var(--err);
+  border-radius: var(--r-sm);
+  color: var(--fg-1);
+  font-size: var(--t-sm);
+  padding: 2px var(--s-2);
+  cursor: pointer;
+}
+.session-search-raw-confirm:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.session-search-raw-armed {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--fg-2);
+}
+.session-search-raw-pill {
+  background: var(--err-soft);
+  border: 1px solid var(--err);
+  border-radius: var(--r-sm);
+  color: var(--err);
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0 4px;
+}
+.session-search-results {
+  overflow-y: auto;
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.session-search-hint,
+.session-search-truncated {
+  color: var(--fg-3);
+  font-size: var(--t-sm);
+  padding: var(--s-3);
+  margin: 0;
+  text-align: center;
+}
+.session-search-result {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: stretch;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  color: var(--fg-1);
+  padding: var(--s-2) var(--s-3);
+  cursor: pointer;
+  width: 100%;
+}
+.session-search-result.selected,
+.session-search-result:hover {
+  background: var(--bg-3);
+  border-color: var(--line-3);
+}
+.session-search-result-snippet {
+  font-size: var(--t-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-search-result-snippet mark {
+  background: var(--accent-soft);
+  color: var(--fg-1);
+  border-radius: 2px;
+}
+.session-search-result-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.session-search-result-loc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-search-result-time {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+.session-search-redacted-badge {
+  background: var(--bg-4);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  color: var(--fg-3);
+  font-size: var(--t-xs);
+  padding: 0 4px;
+}
+.session-search-raw-downgrade {
+  color: var(--err);
+}
