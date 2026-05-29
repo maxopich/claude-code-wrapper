@@ -655,6 +655,47 @@ export type ActiveRunView = {
   currentActivity?: string;
 };
 
+/**
+ * Cluster G E3 UI: app-wide connection-lost slice. Populated when the
+ * WS closes without a reopen OR the initial `/auth-token` fetch fails.
+ * `ConnectionLostOverlay` mounts iff this slice is defined; the overlay
+ * unmounts on a successful `ws_open` (which clears the slice as part of
+ * the same reducer step).
+ *
+ * Per spec §5 E3: "Layout: centered card in main pane, sidebar remains
+ * functional." The slice is app-wide (not per-session) because a closed
+ * WS means *every* session is unreachable; one overlay covers the
+ * scenario.
+ *
+ * `reason` decides the copy variant the overlay renders; `diagnostic`
+ * is the metadata block the "Copy diagnostic" button serialises. Both
+ * are kept verbatim across re-renders so the operator's screenshot /
+ * paste captures the actual failure rather than a refreshed one.
+ */
+export type ConnectionLostReasonValue =
+  | 'origin_not_allowed'
+  | 'host_not_allowed'
+  | 'auth_token_invalid'
+  | 'session_revoked'
+  | 'server_unreachable'
+  | 'unknown';
+
+export type ConnectionLostView = {
+  reason: ConnectionLostReasonValue;
+  /** Metadata captured at the moment of failure — `ts`, optional `url`,
+   *  optional `rejectReason` (from `X-Cebab-Reject-Reason` HTTP header
+   *  on the 403 response), optional `closeCode` (from WS CloseEvent for
+   *  Channel B). Shape mirrors `ConnectionLostDiagnostic` in
+   *  `components/connectionLost/connectionLostReason.ts`. */
+  diagnostic: {
+    ts: number;
+    url?: string;
+    rejectReason?: string;
+    closeCode?: number;
+    wasClean?: boolean;
+  };
+};
+
 export type AppState = {
   connected: boolean;
   projects: Project[];
@@ -706,6 +747,16 @@ export type AppState = {
    * never sees `undefined`.
    */
   activeRuns: ActiveRunView[];
+  /**
+   * Cluster G E3 UI: app-wide connection-lost overlay state. Populated
+   * by `ws_close` (when the close has actionable diagnostic info) and
+   * by the dedicated `connection_lost` action (used from App.tsx's
+   * auth-token fetch failure path). Cleared on `ws_open`.
+   *
+   * Mount predicate is `connectionLost !== undefined`. The overlay
+   * itself decides what copy to render based on the `reason`.
+   */
+  connectionLost?: ConnectionLostView;
 };
 
 export type SettingsView = {
@@ -892,19 +943,67 @@ export type Action =
    * / session_started; this action just removes the prompt without
    * losing the marker metadata (the "■ Stopped by you" line stays).
    */
-  | { type: 'stop_reason_dismissed'; sessionId: string };
+  | { type: 'stop_reason_dismissed'; sessionId: string }
+  /**
+   * Cluster G E3 UI: populate the connection-lost overlay with a
+   * specific failure variant. Fired from App.tsx's auth-token fetch
+   * failure path (`reason: 'origin_not_allowed' | 'host_not_allowed' |
+   * 'server_unreachable' | 'unknown'`) and also wired into the
+   * `ws_close` path when the close info carries a structured code
+   * (4001/4002/1006). Cleared on `ws_open` so a successful reconnect
+   * unmounts the overlay automatically.
+   *
+   * The action takes the full populated view (reason + diagnostic) so
+   * the reducer doesn't need to know about ws.ts internals — the
+   * caller does the close-code → reason mapping via
+   * `resolveFromCloseInfo`.
+   */
+  | { type: 'connection_lost'; view: ConnectionLostView }
+  /**
+   * Cluster G E3 UI: operator clicked Dismiss / closed the overlay
+   * manually. We intentionally don't auto-clear on close — the
+   * operator should explicitly acknowledge the failure (and copy the
+   * diagnostic if needed) before the overlay goes away. A subsequent
+   * `ws_open` also clears the slice as a positive signal.
+   */
+  | { type: 'connection_lost_dismissed' };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case 'ws_open':
-      return { ...state, connected: true };
+      // Cluster G E3 UI: a successful (re-)open is the positive signal
+      // that clears the connection-lost overlay. We do this even if
+      // the overlay was dismissed manually — being connected again
+      // makes any prior failure irrelevant.
+      return { ...state, connected: true, connectionLost: undefined };
     case 'ws_close':
       // Disconnect wipes liveness — any "running on this WS" claim is gone now.
       // Cluster G Phase 3b (G1 UI): also clear `activeRuns`. The snapshot is
       // per-connection (the dispatcher re-emits on the next attach), so a
       // stale dropdown would mislead the operator into thinking runs are
       // still alive when they're really just orphaned in the prior session.
+      //
+      // Note: we do NOT populate `connectionLost` here. The host
+      // (App.tsx onClose) decides whether the close is operator-facing
+      // and dispatches `connection_lost` with the resolved view — a
+      // page-unload close (code 1000 with intent to navigate) should
+      // not light up an overlay the user is about to leave.
       return { ...state, connected: false, liveSessions: {}, activeRuns: [] };
+
+    case 'connection_lost':
+      // Caller (App.tsx auth-token fetch failure OR onClose with
+      // structured code) hands over the fully-resolved view. We replace
+      // any prior overlay state — most-recent failure wins. Operators
+      // who copy the diagnostic before a fresh failure overwrites still
+      // get the data they need; the typical case is one failure at a
+      // time anyway.
+      return { ...state, connectionLost: action.view };
+    case 'connection_lost_dismissed':
+      // Soft-clear. The overlay unmounts because the operator
+      // acknowledged the failure. A subsequent attach also clears
+      // (via ws_open), so dismiss + reconnect doesn't leak stale
+      // state through the rest of the session.
+      return { ...state, connectionLost: undefined };
 
     case 'select_project':
       return { ...state, activeProjectId: action.projectId };

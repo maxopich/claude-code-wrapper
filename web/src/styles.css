@@ -9326,3 +9326,109 @@ pre {
   text-align: center;
   border-top: 1px solid var(--line-3);
 }
+
+/* -----------------------------------------------------------------------
+ * Cluster G E3 UI: ConnectionLostOverlay.
+ *
+ * Per spec §5 E3 + ui-agent §6: full-pane overlay with danger-tier
+ * (`--err`) left-stripe + Copy diagnostic affordance. Pointer-events
+ * pass through the backdrop so the sidebar remains interactive (the
+ * card itself catches clicks normally). `prefers-reduced-motion`
+ * suppresses the fade-in transition.
+ * ------------------------------------------------------------------- */
+.connection-lost-overlay {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--bg-0) 70%, transparent);
+  z-index: var(--notif-stack-z);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  animation: notif-in var(--dur-2) var(--ease-out);
+}
+.connection-lost-card {
+  pointer-events: auto;
+  position: relative;
+  background: var(--bg-4);
+  border: 1px solid var(--line-3);
+  border-left: 4px solid var(--err);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  padding: var(--s-4);
+  width: min(480px, calc(100vw - var(--s-6)));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.connection-lost-stripe {
+  display: none;
+}
+.connection-lost-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.connection-lost-body {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-2);
+  line-height: 1.5;
+}
+.connection-lost-docs {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-2);
+}
+.connection-lost-docs a {
+  color: var(--accent);
+}
+.connection-lost-actions {
+  display: flex;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  flex-wrap: wrap;
+}
+.connection-lost-btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.connection-lost-btn-primary {
+  background: var(--err);
+  color: white;
+  border-color: var(--err);
+  font-weight: 500;
+}
+.connection-lost-btn-primary:hover,
+.connection-lost-btn-primary:focus-visible {
+  background: color-mix(in srgb, var(--err) 90%, white);
+  outline: none;
+}
+.connection-lost-btn-ghost {
+  background: transparent;
+  color: var(--fg-2);
+  border-color: var(--line-3);
+}
+.connection-lost-btn-ghost:hover,
+.connection-lost-btn-ghost:focus-visible {
+  background: var(--bg-3);
+  color: var(--fg-1);
+  outline: none;
+}
+.connection-lost-countdown {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+  margin-left: 2px;
+  font-weight: 400;
+}
+@media (prefers-reduced-motion: reduce) {
+  .connection-lost-overlay {
+    animation: none;
+  }
+}
+
