@@ -2031,6 +2031,14 @@ function emitSettings(conn: Conn): void {
     // so the F-A1b SettingsModal input and the future DraftView
     // Advanced expander can seed from server-truth.
     defaultMaxTurns: resolveMaxTurns(),
+    // Cluster G Phase 1 (A3): runtime MOCK flag. Fixed at server boot
+    // (R-G2 — flips mid-process are deliberately not honored), so this
+    // value is stable for the lifetime of the WS connection. The (Phase 2)
+    // MockBadge in the sidebar header is the canonical operator-facing
+    // surface; mirror chips in TopRunBar / MultiAgentActivityBar / session
+    // list rows will also read this. Forward-compat optional — pre-G1
+    // clients ignore the field.
+    mockMode: config.mock,
   });
 }
 

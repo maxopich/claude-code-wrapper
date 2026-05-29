@@ -222,3 +222,113 @@ describe('HIGHEST_SUBCODES', () => {
     expect(HIGHEST_SUBCODES.has('api_key_scrubbed')).toBe(false);
   });
 });
+
+// ---- Cluster G Phase 1 (A3) — mode column + tagging ----
+
+describe('safety_audit.mode (Cluster G Phase 1 / migration 023)', () => {
+  test("tags 'live' when config.mock is false", () => {
+    const originalMock = config.mock;
+    try {
+      config.mock = false;
+      const { id } = appendSafetyAudit({
+        ts: 1,
+        kind: 'router.drop',
+        reasonCode: 'worker_to_worker',
+        payload: {},
+      });
+      const row = _getSafetyAuditRow(id)!;
+      expect(row.mode).toBe('live');
+    } finally {
+      config.mock = originalMock;
+    }
+  });
+
+  test("tags 'mock' when config.mock is true", () => {
+    const originalMock = config.mock;
+    try {
+      config.mock = true;
+      const { id } = appendSafetyAudit({
+        ts: 1,
+        kind: 'router.drop',
+        reasonCode: 'worker_to_worker',
+        payload: {},
+      });
+      const row = _getSafetyAuditRow(id)!;
+      expect(row.mode).toBe('mock');
+    } finally {
+      config.mock = originalMock;
+    }
+  });
+
+  test('chain remains valid across a burst of mixed-mode appends', () => {
+    // Confirms that swapping `mode` between rows does NOT invalidate the
+    // hash chain — each row's canonicalization includes its OWN mode, and
+    // the chain links via hash_prev / hash_self regardless.
+    const originalMock = config.mock;
+    try {
+      for (let i = 0; i < 10; i++) {
+        config.mock = i % 2 === 0;
+        appendSafetyAudit({
+          ts: 1000 + i,
+          kind: 'router.drop',
+          reasonCode: 'worker_to_worker',
+          payload: { i },
+        });
+      }
+      const result = verifyChain();
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.rowsChecked).toBe(10);
+    } finally {
+      config.mock = originalMock;
+    }
+  });
+
+  test('[security][A] mutating mode after append breaks the chain', () => {
+    // Red-team: if a misconfigured demo's audit rows could be silently
+    // re-tagged from 'mock' to 'live', operators reading default eval
+    // queries would see polluted data without any tamper signal. The
+    // chain MUST detect a `mode` flip.
+    const originalMock = config.mock;
+    try {
+      config.mock = true;
+      const { id } = appendSafetyAudit({
+        ts: 1,
+        kind: 'router.drop',
+        reasonCode: 'worker_to_worker',
+        payload: {},
+      });
+      // Mutate mode directly bypassing the repository.
+      getDb().prepare(`UPDATE safety_audit SET mode = 'live' WHERE id = ?`).run(id);
+      const result = verifyChain();
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.brokenAt).toBe(id);
+    } finally {
+      config.mock = originalMock;
+    }
+  });
+
+  test('migration 023 chain-reset marker is the new anchor', () => {
+    // After migration 023, two `audit.chain_reset` rows exist (015 + 023).
+    // verifyChain anchors on the MOST RECENT marker, so a fresh DB still
+    // reports rowsChecked=0 — the test in `safety_audit genesis marker`
+    // covers the rowsChecked=0 expectation; this test pins the latest
+    // marker's identity so any future migration that adds a third marker
+    // is caught at review time.
+    const db = getDb();
+    const latest = db
+      .prepare<
+        [],
+        { id: string; reason_code: string; mode: string }
+      >(
+        `SELECT id, reason_code, mode FROM safety_audit
+         WHERE kind = 'audit.chain_reset'
+         ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get();
+    expect(latest).toMatchObject({
+      id: 'chain-reset-023',
+      reason_code: 'migration_023',
+      mode: 'live',
+    });
+  });
+});
