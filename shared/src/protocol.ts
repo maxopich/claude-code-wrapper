@@ -2980,6 +2980,37 @@ export type MultiAgentMutationView = {
      *  `'sibling_project'` without a wire-shape break). */
     reasonCode: string;
   };
+  /**
+   * Cluster F Phase F3 (UI-F3): for `Bash` mutations, the rule that
+   * pinned the category (and the matched fragment that triggered it).
+   * Surfaced in the `MutationsDisclosure` badge tooltip so operators
+   * can tell *why* the classifier rated a command `mutate` vs
+   * `dangerous` — a `git push` looks the same as `git push --force`
+   * until you see the `dangerous_subcommand` rule + matched fragment.
+   *
+   * Absent (`undefined`) for non-Bash mutations (the tool name itself
+   * is the rationale: `Write` writes, `Edit` edits) and for rows from
+   * pre-022 sessions. The reducer treats absence as "no rationale to
+   * surface" and the UI falls back to the existing badge-only render.
+   *
+   * Persisted on the mutation row (`multi_agent_mutations.classifier_reason_json`)
+   * so R-A re-attach / R-B reconstruct surface the same tooltip on
+   * past rows; not coupled to safety_audit (the badge is informational,
+   * the `mutate`/`dangerous` category alone drives any audit emit).
+   */
+  classifierReason?: {
+    /** Stable rule ID; see `BashClassifierRule` in
+     *  `shared/src/mutation.ts`. Kept as `string` on the wire to avoid
+     *  a tight coupling — adding a new rule classifier-side ships
+     *  without a protocol bump, and old clients render the existing
+     *  fallback rather than a TS exhaustiveness error. */
+    rule: string;
+    /** Operator-readable explanation. Render verbatim. */
+    detail: string;
+    /** The matched fragment that triggered the rule (the first
+     *  dangerous token, the subcommand pair, the redirect target, …). */
+    matched: string;
+  };
 };
 
 /**

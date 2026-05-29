@@ -2756,7 +2756,30 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
                     <span className="mutation-icon" aria-hidden="true">
                       {m.category === 'dangerous' ? '⚠' : '✎'}
                     </span>
-                    <span className={`mutation-badge mutation-badge-${m.category}`}>
+                    {/* Cluster F Phase F3 (UI-F3): when the server-side Bash
+                     *  classifier produced a rationale, hang it off the
+                     *  category badge as a `title` tooltip + aria-label. The
+                     *  badge text itself stays the same ("MUTATE"/"DANGEROUS")
+                     *  — operators who learn the rules can read the badge at a
+                     *  glance, and operators who don't can hover for the
+                     *  rule + matched fragment ("dangerous_subcommand:
+                     *  'git push --force'"). For non-Bash mutations the tool
+                     *  name (`Write`, `Edit`, …) is the rationale, so we fall
+                     *  back to the existing label-only tooltip. */}
+                    <span
+                      className={`mutation-badge mutation-badge-${m.category}`}
+                      data-testid="mutation-badge"
+                      {...(m.classifierReason
+                        ? {
+                            title:
+                              `${m.category.toUpperCase()} — classifier rule '${m.classifierReason.rule}'` +
+                              ` matched '${m.classifierReason.matched}'.\n` +
+                              `${m.classifierReason.detail}`,
+                            'aria-label':
+                              `${m.category} (rule ${m.classifierReason.rule}, matched ${m.classifierReason.matched})`,
+                          }
+                        : {})}
+                    >
                       {m.category.toUpperCase()}
                     </span>
                     <span className="mutation-tool">{m.toolName}</span>

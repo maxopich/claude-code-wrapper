@@ -204,6 +204,18 @@ export type AgentRunnerDeps = {
         violatedPath: string;
         reasonCode: string;
       };
+      /** Cluster F Phase F3: for Bash mutations, the classifier rule
+       *  that pinned the category + the matched fragment that fired
+       *  it. Undefined for non-Bash mutations (the tool name is the
+       *  rationale: `Write` writes, `Edit` edits) and for any tool
+       *  whose classifyToolCall output happened to omit a reason
+       *  (none today, but defensive). The orchestrator/chain sink
+       *  persists this on the mutation row for the UI tooltip. */
+      classifierReason?: {
+        rule: string;
+        detail: string;
+        matched: string;
+      };
     },
   ) => Promise<void> | void;
   /**
@@ -620,6 +632,10 @@ export class AgentRunner {
                 ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
                 ...(toolUseId !== undefined ? { toolUseId } : {}),
                 ...(guardrailViolation ? { guardrailViolation } : {}),
+                // Cluster F Phase F3: Bash mutations carry the rule that
+                // pinned the category. Non-Bash mutations leave `reason`
+                // undefined (the tool name is the rationale).
+                ...(cls.reason ? { classifierReason: cls.reason } : {}),
               });
             }
           }

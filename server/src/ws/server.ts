@@ -1372,6 +1372,20 @@ function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
           },
         }
       : {}),
+    // Cluster F Phase F3: forward the Bash classifier rationale when
+    // present. Same "omit when absent" pattern as guardrailViolation.
+    // The rule string is opaque on the wire (protocol carries it as
+    // `string`) so no narrowing here — the UI renders the string
+    // verbatim with no enum dependency.
+    ...(m.classifierReason
+      ? {
+          classifierReason: {
+            rule: m.classifierReason.rule,
+            detail: m.classifierReason.detail,
+            matched: m.classifierReason.matched,
+          },
+        }
+      : {}),
   };
 }
 
