@@ -2609,6 +2609,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // keeps the discriminated union exhaustive until that wiring lands.
       return state;
 
+    case 'search_results':
+      // Cluster I Phase C4 backend: the `search_sessions` reply. The C4 UI
+      // slice (SessionSearchModal + Cmd/Ctrl+P) owns consumption via a
+      // dedicated `useSessionSearch` hook + `subscribeServerMsg` side-channel
+      // — same posture as `session_log_chunk` / `recovery_log_snapshot`:
+      // search results are modal-local, ephemeral, and query-versioned, so
+      // routing them through the main store would churn the tree for a
+      // surface that isn't even mounted most of the time. Reducer no-op keeps
+      // the discriminated union exhaustive until that UI slice lands.
+      return state;
+
     case 'bulk_session_op_result': {
       // Cluster I Phase C5 UI: the server has archived or soft-deleted the
       // `succeededSessionIds`. Drop them from every per-project cache so the

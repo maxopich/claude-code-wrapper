@@ -376,6 +376,63 @@ export function isSessionPermissionMode(v: unknown): v is SessionPermissionMode 
   return typeof v === 'string' && SESSION_PERMISSION_MODES.has(v as SessionPermissionMode);
 }
 
+/**
+ * Cluster I Phase C4 (UI_Findings spec §4.2): cross-session search scope.
+ *
+ *   - `this_project`  — restrict the scan to one project's sessions (the
+ *                       `search_sessions.projectId` field names which one).
+ *   - `all_projects`  — scan every project's sessions.
+ *
+ * `Include archived` is an orthogonal compose (the `includeArchived` flag),
+ * not a third scope: it widens EITHER scope to also cover archived sessions
+ * (soft-deleted sessions are NEVER searchable — they're pending purge).
+ */
+export type SearchScope = 'this_project' | 'all_projects';
+
+/**
+ * Cluster I Phase C4 (UI_Findings spec §4.2): one cross-session search hit.
+ *
+ * **Containment invariant (C4-5 / R-I5).** `snippet` is built from the SAME
+ * redacted object the per-session log view (`ws/session_log.ts`) renders, so
+ * a search result can never surface content the per-session view would have
+ * masked. When `search_results.raw === false` (the default), `snippet` and
+ * the matched window are drawn from `redactSensitive(...)` output; a hit whose
+ * only match lived in a redacted field (or in a JSON key name) is dropped
+ * rather than shown, so no `<redacted>` placeholder ever leaks the bytes it
+ * replaced. `raw === true` results skip redaction and require an operator
+ * opt-in + a `session.searched`/`searched_raw` audit row (server-side).
+ */
+export type SearchResult = {
+  /** Single-agent `sessions.id` or multi-agent `multi_agent_sessions.id`. */
+  sessionId: string;
+  /**
+   * Owning project — populated for single-agent hits (where the session maps
+   * to exactly one project). Left undefined for multi-agent hits: a bus
+   * session spans multiple participant projects, so there's no single owner
+   * to name. The UI routes multi-agent hits to the run by `sessionId`.
+   */
+  projectId?: number;
+  projectName?: string;
+  /** Row timestamp (ms epoch) — results sort newest-first. */
+  ts: number;
+  /** One-line, ≤~80 chars, centered on the match. Redacted unless `raw`. */
+  snippet: string;
+  /** Which durable stream the hit came from — drives the UI's source icon. */
+  matchedField: 'events.raw' | 'multi_agent_events.text';
+  /**
+   * Coarse kind for icon selection: single-agent SDK message `type`
+   * (assistant/user/result/system/wrapper) or the multi-agent hop `kind`
+   * (intro/prompt/reply/final/error).
+   */
+  matchedKind?: string;
+  /**
+   * Dot-paths masked by `redactSensitive` when building this hit's snippet
+   * (empty/absent when nothing was masked, or on the `raw` path). Lets the UI
+   * badge "this entry contained redacted content" without re-deriving it.
+   */
+  redactedFields?: string[];
+};
+
 // ---- Browser → Server ----
 export type ClientMsg =
   | { type: 'list_projects' }
@@ -1387,6 +1444,50 @@ export type ClientMsg =
        * — archive never touches disk artifacts.
        */
       removeArtifacts?: boolean;
+    }
+  | {
+      /**
+       * Cluster I Phase C4 (UI_Findings spec §4.2): cross-session content
+       * search. Tier-1 implementation is a LIKE scan over `events.raw`
+       * (single-agent SDK messages) UNION `multi_agent_events.text` (bus
+       * hops); FTS5 is the deferred v2 escape hatch (spec §3 C4 / R-I2).
+       *
+       * Server behavior (`server/src/repo/search.ts` + the
+       * `executeSearchSessions` delegate):
+       *   - Empty / sub-2-char queries return nothing (a bare `LIKE '%a%'`
+       *     would scan the world for no signal).
+       *   - `scope: 'this_project'` filters to `projectId`; `'all_projects'`
+       *     scans every project.
+       *   - Soft-deleted sessions are NEVER searched. Archived sessions are
+       *     excluded unless `includeArchived === true`.
+       *   - Snippets are redacted by the SAME machinery the per-session log
+       *     view uses (containment invariant C4-5 / R-I5). `raw: true` skips
+       *     redaction — an operator opt-in the UI gates behind a typed
+       *     acknowledgment — and writes a `session.searched`/`searched_raw`
+       *     safety_audit row before any unredacted byte ships.
+       *   - `limit` is clamped server-side (default 30, max 100); the reply's
+       *     `truncated` flag signals "narrow your scope" when the cap is hit.
+       */
+      type: 'search_sessions';
+      query: string;
+      scope: SearchScope;
+      /**
+       * Names the project for `scope: 'this_project'` (ignored for
+       * `'all_projects'`). The spec's §4.2 sketch omitted this field, but the
+       * scope is meaningless without it — the UI passes the active project id.
+       */
+      projectId?: number;
+      /** Default false. Widens the scan to include archived sessions. */
+      includeArchived?: boolean;
+      /**
+       * Default false. When true, snippets are returned UNREDACTED — the
+       * privileged path. The UI sets this only after a typed acknowledgment
+       * (mirrors the C2 raw-export `X-Cebab-Acknowledge-Raw` speed bump). The
+       * server writes a forensic audit row before returning raw content.
+       */
+      raw?: boolean;
+      /** Max hits to return; clamped to [1, 100] server-side (default 30). */
+      limit?: number;
     };
 
 // ---- Server → Browser ----
@@ -2823,6 +2924,29 @@ export type ServerMsg =
        * false for `op: 'archive'`.
        */
       removedArtifacts: boolean;
+    }
+  | {
+      /**
+       * Cluster I Phase C4 (UI_Findings spec §4.2): reply to
+       * `search_sessions`. One envelope per request — never streamed. The
+       * client (C4 UI slice) renders `results` newest-first in the
+       * `Cmd/Ctrl+P` SessionSearchModal; a result-row click navigates via
+       * `select_project` + `select_session`.
+       *
+       * `query` + `scope` are echoed so a late-arriving reply for a
+       * superseded query can be discarded client-side (the operator may have
+       * typed past it). `raw` echoes whether these snippets are unredacted
+       * (the server downgrades a `raw` request to redacted if its audit write
+       * fails — so the client must trust THIS flag, not what it asked for).
+       * `truncated` is true when the server-side limit was hit: the UI shows
+       * a "narrow your scope" hint (R-I2).
+       */
+      type: 'search_results';
+      query: string;
+      scope: SearchScope;
+      results: SearchResult[];
+      raw: boolean;
+      truncated: boolean;
     };
 
 /**
