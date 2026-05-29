@@ -114,6 +114,38 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
       ctx.push(msg);
       return;
 
+    case 'recent_rejections': {
+      // Cluster G E3 UI: server emits this on every WS attach when the
+      // in-process Origin/Host rejection ring has at least one entry
+      // within the 5-min visible window. The fan-out here is the
+      // operator-facing warning toast — spec §5 E3:
+      //   "3 origin-rejected WS attempts in the last 5 min —
+      //    possible misconfigured client."
+      // The ConnectionLostOverlay handles the cross-cutting case (this
+      // tab is the one being rejected); this toast handles the
+      // diagnostic case (THIS tab is connected but OTHER browser tabs
+      // (or a misconfigured proxy) are getting rejected).
+      //
+      // dedupeKey is per-attach (no second dimension) so a fresh
+      // attach with the same ring contents replaces the toast rather
+      // than stacking duplicates. Sticky=false because the diagnostic
+      // is a moment-in-time read; if the next attach still has
+      // entries, a fresh toast will replace it.
+      if (msg.count <= 0) return;
+      const noun = msg.count === 1 ? 'attempt' : 'attempts';
+      ctx.push({
+        id: mintId(),
+        ts: now,
+        severity: 'warn',
+        class: 'operational',
+        dedupeKey: 'origin_rejections:attach',
+        title: `${msg.count} origin-rejected ${noun} in the last 5 min`,
+        message: 'A browser or proxy may be misconfigured. See server logs for details.',
+        sticky: false,
+      });
+      return;
+    }
+
     case 'wrapper_error': {
       // UI-14: a wrapper_error not pinned to a chat session pushes an error
       // toast. Session-scoped wrapper_errors are already rendered as a

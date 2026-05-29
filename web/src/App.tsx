@@ -56,6 +56,11 @@ import { RecoveryLogButton, RecoveryLogProvider } from './components/recoveryLog
 import { ForensicViewerProvider } from './components/agentControl/ForensicViewerContext';
 import { KickForensicsModal } from './components/agentControl/KickForensicsModal';
 import { RunsBadge } from './components/runs';
+import {
+  ConnectionLostOverlay,
+  resolveFromAuthTokenResponse,
+  resolveFromCloseInfo,
+} from './components/connectionLost';
 import { HELD_MESSAGES_CAP } from './store';
 import type { ActiveRunView } from './store';
 
@@ -578,13 +583,15 @@ function AppShell({
     }
   }
 
-  // WS lifecycle bookkeeping for connect/disconnect toasts (UX-11):
+  // WS lifecycle bookkeeping for the reconnect toast (UX-11):
   //   - `hasOpenedRef`: skip the success toast on the FIRST open (initial
   //     connection — there was nothing to reconnect from).
-  //   - `wsDisconnectToastIdRef`: the id of the sticky "Disconnected"
-  //     toast, so a reconnect can dismiss it. Cleared on dismiss.
+  //
+  // The sticky "Disconnected" warn toast that used to live here was
+  // superseded by `ConnectionLostOverlay` in Cluster G E3 UI — the
+  // overlay carries the same severity AND adds a Retry affordance, so
+  // dual surfacing would just be noise.
   const hasOpenedRef = useRef(false);
-  const wsDisconnectToastIdRef = useRef<string | null>(null);
 
   // Cluster G Phase 2a (UI-A3): one-shot boot toast when the operator
   // connects to a Cebab process running under MOCK=1. The persistent
@@ -625,6 +632,13 @@ function AppShell({
     mockBootToastFiredRef.current = true;
   }, [state.settings?.mockMode, notifPushRef]);
 
+  // Cluster G E3 UI: a monotonic counter the operator (or the
+  // ConnectionLostOverlay's auto-retry) bumps to force the WS effect
+  // to re-run. The effect can't see state.connectionLost dismissals
+  // directly (they don't repopulate the WS handle); the counter is
+  // the cleanest "trigger this side-effect again" signal.
+  const [wsRetryNonce, setWsRetryNonce] = useState(0);
+
   useEffect(() => {
     let cancelled = false;
     let ws: WsHandle | null = null;
@@ -637,10 +651,44 @@ function AppShell({
       let token: string;
       try {
         const r = await fetch(`${HTTP_BASE}/auth-token`);
-        if (!r.ok) throw new Error(`status ${r.status}`);
+        if (!r.ok) {
+          // Cluster G E3 UI: surface a structured overlay instead of a
+          // silent return. The server's `X-Cebab-Reject-Reason` header
+          // (PR #175) disambiguates origin/host rejections; non-403
+          // statuses route to server_unreachable.
+          const reason = resolveFromAuthTokenResponse(r);
+          dispatch({
+            type: 'connection_lost',
+            view: {
+              reason,
+              diagnostic: {
+                ts: Date.now(),
+                url: `${HTTP_BASE}/auth-token`,
+                rejectReason: r.headers.get('X-Cebab-Reject-Reason') ?? undefined,
+              },
+            },
+          });
+          throw new Error(`status ${r.status}`);
+        }
         token = (await r.text()).trim();
       } catch (err) {
         console.error('[ws] failed to fetch auth token', err);
+        // `fetch` itself threw (network error) — no response object to
+        // inspect, so the resolver yields server_unreachable. We avoid
+        // double-dispatching for the !r.ok case above by checking the
+        // existing slice; the most-recent failure still wins.
+        if (!stateRef.current.connectionLost) {
+          dispatch({
+            type: 'connection_lost',
+            view: {
+              reason: resolveFromAuthTokenResponse(null),
+              diagnostic: {
+                ts: Date.now(),
+                url: `${HTTP_BASE}/auth-token`,
+              },
+            },
+          });
+        }
         return;
       }
       if (cancelled) return;
@@ -655,10 +703,6 @@ function AppShell({
           // opens follow a disconnect and are reconnect events worth
           // announcing (and clearing the prior sticky warn).
           if (hasOpenedRef.current) {
-            if (wsDisconnectToastIdRef.current) {
-              notifDismissRef.current?.(wsDisconnectToastIdRef.current);
-              wsDisconnectToastIdRef.current = null;
-            }
             notifPushRef.current?.({
               id: mintNotificationId(),
               ts: Date.now(),
@@ -671,22 +715,32 @@ function AppShell({
           }
           hasOpenedRef.current = true;
         },
-        onClose: () => {
+        onClose: (info) => {
           dispatch({ type: 'ws_close' });
-          // UX-11: sticky warn while the socket is down. ws.ts doesn't
-          // auto-reconnect today, so the message points to a reload — Phase
-          // 5+ adds an action button once a retry path exists.
-          const id = mintNotificationId();
-          wsDisconnectToastIdRef.current = id;
-          notifPushRef.current?.({
-            id,
-            ts: Date.now(),
-            severity: 'warn',
-            class: 'operational',
-            dedupeKey: 'ws:disconnected',
-            title: 'Disconnected',
-            message: 'Reload the page to reconnect.',
-            sticky: true,
+          // Cluster G E3 UI: route the close info into the
+          // ConnectionLostOverlay. The reason resolver maps close
+          // codes (4001/4002 → structured; 1006 → server_unreachable;
+          // 1000/1001/1011 → unknown). The previous "Reload the page
+          // to reconnect" sticky toast is superseded by the overlay's
+          // explicit Retry affordance.
+          //
+          // We skip the overlay for code 1000 *only when* the operator
+          // explicitly initiated it (page unload). Today there's no
+          // reliable signal for that in the browser — `beforeunload`
+          // doesn't fire before WS close in all cases — so we let
+          // 1000 surface as `unknown`; the operator can Dismiss.
+          const reason = resolveFromCloseInfo(info);
+          dispatch({
+            type: 'connection_lost',
+            view: {
+              reason,
+              diagnostic: {
+                ts: Date.now(),
+                url: `${WS_URL}/`,
+                closeCode: info.code,
+                wasClean: info.wasClean,
+              },
+            },
           });
         },
         onMessage: (msg) => {
@@ -805,7 +859,12 @@ function AppShell({
       cancelled = true;
       ws?.close();
     };
-  }, [wsRef, notifPushRef, notifDismissRef]);
+    // Cluster G E3 UI: `wsRetryNonce` participates so a Retry click
+    // (which bumps the counter) re-runs this effect cleanly. Putting
+    // the nonce in the deps array also makes the auto-retry timer's
+    // `onRetry` callback trigger a real reconnect path rather than
+    // closing over a stale effect closure.
+  }, [wsRef, notifPushRef, notifDismissRef, wsRetryNonce]);
 
   // First-run UX: open the settings modal automatically when we learn the
   // workspace path is unset / invalid.
@@ -2002,6 +2061,19 @@ function AppShell({
         />
       )}
       {shortcutsOpen && <KeyboardShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+      {/*
+        Cluster G E3 UI: connection-lost overlay. Mounts iff the slice
+        is populated (a recent WS close or initial fetch failure that
+        the operator hasn't acknowledged). Mounts as a sibling of the
+        main shell so its absolute positioning can cover the main pane
+        without affecting layout flow. The sidebar stays visible per
+        spec — the overlay's CSS leaves space at the left edge for it.
+      */}
+      <ConnectionLostOverlay
+        view={state.connectionLost}
+        onDismiss={() => dispatch({ type: 'connection_lost_dismissed' })}
+        onRetry={() => setWsRetryNonce((n) => n + 1)}
+      />
     </div>
   );
 }
