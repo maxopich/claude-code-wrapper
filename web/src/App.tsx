@@ -123,11 +123,12 @@ export function App() {
   // pipes `inbox_snapshot` ServerMsgs through this ref into the
   // provider's reducer.
   const inboxHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
-  // Cluster B Phase 6a: bridge for the gate-modals provider. Same shape
-  // as inboxHandlerRef — App.tsx's onMessage routes
-  // `mcp_auto_install_pending` + `session_start_gated` envelopes through
-  // this ref into the GateModalsProvider's queue. The provider then
-  // surfaces a modal whose Submit ships the matching ClientMsg.
+  // Cluster B Phase 6a + Cluster G Phase 4 (D6/D11): bridge for the
+  // gate-modals provider. Same shape as inboxHandlerRef — App.tsx's
+  // onMessage routes `mcp_auto_install_pending` / `session_start_gated`
+  // / `bus_auto_install_pending` envelopes through this ref into the
+  // GateModalsProvider's queue. The provider then surfaces a modal
+  // whose Submit ships the matching ClientMsg.
   const gateHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   // Cluster B Phase 6e: bridge for the AuthorityProvider. Same shape as the
   // inbox / gate handlers — App.tsx's onMessage routes `project_authority`
@@ -783,10 +784,12 @@ function AppShell({
           } catch (err) {
             console.error('[inbox] handler threw', err);
           }
-          // Cluster B Phase 6a: hand to the GateModalsProvider bridge
-          // so `mcp_auto_install_pending` + `session_start_gated`
+          // Cluster B Phase 6a + Cluster G Phase 4 (D6/D11): hand to
+          // the GateModalsProvider bridge so `mcp_auto_install_pending`
+          // / `session_start_gated` / `bus_auto_install_pending`
           // surface their modals. Same narrow-filter posture as the
-          // inbox handler — non-gate messages are silently dropped.
+          // inbox handler — non-gate messages are silently dropped by
+          // the provider's internal type filter.
           try {
             gateHandlerRef.current?.(msg);
           } catch (err) {
