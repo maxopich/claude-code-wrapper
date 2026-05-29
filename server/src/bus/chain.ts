@@ -742,6 +742,10 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         filePath: cls.filePath ?? null,
         cwd,
         toolUseId: cls.toolUseId ?? null,
+        // Cluster F Phase D5+: persist the guardrail-violation verdict
+        // alongside the mutation (mirrors orchestrator.ts).
+        guardrailViolationPath: cls.guardrailViolation?.violatedPath ?? null,
+        guardrailReason: cls.guardrailViolation?.reasonCode ?? null,
       });
     } catch (err) {
       console.error('[chain] persist mutation failed', err);

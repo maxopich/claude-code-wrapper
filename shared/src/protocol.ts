@@ -2950,6 +2950,36 @@ export type MultiAgentMutationView = {
    * flat `WHERE promoted = 1`; pre-012 / non-promoted rows stay `false`.
    */
   promoted: boolean;
+  /**
+   * Cluster F Phase D5+ (UI-D5+): server-side guardrail-violation
+   * verdict, populated when the bus runner's path classifier flagged
+   * this mutation as targeting a file outside the agent's project
+   * folder. Absent (`undefined`) for in-scope mutations and for rows
+   * from pre-021 sessions — the UI reducer treats absence as in-scope
+   * and renders no badge.
+   *
+   * Persisted on the mutation row (`multi_agent_mutations.guardrail_*`)
+   * so R-A re-attach / R-B reconstruct surface the badge on past rows.
+   * The dispatcher ALSO emits a separate `safety_audit` row + sticky
+   * notification per violation — this field on the mutation row is the
+   * UI-side render hook, the audit row is the durable forensic
+   * record.
+   */
+  guardrailViolation?: {
+    /** Absolute (resolved) path the tool targeted, after relative + ~
+     *  expansion against the agent's cwd. Shown verbatim in the badge
+     *  tooltip + the safety_audit payload. */
+    violatedPath: string;
+    /** The agent's cwd at the moment of the mutation (already on
+     *  `cwd` above, repeated here so the reducer/UI doesn't need to
+     *  read two fields to render the "out of scope: X (cwd was Y)"
+     *  message). */
+    agentCwd: string | null;
+    /** Stable reason code; `'path_outside_cwd'` today (open-ended
+     *  TEXT for future sub-cases like `'system_path'` or
+     *  `'sibling_project'` without a wire-shape break). */
+    reasonCode: string;
+  };
 };
 
 /**

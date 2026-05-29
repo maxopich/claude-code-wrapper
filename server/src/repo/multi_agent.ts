@@ -146,6 +146,16 @@ export type MutationRecord = {
   /** Phase E (migration 012): flipped by `classifyArtifact` when the file
    *  passes promotion globs. */
   promoted: boolean;
+  /** Cluster F Phase D5+ (migration 021): when the mutation's resolved
+   *  target path falls outside the agent's project folder (the consultant-
+   *  mode guardrail), this carries the absolute resolved path AND a
+   *  reason code (`'path_outside_cwd'` today; open-ended TEXT in the DB
+   *  for future sub-cases without a migration). When in-scope (the
+   *  common case) OR the tool has no file path (Bash, Task), both
+   *  fields are NULL — the presence of `guardrailViolationPath` is the
+   *  signal the UI reducer + safety_audit dispatcher gate on. */
+  guardrailViolationPath: string | null;
+  guardrailReason: string | null;
 };
 
 export type MultiAgentMutationRow = {
@@ -163,6 +173,9 @@ export type MultiAgentMutationRow = {
   tool_use_id: string | null;
   confirmed_at: number | null;
   promoted: number;
+  // Migration 021 — nullable; pre-021 rows project both as NULL.
+  guardrail_violation_path: string | null;
+  guardrail_reason: string | null;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -429,6 +442,12 @@ function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
     toolUseId: row.tool_use_id,
     confirmedAt: row.confirmed_at,
     promoted: row.promoted === 1,
+    // Migration 021 — both NULL for in-scope mutations and for rows
+    // appended before the runner wiring landed. Defensive `?? null` so
+    // a project against an older DB (column missing entirely) doesn't
+    // surface `undefined` to the projector callers.
+    guardrailViolationPath: row.guardrail_violation_path ?? null,
+    guardrailReason: row.guardrail_reason ?? null,
   };
 }
 
@@ -452,15 +471,26 @@ export function appendMultiAgentMutation(
   toolName: string,
   category: 'mutate' | 'dangerous',
   summary: string,
-  extra: { filePath: string | null; cwd: string | null; toolUseId: string | null },
+  extra: {
+    filePath: string | null;
+    cwd: string | null;
+    toolUseId: string | null;
+    /** Cluster F Phase D5+ (migration 021): set when the bus runner's
+     *  per-mutation scope classifier flagged this mutation as targeting
+     *  a path outside the agent's project folder. Both fields are
+     *  written together — never one without the other. */
+    guardrailViolationPath?: string | null;
+    guardrailReason?: string | null;
+  },
 ): MutationRecord {
   const ts = Date.now();
   const info = getDb()
     .prepare(
       `INSERT INTO multi_agent_mutations
          (session_id, ts, agent_name, tool_name, category, summary,
-          file_path, cwd, tool_use_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          file_path, cwd, tool_use_id,
+          guardrail_violation_path, guardrail_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       sessionId,
@@ -472,6 +502,8 @@ export function appendMultiAgentMutation(
       extra.filePath,
       extra.cwd,
       extra.toolUseId,
+      extra.guardrailViolationPath ?? null,
+      extra.guardrailReason ?? null,
     );
   const row = getDb()
     .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')
