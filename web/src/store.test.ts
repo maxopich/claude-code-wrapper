@@ -2159,3 +2159,59 @@ describe('store / result reducer carries numTurns + effectiveMaxTurns (F-A1b)', 
     expect(last.effectiveMaxTurns).toBeUndefined();
   });
 });
+
+// Cluster G Phase 2a (A3): settings reducer carries the mockMode field
+// through to SettingsView. Mirror of the Cluster E Phase 3 + F-A1a
+// patterns — strict pass-through, no defaulting, optional for
+// forward-compat so pre-G1 server payloads leave the field undefined.
+describe('store / settings reducer carries mockMode (G2a)', () => {
+  test('forwards mockMode=true when server sets it', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        mockMode: true,
+      },
+    });
+    expect(s.settings?.mockMode).toBe(true);
+  });
+
+  test('forwards mockMode=false when server sets it', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: '/whatever',
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        mockMode: false,
+      },
+    });
+    expect(s.settings?.mockMode).toBe(false);
+  });
+
+  test('older server omits mockMode → SettingsView leaves it undefined', () => {
+    // The MockBadge mount predicate uses strict equality (=== true), so
+    // undefined renders nothing rather than implying "not mock".
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        // mockMode intentionally omitted (pre-G1 server)
+      },
+    });
+    expect(s.settings?.mockMode).toBeUndefined();
+  });
+});

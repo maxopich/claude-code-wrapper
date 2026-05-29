@@ -29,6 +29,7 @@ import { SHORTCUTS } from './shortcutRegistry';
 import { findShortcut, useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
+import { MockBadge } from './components/MockBadge';
 import { Icon } from './components/Icon';
 import { mqBelow } from './breakpoints';
 import {
@@ -582,6 +583,45 @@ function AppShell({
   //     toast, so a reconnect can dismiss it. Cleared on dismiss.
   const hasOpenedRef = useRef(false);
   const wsDisconnectToastIdRef = useRef<string | null>(null);
+
+  // Cluster G Phase 2a (UI-A3): one-shot boot toast when the operator
+  // connects to a Cebab process running under MOCK=1. The persistent
+  // MockBadge in the sidebar header is the ongoing visual signal; the
+  // toast is the at-first-glance announcement so the operator doesn't
+  // start typing into what they think is a live session.
+  //
+  // Fired exactly once per page load, gated by `mockBootToastFiredRef`.
+  // Reconnects (the WS open effect re-fires) don't re-trigger because
+  // the ref persists across renders. A genuine in-page mode flip
+  // (impossible per R-G2 — config.mock is fixed at server boot) would
+  // ALSO not re-trigger, which is the correct behavior — the operator
+  // can't lose information by missing a re-fire.
+  //
+  // We check `notifPushRef.current` inside the effect rather than as a
+  // dependency because refs don't trigger re-renders; by the time
+  // `state.settings.mockMode` flips from undefined → true (post-WS
+  // settings landing), the NotificationsBridge has already mounted and
+  // populated the push handler.
+  const mockBootToastFiredRef = useRef(false);
+  useEffect(() => {
+    if (mockBootToastFiredRef.current) return;
+    if (state.settings?.mockMode !== true) return;
+    const push = notifPushRef.current;
+    if (!push) return; // bridge hasn't mounted yet — wait for the next render
+    push({
+      id: mintNotificationId(),
+      ts: Date.now(),
+      severity: 'info',
+      class: 'operational',
+      dedupeKey: 'mock_mode:boot',
+      title: 'Mock mode is on',
+      message:
+        'No live model calls are being made. Responses come from replay fixtures. ' +
+        'The MOCK badge in the sidebar header stays visible while this process runs.',
+      sticky: false,
+    });
+    mockBootToastFiredRef.current = true;
+  }, [state.settings?.mockMode, notifPushRef]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1514,6 +1554,18 @@ function AppShell({
         <header>
           <ClaudeMark className="brand-mark" />
           <h1>cebab</h1>
+          {/*
+            Cluster G Phase 2a (UI-A3): MOCK runtime badge. Mount immediately
+            right of the brand (per ux-agent §5: "immediately right of Cebab
+            logo") so it reads as the FIRST status signal the operator sees,
+            before they look at the connection dot or notification bell.
+            Non-dismissible by design — the whole point of the badge is that
+            MOCK persists for the lifetime of the process. Strict equality
+            on mockMode === true: an undefined value (pre-G1 server, or
+            settings haven't arrived yet) renders nothing rather than
+            falsely advertising "not mock".
+          */}
+          {state.settings?.mockMode === true && <MockBadge />}
           <div className="sidebar-header-controls">
             <span
               className={state.connected ? 'dot on' : 'dot off'}

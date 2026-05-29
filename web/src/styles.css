@@ -9094,3 +9094,53 @@ pre {
   cursor: help;
   white-space: nowrap;
 }
+
+/* ---- Cluster G Phase 2a (UI-A3): MockBadge -------------------------
+ *
+ * Red diagonal-stripe pill. The PATTERN is the unique signal — neither
+ * any agent identity hue nor any other status chip in the app uses a
+ * stripe; agentic-reviewer's correction (don't reuse --coral) is what
+ * keeps a misconfigured demo from being mistaken for a live agent-0
+ * run.
+ *
+ * Geometry mirrors `.ma-consultant-chip` and `.ma-hop-budget-chip` so
+ * the sidebar header reads as one chip family with the connection dot,
+ * NotificationBell, and (deferred) RunsBadge. The slightly higher
+ * letter-spacing + bolder weight push MOCK forward visually without
+ * shouting.
+ *
+ * Non-interactive (no role="button", no onClick) — `cursor: help` is
+ * the read-only "tooltip carries the detail" convention used by every
+ * status chip in this app.
+ *
+ * The white text on the high-contrast red stripe is the worst-case
+ * combination (operator may have applied a custom theme); we set
+ * `color: #fff` explicitly rather than `var(--fg-0)` so the override
+ * cannot accidentally lower text contrast below WCAG AA when the
+ * background is the saturated `--err`.
+ */
+.mock-badge {
+  font-family: var(--font-sans);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--err) 60%, var(--border));
+  /* Diagonal-stripe pattern (per ui-agent §6 + agentic-reviewer): not a
+   * hue — operator can distinguish from agent-0 even at low color
+   * acuity by the pattern alone. Each stripe pair is 12px so the
+   * diagonal reads as texture, not just two parallel bands. */
+  background:
+    repeating-linear-gradient(45deg, var(--err) 0 6px, var(--err-soft) 6px 12px);
+  color: #fff;
+  /* Subtle text outline so MOCK stays legible across the lighter
+   * stripes. text-shadow keeps SR text rendering intact. */
+  text-shadow: 0 0 2px color-mix(in srgb, var(--err) 80%, #000);
+  margin-left: 8px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  cursor: help;
+}

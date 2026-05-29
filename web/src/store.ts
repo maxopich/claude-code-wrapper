@@ -669,6 +669,20 @@ export type SettingsView = {
    * known value.
    */
   defaultMaxTurns?: number;
+  /**
+   * Cluster G Phase 2a (A3): MOCK runtime tag from the server. `true`
+   * iff Cebab was launched with `MOCK=1` (fixed at server boot per
+   * R-G2). The sidebar-header `MockBadge` mounts when this is true;
+   * the (deferred) per-session and TopRunBar mirror chips will key off
+   * the per-session `mock` flag instead (a session can predate the
+   * current process's MOCK setting).
+   *
+   * Undefined while no `settings` ServerMsg has landed yet OR when the
+   * server is pre-G1 (older payloads omit the field). The badge mount
+   * predicate is `mockMode === true` — strict equality so neither
+   * undefined nor false renders the chip.
+   */
+  mockMode?: boolean;
 };
 
 export const initialState: AppState = {
@@ -1578,6 +1592,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           // MAX_TURNS so the F-A1b SettingsModal input seeds from
           // server truth. Optional for forward-compat.
           ...(msg.defaultMaxTurns !== undefined ? { defaultMaxTurns: msg.defaultMaxTurns } : {}),
+          // Cluster G Phase 2a (A3): forward the MOCK runtime flag so
+          // the sidebar-header MockBadge can mount. Optional for
+          // forward-compat — pre-G1 servers omit it, and the badge
+          // mount predicate (`mockMode === true`) renders nothing in
+          // that case.
+          ...(msg.mockMode !== undefined ? { mockMode: msg.mockMode } : {}),
         },
       };
 
