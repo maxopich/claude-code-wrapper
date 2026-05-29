@@ -146,6 +146,19 @@ export function sessionLogFilePath(sessionId: string): string {
  * Mount the export route on the provided express app. Call after
  * `initAuthToken()` (so `verifyToken` has a value) and after
  * `applyMigrations()` (so `appendSafetyAudit` can write).
+ *
+ * Note on `js/missing-rate-limiting` (CodeQL): this route reads a file
+ * from disk based on a user-provided `:sid`, which trips CodeQL's
+ * "expensive op without rate-limiting middleware" heuristic. Cebab's
+ * threat model makes a rate limit theater: the HTTP server binds to
+ * 127.0.0.1, every route is gated on Origin+Host AND a per-launch
+ * random token from `~/.cebab/auth-token` (mode 0600), and the only
+ * legitimate caller is the operator on the same machine. A "rate
+ * limit" against the operator pulling their own data adds nothing. The
+ * query is excluded at the CodeQL config layer (`.github/workflows/
+ * codeql.yml`); see that file's comment for the full rationale and the
+ * conditions under which to revisit (multi-user, remote, or non-
+ * operator caller — none planned for v1).
  */
 export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {}): void {
   const allowedOrigins = buildAllowedOrigins();
