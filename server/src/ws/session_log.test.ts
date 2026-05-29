@@ -713,7 +713,7 @@ describe('multiAgentMutationToLogRow — tail converter parity', () => {
       cwd: '/p',
       toolUseId: 'tu-conf',
     });
-    confirmMutationByToolUseId('s1', 'tu-conf', { success: true });
+    confirmMutationByToolUseId('s1', 'tu-conf');
     const m = listMultiAgentMutations('s1')[0]!;
     const log = multiAgentMutationToLogRow(m, false);
     expect(log).not.toBeNull();
@@ -731,7 +731,7 @@ describe('multiAgentMutationToLogRow — tail converter parity', () => {
       cwd: '/p',
       toolUseId: 'tu-art',
     });
-    confirmMutationByToolUseId('s1', 'tu-art', { success: true });
+    confirmMutationByToolUseId('s1', 'tu-art');
     const m = listMultiAgentMutations('s1')[0]!;
     setMutationPromoted(m.id, true);
     const promoted = listMultiAgentMutations('s1')[0]!;
@@ -746,7 +746,7 @@ describe('multiAgentMutationToLogRow — tail converter parity', () => {
       cwd: '/p',
       toolUseId: 'tu-eq',
     });
-    confirmMutationByToolUseId('s1', 'tu-eq', { success: true });
+    confirmMutationByToolUseId('s1', 'tu-eq');
     const m = listMultiAgentMutations('s1')[0]!;
 
     const chunk = buildSessionLogChunk({
