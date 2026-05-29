@@ -51,6 +51,15 @@ export type MessageView =
        * between turns). The chat-header chip uses it as the denominator.
        */
       effectiveMaxTurns?: number;
+      /**
+       * Cluster H B5: wall-clock duration of the turn in milliseconds, taken
+       * verbatim from the SDK's `result.duration_ms` (forwarded as
+       * `result.durationMs` over the wire at `translate.ts:283`). Rendered
+       * in the result-block footer next to subtype + cost so operators can
+       * spot slow turns at a glance. Optional — older server payloads omit
+       * it and the footer degrades to just `subtype · $cost`.
+       */
+      durationMs?: number;
     }
   | { kind: 'error'; id: string; errorKind: WrapperErrorKind; message: string }
   | {
@@ -2259,6 +2268,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             ...(msg.numTurns !== undefined ? { numTurns: msg.numTurns } : {}),
             ...(msg.effectiveMaxTurns !== undefined
               ? { effectiveMaxTurns: msg.effectiveMaxTurns }
+              : {}),
+            // Cluster H B5: stash wall-clock duration alongside cost so the
+            // result-block footer can render "subtype · $cost · 2.4s" without
+            // re-querying turn metadata. `result` ServerMsg's `durationMs`
+            // is always populated on the wire today (translate.ts:283), but
+            // we still gate the spread for forward-compat with replays of
+            // older persisted envelopes.
+            ...(typeof msg.durationMs === 'number' && Number.isFinite(msg.durationMs)
+              ? { durationMs: msg.durationMs }
               : {}),
           },
         ],

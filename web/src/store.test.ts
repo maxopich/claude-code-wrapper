@@ -632,7 +632,7 @@ describe('store / multi-agent reducer (PR 2)', () => {
     expect(s.lastBusInstallAt[1]).toBeUndefined();
   });
 
-  test('lastBusInstallAt is per-project (one install doesn\'t leak into siblings)', () => {
+  test("lastBusInstallAt is per-project (one install doesn't leak into siblings)", () => {
     let s = seedWithThreeProjects();
     s = reduce(s, {
       type: 'server',
@@ -2739,5 +2739,103 @@ describe('store / active_runs reducer (Phase 3b)', () => {
     expect(s.activeRuns).toEqual([]);
     expect(s.connected).toBe(false);
     expect(s.liveSessions).toEqual({});
+  });
+});
+
+// Cluster H B5 — `result` reducer must persist durationMs onto the message
+// entry so MessageBlock's per-turn footer can render "subtype · $cost · 2.4s"
+// without prop-drilling. Older payloads omit `durationMs` (or send a
+// non-finite value); the slot must stay undefined in those cases.
+describe('store / result reducer carries durationMs (Cluster H B5)', () => {
+  test('forwards durationMs when the wire envelope sets it', () => {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'hi' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-b5',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: 'sess-b5',
+        subtype: 'success',
+        durationMs: 2_400,
+        totalCostUsd: 0.0123,
+      },
+    });
+    const sess = activeSession(s)!;
+    const last = sess.messages[sess.messages.length - 1];
+    if (!last || last.kind !== 'result') throw new Error('expected result kind');
+    expect(last.durationMs).toBe(2_400);
+  });
+
+  test('omits durationMs slot when the field is absent (forward-compat)', () => {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'hi' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-b5b',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    // Cast through unknown to omit `durationMs` from the wire payload while
+    // satisfying the discriminated-union type. Mirrors what an older
+    // persisted envelope (pre-Cluster-H replay) would actually look like at
+    // runtime; the runtime guard in the reducer must still produce
+    // `durationMs: undefined` on the MessageView.
+    const action = {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: 'sess-b5b',
+        subtype: 'success',
+        totalCostUsd: 0.001,
+      },
+    } as unknown as Parameters<typeof reduce>[1];
+    s = reduce(s, action);
+    const sess = activeSession(s)!;
+    const last = sess.messages[sess.messages.length - 1];
+    if (!last || last.kind !== 'result') throw new Error('expected result kind');
+    expect(last.durationMs).toBeUndefined();
+  });
+
+  test('rejects non-finite durationMs values to avoid "NaNms" in the UI', () => {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'hi' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-b5c',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: 'sess-b5c',
+        subtype: 'success',
+        durationMs: Number.NaN,
+        totalCostUsd: 0.001,
+      },
+    });
+    const sess = activeSession(s)!;
+    const last = sess.messages[sess.messages.length - 1];
+    if (!last || last.kind !== 'result') throw new Error('expected result kind');
+    expect(last.durationMs).toBeUndefined();
   });
 });

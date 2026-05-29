@@ -726,6 +726,13 @@ pre {
 .msg.result.err {
   border-color: var(--err);
 }
+/* Cluster H B5: the per-turn duration ("2.4s") shares the role-line typography
+ * but is tabular-num'd so successive turns line up vertically when stacked,
+ * and tinted one step down so cost stays the primary signal. */
+.msg.result .role .result-duration {
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
 .msg.error {
   border-color: var(--err);
   color: var(--err);

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ContentBlock } from '@cebab/shared/protocol';
 import type { MessageView } from '../store';
+import { formatResultDuration } from '../format';
 import { Markdown } from './Markdown';
 import { ClaudeMark } from './ClaudeMark';
 import { badgeTooltip, renderPermissionBody } from './PermissionCards';
@@ -101,14 +102,31 @@ export function MessageBlock(props: {
         />
       );
     }
+    // Cluster H B5: assemble the per-turn footer as discrete spans so each
+    // metadatum is independently styleable and the visible-text order
+    // matches the accessible label. Duration is appended only when
+    // `m.durationMs` is present — older replays / forward-compat envelopes
+    // degrade to just `subtype · $cost`.
+    const durationLabel =
+      typeof m.durationMs === 'number' ? formatResultDuration(m.durationMs) : null;
+    const ariaParts: string[] = [`turn metadata: ${m.subtype}`, `$${m.cost.toFixed(4)}`];
+    if (durationLabel !== null) ariaParts.push(durationLabel);
     return (
       <div className={`msg result msg-group ${m.subtype === 'success' ? 'ok' : 'err'}`}>
         <div className="avatar tool" aria-hidden="true">
           Σ
         </div>
         <div className="msg-body">
-          <div className="role">
-            {m.subtype} · ${m.cost.toFixed(4)}
+          <div className="role" aria-label={ariaParts.join(', ')}>
+            <span>{m.subtype}</span>
+            <span aria-hidden="true"> · </span>
+            <span>${m.cost.toFixed(4)}</span>
+            {durationLabel !== null && (
+              <>
+                <span aria-hidden="true"> · </span>
+                <span className="result-duration">{durationLabel}</span>
+              </>
+            )}
           </div>
           {m.errors && m.errors.length > 0 && <pre>{m.errors.join('\n')}</pre>}
         </div>
