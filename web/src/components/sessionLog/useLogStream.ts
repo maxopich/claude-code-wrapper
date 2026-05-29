@@ -17,9 +17,23 @@
  * `refresh()` re-requests from offset 0 if the operator wants a fresh poll.
  */
 import { useEffect, useRef, useState } from 'react';
-import type { LogRow, ServerMsg } from '@cebab/shared/protocol';
+import type { LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
 
 const DEFAULT_PAGE = 500;
+
+/**
+ * Cluster H C3: callsite-side default for the projector branch. When a
+ * caller omits `scope`, we pass undefined to `onLoadSessionLog` (which sends
+ * an envelope without the field — the server defaults to multi_agent on the
+ * other end). Older callers still work without changes.
+ */
+type LoadSessionLog = (
+  sessionId: string,
+  offset: number,
+  limit: number,
+  revealSensitive: boolean,
+  scope?: SessionLogScope,
+) => void;
 
 export type LogStreamState = {
   rows: LogRow[];
@@ -44,15 +58,17 @@ export type LogStreamHandle = LogStreamState & {
 export function useLogStream(opts: {
   sessionId: string;
   pageSize?: number;
-  onLoadSessionLog: (
-    sessionId: string,
-    offset: number,
-    limit: number,
-    revealSensitive: boolean,
-  ) => void;
+  /**
+   * Cluster H C3: which server-side projector to invoke. Optional — omit
+   * (or pass undefined) to keep the historical multi-agent behavior. The
+   * value is round-tripped on every fetch (initial load, loadMore, refresh,
+   * reveal-flip).
+   */
+  scope?: SessionLogScope;
+  onLoadSessionLog: LoadSessionLog;
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }): LogStreamHandle {
-  const { sessionId } = opts;
+  const { sessionId, scope } = opts;
   const pageSize = opts.pageSize ?? DEFAULT_PAGE;
 
   const [state, setState] = useState<LogStreamState>({
@@ -75,7 +91,10 @@ export function useLogStream(opts: {
   const onLoadRef = useRef(opts.onLoadSessionLog);
   onLoadRef.current = opts.onLoadSessionLog;
 
-  // Reset when the target session OR the reveal flag changes.
+  // Reset when the target session, the reveal flag, OR the projector scope
+  // changes. Cluster H C3: scope flips are rare in practice (LogsButton
+  // mounts pin it for the modal's lifetime), but including it in the dep
+  // array keeps a future `<LogsModal scope={…} />` toggle correct.
   useEffect(() => {
     setState({
       rows: [],
@@ -85,8 +104,8 @@ export function useLogStream(opts: {
       revealedSensitive: false,
       error: null,
     });
-    onLoadRef.current(sessionId, 0, pageSize, reveal);
-  }, [sessionId, reveal, pageSize]);
+    onLoadRef.current(sessionId, 0, pageSize, reveal, scope);
+  }, [sessionId, reveal, pageSize, scope]);
 
   useEffect(() => {
     const unsub = opts.subscribeServerMsg((msg) => {
@@ -135,12 +154,12 @@ export function useLogStream(opts: {
   function loadMore() {
     if (stateRef.current.loading || !stateRef.current.hasMore) return;
     setState((prev) => ({ ...prev, loading: true }));
-    onLoadRef.current(sessionId, stateRef.current.rows.length, pageSize, reveal);
+    onLoadRef.current(sessionId, stateRef.current.rows.length, pageSize, reveal, scope);
   }
 
   function refresh() {
     setState((prev) => ({ ...prev, rows: [], total: 0, loading: true, error: null }));
-    onLoadRef.current(sessionId, 0, pageSize, reveal);
+    onLoadRef.current(sessionId, 0, pageSize, reveal, scope);
   }
 
   return {

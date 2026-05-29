@@ -9,7 +9,7 @@
  * deliberately styled as a danger action; the click handler in the modal
  * pops a `window.confirm` before flipping the server-side flag.
  */
-import { LOG_ROW_KINDS, type LogRowKind } from '@cebab/shared/protocol';
+import { LOG_ROW_KINDS, type LogRowKind, type SessionLogScope } from '@cebab/shared/protocol';
 import type { LogFiltersHandle } from './useLogFilters';
 
 const KIND_LABELS: Record<LogRowKind, string> = {
@@ -20,9 +20,25 @@ const KIND_LABELS: Record<LogRowKind, string> = {
   artifact: 'artifact',
 };
 
+/**
+ * Cluster H C3 UI: kinds the single-agent projector never emits. The Agent
+ * filter is hidden for single-agent scope (every row is `agent: 'agent'`), and
+ * `bus | artifact` chips are dropped from the Kinds dropdown so the operator
+ * doesn't toggle a chip that can't match any row. The single-agent projector's
+ * actual kinds — `tool | llm | error` — are the chips that remain.
+ */
+const SINGLE_AGENT_HIDDEN_KINDS: ReadonlySet<LogRowKind> = new Set<LogRowKind>(['bus', 'artifact']);
+
 export function LogToolbar(props: {
   filters: LogFiltersHandle;
   agents: readonly string[];
+  /**
+   * Cluster H C3 UI: scope discriminator. `'single'` hides the Agent
+   * multi-select (single-agent runs have no meaningful per-agent split) and
+   * drops the `bus | artifact` chips from the Kinds dropdown — those rows
+   * cannot occur in the events-table-backed single-agent projection.
+   */
+  scope?: SessionLogScope;
   revealedSensitive: boolean;
   loading: boolean;
   onRevealSensitive: () => void;
@@ -30,6 +46,14 @@ export function LogToolbar(props: {
   onDownload: () => void;
 }) {
   const { filters } = props;
+  const isSingleAgent = props.scope === 'single';
+  // Cluster H C3 UI: when single-agent, restrict the chips list to the kinds
+  // the server actually emits. The Agent filter is hidden entirely; collapsing
+  // `filters.agents` into the hasFilter predicate stays correct because the
+  // operator can never set it.
+  const visibleKinds = isSingleAgent
+    ? [...LOG_ROW_KINDS].filter((k) => !SINGLE_AGENT_HIDDEN_KINDS.has(k))
+    : [...LOG_ROW_KINDS];
   const hasFilter = filters.search.length > 0 || filters.agents.size > 0 || filters.kinds.size > 0;
   return (
     <div className="logs-toolbar" role="toolbar" aria-label="Log filters and actions">
@@ -42,30 +66,32 @@ export function LogToolbar(props: {
         aria-label="Search log rows"
       />
 
-      <details className="logs-filter-dropdown">
-        <summary className="logs-filter-summary">
-          Agents
-          {filters.agents.size > 0 && (
-            <span className="logs-filter-count">{filters.agents.size}</span>
-          )}
-        </summary>
-        <div className="logs-filter-panel" role="group" aria-label="Filter by agent">
-          {props.agents.length === 0 ? (
-            <p className="logs-filter-empty">No agents yet.</p>
-          ) : (
-            props.agents.map((a) => (
-              <label key={a} className="logs-filter-option">
-                <input
-                  type="checkbox"
-                  checked={filters.agents.has(a)}
-                  onChange={() => filters.toggleAgent(a)}
-                />
-                <span>{a}</span>
-              </label>
-            ))
-          )}
-        </div>
-      </details>
+      {!isSingleAgent && (
+        <details className="logs-filter-dropdown">
+          <summary className="logs-filter-summary">
+            Agents
+            {filters.agents.size > 0 && (
+              <span className="logs-filter-count">{filters.agents.size}</span>
+            )}
+          </summary>
+          <div className="logs-filter-panel" role="group" aria-label="Filter by agent">
+            {props.agents.length === 0 ? (
+              <p className="logs-filter-empty">No agents yet.</p>
+            ) : (
+              props.agents.map((a) => (
+                <label key={a} className="logs-filter-option">
+                  <input
+                    type="checkbox"
+                    checked={filters.agents.has(a)}
+                    onChange={() => filters.toggleAgent(a)}
+                  />
+                  <span>{a}</span>
+                </label>
+              ))
+            )}
+          </div>
+        </details>
+      )}
 
       <details className="logs-filter-dropdown">
         <summary className="logs-filter-summary">
@@ -75,7 +101,7 @@ export function LogToolbar(props: {
           )}
         </summary>
         <div className="logs-filter-panel" role="group" aria-label="Filter by kind">
-          {[...LOG_ROW_KINDS].map((k) => (
+          {visibleKinds.map((k) => (
             <label key={k} className="logs-filter-option">
               <input
                 type="checkbox"

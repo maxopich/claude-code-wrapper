@@ -9,6 +9,7 @@ import type {
   NotificationEnvelope,
   PauseExpiryAction,
   ServerMsg,
+  SessionLogScope,
   SessionPermissionMode,
   StopReasonCode,
 } from '@cebab/shared/protocol';
@@ -23,6 +24,8 @@ import { ModelChip } from './components/ModelChip';
 import { MaxTurnsInput } from './components/MaxTurnsInput';
 import { TurnCounterChip } from './components/TurnCounterChip';
 import { SlashCommandButtons } from './components/SlashCommandButtons';
+import { LogsButton } from './components/sessionLog';
+import { logsHashFor } from './components/sessionLog/logsHash';
 import { SettingsModal } from './components/SettingsModal';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { SHORTCUTS } from './shortcutRegistry';
@@ -998,6 +1001,32 @@ function AppShell({
       // when no session is active.
       () => interruptSession(),
     ],
+    [
+      findShortcut(SHORTCUTS, 'session.logs.cmdShiftL'),
+      // Cluster H C3 UI: push the `#/session/:id/logs` hash for the
+      // active single-agent session. The single-agent LogsButton's
+      // hashchange subscriber promotes the matching hash to an open
+      // modal, restoring focus on Esc. No-op when no single-agent
+      // session is active (multi-agent runs have their own LogsButton
+      // mounted in TopRunBar; we don't double-dispatch here).
+      () => {
+        const target = session && !isSessionPending(session.id) ? session.id : null;
+        if (target === null) return;
+        const hash = logsHashFor(target);
+        // Both operands are URL fragments — not credentials, not session
+        // secrets. The security/detect-possible-timing-attacks rule fires
+        // on every string `!==` and would force an indexOf-style workaround
+        // that is strictly less readable here.
+        // eslint-disable-next-line security/detect-possible-timing-attacks
+        if (window.location.hash !== hash) {
+          window.history.pushState(null, '', hash);
+          // Browsers fire hashchange only on actual URL changes, but
+          // not when we push the same hash twice. The early-return
+          // above guards against that path so we never silently miss.
+          window.dispatchEvent(new HashChangeEvent('hashchange'));
+        }
+      },
+    ],
   ]);
 
   // Cluster C Phase 2: ship the operator's reason-for-stop. Server
@@ -1567,16 +1596,23 @@ function AppShell({
     offset: number,
     limit: number,
     revealSensitive: boolean,
+    scope?: SessionLogScope,
   ) {
     // Phase H: pure WS round-trip. The matching `session_log_chunk` reply
     // is consumed by the LogsModal via its `subscribeServerMsg` subscriber
     // (the reducer no-ops on the chunk because the rows live outside Redux).
+    //
+    // Cluster H C3 UI: `scope` is optional and forwarded verbatim. Older
+    // callers (multi-agent TopRunBar / participants list mount) omit it;
+    // the server defaults to `'multi_agent'` so the existing projection
+    // still answers. The single-agent LogsButton mount passes `'single'`.
     wsRef.current?.send({
       type: 'load_session_log',
       sessionId,
       offset,
       limit,
       revealSensitive,
+      ...(scope !== undefined ? { scope } : {}),
     });
   }
   function subscribeServerMsg(cb: (msg: ServerMsg) => void): () => void {
@@ -1932,6 +1968,20 @@ function AppShell({
                      *  lacking numTurns/effectiveMaxTurns). */}
                     <TurnCounterChip messages={session.messages} />
                     <SlashCommandButtons disabled={inputDisabled} onSend={sendMessage} />
+                    {/* Cluster H C3 UI: raw-event inspector for the
+                     *  single-agent session. Reuses the same `LogsButton`
+                     *  the multi-agent TopRunBar already mounts; the
+                     *  `scope='single'` prop tells the LogsModal to ask
+                     *  the server's single-agent projector for `events`-
+                     *  table rows and to hide the Agent multi-select.
+                     *  Cmd/Ctrl+Shift+L below routes the same way via
+                     *  the hash-route LogsButton listens for. */}
+                    <LogsButton
+                      sessionId={session.id}
+                      scope="single"
+                      onLoadSessionLog={loadSessionLog}
+                      subscribeServerMsg={subscribeServerMsg}
+                    />
                   </div>
                 )}
                 {/* Cluster B Phase 6e (UI-B7): in-session authority disclosure.

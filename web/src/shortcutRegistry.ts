@@ -94,8 +94,7 @@ export const SHORTCUTS: ReadonlyArray<ShortcutDescriptor> = [
     section: 'Help',
     keyDisplay: ['?'],
     description: 'Open keyboard cheatsheet (when no input is focused)',
-    keyMatch: (e) =>
-      e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey && !isInTextInput(e),
+    keyMatch: (e) => e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey && !isInTextInput(e),
     documentationOnly: false,
   },
   {
@@ -133,8 +132,22 @@ export const SHORTCUTS: ReadonlyArray<ShortcutDescriptor> = [
     // a global handler in App.tsx so it works even when focus is
     // outside the composer. Per spec H1-7, this is the canonical
     // Stop binding when Esc precedence is unclear.
+    keyMatch: (e) => e.key === '.' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey,
+    documentationOnly: false,
+  },
+  {
+    id: 'session.logs.cmdShiftL',
+    section: 'Session',
+    keyDisplay: ['Cmd/Ctrl', 'Shift', 'L'],
+    description: 'Open the raw-event Logs inspector for the active session',
+    // Cluster H C3 UI: keyboard parity for the single-agent LogsButton
+    // mount. Global handler in App.tsx pushes the `#/session/:id/logs`
+    // hash, which the existing LogsButton hashchange subscriber promotes
+    // to an open modal. Works whether focus is in the composer or on
+    // the page chrome. Letter keys arrive as `e.key === 'L'` (uppercase)
+    // when Shift is held; match both cases for IME / OS-quirk safety.
     keyMatch: (e) =>
-      e.key === '.' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey,
+      (e.key === 'L' || e.key === 'l') && e.shiftKey && (e.metaKey || e.ctrlKey) && !e.altKey,
     documentationOnly: false,
   },
 
@@ -143,7 +156,8 @@ export const SHORTCUTS: ReadonlyArray<ShortcutDescriptor> = [
     id: 'composer.send.cmdEnter',
     section: 'Composer',
     keyDisplay: ['Cmd/Ctrl', 'Enter'],
-    description: 'Send the current draft (Enter alone also sends; Cmd/Ctrl+Enter is the explicit alias)',
+    description:
+      'Send the current draft (Enter alone also sends; Cmd/Ctrl+Enter is the explicit alias)',
     // Documentation only — Enter-to-send lives in GrowTextarea. The
     // Cmd/Ctrl+Enter binding is the explicit alias muscle-memory from
     // other chat apps; GrowTextarea handles bare Enter, so we don't
