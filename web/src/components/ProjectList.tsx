@@ -15,6 +15,13 @@ export function ProjectList(props: {
   onNewSession: (projectId: number) => void;
   onToggleTrust: (id: number, trusted: boolean) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
+  /**
+   * Cluster I C2 UI: trigger a per-session JSONL download. Returns a
+   * promise so a future surface (e.g. SessionSettingsPanel Data entry)
+   * can await + show a spinner. The promise NEVER throws — toasting on
+   * success/error is App.tsx's responsibility.
+   */
+  onDownloadSession: (sessionId: string) => Promise<void>;
 }) {
   // Cluster B Phase 6e: tracks which project's preflight modal is open. One
   // at a time — the operator clicks an ⓘ button, modal opens for THAT
@@ -104,6 +111,7 @@ export function ProjectList(props: {
                       active={s.id === activeSessionId}
                       onSelect={() => props.onSelectSession(p.id, s.id)}
                       onRename={(title) => props.onRenameSession(s.id, title)}
+                      onDownload={() => props.onDownloadSession(s.id)}
                     />
                   ))}
                 </ul>
@@ -128,10 +136,17 @@ function SessionRow(props: {
   active: boolean;
   onSelect: () => void;
   onRename: (title: string | null) => void;
+  /**
+   * Cluster I C2 UI: per-row JSONL download trigger. Returns a promise
+   * so we can swap the icon for a transient spinner state — the
+   * download path may take a beat for larger sessions.
+   */
+  onDownload: () => Promise<void>;
 }) {
   const { session: s } = props;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const [downloading, setDownloading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Auto-focus + select-all when entering edit mode so the user can immediately
@@ -218,6 +233,27 @@ function SessionRow(props: {
           }}
         >
           ✎
+        </button>
+      )}
+      {/* Cluster I C2 UI: per-session JSONL download. Sits right of the
+       *  Rename btn so the action cluster stays at the right edge of the
+       *  row. Disabled while a download is in-flight to prevent the
+       *  operator from double-firing the same fetch + audit row. */}
+      {!editing && (
+        <button
+          className="session-download-btn"
+          title="Download session log (.jsonl)"
+          aria-label="Download session log"
+          aria-busy={downloading || undefined}
+          disabled={downloading}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (downloading) return;
+            setDownloading(true);
+            props.onDownload().finally(() => setDownloading(false));
+          }}
+        >
+          ⤓
         </button>
       )}
       {!editing && <span className="session-meta">{formatRelative(s.lastEventAt)}</span>}
