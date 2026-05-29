@@ -128,3 +128,69 @@ describe('MockBadge — sidebar-header mount predicate (App.tsx pattern)', () =>
     expect(container.querySelector('.mock-badge')).toBeNull();
   });
 });
+
+// Cluster G Phase 2b (UI-A3) — variant prop. Three call sites use three
+// distinct visual shapes; the `variant` prop selects the modifier class
+// that styles each. Pins the {variant → class, variant → data-testid}
+// contract so a rename of a CSS class is caught at review time.
+describe('MockBadge — variants (Phase 2b)', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  test('default (no variant prop) → sidebar shape, no modifier class', () => {
+    act(() => root.render(<MockBadge />));
+    const el = container.querySelector('.mock-badge');
+    expect(el).not.toBeNull();
+    expect(el?.classList.contains('mock-badge-inline')).toBe(false);
+    expect(el?.classList.contains('mock-badge-history')).toBe(false);
+    expect(el?.getAttribute('data-testid')).toBe('mock-badge-sidebar');
+  });
+
+  test('variant="sidebar" → no modifier class (explicit-default parity)', () => {
+    act(() => root.render(<MockBadge variant="sidebar" />));
+    const el = container.querySelector('.mock-badge');
+    expect(el?.classList.contains('mock-badge-inline')).toBe(false);
+    expect(el?.classList.contains('mock-badge-history')).toBe(false);
+    expect(el?.getAttribute('data-testid')).toBe('mock-badge-sidebar');
+  });
+
+  test('variant="inline" → mock-badge-inline modifier (ChatHeader)', () => {
+    act(() => root.render(<MockBadge variant="inline" />));
+    const el = container.querySelector('.mock-badge');
+    expect(el?.classList.contains('mock-badge-inline')).toBe(true);
+    expect(el?.classList.contains('mock-badge-history')).toBe(false);
+    expect(el?.getAttribute('data-testid')).toBe('mock-badge-inline');
+  });
+
+  test('variant="history" → mock-badge-history modifier (ProjectList row)', () => {
+    act(() => root.render(<MockBadge variant="history" />));
+    const el = container.querySelector('.mock-badge');
+    expect(el?.classList.contains('mock-badge-history')).toBe(true);
+    expect(el?.classList.contains('mock-badge-inline')).toBe(false);
+    expect(el?.getAttribute('data-testid')).toBe('mock-badge-history');
+  });
+
+  test('every variant still carries the same aria-label + tooltip — accessibility is variant-agnostic', () => {
+    // Visual changes shrink + dim the chip; the screen-reader and
+    // tooltip surfaces don't change because the message they convey
+    // ("Cebab is in MOCK mode, no live model calls") is the same.
+    for (const variant of ['sidebar', 'inline', 'history'] as const) {
+      act(() => root.render(<MockBadge variant={variant} />));
+      const el = container.querySelector('.mock-badge');
+      expect(el?.getAttribute('aria-label')).toMatch(/no real model calls/i);
+      expect(el?.getAttribute('title')).toMatch(/MOCK=0/);
+      expect(el?.textContent).toBe('MOCK');
+    }
+  });
+});

@@ -9144,3 +9144,30 @@ pre {
   white-space: nowrap;
   cursor: help;
 }
+
+/* Cluster G Phase 2b (UI-A3): inline variant for the ChatHeader (mounted
+ * after ModelChip). Geometry mirrors `.ma-hop-budget-chip` so the chat
+ * header reads as one chip family with ModelChip + ChatHeaderChip +
+ * TurnCounterChip — same letter-spacing/padding/font ramp, adopting the
+ * stripe pattern as background. */
+.mock-badge.mock-badge-inline {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  padding: 2px 8px;
+  margin-left: 4px;
+}
+
+/* History variant for the ProjectList session row — smaller and dimmed
+ * because the row is a record of a past session, not a live
+ * announcement. The opacity step matches the typography ramp used
+ * elsewhere for archival/historical context; live-session surfaces
+ * (sidebar + ChatHeader) keep the full-contrast variant. */
+.mock-badge.mock-badge-history {
+  font-size: 8px;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+  padding: 1px 5px;
+  margin-left: 4px;
+  opacity: 0.7;
+}

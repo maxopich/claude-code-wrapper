@@ -2230,6 +2230,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         createdAt: s.created_at,
         lastEventAt: s.last_event_at,
         totalCostUsd: s.total_cost_usd,
+        // Cluster G Phase 2b (UI-A3): project the per-session MOCK flag
+        // (migration 023) so the ProjectList session-row can render the
+        // small `MockBadge` mirror chip. Spread-omit when 0 to keep the
+        // payload minimal on the common live path; pre-023 rows project
+        // as 0 (live) per the column's DEFAULT.
+        ...(s.mock === 1 ? { mock: true } : {}),
       }));
       const runningSessionIds = [...conn.inFlight.entries()]
         .filter(([, f]) => f.projectId === project.id)

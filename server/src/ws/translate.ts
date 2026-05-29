@@ -6,6 +6,7 @@ import {
   type ServerMsg,
   type StreamDelta,
 } from '@cebab/shared/protocol';
+import { getSession } from '../repo/sessions.js';
 
 let warnedUnknownResultSubtypes: Set<string> | null = null;
 function coerceResultSubtype(raw: string): ResultSubtype {
@@ -92,6 +93,21 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
           ...(init.skills !== undefined && { skills: init.skills }),
           ...(init.agents !== undefined && { agents: init.agents }),
           ...(init.plugins !== undefined && { plugins: init.plugins }),
+          // Cluster G Phase 2b (UI-A3): project the per-session `mock`
+          // flag (migration 023) onto the wire so the ChatHeader
+          // `MockBadge` can mirror the sidebar chip for sessions that
+          // were created under MOCK — including historical sessions
+          // opened after a live restart, where the global
+          // `settings.mockMode` would say "false" but the session row
+          // still belongs to the mock-era. The SDK does not know about
+          // this dimension; the lookup happens here, inline, against the
+          // session row created in `createSession` BEFORE the runner
+          // spawned (the row always exists by the time `init` fires).
+          // `getSession` returns 0 (live) for pre-023 rows. Omitting the
+          // field when mock is false keeps the wire envelope minimal on
+          // the common live path and stays compatible with older
+          // clients that ignore unknown fields.
+          ...(getSession(sessionId)?.mock === 1 ? { mock: true } : {}),
         };
       }
       return {

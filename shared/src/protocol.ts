@@ -44,6 +44,19 @@ export type SessionSummary = {
   createdAt: number;
   lastEventAt: number;
   totalCostUsd: number;
+  /**
+   * Cluster G Phase 2b (UI-A3): 1 iff this session was created under MOCK
+   * runtime mode (the `sessions.mock` column from migration 023). Surfaced
+   * so the ProjectList session row can render its `MockBadge` even when
+   * the row predates the current process's MOCK setting — the operator
+   * may have launched the server in mock mode last week, then restarted
+   * live; the historical session still carries the MOCK tag.
+   *
+   * Optional for forward-compat: pre-G2 server payloads omit; the row
+   * mount predicate uses strict equality on === true so undefined (and
+   * false) both render nothing.
+   */
+  mock?: boolean;
 };
 
 export type ContentBlock =
@@ -1354,6 +1367,20 @@ export type ServerMsg =
       skills?: string[];
       agents?: string[];
       plugins?: { name: string; path: string }[];
+      /**
+       * Cluster G Phase 2b (UI-A3): 1 iff this session was created under
+       * MOCK runtime mode. Per-session truth — the global runtime flag is
+       * carried on the `settings.mockMode` field, but each session row
+       * locks its own `mock` value at creation (a session created in mock
+       * stays mock even after a live restart).
+       *
+       * Surfaced so the in-chat ChatHeader `MockBadge` (mounted after the
+       * ModelChip) can fire when the operator opens a historical mock
+       * session under a now-live process. Optional for forward-compat —
+       * pre-G2 servers omit; the mount predicate uses strict `=== true`
+       * so undefined and false both render nothing.
+       */
+      mock?: boolean;
     }
   | { type: 'assistant_message'; sessionId: string; uuid: string; blocks: ContentBlock[] }
   | { type: 'user_message'; sessionId: string; uuid: string; blocks: ContentBlock[] }

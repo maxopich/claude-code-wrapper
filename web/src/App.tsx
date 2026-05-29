@@ -1770,6 +1770,15 @@ function AppShell({
                      *  Reads from `session.model` which the reducer
                      *  captures on every `session_started`. */}
                     <ModelChip model={session.model} />
+                    {/* Cluster G Phase 2b (UI-A3): per-session MOCK
+                     *  badge, mounted immediately after ModelChip when
+                     *  the session was created under MOCK runtime mode.
+                     *  Reads `session.mock` (server projects from
+                     *  `sessions.mock`), NOT `settings.mockMode` — so a
+                     *  historical mock session opened after a live
+                     *  restart still shows the badge. Strict equality
+                     *  on === true so undefined/false renders nothing. */}
+                    {session.mock === true && <MockBadge variant="inline" />}
                     {activeProject && (
                       <ChatHeaderChip
                         trusted={activeProject.trusted}
