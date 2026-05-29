@@ -757,6 +757,29 @@ export type AppState = {
    * itself decides what copy to render based on the `reason`.
    */
   connectionLost?: ConnectionLostView;
+  /**
+   * Cluster G Phase 4 (D6/D11): per-project timestamp of the most
+   * recent `bus_integration_changed { installed: true }` event observed
+   * during this WS session. Drives the `BusInstalledBadge` 30-second
+   * highlight on the participant row.
+   *
+   * Anti-pattern guard (per agentic-reviewer): the badge must NOT
+   * appear unless a corresponding `bus.trust_decided` audit row exists.
+   * The structural guarantee here is that every `bus_integration_changed`
+   * with `installed:true` is preceded by the server's
+   * `install_trust_gate.ts` writing the audit row — so an entry in this
+   * map IS the proof that an audit row exists for that install. A
+   * project that was already `bus_installed=1` at page load (e.g. via
+   * the migration 024 backfill of pre-gate installs) emits no
+   * `bus_integration_changed` event and therefore gets no badge.
+   *
+   * Cleared on:
+   *   - `bus_integration_changed { installed: false }` for that project
+   *   - WS disconnect (`ws_close`) — a reconnect starts fresh; we don't
+   *     want a stale 31-minute-old timestamp from a prior session to
+   *     accidentally highlight on reattach.
+   */
+  lastBusInstallAt: Record<number, number>;
 };
 
 export type SettingsView = {
@@ -820,6 +843,10 @@ export const initialState: AppState = {
   // even when the snapshot is empty, so the badge clears stale state
   // from a prior connection).
   activeRuns: [],
+  // Cluster G Phase 4 (D6/D11): empty until the first observed
+  // `bus_integration_changed { installed: true }` event in this WS
+  // session. See the AppState field's JSDoc for the anti-pattern guard.
+  lastBusInstallAt: {},
   multiAgent: {
     view: 'chat',
     draftLifecycle: 'persistent',
@@ -988,7 +1015,17 @@ export function reduce(state: AppState, action: Action): AppState {
       // and dispatches `connection_lost` with the resolved view — a
       // page-unload close (code 1000 with intent to navigate) should
       // not light up an overlay the user is about to leave.
-      return { ...state, connected: false, liveSessions: {}, activeRuns: [] };
+      return {
+        ...state,
+        connected: false,
+        liveSessions: {},
+        activeRuns: [],
+        // Cluster G Phase 4 (D6/D11): clear the in-session install
+        // timestamps too. A stale 25-second-old entry would otherwise
+        // briefly relight the badge on reconnect for an install that
+        // happened before the connection dropped.
+        lastBusInstallAt: {},
+      };
 
     case 'connection_lost':
       // Caller (App.tsx auth-token fetch failure OR onClose with
@@ -1472,7 +1509,21 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         busInstalled: msg.installed,
         busAgentName: msg.agentName,
       };
-      return { ...state, projects: next };
+      // Cluster G Phase 4 (D6/D11): track the install timestamp so the
+      // `BusInstalledBadge` can light up for 30 seconds next to the
+      // `.participant-bus-tag.installed` chip. We only record on
+      // `installed: true` and clear on `installed: false`; the badge
+      // component reads `lastBusInstallAt[projectId]` and hides itself
+      // after the 30-second window elapses. See AppState['lastBusInstallAt']
+      // JSDoc for the anti-pattern guard rationale.
+      let nextLastBusInstallAt = state.lastBusInstallAt;
+      if (msg.installed) {
+        nextLastBusInstallAt = { ...state.lastBusInstallAt, [msg.projectId]: Date.now() };
+      } else if (msg.projectId in state.lastBusInstallAt) {
+        nextLastBusInstallAt = { ...state.lastBusInstallAt };
+        delete nextLastBusInstallAt[msg.projectId];
+      }
+      return { ...state, projects: next, lastBusInstallAt: nextLastBusInstallAt };
     }
 
     case 'multi_agent_started': {

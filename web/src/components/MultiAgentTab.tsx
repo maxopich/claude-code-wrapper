@@ -33,6 +33,7 @@ import { ParticipantControlsCounter } from './agentControl/ParticipantControlsCo
 import { ParticipantStatePills } from './agentControl/ParticipantStatePills';
 import { ParticipantControlMenu } from './agentControl/ParticipantControlMenu';
 import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
+import { BusInstalledBadge } from './BusInstalledBadge';
 import { AgentDiagram } from './templatePreview/AgentDiagram';
 import { TemplatePreviewModal } from './templatePreview/TemplatePreviewModal';
 import type { ModalOrigin } from './templatePreview/TemplatePreviewModal';
@@ -79,6 +80,15 @@ export function MultiAgentTab(props: {
   /** The active tab IS the mode: orchestrator (Multi-Agent) or chain (Chained Chat). */
   mode: 'chain' | 'orchestrator';
   projects: Project[];
+  /**
+   * Cluster G Phase 4 (D6/D11): per-project install timestamps from the
+   * store. Threaded into the DraftView participant list so each row can
+   * mount a `<BusInstalledBadge>` next to the existing
+   * `.participant-bus-tag.installed` chip for the 30-second post-install
+   * highlight. See AppState['lastBusInstallAt'] JSDoc for the
+   * anti-pattern guard.
+   */
+  lastBusInstallAt: Record<number, number>;
   multiAgent: MultiAgentState;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
@@ -234,6 +244,15 @@ export function MultiAgentTab(props: {
 function DraftView(props: {
   mode: 'chain' | 'orchestrator';
   projects: Project[];
+  /**
+   * Cluster G Phase 4 (D6/D11): per-project install timestamps from the
+   * store, threaded down from MultiAgentTab. Each `participant-row` reads
+   * `props.lastBusInstallAt[p.id]` to drive the 30-second post-install
+   * `<BusInstalledBadge>` highlight next to the `.participant-bus-tag.installed`
+   * chip. See AppState['lastBusInstallAt'] JSDoc in store.ts for the
+   * structural anti-pattern guard.
+   */
+  lastBusInstallAt: Record<number, number>;
   multiAgent: MultiAgentState;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
@@ -418,12 +437,22 @@ function DraftView(props: {
                     <div className="participant-meta">
                       <span className="participant-name">{p.name}</span>
                       {p.busInstalled ? (
-                        <span
-                          className="participant-bus-tag installed"
-                          title={`Bus agent: ${p.busAgentName ?? '?'}`}
-                        >
-                          bus: {p.busAgentName}
-                        </span>
+                        <>
+                          <span
+                            className="participant-bus-tag installed"
+                            title={`Bus agent: ${p.busAgentName ?? '?'}`}
+                          >
+                            bus: {p.busAgentName}
+                          </span>
+                          {/* Cluster G Phase 4 (D6/D11): 30-second post-install
+                            * highlight. Reads the timestamp from the store's
+                            * `lastBusInstallAt` map; the badge auto-hides
+                            * 30s after the install. A `bus: <name>` chip
+                            * with no entry in the map (pre-existing install
+                            * from before page load) gets no badge — the
+                            * anti-pattern guard is structural. */}
+                          <BusInstalledBadge installedAt={props.lastBusInstallAt[p.id]} />
+                        </>
                       ) : (
                         <span
                           className="participant-bus-tag missing"
