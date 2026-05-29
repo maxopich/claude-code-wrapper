@@ -581,6 +581,88 @@ describe('store / multi-agent reducer (PR 2)', () => {
     });
     expect(after).toBe(before);
   });
+
+  // Cluster G Phase 4 (D6/D11): lastBusInstallAt drives the
+  // BusInstalledBadge 30s highlight. Spec §4.4 anti-pattern guard:
+  // the badge MUST NOT appear unless an audit row exists; we enforce
+  // structurally by only recording on `bus_integration_changed { installed:
+  // true }`, which the server only emits after the bus trust gate
+  // has dual-written `bus.trust_decided` + the projects column.
+  test('bus_integration_changed { installed: true } records lastBusInstallAt', () => {
+    let s = seedWithThreeProjects();
+    expect(s.lastBusInstallAt).toEqual({});
+    const before = Date.now();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 1,
+        installed: true,
+        agentName: 'alpha',
+      },
+    });
+    const after = Date.now();
+    expect(s.lastBusInstallAt[1]).toBeGreaterThanOrEqual(before);
+    expect(s.lastBusInstallAt[1]).toBeLessThanOrEqual(after);
+  });
+
+  test('bus_integration_changed { installed: false } clears the timestamp', () => {
+    let s = seedWithThreeProjects();
+    // First install records the timestamp.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 1,
+        installed: true,
+        agentName: 'alpha',
+      },
+    });
+    expect(s.lastBusInstallAt[1]).toBeDefined();
+    // Then uninstall removes it.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 1,
+        installed: false,
+        agentName: null,
+      },
+    });
+    expect(s.lastBusInstallAt[1]).toBeUndefined();
+  });
+
+  test('lastBusInstallAt is per-project (one install doesn\'t leak into siblings)', () => {
+    let s = seedWithThreeProjects();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 2,
+        installed: true,
+        agentName: 'beta',
+      },
+    });
+    expect(s.lastBusInstallAt[2]).toBeDefined();
+    expect(s.lastBusInstallAt[1]).toBeUndefined();
+    expect(s.lastBusInstallAt[3]).toBeUndefined();
+  });
+
+  test('ws_close clears lastBusInstallAt to prevent stale highlight on reconnect', () => {
+    let s = seedWithThreeProjects();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'bus_integration_changed',
+        projectId: 1,
+        installed: true,
+        agentName: 'alpha',
+      },
+    });
+    expect(s.lastBusInstallAt[1]).toBeDefined();
+    s = reduce(s, { type: 'ws_close' });
+    expect(s.lastBusInstallAt).toEqual({});
+  });
 });
 
 // Cluster E Phase 2.x — session_started aggregates participant models

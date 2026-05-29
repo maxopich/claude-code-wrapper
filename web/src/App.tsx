@@ -2010,6 +2010,7 @@ function AppShell({
               <MultiAgentTab
                 mode={view === 'chained-chat' ? 'chain' : 'orchestrator'}
                 projects={state.projects}
+                lastBusInstallAt={state.lastBusInstallAt}
                 multiAgent={state.multiAgent}
                 onSetLifecycle={setMultiAgentLifecycle}
                 onAddParticipant={addParticipant}

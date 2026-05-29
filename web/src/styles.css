@@ -2342,6 +2342,60 @@ pre {
   border-color: rgba(251, 191, 36, 0.35);
   background: var(--warn-soft);
 }
+
+/* Cluster G Phase 4 (D6/D11): 30-second post-install highlight on a
+ * participant row. Sits next to `.participant-bus-tag.installed` and
+ * uses the same chip geometry; the visual difference is the leading
+ * checkmark + brief entry animation that draws the eye for a beat.
+ *
+ * Reduced-motion: keyframes drop their transform component, leaving an
+ * opacity-only fade. Auto-hide is a JS-driven setTimeout in the
+ * BusInstalledBadge component itself (the badge unmounts at 30s);
+ * the animation here is the *entry* highlight. */
+.bus-installed-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: var(--r-pill);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+  background: var(--ok-soft);
+  color: var(--ok);
+  flex-shrink: 0;
+  animation: bus-installed-badge-enter 240ms ease-out;
+}
+.bus-installed-badge-glyph {
+  font-weight: 600;
+  line-height: 1;
+}
+@keyframes bus-installed-badge-enter {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bus-installed-badge {
+    /* Per spec D6-7: opacity-only fade under prefers-reduced-motion. */
+    animation: bus-installed-badge-fade 240ms ease-out;
+  }
+  @keyframes bus-installed-badge-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
 .participant-actions {
   display: flex;
   align-items: center;
