@@ -55,6 +55,7 @@ import {
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
+import type { BashClassifierReason } from '@cebab/shared';
 import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
@@ -1181,6 +1182,20 @@ export function wireOrchestratorSession(p: {
         // the column write symmetric.
         guardrailViolationPath: cls.guardrailViolation?.violatedPath ?? null,
         guardrailReason: cls.guardrailViolation?.reasonCode ?? null,
+        // Cluster F Phase F3: persist the Bash classifier rationale so
+        // the MutationsDisclosure tooltip survives R-A/R-B replay. NULL
+        // for non-Bash mutations (the tool name is the rationale). Cast
+        // narrows `rule: string` from the runner-hook payload back to
+        // the BashClassifierReason discriminated union expected by the
+        // repo; the rule strings come from `classifyToolCall` so they
+        // are always in the union.
+        classifierReason: cls.classifierReason
+          ? {
+              rule: cls.classifierReason.rule as BashClassifierReason['rule'],
+              detail: cls.classifierReason.detail,
+              matched: cls.classifierReason.matched,
+            }
+          : null,
       });
     } catch (err) {
       console.error('[orchestrator] persist mutation failed', err);

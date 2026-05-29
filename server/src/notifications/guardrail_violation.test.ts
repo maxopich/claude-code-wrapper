@@ -72,6 +72,9 @@ function makeMutation(overrides: Partial<MutationRecord> = {}): MutationRecord {
     // Defaults for the new D5+ fields; tests can override per-case.
     guardrailViolationPath: '/tmp/scratch.txt',
     guardrailReason: 'path_outside_cwd',
+    // F3: this fixture is a Write mutation; classifier rationale is
+    // Bash-only, so the field stays NULL on this row.
+    classifierReason: null,
     ...overrides,
   };
 }

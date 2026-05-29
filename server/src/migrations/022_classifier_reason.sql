@@ -1,0 +1,42 @@
+-- Cluster F Phase F3: per-mutation classifier-rationale on
+-- multi_agent_mutations. The Bash classifier in shared/src/mutation.ts has
+-- always been a careful set of rules (first-token, subcommand, redirect,
+-- env-strip, shell-substitution) but it threw away the *reason* — operators
+-- saw a yellow or red badge and had to re-derive "why did this command get
+-- this badge?" from the command itself. This phase persists the rule that
+-- fired + the matched fragment alongside the mutation row, so the
+-- MutationsDisclosure badge can carry a tooltip ("dangerous_subcommand:
+-- 'git push --force'") that survives R-A/R-B replay.
+--
+-- The same persistence is also useful for safety_audit forensics — an
+-- analyst querying the audit table no longer has to re-classify the
+-- command string to recover the rule that produced the verdict.
+--
+-- Why one JSON column (not three separate columns):
+--   The shape `{rule, detail, matched}` is small (~150 B typical) and only
+--   read together; splitting it would add three migrations every time the
+--   classifier learns a new field. JSON keeps the wire shape on the row
+--   identical to the protocol's `MultiAgentMutationView.classifierReason`,
+--   so the projector just JSON.parse-s it without touching column lists.
+--   We've used the same pattern for `safety_audit.payload_json`.
+--
+-- Why nullable with no default:
+--   - Bash mutations classified as `mutate`/`dangerous` get populated.
+--   - Non-Bash mutations (Write, Edit, MultiEdit, NotebookEdit) leave it
+--     NULL — the tool name itself is the rationale; no rule lookup.
+--   - Pre-022 rows naturally project as NULL.
+--   - The UI reducer treats NULL as "no rationale to surface" and renders
+--     the existing badge-only layout.
+--
+-- Re-application: gated by `schema_migrations` like every other ALTER
+-- migration in this directory.
+
+ALTER TABLE multi_agent_mutations
+  ADD COLUMN classifier_reason_json TEXT;
+
+-- Indexing note: not indexed. Reads are always by row id (after
+-- listMultiAgentMutations narrowed by session_id, which uses the existing
+-- per-session index). Cross-session "show me all dangerous_first_token
+-- rm/dd/sudo events" queries are a safety_audit concern, not a
+-- multi_agent_mutations concern; if such a surface lands in the future
+-- it'd add its own index then.

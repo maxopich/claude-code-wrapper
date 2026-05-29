@@ -370,3 +370,230 @@ describe('classifyBashCommand', () => {
     });
   });
 });
+
+/**
+ * Cluster F Phase F3 (UI-F3): the Bash classifier returns a structured
+ * `reason` (rule + detail + matched fragment) on every `mutate`/`dangerous`
+ * verdict so the UI can explain *why* the badge fired. These tests pin one
+ * representative case per rule path; the discriminator is `reason.rule`,
+ * the human-text `detail`/`matched` are spot-checked only on a few cases.
+ *
+ * Read verdicts intentionally carry no reason — the badge isn't rendered.
+ * `--version`/`--help` (rule 1 in classifyByTokens) is a `read` escape hatch
+ * and so has no reason either.
+ */
+describe('classifyBashCommand — Phase F3 rationale (reason.rule)', () => {
+  it('read verdict has NO reason (no badge → no rationale)', () => {
+    const r = classifyBashCommand('ls -la');
+    expect(r.category).toBe('read');
+    expect(r.reason).toBeUndefined();
+  });
+
+  it('--version escape hatch → read, no reason', () => {
+    const r = classifyBashCommand('node --version');
+    expect(r.category).toBe('read');
+    expect(r.reason).toBeUndefined();
+  });
+
+  it('shell_substitution: $(...)', () => {
+    const r = classifyBashCommand('echo $(cat /etc/passwd)');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('shell_substitution');
+    // `matched` is the trigger marker only (not the full `$(...)` fragment)
+    // — the classifier deliberately doesn't try to scan for the closing
+    // `)` because that pushed CodeQL into a polynomial-ReDoS warning on
+    // adversarial input. Operators read the full command from `summary`.
+    expect(r.reason?.matched).toBe('$(');
+  });
+
+  it('shell_substitution: backticks', () => {
+    const r = classifyBashCommand('echo `whoami`');
+    expect(r.reason?.rule).toBe('shell_substitution');
+    expect(r.reason?.matched).toBe('`');
+  });
+
+  it('process_substitution: <(...)', () => {
+    const r = classifyBashCommand('diff <(ls a) <(ls b)');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('process_substitution');
+    // Same marker-only convention as shell_substitution above.
+    expect(r.reason?.matched).toBe('<(');
+  });
+
+  it('redirect_system_path: /etc/passwd', () => {
+    const r = classifyBashCommand('echo hi > /etc/passwd');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('redirect_system_path');
+    expect(r.reason?.matched).toBe('/etc/passwd');
+  });
+
+  it('redirect_system_path: ~/.ssh/authorized_keys', () => {
+    const r = classifyBashCommand('echo key >> ~/.ssh/authorized_keys');
+    expect(r.reason?.rule).toBe('redirect_system_path');
+  });
+
+  it('redirect_path: ordinary file → mutate', () => {
+    const r = classifyBashCommand('echo hi > /tmp/scratch.txt');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('redirect_path');
+    expect(r.reason?.matched).toBe('/tmp/scratch.txt');
+  });
+
+  it('dangerous_subcommand: git push --force', () => {
+    const r = classifyBashCommand('git push --force origin main');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('dangerous_subcommand');
+    expect(r.reason?.matched).toBe('git push --force');
+  });
+
+  it('dangerous_subcommand: docker rm', () => {
+    const r = classifyBashCommand('docker rm $CONTAINER');
+    expect(r.reason?.rule).toBe('dangerous_subcommand');
+    expect(r.reason?.matched).toBe('docker rm');
+  });
+
+  it('dangerous_first_token: rm', () => {
+    const r = classifyBashCommand('rm -rf node_modules');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('dangerous_first_token');
+    expect(r.reason?.matched).toBe('rm');
+  });
+
+  it('dangerous_first_token: sudo', () => {
+    const r = classifyBashCommand('sudo apt install foo');
+    expect(r.reason?.rule).toBe('dangerous_first_token');
+    expect(r.reason?.matched).toBe('sudo');
+  });
+
+  it('mkfs_variant: mkfs.ext4', () => {
+    const r = classifyBashCommand('mkfs.ext4 /dev/sdb1');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('mkfs_variant');
+    expect(r.reason?.matched).toBe('mkfs.ext4');
+  });
+
+  it('shell_invocation_bare: bare `sh`', () => {
+    const r = classifyBashCommand('sh');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('shell_invocation_bare');
+    expect(r.reason?.matched).toBe('sh');
+  });
+
+  it('shell_invocation_dash_c: `bash -c`', () => {
+    const r = classifyBashCommand('bash -c "echo hi"');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('shell_invocation_dash_c');
+    expect(r.reason?.matched).toBe('bash -c');
+  });
+
+  it('shell_invocation_script: `bash script.sh`', () => {
+    const r = classifyBashCommand('bash script.sh');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('shell_invocation_script');
+    expect(r.reason?.matched).toBe('bash script.sh');
+  });
+
+  it('kill_minus_nine: `kill -9`', () => {
+    const r = classifyBashCommand('kill -9 1234');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('kill_minus_nine');
+    expect(r.reason?.matched).toBe('kill -9');
+  });
+
+  it('kill_minus_nine: `kill -KILL`', () => {
+    const r = classifyBashCommand('kill -KILL 1234');
+    expect(r.reason?.rule).toBe('kill_minus_nine');
+    expect(r.reason?.matched).toBe('kill -KILL');
+  });
+
+  it('kill_other: plain `kill <pid>`', () => {
+    const r = classifyBashCommand('kill 1234');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('kill_other');
+  });
+
+  it('chmod_chown_system_path: chmod /etc', () => {
+    const r = classifyBashCommand('chmod 777 /etc/passwd');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('chmod_chown_system_path');
+    expect(r.reason?.matched).toContain('chmod');
+    expect(r.reason?.matched).toContain('/etc/passwd');
+  });
+
+  it('find_with_delete_or_exec: find -delete', () => {
+    const r = classifyBashCommand('find . -name "*.log" -delete');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('find_with_delete_or_exec');
+    expect(r.reason?.matched).toBe('find -delete');
+  });
+
+  it('find_with_delete_or_exec: find -exec', () => {
+    const r = classifyBashCommand('find . -name "*.log" -exec rm {} \\;');
+    expect(r.reason?.rule).toBe('find_with_delete_or_exec');
+    expect(r.reason?.matched).toBe('find -exec');
+  });
+
+  it('sed_in_place: sed -i', () => {
+    const r = classifyBashCommand('sed -i "s/a/b/" file.txt');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('sed_in_place');
+    expect(r.reason?.matched).toBe('sed -i');
+  });
+
+  it('unknown_subcommand_of_known_tool: git checkout', () => {
+    const r = classifyBashCommand('git checkout main');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('unknown_subcommand_of_known_tool');
+    expect(r.reason?.matched).toBe('git checkout');
+  });
+
+  it('mutating_first_token: mv', () => {
+    const r = classifyBashCommand('mv a b');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('mutating_first_token');
+    expect(r.reason?.matched).toBe('mv');
+  });
+
+  it('mutating_first_token: curl', () => {
+    const r = classifyBashCommand('curl -O https://x/y');
+    expect(r.reason?.rule).toBe('mutating_first_token');
+    expect(r.reason?.matched).toBe('curl');
+  });
+
+  it('unknown_first_token: arbitrary binary', () => {
+    const r = classifyBashCommand('weird-thing foo bar');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('unknown_first_token');
+    expect(r.reason?.matched).toBe('weird-thing');
+  });
+
+  it('compound command: worst piece pins the reason (read || dangerous → dangerous + that piece reason)', () => {
+    // Plain `ls` is read; `rm -rf x` is dangerous (dangerous_first_token).
+    // The compound's reason should be the rm one, not silently fall through.
+    const r = classifyBashCommand('ls && rm -rf x');
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('dangerous_first_token');
+    expect(r.reason?.matched).toBe('rm');
+  });
+
+  it('compound command: mutate piece wins over read pieces', () => {
+    const r = classifyBashCommand('cat foo; mv a b');
+    expect(r.category).toBe('mutate');
+    expect(r.reason?.rule).toBe('mutating_first_token');
+    expect(r.reason?.matched).toBe('mv');
+  });
+
+  it('classifyToolCall for Bash forwards `reason` onto the classification', () => {
+    const r = classifyToolCall('Bash', { command: 'rm -rf node_modules' });
+    expect(r.category).toBe('dangerous');
+    expect(r.reason?.rule).toBe('dangerous_first_token');
+    expect(r.reason?.matched).toBe('rm');
+  });
+
+  it('classifyToolCall for non-Bash mutating tools has no `reason`', () => {
+    // Write/Edit/MultiEdit/NotebookEdit: the tool name itself is the
+    // rationale; no rule lookup needed, so reason stays undefined.
+    expect(classifyToolCall('Write', { file_path: '/x', content: 'y' }).reason).toBeUndefined();
+    expect(classifyToolCall('Edit', { file_path: '/x', old_string: 'a' }).reason).toBeUndefined();
+  });
+});

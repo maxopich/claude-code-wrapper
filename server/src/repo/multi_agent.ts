@@ -10,6 +10,7 @@
  * to keep all multi-agent-runtime concerns in one repo module.
  */
 import type { RecoveryAgentEntry, RecoveryContextView } from '@cebab/shared/protocol';
+import type { BashClassifierReason } from '@cebab/shared';
 import { getDb } from '../db.js';
 
 export type MultiAgentMode = 'chain' | 'orchestrator';
@@ -156,6 +157,12 @@ export type MutationRecord = {
    *  signal the UI reducer + safety_audit dispatcher gate on. */
   guardrailViolationPath: string | null;
   guardrailReason: string | null;
+  /** Cluster F Phase F3 (migration 022): for Bash mutations, the
+   *  classifier rule that pinned the category + the matched fragment.
+   *  NULL for non-Bash mutations (the tool name is the rationale) and
+   *  for rows from pre-022 sessions. Surfaced through to the wire view
+   *  so `MutationsDisclosure` can render the rationale tooltip. */
+  classifierReason: BashClassifierReason | null;
 };
 
 export type MultiAgentMutationRow = {
@@ -176,6 +183,9 @@ export type MultiAgentMutationRow = {
   // Migration 021 — nullable; pre-021 rows project both as NULL.
   guardrail_violation_path: string | null;
   guardrail_reason: string | null;
+  // Migration 022 — JSON-encoded BashClassifierReason; NULL for non-Bash
+  // mutations and pre-022 rows.
+  classifier_reason_json: string | null;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -448,7 +458,38 @@ function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
     // surface `undefined` to the projector callers.
     guardrailViolationPath: row.guardrail_violation_path ?? null,
     guardrailReason: row.guardrail_reason ?? null,
+    // Migration 022 — JSON.parse the classifier reason if present; NULL
+    // for non-Bash mutations and pre-022 rows. Parse failures (corrupt
+    // value, schema drift) are swallowed → NULL: the rationale tooltip
+    // is informational, never a correctness-critical signal.
+    classifierReason: parseClassifierReason(row.classifier_reason_json),
   };
+}
+
+/**
+ * Tolerant JSON.parse for the `classifier_reason_json` column. The shape
+ * is enforced at write time, but a row written by an older binary OR a
+ * row touched by `sqlite3` CLI edits could be malformed. Falling back to
+ * `null` keeps the projector total — the worst the UI sees is "no
+ * rationale", which is exactly the pre-022 fallback path.
+ */
+function parseClassifierReason(json: string | null): BashClassifierReason | null {
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (parsed && typeof parsed === 'object') {
+      const o = parsed as Record<string, unknown>;
+      if (typeof o.rule === 'string' && typeof o.detail === 'string' && typeof o.matched === 'string') {
+        // Cast: BashClassifierRule is a string union, and the projector
+        // doesn't need to validate the rule against the live enum —
+        // protocol carries it as plain `string` deliberately.
+        return { rule: o.rule as BashClassifierReason['rule'], detail: o.detail, matched: o.matched };
+      }
+    }
+  } catch {
+    // fall through to NULL
+  }
+  return null;
 }
 
 /**
@@ -481,6 +522,12 @@ export function appendMultiAgentMutation(
      *  written together — never one without the other. */
     guardrailViolationPath?: string | null;
     guardrailReason?: string | null;
+    /** Cluster F Phase F3 (migration 022): for Bash mutations, the
+     *  rule that pinned the category + the matched fragment. Surfaced
+     *  in the MutationsDisclosure badge tooltip. NULL for non-Bash
+     *  mutations (the tool name is the rationale). JSON-encoded at the
+     *  storage boundary; the projector parses it back. */
+    classifierReason?: BashClassifierReason | null;
   },
 ): MutationRecord {
   const ts = Date.now();
@@ -489,8 +536,9 @@ export function appendMultiAgentMutation(
       `INSERT INTO multi_agent_mutations
          (session_id, ts, agent_name, tool_name, category, summary,
           file_path, cwd, tool_use_id,
-          guardrail_violation_path, guardrail_reason)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          guardrail_violation_path, guardrail_reason,
+          classifier_reason_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       sessionId,
@@ -504,6 +552,7 @@ export function appendMultiAgentMutation(
       extra.toolUseId,
       extra.guardrailViolationPath ?? null,
       extra.guardrailReason ?? null,
+      extra.classifierReason ? JSON.stringify(extra.classifierReason) : null,
     );
   const row = getDb()
     .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')

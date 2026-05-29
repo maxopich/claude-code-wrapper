@@ -9,6 +9,7 @@ import {
   appendMultiAgentMutation,
   confirmMutationByToolUseId,
   createMultiAgentSession,
+  listMultiAgentMutations,
   setMutationPromoted,
 } from '../repo/multi_agent.js';
 import { buildSessionLogChunk } from './session_log.js';
@@ -276,5 +277,63 @@ describe('buildSessionLogChunk — redaction', () => {
     // operator-facing one-liner needs SOME context, and the heuristic
     // patterns we mask are visibly synthetic.)
     expect(chunk.rows[0]?.summary).toContain('a → b');
+  });
+});
+
+/**
+ * Cluster F Phase F3 (UI-F3): migration 022 added
+ * `multi_agent_mutations.classifier_reason_json`. These tests pin the
+ * append → projector round-trip so the new column survives R-A/R-B replay
+ * — i.e. a row written with a Bash classifier reason re-emits the same
+ * structured rationale when re-projected via `listMultiAgentMutations`.
+ *
+ * The dispatcher's UI-side render (badge tooltip) reads `m.classifierReason`
+ * unchanged; the round-trip here guarantees the field is non-null and
+ * shape-correct after a write+read cycle on the real DB.
+ */
+describe('multi_agent_mutations — F3 classifierReason round-trip', () => {
+  test('write with classifierReason persists and projects identically', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentMutation('s1', 'worker', 'Bash', 'dangerous', 'rm -rf node_modules', {
+      filePath: null,
+      cwd: '/projects/foo',
+      toolUseId: 'tu1',
+      classifierReason: {
+        rule: 'dangerous_first_token',
+        detail: "first token 'rm' is always dangerous (destructive, privilege-escalating, or remote-code-executing)",
+        matched: 'rm',
+      },
+    });
+    const rows = listMultiAgentMutations('s1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.classifierReason).toEqual({
+      rule: 'dangerous_first_token',
+      detail: "first token 'rm' is always dangerous (destructive, privilege-escalating, or remote-code-executing)",
+      matched: 'rm',
+    });
+  });
+
+  test('write without classifierReason projects null (non-Bash mutation)', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentMutation('s1', 'worker', 'Write', 'mutate', 'create file.ts', {
+      filePath: '/projects/foo/file.ts',
+      cwd: '/projects/foo',
+      toolUseId: 'tu1',
+    });
+    const rows = listMultiAgentMutations('s1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.classifierReason).toBeNull();
+  });
+
+  test('explicit classifierReason: null projects null', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentMutation('s1', 'worker', 'Bash', 'mutate', 'mv a b', {
+      filePath: null,
+      cwd: '/projects/foo',
+      toolUseId: 'tu1',
+      classifierReason: null,
+    });
+    const rows = listMultiAgentMutations('s1');
+    expect(rows[0]?.classifierReason).toBeNull();
   });
 });

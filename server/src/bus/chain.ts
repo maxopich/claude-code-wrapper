@@ -61,6 +61,7 @@ import {
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
+import type { BashClassifierReason } from '@cebab/shared';
 import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
@@ -746,6 +747,15 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         // alongside the mutation (mirrors orchestrator.ts).
         guardrailViolationPath: cls.guardrailViolation?.violatedPath ?? null,
         guardrailReason: cls.guardrailViolation?.reasonCode ?? null,
+        // Cluster F Phase F3: persist the Bash classifier rationale
+        // (mirrors orchestrator.ts). NULL for non-Bash mutations.
+        classifierReason: cls.classifierReason
+          ? {
+              rule: cls.classifierReason.rule as BashClassifierReason['rule'],
+              detail: cls.classifierReason.detail,
+              matched: cls.classifierReason.matched,
+            }
+          : null,
       });
     } catch (err) {
       console.error('[chain] persist mutation failed', err);

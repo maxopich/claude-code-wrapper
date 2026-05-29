@@ -29,6 +29,55 @@
 
 export type MutationCategory = 'read' | 'mutate' | 'dangerous';
 
+/**
+ * Cluster F Phase F3 (UI-F3): stable IDs for every classifier rule that can
+ * promote a Bash command above `read`. The rationale is operator-facing
+ * (rendered as a tooltip on the mutation badge in `MutationsDisclosure`)
+ * AND machine-facing (persisted on `multi_agent_mutations.classifier_reason_json`,
+ * which the safety_audit + forensic-replay paths can query without re-parsing
+ * the command string). Add new variants conservatively — once a rule is on the
+ * wire it's also in the durable record, so renames need a back-fill story.
+ */
+export type BashClassifierRule =
+  | 'shell_substitution'
+  | 'process_substitution'
+  | 'redirect_system_path'
+  | 'redirect_path'
+  | 'dangerous_subcommand'
+  | 'dangerous_first_token'
+  | 'mkfs_variant'
+  | 'shell_invocation_bare'
+  | 'shell_invocation_dash_c'
+  | 'shell_invocation_script'
+  | 'kill_minus_nine'
+  | 'kill_other'
+  | 'chmod_chown_system_path'
+  | 'find_with_delete_or_exec'
+  | 'sed_in_place'
+  | 'unknown_subcommand_of_known_tool'
+  | 'mutating_first_token'
+  | 'unknown_first_token';
+
+export type BashClassifierReason = {
+  /** Stable rule ID; see `BashClassifierRule` above. */
+  rule: BashClassifierRule;
+  /**
+   * Operator-readable explanation, e.g.
+   *   `"first token 'rm' is always dangerous"`,
+   *   `"output redirect to system path /etc/passwd"`,
+   *   `"git subcommand 'push --force' is in the dangerous-subcommand list"`.
+   * Kept short — the badge tooltip is the primary surface. Render as-is.
+   */
+  detail: string;
+  /**
+   * The actual fragment that triggered the rule. For first-token rules this
+   * is the token (`'rm'`); for subcommand rules it's `'<bin> <sub>'`; for
+   * redirect rules it's the resolved target. Surfaced so the operator can
+   * tell at a glance "yes, that's the bit I meant".
+   */
+  matched: string;
+};
+
 export type ToolClassification = {
   category: MutationCategory;
   summary: string;
@@ -42,6 +91,16 @@ export type ToolClassification = {
    * a single canonical field to glob against.
    */
   filePath?: string;
+  /**
+   * Cluster F Phase F3 (UI-F3): for `Bash` commands classified as `mutate`
+   * or `dangerous`, the rule that fired + the matched fragment. Undefined
+   * for non-Bash tools (the tool name itself is the rationale) and for
+   * Bash commands classified as `read` (the operator never sees a badge).
+   * When a command compounds multiple top-level pieces (`;`/`&&`/`||`/`|`),
+   * this is the reason for the *worst* piece — the piece that pinned the
+   * overall category.
+   */
+  reason?: BashClassifierReason;
 };
 
 const CATEGORY_RANK: Record<MutationCategory, number> = {
@@ -49,10 +108,6 @@ const CATEGORY_RANK: Record<MutationCategory, number> = {
   mutate: 1,
   dangerous: 2,
 };
-
-function worse(a: MutationCategory, b: MutationCategory): MutationCategory {
-  return CATEGORY_RANK[a] >= CATEGORY_RANK[b] ? a : b;
-}
 
 /**
  * Top-level dispatch. `toolName` is the SDK tool identifier
@@ -168,7 +223,11 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       const cls = classifyBashCommand(command);
       const truncated = command.length > 200 ? `${command.slice(0, 197)}...` : command;
       const suffix = desc ? ` (${truncateForDesc(desc)})` : '';
-      return { category: cls.category, summary: `${truncated}${suffix}` };
+      return {
+        category: cls.category,
+        summary: `${truncated}${suffix}`,
+        ...(cls.reason ? { reason: cls.reason } : {}),
+      };
     }
 
     case 'Agent':
@@ -364,6 +423,18 @@ const DANGEROUS_SUBCOMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Internal verdict shape: bundle the category with the reason that produced
+ * it, so the multi-piece reduction in `classifyBashCommand` can preserve the
+ * `worst` piece's rationale (not just its category). `reason` is `null` for
+ * `read` verdicts and for the initial "no pieces yet" seed.
+ */
+type Verdict = { category: MutationCategory; reason: BashClassifierReason | null };
+
+function verdictWorse(a: Verdict, b: Verdict): Verdict {
+  return CATEGORY_RANK[a.category] >= CATEGORY_RANK[b.category] ? a : b;
+}
+
+/**
  * Classify a single Bash command string. Exported for direct unit testing.
  *
  * The classification scans every top-level subcommand (split on `;`, `&&`,
@@ -373,32 +444,76 @@ const DANGEROUS_SUBCOMMANDS: ReadonlySet<string> = new Set([
  */
 export function classifyBashCommand(command: string): ToolClassification {
   const trimmed = command.trim();
-  if (!trimmed) return { category: 'mutate', summary: '' };
+  if (!trimmed) {
+    return {
+      category: 'mutate',
+      summary: '',
+      reason: {
+        rule: 'unknown_first_token',
+        detail: 'empty Bash command — defaulting to mutate',
+        matched: '',
+      },
+    };
+  }
 
   // Shell-substitution: don't try to parse what's inside; mark dangerous.
-  if (/(?<![\\$])\$\(/.test(trimmed) || /`/.test(trimmed)) {
-    return { category: 'dangerous', summary: trimmed };
+  // Detection patterns are deliberately marker-only (no `[^)]*\)` body
+  // match) to keep the regex O(N) on adversarial input — see r-A1 in the
+  // F3 plan. CodeQL flagged the previous body-matching pattern as
+  // polynomial-ReDoS on inputs like `<(<(<(<(...` with no closing `)`.
+  // The operator reads the offending substring from `summary` (which
+  // carries the full command verbatim); `matched` is just the trigger
+  // marker for "this is the bit that fired".
+  const subMatch = /(?<![\\$])\$\(|`/.exec(trimmed);
+  if (subMatch) {
+    return {
+      category: 'dangerous',
+      summary: trimmed,
+      reason: {
+        rule: 'shell_substitution',
+        detail:
+          'command contains shell-substitution (`$(...)` or backticks) — the substituted text could be anything',
+        matched: subMatch[0],
+      },
+    };
   }
 
   // Process-substitution: `<(curl ...)` etc. — also unparseable; dangerous.
-  if (/<\(|>\(/.test(trimmed)) {
-    return { category: 'dangerous', summary: trimmed };
+  // Same marker-only detection as shell-substitution above (CodeQL
+  // `js/polynomial-redos`); the operator inspects `summary` for the
+  // full fragment.
+  const procMatch = /<\(|>\(/.exec(trimmed);
+  if (procMatch) {
+    return {
+      category: 'dangerous',
+      summary: trimmed,
+      reason: {
+        rule: 'process_substitution',
+        detail:
+          'command contains process-substitution (`<(...)` or `>(...)`) — the substituted process could run anything',
+        matched: procMatch[0],
+      },
+    };
   }
 
-  let worst: MutationCategory = 'read';
+  let worst: Verdict = { category: 'read', reason: null };
   for (const piece of splitTopLevel(trimmed)) {
-    const pieceCls = classifyBashPiece(piece);
-    worst = worse(worst, pieceCls);
-    if (worst === 'dangerous') break;
+    const pieceVerdict = classifyBashPiece(piece);
+    worst = verdictWorse(worst, pieceVerdict);
+    if (worst.category === 'dangerous') break;
   }
 
-  return { category: worst, summary: trimmed };
+  return {
+    category: worst.category,
+    summary: trimmed,
+    ...(worst.reason ? { reason: worst.reason } : {}),
+  };
 }
 
 /** Classify one segment of a compound Bash command. */
-function classifyBashPiece(piece: string): MutationCategory {
+function classifyBashPiece(piece: string): Verdict {
   const stripped = stripEnvAssignments(piece.trim());
-  if (!stripped) return 'read';
+  if (!stripped) return { category: 'read', reason: null };
 
   // Output redirection (`> file`, `>> file`) — at least `mutate`; targets to
   // sensitive system paths → `dangerous`.
@@ -418,16 +533,34 @@ function classifyBashPiece(piece: string): MutationCategory {
       /^~\/\.aws\b/.test(target) ||
       /^~\/\.kube\b/.test(target)
     ) {
-      return 'dangerous';
+      return {
+        category: 'dangerous',
+        reason: {
+          rule: 'redirect_system_path',
+          detail: `output redirect (>, >>) to system or secret-store path '${target}'`,
+          matched: target,
+        },
+      };
     }
-    // Any other redirect target → mutate (at least).
-    return worseOrSelf(classifyByTokens(stripped), 'mutate');
+    // Any other redirect target → mutate (at least). Run the token-level
+    // classifier too in case the redirect *target* is benign but the
+    // *first token* is dangerous (`sudo something > /tmp/x`).
+    const inner = classifyByTokens(stripped);
+    if (CATEGORY_RANK[inner.category] >= CATEGORY_RANK['mutate']) return inner;
+    return {
+      category: 'mutate',
+      reason: {
+        rule: 'redirect_path',
+        detail: `output redirect (>, >>) to '${target}'`,
+        matched: target,
+      },
+    };
   }
 
   return classifyByTokens(stripped);
 }
 
-function classifyByTokens(stripped: string): MutationCategory {
+function classifyByTokens(stripped: string): Verdict {
   const tokens = stripped.split(/\s+/);
   const first = tokens[0] ?? '';
   const second = tokens[1] ?? '';
@@ -442,22 +575,48 @@ function classifyByTokens(stripped: string): MutationCategory {
   //    (`shutdown -h`, `git help` is genuinely help but `npm help <cmd>` opens
   //    docs which is fine to default to mutate via a positive-list miss).
   if (second === '--version' || second === '-V' || second === '--help') {
-    return 'read';
+    return { category: 'read', reason: null };
   }
 
   // 2) Exact dangerous-subcommand match.
-  if (DANGEROUS_SUBCOMMANDS.has(triple) || DANGEROUS_SUBCOMMANDS.has(pair)) {
-    return 'dangerous';
+  const dangerSub = DANGEROUS_SUBCOMMANDS.has(triple)
+    ? triple
+    : DANGEROUS_SUBCOMMANDS.has(pair)
+      ? pair
+      : null;
+  if (dangerSub) {
+    return {
+      category: 'dangerous',
+      reason: {
+        rule: 'dangerous_subcommand',
+        detail: `subcommand '${dangerSub}' is in the dangerous-subcommand list (destructive, force-push, prune, or untrusted install)`,
+        matched: dangerSub,
+      },
+    };
   }
 
   // 3) Plain `rm` (any args) is dangerous.
   if (DANGEROUS_FIRST_TOKENS.has(first)) {
-    return 'dangerous';
+    return {
+      category: 'dangerous',
+      reason: {
+        rule: 'dangerous_first_token',
+        detail: `first token '${first}' is always dangerous (destructive, privilege-escalating, or remote-code-executing)`,
+        matched: first,
+      },
+    };
   }
 
   // 4) `mkfs*` (mkfs.ext4, mkfs.xfs, etc.) — any filesystem-create variant.
   if (first.startsWith('mkfs.') || first === 'mkfs') {
-    return 'dangerous';
+    return {
+      category: 'dangerous',
+      reason: {
+        rule: 'mkfs_variant',
+        detail: `'${first}' creates a filesystem — irreversible data loss on the target device`,
+        matched: first,
+      },
+    };
   }
 
   // 5) Shell invocation (`sh`, `bash`, `zsh`):
@@ -467,49 +626,147 @@ function classifyByTokens(stripped: string): MutationCategory {
   //    - `bash script.sh`: running a script. We can't introspect — mutate
   //      (operator sees the script path and decides).
   if (first === 'sh' || first === 'bash' || first === 'zsh') {
-    if (tokens.length === 1) return 'dangerous';
-    if (second === '-c') return 'dangerous';
-    return 'mutate';
+    if (tokens.length === 1) {
+      return {
+        category: 'dangerous',
+        reason: {
+          rule: 'shell_invocation_bare',
+          detail: `bare '${first}' with no arguments — typically the receiving end of a 'curl | sh' pipe`,
+          matched: first,
+        },
+      };
+    }
+    if (second === '-c') {
+      return {
+        category: 'dangerous',
+        reason: {
+          rule: 'shell_invocation_dash_c',
+          detail: `'${first} -c' runs an arbitrary command string from its argument`,
+          matched: `${first} -c`,
+        },
+      };
+    }
+    return {
+      category: 'mutate',
+      reason: {
+        rule: 'shell_invocation_script',
+        detail: `'${first} ${second}' runs the named script — its contents aren't parsed by the classifier`,
+        matched: `${first} ${second}`,
+      },
+    };
   }
 
   // 6) `kill` with `-9` / `-KILL` is dangerous; plain `kill` is mutate.
   if (first === 'kill') {
-    return tokens.includes('-9') || tokens.includes('-KILL') ? 'dangerous' : 'mutate';
+    if (tokens.includes('-9') || tokens.includes('-KILL')) {
+      const signal = tokens.includes('-9') ? '-9' : '-KILL';
+      return {
+        category: 'dangerous',
+        reason: {
+          rule: 'kill_minus_nine',
+          detail: `'kill ${signal}' is unmaskable — could knock out the Cebab server if misdirected`,
+          matched: `kill ${signal}`,
+        },
+      };
+    }
+    return {
+      category: 'mutate',
+      reason: {
+        rule: 'kill_other',
+        detail: `'kill' sends a signal to a process — surfaced so the operator can confirm intent`,
+        matched: 'kill',
+      },
+    };
   }
 
   // 7) Subcommand-aware read-only check (git/npm/docker/cargo/...).
   const subAllow = READONLY_SUBCOMMANDS[first];
   if (subAllow) {
-    if (second && subAllow.has(second)) return 'read';
+    if (second && subAllow.has(second)) return { category: 'read', reason: null };
     // Other subcommands of `git`/`npm`/`docker`/etc. → mutate (default).
-    return 'mutate';
+    return {
+      category: 'mutate',
+      reason: {
+        rule: 'unknown_subcommand_of_known_tool',
+        detail: `'${first} ${second || '<no subcommand>'}' is not in the readonly-subcommand allowlist for '${first}'`,
+        matched: pair,
+      },
+    };
   }
 
   // 8) Plain read-only allowlist.
   if (READONLY_FIRST_TOKENS.has(first)) {
     // `find` with `-delete` / `-exec` flags is mutating.
     if (first === 'find' && (tokens.includes('-delete') || tokens.includes('-exec'))) {
-      return 'mutate';
+      const flag = tokens.includes('-delete') ? '-delete' : '-exec';
+      return {
+        category: 'mutate',
+        reason: {
+          rule: 'find_with_delete_or_exec',
+          detail: `'find ${flag}' mutates files (or executes a command per match)`,
+          matched: `find ${flag}`,
+        },
+      };
     }
     // `sed -i` is in-place edit → mutate.
     if (first === 'sed' && tokens.includes('-i')) {
-      return 'mutate';
+      return {
+        category: 'mutate',
+        reason: {
+          rule: 'sed_in_place',
+          detail: `'sed -i' edits files in place`,
+          matched: 'sed -i',
+        },
+      };
     }
-    return 'read';
+    return { category: 'read', reason: null };
   }
 
   // 9) Mutating allowlist.
   if (MUTATING_FIRST_TOKENS.has(first)) {
     // `chmod` / `chown` on system paths → dangerous.
     if ((first === 'chmod' || first === 'chown') && hasSystemPath(tokens)) {
-      return 'dangerous';
+      const sysToken =
+        tokens.find(
+          (t) =>
+            t === '/' ||
+            t.startsWith('/etc/') ||
+            t.startsWith('/usr/') ||
+            t.startsWith('/var/') ||
+            t.startsWith('/boot/') ||
+            t.startsWith('/dev/') ||
+            t.startsWith('/sys/') ||
+            t.startsWith('/proc/'),
+        ) ?? '';
+      return {
+        category: 'dangerous',
+        reason: {
+          rule: 'chmod_chown_system_path',
+          detail: `'${first}' targets system path '${sysToken}'`,
+          matched: `${first} ${sysToken}`,
+        },
+      };
     }
-    return 'mutate';
+    return {
+      category: 'mutate',
+      reason: {
+        rule: 'mutating_first_token',
+        detail: `first token '${first}' is in the mutating-token list (filesystem, VCS, packages, or download)`,
+        matched: first,
+      },
+    };
   }
 
   // 10) Anything else (unknown first token) defaults to mutate. The operator
   //     sees a yellow badge and the command verbatim and decides.
-  return 'mutate';
+  return {
+    category: 'mutate',
+    reason: {
+      rule: 'unknown_first_token',
+      detail: `first token '${first}' is not in any classifier allowlist — defaulted to mutate (conservative)`,
+      matched: first,
+    },
+  };
 }
 
 function hasSystemPath(tokens: string[]): boolean {
@@ -641,8 +898,4 @@ function previewSnippet(s: string, max: number): string {
 
 function truncateForDesc(s: string): string {
   return s.length > 60 ? `${s.slice(0, 57)}...` : s;
-}
-
-function worseOrSelf(current: MutationCategory, floor: MutationCategory): MutationCategory {
-  return worse(current, floor);
 }
