@@ -67,7 +67,7 @@ import {
 } from '../repo/session_start_gate.js';
 import { classifyError } from './errors.js';
 import { shouldAutoAllow } from './permission.js';
-import { buildSessionLogChunk } from './session_log.js';
+import { buildSessionLogChunk, buildSingleAgentSessionLogChunk } from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
 import {
   awaitBusTrustDecision,
@@ -3999,24 +3999,45 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'load_session_log': {
-      // Phase H: paginated merged log for a multi-agent session. Pure read
-      // — no DB mutation, no side effects, no permission check beyond
-      // session existence. `revealSensitive=true` requires the operator's
-      // explicit confirm client-side (the WS message is enough server-side
-      // because the connection is already bound to 127.0.0.1).
-      const meta = getMultiAgentSession(msg.sessionId);
-      if (!meta) {
-        send(conn.ws, {
-          type: 'wrapper_error',
-          sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `load_session_log: no such multi-agent session ${msg.sessionId}`,
-        });
-        return;
+      // Phase H: paginated session log. Pure read — no DB mutation, no side
+      // effects, no permission check beyond session existence.
+      // `revealSensitive=true` requires the operator's explicit confirm
+      // client-side (the WS message is enough server-side because the
+      // connection is already bound to 127.0.0.1).
+      //
+      // Cluster H C3 backend: branch on `msg.scope`. Default is the original
+      // multi-agent projector ('multi_agent'); `'single'` reads the
+      // per-session `events` table and routes through
+      // `buildSingleAgentSessionLogChunk`. Existence check matches the
+      // chosen scope so the operator gets a precise error if they ask for
+      // single-agent rows from a bus session id (or vice versa).
+      const scope = msg.scope ?? 'multi_agent';
+      if (scope === 'single') {
+        if (!getSession(msg.sessionId)) {
+          send(conn.ws, {
+            type: 'wrapper_error',
+            sessionId: msg.sessionId,
+            kind: 'process_crashed',
+            message: `load_session_log: no such single-agent session ${msg.sessionId}`,
+          });
+          return;
+        }
+      } else {
+        const meta = getMultiAgentSession(msg.sessionId);
+        if (!meta) {
+          send(conn.ws, {
+            type: 'wrapper_error',
+            sessionId: msg.sessionId,
+            kind: 'process_crashed',
+            message: `load_session_log: no such multi-agent session ${msg.sessionId}`,
+          });
+          return;
+        }
       }
       const offset = Number.isFinite(msg.offset) ? Math.max(0, Math.floor(msg.offset)) : 0;
       const limit = Number.isFinite(msg.limit) ? Math.max(1, Math.floor(msg.limit)) : 200;
-      const chunk = buildSessionLogChunk({
+      const project = scope === 'single' ? buildSingleAgentSessionLogChunk : buildSessionLogChunk;
+      const chunk = project({
         sessionId: msg.sessionId,
         offset,
         limit,

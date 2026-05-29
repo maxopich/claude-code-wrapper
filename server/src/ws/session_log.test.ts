@@ -12,7 +12,10 @@ import {
   listMultiAgentMutations,
   setMutationPromoted,
 } from '../repo/multi_agent.js';
-import { buildSessionLogChunk } from './session_log.js';
+import { upsertProject } from '../repo/projects.js';
+import { createSession } from '../repo/sessions.js';
+import { insertEvent, nextSeq } from '../repo/events.js';
+import { buildSessionLogChunk, buildSingleAgentSessionLogChunk } from './session_log.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -300,7 +303,8 @@ describe('multi_agent_mutations — F3 classifierReason round-trip', () => {
       toolUseId: 'tu1',
       classifierReason: {
         rule: 'dangerous_first_token',
-        detail: "first token 'rm' is always dangerous (destructive, privilege-escalating, or remote-code-executing)",
+        detail:
+          "first token 'rm' is always dangerous (destructive, privilege-escalating, or remote-code-executing)",
         matched: 'rm',
       },
     });
@@ -308,7 +312,8 @@ describe('multi_agent_mutations — F3 classifierReason round-trip', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]?.classifierReason).toEqual({
       rule: 'dangerous_first_token',
-      detail: "first token 'rm' is always dangerous (destructive, privilege-escalating, or remote-code-executing)",
+      detail:
+        "first token 'rm' is always dangerous (destructive, privilege-escalating, or remote-code-executing)",
       matched: 'rm',
     });
   });
@@ -335,5 +340,267 @@ describe('multi_agent_mutations — F3 classifierReason round-trip', () => {
     });
     const rows = listMultiAgentMutations('s1');
     expect(rows[0]?.classifierReason).toBeNull();
+  });
+});
+
+// Cluster H C3 backend — single-agent projector. Reads the `events` table
+// directly (no bus hops, no mutation lane) and classifies each row into the
+// 'tool' | 'llm' | 'error' subset of `LogRowKind`.
+describe('buildSingleAgentSessionLogChunk — projection', () => {
+  function setupSession(id = 'sa-1'): string {
+    const project = upsertProject('p', '/tmp/p');
+    createSession(id, project.id);
+    return id;
+  }
+
+  function pushEvent(
+    sessionId: string,
+    type: string,
+    subtype: string | null,
+    payload: unknown,
+  ): void {
+    const seq = nextSeq(sessionId);
+    insertEvent(sessionId, seq, type, subtype, JSON.stringify(payload));
+  }
+
+  test('assistant with a text block projects as kind=llm', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'assistant', null, {
+      message: { content: [{ type: 'text', text: 'hello world' }] },
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.total).toBe(1);
+    expect(chunk.rows[0]).toMatchObject({ kind: 'llm', agent: 'agent' });
+    expect(chunk.rows[0]?.summary).toBe('hello world');
+  });
+
+  test('assistant carrying tool_use blocks projects as kind=tool with the tool name in status', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'assistant', null, {
+      message: {
+        content: [
+          { type: 'text', text: 'about to read' },
+          { type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: '/a' } },
+        ],
+      },
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.rows[0]?.kind).toBe('tool');
+    // status drives the chip discriminator; surface the tool name so the
+    // UI can colour-code per tool just like the multi-agent path does.
+    expect(chunk.rows[0]?.status).toBe('Read');
+    // Text takes summary precedence so the operator still sees the
+    // assistant's prelude, not just "tool_use: Read".
+    expect(chunk.rows[0]?.summary).toBe('about to read');
+  });
+
+  test('user with tool_result blocks projects as kind=tool', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'user', null, {
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'file contents' }],
+      },
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.rows[0]?.kind).toBe('tool');
+    expect(chunk.rows[0]?.summary).toBe('tool_result');
+  });
+
+  test('user with several tool_result blocks coalesces into "tool_result × N"', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'user', null, {
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'tu_1', content: 'a' },
+          { type: 'tool_result', tool_use_id: 'tu_2', content: 'b' },
+          { type: 'tool_result', tool_use_id: 'tu_3', content: 'c' },
+        ],
+      },
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.rows[0]?.summary).toBe('tool_result × 3');
+  });
+
+  test('wrapper row projects as kind=error with subtype as status', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'wrapper', 'auth_expired', {
+      type: 'wrapper',
+      subtype: 'auth_expired',
+      message: 'token expired',
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.rows[0]?.kind).toBe('error');
+    expect(chunk.rows[0]?.status).toBe('auth_expired');
+    expect(chunk.rows[0]?.summary).toBe('auth_expired: token expired');
+  });
+
+  test('result row projects as kind=llm with cost + duration in the summary', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'result', 'success', {
+      type: 'result',
+      subtype: 'success',
+      total_cost_usd: 0.012345,
+      duration_ms: 1234,
+      num_turns: 4,
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.rows[0]?.kind).toBe('llm');
+    expect(chunk.rows[0]?.summary).toMatch(/^success · \$0\.0123 · 1234ms$/);
+  });
+
+  test('unknown type falls through to kind=llm (catch-all per the spec)', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'system', 'status', { type: 'system', subtype: 'status' });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.rows[0]?.kind).toBe('llm');
+  });
+
+  test('rows ordered ts ASC; offset + limit honored; hasMore signals next page', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'assistant', null, { message: { content: [{ type: 'text', text: 'a' }] } });
+    pushEvent(sid, 'assistant', null, { message: { content: [{ type: 'text', text: 'b' }] } });
+    pushEvent(sid, 'assistant', null, { message: { content: [{ type: 'text', text: 'c' }] } });
+
+    const page1 = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 2,
+      revealSensitive: false,
+    });
+    expect(page1.total).toBe(3);
+    expect(page1.rows.length).toBe(2);
+    expect(page1.hasMore).toBe(true);
+
+    const page2 = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 2,
+      limit: 2,
+      revealSensitive: false,
+    });
+    expect(page2.rows.length).toBe(1);
+    expect(page2.hasMore).toBe(false);
+  });
+
+  test('redaction redacts sensitive fields in payload by default', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'assistant', null, {
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_1',
+            name: 'Bash',
+            input: { command: 'echo $ANTHROPIC_API_KEY', credentials: 'secret-token' },
+          },
+        ],
+      },
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    const row = chunk.rows[0]!;
+    expect(row.redactedFields ?? []).not.toEqual([]);
+    expect(chunk.revealedSensitive).toBe(false);
+  });
+
+  test('revealSensitive=true leaves the payload untouched (no redactedFields)', () => {
+    const sid = setupSession();
+    pushEvent(sid, 'assistant', null, {
+      message: {
+        content: [
+          {
+            type: 'tool_use',
+            id: 'tu_1',
+            name: 'Bash',
+            input: { credentials: 'secret-token' },
+          },
+        ],
+      },
+    });
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: true,
+    });
+    const row = chunk.rows[0]!;
+    expect(row.redactedFields).toBeUndefined();
+    expect(chunk.revealedSensitive).toBe(true);
+  });
+
+  test('empty session returns an empty chunk with total=0', () => {
+    const sid = setupSession();
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk).toEqual({ rows: [], total: 0, hasMore: false, revealedSensitive: false });
+  });
+
+  test('corrupt raw JSON still produces an llm row rather than silently vanishing', () => {
+    const sid = setupSession();
+    // Insert a row whose `raw` is intentionally garbled. safeParseEventRaw
+    // returns null; classifier falls through to 'llm'; summary falls back to
+    // type/subtype. The row must NOT throw.
+    const seq = nextSeq(sid);
+    insertEvent(sid, seq, 'assistant', null, '{not valid json');
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.total).toBe(1);
+    expect(chunk.rows[0]?.kind).toBe('llm');
   });
 });
