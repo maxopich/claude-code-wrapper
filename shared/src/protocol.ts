@@ -1941,6 +1941,34 @@ export type ServerMsg =
     }
   | {
       /**
+       * Cluster H D12 backend: real-time tail signal for the Logs inspector.
+       * Emitted by the server immediately after a new log-relevant row is
+       * persisted AND broadcast through its existing live channel (the
+       * matching `multi_agent_event` or `multi_agent_mutation` envelope).
+       * Carries the projected `LogRow` shape so the client can append it to
+       * its tail-mode cache without re-fetching a chunk.
+       *
+       * Always emitted with `revealSensitive: false` semantics (the row's
+       * `raw` is server-masked unless the operator's last `load_session_log`
+       * was a Reveal). Switching the un-mask flag mid-tail requires the
+       * client to re-issue `load_session_log` — same contract as `session_log_chunk`.
+       *
+       * `scope` mirrors the original `load_session_log` discriminator so the
+       * client can filter by the active session log's projector (a single-
+       * agent inspector ignores `multi_agent` envelopes for the same id and
+       * vice versa).
+       *
+       * NOT a replay envelope: this only fires for rows appended after the
+       * caller's most recent `load_session_log`. Replay still happens via
+       * `session_log_chunk` when the inspector opens.
+       */
+      type: 'log_row_appended';
+      sessionId: string;
+      scope: SessionLogScope;
+      row: LogRow;
+    }
+  | {
+      /**
        * PR-6: reply to `read_project_facts`. Carries the project's static
        * facts for the per-participant disclosure inside the template-preview
        * modal. Always emitted (even when the project has no readable

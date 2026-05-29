@@ -2598,6 +2598,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // where the bell badge + panel actually update.
       return state;
 
+    case 'log_row_appended':
+      // Cluster H D12 backend: the LogsModal's tail-mode (D12 client
+      // slice, follow-up) will own consumption of these via the existing
+      // `subscribeServerMsg` side-channel inside `useLogStream` — same
+      // pattern as `session_log_chunk` (handled above). Putting the row
+      // in the main store would churn the whole tree on every bus hop
+      // while the operator isn't even watching the log; the side-channel
+      // subscriber only fires when the inspector is open. Reducer no-op
+      // keeps the discriminated union exhaustive until that wiring lands.
+      return state;
+
     case 'wrapper_error': {
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)

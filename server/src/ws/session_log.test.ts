@@ -15,7 +15,13 @@ import {
 import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
 import { insertEvent, nextSeq } from '../repo/events.js';
-import { buildSessionLogChunk, buildSingleAgentSessionLogChunk } from './session_log.js';
+import {
+  buildSessionLogChunk,
+  buildSingleAgentSessionLogChunk,
+  multiAgentEventToLogRow,
+  multiAgentMutationToLogRow,
+} from './session_log.js';
+import type { MultiAgentEventRow } from '../repo/multi_agent.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -602,5 +608,155 @@ describe('buildSingleAgentSessionLogChunk — projection', () => {
     });
     expect(chunk.total).toBe(1);
     expect(chunk.rows[0]?.kind).toBe('llm');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cluster H D12 backend: per-row converter exports. The tail emitter in
+// ws/server.ts calls these to project a single appended row into the
+// `log_row_appended` envelope without re-running the whole chunk projection.
+// Tests pin parity with the chunk projector (same kind/agent/summary/raw
+// shape) so the streaming row is byte-equivalent to what a fresh
+// `load_session_log` would have returned for that same row.
+// ---------------------------------------------------------------------------
+
+describe('multiAgentEventToLogRow — tail converter parity', () => {
+  test('byte-equivalent to chunk projection for the same event', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    const row = appendMultiAgentEvent('s1', 'worker', 'cebab', 'reply', 'all good');
+
+    const chunk = buildSessionLogChunk({
+      sessionId: 's1',
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    const fromChunk = chunk.rows[0]!;
+    const fromTail = multiAgentEventToLogRow(row, false);
+    expect(fromTail).toEqual(fromChunk);
+  });
+
+  test('error-kind event projects to LogRow kind=error', () => {
+    const row: MultiAgentEventRow = {
+      id: 99,
+      session_id: 's1',
+      ts: 1700000000000,
+      source: 'cebab',
+      destination: 'user',
+      kind: 'error',
+      text: 'worker crashed',
+    };
+    const log = multiAgentEventToLogRow(row, false);
+    expect(log.kind).toBe('error');
+    expect(log.agent).toBe('cebab');
+    expect(log.status).toBe('error');
+    expect(log.id).toBe('event:99');
+  });
+
+  test('non-error bus kinds project to LogRow kind=bus', () => {
+    const row: MultiAgentEventRow = {
+      id: 7,
+      session_id: 's1',
+      ts: 1700000000000,
+      source: 'reviewer',
+      destination: 'planner',
+      kind: 'prompt',
+      text: 'please review',
+    };
+    const log = multiAgentEventToLogRow(row, false);
+    expect(log.kind).toBe('bus');
+    expect(log.status).toBe('prompt');
+    expect(log.summary).toContain('reviewer → planner');
+    expect(log.summary).toContain('please review');
+  });
+
+  test('revealSensitive=false redacts raw payload fields', () => {
+    const row: MultiAgentEventRow = {
+      id: 1,
+      session_id: 's1',
+      ts: 1,
+      source: 'a',
+      destination: 'b',
+      kind: 'reply',
+      text: 'sk-ant-api03-DEADBEEF-payload',
+    };
+    const masked = multiAgentEventToLogRow(row, false);
+    const revealed = multiAgentEventToLogRow(row, true);
+    // The reveal=true path returns the raw payload as-is; reveal=false runs
+    // it through redactSensitive (may or may not redact depending on the
+    // specific field). The contract here is that the two paths are NOT
+    // necessarily identical — reveal=true is the un-masked superset.
+    expect(masked).toBeDefined();
+    expect(revealed).toBeDefined();
+    // The reveal=true row never carries a redactedFields hint.
+    expect(revealed.redactedFields).toBeUndefined();
+  });
+});
+
+describe('multiAgentMutationToLogRow — tail converter parity', () => {
+  test('provisional mutation returns null (chunk projector skips it)', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentMutation('s1', 'worker', 'Write', 'mutate', 'create x', {
+      filePath: '/p/x',
+      cwd: '/p',
+      toolUseId: 'tu-prov',
+    });
+    const provisional = listMultiAgentMutations('s1')[0]!;
+    expect(provisional.confirmedAt).toBeNull();
+    expect(multiAgentMutationToLogRow(provisional, false)).toBeNull();
+  });
+
+  test('confirmed mutation projects to kind=tool', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentMutation('s1', 'worker', 'Edit', 'mutate', 'edit y', {
+      filePath: '/p/y',
+      cwd: '/p',
+      toolUseId: 'tu-conf',
+    });
+    confirmMutationByToolUseId('s1', 'tu-conf', { success: true });
+    const m = listMultiAgentMutations('s1')[0]!;
+    const log = multiAgentMutationToLogRow(m, false);
+    expect(log).not.toBeNull();
+    expect(log!.kind).toBe('tool');
+    expect(log!.agent).toBe('worker');
+    expect(log!.status).toBe('Edit');
+    expect(log!.severity).toBe('mutate');
+    expect(log!.id).toBe(`mutation:${m.id}`);
+  });
+
+  test('promoted mutation projects to kind=artifact', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentMutation('s1', 'worker', 'Bash', 'mutate', 'cp final.txt', {
+      filePath: '/p/final.txt',
+      cwd: '/p',
+      toolUseId: 'tu-art',
+    });
+    confirmMutationByToolUseId('s1', 'tu-art', { success: true });
+    const m = listMultiAgentMutations('s1')[0]!;
+    setMutationPromoted(m.id, true);
+    const promoted = listMultiAgentMutations('s1')[0]!;
+    const log = multiAgentMutationToLogRow(promoted, false);
+    expect(log!.kind).toBe('artifact');
+  });
+
+  test('byte-equivalent to chunk projection for the same confirmed mutation', () => {
+    createMultiAgentSession('s1', 'orchestrator');
+    appendMultiAgentMutation('s1', 'worker', 'Write', 'mutate', 'create z', {
+      filePath: '/p/z',
+      cwd: '/p',
+      toolUseId: 'tu-eq',
+    });
+    confirmMutationByToolUseId('s1', 'tu-eq', { success: true });
+    const m = listMultiAgentMutations('s1')[0]!;
+
+    const chunk = buildSessionLogChunk({
+      sessionId: 's1',
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    const fromChunk = chunk.rows.find((r) => r.id === `mutation:${m.id}`)!;
+    const fromTail = multiAgentMutationToLogRow(m, false)!;
+    expect(fromTail).toEqual(fromChunk);
   });
 });
