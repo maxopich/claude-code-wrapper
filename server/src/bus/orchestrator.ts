@@ -1272,6 +1272,9 @@ export function wireOrchestratorSession(p: {
   };
 
   const runner = new AgentRunner({
+    // Cluster G Phase 3 (G1): bus session id for the lifecycle registry's
+    // per-hop snapshot. Same value for every orchestrator + worker hop.
+    sessionId,
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);
@@ -1344,6 +1347,9 @@ export function wireOrchestratorSession(p: {
       name: w.agentName,
       cwd: w.cwd,
       settingSources: ['user', 'project', 'local'],
+      // Cluster G Phase 3 (G1): see chain.ts mirror — per-participant
+      // project for the active-runs registry snapshot.
+      projectId: w.projectId,
     });
   }
 
@@ -1452,6 +1458,10 @@ export function wireOrchestratorSession(p: {
       name: newAgent.agentName,
       cwd: newAgent.cwd,
       settingSources: ['user', 'project', 'local'],
+      // Cluster G Phase 3 (G1): same projectId threading as the
+      // initial-workers loop so mid-run added workers also appear in the
+      // active-runs snapshot with the right project.
+      projectId,
     });
     router.registerWorker(newAgent.agentName);
     addParticipant(sessionId, projectId, 'worker', null);

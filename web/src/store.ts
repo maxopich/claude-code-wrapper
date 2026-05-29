@@ -2249,6 +2249,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'bus_auto_installed':
     case 'tool_denied':
     case 'session_reconstructed':
+    case 'active_runs':
+      // Cluster G Phase 3 (G1): backend-only slice. The dispatcher pushes
+      // `active_runs` snapshots on attach + every 200ms-debounced lifecycle
+      // mutation + a 10s heartbeat, but the UI side (RunsBadge +
+      // RunsDropdown) lands in the next phase. Until then the wire envelope
+      // is received and discarded — the protocol slot exists so a future
+      // reducer arm can drop in without a server-side change.
+      //
       // Cluster A Phase 3+4+6: the dispatcher fans every one of these into a
       // matching `notification` envelope (see `server/src/notifications/
       // dispatcher.ts`); the dock owns the operator-facing surface. The

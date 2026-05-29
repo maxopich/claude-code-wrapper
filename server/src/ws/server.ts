@@ -24,7 +24,8 @@ import { listEvents, listEventsTail } from '../repo/events.js';
 import { persistMessage } from '../runner/orchestrator.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
-import { registerQuery } from '../runner/lifecycle.js';
+import { onInFlightChange, registerQuery, snapshotInFlight } from '../runner/lifecycle.js';
+import { buildActiveRunsMsg } from '../notifications/active_runs.js';
 import { getSetting, setSetting } from '../repo/settings.js';
 import { listTemplates, saveTemplate, deleteTemplate } from '../repo/templates.js';
 import {
@@ -1663,6 +1664,49 @@ function onConnection(ws: WebSocket): void {
     unackedGlobal: initialSnapshot.unackedGlobal,
   });
 
+  // Cluster G Phase 3 (G1): subscribe THIS Conn to in-flight registry
+  // changes and push `active_runs` snapshots on: (a) initial attach,
+  // (b) any registry mutation (debounced 200ms so a chain hop switching
+  //     agents collapses to one emit), and (c) a 10s heartbeat (catches a
+  //     desync if a listener was somehow dropped without firing).
+  //
+  // The project-name resolver is bound here so the helper stays DB-API
+  // agnostic; failures inside `getProject` are absorbed so a transient
+  // read error doesn't kill the dispatcher's listener.
+  const resolveProjectName = (id: number): string | undefined => {
+    try {
+      return getProject(id)?.name;
+    } catch {
+      return undefined;
+    }
+  };
+  const emitActiveRuns = (): void => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    const msg = buildActiveRunsMsg(snapshotInFlight(), resolveProjectName, Date.now());
+    send(ws, msg);
+  };
+  // Initial snapshot — emit even if empty so the client clears any stale
+  // state from a prior connection. The debounce timer is only used for
+  // post-attach mutations; the attach emit fires synchronously.
+  emitActiveRuns();
+  // Debounce wrapper for the change listener. 200ms matches the spec
+  // budget for "live but burst-tolerant"; faster makes a chain hop's
+  // unregister-then-register thrash the wire, slower hides genuine
+  // changes from the operator.
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  const onChange = (): void => {
+    if (debounceTimer !== null) return; // already pending
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      emitActiveRuns();
+    }, 200);
+  };
+  const unsubscribeChanges = onInFlightChange(onChange);
+  // 10s heartbeat. Cheap (one JSON send per Conn every 10s) and resilient
+  // against a missed listener notification — if the registry is empty,
+  // the wire envelope is the smallest possible `{type:'active_runs', runs:[]}`.
+  const heartbeatTimer = setInterval(emitActiveRuns, 10_000);
+
   ws.on('message', (raw) => {
     let parsed: ClientMsg;
     try {
@@ -1689,6 +1733,16 @@ function onConnection(ws: WebSocket): void {
     conn.pendingPermissions.clear();
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
+    // Cluster G Phase 3 (G1): tear down the active-runs dispatcher so its
+    // listener + heartbeat don't outlive the WS. The closed-ws guard inside
+    // `emitActiveRuns` would no-op the send, but the timer still fires; the
+    // explicit clear keeps the event loop quiet.
+    unsubscribeChanges();
+    clearInterval(heartbeatTimer);
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
     // Multi-agent: detach but DON'T tear down. The bus session keeps
     // running in-process (AgentRunner + router live in the session
     // registry); the DB row stays 'running'. A future WS connect (browser
@@ -4194,7 +4248,17 @@ async function runOneTurn(
     // turns takes effect immediately.
     maxTurns: effectiveMaxTurns,
   });
-  const unregister = registerQuery(runner);
+  // Cluster G Phase 3 (G1): tag the lifecycle entry with run metadata so
+  // the dispatcher's `active_runs` snapshot can show this turn in the
+  // sidebar RunsBadge / dropdown. `sessionId` here is the SINGLE-AGENT
+  // session id (the value the client uses as the SessionView key) — that's
+  // what the operator clicks "[Jump to session]" to land on.
+  const unregister = registerQuery(runner, {
+    sessionId,
+    projectId: project.id,
+    kind: 'single',
+    startedAt: Date.now(),
+  });
 
   conn.inFlight.set(sessionId, { ac, projectId: project.id, runner, permissionMode });
   // Persist the seed so subsequent runOneTurn calls (this same session) and

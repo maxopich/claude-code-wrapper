@@ -149,6 +149,18 @@ export type AgentSpec = {
    * forgets to pass one (defensive narrow fallback).
    */
   settingSources?: SettingSource[];
+  /**
+   * Cluster G Phase 3 (G1): the project this agent is rooted in. Threaded
+   * onto the lifecycle registry's `InFlightMeta` so the `active_runs`
+   * ServerMsg can name the project for the sidebar dropdown row.
+   *
+   * Optional because tests construct minimal AgentSpecs without a project
+   * (runner.test.ts, runner.pause.test.ts) and the orchestrator's own spec
+   * has no project (its cwd is the Cebab-owned `<sessionFolder>/orchestrator/`).
+   * Absence is fine — the registry entry just drops `projectId` from the
+   * snapshot, which the dropdown row renders as "no project" gracefully.
+   */
+  projectId?: number;
 };
 
 export type AgentRunnerDeps = {
@@ -274,6 +286,15 @@ export type AgentRunnerDeps = {
     reason: 'transient_overload';
     error: unknown;
   }) => void;
+  /**
+   * Cluster G Phase 3 (G1): the BUS session id this AgentRunner belongs to.
+   * Stamped onto every per-hop `registerQuery` call so the lifecycle
+   * snapshot rows have the operator-facing session id (NOT the per-hop CLI
+   * session id which changes every turn). Absent in tests and in the
+   * single-agent path (which uses its own `registerQuery` call site with
+   * the single-agent sessionId).
+   */
+  sessionId?: string;
 };
 
 /**
@@ -321,10 +342,7 @@ export class AgentRunner {
    * false without state change — caller (WS handler) surfaces as
    * `already_in_state`.
    */
-  private readonly pauseGates = new Map<
-    string,
-    { promise: Promise<void>; release: () => void }
-  >();
+  private readonly pauseGates = new Map<string, { promise: Promise<void>; release: () => void }>();
   /**
    * Cluster C Phase 4c (spec AE-5 [security]): count of deliverTurn calls
    * the agent has queued but not yet started (i.e. waiting on the tail).
@@ -383,10 +401,7 @@ export class AgentRunner {
     // before runOneTurn fires. The window between bump + decrement is
     // exactly "queued but not running" — which matches the operator's
     // "stuck behind this agent" mental model for AE-5's queuedDeliveries.
-    this.pendingDeliveries.set(
-      agentName,
-      (this.pendingDeliveries.get(agentName) ?? 0) + 1,
-    );
+    this.pendingDeliveries.set(agentName, (this.pendingDeliveries.get(agentName) ?? 0) + 1);
     const tail = this.turnTails.get(agentName) ?? Promise.resolve();
     const result = tail.then(() => {
       this.pendingDeliveries.set(
@@ -580,7 +595,22 @@ export class AgentRunner {
       abortController: this.deps.abortController,
     });
 
-    const unregister = registerQuery(runner);
+    // Cluster G Phase 3 (G1): tag the lifecycle entry with bus-run metadata
+    // when the caller (chain.ts / orchestrator.ts) provided a sessionId in
+    // deps. Absent in tests, in which case the query is still tracked for
+    // shutdown but is invisible to the `active_runs` snapshot — that's the
+    // right default for the runner test harnesses (they don't simulate a
+    // real bus session id).
+    const meta =
+      this.deps.sessionId !== undefined
+        ? {
+            sessionId: this.deps.sessionId,
+            ...(spec.projectId !== undefined ? { projectId: spec.projectId } : {}),
+            kind: 'bus-worker' as const,
+            startedAt: Date.now(),
+          }
+        : undefined;
+    const unregister = registerQuery(runner, meta);
     try {
       for await (const msg of runner) {
         this.deps.onMessage?.(agentName, msg);
