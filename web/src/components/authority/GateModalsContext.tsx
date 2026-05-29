@@ -10,13 +10,18 @@ import {
 import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
 import { McpTofuModal } from './McpTofuModal';
 import { EnvInjectionGateModal } from './EnvInjectionGateModal';
+import { BusTofuModal } from './BusTofuModal';
 
-// Cluster B Phase 6a: UI surface for the pre-spawn gates.
+// Cluster B Phase 6a + Cluster G Phase 4 (D6/D11): UI surface for the
+// pre-spawn / pre-install gates.
 //
-// Phases 4b + 5 built the backend gates: when the SDK is about to spawn an
-// untrusted MCP server or load a project with credential-class env keys,
-// the server emits `mcp_auto_install_pending` or `session_start_gated` and
-// awaits the operator's `mcp_trust_decision` / `acknowledge_and_start`.
+// Phases 4b + 5 + Cluster G D6/D11 built the backend gates: when the SDK
+// is about to spawn an untrusted MCP server or load a project with
+// credential-class env keys, OR when the bus is about to flip
+// `bus_installed=1` for a project that's never been trusted, the server
+// emits `mcp_auto_install_pending` / `session_start_gated` /
+// `bus_auto_install_pending` and awaits the operator's
+// `mcp_trust_decision` / `acknowledge_and_start` / `bus_trust_decision`.
 // Without UI, those envelopes hit the wire and nothing visible happens —
 // the spawn silently hangs.
 //
@@ -39,7 +44,8 @@ import { EnvInjectionGateModal } from './EnvInjectionGateModal';
 
 type Pending =
   | (Extract<ServerMsg, { type: 'mcp_auto_install_pending' }> & { kind: 'mcp' })
-  | (Extract<ServerMsg, { type: 'session_start_gated' }> & { kind: 'env' });
+  | (Extract<ServerMsg, { type: 'session_start_gated' }> & { kind: 'env' })
+  | (Extract<ServerMsg, { type: 'bus_auto_install_pending' }> & { kind: 'bus' });
 
 type State = {
   queue: Pending[];
@@ -71,7 +77,9 @@ function reducer(state: State, action: Action): State {
 }
 
 function pendingKey(p: Pending): string {
-  return p.kind === 'mcp' ? `mcp:${p.pendingId}` : `env:${p.pendingStartId}`;
+  if (p.kind === 'mcp') return `mcp:${p.pendingId}`;
+  if (p.kind === 'env') return `env:${p.pendingStartId}`;
+  return `bus:${p.pendingId}`;
 }
 
 // ---- context ----
@@ -79,7 +87,10 @@ function pendingKey(p: Pending): string {
 type ActionsValue = {
   /** Called by App.tsx when a gate envelope arrives over the WS. */
   enqueue: (
-    env: Extract<ServerMsg, { type: 'mcp_auto_install_pending' | 'session_start_gated' }>,
+    env: Extract<
+      ServerMsg,
+      { type: 'mcp_auto_install_pending' | 'session_start_gated' | 'bus_auto_install_pending' }
+    >,
   ) => void;
   /** Dismisses the head of the queue if it matches `matchKey`. Called
    *  from the modal after the operator submits/closes. */
@@ -106,8 +117,14 @@ export function GateModalsProvider({ children, send, handlerRef }: GateModalsPro
   const [state, dispatch] = useReducer(reducer, initialState);
 
   const enqueue = useCallback<ActionsValue['enqueue']>((env) => {
-    const pending: Pending =
-      env.type === 'mcp_auto_install_pending' ? { ...env, kind: 'mcp' } : { ...env, kind: 'env' };
+    let pending: Pending;
+    if (env.type === 'mcp_auto_install_pending') {
+      pending = { ...env, kind: 'mcp' };
+    } else if (env.type === 'session_start_gated') {
+      pending = { ...env, kind: 'env' };
+    } else {
+      pending = { ...env, kind: 'bus' };
+    }
     dispatch({ type: 'enqueue', pending });
   }, []);
 
@@ -121,7 +138,11 @@ export function GateModalsProvider({ children, send, handlerRef }: GateModalsPro
   useEffect(() => {
     if (!handlerRef) return;
     handlerRef.current = (msg) => {
-      if (msg.type === 'mcp_auto_install_pending' || msg.type === 'session_start_gated') {
+      if (
+        msg.type === 'mcp_auto_install_pending' ||
+        msg.type === 'session_start_gated' ||
+        msg.type === 'bus_auto_install_pending'
+      ) {
         enqueue(msg);
       }
     };
@@ -177,5 +198,8 @@ function GateModalHost() {
   if (head.kind === 'mcp') {
     return <McpTofuModal pending={head} send={send} onClose={onClose} />;
   }
-  return <EnvInjectionGateModal pending={head} send={send} onClose={onClose} />;
+  if (head.kind === 'env') {
+    return <EnvInjectionGateModal pending={head} send={send} onClose={onClose} />;
+  }
+  return <BusTofuModal pending={head} send={send} onClose={onClose} />;
 }

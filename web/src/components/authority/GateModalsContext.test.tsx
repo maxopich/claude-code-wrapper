@@ -51,6 +51,17 @@ function mkMcp(pendingId: string): Extract<ServerMsg, { type: 'mcp_auto_install_
   };
 }
 
+function mkBus(pendingId: string): Extract<ServerMsg, { type: 'bus_auto_install_pending' }> {
+  return {
+    type: 'bus_auto_install_pending',
+    pendingId,
+    projectId: 7,
+    projectName: 'Alpha',
+    agentName: 'alpha',
+    contextSessionId: null,
+  };
+}
+
 function mkEnv(pendingStartId: string): Extract<ServerMsg, { type: 'session_start_gated' }> {
   return {
     type: 'session_start_gated',
@@ -108,6 +119,26 @@ describe('GateModalsProvider — enqueue + render', () => {
     const dialog = container.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
     expect(dialog?.getAttribute('aria-labelledby')).toBe('mcp-tofu-title-pid-1');
+  });
+
+  test('enqueuing a bus pending surfaces the BusTofuModal', () => {
+    // Cluster G Phase 4 (D6/D11): the third gate variant. Same one-modal-
+    // at-a-time policy as mcp/env; the bus arm uses `bus:<pendingId>` as
+    // its dedupe/dismiss key.
+    const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
+    act(() => {
+      root.render(
+        <GateModalsProvider send={() => {}}>
+          <ActionsExposer actionsRef={actionsRef} />
+        </GateModalsProvider>,
+      );
+    });
+    act(() => {
+      actionsRef.current!.enqueue(mkBus('bus-pid-1'));
+    });
+    const dialog = container.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.getAttribute('aria-labelledby')).toBe('bus-tofu-title-bus-pid-1');
   });
 
   test('enqueuing an env pending surfaces the EnvInjectionGateModal', () => {
@@ -215,6 +246,30 @@ describe('GateModalsProvider — handlerRef bridge', () => {
       handlerRef.current!(mkMcp('pid-from-ws'));
     });
     expect(stateRef.current?.queue).toHaveLength(1);
+  });
+
+  test('bus_auto_install_pending ServerMsgs route through the bridge', () => {
+    // Cluster G Phase 4 (D6/D11): App.tsx's onMessage feeds every
+    // ServerMsg through `gateHandlerRef.current`; the provider's
+    // bridge filter must include the bus variant. Without this, the
+    // server's first-seen prompt would arrive but no modal would mount.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const stateRef = { current: null as ReturnType<typeof useGateModalsState> | null };
+    const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
+    act(() => {
+      root.render(
+        <GateModalsProvider send={() => {}} handlerRef={handlerRef}>
+          <ActionsExposer actionsRef={actionsRef} stateRef={stateRef} />
+        </GateModalsProvider>,
+      );
+    });
+    act(() => {
+      handlerRef.current!(mkBus('bus-from-ws'));
+    });
+    expect(stateRef.current?.queue).toHaveLength(1);
+    expect(container.querySelector('[role="dialog"]')?.getAttribute('aria-labelledby')).toBe(
+      'bus-tofu-title-bus-from-ws',
+    );
   });
 
   test('non-gate ServerMsgs are silently ignored by the bridge', () => {
