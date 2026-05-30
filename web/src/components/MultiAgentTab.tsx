@@ -24,6 +24,7 @@ import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalSurface } from '../useModalSurface';
 import { AgentTag } from './AgentTag';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
+import { useArtifactContentBridge } from './ArtifactContentContext';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
 import { HopBudgetInput } from './HopBudgetInput';
@@ -2145,11 +2146,7 @@ function SessionSettingsPanel(props: {
           <>
             <dt>Artifacts</dt>
             <dd>
-              <ArtifactsDisclosure
-                run={run}
-                send={props.send}
-                subscribeServerMsg={props.subscribeServerMsg}
-              />
+              <ArtifactsDisclosure run={run} />
             </dd>
           </>
         )}
@@ -2926,13 +2923,13 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
  * Routing trail; caller (`SessionSettingsPanel`) only renders the row when
  * `groupArtifacts(run.mutations).length > 0`.
  */
-function ArtifactsDisclosure(props: {
-  run: MultiAgentRun;
-  send: (msg: ClientMsg) => void;
-  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
-}) {
+function ArtifactsDisclosure(props: { run: MultiAgentRun }) {
   const [open, setOpen] = useState(false);
   const count = groupArtifacts(props.run.mutations).length;
+  // Cluster I H3 UI: the WS send + side-channel subscribe for the lazy content
+  // disclosure ride a context bridge (App mounts <ArtifactContentProvider>),
+  // not props — this wrapper sits four typed-callback layers below MultiAgentTab.
+  const { send, subscribeServerMsg } = useArtifactContentBridge();
   return (
     <>
       <button
@@ -2945,11 +2942,7 @@ function ArtifactsDisclosure(props: {
         {open ? '▾' : '▸'} {count} artifact{count === 1 ? '' : 's'}
       </button>
       {open && (
-        <ArtifactsView
-          run={props.run}
-          send={props.send}
-          subscribeServerMsg={props.subscribeServerMsg}
-        />
+        <ArtifactsView run={props.run} send={send} subscribeServerMsg={subscribeServerMsg} />
       )}
     </>
   );
