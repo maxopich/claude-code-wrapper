@@ -128,4 +128,58 @@ describe('useArtifactContent', () => {
     expect(latest.status).toBe('loading');
     expect(latest.error).toBeUndefined();
   });
+
+  // Cebab Security Reviewer (PR #193): confirm the subscribe effect's cleanup
+  // ALWAYS fires — every `subscribeServerMsg(cb)` is paired 1:1 with its
+  // returned unsubscribe, so neither an unmount nor a remount loop (mutationId
+  // churn → effect re-run) can leak `artifact_content` listeners. Self-contained
+  // root so the live-subscription count is asserted directly, independent of the
+  // shared harness.
+  test('[security] subscribe/unsubscribe are paired across remounts + unmount (no listener leak)', () => {
+    let subs = 0;
+    let unsubs = 0;
+    const c = document.createElement('div');
+    document.body.appendChild(c);
+    let r!: Root;
+    act(() => {
+      r = createRoot(c);
+    });
+
+    function Probe({ id }: { id: number }) {
+      useArtifactContent({
+        mutationId: id,
+        send: () => {},
+        subscribeServerMsg: () => {
+          subs++;
+          return () => {
+            unsubs++;
+          };
+        },
+      });
+      return null;
+    }
+
+    act(() => {
+      r.render(createElement(Probe, { id: 1 }));
+    });
+    expect(subs - unsubs).toBe(1); // exactly one live subscription after mount
+
+    // The reviewer's "remount loop": each mutationId change re-runs the effect.
+    // The old subscription must be cleaned up before the new one is added, so
+    // the live count never climbs past one.
+    for (const id of [2, 3, 4, 5]) {
+      act(() => {
+        r.render(createElement(Probe, { id }));
+      });
+      expect(subs - unsubs).toBe(1);
+    }
+    expect(subs).toBe(5); // mount + 4 churns
+
+    act(() => {
+      r.unmount();
+    });
+    expect(subs - unsubs).toBe(0); // unmount cleaned up the last → zero leaked
+    expect(unsubs).toBe(5);
+    c.remove();
+  });
 });
