@@ -2620,6 +2620,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // the discriminated union exhaustive until that UI slice lands.
       return state;
 
+    case 'artifact_content':
+      // Cluster I Phase H3 backend: the `get_artifact_content` reply. The H3
+      // UI slice (ArtifactsView "▸ View latest content" disclosure) owns
+      // consumption via the `subscribeServerMsg` side-channel, keyed on
+      // `mutationId` — same modal-local, lazily-fetched posture as
+      // `search_results` / `session_log_chunk`. Routing it through the main
+      // store would churn the tree for a per-row disclosure that's collapsed
+      // most of the time. Reducer no-op keeps the union exhaustive until that
+      // UI slice lands.
+      return state;
+
     case 'bulk_session_op_result': {
       // Cluster I Phase C5 UI: the server has archived or soft-deleted the
       // `succeededSessionIds`. Drop them from every per-project cache so the
