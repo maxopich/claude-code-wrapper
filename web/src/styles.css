@@ -5248,6 +5248,88 @@ pre {
   font-style: italic;
 }
 
+/* Cluster I Phase H3 UI: lazy "▸ View latest content" disclosure. */
+.artifact-content {
+  margin-top: var(--s-2);
+}
+
+.artifact-content-toggle {
+  font-size: var(--t-sm);
+}
+
+.artifact-content-body {
+  margin-top: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.artifact-content-hint {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+}
+
+.artifact-content-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+
+.artifact-content-redacted {
+  padding: 0 var(--s-1);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.artifact-content-truncated {
+  color: var(--fg-3);
+  font-style: italic;
+}
+
+.artifact-content-pre {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--s-2);
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-1);
+}
+
+.artifact-content-error {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--err);
+}
+
+.artifact-content-error p {
+  margin: 0;
+}
+
+.artifact-content-diff-btn {
+  align-self: flex-start;
+  font-size: var(--t-sm);
+}
+
+.artifact-content-diff-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Working files — collapsed disclosure inside the Session info grid.
  *  The triangle glyph comes from the React component itself; the
  *  ::-webkit-details-marker reset just hides the browser default. */

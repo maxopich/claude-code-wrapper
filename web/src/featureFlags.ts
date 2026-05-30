@@ -22,3 +22,14 @@
  * caller exists, and that is deliberate.
  */
 export const ENABLE_CUSTOM_MODE_PICKER: boolean = import.meta.env.DEV;
+
+/**
+ * Cluster I Phase H3 UI (UI_Findings spec §6 / H3-5): gates the "Diff against
+ * previous edit" affordance in the ArtifactsView content disclosure. OFF for
+ * v1 — Cebab captures NO pre-mutation snapshot (spec §2 / OQ-I5), so a real
+ * diff is impossible today. With it off the affordance renders DISABLED with an
+ * explanatory tooltip; flipping it to `true` is the v2 entry point once
+ * pre-image capture lands. A plain `false` (not `import.meta.env`-derived) — it
+ * gates a permanently-unbuilt feature, not a dev-only preview.
+ */
+export const FEATURE_ARTIFACT_DIFF_V2 = false;

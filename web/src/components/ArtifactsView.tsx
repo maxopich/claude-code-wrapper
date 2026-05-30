@@ -25,7 +25,7 @@
 import { useMemo, useState } from 'react';
 import { logsHashFor } from './sessionLog/logsHash';
 import { AgentTag } from './AgentTag';
-import { ARTIFACT_DIFF_V2 } from '../featureFlags';
+import { FEATURE_ARTIFACT_DIFF_V2 } from '../featureFlags';
 import { useArtifactContent } from '../useArtifactContent';
 import type { MultiAgentRun } from '../store';
 import type {
@@ -293,9 +293,9 @@ function ArtifactContentDisclosure(props: {
           <button
             type="button"
             className="ghost-btn artifact-content-diff-btn"
-            disabled={!ARTIFACT_DIFF_V2}
+            disabled={!FEATURE_ARTIFACT_DIFF_V2}
             title={
-              ARTIFACT_DIFF_V2
+              FEATURE_ARTIFACT_DIFF_V2
                 ? 'Diff this artifact against its previous edit'
                 : 'Diff requires a pre-mutation snapshot; coming in v2.'
             }
