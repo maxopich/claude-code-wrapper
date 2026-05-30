@@ -129,12 +129,12 @@ describe('useArtifactContent', () => {
     expect(latest.error).toBeUndefined();
   });
 
-  // Cebab Security Reviewer (PR #193): confirm the subscribe effect's cleanup
-  // ALWAYS fires — every `subscribeServerMsg(cb)` is paired 1:1 with its
-  // returned unsubscribe, so neither an unmount nor a remount loop (mutationId
-  // churn → effect re-run) can leak `artifact_content` listeners. Self-contained
-  // root so the live-subscription count is asserted directly, independent of the
-  // shared harness.
+  // Defensive coverage: confirm the subscribe effect's cleanup ALWAYS fires —
+  // every `subscribeServerMsg(cb)` is paired 1:1 with its returned unsubscribe,
+  // so neither an unmount nor a remount loop (mutationId churn → effect re-run)
+  // can leak `artifact_content` listeners. Self-contained root so the
+  // live-subscription count is asserted directly, independent of the shared
+  // harness.
   test('[security] subscribe/unsubscribe are paired across remounts + unmount (no listener leak)', () => {
     let subs = 0;
     let unsubs = 0;
