@@ -2145,7 +2145,11 @@ function SessionSettingsPanel(props: {
           <>
             <dt>Artifacts</dt>
             <dd>
-              <ArtifactsDisclosure run={run} />
+              <ArtifactsDisclosure
+                run={run}
+                send={props.send}
+                subscribeServerMsg={props.subscribeServerMsg}
+              />
             </dd>
           </>
         )}
@@ -2922,7 +2926,11 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
  * Routing trail; caller (`SessionSettingsPanel`) only renders the row when
  * `groupArtifacts(run.mutations).length > 0`.
  */
-function ArtifactsDisclosure(props: { run: MultiAgentRun }) {
+function ArtifactsDisclosure(props: {
+  run: MultiAgentRun;
+  send: (msg: ClientMsg) => void;
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+}) {
   const [open, setOpen] = useState(false);
   const count = groupArtifacts(props.run.mutations).length;
   return (
@@ -2936,7 +2944,13 @@ function ArtifactsDisclosure(props: { run: MultiAgentRun }) {
       >
         {open ? '▾' : '▸'} {count} artifact{count === 1 ? '' : 's'}
       </button>
-      {open && <ArtifactsView run={props.run} />}
+      {open && (
+        <ArtifactsView
+          run={props.run}
+          send={props.send}
+          subscribeServerMsg={props.subscribeServerMsg}
+        />
+      )}
     </>
   );
 }
