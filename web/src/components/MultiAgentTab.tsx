@@ -24,6 +24,7 @@ import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalSurface } from '../useModalSurface';
 import { AgentTag } from './AgentTag';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
+import { useArtifactContentBridge } from './ArtifactContentContext';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
 import { HopBudgetInput } from './HopBudgetInput';
@@ -2925,6 +2926,10 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
 function ArtifactsDisclosure(props: { run: MultiAgentRun }) {
   const [open, setOpen] = useState(false);
   const count = groupArtifacts(props.run.mutations).length;
+  // Cluster I H3 UI: the WS send + side-channel subscribe for the lazy content
+  // disclosure ride a context bridge (App mounts <ArtifactContentProvider>),
+  // not props — this wrapper sits four typed-callback layers below MultiAgentTab.
+  const { send, subscribeServerMsg } = useArtifactContentBridge();
   return (
     <>
       <button
@@ -2936,7 +2941,9 @@ function ArtifactsDisclosure(props: { run: MultiAgentRun }) {
       >
         {open ? '▾' : '▸'} {count} artifact{count === 1 ? '' : 's'}
       </button>
-      {open && <ArtifactsView run={props.run} />}
+      {open && (
+        <ArtifactsView run={props.run} send={send} subscribeServerMsg={subscribeServerMsg} />
+      )}
     </>
   );
 }

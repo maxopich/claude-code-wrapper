@@ -14,15 +14,26 @@
  * panel via `WorkingFiles`. The split is privacy-by-default: an `.env`
  * write or a node_modules touch shouldn't bubble up as a deliverable.
  *
- * Preview pane is intentionally metadata-only for v1: we DO NOT load
- * file contents into the browser without an explicit click. Screenshots
- * leak.
+ * Preview pane stays metadata-first: the file body is NEVER auto-loaded on
+ * row select. Cluster I H3 adds an opt-in "▸ View latest content" disclosure
+ * (preserving that lazy posture, H3-2 / R-I6) that fetches the current on-disk
+ * content only on explicit open, via `get_artifact_content` — server-redacted
+ * (H3-3) and capped at 1 MB (H3-4). A real diff against a pre-mutation snapshot
+ * is v2 (Cebab captures no pre-image today, spec §2 / OQ-I5); the "Diff against
+ * previous edit" affordance is scaffolded but disabled behind `ARTIFACT_DIFF_V2`.
  */
 import { useMemo, useState } from 'react';
 import { logsHashFor } from './sessionLog/logsHash';
 import { AgentTag } from './AgentTag';
+import { FEATURE_ARTIFACT_DIFF_V2 } from '../featureFlags';
+import { useArtifactContent } from '../useArtifactContent';
 import type { MultiAgentRun } from '../store';
-import type { MultiAgentMutationView } from '@cebab/shared/protocol';
+import type {
+  ArtifactContentError,
+  ClientMsg,
+  MultiAgentMutationView,
+  ServerMsg,
+} from '@cebab/shared/protocol';
 
 type ArtifactGroup = {
   filePath: string;
@@ -74,7 +85,13 @@ function fileType(path: string): string {
     .slice(0, 6);
 }
 
-export function ArtifactsView(props: { run: MultiAgentRun }) {
+export function ArtifactsView(props: {
+  run: MultiAgentRun;
+  /** WS send — used by the lazy content disclosure (`get_artifact_content`). */
+  send: (msg: ClientMsg) => void;
+  /** Side-channel subscribe — the `artifact_content` reply lands here. */
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+}) {
   const groups = useMemo(() => groupArtifacts(props.run.mutations), [props.run.mutations]);
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -185,12 +202,131 @@ export function ArtifactsView(props: { run: MultiAgentRun }) {
               <code>{selectedGroup.authoringAgent}</code> · last touch{' '}
               {formatTs(selectedGroup.latest.ts)}
             </p>
-            <p className="artifacts-preview-note">
-              File contents are not auto-loaded — open the file from disk to inspect.
-            </p>
+            <ArtifactContentDisclosure
+              key={selectedGroup.latest.id}
+              mutationId={selectedGroup.latest.id}
+              send={props.send}
+              subscribeServerMsg={props.subscribeServerMsg}
+            />
           </div>
         </aside>
       )}
     </div>
   );
+}
+
+/**
+ * Cluster I Phase H3 UI: the per-artifact "▸ View latest content" disclosure
+ * inside the preview aside. Lazy + opt-in (H3-2): nothing is fetched until the
+ * operator expands it. The parent keys this by `mutationId`, so selecting a
+ * different artifact remounts it collapsed + idle — no auto-fetch on select.
+ */
+function ArtifactContentDisclosure(props: {
+  mutationId: number;
+  send: (msg: ClientMsg) => void;
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const { status, content, size, truncated, redactedFields, error, load } = useArtifactContent({
+    mutationId: props.mutationId,
+    send: props.send,
+    subscribeServerMsg: props.subscribeServerMsg,
+  });
+
+  function toggle() {
+    setOpen((wasOpen) => {
+      const next = !wasOpen;
+      // Lazy: fetch on the FIRST open only (status leaves 'idle' once we ask).
+      if (next && status === 'idle') load();
+      return next;
+    });
+  }
+
+  return (
+    <div className="artifact-content">
+      <button
+        type="button"
+        className="ghost-btn artifact-content-toggle"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        {open ? '▾' : '▸'} View latest content
+      </button>
+
+      {open && (
+        <div className="artifact-content-body">
+          {status === 'loading' && <p className="artifact-content-hint">Loading…</p>}
+
+          {status === 'error' && (
+            <div className="artifact-content-error" role="alert">
+              <p>{describeArtifactError(error)}</p>
+              <button type="button" className="ghost-btn" onClick={load}>
+                Retry
+              </button>
+            </div>
+          )}
+
+          {status === 'loaded' && (
+            <>
+              <div className="artifact-content-meta">
+                <span className="artifact-content-size">{formatBytes(size)}</span>
+                {redactedFields.length > 0 && (
+                  <span
+                    className="artifact-content-redacted"
+                    title="Sensitive content was masked before display"
+                  >
+                    redacted
+                  </span>
+                )}
+                {truncated && (
+                  <span className="artifact-content-truncated">first 1 MB — file is larger</span>
+                )}
+              </div>
+              <pre className="artifact-content-pre">{content}</pre>
+            </>
+          )}
+
+          {/* v2 scaffold (H3-5): a real diff needs a pre-mutation snapshot Cebab
+              doesn't capture yet (spec §2 / OQ-I5). Disabled behind the flag;
+              when enabled it would render a <pre className="permission-diff">
+              with <del>/<ins>, reusing PermissionCards' diff styling. */}
+          <button
+            type="button"
+            className="ghost-btn artifact-content-diff-btn"
+            disabled={!FEATURE_ARTIFACT_DIFF_V2}
+            title={
+              FEATURE_ARTIFACT_DIFF_V2
+                ? 'Diff this artifact against its previous edit'
+                : 'Diff requires a pre-mutation snapshot; coming in v2.'
+            }
+          >
+            ⇄ Diff against previous edit
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Human label for a failed content read (`artifact_content.error`). */
+function describeArtifactError(error: ArtifactContentError | undefined): string {
+  switch (error) {
+    case 'mutation_not_found':
+      return "Couldn't find this artifact's record — the session may have been purged.";
+    case 'no_file_path':
+      return 'This mutation has no single file to preview.';
+    case 'not_a_file':
+      return 'That path is no longer a regular file.';
+    case 'read_failed':
+      return "Couldn't read the file — it may have been moved or deleted since.";
+    default:
+      return "Couldn't load the file content.";
+  }
+}
+
+/** Compact byte size for the content meta line. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

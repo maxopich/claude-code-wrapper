@@ -30,6 +30,7 @@ import { logsHashFor } from './components/sessionLog/logsHash';
 import { SettingsModal } from './components/SettingsModal';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { SessionSearchModal } from './components/SessionSearchModal';
+import { ArtifactContentProvider } from './components/ArtifactContentContext';
 import { SHORTCUTS } from './shortcutRegistry';
 import { findShortcut, useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
@@ -2276,52 +2277,57 @@ function AppShell({
                 />
               </>
             ) : (
-              <MultiAgentTab
-                mode={view === 'chained-chat' ? 'chain' : 'orchestrator'}
-                projects={state.projects}
-                lastBusInstallAt={state.lastBusInstallAt}
-                multiAgent={state.multiAgent}
-                onSetLifecycle={setMultiAgentLifecycle}
-                onAddParticipant={addParticipant}
-                onRemoveParticipant={removeParticipant}
-                onReorderParticipant={reorderParticipant}
-                onInstallBus={installBus}
-                onUninstallBus={uninstallBus}
-                onSetDraftPrompt={setDraftPrompt}
-                onStart={view === 'chained-chat' ? startChain : startOrchestrator}
-                onStopMultiAgent={stopMultiAgent}
-                onResumeSession={resumeSession}
-                wrapperErrorSeq={state.wrapperErrorSeq}
-                onSendUserPrompt={sendMultiAgentUserPrompt}
-                onContinueMultiAgent={continueMultiAgent}
-                onRetryWorker={retryWorker}
-                onAbandonSession={abandonSession}
-                onArchiveSession={archiveSession}
-                onContinueThroughMutation={continueThroughMutation}
-                onClearAutoRetry={clearAutoRetry}
-                onSetDraftPauseOnMutation={setDraftPauseOnMutation}
-                onSetDraftHopBudget={setDraftHopBudget}
-                defaultHopBudget={state.settings?.defaultHopBudget ?? null}
-                onSetActiveLifecycle={setActiveLifecycle}
-                onAddActiveParticipant={addActiveParticipant}
-                onMuteParticipant={muteParticipant}
-                onUnmuteParticipant={unmuteParticipant}
-                onPauseParticipant={pauseParticipant}
-                onResumeParticipant={resumeParticipant}
-                onKickParticipant={kickParticipant}
-                onDismissActive={dismissActiveRun}
-                onRefreshIterations={refreshIterations}
-                onClearIterations={clearIterations}
-                onRefreshTemplates={refreshTemplates}
-                onSaveTemplate={saveTemplate}
-                onUpdateTemplateRoles={updateTemplateRoles}
-                onDeleteTemplate={deleteTemplate}
-                onApplyTemplate={applyTemplate}
-                onLoadSessionLog={loadSessionLog}
+              <ArtifactContentProvider
+                send={(m) => wsRef.current?.send(m)}
                 subscribeServerMsg={subscribeServerMsg}
-                onReadProjectFacts={readProjectFacts}
-                onReadLastRunForTemplate={readLastRunForTemplate}
-              />
+              >
+                <MultiAgentTab
+                  mode={view === 'chained-chat' ? 'chain' : 'orchestrator'}
+                  projects={state.projects}
+                  lastBusInstallAt={state.lastBusInstallAt}
+                  multiAgent={state.multiAgent}
+                  onSetLifecycle={setMultiAgentLifecycle}
+                  onAddParticipant={addParticipant}
+                  onRemoveParticipant={removeParticipant}
+                  onReorderParticipant={reorderParticipant}
+                  onInstallBus={installBus}
+                  onUninstallBus={uninstallBus}
+                  onSetDraftPrompt={setDraftPrompt}
+                  onStart={view === 'chained-chat' ? startChain : startOrchestrator}
+                  onStopMultiAgent={stopMultiAgent}
+                  onResumeSession={resumeSession}
+                  wrapperErrorSeq={state.wrapperErrorSeq}
+                  onSendUserPrompt={sendMultiAgentUserPrompt}
+                  onContinueMultiAgent={continueMultiAgent}
+                  onRetryWorker={retryWorker}
+                  onAbandonSession={abandonSession}
+                  onArchiveSession={archiveSession}
+                  onContinueThroughMutation={continueThroughMutation}
+                  onClearAutoRetry={clearAutoRetry}
+                  onSetDraftPauseOnMutation={setDraftPauseOnMutation}
+                  onSetDraftHopBudget={setDraftHopBudget}
+                  defaultHopBudget={state.settings?.defaultHopBudget ?? null}
+                  onSetActiveLifecycle={setActiveLifecycle}
+                  onAddActiveParticipant={addActiveParticipant}
+                  onMuteParticipant={muteParticipant}
+                  onUnmuteParticipant={unmuteParticipant}
+                  onPauseParticipant={pauseParticipant}
+                  onResumeParticipant={resumeParticipant}
+                  onKickParticipant={kickParticipant}
+                  onDismissActive={dismissActiveRun}
+                  onRefreshIterations={refreshIterations}
+                  onClearIterations={clearIterations}
+                  onRefreshTemplates={refreshTemplates}
+                  onSaveTemplate={saveTemplate}
+                  onUpdateTemplateRoles={updateTemplateRoles}
+                  onDeleteTemplate={deleteTemplate}
+                  onApplyTemplate={applyTemplate}
+                  onLoadSessionLog={loadSessionLog}
+                  subscribeServerMsg={subscribeServerMsg}
+                  onReadProjectFacts={readProjectFacts}
+                  onReadLastRunForTemplate={readLastRunForTemplate}
+                />
+              </ArtifactContentProvider>
             )}
           </>
         )}

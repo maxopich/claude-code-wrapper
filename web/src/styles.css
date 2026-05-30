@@ -26,7 +26,7 @@
   --fg-3: #7a818e;
   /* Borders — soft, layered */
   --line-1: rgba(255, 255, 255, 0.07);
-  --line-2: rgba(255, 255, 255, 0.10);
+  --line-2: rgba(255, 255, 255, 0.1);
   --line-3: rgba(255, 255, 255, 0.13);
   /* Action accent — teal (NOT coral; coral is brand-mark only) */
   --accent: #2fb6c4;
@@ -67,12 +67,12 @@
    * annotations adjacent to a ≥11 px label, and are exempted from
    * the rem ramp. Do not bulk-replace with var(--t-xs); audit per
    * site if you intend to revisit. */
-  --t-xs: 0.6875rem;   /* 11 */
-  --t-sm: 0.75rem;     /* 12 */
-  --t-md: 0.8125rem;   /* 13 */
-  --t-lg: 0.875rem;    /* 14 */
-  --t-xl: clamp(0.9375rem, 0.85rem + 0.25vw, 1.0625rem);  /* 15→17 */
-  --t-2xl: clamp(1.125rem, 0.95rem + 0.6vw, 1.375rem);    /* 18→22 */
+  --t-xs: 0.6875rem; /* 11 */
+  --t-sm: 0.75rem; /* 12 */
+  --t-md: 0.8125rem; /* 13 */
+  --t-lg: 0.875rem; /* 14 */
+  --t-xl: clamp(0.9375rem, 0.85rem + 0.25vw, 1.0625rem); /* 15→17 */
+  --t-2xl: clamp(1.125rem, 0.95rem + 0.6vw, 1.375rem); /* 18→22 */
   /* PR-4: template-preview typography mirror. Used by HTML elements
    * around the SVG (panel rows, modal subtitle). SVG <text> reads
    * numeric values from `templatePreview/tokens.ts` — kept in sync.
@@ -84,14 +84,14 @@
   --tpl-fs-hub: var(--t-md);
   --tpl-fs-slug: var(--t-xs);
   /* Spacing — rem-based (1rem = 16px assumed) */
-  --s-1: 0.25rem;   /* 4 */
-  --s-2: 0.5rem;    /* 8 */
-  --s-3: 0.75rem;   /* 12 */
-  --s-4: 1rem;      /* 16 */
-  --s-5: 1.25rem;   /* 20 */
-  --s-6: 1.5rem;    /* 24 */
-  --s-8: 2rem;      /* 32 */
-  --s-10: 2.5rem;   /* 40 */
+  --s-1: 0.25rem; /* 4 */
+  --s-2: 0.5rem; /* 8 */
+  --s-3: 0.75rem; /* 12 */
+  --s-4: 1rem; /* 16 */
+  --s-5: 1.25rem; /* 20 */
+  --s-6: 1.5rem; /* 24 */
+  --s-8: 2rem; /* 32 */
+  --s-10: 2.5rem; /* 40 */
   /* Radii */
   --r-sm: 4px;
   --r-md: 6px;
@@ -1217,8 +1217,9 @@ pre {
    * variants (UI-1: same DOM node, focus survives the swap, but the
    * visual switch shouldn't pop). prefers-reduced-motion override
    * below kills the transition for accessibility (UI-8). */
-  transition: opacity var(--dur-1, 120ms) ease,
-              background-color var(--dur-1, 120ms) ease;
+  transition:
+    opacity var(--dur-1, 120ms) ease,
+    background-color var(--dur-1, 120ms) ease;
 }
 .input-box button:hover:not(:disabled) {
   background: var(--accent-2);
@@ -5248,6 +5249,88 @@ pre {
   font-style: italic;
 }
 
+/* Cluster I Phase H3 UI: lazy "▸ View latest content" disclosure. */
+.artifact-content {
+  margin-top: var(--s-2);
+}
+
+.artifact-content-toggle {
+  font-size: var(--t-sm);
+}
+
+.artifact-content-body {
+  margin-top: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.artifact-content-hint {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+}
+
+.artifact-content-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+
+.artifact-content-redacted {
+  padding: 0 var(--s-1);
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  color: var(--warn);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.artifact-content-truncated {
+  color: var(--fg-3);
+  font-style: italic;
+}
+
+.artifact-content-pre {
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: var(--s-2);
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-1);
+}
+
+.artifact-content-error {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-sm);
+  color: var(--err);
+}
+
+.artifact-content-error p {
+  margin: 0;
+}
+
+.artifact-content-diff-btn {
+  align-self: flex-start;
+  font-size: var(--t-sm);
+}
+
+.artifact-content-diff-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Working files — collapsed disclosure inside the Session info grid.
  *  The triangle glyph comes from the React component itself; the
  *  ::-webkit-details-marker reset just hides the browser default. */
@@ -7912,7 +7995,9 @@ pre {
   margin-left: auto;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 120ms ease, color 120ms ease;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease;
 }
 .session-row:hover .session-row-authority-btn,
 .session-row-authority-btn:focus-visible {
@@ -9471,8 +9556,7 @@ pre {
    * hue — operator can distinguish from agent-0 even at low color
    * acuity by the pattern alone. Each stripe pair is 12px so the
    * diagonal reads as texture, not just two parallel bands. */
-  background:
-    repeating-linear-gradient(45deg, var(--err) 0 6px, var(--err-soft) 6px 12px);
+  background: repeating-linear-gradient(45deg, var(--err) 0 6px, var(--err-soft) 6px 12px);
   color: #fff;
   /* Subtle text outline so MOCK stays legible across the lighter
    * stripes. text-shadow keeps SR text rendering intact. */
@@ -9770,7 +9854,6 @@ pre {
     animation: none;
   }
 }
-
 
 /* ── Cluster I C4 UI: SessionSearchModal (Cmd/Ctrl+P) ──────────────────────
    Command-palette-style overlay: top-aligned (not centered) so the input sits

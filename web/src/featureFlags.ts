@@ -22,3 +22,22 @@
  * caller exists, and that is deliberate.
  */
 export const ENABLE_CUSTOM_MODE_PICKER: boolean = import.meta.env.DEV;
+
+/**
+ * Cluster I Phase H3 UI (UI_Findings spec §6 / H3-5): gates the "Diff against
+ * previous edit" affordance in the ArtifactsView content disclosure. OFF for
+ * v1 — Cebab captures NO pre-mutation snapshot (spec §2 / OQ-I5), so a real
+ * diff is impossible today. With it off the affordance renders DISABLED with an
+ * explanatory tooltip; the v2 entry point is to set `VITE_ARTIFACT_DIFF_V2=1`
+ * (or hardcode `true` here) once pre-image capture lands.
+ *
+ * Derived from an env read rather than a bare `false` ON PURPOSE: a literal
+ * `const X = false` makes every `!X` / `X ? … : …` a provably-constant branch,
+ * which CodeQL flags as `js/trivial-conditional` ("always evaluates to false").
+ * Reading `import.meta.env` makes the value non-constant to that analysis (the
+ * same reason `ENABLE_CUSTOM_MODE_PICKER` above reads `import.meta.env.DEV`),
+ * while still resolving to `false` everywhere the var is unset — which is
+ * everywhere in v1, including Vitest (`import.meta.env.VITE_ARTIFACT_DIFF_V2`
+ * is `undefined` → `=== '1'` is `false`).
+ */
+export const FEATURE_ARTIFACT_DIFF_V2: boolean = import.meta.env.VITE_ARTIFACT_DIFF_V2 === '1';
