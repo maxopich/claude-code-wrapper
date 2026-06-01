@@ -172,6 +172,15 @@ export type MutationRecord = {
    *  for rows from pre-022 sessions. Surfaced through to the wire view
    *  so `MutationsDisclosure` can render the rationale tooltip. */
   classifierReason: BashClassifierReason | null;
+  /** Migration 026: full tool input (the args the agent ran), parsed from
+   *  JSON and captured at append time. Capped (~64 KB) at the storage
+   *  boundary — over-cap values become `{ truncated, bytes, preview }`. NULL
+   *  for pre-026 rows. Surfaced in the Logs drawer (not the Mutations panel). */
+  toolInput: unknown;
+  /** Migration 026: full tool result/output, parsed from JSON. Written when
+   *  the matching `tool_result` lands (same UPDATE that flips `confirmedAt`).
+   *  Same cap. NULL until the result arrives / for pre-026 rows. */
+  toolResult: unknown;
 };
 
 export type MultiAgentMutationRow = {
@@ -195,6 +204,9 @@ export type MultiAgentMutationRow = {
   // Migration 022 — JSON-encoded BashClassifierReason; NULL for non-Bash
   // mutations and pre-022 rows.
   classifier_reason_json: string | null;
+  // Migration 026 — full tool input/output JSON; NULL for pre-026 rows.
+  tool_input_json: string | null;
+  tool_result_json: string | null;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -480,6 +492,10 @@ function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
     // value, schema drift) are swallowed → NULL: the rationale tooltip
     // is informational, never a correctness-critical signal.
     classifierReason: parseClassifierReason(row.classifier_reason_json),
+    // Migration 026 — full tool input/output. Tolerant parse (raw string on a
+    // malformed value) keeps the projector total.
+    toolInput: parseToolIoJson(row.tool_input_json),
+    toolResult: parseToolIoJson(row.tool_result_json),
   };
 }
 
@@ -496,17 +512,65 @@ function parseClassifierReason(json: string | null): BashClassifierReason | null
     const parsed = JSON.parse(json) as unknown;
     if (parsed && typeof parsed === 'object') {
       const o = parsed as Record<string, unknown>;
-      if (typeof o.rule === 'string' && typeof o.detail === 'string' && typeof o.matched === 'string') {
+      if (
+        typeof o.rule === 'string' &&
+        typeof o.detail === 'string' &&
+        typeof o.matched === 'string'
+      ) {
         // Cast: BashClassifierRule is a string union, and the projector
         // doesn't need to validate the rule against the live enum —
         // protocol carries it as plain `string` deliberately.
-        return { rule: o.rule as BashClassifierReason['rule'], detail: o.detail, matched: o.matched };
+        return {
+          rule: o.rule as BashClassifierReason['rule'],
+          detail: o.detail,
+          matched: o.matched,
+        };
       }
     }
   } catch {
     // fall through to NULL
   }
   return null;
+}
+
+/**
+ * Migration 026: serialize a tool input/result for storage, capping the JSON
+ * at ~64 KB so one pathological row (a huge Write `content`, a big command
+ * output) can't blow the WS-frame budget the log projector pages against.
+ * Over-cap values are replaced by a `{ truncated, bytes, preview }` envelope
+ * (preview = first 8 KB). Returns NULL for nullish input or an unserializable
+ * value (a cyclic structure throws → drop it rather than fail the write).
+ */
+const TOOL_IO_CAP_BYTES = 64 * 1024;
+export function capToolIoJson(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    return null;
+  }
+  if (json === undefined) return null;
+  if (json.length <= TOOL_IO_CAP_BYTES) return json;
+  return JSON.stringify({
+    truncated: true,
+    bytes: json.length,
+    preview: json.slice(0, 8 * 1024),
+  });
+}
+
+/**
+ * Tolerant inverse of `capToolIoJson`. Parses the stored JSON back to its
+ * value; on a malformed row (hand-edited, schema drift) returns the raw string
+ * rather than null so the drawer still shows *something*. NULL column → null.
+ */
+function parseToolIoJson(json: string | null): unknown {
+  if (json === null) return null;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return json;
+  }
 }
 
 /**
@@ -545,6 +609,11 @@ export function appendMultiAgentMutation(
      *  mutations (the tool name is the rationale). JSON-encoded at the
      *  storage boundary; the projector parses it back. */
     classifierReason?: BashClassifierReason | null;
+    /** Migration 026: the full `tool_use.input` for this call. Capped at the
+     *  storage boundary (`capToolIoJson`). Undefined → column NULL. The
+     *  matching result/output is written later by
+     *  `confirmMutationByToolUseId`. */
+    toolInput?: unknown;
   },
 ): MutationRecord {
   const ts = Date.now();
@@ -554,8 +623,8 @@ export function appendMultiAgentMutation(
          (session_id, ts, agent_name, tool_name, category, summary,
           file_path, cwd, tool_use_id,
           guardrail_violation_path, guardrail_reason,
-          classifier_reason_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          classifier_reason_json, tool_input_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       sessionId,
@@ -570,6 +639,7 @@ export function appendMultiAgentMutation(
       extra.guardrailViolationPath ?? null,
       extra.guardrailReason ?? null,
       extra.classifierReason ? JSON.stringify(extra.classifierReason) : null,
+      capToolIoJson(extra.toolInput),
     );
   const row = getDb()
     .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')
@@ -590,15 +660,21 @@ export function appendMultiAgentMutation(
 export function confirmMutationByToolUseId(
   sessionId: string,
   toolUseId: string,
+  // Migration 026: the matching `tool_result.content`. Persisted in the same
+  // UPDATE that flips `confirmed_at` (COALESCE so a nullish result never
+  // clobbers a value an earlier call already wrote). Undefined → unchanged.
+  result?: unknown,
 ): MutationRecord | null {
   const now = Date.now();
+  const resultJson = result === undefined ? null : capToolIoJson(result);
   const info = getDb()
     .prepare(
       `UPDATE multi_agent_mutations
-          SET confirmed_at = ?
+          SET confirmed_at = ?,
+              tool_result_json = COALESCE(?, tool_result_json)
         WHERE session_id = ? AND tool_use_id = ? AND confirmed_at IS NULL`,
     )
-    .run(now, sessionId, toolUseId);
+    .run(now, resultJson, sessionId, toolUseId);
   if (info.changes === 0) {
     // Either no row (not a classified mutation, or pre-012) or already
     // confirmed. Fetch any matching row so an already-confirmed row still

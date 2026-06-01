@@ -743,6 +743,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         filePath: cls.filePath ?? null,
         cwd,
         toolUseId: cls.toolUseId ?? null,
+        // Migration 026: persist the full tool input (capped in the repo) so
+        // the Logs drawer can show the complete command/args.
+        toolInput: cls.toolInput,
         // Cluster F Phase D5+: persist the guardrail-violation verdict
         // alongside the mutation (mirrors orchestrator.ts).
         guardrailViolationPath: cls.guardrailViolation?.violatedPath ?? null,
@@ -790,10 +793,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   // Migration 012 + Phase E: tool-result tap (mirrors orchestrator.ts's
   // `onToolResultHook`). Flips `confirmed_at`, runs the artifact classifier,
   // and re-emits `multi_agent_mutation` (the wire reducer dedupes by id).
-  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
+  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId, meta) => {
     let confirmed: MutationRecord | null;
     try {
-      confirmed = confirmMutationByToolUseId(sessionId, toolUseId);
+      // Migration 026: also persist the tool output (result content) so the
+      // Logs drawer shows what the call returned, not just that it confirmed.
+      confirmed = confirmMutationByToolUseId(sessionId, toolUseId, meta.content);
     } catch (err) {
       console.error('[chain] confirm mutation failed', err);
       return;

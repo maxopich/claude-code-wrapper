@@ -5926,6 +5926,14 @@ pre {
   outline-offset: 1px;
 }
 
+/* Migration 026: dedicated Tool input / Tool output blocks (label + <pre>)
+ * above the raw JSON dump, for bus tool rows that now carry full I/O. */
+.logs-row-detail-io {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .logs-modal-overlay,
   .logs-modal {

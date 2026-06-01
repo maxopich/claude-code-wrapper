@@ -84,6 +84,40 @@ export function LogRowDetail(props: { row: LogRow }) {
         </p>
       )}
 
+      {(() => {
+        // Migration 026: dedicated, readable Tool input / Tool output sections
+        // for bus tool rows. The same values live inside `row.raw` (and the
+        // JSON dump below), but surfacing the command + output as labeled
+        // blocks is the point of "review the full log". Guarded so non-tool
+        // rows and pre-026 rows render exactly as before.
+        const raw = row.raw;
+        if (!raw || typeof raw !== 'object') return null;
+        const r = raw as Record<string, unknown>;
+        const hasInput = r.toolInput !== undefined && r.toolInput !== null;
+        const hasResult = r.toolResult !== undefined && r.toolResult !== null;
+        if (!hasInput && !hasResult) return null;
+        return (
+          <>
+            {hasInput && (
+              <section className="logs-row-detail-io">
+                <span className="logs-row-detail-label">Tool input</span>
+                <pre className="logs-row-detail-raw" tabIndex={0}>
+                  <code>{renderToolIo(r.toolInput)}</code>
+                </pre>
+              </section>
+            )}
+            {hasResult && (
+              <section className="logs-row-detail-io">
+                <span className="logs-row-detail-label">Tool output</span>
+                <pre className="logs-row-detail-raw" tabIndex={0}>
+                  <code>{renderToolIo(r.toolResult)}</code>
+                </pre>
+              </section>
+            )}
+          </>
+        );
+      })()}
+
       {row.raw !== undefined && (
         <pre className="logs-row-detail-raw" tabIndex={0}>
           <code>{JSON.stringify(row.raw, null, 2)}</code>
@@ -91,6 +125,25 @@ export function LogRowDetail(props: { row: LogRow }) {
       )}
     </div>
   );
+}
+
+/**
+ * Render a captured tool input/output value for the detail drawer. Server-
+ * capped values arrive as `{ truncated, bytes, preview }` (see capToolIoJson)
+ * — surface the note + preview rather than a confusing object dump. Strings
+ * render verbatim; everything else pretty-prints.
+ */
+function renderToolIo(value: unknown): string {
+  if (value && typeof value === 'object' && (value as Record<string, unknown>).truncated === true) {
+    const v = value as { bytes?: number; preview?: string };
+    return `[truncated — ${v.bytes ?? '?'} bytes total; first 8 KB shown]\n\n${v.preview ?? ''}`;
+  }
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function formatLine(row: LogRow): string {

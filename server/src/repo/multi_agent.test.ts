@@ -22,6 +22,10 @@ import {
   listResolvedParticipants,
   recordSessionTeardown,
   setProjectBusInstalled,
+  appendMultiAgentMutation,
+  confirmMutationByToolUseId,
+  listMultiAgentMutations,
+  capToolIoJson,
 } from './multi_agent.js';
 
 // Isolation scaffolding: each test gets its own ~/.cebab dir so DB writes
@@ -551,5 +555,67 @@ describe('getLastRunForTemplate', () => {
     createMultiAgentSession('tmpl', 'chain', '002', '/f', 'persistent', { templateId: 'tpl-keep' });
     const row = getLastRunForTemplate('tpl-keep');
     expect(row?.id).toBe('tmpl');
+  });
+});
+
+describe('migration 026 — tool input/output capture', () => {
+  test('appendMultiAgentMutation persists toolInput; listMultiAgentMutations reads it back', () => {
+    createMultiAgentSession('io1', 'orchestrator', '001');
+    const row = appendMultiAgentMutation('io1', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_1',
+      toolInput: { file_path: '/x', content: 'hello' },
+    });
+    expect(row.toolInput).toEqual({ file_path: '/x', content: 'hello' });
+    expect(row.toolResult).toBeNull();
+
+    const listed = listMultiAgentMutations('io1');
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.toolInput).toEqual({ file_path: '/x', content: 'hello' });
+  });
+
+  test('confirmMutationByToolUseId writes toolResult on the matching row', () => {
+    createMultiAgentSession('io2', 'orchestrator', '001');
+    appendMultiAgentMutation('io2', 'worker', 'Bash', 'mutate', 'npm test', {
+      filePath: null,
+      cwd: '/repo',
+      toolUseId: 'toolu_2',
+      toolInput: { command: 'npm test' },
+    });
+    const confirmed = confirmMutationByToolUseId('io2', 'toolu_2', [
+      { type: 'text', text: 'PASS' },
+    ]);
+    expect(confirmed?.confirmedAt).not.toBeNull();
+    expect(confirmed?.toolResult).toEqual([{ type: 'text', text: 'PASS' }]);
+  });
+
+  test('confirm without a result leaves toolResult null (back-compat call shape)', () => {
+    createMultiAgentSession('io3', 'orchestrator', '001');
+    appendMultiAgentMutation('io3', 'worker', 'Edit', 'mutate', 'edit /y', {
+      filePath: '/y',
+      cwd: '/repo',
+      toolUseId: 'toolu_3',
+      toolInput: { file_path: '/y' },
+    });
+    const confirmed = confirmMutationByToolUseId('io3', 'toolu_3');
+    expect(confirmed?.confirmedAt).not.toBeNull();
+    expect(confirmed?.toolResult).toBeNull();
+  });
+
+  test('capToolIoJson caps oversized values to a truncated preview envelope', () => {
+    const big = 'x'.repeat(80 * 1024);
+    const capped = capToolIoJson({ content: big });
+    expect(capped).not.toBeNull();
+    const parsed = JSON.parse(capped!) as { truncated?: boolean; bytes?: number; preview?: string };
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.bytes).toBeGreaterThan(64 * 1024);
+    expect(parsed.preview!.length).toBeLessThanOrEqual(8 * 1024);
+  });
+
+  test('capToolIoJson returns null for nullish input and passes small values through', () => {
+    expect(capToolIoJson(undefined)).toBeNull();
+    expect(capToolIoJson(null)).toBeNull();
+    expect(capToolIoJson({ a: 1 })).toBe('{"a":1}');
   });
 });

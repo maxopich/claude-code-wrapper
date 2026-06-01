@@ -75,6 +75,9 @@ function makeMutation(overrides: Partial<MutationRecord> = {}): MutationRecord {
     // F3: this fixture is a Write mutation; classifier rationale is
     // Bash-only, so the field stays NULL on this row.
     classifierReason: null,
+    // Migration 026: full tool I/O — not relevant to this guardrail fixture.
+    toolInput: null,
+    toolResult: null,
     ...overrides,
   };
 }
