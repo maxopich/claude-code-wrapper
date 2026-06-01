@@ -86,7 +86,12 @@ export function RunsBadge({ runs, onJump }: RunsBadgeProps) {
   const ariaLabel = `${count} active ${count === 1 ? 'run' : 'runs'}`;
 
   return (
-    <>
+    // Positioned anchor so the dropdown popover anchors to the badge
+    // itself (not whatever ancestor happens to be positioned). Lets the
+    // badge live in the main top bar with its dropdown opening just below
+    // it over the main content — see `.runs-dropdown-popover`. A <div>
+    // (not a fragment/span) keeps the block-level popover validly nested.
+    <div className="runs-badge-anchor">
       <button
         ref={buttonRef}
         type="button"
@@ -110,6 +115,6 @@ export function RunsBadge({ runs, onJump }: RunsBadgeProps) {
           <RunsDropdown runs={runs} onJump={onJump} onRequestClose={closePanel} />
         </div>
       )}
-    </>
+    </div>
   );
 }
