@@ -1711,6 +1711,16 @@ pre {
   gap: var(--s-2);
   flex-shrink: 0;
 }
+/* Right-side action cluster in `.main-top-bar`: the global RunsBadge +
+ * the per-session TopRunBar. Mirrors `.main-top-bar-right`; `flex-wrap`
+ * lets it drop to a second line on narrow widths instead of overflowing. */
+.main-top-bar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
 .main-top-bar-title {
   font-size: var(--t-sm);
   color: var(--fg-2);
@@ -6215,8 +6225,14 @@ pre {
 }
 .notif-bell-badge {
   position: absolute;
-  top: -2px;
-  right: -4px;
+  /* Pulled in from -2/-4 so the badge stays inside the bell's icon-btn
+   * focus-ring envelope (outline 2px @ offset 2px) and clear of the
+   * adjacent control across the 8px gap; the --bg-2 halo (sidebar bg)
+   * separates it from any line/ring it grazes so it reads as a discrete
+   * dot rather than colliding with a border. */
+  top: -1px;
+  right: -1px;
+  box-shadow: 0 0 0 1.5px var(--bg-2);
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
@@ -9628,11 +9644,23 @@ pre {
   border-color: rgba(139, 92, 246, 0.55);
 }
 
+/* Positioned wrapper around the badge + its popover (RunsBadge.tsx) so the
+ * popover anchors to the badge regardless of where the badge is mounted. */
+.runs-badge-anchor {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
 .runs-dropdown-popover {
   position: absolute;
-  top: 48px;
-  left: var(--s-3);
-  right: var(--s-3);
+  /* Anchored to `.runs-badge-anchor` (the badge), not the sidebar: drops
+   * just below the badge and right-aligns so the ≤440px panel grows
+   * leftward over the main content — never over the sidebar/project list
+   * (replaces the old `top:48px; left/right:var(--s-3)` sidebar anchoring). */
+  top: calc(100% + var(--s-1));
+  right: 0;
+  width: max-content;
   max-width: 440px;
   max-height: min(70vh, 600px);
   background: var(--bg-4);

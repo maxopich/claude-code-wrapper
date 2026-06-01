@@ -1924,26 +1924,10 @@ function AppShell({
           */}
           {state.settings?.mockMode === true && <MockBadge />}
           <div className="sidebar-header-controls">
-            {/*
-              Cluster G Phase 3b (G1 UI): "▶ N active" pill. Mount predicate
-              is `state.activeRuns.length > 0` (hidden silently when
-              nothing is running); the spec (§5 G1) places it between
-              brand and connection dot so it reads left-to-right as
-              "what's running here? → is the link up? → events". Each
-              chip in the controls strip stands alone and unmounts when
-              irrelevant — matches MockBadge / NotificationBell.
-
-              `onJumpToRun` is defined just below `selectSession` so it
-              can reuse the same project-bucket reconciliation path; if
-              the descriptor is single-agent and the project is known,
-              it both selects the session and flips to the chat tab. For
-              bus/orchestrator descriptors it can't disambiguate
-              orchestrator-vs-chain from the wire alone, so it lands the
-              operator on the multi-agent tab (the live run will be
-              visible there iff it's the active session — chain & orch
-              currently share the same active-slot reducer slice).
-            */}
-            <RunsBadge runs={state.activeRuns} onJump={onJumpToRun} />
+            {/* RunsBadge ("▶ N active") now lives in the main top bar — it's
+                global run/session activity, not sidebar chrome, and its
+                dropdown was overlaying (and blocking clicks on) the project
+                list when anchored here. */}
             <span
               className={state.connected ? 'dot on' : 'dot off'}
               title={state.connected ? 'connected' : 'disconnected'}
@@ -2127,15 +2111,26 @@ function AppShell({
                   Chained Chat
                 </button>
               </nav>
-              {view !== 'chat' && state.multiAgent.active && (
-                <TopRunBar
-                  run={state.multiAgent.active}
-                  onStop={stopMultiAgent}
-                  onDismiss={dismissActiveRun}
-                  onLoadSessionLog={loadSessionLog}
-                  subscribeServerMsg={subscribeServerMsg}
-                />
-              )}
+              {/* Right side of the bar: the global "▶ N active" runs badge
+                  (ungated by view — active runs are global; it self-hides at
+                  0) rides alongside the per-session TopRunBar. The badge's
+                  dropdown anchors to itself (via `.runs-badge-anchor`) and
+                  opens below it over the main content, NOT the project list
+                  (its old sidebar-header home). It's absent only on the empty
+                  "Choose a folder" screen — this bar isn't rendered there, and
+                  a jump would have no project context anyway. */}
+              <div className="main-top-bar-actions">
+                <RunsBadge runs={state.activeRuns} onJump={onJumpToRun} />
+                {view !== 'chat' && state.multiAgent.active && (
+                  <TopRunBar
+                    run={state.multiAgent.active}
+                    onStop={stopMultiAgent}
+                    onDismiss={dismissActiveRun}
+                    onLoadSessionLog={loadSessionLog}
+                    subscribeServerMsg={subscribeServerMsg}
+                  />
+                )}
+              </div>
             </div>
             {view !== 'chat' && (
               <MultiAgentActivityBar run={state.multiAgent.active} projects={state.projects} />
