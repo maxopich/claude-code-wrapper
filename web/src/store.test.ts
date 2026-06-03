@@ -878,6 +878,7 @@ describe('store / eventDefaultCollapsed', () => {
       mutationsAcknowledged: false,
       mutations: [],
       pendingMutation: null,
+      pendingQuestion: null,
       recoveryContext: null,
       routerDrops: [],
       participantControls: {},
@@ -1379,6 +1380,92 @@ describe('store / pause-on-mutation + mutations', () => {
       msg: { type: 'multi_agent_pending_mutation', sessionId: 's-pom', pending: null },
     });
     expect(s.multiAgent.active!.pendingMutation).toBeNull();
+  });
+
+  test('multi_agent_ask_user_question sets the slot; _resolved clears it (matching id)', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    const questions = [
+      {
+        question: 'Deploy where?',
+        header: 'Env',
+        options: [{ label: 'Staging' }, { label: 'Prod' }],
+        multiSelect: false,
+      },
+    ];
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_ask_user_question',
+        sessionId: 's-pom',
+        agent: 'coder',
+        toolUseId: 'tu1',
+        questions,
+      },
+    });
+    expect(s.multiAgent.active!.pendingQuestion).toEqual({
+      agent: 'coder',
+      toolUseId: 'tu1',
+      questions,
+    });
+
+    // A resolved for a DIFFERENT id is ignored.
+    const s2 = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_ask_user_resolved', sessionId: 's-pom', toolUseId: 'other' },
+    });
+    expect(s2.multiAgent.active!.pendingQuestion).not.toBeNull();
+
+    // The matching id clears it.
+    const s3 = reduce(s, {
+      type: 'server',
+      msg: { type: 'multi_agent_ask_user_resolved', sessionId: 's-pom', toolUseId: 'tu1' },
+    });
+    expect(s3.multiAgent.active!.pendingQuestion).toBeNull();
+  });
+
+  test('multi_agent_ask_user_question dedupes an identical re-emit by toolUseId', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    const msg = {
+      type: 'multi_agent_ask_user_question' as const,
+      sessionId: 's-pom',
+      agent: 'coder',
+      toolUseId: 'tu1',
+      questions: [{ question: 'Q', header: 'H', options: [{ label: 'A' }], multiSelect: false }],
+    };
+    s = reduce(s, { type: 'server', msg });
+    const before = s.multiAgent.active!.pendingQuestion;
+    const s2 = reduce(s, { type: 'server', msg });
+    // Re-emit is a no-op → same slot reference preserved.
+    expect(s2.multiAgent.active!.pendingQuestion).toBe(before);
+  });
+
+  test('ma_clear_pending_question optimistically clears the slot', () => {
+    let s = reduce(initialState, { type: 'server', msg: baseStarted });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_ask_user_question',
+        sessionId: 's-pom',
+        agent: 'coder',
+        toolUseId: 'tu1',
+        questions: [{ question: 'Q', header: 'H', options: [{ label: 'A' }], multiSelect: false }],
+      },
+    });
+    s = reduce(s, { type: 'ma_clear_pending_question' });
+    expect(s.multiAgent.active!.pendingQuestion).toBeNull();
+  });
+
+  test('multi_agent_started hydrates pendingQuestion (R-A re-attach)', () => {
+    const pendingQuestion = {
+      agent: 'coder',
+      toolUseId: 'tu9',
+      questions: [{ question: 'Q', header: 'H', options: [{ label: 'A' }], multiSelect: false }],
+    };
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, pendingQuestion },
+    });
+    expect(s.multiAgent.active!.pendingQuestion).toEqual(pendingQuestion);
   });
 
   test('ma_clear_pending_mutation optimistically clears + flips ack flag; idempotent', () => {

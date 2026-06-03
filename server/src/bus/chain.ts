@@ -85,6 +85,7 @@ import {
   type ResolvedAgent,
 } from './runtime.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
+import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import { DEFAULT_HOP_BUDGET } from './orchestrator.js';
 import { uninstallBusForProject } from './install.js';
@@ -825,6 +826,28 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
   };
 
+  // Interactive AskUserQuestion (mirrors orchestrator.ts): emit the card and
+  // park the turn until the operator answers. `opts.sendServerMsg` is the
+  // live, rebind-aware sink (same one `onAutoRetry` uses).
+  const onAskUserQuestionHook: AgentRunnerDeps['onAskUserQuestion'] = (
+    agentName,
+    toolUseId,
+    questions,
+  ) => {
+    try {
+      opts.sendServerMsg?.({
+        type: 'multi_agent_ask_user_question',
+        sessionId,
+        agent: agentName,
+        toolUseId,
+        questions,
+      });
+    } catch (err) {
+      console.error('[chain] sendServerMsg ask_user_question threw', err);
+    }
+    return parkQuestion(sessionId, { agent: agentName, toolUseId, questions });
+  };
+
   const runner = new AgentRunner({
     // Cluster G Phase 3 (G1): bus session id for the lifecycle registry's
     // per-hop snapshot. Same value every hop of this chain run.
@@ -836,6 +859,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     },
     onMutation: onMutationHook,
     onToolResult: onToolResultHook,
+    onAskUserQuestion: onAskUserQuestionHook,
     abortController,
     runnerFactory: opts.runnerFactory,
     // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): every transient-
@@ -924,7 +948,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onTeardown,
-    onFinalize: () => activity.dispose(),
+    onFinalize: () => {
+      // Interactive AskUserQuestion: drain any parked questions so a
+      // stopped/ended session doesn't leave a canUseTool Promise dangling.
+      rejectQuestionsForSession(sessionId, 'session ended');
+      activity.dispose();
+    },
     deliver,
     hopBudget,
     onPendingRetry: opts.onPendingRetry,

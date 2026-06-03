@@ -23,6 +23,7 @@ import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalSurface } from '../useModalSurface';
 import { AgentTag } from './AgentTag';
+import { AskUserQuestionCard } from './AskUserQuestionCard';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
 import { useArtifactContentBridge } from './ArtifactContentContext';
 import { WorkingFiles } from './WorkingFiles';
@@ -115,6 +116,13 @@ export function MultiAgentTab(props: {
   onArchiveSession: (sessionId: string) => void;
   /** Item #5: operator clicked Continue on the pause-on-first-mutation banner. */
   onContinueThroughMutation: (sessionId: string) => void;
+  /** Interactive AskUserQuestion: the operator answered a parked question. */
+  onAnswerQuestion: (
+    sessionId: string,
+    agent: string,
+    toolUseId: string,
+    answers: Record<string, string>,
+  ) => void;
   /** Cluster D Phase 4d: CountdownChip onElapsed sink — clears the bus
    *  auto-retry slice so the banner unmounts. If attempt N+1 also fails,
    *  the next `auto_retry` ServerMsg repopulates the slice. */
@@ -229,6 +237,7 @@ export function MultiAgentTab(props: {
         onAbandonSession={props.onAbandonSession}
         onArchiveSession={props.onArchiveSession}
         onContinueThroughMutation={props.onContinueThroughMutation}
+        onAnswerQuestion={props.onAnswerQuestion}
         onSetLifecycle={props.onSetActiveLifecycle}
         onAddParticipant={props.onAddActiveParticipant}
         onMuteParticipant={props.onMuteParticipant}
@@ -1484,6 +1493,13 @@ function ActiveRunView(props: {
   /** Item #5: operator clicked Continue on the pause-on-first-mutation
    *  banner. Stateless from the client's POV — server reads the slot. */
   onContinueThroughMutation: (sessionId: string) => void;
+  /** Interactive AskUserQuestion: the operator answered a parked question. */
+  onAnswerQuestion: (
+    sessionId: string,
+    agent: string,
+    toolUseId: string,
+    answers: Record<string, string>,
+  ) => void;
   /** Cluster D Phase 4d: clear the bus auto-retry slice on chip elapse. */
   onClearAutoRetry: () => void;
 }) {
@@ -1834,11 +1850,21 @@ function ActiveRunView(props: {
         />
       )}
 
+      {isRunning && (
+        <AskUserQuestionCard
+          pending={run.pendingQuestion}
+          onSubmit={(agent, toolUseId, answers) =>
+            props.onAnswerQuestion(run.sessionId, agent, toolUseId, answers)
+          }
+        />
+      )}
+
       {isOrchestrator &&
         isRunning &&
         !run.awaitingContinue &&
         !run.pendingRetry &&
-        !run.pendingMutation && (
+        !run.pendingMutation &&
+        !run.pendingQuestion && (
           <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
         )}
     </div>

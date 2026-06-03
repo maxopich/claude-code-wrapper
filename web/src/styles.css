@@ -10107,3 +10107,111 @@ pre {
 .session-search-raw-downgrade {
   color: var(--err);
 }
+
+/* Interactive AskUserQuestion card (AskUserQuestionCard.tsx) — rendered in the
+ * multi-agent scrollback when a bus agent parks on AskUserQuestion. */
+.ask-user-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: var(--s-2) 0;
+  padding: var(--s-3);
+  background: var(--bg-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+}
+.ask-user-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.ask-user-card-badge {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-ink);
+  background: rgba(47, 182, 196, 0.12);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-pill);
+  padding: 1px 8px;
+  font-weight: 600;
+}
+.ask-user-q {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.ask-user-q-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+.ask-user-q-chip {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+  background: var(--bg-4);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+}
+.ask-user-q-text {
+  font-size: var(--t-sm);
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.ask-user-q-multi {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.ask-user-q-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.ask-user-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: var(--s-2);
+  background: var(--bg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  color: var(--fg-1);
+}
+.ask-user-option:hover {
+  border-color: var(--accent-2);
+}
+.ask-user-option.selected {
+  border-color: var(--accent);
+  background: rgba(47, 182, 196, 0.1);
+}
+.ask-user-option-label {
+  font-size: var(--t-sm);
+  font-weight: 600;
+}
+.ask-user-option-desc {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.ask-user-other {
+  width: 100%;
+  padding: var(--s-2);
+  background: var(--bg-0);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  color: var(--fg-1);
+  font: inherit;
+}
+.ask-user-other:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ask-user-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}

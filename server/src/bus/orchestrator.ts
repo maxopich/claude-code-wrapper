@@ -82,6 +82,7 @@ import {
   type ResolvedAgent,
 } from './runtime.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
+import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import {
   getLiveSession,
@@ -1276,6 +1277,31 @@ export function wireOrchestratorSession(p: {
     }
   };
 
+  // Interactive AskUserQuestion: a worker (or the orchestrator) called
+  // AskUserQuestion. Emit the card to the operator and park the turn — the
+  // runner blocks the in-flight SDK query on this Promise until the operator
+  // answers (resolved by the WS `multi_agent_ask_user_answer` handler) or it's
+  // drained on stop/interrupt. `p.sendServerMsg` is the live, rebind-aware sink
+  // (same one `onAutoRetry` uses), so the card survives an R-A re-attach.
+  const onAskUserQuestionHook: AgentRunnerDeps['onAskUserQuestion'] = (
+    agentName,
+    toolUseId,
+    questions,
+  ) => {
+    try {
+      p.sendServerMsg?.({
+        type: 'multi_agent_ask_user_question',
+        sessionId,
+        agent: agentName,
+        toolUseId,
+        questions,
+      });
+    } catch (err) {
+      console.error('[orchestrator] sendServerMsg ask_user_question threw', err);
+    }
+    return parkQuestion(sessionId, { agent: agentName, toolUseId, questions });
+  };
+
   const runner = new AgentRunner({
     // Cluster G Phase 3 (G1): bus session id for the lifecycle registry's
     // per-hop snapshot. Same value for every orchestrator + worker hop.
@@ -1297,6 +1323,7 @@ export function wireOrchestratorSession(p: {
     },
     onMutation: onMutationHook,
     onToolResult: onToolResultHook,
+    onAskUserQuestion: onAskUserQuestionHook,
     abortController,
     runnerFactory: p.runnerFactory,
     // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): mirror the chain.ts
@@ -1436,7 +1463,12 @@ export function wireOrchestratorSession(p: {
     onEvent: p.onEvent,
     onEnded: p.onEnded,
     onTeardown,
-    onFinalize: () => activity.dispose(),
+    onFinalize: () => {
+      // Interactive AskUserQuestion: drain any parked questions so a
+      // stopped/ended session doesn't leave a canUseTool Promise dangling.
+      rejectQuestionsForSession(sessionId, 'session ended');
+      activity.dispose();
+    },
     deliver,
     hopBudget,
     initialHopsCount: p.initialHopsCount,
