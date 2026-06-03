@@ -700,6 +700,21 @@ export type ClientMsg =
     }
   | {
       /**
+       * The operator's answer to a parked AskUserQuestion (see
+       * `multi_agent_ask_user_question`). `answers` maps each question's text
+       * to the chosen value (multi-select → comma-joined labels; the free-text
+       * "Other" → the raw string). The server resolves the parked `canUseTool`
+       * Promise, which feeds the answer back to the agent as the tool result,
+       * and the parked turn resumes.
+       */
+      type: 'multi_agent_ask_user_answer';
+      sessionId: string;
+      agent: string;
+      toolUseId: string;
+      answers: Record<string, string>;
+    }
+  | {
+      /**
        * Ask the server for the list of past multi-agent runs (iterations).
        * Server replies with an `iterations` ServerMsg. Used by the
        * Multi-Agent tab's Iterations section.
@@ -1883,6 +1898,15 @@ export type ServerMsg =
        */
       pendingMutation?: MultiAgentMutationView;
       /**
+       * Populated when a bus agent's turn is parked on an AskUserQuestion the
+       * operator hasn't answered yet. Survives R-A re-attach (the parked
+       * Promise lives in the in-process pending-questions registry and is
+       * re-emitted here on attach). NOT restored on R-B server restart — the
+       * Promise died with the process, so a reconstructed session comes back
+       * `awaitingContinue` and the agent re-asks if it still needs to.
+       */
+      pendingQuestion?: PendingAskUserQuestionView;
+      /**
        * Item #7: server-derived recovery snapshot surfaced ONLY when the
        * session is in `awaiting_continue` state (R-B reconstruct, or a
        * pause-on-mutation banner that survived a Cebab restart). Powers the
@@ -2005,6 +2029,32 @@ export type ServerMsg =
       type: 'multi_agent_pending_mutation';
       sessionId: string;
       pending: MultiAgentMutationView | null;
+    }
+  | {
+      /**
+       * Interactive AskUserQuestion: a bus agent's turn is parked at the SDK
+       * permission gate awaiting the operator's pick. The card renders in the
+       * multi-agent scrollback; the operator answers via
+       * `multi_agent_ask_user_answer`. `toolUseId` is the SDK `tool_use.id`
+       * (the park key + idempotency key — a re-attach re-emit carries the same
+       * id so the reducer dedupes). Initial value on attach travels on
+       * `multi_agent_started.pendingQuestion`.
+       */
+      type: 'multi_agent_ask_user_question';
+      sessionId: string;
+      agent: string;
+      toolUseId: string;
+      questions: AskUserQuestionView[];
+    }
+  | {
+      /**
+       * Cleared the pending AskUserQuestion (answered, or drained on
+       * stop/interrupt/end). The reducer clears its slot iff `toolUseId`
+       * matches the one it's currently showing.
+       */
+      type: 'multi_agent_ask_user_resolved';
+      sessionId: string;
+      toolUseId: string;
     }
   | {
       /**
@@ -3537,6 +3587,42 @@ export type PendingRetryDescriptor = {
  * for direct rendering (no JOINs on the client). The `category` field is
  * always `'mutate'` or `'dangerous'` — read-only tool calls are not logged.
  */
+export type AskUserQuestionOption = {
+  /** Button label the operator clicks; the value fed back as the answer. */
+  label: string;
+  /** One-line explanation shown under the label. Optional. */
+  description?: string;
+};
+
+/**
+ * One question from an `AskUserQuestion` tool call, flattened from the SDK's
+ * fixed-length tuple shape to plain arrays for the wire + the card UI.
+ */
+export type AskUserQuestionView = {
+  /** The full question text. */
+  question: string;
+  /** Short (≤12 char) chip/tag labelling the question. */
+  header: string;
+  /** 2–4 distinct options. The SDK auto-provides a free-text "Other"; the UI
+   *  renders that separately, so it is never present in this list. */
+  options: AskUserQuestionOption[];
+  /** When true the operator may select multiple options. */
+  multiSelect: boolean;
+};
+
+/**
+ * A parked AskUserQuestion awaiting the operator. Carried on
+ * `multi_agent_started.pendingQuestion` (R-A re-attach hydration) and as the
+ * live `multi_agent_ask_user_question` ServerMsg payload. One card shows at a
+ * time, keyed by `toolUseId` (the SDK `tool_use.id`, also the park key).
+ */
+export type PendingAskUserQuestionView = {
+  /** Bus slug (or 'orchestrator') of the agent that asked. */
+  agent: string;
+  toolUseId: string;
+  questions: AskUserQuestionView[];
+};
+
 export type MultiAgentMutationView = {
   /** DB row id; the dedupe key for live + replay reconciliation. */
   id: number;

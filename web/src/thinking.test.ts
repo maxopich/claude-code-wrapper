@@ -149,6 +149,7 @@ function run(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
     mutationsAcknowledged: false,
     mutations: [],
     pendingMutation: null,
+    pendingQuestion: null,
     recoveryContext: null,
     routerDrops: [],
     participantControls: {},

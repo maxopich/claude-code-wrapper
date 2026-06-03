@@ -1720,6 +1720,25 @@ function AppShell({
     dispatch({ type: 'ma_clear_pending_mutation' });
     wsRef.current?.send({ type: 'continue_through_mutation', sessionId });
   }
+  function answerQuestion(
+    sessionId: string,
+    agent: string,
+    toolUseId: string,
+    answers: Record<string, string>,
+  ) {
+    // Interactive AskUserQuestion: optimistically clear the card, then send the
+    // answer. The server resolves the parked turn (the agent receives the
+    // answer as the tool result and resumes) + echoes
+    // `multi_agent_ask_user_resolved`.
+    dispatch({ type: 'ma_clear_pending_question' });
+    wsRef.current?.send({
+      type: 'multi_agent_ask_user_answer',
+      sessionId,
+      agent,
+      toolUseId,
+      answers,
+    });
+  }
   function setDraftPauseOnMutation(value: boolean) {
     // Item #5: setup-screen toggle. Persists only in client state until
     // `start_multi_agent` sends it as `pauseOnMutation`.
@@ -2298,6 +2317,7 @@ function AppShell({
                   onAbandonSession={abandonSession}
                   onArchiveSession={archiveSession}
                   onContinueThroughMutation={continueThroughMutation}
+                  onAnswerQuestion={answerQuestion}
                   onClearAutoRetry={clearAutoRetry}
                   onSetDraftPauseOnMutation={setDraftPauseOnMutation}
                   onSetDraftHopBudget={setDraftHopBudget}

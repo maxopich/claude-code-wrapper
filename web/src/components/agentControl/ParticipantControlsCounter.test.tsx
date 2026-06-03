@@ -59,6 +59,7 @@ function mkRun(participantControls: Record<number, ParticipantControlView>): Mul
     mutationsAcknowledged: false,
     mutations: [],
     pendingMutation: null,
+    pendingQuestion: null,
     recoveryContext: null,
     routerDrops: [],
     participantControls,

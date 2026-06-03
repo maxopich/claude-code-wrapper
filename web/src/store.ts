@@ -7,6 +7,7 @@ import type {
   MultiAgentEventKind,
   MultiAgentLifecycle,
   MultiAgentMutationView,
+  PendingAskUserQuestionView,
   MultiAgentTemplate,
   PauseExpiryAction,
   PendingRetryDescriptor,
@@ -322,6 +323,12 @@ export type MultiAgentRun = {
    *  on Continue click and authoritatively by
    *  `multi_agent_pending_mutation { pending: null }`. */
   pendingMutation: MultiAgentMutationView | null;
+  /** Interactive AskUserQuestion: the active question awaiting the operator,
+   *  or null. Mirrors `pendingMutation` — gates `UserPromptInput`, cleared
+   *  optimistically on submit (`ma_clear_pending_question`) and
+   *  authoritatively by `multi_agent_ask_user_resolved`. Hydrated on attach
+   *  from `multi_agent_started.pendingQuestion` (R-A). */
+  pendingQuestion: PendingAskUserQuestionView | null;
   /** Item #7: server-derived recovery snapshot, populated ONLY while
    *  `awaitingContinue` is true (R-B reconstruct, or a pause-on-mutation
    *  banner that survived a Cebab restart). Drives the "▾ Recovery details"
@@ -944,6 +951,7 @@ export type Action =
   | { type: 'ma_clear_awaiting' }
   | { type: 'ma_clear_pending_retry' }
   | { type: 'ma_clear_pending_mutation' }
+  | { type: 'ma_clear_pending_question' }
   /** Cluster D Phase 4d: drop the bus auto-retry slice (the CountdownChip's
    *  onElapsed fires this — the retry has fired, banner should unmount.
    *  If attempt N+1 also fails, the next `auto_retry` ServerMsg
@@ -1339,6 +1347,20 @@ export function reduce(state: AppState, action: Action): AppState {
       };
     }
 
+    case 'ma_clear_pending_question': {
+      // Interactive AskUserQuestion: optimistic clear on answer submit, before
+      // the server's `multi_agent_ask_user_resolved` echo arrives.
+      const active = state.multiAgent.active;
+      if (!active || !active.pendingQuestion) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, pendingQuestion: null },
+        },
+      };
+    }
+
     case 'auth_expired_dismissed': {
       // Cluster D Phase 6: soft hide. The slice persists (count + first/
       // last timestamps remain useful for tooltips and accurate re-surface
@@ -1566,6 +1588,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             mutationsAcknowledged: msg.mutationsAcknowledged,
             mutations: msg.mutations,
             pendingMutation: msg.pendingMutation ?? null,
+            // Interactive AskUserQuestion: hydrate a parked question on attach
+            // (R-A) so the card reappears after a browser refresh.
+            pendingQuestion: msg.pendingQuestion ?? null,
             // Item #7: server includes `recoveryContext` only when
             // `awaitingContinue=true` (R-B reconstruct or a pause-on-mutation
             // banner that survived a restart). Null in every other case;
@@ -1669,6 +1694,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // Item #5: same reasoning for pending-mutation; the row's pause
             // slot is no longer actionable once the session has ended.
             pendingMutation: null,
+            // Interactive AskUserQuestion: a stopped/crashed session can't be
+            // answered either — drop any parked question.
+            pendingQuestion: null,
             // Item #7: a stopped/crashed session can't be continued, so the
             // recovery disclosure (banner-bound) is moot. Drop it for the
             // same reason.
@@ -1722,6 +1750,42 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         multiAgent: {
           ...state.multiAgent,
           active: { ...active, pendingMutation: msg.pending },
+        },
+      };
+    }
+
+    case 'multi_agent_ask_user_question': {
+      // Interactive AskUserQuestion: set the pending-question slot. Dedupe by
+      // toolUseId so a re-attach re-emit doesn't churn an identical card.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      if (active.pendingQuestion?.toolUseId === msg.toolUseId) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: {
+            ...active,
+            pendingQuestion: {
+              agent: msg.agent,
+              toolUseId: msg.toolUseId,
+              questions: msg.questions,
+            },
+          },
+        },
+      };
+    }
+
+    case 'multi_agent_ask_user_resolved': {
+      // Clear the slot iff it's the question being resolved.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      if (active.pendingQuestion?.toolUseId !== msg.toolUseId) return state;
+      return {
+        ...state,
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, pendingQuestion: null },
         },
       };
     }

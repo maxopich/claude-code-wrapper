@@ -141,6 +141,7 @@ import {
   type ResumeCallbacks,
 } from '../bus/resume.js';
 import {
+  appendMultiAgentEvent,
   archiveMultiAgentSession,
   clearFinishedMultiAgentSessions,
   computeRecoveryContext,
@@ -161,6 +162,11 @@ import {
 import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { getLiveSession, hasLiveSession } from '../bus/session_registry.js';
+import {
+  resolveQuestion,
+  listParkedQuestions,
+  formatAskUserAnswer,
+} from '../bus/pending_questions.js';
 import {
   buildParticipantKickedMsg,
   buildParticipantMuteChangedMsg,
@@ -2102,6 +2108,10 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   const pendingMutationView = pendingMutationRow
     ? mutationRecordToView(pendingMutationRow)
     : undefined;
+  // Interactive AskUserQuestion: a parked question (if any) so the card
+  // reappears on R-A re-attach. The Promise lives in the in-process registry
+  // (survives the sink swap); one card at a time.
+  const pendingQuestion = listParkedQuestions(resumed.handle.sessionId)[0];
   // Item #7: surface the per-agent recovery snapshot ONLY when the session
   // is in awaiting_continue state (R-B reconstruct or a pause-on-mutation
   // banner that survived a Cebab restart). When awaiting_continue is false
@@ -2129,6 +2139,15 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     mutationsAcknowledged,
     mutations,
     ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
+    ...(pendingQuestion
+      ? {
+          pendingQuestion: {
+            agent: pendingQuestion.agent,
+            toolUseId: pendingQuestion.toolUseId,
+            questions: pendingQuestion.questions,
+          },
+        }
+      : {}),
     ...(recoveryContext ? { recoveryContext } : {}),
     // Cluster G Phase 2c (UI-A3): per-session MOCK posture projection. The
     // row's `mock` column is locked at CREATE time (migration 023), so a
@@ -3829,6 +3848,48 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           sessionId: msg.sessionId,
           kind: 'process_crashed',
           message,
+        });
+      }
+      return;
+    }
+    case 'multi_agent_ask_user_answer': {
+      // Interactive AskUserQuestion: the operator answered a parked question.
+      // Resolve the parked canUseTool Promise with the formatted answer (the
+      // SDK delivers it to the model as the tool result and the turn resumes),
+      // persist + broadcast the answer as a scrollback event so the Q&A
+      // survives reload/replay, and echo `_resolved` so the card clears.
+      const active = conn.multiAgent;
+      if (!active || active.sessionId !== msg.sessionId) {
+        return;
+      }
+      const answerText = formatAskUserAnswer(msg.answers);
+      const resolved = resolveQuestion(msg.sessionId, msg.toolUseId, answerText);
+      if (resolved) {
+        try {
+          const row = appendMultiAgentEvent(
+            msg.sessionId,
+            'cebab',
+            msg.agent,
+            'prompt',
+            answerText,
+          );
+          send(conn.ws, {
+            type: 'multi_agent_event',
+            sessionId: msg.sessionId,
+            eventId: row.id,
+            ts: row.ts,
+            source: row.source,
+            destination: row.destination,
+            kind: isMultiAgentEventKind(row.kind) ? row.kind : 'prompt',
+            text: row.text,
+          });
+        } catch (err) {
+          console.error('[ws] persist/emit ask-user answer event failed', err);
+        }
+        send(conn.ws, {
+          type: 'multi_agent_ask_user_resolved',
+          sessionId: msg.sessionId,
+          toolUseId: msg.toolUseId,
         });
       }
       return;

@@ -21,6 +21,7 @@
 import { createSdkMcpServer, tool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { classifyToolCall } from '@cebab/shared';
+import type { AskUserQuestionOption, AskUserQuestionView } from '@cebab/shared/protocol';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
@@ -247,6 +248,22 @@ export type AgentRunnerDeps = {
     toolUseId: string,
     meta: { isError: boolean; content?: unknown },
   ) => Promise<void> | void;
+  /**
+   * Interactive AskUserQuestion. When wired, `runOneAttempt` switches the SDK
+   * query to `permissionMode:'default'` + a `canUseTool` that auto-allows every
+   * tool EXCEPT `AskUserQuestion`, which it routes here. The returned Promise
+   * resolves with the operator's answer string — the runner returns it to the
+   * SDK as a `deny` message, which the model receives as the tool result
+   * (marked is_error, but it reads + uses it) and the SAME turn resumes.
+   * Rejecting denies with a generic dismissal. The runner blocks the in-flight
+   * SDK turn on this Promise, so the agent genuinely pauses until answered.
+   * Absent (the default) → headless bypass posture, unchanged.
+   */
+  onAskUserQuestion?: (
+    agentName: string,
+    toolUseId: string,
+    questions: AskUserQuestionView[],
+  ) => Promise<string>;
   /** Injectable for tests; defaults to the real `pickRunner` (mock-aware). */
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
   /** Shared cancellation for the whole session's turns. */
@@ -563,6 +580,32 @@ export class AgentRunner {
     throw lastErr;
   }
 
+  /**
+   * Build the `canUseTool` gate for one agent's query (interactive
+   * AskUserQuestion path). Auto-allows every tool to preserve the bus's
+   * no-human-gate posture; for `AskUserQuestion` it parks via
+   * `onAskUserQuestion` and returns the operator's answer as a `deny` message
+   * — the SDK delivers that to the model as the tool result (validated spike:
+   * the model reads "User selected: X" and continues).
+   */
+  private makeCanUseTool(agentName: string): NonNullable<RunOptions['canUseTool']> {
+    const onAsk = this.deps.onAskUserQuestion;
+    return async (toolName, input, { toolUseID }) => {
+      if (toolName !== 'AskUserQuestion' || !onAsk) {
+        return { behavior: 'allow', updatedInput: input };
+      }
+      try {
+        const answer = await onAsk(agentName, toolUseID, parseAskUserQuestions(input));
+        return { behavior: 'deny', message: answer };
+      } catch {
+        return {
+          behavior: 'deny',
+          message: 'The user dismissed the question without answering.',
+        };
+      }
+    };
+  }
+
   private async runOneAttempt(
     agentName: string,
     promptText: string,
@@ -575,12 +618,20 @@ export class AgentRunner {
     // failed attempt's pre-throw `m.session_id` capture.
     const prior = this.sessions.get(agentName);
 
+    // Interactive AskUserQuestion: when the ask-gate hook is wired we run under
+    // 'default' permission mode with a canUseTool that auto-allows every tool
+    // EXCEPT AskUserQuestion (which it parks for the operator). Without the
+    // hook we keep the original headless posture — bypass everything, no gate —
+    // so callers/tests that don't wire it stay byte-identical to before.
+    const askGate = this.deps.onAskUserQuestion
+      ? { permissionMode: 'default' as const, canUseTool: this.makeCanUseTool(agentName) }
+      : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true };
+
     const runner = factory({
       cwd: spec.cwd,
       prompt: promptText,
       ...(prior ? { resume: prior } : {}),
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
+      ...askGate,
       settingSources: spec.settingSources ?? ['user'],
       mcpServers: {
         cebab_bus: makeBusToolServer(agentName, this.deps.onEvent),
@@ -795,4 +846,37 @@ export function isTransientOverload(err: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Tolerant coercion of an `AskUserQuestion` tool input into the wire
+ * `AskUserQuestionView[]`. The SDK input is a union of fixed-length option
+ * tuples; we flatten to plain arrays and drop anything malformed so the card
+ * always renders *something* rather than throwing inside the permission gate.
+ * Exported for unit testing.
+ */
+export function parseAskUserQuestions(input: Record<string, unknown>): AskUserQuestionView[] {
+  const rawQuestions = (input as { questions?: unknown }).questions;
+  if (!Array.isArray(rawQuestions)) return [];
+  const out: AskUserQuestionView[] = [];
+  for (const q of rawQuestions) {
+    if (!q || typeof q !== 'object') continue;
+    const o = q as Record<string, unknown>;
+    const question = typeof o.question === 'string' ? o.question : '';
+    const header = typeof o.header === 'string' ? o.header : '';
+    const multiSelect = o.multiSelect === true;
+    const options: AskUserQuestionOption[] = [];
+    if (Array.isArray(o.options)) {
+      for (const op of o.options) {
+        if (!op || typeof op !== 'object') continue;
+        const oo = op as Record<string, unknown>;
+        const label = typeof oo.label === 'string' ? oo.label : '';
+        if (!label) continue;
+        const description = typeof oo.description === 'string' ? oo.description : undefined;
+        options.push(description !== undefined ? { label, description } : { label });
+      }
+    }
+    out.push({ question, header, options, multiSelect });
+  }
+  return out;
 }
