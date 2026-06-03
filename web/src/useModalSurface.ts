@@ -29,7 +29,7 @@ export function useModalSurface(opts: {
   onConfirm?: () => void;
   canConfirm?: boolean;
 }): {
-  overlayRef: RefObject<HTMLDivElement>;
+  overlayRef: RefObject<HTMLDivElement | null>;
   onBackdropMouseDown: (e: ReactMouseEvent<HTMLDivElement>) => void;
 } {
   useModalKeys(opts);

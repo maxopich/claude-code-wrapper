@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type JSX } from 'react';
 import type { ParticipantControlView } from '../../store';
 
 // Cluster C Phase 4g1: small pill cluster rendering muted / paused /
