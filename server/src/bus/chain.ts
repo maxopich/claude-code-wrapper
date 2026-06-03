@@ -70,6 +70,7 @@ import type {
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
+import { shouldPauseForMutation } from './pause_gate.js';
 import {
   archiveAgentHop,
   CEBAB_SOURCE,
@@ -770,12 +771,11 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     } catch (err) {
       console.error('[chain] onMutation sink threw', err);
     }
+    // Pause gate — fires only on `dangerous`-category mutations (see
+    // `shouldPauseForMutation`, shared with orchestrator.ts). MCP calls and
+    // ordinary edits classify as `mutate` and run free.
     const session = getMultiAgentSession(sessionId);
-    if (
-      session?.pause_on_mutation === 1 &&
-      session.mutations_acknowledged === 0 &&
-      session.pending_mutation_id === null
-    ) {
+    if (shouldPauseForMutation(cls.category, session)) {
       try {
         setPendingMutation(sessionId, row.id);
         setAwaitingContinue(sessionId, true);

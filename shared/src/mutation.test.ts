@@ -612,3 +612,56 @@ describe('classifyBashCommand — Phase F3 rationale (reason.rule)', () => {
     expect(classifyToolCall('Edit', { file_path: '/x', old_string: 'a' }).reason).toBeUndefined();
   });
 });
+
+describe('classifyBashCommand — extended dangerous detection (pause-on-dangerous)', () => {
+  // Infra-as-code / cluster / cloud / DB destructive ops → dangerous.
+  it.each([
+    'kubectl delete pod web-0',
+    'terraform destroy -auto-approve',
+    'terraform apply',
+    'helm uninstall my-release',
+    'aws s3 rm s3://bucket/key --recursive',
+    'psql -c "DROP TABLE users"',
+    'mysql -e "DELETE FROM users"',
+  ])('%s → dangerous', (cmd) => {
+    expect(classifyBashCommand(cmd).category).toBe('dangerous');
+  });
+
+  // Filesystem / disk destroyers → dangerous (new dangerous-first-tokens).
+  it.each(['shred -u secret.key', 'truncate -s 0 db.sqlite', 'diskutil eraseDisk JHFS+ X disk2'])(
+    '%s → dangerous',
+    (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    },
+  );
+
+  // Redirect to shell-init / credential dotfiles → dangerous (RCE-on-next-shell
+  // or secret-overwrite vector).
+  it.each([
+    'echo "evil" >> ~/.zshrc',
+    'echo x > ~/.bashrc',
+    'cat payload > ~/.gitconfig',
+    'echo token > ~/.npmrc',
+  ])('%s → dangerous', (cmd) => {
+    expect(classifyBashCommand(cmd).category).toBe('dangerous');
+  });
+
+  // Regression guard: a chained dangerous command is caught (split on && / ; / |,
+  // worst piece wins) — NOT masked by a benign leading token.
+  it('cd dir && rm -rf x → dangerous (worst piece wins)', () => {
+    expect(classifyBashCommand('cd /tmp && rm -rf build').category).toBe('dangerous');
+  });
+
+  // MCP tool calls stay `mutate` (unknown-tool default), never `dangerous`, so
+  // they run free under the dangerous-only pause gate. Load-bearing fact for
+  // "let MCP run without my explicit permission".
+  it('third-party MCP tools → mutate (never dangerous)', () => {
+    expect(
+      classifyToolCall('mcp__falcon__falcon_search_ngsiem', { query_string: '...' }).category,
+    ).toBe('mutate');
+    expect(
+      classifyToolCall('mcp__hodor__hodor_execute_tool', { tool_name: 'jira_search_issues' })
+        .category,
+    ).toBe('mutate');
+  });
+});

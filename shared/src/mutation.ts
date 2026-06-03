@@ -290,6 +290,14 @@ const DANGEROUS_FIRST_TOKENS: ReadonlySet<string> = new Set([
   'eval',
   'exec',
   'source', // can run anything from a file
+  // Filesystem / disk destroyers and persistence-layer mutators.
+  'shred',
+  'truncate',
+  'wipefs',
+  'fdisk',
+  'parted',
+  'diskutil',
+  'chflags',
 ]);
 
 /**
@@ -432,6 +440,16 @@ const DANGEROUS_SUBCOMMANDS: ReadonlySet<string> = new Set([
   'docker network prune',
   'docker rm',
   'docker rmi',
+  // Infra-as-code, cluster, cloud, and DB destructive ops. Matched as exact
+  // first-token pairs (and `aws s3 rm` as a triple) — see classifyByTokens.
+  'kubectl delete',
+  'terraform destroy',
+  'terraform apply',
+  'helm delete',
+  'helm uninstall',
+  'aws s3 rm',
+  'psql -c',
+  'mysql -e',
 ]);
 
 /**
@@ -543,7 +561,10 @@ function classifyBashPiece(piece: string): Verdict {
       target === '/dev/sda' || // catch literal
       /^~\/\.ssh\b/.test(target) ||
       /^~\/\.aws\b/.test(target) ||
-      /^~\/\.kube\b/.test(target)
+      /^~\/\.kube\b/.test(target) ||
+      // Shell-init / persistence / credential dotfiles — a redirect here is
+      // an RCE-on-next-shell or secret-overwrite vector.
+      /^~\/\.(zshrc|bashrc|bash_profile|zprofile|profile|gitconfig|npmrc)\b/.test(target)
     ) {
       return {
         category: 'dangerous',
