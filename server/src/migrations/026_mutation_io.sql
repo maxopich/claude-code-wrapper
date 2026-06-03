@@ -1,0 +1,40 @@
+-- Cluster H follow-up: full tool input + output on multi_agent_mutations.
+-- The bus mutation tap (server/src/bus/runner.ts) classifies every non-`read`
+-- tool_use into a one-line summary and persisted only that summary + metadata
+-- (tool name, category, file path, cwd). The actual tool INPUT (the command /
+-- args the agent ran) and the tool RESULT (its output) were discarded — so the
+-- Logs drawer could show "what kind of call" but never "the full command" or
+-- "what it returned". Single-agent sessions never had this gap: their `events`
+-- table stores the entire raw SDK envelope. This migration closes it for the
+-- bus path.
+--
+-- Two columns, both JSON-encoded TEXT, both nullable:
+--   1. tool_input_json  — JSON.stringify of the `tool_use.input`, captured at
+--                         append time in the mutation tap. Large inputs (e.g. a
+--                         Write `content`) are capped (~64 KB) at the repo
+--                         boundary to a `{truncated, bytes, preview}` envelope
+--                         so a single row can't blow the WS frame budget.
+--   2. tool_result_json — JSON.stringify of the matching `tool_result.content`,
+--                         written when the result lands (same UPDATE that flips
+--                         `confirmed_at`). Same cap. NULL until the result
+--                         arrives, or for a provisional mutation whose result
+--                         never came back.
+--
+-- Why JSON TEXT (not structured columns): tool inputs/outputs are arbitrary
+-- shapes per tool; we only ever read them back to display, never to query, so
+-- one opaque JSON column each mirrors the `classifier_reason_json` (022) and
+-- `safety_audit.payload_json` precedent. The projector hands them to the log
+-- drawer's existing `redactSensitive` pass, so secrets are masked on read.
+--
+-- Why nullable with no default / no backfill:
+--   - Rows appended after this migration get populated.
+--   - Pre-026 rows (and any read-tool calls, which the tap skips) project as
+--     NULL → the drawer simply shows no input/output section for them.
+--
+-- Indexing note: not indexed — same reasoning as 022. These columns are read
+-- by row id after the per-session query; they're never a filter/sort key.
+--
+-- Re-application: gated by `schema_migrations` like every other ALTER here.
+
+ALTER TABLE multi_agent_mutations ADD COLUMN tool_input_json  TEXT;
+ALTER TABLE multi_agent_mutations ADD COLUMN tool_result_json TEXT;

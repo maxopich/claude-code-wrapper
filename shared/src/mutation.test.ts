@@ -51,6 +51,21 @@ describe('classifyToolCall', () => {
       const r = classifyToolCall('bus_send', { destination: 'reviewer' });
       expect(r.category).toBe('read');
     });
+
+    it('AskUserQuestion → read (asks the operator; not a mutation)', () => {
+      const r = classifyToolCall('AskUserQuestion', {
+        questions: [
+          { question: 'Pick one', header: 'Choice', options: [{ label: 'A' }, { label: 'B' }] },
+        ],
+      });
+      expect(r.category).toBe('read');
+      expect(r.summary).toBe('ask user 1 question');
+    });
+
+    it('AskUserQuestion pluralizes the summary', () => {
+      const r = classifyToolCall('AskUserQuestion', { questions: [{}, {}] });
+      expect(r.summary).toBe('ask user 2 questions');
+    });
   });
 
   describe('mutating tools', () => {

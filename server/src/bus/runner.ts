@@ -228,6 +228,10 @@ export type AgentRunnerDeps = {
         detail: string;
         matched: string;
       };
+      /** Migration 026: the raw `tool_use.input` for this call. Routed into
+       *  the persisted mutation row (capped at the repo boundary) so the Logs
+       *  drawer can show the full command/args, not just the one-line summary. */
+      toolInput?: unknown;
     },
   ) => Promise<void> | void;
   /**
@@ -241,7 +245,7 @@ export type AgentRunnerDeps = {
   onToolResult?: (
     agentName: string,
     toolUseId: string,
-    meta: { isError: boolean },
+    meta: { isError: boolean; content?: unknown },
   ) => Promise<void> | void;
   /** Injectable for tests; defaults to the real `pickRunner` (mock-aware). */
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
@@ -659,6 +663,9 @@ export class AgentRunner {
               await this.deps.onMutation(agentName, toolName, spec.cwd, {
                 category: cls.category,
                 summary: cls.summary,
+                // Migration 026: capture the full tool input so the Logs
+                // drawer shows the complete command/args (repo caps the size).
+                toolInput: block.input,
                 ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
                 ...(toolUseId !== undefined ? { toolUseId } : {}),
                 ...(guardrailViolation ? { guardrailViolation } : {}),
@@ -680,7 +687,12 @@ export class AgentRunner {
           const um = msg as {
             type?: string;
             message?: {
-              content?: Array<{ type?: string; tool_use_id?: string; is_error?: boolean }>;
+              content?: Array<{
+                type?: string;
+                tool_use_id?: string;
+                is_error?: boolean;
+                content?: unknown;
+              }>;
             };
           };
           if (um.type === 'user' && Array.isArray(um.message?.content)) {
@@ -690,6 +702,9 @@ export class AgentRunner {
               try {
                 await this.deps.onToolResult(agentName, block.tool_use_id, {
                   isError: block.is_error === true,
+                  // Migration 026: forward the result payload so the matching
+                  // mutation row stores the full tool output.
+                  content: block.content,
                 });
               } catch (err) {
                 console.error(`[runner] onToolResult(${agentName}) failed`, err);

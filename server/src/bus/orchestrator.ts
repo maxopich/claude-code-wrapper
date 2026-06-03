@@ -1176,6 +1176,9 @@ export function wireOrchestratorSession(p: {
         filePath: cls.filePath ?? null,
         cwd,
         toolUseId: cls.toolUseId ?? null,
+        // Migration 026: persist the full tool input (capped in the repo) so
+        // the Logs drawer can show the complete command/args.
+        toolInput: cls.toolInput,
         // Cluster F Phase D5+: persist the guardrail-violation verdict
         // alongside the mutation so R-A/R-B replays show the badge.
         // Both fields are NULL when in-scope — `?? null` on both keeps
@@ -1241,10 +1244,12 @@ export function wireOrchestratorSession(p: {
   // file passes the locked promotion globs, flip `promoted=1` and re-emit
   // again with the promotion flag set — the reducer dedupes by id so this
   // looks like a single state transition to the client.
-  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId) => {
+  const onToolResultHook: AgentRunnerDeps['onToolResult'] = (_agentName, toolUseId, meta) => {
     let confirmed: MutationRecord | null;
     try {
-      confirmed = confirmMutationByToolUseId(sessionId, toolUseId);
+      // Migration 026: also persist the tool output (result content) so the
+      // Logs drawer shows what the call returned, not just that it confirmed.
+      confirmed = confirmMutationByToolUseId(sessionId, toolUseId, meta.content);
     } catch (err) {
       console.error('[orchestrator] confirm mutation failed', err);
       return;

@@ -243,6 +243,18 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       return { category: 'read', summary: `bus_send → ${dest}` };
     }
 
+    case 'AskUserQuestion': {
+      // Asks the operator a question — touches no filesystem. Classify as
+      // `read` so it never trips the pause-on-mutation gate or inflates the
+      // mutations counter (pre-fix it fell through to `default` → `mutate`).
+      // In the bus this tool is separately intercepted and surfaced to the
+      // operator (see the runner's canUseTool path); the classification here
+      // only governs the mutation log/counter.
+      const qs = inp['questions'];
+      const n = Array.isArray(qs) ? qs.length : 0;
+      return { category: 'read', summary: `ask user ${n} question${n === 1 ? '' : 's'}` };
+    }
+
     default: {
       // Unknown tool — could be an MCP tool the operator has installed
       // (`mcp__foo__bar`) or a future SDK tool. Default safe: classify as

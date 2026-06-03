@@ -168,6 +168,11 @@ function mutationToLogRow(m: MutationRecord, revealSensitive: boolean): LogRow {
     cwd: m.cwd,
     promoted: m.promoted,
     confirmedAt: m.confirmedAt,
+    // Migration 026: full tool input/output (null until captured / for pre-026
+    // rows). Routed through the same redactSensitive pass below, so secrets in
+    // the args/output are masked and listed in redactedFields.
+    toolInput: m.toolInput,
+    toolResult: m.toolResult,
   };
   const { redacted, fields } = revealSensitive
     ? { redacted: raw, fields: [] as string[] }
