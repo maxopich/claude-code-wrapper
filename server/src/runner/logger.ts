@@ -3,21 +3,38 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 
-type StreamEntry = { stream: fs.WriteStream; failed: boolean };
+export type LogFailureReason = 'stream_error' | 'drain_timeout';
+export type LogWriteResult = { ok: true } | { ok: false; reason: LogFailureReason };
+
+type StreamEntry = { stream: fs.WriteStream; failed: boolean; reason?: LogFailureReason };
 
 const streams = new Map<string, StreamEntry>();
+
+// Test seam: overridable so a unit test can inject a fake WriteStream that
+// emits 'error' or stays `writableNeedDrain` deterministically, rather than
+// relying on OS-specific unwritable paths (CI runs ubuntu + windows).
+let createStream: (filePath: string, opts: { flags: string }) => fs.WriteStream = (
+  filePath,
+  opts,
+) => fs.createWriteStream(filePath, opts);
+
+/** @internal test-only: override the write-stream factory (or reset with `null`). */
+export function __setStreamFactoryForTests(fn: typeof createStream | null): void {
+  createStream = fn ?? ((filePath, opts) => fs.createWriteStream(filePath, opts));
+}
 
 function streamFor(sessionId: string): StreamEntry {
   let entry = streams.get(sessionId);
   if (entry) return entry;
   fs.mkdirSync(config.logsDir, { recursive: true });
-  const stream = fs.createWriteStream(path.join(config.logsDir, `${sessionId}.jsonl`), {
+  const stream = createStream(path.join(config.logsDir, `${sessionId}.jsonl`), {
     flags: 'a',
   });
   entry = { stream, failed: false };
   stream.on('error', (err) => {
     if (!entry!.failed) {
       entry!.failed = true;
+      entry!.reason = 'stream_error';
       console.error(`[logger] write to ${sessionId}.jsonl failed:`, err);
     }
   });
@@ -47,10 +64,19 @@ function drainOrTimeout(stream: fs.WriteStream): Promise<void> {
   });
 }
 
-/** Append one JSON-encodable event. Honors backpressure; logs once on stream error. */
-export async function logEvent(sessionId: string, payload: unknown): Promise<void> {
+/**
+ * Append one JSON-encodable event. Honors backpressure. Returns a result so
+ * the caller can surface a failure to the operator: once a session's stream
+ * hits a write `'error'` or a drain timeout it is suppressed for the rest of
+ * that session's life (the `failed` flag is sticky, as before), and every
+ * subsequent call returns `{ ok: false, reason }`. Returning on every call
+ * (not just the first) lets the caller emit a coalesced/sticky notification
+ * that a late-attaching operator still sees. Still logs once to the console
+ * on the first failure.
+ */
+export async function logEvent(sessionId: string, payload: unknown): Promise<LogWriteResult> {
   const entry = streamFor(sessionId);
-  if (entry.failed) return; // already complained once; don't loop
+  if (entry.failed) return { ok: false, reason: entry.reason ?? 'stream_error' };
   const line = JSON.stringify(payload) + '\n';
   const ok = entry.stream.write(line);
   if (!ok) {
@@ -61,10 +87,16 @@ export async function logEvent(sessionId: string, payload: unknown): Promise<voi
       // Still backed up after the timeout — give up on this stream.
       if (!entry.failed) {
         entry.failed = true;
+        entry.reason = 'drain_timeout';
         console.error(`[logger] drain timeout on ${sessionId}.jsonl; suppressing further writes`);
       }
+      return { ok: false, reason: 'drain_timeout' };
     }
   }
+  // A write `'error'` can fire asynchronously (during the await above, or on a
+  // later tick); surface it on this call if it already landed.
+  if (entry.failed) return { ok: false, reason: entry.reason ?? 'stream_error' };
+  return { ok: true };
 }
 
 export function closeLogger(sessionId?: string): void {
