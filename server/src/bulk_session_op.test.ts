@@ -16,8 +16,11 @@ import { getSetting } from './repo/settings.js';
 import { registerQuery } from './runner/lifecycle.js';
 import {
   executeBulkSessionOp,
+  LAST_AUTO_RECLAIM_AT_KEY,
+  LAST_AUTO_RECLAIM_COUNT_KEY,
   LAST_PURGE_AT_KEY,
   LAST_PURGE_COUNT_KEY,
+  runIdleSessionReclaim,
   runSessionPurge,
   SESSION_PURGE_AFTER_MS,
 } from './bulk_session_op.js';
@@ -546,5 +549,119 @@ describe('runSessionPurge — heartbeat (P0-C part 2)', () => {
     await runSessionPurge(second);
     expect(getSetting<number>(LAST_PURGE_AT_KEY)).toBe(second);
     expect(getSetting<number>(LAST_PURGE_COUNT_KEY)).toBe(0);
+  });
+});
+
+// P0-C part 2b: opt-in idle auto-reclamation. Gated by config.autoReclaimDays
+// (env CEBAB_AUTO_RECLAIM_DAYS); soft-deletes idle, non-archived, non-running
+// sessions into the EXISTING 7-day undo window. We set/restore the config flag
+// per test and pin nowMs + last_event_at directly.
+describe('runIdleSessionReclaim (P0-C part 2b)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  let savedDays: number | null;
+
+  beforeEach(() => {
+    savedDays = config.autoReclaimDays;
+  });
+  afterEach(() => {
+    config.autoReclaimDays = savedDays;
+  });
+
+  function setLastEventAt(id: string, ts: number): void {
+    getDb().prepare(`UPDATE sessions SET last_event_at = ? WHERE id = ?`).run(ts, id);
+  }
+
+  test('disabled (autoReclaimDays = null) is a no-op — no soft-delete, no heartbeat', () => {
+    config.autoReclaimDays = null;
+    setupProjectWithSessions(['ancient']);
+    const now = Date.now();
+    setLastEventAt('ancient', now - 999 * DAY);
+
+    expect(runIdleSessionReclaim(now)).toBe(0);
+    expect(getSession('ancient')?.deleted_at).toBeNull();
+    expect(getSetting<number>(LAST_AUTO_RECLAIM_AT_KEY)).toBeNull();
+  });
+
+  test('soft-deletes sessions idle longer than the cutoff, leaves fresh ones', () => {
+    config.autoReclaimDays = 30;
+    setupProjectWithSessions(['old', 'fresh']);
+    const now = Date.now();
+    setLastEventAt('old', now - 31 * DAY);
+    setLastEventAt('fresh', now - 5 * DAY);
+
+    expect(runIdleSessionReclaim(now)).toBe(1);
+    expect(getSession('old')?.deleted_at).toBe(now); // stamped with the injected now
+    expect(getSession('fresh')?.deleted_at).toBeNull();
+  });
+
+  test('protects archived sessions (archiving = keep)', () => {
+    config.autoReclaimDays = 30;
+    setupProjectWithSessions(['arch']);
+    const now = Date.now();
+    setLastEventAt('arch', now - 99 * DAY);
+    getDb().prepare(`UPDATE sessions SET archived = 1 WHERE id = ?`).run('arch');
+
+    expect(runIdleSessionReclaim(now)).toBe(0);
+    expect(getSession('arch')?.deleted_at).toBeNull();
+  });
+
+  test('never reclaims a running session', () => {
+    config.autoReclaimDays = 30;
+    setupProjectWithSessions(['running']);
+    const now = Date.now();
+    setLastEventAt('running', now - 99 * DAY);
+    const unregister = registerQuery({}, { sessionId: 'running', kind: 'single', startedAt: now });
+
+    try {
+      expect(runIdleSessionReclaim(now)).toBe(0);
+      expect(getSession('running')?.deleted_at).toBeNull();
+    } finally {
+      unregister();
+    }
+  });
+
+  test('writes a session.auto_reclaim audit row per reclaim + stamps the heartbeat', () => {
+    config.autoReclaimDays = 30;
+    setupProjectWithSessions(['old']);
+    const now = Date.now();
+    setLastEventAt('old', now - 31 * DAY);
+
+    runIdleSessionReclaim(now);
+
+    const audits = getDb()
+      .prepare<
+        [],
+        { n: number }
+      >(`SELECT COUNT(*) AS n FROM safety_audit WHERE session_id = 'old' AND kind = 'session.auto_reclaim' AND reason_code = 'auto_reclaim_idle'`)
+      .get();
+    expect(audits?.n).toBe(1);
+    expect(getSetting<number>(LAST_AUTO_RECLAIM_AT_KEY)).toBe(now);
+    expect(getSetting<number>(LAST_AUTO_RECLAIM_COUNT_KEY)).toBe(1);
+  });
+
+  test('stamps the heartbeat even on a 0-reclaim enabled run', () => {
+    config.autoReclaimDays = 30;
+    setupProjectWithSessions(['fresh']);
+    const now = Date.now();
+    setLastEventAt('fresh', now - 1 * DAY);
+
+    expect(runIdleSessionReclaim(now)).toBe(0);
+    expect(getSetting<number>(LAST_AUTO_RECLAIM_AT_KEY)).toBe(now);
+    expect(getSetting<number>(LAST_AUTO_RECLAIM_COUNT_KEY)).toBe(0);
+  });
+
+  test('reclaimed rows are recoverable — the same-tick purge does NOT hard-delete them', async () => {
+    config.autoReclaimDays = 30;
+    setupProjectWithSessions(['old']);
+    const now = Date.now();
+    setLastEventAt('old', now - 31 * DAY);
+
+    runIdleSessionReclaim(now);
+    // deleted_at = now, so the purge (cutoff = now - 7d) leaves it for the window.
+    const purged = await runSessionPurge(now);
+
+    expect(purged).toBe(0);
+    expect(getSession('old')).toBeDefined();
+    expect(getSession('old')?.deleted_at).toBe(now);
   });
 });

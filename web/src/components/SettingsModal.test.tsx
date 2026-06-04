@@ -260,6 +260,7 @@ describe('SettingsModal — Storage section', () => {
       ],
       purgeIntervalMs: 21_600_000,
       purgeAfterMs: 604_800_000,
+      autoReclaim: { enabled: false, idleDays: null, lastRunAt: null, lastCount: null },
       ...over,
     };
     act(() => storageCb?.(msg));
@@ -304,5 +305,27 @@ describe('SettingsModal — Storage section', () => {
     const text = lastPurgeText();
     expect(text).toContain('Last cleanup');
     expect(text).toContain('removed 1 session.');
+  });
+
+  function autoReclaimText(): string {
+    return document.querySelector('[data-testid="storage-auto-reclaim"]')?.textContent ?? '';
+  }
+
+  test('auto-reclaim off → prompts for the env var', () => {
+    renderWithStorage();
+    feed({ autoReclaim: { enabled: false, idleDays: null, lastRunAt: null, lastCount: null } });
+    expect(autoReclaimText()).toContain('Auto-reclaim: off');
+    expect(autoReclaimText()).toContain('CEBAB_AUTO_RECLAIM_DAYS');
+  });
+
+  test('auto-reclaim on → shows the idle window + last run', () => {
+    renderWithStorage();
+    feed({
+      autoReclaim: { enabled: true, idleDays: 30, lastRunAt: 1_700_000_000_000, lastCount: 4 },
+    });
+    const text = autoReclaimText();
+    expect(text).toContain('Auto-reclaim: on');
+    expect(text).toContain('30d');
+    expect(text).toContain('reclaimed 4');
   });
 });

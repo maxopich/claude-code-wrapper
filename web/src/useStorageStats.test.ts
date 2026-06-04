@@ -65,6 +65,7 @@ const sampleStats: StorageStatsView = {
   tableStats: [{ table: 'events', rows: 7 }],
   purgeIntervalMs: 21_600_000,
   purgeAfterMs: 604_800_000,
+  autoReclaim: { enabled: false, idleDays: null, lastRunAt: null, lastCount: null },
 };
 
 describe('useStorageStats', () => {

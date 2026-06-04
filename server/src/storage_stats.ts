@@ -19,6 +19,8 @@ import { config } from './config.js';
 import { getDb } from './db.js';
 import { getSetting } from './repo/settings.js';
 import {
+  LAST_AUTO_RECLAIM_AT_KEY,
+  LAST_AUTO_RECLAIM_COUNT_KEY,
   LAST_PURGE_AT_KEY,
   LAST_PURGE_COUNT_KEY,
   SESSION_PURGE_AFTER_MS,
@@ -123,5 +125,11 @@ export function executeStorageStats(args: { send: (msg: ServerMsg) => void }): v
     tableStats: computeTableStats(),
     purgeIntervalMs: SESSION_PURGE_INTERVAL_MS,
     purgeAfterMs: SESSION_PURGE_AFTER_MS,
+    autoReclaim: {
+      enabled: config.autoReclaimDays != null,
+      idleDays: config.autoReclaimDays,
+      lastRunAt: getSetting<number>(LAST_AUTO_RECLAIM_AT_KEY),
+      lastCount: getSetting<number>(LAST_AUTO_RECLAIM_COUNT_KEY),
+    },
   });
 }

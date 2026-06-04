@@ -42,6 +42,7 @@ import {
   archiveSession,
   getSession,
   hardDeleteSession,
+  listIdleSessionIds,
   listSoftDeletedSessionsOlderThan,
   softDeleteSession,
 } from './repo/sessions.js';
@@ -73,6 +74,15 @@ export const SESSION_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
  */
 export const LAST_PURGE_AT_KEY = 'last_purge_at';
 export const LAST_PURGE_COUNT_KEY = 'last_purge_count';
+
+/**
+ * P0-C part 2b: settings-table keys for the idle auto-reclaim heartbeat.
+ * `runIdleSessionReclaim` stamps both on every ENABLED run (incl. 0-reclaim)
+ * so the Storage section can show "Auto-reclaim: on — last run …". They stay
+ * unset while the feature is OFF. Read back by `storage_stats.ts`.
+ */
+export const LAST_AUTO_RECLAIM_AT_KEY = 'last_auto_reclaim_at';
+export const LAST_AUTO_RECLAIM_COUNT_KEY = 'last_auto_reclaim_count';
 
 /**
  * Build the path to a session's JSONL log under `~/.cebab/logs/`. The
@@ -363,7 +373,82 @@ export async function runSessionPurge(nowMs: number = Date.now()): Promise<numbe
 }
 
 /**
- * Cluster I Phase C5: schedule the 7-day soft-delete purge as a
+ * P0-C part 2b: opt-in idle-session auto-reclamation. When
+ * `config.autoReclaimDays` is set (via `CEBAB_AUTO_RECLAIM_DAYS`), soft-delete
+ * every session whose `last_event_at` is older than that many days —
+ * EXCLUDING archived sessions (an explicit "keep") and any session currently
+ * running. Each reclaim routes through the SAME `deleted_at` undo window the
+ * operator's manual delete uses, so it's recoverable for 7 days and then
+ * hard-deleted by the purge; each writes a `safety_audit` row.
+ *
+ * Default-OFF: with the env unset, `config.autoReclaimDays` is null and this
+ * is a cheap no-op (no DB scan, no heartbeat). Synchronous — every op here
+ * (query, soft-delete, audit, settings) is sync. `nowMs` is injectable so
+ * tests pin both the idle cutoff and the recorded `deleted_at`/heartbeat.
+ *
+ * Returns the number of sessions reclaimed this run.
+ */
+export function runIdleSessionReclaim(nowMs: number = Date.now()): number {
+  const days = config.autoReclaimDays;
+  if (days == null) return 0; // feature OFF — opt-in via CEBAB_AUTO_RECLAIM_DAYS
+  const cutoff = nowMs - days * 24 * 60 * 60 * 1000;
+  const ids = listIdleSessionIds(cutoff);
+  // Running-state lives in the in-memory lifecycle registry, not the DB, so we
+  // filter it here rather than in the query (same guard executeBulkSessionOp
+  // uses for manual bulk ops).
+  const running = new Set(snapshotInFlight().map((m) => m.sessionId));
+  let reclaimed = 0;
+  for (const id of ids) {
+    if (running.has(id)) continue;
+    const flipped = softDeleteSession(id, nowMs);
+    if (!flipped) continue; // race: deleted between the query and now
+    reclaimed += 1;
+    try {
+      appendSafetyAudit({
+        ts: nowMs,
+        sessionId: id,
+        parentSessionId: null,
+        agentId: null,
+        kind: 'session.auto_reclaim',
+        reasonCode: 'auto_reclaim_idle',
+        payload: { idleDays: days, reclaimedAt: nowMs },
+      });
+    } catch (err) {
+      // Audit-append failure is logged but doesn't roll back the soft-delete
+      // (same posture as the bulk-op audit + the purge heartbeat).
+      console.error(`[bulk_session_op] safety_audit append failed for auto-reclaim ${id}`, err);
+    }
+  }
+  // Heartbeat (best-effort) — stamped on every ENABLED run, incl. 0-reclaim,
+  // so Settings → Storage can show "Auto-reclaim: on — last run …".
+  try {
+    setSetting<number>(LAST_AUTO_RECLAIM_AT_KEY, nowMs);
+    setSetting<number>(LAST_AUTO_RECLAIM_COUNT_KEY, reclaimed);
+  } catch (err) {
+    console.error('[bulk_session_op] failed to record auto-reclaim heartbeat', err);
+  }
+  return reclaimed;
+}
+
+/**
+ * P0-C part 2b: one retention tick = reclaim idle sessions FIRST (into the
+ * soft-delete undo window), THEN purge rows whose window has expired. The
+ * ordering matters: a session reclaimed this tick gets `deleted_at = now`, so
+ * it survives the full 7-day window before this same cron can hard-delete it.
+ * Reclaim is wrapped so a failure there can't block the purge.
+ */
+async function runRetentionCycle(): Promise<void> {
+  try {
+    runIdleSessionReclaim();
+  } catch (err) {
+    console.error('[bulk_session_op] idle auto-reclaim failed', err);
+  }
+  await runSessionPurge();
+}
+
+/**
+ * Cluster I Phase C5 (+ P0-C part 2b): schedule the retention cycle —
+ * opt-in idle auto-reclaim, then the 7-day soft-delete purge — as a
  * background heartbeat. Fires once on the next event-loop tick (so the
  * server's boot path is unblocked) AND every
  * `SESSION_PURGE_INTERVAL_MS` thereafter.
@@ -381,13 +466,13 @@ export function startSessionPurgeCron(): () => void {
   // First tick: kick the purge once. Wrapped in `void` because the
   // Promise's resolution shape isn't part of the cron contract — the
   // result is the side effect on the DB.
-  void runSessionPurge().catch((err) => {
-    console.error('[bulk_session_op] boot purge failed', err);
+  void runRetentionCycle().catch((err) => {
+    console.error('[bulk_session_op] boot retention cycle failed', err);
   });
 
   const handle = setInterval(() => {
-    void runSessionPurge().catch((err) => {
-      console.error('[bulk_session_op] interval purge failed', err);
+    void runRetentionCycle().catch((err) => {
+      console.error('[bulk_session_op] interval retention cycle failed', err);
     });
   }, SESSION_PURGE_INTERVAL_MS);
   handle.unref();

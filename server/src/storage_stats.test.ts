@@ -9,6 +9,8 @@ import { upsertProject } from './repo/projects.js';
 import { createSession } from './repo/sessions.js';
 import { setSetting } from './repo/settings.js';
 import {
+  LAST_AUTO_RECLAIM_AT_KEY,
+  LAST_AUTO_RECLAIM_COUNT_KEY,
   LAST_PURGE_AT_KEY,
   LAST_PURGE_COUNT_KEY,
   SESSION_PURGE_AFTER_MS,
@@ -137,5 +139,41 @@ describe('executeStorageStats', () => {
     executeStorageStats({ send: (m) => sent.push(m) });
     expect(lastStats().lastPurgeAt).toBe(1_700_000_000_000);
     expect(lastStats().lastPurgeCount).toBe(4);
+  });
+});
+
+// P0-C part 2b: the autoReclaim block on the storage_stats reply reflects
+// config.autoReclaimDays (env opt-in) + the reclaim heartbeat keys.
+describe('executeStorageStats — autoReclaim (P0-C part 2b)', () => {
+  let savedDays: number | null;
+  beforeEach(() => {
+    savedDays = config.autoReclaimDays;
+  });
+  afterEach(() => {
+    config.autoReclaimDays = savedDays;
+  });
+
+  test('off when CEBAB_AUTO_RECLAIM_DAYS is unset (config null)', () => {
+    config.autoReclaimDays = null;
+    executeStorageStats({ send: (m) => sent.push(m) });
+    expect(lastStats().autoReclaim).toEqual({
+      enabled: false,
+      idleDays: null,
+      lastRunAt: null,
+      lastCount: null,
+    });
+  });
+
+  test('on with idleDays + heartbeat passthrough when enabled', () => {
+    config.autoReclaimDays = 30;
+    setSetting<number>(LAST_AUTO_RECLAIM_AT_KEY, 1_700_000_000_000);
+    setSetting<number>(LAST_AUTO_RECLAIM_COUNT_KEY, 2);
+    executeStorageStats({ send: (m) => sent.push(m) });
+    expect(lastStats().autoReclaim).toEqual({
+      enabled: true,
+      idleDays: 30,
+      lastRunAt: 1_700_000_000_000,
+      lastCount: 2,
+    });
   });
 });

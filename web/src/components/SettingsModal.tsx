@@ -233,6 +233,17 @@ export function SettingsModal(props: {
                 soft-deleted sessions {Math.round(storage.purgeAfterMs / 86_400_000)}d after you
                 delete them. Sessions you never delete are kept.
               </p>
+              <p className="hint" data-testid="storage-auto-reclaim">
+                {storage.autoReclaim.enabled
+                  ? `Auto-reclaim: on — sessions idle over ${storage.autoReclaim.idleDays}d are soft-deleted (recoverable for 7 days)${
+                      storage.autoReclaim.lastRunAt !== null
+                        ? `. Last run ${new Date(
+                            storage.autoReclaim.lastRunAt,
+                          ).toLocaleString()}, reclaimed ${storage.autoReclaim.lastCount ?? 0}.`
+                        : '.'
+                    }`
+                  : 'Auto-reclaim: off — set CEBAB_AUTO_RECLAIM_DAYS to soft-delete sessions left idle for N days.'}
+              </p>
             </>
           ) : (
             <p className="hint">{storageLoading ? 'Loading…' : 'Storage stats unavailable.'}</p>

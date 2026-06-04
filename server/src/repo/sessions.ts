@@ -154,6 +154,24 @@ export function listSoftDeletedSessionsOlderThan(cutoffMs: number): string[] {
 }
 
 /**
+ * P0-C part 2b: list session IDs eligible for opt-in idle auto-reclamation —
+ * sessions whose `last_event_at` predates the cutoff, EXCLUDING ones already
+ * soft-deleted (`deleted_at IS NULL`) and archived ones (`archived = 0` —
+ * archiving is treated as an explicit "keep"). Returns just IDs, oldest-idle
+ * first. The caller (`runIdleSessionReclaim`) additionally skips any session
+ * that's currently running — running-state isn't a DB column, so it can't be
+ * filtered here.
+ */
+export function listIdleSessionIds(cutoffMs: number): string[] {
+  return getDb()
+    .prepare<[number], { id: string }>(
+      'SELECT id FROM sessions WHERE last_event_at < ? AND deleted_at IS NULL AND archived = 0 ORDER BY last_event_at ASC',
+    )
+    .all(cutoffMs)
+    .map((r) => r.id);
+}
+
+/**
  * Cluster I Phase C5: hard-delete a session row + its events. The purge
  * cron calls this for each ID returned by `listSoftDeletedSessionsOlderThan`.
  * Wraps both deletes in a transaction so a half-finished purge can't
