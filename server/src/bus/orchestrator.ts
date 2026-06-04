@@ -64,6 +64,7 @@ import type {
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { PausedForMutationError, isPausedForMutation } from './errors.js';
+import { shouldPauseForMutation } from './pause_gate.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
@@ -1210,15 +1211,13 @@ export function wireOrchestratorSession(p: {
     } catch (err) {
       console.error('[orchestrator] onMutation sink threw', err);
     }
-    // Pause gate. Fresh DB read each time — handles the operator flipping
-    // `mutations_acknowledged` mid-turn via Continue, and R-B reconstructed
-    // sessions where the in-memory closure has no value to read.
+    // Pause gate — fires only on `dangerous`-category mutations (see
+    // `shouldPauseForMutation`). MCP calls and ordinary edits classify as
+    // `mutate` and run free. Fresh DB read each time — handles the operator
+    // flipping `mutations_acknowledged` mid-turn via Continue, and R-B
+    // reconstructed sessions where the in-memory closure has no value to read.
     const session = getMultiAgentSession(sessionId);
-    if (
-      session?.pause_on_mutation === 1 &&
-      session.mutations_acknowledged === 0 &&
-      session.pending_mutation_id === null
-    ) {
+    if (shouldPauseForMutation(cls.category, session)) {
       try {
         setPendingMutation(sessionId, row.id);
         setAwaitingContinue(sessionId, true);

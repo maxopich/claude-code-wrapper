@@ -24,7 +24,10 @@
  *     piece by first token (after stripping env-var prefixes), reduce to worst.
  *     Unknown first token → `mutate`. Output redirection (`>`/`>>`) bumps any
  *     read to at least `mutate`. Shell substitution (`$(...)`, backticks) bumps
- *     to `dangerous` (we don't try to parse what's inside).
+ *     to `dangerous` (we don't try to parse what's inside). Windows-native
+ *     commands (cmd builtins + PowerShell cmdlets/aliases, `powershell -c`,
+ *     redirects to `C:\Windows`) are matched case-insensitively — Cebab
+ *     targets Windows without WSL.
  */
 
 export type MutationCategory = 'read' | 'mutate' | 'dangerous';
@@ -290,6 +293,14 @@ const DANGEROUS_FIRST_TOKENS: ReadonlySet<string> = new Set([
   'eval',
   'exec',
   'source', // can run anything from a file
+  // Filesystem / disk destroyers and persistence-layer mutators.
+  'shred',
+  'truncate',
+  'wipefs',
+  'fdisk',
+  'parted',
+  'diskutil',
+  'chflags',
 ]);
 
 /**
@@ -432,6 +443,101 @@ const DANGEROUS_SUBCOMMANDS: ReadonlySet<string> = new Set([
   'docker network prune',
   'docker rm',
   'docker rmi',
+  // Infra-as-code, cluster, cloud, and DB destructive ops. Matched as exact
+  // first-token pairs (and `aws s3 rm` as a triple) — see classifyByTokens.
+  'kubectl delete',
+  'terraform destroy',
+  'terraform apply',
+  'helm delete',
+  'helm uninstall',
+  'aws s3 rm',
+  'psql -c',
+  'mysql -e',
+]);
+
+/**
+ * Windows-native dangerous first tokens (cmd builtins + PowerShell cmdlets and
+ * aliases). Cebab targets Windows without WSL, so a worker's Bash-tool string
+ * can be a cmd / PowerShell command. Matched CASE-INSENSITIVELY against the
+ * lowercased first-token basename (PowerShell is case-insensitive and
+ * alias-rich: `Remove-Item` / `ri` / `del` / `rd` are one thing). `attrib` /
+ * `icacls` are intentionally absent — permission tweaks ~ chmod → `mutate`.
+ */
+const DANGEROUS_WINDOWS_FIRST_TOKENS: ReadonlySet<string> = new Set([
+  // cmd builtins + disk / recovery / boot tools.
+  'del',
+  'erase',
+  'rd',
+  'rmdir',
+  'format',
+  'diskpart',
+  'takeown',
+  'cipher', // `cipher /w` wipes free space
+  'vssadmin', // shadow-copy deletion — ransomware pattern
+  'fsutil',
+  'bcdedit',
+  'taskkill', // can knock out the Cebab server (~ pkill)
+  // PowerShell destructive cmdlets + aliases.
+  'remove-item',
+  'ri',
+  'clear-disk',
+  'format-volume',
+  'clear-content',
+  'clear-item',
+  'stop-computer',
+  'restart-computer',
+  'set-executionpolicy', // disables the script-signing brake
+  'invoke-expression', // arbitrary code (~ eval)
+  'iex',
+]);
+
+/**
+ * Windows shells whose `-Command` / `-c` / `-EncodedCommand` / `/c` invocation
+ * runs an arbitrary, un-introspectable command string (the `bash -c` analogue).
+ * Matched on the lowercased basename so `C:\Windows\System32\cmd.exe` matches.
+ */
+const WINDOWS_SHELLS: ReadonlySet<string> = new Set([
+  'powershell',
+  'powershell.exe',
+  'pwsh',
+  'pwsh.exe',
+  'cmd',
+  'cmd.exe',
+]);
+
+/**
+ * Arbitrary-code flags for the Windows shells above (lowercased exact match).
+ * `-c` / `-e` are PowerShell's documented abbreviations of `-Command` /
+ * `-EncodedCommand`; `/c` `/k` are cmd's.
+ */
+const WINDOWS_SHELL_CODE_FLAGS: ReadonlySet<string> = new Set([
+  '-command',
+  '-c',
+  '-encodedcommand',
+  '-enc',
+  '-ec',
+  '-e',
+  '/c',
+  '/k',
+]);
+
+/**
+ * Windows dangerous subcommands — `<bin> <sub>` pairs (lowercased): registry
+ * mutation (persistence), account / service control. `reg query` / `reg export`
+ * fall through to the default (`mutate`).
+ */
+const DANGEROUS_WINDOWS_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'reg delete',
+  'reg add',
+  'reg import',
+  'reg load',
+  'reg unload',
+  'net user',
+  'net localgroup',
+  'net stop',
+  'sc delete',
+  'sc stop',
+  'sc config',
 ]);
 
 /**
@@ -543,7 +649,13 @@ function classifyBashPiece(piece: string): Verdict {
       target === '/dev/sda' || // catch literal
       /^~\/\.ssh\b/.test(target) ||
       /^~\/\.aws\b/.test(target) ||
-      /^~\/\.kube\b/.test(target)
+      /^~\/\.kube\b/.test(target) ||
+      // Shell-init / persistence / credential dotfiles — a redirect here is
+      // an RCE-on-next-shell or secret-overwrite vector.
+      /^~\/\.(zshrc|bashrc|bash_profile|zprofile|profile|gitconfig|npmrc)\b/.test(target) ||
+      // Windows system locations (case-insensitive; `\` or `/` separators).
+      /^[a-z]:[\\/]windows(?:[\\/]|$)/i.test(target) ||
+      /^%(?:systemroot|windir)%/i.test(target)
     ) {
       return {
         category: 'dangerous',
@@ -578,6 +690,10 @@ function classifyByTokens(stripped: string): Verdict {
   const second = tokens[1] ?? '';
   const pair = second ? `${first} ${second}` : first;
   const triple = tokens[2] ? `${first} ${second} ${tokens[2]}` : pair;
+  // Windows commands are case-insensitive; compare lowercased forms (and the
+  // shell basename so a full-path `C:\…\cmd.exe` still matches).
+  const firstBase = first.toLowerCase().replace(/^.*[\\/]/, '');
+  const winPair = second ? `${firstBase} ${second.toLowerCase()}` : firstBase;
 
   // 1) Universal version/help check: `<anything> --version` / `-V` /
   //    `--help` is always a query, no matter the binary. Cheap escape
@@ -687,6 +803,61 @@ function classifyByTokens(stripped: string): Verdict {
         rule: 'kill_other',
         detail: `'kill' sends a signal to a process — surfaced so the operator can confirm intent`,
         matched: 'kill',
+      },
+    };
+  }
+
+  // 6b) Windows-native dangerous commands (cmd / PowerShell). Cebab runs on
+  //     Windows without WSL, so a Bash-tool string may be a Windows command.
+  //     Checked case-insensitively against the lowercased token / basename.
+  if (DANGEROUS_WINDOWS_SUBCOMMANDS.has(winPair)) {
+    return {
+      category: 'dangerous',
+      reason: {
+        rule: 'dangerous_subcommand',
+        detail: `Windows subcommand '${winPair}' is destructive (registry, account, or service mutation)`,
+        matched: winPair,
+      },
+    };
+  }
+  if (WINDOWS_SHELLS.has(firstBase)) {
+    const codeFlag = tokens.slice(1).find((t) => WINDOWS_SHELL_CODE_FLAGS.has(t.toLowerCase()));
+    if (codeFlag) {
+      return {
+        category: 'dangerous',
+        reason: {
+          rule: 'shell_invocation_dash_c',
+          detail: `'${first} ${codeFlag}' runs an arbitrary (possibly base64-encoded) command string — contents not introspected`,
+          matched: `${firstBase} ${codeFlag.toLowerCase()}`,
+        },
+      };
+    }
+    if (tokens.length === 1) {
+      return {
+        category: 'dangerous',
+        reason: {
+          rule: 'shell_invocation_bare',
+          detail: `bare '${first}' with no arguments — typically the receiving end of a pipe`,
+          matched: firstBase,
+        },
+      };
+    }
+    return {
+      category: 'mutate',
+      reason: {
+        rule: 'shell_invocation_script',
+        detail: `'${first}' runs the named script / args — contents aren't parsed by the classifier`,
+        matched: firstBase,
+      },
+    };
+  }
+  if (DANGEROUS_WINDOWS_FIRST_TOKENS.has(firstBase)) {
+    return {
+      category: 'dangerous',
+      reason: {
+        rule: 'dangerous_first_token',
+        detail: `Windows command '${first}' is destructive, privilege-escalating, or remote-code-executing`,
+        matched: first,
       },
     };
   }

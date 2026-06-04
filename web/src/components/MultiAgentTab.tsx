@@ -573,14 +573,14 @@ function DraftView(props: {
               operator opts in explicitly per session. Survives R-B once set. */}
           <label
             className="ma-pause-mutation-checkbox"
-            title="When enabled, the session pauses before the first non-read tool call from any worker and asks for your approval. Subsequent mutations auto-allow once you click Continue. Survives a Cebab server restart."
+            title="When enabled, the session pauses before the first dangerous command (rm, sudo, force-push, curl|sh, writes to system or secret paths, destructive infra/cluster/DB ops) from any worker and asks for your approval. Ordinary edits and MCP tool calls run without a prompt. Subsequent dangerous commands auto-allow once you click Continue. Survives a Cebab server restart."
           >
             <input
               type="checkbox"
               checked={multiAgent.draftPauseOnMutation}
               onChange={(e) => props.onSetDraftPauseOnMutation(e.target.checked)}
             />
-            Pause before any worker mutates the filesystem
+            Pause before a worker runs a dangerous command
           </label>
           {/* Cluster F Phase D9 (UI-D9): per-run hop-budget override. The
               wire was complete (start_multi_agent.hopBudget + template
@@ -1828,15 +1828,15 @@ function ActiveRunView(props: {
                 </strong>
               </p>
               <p>
-                You enabled "Pause before any worker mutates the filesystem" for this session. This
-                is the first mutation. Continue to allow this call and let subsequent mutations
-                auto-allow.
+                You enabled "Pause before a worker runs a dangerous command" for this session. This
+                is the first dangerous command. Continue to allow this call and let subsequent
+                dangerous commands auto-allow.
               </p>
             </>
           }
           actions={[
             {
-              label: 'Continue with this mutation',
+              label: 'Continue with this command',
               variant: 'primary',
               onClick: () => props.onContinueThroughMutation(run.sessionId),
               title: 'Allow this tool call and any subsequent mutations in this session.',
@@ -2184,11 +2184,11 @@ function SessionSettingsPanel(props: {
 
         {run.pauseOnMutation && (
           <>
-            <dt>Pause on mutation</dt>
+            <dt>Pause on dangerous</dt>
             <dd>
               {run.mutationsAcknowledged
-                ? 'On · acknowledged (subsequent mutations auto-allow)'
-                : 'On · pending first mutation'}
+                ? 'On · acknowledged (subsequent dangerous commands auto-allow)'
+                : 'On · pending first dangerous command'}
             </dd>
           </>
         )}
