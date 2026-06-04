@@ -12,9 +12,12 @@ import {
   listSessionsForProject,
   listSoftDeletedSessionsOlderThan,
 } from './repo/sessions.js';
+import { getSetting } from './repo/settings.js';
 import { registerQuery } from './runner/lifecycle.js';
 import {
   executeBulkSessionOp,
+  LAST_PURGE_AT_KEY,
+  LAST_PURGE_COUNT_KEY,
   runSessionPurge,
   SESSION_PURGE_AFTER_MS,
 } from './bulk_session_op.js';
@@ -497,5 +500,51 @@ describe('runSessionPurge', () => {
 
     const ids = listSoftDeletedSessionsOlderThan(now);
     expect(ids).toEqual(['oldest', 'middle', 'newest']);
+  });
+});
+
+// P0-C part 2 (retention visibility): the purge cron now records a heartbeat
+// (last-run time + reclaimed count) in the settings table so the operator can
+// see it's alive from Settings → Storage. The stamp is best-effort and uses
+// the injectable `nowMs`, so we assert against a pinned clock.
+describe('runSessionPurge — heartbeat (P0-C part 2)', () => {
+  test('stamps last_purge_at + last_purge_count after reclaiming rows', async () => {
+    setupProjectWithSessions(['old']);
+    const now = Date.now();
+    getDb()
+      .prepare(`UPDATE sessions SET deleted_at = ? WHERE id = ?`)
+      .run(now - SESSION_PURGE_AFTER_MS - 1000, 'old');
+
+    const purged = await runSessionPurge(now);
+
+    expect(purged).toBe(1);
+    expect(getSetting<number>(LAST_PURGE_AT_KEY)).toBe(now);
+    expect(getSetting<number>(LAST_PURGE_COUNT_KEY)).toBe(1);
+  });
+
+  test('stamps the heartbeat even on a 0-reclaim run', async () => {
+    // A never-deleted session is ineligible, so nothing is purged — but the
+    // heartbeat must still record that the cron RAN (the whole point of the
+    // visibility feature: "is cleanup working?", not just "did it delete?").
+    setupProjectWithSessions(['never-deleted']);
+    const now = Date.now();
+
+    const purged = await runSessionPurge(now);
+
+    expect(purged).toBe(0);
+    expect(getSetting<number>(LAST_PURGE_AT_KEY)).toBe(now);
+    expect(getSetting<number>(LAST_PURGE_COUNT_KEY)).toBe(0);
+  });
+
+  test('a later run overwrites the heartbeat', async () => {
+    setupProjectWithSessions(['s1']);
+    const first = 1_000_000;
+    await runSessionPurge(first);
+    expect(getSetting<number>(LAST_PURGE_AT_KEY)).toBe(first);
+
+    const second = 2_000_000;
+    await runSessionPurge(second);
+    expect(getSetting<number>(LAST_PURGE_AT_KEY)).toBe(second);
+    expect(getSetting<number>(LAST_PURGE_COUNT_KEY)).toBe(0);
   });
 });

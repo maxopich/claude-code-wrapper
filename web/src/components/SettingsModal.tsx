@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import type { SettingsView } from '../store';
 import { useModalSurface } from '../useModalSurface';
+import { useStorageStats } from '../useStorageStats';
+import type { ClientMsg, ServerMsg } from '@cebab/shared';
 
 export type SettingsSavePayload = {
   workspaceRoot: string;
@@ -32,7 +34,18 @@ export function SettingsModal(props: {
   /** Caller decides which fields actually changed and fires the matching
    *  ClientMsg(s). All values are always provided. */
   onSave: (payload: SettingsSavePayload) => void;
+  /** WS side-channel for the read-only "Storage" section (P0-C part 2):
+   *  dispatch `get_storage_stats` + consume `storage_stats`. Mirrors the
+   *  SessionSearchModal wiring in App.tsx. */
+  send: (msg: ClientMsg) => void;
+  subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
+  // P0-C part 2 (retention visibility): fetch storage stats on open via the
+  // WS side-channel; rendered read-only in the "Storage" section below.
+  const { stats: storage, loading: storageLoading } = useStorageStats({
+    send: props.send,
+    subscribeServerMsg: props.subscribeServerMsg,
+  });
   const [value, setValue] = useState(
     props.settings.workspaceRoot ?? props.settings.defaultWorkspaceRoot,
   );
@@ -193,6 +206,38 @@ export function SettingsModal(props: {
           </p>
           {!maxTurnsValid && <p className="hint warn">Max turns must be a positive integer.</p>}
         </section>
+        <section data-testid="storage-section">
+          <div className="label">Storage</div>
+          {storage ? (
+            <>
+              <p className="hint">
+                Database <code>{formatBytes(storage.dbSizeBytes)}</code> · session logs{' '}
+                <code>{formatBytes(storage.logsDirSizeBytes)}</code>
+              </p>
+              <ul className="settings-storage-tables">
+                {storage.tableStats.map((t) => (
+                  <li key={t.table}>
+                    <code>{t.table}</code>: {t.rows.toLocaleString()} rows
+                  </li>
+                ))}
+              </ul>
+              <p className="hint" data-testid="storage-last-purge">
+                {storage.lastPurgeAt !== null
+                  ? `Last cleanup ${new Date(storage.lastPurgeAt).toLocaleString()} — removed ${
+                      storage.lastPurgeCount ?? 0
+                    } session${storage.lastPurgeCount === 1 ? '' : 's'}.`
+                  : "Cleanup hasn't run yet."}
+              </p>
+              <p className="hint">
+                Cleanup runs every {Math.round(storage.purgeIntervalMs / 3_600_000)}h and removes
+                soft-deleted sessions {Math.round(storage.purgeAfterMs / 86_400_000)}d after you
+                delete them. Sessions you never delete are kept.
+              </p>
+            </>
+          ) : (
+            <p className="hint">{storageLoading ? 'Loading…' : 'Storage stats unavailable.'}</p>
+          )}
+        </section>
         <footer>
           <button className="ghost-btn" onClick={props.onClose}>
             Cancel
@@ -240,4 +285,15 @@ function fallbackSourceSentence(source: 'env' | 'builtin' | undefined): string {
     default:
       return '(default fallback)';
   }
+}
+
+/**
+ * Compact byte size for the Storage readout. Mirrors the private helper in
+ * ArtifactsView.tsx; a future cleanup could hoist both into a shared util
+ * (out of scope here).
+ */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

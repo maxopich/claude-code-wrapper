@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { SettingsView } from '../store';
 import { SettingsModal } from './SettingsModal';
+import type { ClientMsg, ServerMsg } from '@cebab/shared';
 
 // Cluster E Phase 3 (A4) — SettingsModal contract additions:
 //   - Inline "(default fallback)" tag renders ONLY when workspaceRoot is
@@ -44,9 +45,25 @@ function settings(over: Partial<SettingsView> = {}): SettingsView {
   };
 }
 
-function render(settingsView: SettingsView, onSave = vi.fn(), onClose = vi.fn()) {
+function render(
+  settingsView: SettingsView,
+  onSave = vi.fn(),
+  onClose = vi.fn(),
+  opts: {
+    send?: (m: ClientMsg) => void;
+    subscribeServerMsg?: (cb: (m: ServerMsg) => void) => () => void;
+  } = {},
+) {
   act(() => {
-    root.render(<SettingsModal settings={settingsView} onSave={onSave} onClose={onClose} />);
+    root.render(
+      <SettingsModal
+        settings={settingsView}
+        onSave={onSave}
+        onClose={onClose}
+        send={opts.send ?? vi.fn()}
+        subscribeServerMsg={opts.subscribeServerMsg ?? (() => () => {})}
+      />,
+    );
   });
 }
 
@@ -208,5 +225,84 @@ describe('SettingsModal — defaultMaxTurns', () => {
       (e) => e.textContent ?? '',
     );
     expect(hints.some((t) => t.includes('Max turns must be a positive integer'))).toBe(true);
+  });
+});
+
+// P0-C part 2 (retention visibility) — the read-only "Storage" section fed by
+// the get_storage_stats / storage_stats WS round-trip (modal-local, via
+// useStorageStats). We drive it by capturing the subscribe callback and
+// feeding a canned reply.
+describe('SettingsModal — Storage section', () => {
+  let storageCb: ((m: ServerMsg) => void) | null = null;
+
+  function renderWithStorage(over: Partial<SettingsView> = {}) {
+    storageCb = null;
+    render(settings({ workspaceRoot: '/already/set', ...over }), vi.fn(), vi.fn(), {
+      subscribeServerMsg: (cb) => {
+        storageCb = cb;
+        return () => {
+          storageCb = null;
+        };
+      },
+    });
+  }
+
+  function feed(over: Partial<Extract<ServerMsg, { type: 'storage_stats' }>> = {}) {
+    const msg: Extract<ServerMsg, { type: 'storage_stats' }> = {
+      type: 'storage_stats',
+      dbSizeBytes: 2048,
+      logsDirSizeBytes: 1536,
+      lastPurgeAt: null,
+      lastPurgeCount: null,
+      tableStats: [
+        { table: 'events', rows: 12 },
+        { table: 'sessions', rows: 3 },
+      ],
+      purgeIntervalMs: 21_600_000,
+      purgeAfterMs: 604_800_000,
+      ...over,
+    };
+    act(() => storageCb?.(msg));
+  }
+
+  function storageText(): string {
+    return document.querySelector('[data-testid="storage-section"]')?.textContent ?? '';
+  }
+
+  function lastPurgeText(): string {
+    return document.querySelector('[data-testid="storage-last-purge"]')?.textContent ?? '';
+  }
+
+  test('shows "Loading…" until a reply arrives', () => {
+    renderWithStorage();
+    expect(storageText()).toContain('Loading…');
+  });
+
+  test('renders sizes, per-table row counts, and cadence after a reply', () => {
+    renderWithStorage();
+    feed();
+    const text = storageText();
+    expect(text).toContain('2.0 KB'); // dbSizeBytes 2048
+    expect(text).toContain('1.5 KB'); // logsDirSizeBytes 1536
+    expect(text).toContain('events');
+    expect(text).toContain('12 rows');
+    expect(text).toContain('sessions');
+    expect(text).toContain('3 rows');
+    expect(text).toContain('6h'); // 21,600,000 ms interval
+    expect(text).toContain('7d'); // 604,800,000 ms cutoff
+  });
+
+  test('lastPurgeAt null → "Cleanup hasn\'t run yet."', () => {
+    renderWithStorage();
+    feed({ lastPurgeAt: null, lastPurgeCount: null });
+    expect(lastPurgeText()).toContain("Cleanup hasn't run yet.");
+  });
+
+  test('lastPurgeAt set → "Last cleanup … removed N session(s)." (singular)', () => {
+    renderWithStorage();
+    feed({ lastPurgeAt: 1_700_000_000_000, lastPurgeCount: 1 });
+    const text = lastPurgeText();
+    expect(text).toContain('Last cleanup');
+    expect(text).toContain('removed 1 session.');
   });
 });
