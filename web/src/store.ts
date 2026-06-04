@@ -2695,6 +2695,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // UI slice lands.
       return state;
 
+    case 'storage_stats':
+      // P0-C part 2 (retention visibility): the `get_storage_stats` reply.
+      // The Settings modal's read-only "Storage" section owns consumption via
+      // the `useStorageStats` hook + `subscribeServerMsg` side-channel — same
+      // modal-local, fetched-on-open posture as `search_results` /
+      // `recovery_log_snapshot`. Routing it through the main store would churn
+      // the tree for a surface that's only mounted when Settings is open.
+      // Reducer no-op keeps the discriminated union exhaustive.
+      return state;
+
     case 'bulk_session_op_result': {
       // Cluster I Phase C5 UI: the server has archived or soft-deleted the
       // `succeededSessionIds`. Drop them from every per-project cache so the

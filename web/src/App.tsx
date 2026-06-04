@@ -2352,6 +2352,8 @@ function AppShell({
           settings={state.settings}
           onClose={() => setSettingsOpen(false)}
           onSave={saveSettings}
+          send={(m) => wsRef.current?.send(m)}
+          subscribeServerMsg={subscribeServerMsg}
         />
       )}
       {shortcutsOpen && <KeyboardShortcutsModal onClose={() => setShortcutsOpen(false)} />}

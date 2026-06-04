@@ -45,6 +45,7 @@ import {
   listSoftDeletedSessionsOlderThan,
   softDeleteSession,
 } from './repo/sessions.js';
+import { setSetting } from './repo/settings.js';
 
 /**
  * 7-day soft-delete undo window per spec §4.3. Rows whose `deleted_at`
@@ -63,6 +64,15 @@ export const SESSION_PURGE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
  * each restart.
  */
 export const SESSION_PURGE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * P0-C part 2 (retention visibility): settings-table keys for the purge
+ * heartbeat. `runSessionPurge` stamps both on every run — including 0-reclaim
+ * runs — so the operator can see the cron is alive (Settings → Storage).
+ * Read back by `storage_stats.ts`.
+ */
+export const LAST_PURGE_AT_KEY = 'last_purge_at';
+export const LAST_PURGE_COUNT_KEY = 'last_purge_count';
 
 /**
  * Build the path to a session's JSONL log under `~/.cebab/logs/`. The
@@ -337,6 +347,17 @@ export async function runSessionPurge(nowMs: number = Date.now()): Promise<numbe
     } catch (err) {
       console.error(`[bulk_session_op] rm ${logPath} failed during purge`, err);
     }
+  }
+  // P0-C part 2 (retention visibility): stamp the purge heartbeat so the
+  // operator can see the cron ran (Settings → Storage), even on a 0-reclaim
+  // run. Best-effort — a settings-write failure must not fail the purge (same
+  // log-and-continue posture as the per-row delete/rm above). Uses the
+  // injectable `nowMs` so tests pin both the cutoff and the recorded time.
+  try {
+    setSetting<number>(LAST_PURGE_AT_KEY, nowMs);
+    setSetting<number>(LAST_PURGE_COUNT_KEY, purged);
+  } catch (err) {
+    console.error('[bulk_session_op] failed to record purge heartbeat', err);
   }
   return purged;
 }

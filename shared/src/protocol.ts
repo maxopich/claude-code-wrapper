@@ -1293,6 +1293,17 @@ export type ClientMsg =
     }
   | {
       /**
+       * P0-C part 2 (retention visibility): operator request for storage
+       * stats — DB file size, logs-dir size, per-big-table row counts, and
+       * the purge cron's last-run heartbeat. Read-only; powers the Settings
+       * modal's "Storage" section. No auth gate — local-operator metadata,
+       * same posture as `get_recovery_log_snapshot`. Param-free so it can
+       * gain optional fields later without a breaking change.
+       */
+      type: 'get_storage_stats';
+    }
+  | {
+      /**
        * Cluster C Phase 4g4 (spec §5.5, §6.4): operator request for the
        * forensic bundle captured at the moment a specific agent was kicked
        * in a specific session. The reply (`kick_forensics_snapshot`) carries
@@ -2867,6 +2878,39 @@ export type ServerMsg =
         newSession: number;
       } | null;
       recent: RecoveryLogEntry[];
+    }
+  | {
+      /**
+       * P0-C part 2 (retention visibility): reply to `get_storage_stats`.
+       * Surfaces what's growing on disk so the operator can reason about
+       * retention without a CLI dig.
+       *
+       * `dbSizeBytes` — cebab.sqlite + its `-wal`/`-shm` sidecars on disk
+       *   (statted, not page-math: under WAL the sidecar holds uncommitted
+       *   pages a `page_count × page_size` would miss).
+       * `logsDirSizeBytes` — sum of the per-session `*.jsonl` under
+       *   `~/.cebab/logs/`; 0 when the dir doesn't exist yet.
+       * `lastPurgeAt` / `lastPurgeCount` — the purge cron heartbeat
+       *   (`runSessionPurge` stamps both on every run, including 0-reclaim
+       *   runs); null until the cron has run once.
+       * `tableStats` — row counts for the never-or-rarely-reclaimed tables,
+       *   in a fixed order. `bytes` is reserved (omitted today) for a future
+       *   per-table-size pass.
+       * `purgeIntervalMs` / `purgeAfterMs` — the cron's cadence + soft-delete
+       *   cutoff, echoed so the UI explains "runs every 6h, removes
+       *   soft-deleted sessions after 7d" without hardcoding the numbers.
+       *
+       * Always succeeds — local SQLite + FS reads; failures surface as
+       * `wrapper_error`.
+       */
+      type: 'storage_stats';
+      dbSizeBytes: number;
+      logsDirSizeBytes: number;
+      lastPurgeAt: number | null;
+      lastPurgeCount: number | null;
+      tableStats: { table: string; rows: number; bytes?: number }[];
+      purgeIntervalMs: number;
+      purgeAfterMs: number;
     }
   | {
       /**

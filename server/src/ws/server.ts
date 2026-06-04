@@ -119,6 +119,7 @@ import { maybeDispatchDangerousMutation } from '../notifications/dangerous_mutat
 import { executeBulkSessionOp } from '../bulk_session_op.js';
 import { executeSearchSessions } from '../search_sessions.js';
 import { executeGetArtifactContent } from '../get_artifact_content.js';
+import { executeStorageStats } from '../storage_stats.js';
 import { maybeDispatchGuardrailViolation } from '../notifications/guardrail_violation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
@@ -4108,6 +4109,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         recentLimit: msg.recentLimit,
         send: (m) => send(conn.ws, m),
       });
+      return;
+    }
+    case 'get_storage_stats': {
+      // P0-C part 2 (retention visibility): read-only DB/log size + per-table
+      // row counts + purge heartbeat for the Settings "Storage" section. The
+      // executor lives in storage_stats.ts (testable without the WS scaffold),
+      // same posture as executeSearchSessions / executeRecoveryLogSnapshot.
+      executeStorageStats({ send: (m) => send(conn.ws, m) });
       return;
     }
     case 'get_kick_forensics': {
