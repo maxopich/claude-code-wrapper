@@ -1,7 +1,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { setSessionCost, bumpSession } from '../repo/sessions.js';
 import { insertEvent, nextSeq } from '../repo/events.js';
-import { logEvent } from './logger.js';
+import { logEvent, type LogFailureReason } from './logger.js';
 
 /**
  * Persist one SDK message. Stream deltas go only to the per-session JSONL
@@ -10,13 +10,21 @@ import { logEvent } from './logger.js';
  *
  * Returns the seq we used (or null if we skipped the events table).
  */
-export async function persistMessage(sessionId: string, msg: SDKMessage): Promise<number | null> {
+export async function persistMessage(
+  sessionId: string,
+  msg: SDKMessage,
+  onLogFailure?: (reason: LogFailureReason) => void,
+): Promise<number | null> {
   const m = msg as { type: string; subtype?: string };
   const type = m.type ?? 'unknown';
   const subtype = typeof m.subtype === 'string' ? m.subtype : null;
 
   // JSONL is a full trace including deltas — useful for fixture capture.
-  await logEvent(sessionId, msg);
+  // logEvent is fail-silent on disk; surface a write failure to the caller
+  // (which emits one coalesced operator notification) so the on-disk gap
+  // isn't invisible. The DB-event path below runs regardless.
+  const logResult = await logEvent(sessionId, msg);
+  if (!logResult.ok) onLogFailure?.(logResult.reason);
 
   // The events table skips stream_event: those are high-volume partials that
   // would balloon the DB and slow down replaySession() with no payoff (the

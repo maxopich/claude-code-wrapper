@@ -4640,9 +4640,31 @@ async function runOneTurn(
   // turn end, the prompt is held and a retry-now affordance applies.
   let heldByRateLimit = false;
 
+  // P0-C: the per-session JSONL transcript writer is fail-silent on disk —
+  // after one write error / drain-timeout it suppresses all further writes.
+  // Surface that as ONE sticky operational notification (the dedupeKey
+  // coalesces the burst that follows, since the logger's failure flag is
+  // sticky) so the operator learns the on-disk .jsonl is now incomplete.
+  // Live chat and the DB event log are unaffected.
+  const onLogFailure = (reason: 'stream_error' | 'drain_timeout') => {
+    emitNotification(
+      {
+        class: 'operational',
+        severity: 'warn',
+        dedupeKey: `log_write_failed:${sessionId}`,
+        title: 'Session transcript log degraded',
+        message: `The on-disk JSONL transcript (~/.cebab/logs/) stopped updating after a ${reason}. Live chat, resume, and the database event log are unaffected; the .jsonl (used for mock fixtures / offline replay) will be incomplete until this session restarts.`,
+        sessionId,
+        sticky: true,
+        reasonCode: 'log_write_failed',
+      },
+      (m) => send(conn.ws, m),
+    );
+  };
+
   try {
     for await (const sdkMsg of runner) {
-      await persistMessage(sessionId, sdkMsg);
+      await persistMessage(sessionId, sdkMsg, onLogFailure);
       // Cluster F Phase A1b (UI-A1): `out` is `let` (was `const`) so the
       // result-envelope decoration below can re-bind it with the
       // server-side `effectiveMaxTurns` snapshot. Every other branch
@@ -4733,13 +4755,17 @@ async function runOneTurn(
   } catch (err) {
     const wrap = classifyError(err);
     send(conn.ws, { type: 'wrapper_error', sessionId, kind: wrap.kind, message: wrap.message });
-    await persistMessage(sessionId, {
-      type: 'wrapper',
-      subtype: wrap.kind,
-      session_id: sessionId,
-      uuid: randomUUID(),
-      message: wrap.message,
-    } as never);
+    await persistMessage(
+      sessionId,
+      {
+        type: 'wrapper',
+        subtype: wrap.kind,
+        session_id: sessionId,
+        uuid: randomUUID(),
+        message: wrap.message,
+      } as never,
+      onLogFailure,
+    );
     // Cluster A Phase 6: fan out as an operational notification with a
     // typed reason-code so the dock + inbox surface session crashes /
     // auth lapses uniformly. The session-scoped MessageBlock status banner
