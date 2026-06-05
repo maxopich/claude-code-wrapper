@@ -2911,6 +2911,18 @@ export type ServerMsg =
       tableStats: { table: string; rows: number; bytes?: number }[];
       purgeIntervalMs: number;
       purgeAfterMs: number;
+      /**
+       * P0-C part 2b: opt-in idle auto-reclamation status (env
+       * `CEBAB_AUTO_RECLAIM_DAYS`). `enabled` is false + `idleDays` null when
+       * off; `lastRunAt`/`lastCount` are the reclaim heartbeat (null until it
+       * first runs while enabled). Surfaced read-only in Settings → Storage.
+       */
+      autoReclaim: {
+        enabled: boolean;
+        idleDays: number | null;
+        lastRunAt: number | null;
+        lastCount: number | null;
+      };
     }
   | {
       /**
