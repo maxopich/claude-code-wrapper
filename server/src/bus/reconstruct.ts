@@ -249,7 +249,7 @@ export function reconstructOrchestratorSession(
       // UI re-attaches with the correct toggle state. The runtime read is
       // always DB-fresh inside `onMutationHook`; this is purely the handle's
       // self-report.
-      pauseOnMutation: row.pause_on_mutation === 1,
+      pauseOnDangerous: row.pause_on_dangerous === 1,
       // Phase 4e: forward mute + kick seeds into the rebuilt router.
       initialMutedAgents,
       initialKickedAgents,

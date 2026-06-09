@@ -1607,7 +1607,7 @@ function AppShell({
       draftParticipants,
       draftPrompt,
       draftLifecycle,
-      draftPauseOnMutation,
+      draftPauseOnDangerous,
       // PR-7: template provenance + per-template hop budget. Both are null
       // for ad-hoc runs; the server stamps them onto the row only if set.
       draftTemplateId,
@@ -1621,7 +1621,7 @@ function AppShell({
       participants: draftParticipants,
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
-      pauseOnMutation: draftPauseOnMutation,
+      pauseOnDangerous: draftPauseOnDangerous,
       ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
       ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
     });
@@ -1632,7 +1632,7 @@ function AppShell({
       draftParticipants,
       draftPrompt,
       draftLifecycle,
-      draftPauseOnMutation,
+      draftPauseOnDangerous,
       draftTemplateId,
       draftHopBudget,
     } = state.multiAgent;
@@ -1646,7 +1646,7 @@ function AppShell({
       participants: draftParticipants,
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
-      pauseOnMutation: draftPauseOnMutation,
+      pauseOnDangerous: draftPauseOnDangerous,
       ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
       ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
     });
@@ -1739,10 +1739,10 @@ function AppShell({
       answers,
     });
   }
-  function setDraftPauseOnMutation(value: boolean) {
+  function setDraftPauseOnDangerous(value: boolean) {
     // Item #5: setup-screen toggle. Persists only in client state until
-    // `start_multi_agent` sends it as `pauseOnMutation`.
-    dispatch({ type: 'ma_set_draft_pause_on_mutation', value });
+    // `start_multi_agent` sends it as `pauseOnDangerous`.
+    dispatch({ type: 'ma_set_draft_pause_on_dangerous', value });
   }
   function setDraftHopBudget(value: number | null) {
     // Cluster F Phase D9 (UI-D9): operator-typed hop-budget override.
@@ -2319,7 +2319,7 @@ function AppShell({
                   onContinueThroughMutation={continueThroughMutation}
                   onAnswerQuestion={answerQuestion}
                   onClearAutoRetry={clearAutoRetry}
-                  onSetDraftPauseOnMutation={setDraftPauseOnMutation}
+                  onSetDraftPauseOnDangerous={setDraftPauseOnDangerous}
                   onSetDraftHopBudget={setDraftHopBudget}
                   defaultHopBudget={state.settings?.defaultHopBudget ?? null}
                   onSetActiveLifecycle={setActiveLifecycle}

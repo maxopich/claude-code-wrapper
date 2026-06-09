@@ -20,7 +20,7 @@ export function shouldPauseForMutation(
   category: MutationCategory,
   session:
     | {
-        pause_on_mutation: number;
+        pause_on_dangerous: number;
         mutations_acknowledged: number;
         pending_mutation_id: number | null;
       }
@@ -28,7 +28,7 @@ export function shouldPauseForMutation(
 ): boolean {
   return (
     category === 'dangerous' &&
-    session?.pause_on_mutation === 1 &&
+    session?.pause_on_dangerous === 1 &&
     session.mutations_acknowledged === 0 &&
     session.pending_mutation_id === null
   );

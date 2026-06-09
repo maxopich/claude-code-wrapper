@@ -186,7 +186,7 @@ describe('ReopenProvider — happy probe→confirm→commit flow', () => {
         sessionFolder: '/tmp/sf',
         hopBudget: 100,
         awaitingContinue: false,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       });
@@ -337,7 +337,7 @@ describe('ReopenProvider — race safety', () => {
         sessionFolder: '/tmp/sf',
         hopBudget: 100,
         awaitingContinue: false,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       });

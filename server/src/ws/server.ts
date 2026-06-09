@@ -2095,13 +2095,13 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
         errorEventId: pendingRow.errorEventId,
       }
     : undefined;
-  // Item #5: hydrate the pause-on-mutation overlay from the DB so the banner
+  // Item #5: hydrate the pause-on-dangerous overlay from the DB so the banner
   // restores after R-A re-attach (live registry still wired) and R-B
   // reconstruct (rebuilt session). All three reads (row, mutations list,
   // pending slot) are fast indexed reads — same posture as the awaiting /
   // pending-retry hydration above.
   const sessionRow = getMultiAgentSession(resumed.handle.sessionId);
-  const pauseOnMutation = sessionRow?.pause_on_mutation === 1;
+  const pauseOnDangerous = sessionRow?.pause_on_dangerous === 1;
   const mutationsAcknowledged = sessionRow?.mutations_acknowledged === 1;
   const mutationsList = listMultiAgentMutations(resumed.handle.sessionId);
   const pendingMutationRow = getPendingMutation(resumed.handle.sessionId);
@@ -2114,7 +2114,7 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   // (survives the sink swap); one card at a time.
   const pendingQuestion = listParkedQuestions(resumed.handle.sessionId)[0];
   // Item #7: surface the per-agent recovery snapshot ONLY when the session
-  // is in awaiting_continue state (R-B reconstruct or a pause-on-mutation
+  // is in awaiting_continue state (R-B reconstruct or a pause-on-dangerous
   // banner that survived a Cebab restart). When awaiting_continue is false
   // the recovery context is irrelevant — the banner isn't shown.
   const recoveryContext = awaitingContinue
@@ -2136,7 +2136,7 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     hopBudget: resumed.handle.hopBudget,
     awaitingContinue,
     ...(pendingRetry ? { pendingRetry } : {}),
-    pauseOnMutation,
+    pauseOnDangerous,
     mutationsAcknowledged,
     mutations,
     ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
@@ -3429,7 +3429,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // toast independent of the dangerous-category dispatch.
         dispatchGuardrailViolationForConn(sessionId, mutation, conn);
       };
-      // Item #5: pause-on-mutation slot set/clear → wire. Fresh starts never
+      // Item #5: pause-on-dangerous slot set/clear → wire. Fresh starts never
       // carry a pending slot on `multi_agent_started`; this is the delta.
       const onPendingMutation = (sessionId: string, pending: MutationRecord | null) => {
         send(conn.ws, {
@@ -3537,7 +3537,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             sendRouterDrop,
             sendServerMsg,
             hopBudget,
-            pauseOnMutation: msg.pauseOnMutation === true,
+            pauseOnDangerous: msg.pauseOnDangerous === true,
             // PR-7: stamp template provenance onto the row so the rail can
             // SELECT by template post-teardown. Absent on ad-hoc runs.
             templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
@@ -3559,9 +3559,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             sessionFolder: handle.sessionFolder,
             hopBudget: handle.hopBudget,
             // Item #5: fresh start — no mutations recorded yet, no pending,
-            // ack flag false. `pauseOnMutation` echoes the operator's choice
+            // ack flag false. `pauseOnDangerous` echoes the operator's choice
             // so the UI mirrors its own setup checkbox.
-            pauseOnMutation: handle.pauseOnMutation,
+            pauseOnDangerous: handle.pauseOnDangerous,
             mutationsAcknowledged: false,
             mutations: [],
             ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
@@ -3610,7 +3610,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           sendRouterDrop,
           sendServerMsg,
           hopBudget,
-          pauseOnMutation: msg.pauseOnMutation === true,
+          pauseOnDangerous: msg.pauseOnDangerous === true,
           // PR-7: stamp template provenance onto the row.
           templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
         });
@@ -3628,7 +3628,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
           hopBudget: handle.hopBudget,
-          pauseOnMutation: handle.pauseOnMutation,
+          pauseOnDangerous: handle.pauseOnDangerous,
           mutationsAcknowledged: false,
           mutations: [],
           ...(chainRow?.mock === 1 ? { mock: true } : {}),

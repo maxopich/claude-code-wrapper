@@ -47,7 +47,7 @@ function buildRun(overrides: Partial<MultiAgentRun> = {}): MultiAgentRun {
     activity: null,
     hopBudget: 30,
     pendingRetry: null,
-    pauseOnMutation: false,
+    pauseOnDangerous: false,
     mutationsAcknowledged: false,
     mutations: [],
     pendingMutation: null,

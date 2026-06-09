@@ -63,11 +63,11 @@ export type MultiAgentSessionRow = {
   pending_retry_reason: string | null;
   pending_retry_ts: number | null;
   pending_retry_error_event_id: number | null;
-  /** Item #5 (migration 011): opt-in pause-on-first-mutation flag. 1 if the
-   *  operator enabled the setup-screen checkbox at session start. Narrowed
-   *  to boolean at the boundary. */
-  pause_on_mutation: number;
-  /** Item #5: 1 once the operator has clicked Continue on a pause-on-mutation
+  /** Item #5 (migration 011, renamed in 027): opt-in pause-on-first-DANGEROUS-
+   *  command flag. 1 if the operator enabled the setup-screen checkbox at
+   *  session start. Narrowed to boolean at the boundary. */
+  pause_on_dangerous: number;
+  /** Item #5: 1 once the operator has clicked Continue on a pause-on-dangerous
    *  banner at least once during this session. Subsequent mutations
    *  auto-allow when this is 1. */
   mutations_acknowledged: number;
@@ -465,7 +465,7 @@ export function getPendingRetry(id: string): PendingRetry | null {
   };
 }
 
-// ---- Item #5: pause-on-mutation + mutation log helpers ----
+// ---- Item #5: pause-on-dangerous + mutation log helpers ----
 
 function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
   return {
@@ -734,10 +734,10 @@ export function getMultiAgentMutation(id: number): MutationRecord | null {
   return row ? rowToMutation(row) : null;
 }
 
-/** Persist the operator's setup-screen pause-on-mutation choice. Idempotent. */
-export function setPauseOnMutation(sessionId: string, value: boolean): void {
+/** Persist the operator's setup-screen pause-on-dangerous choice. Idempotent. */
+export function setPauseOnDangerous(sessionId: string, value: boolean): void {
   getDb()
-    .prepare(`UPDATE multi_agent_sessions SET pause_on_mutation = ? WHERE id = ?`)
+    .prepare(`UPDATE multi_agent_sessions SET pause_on_dangerous = ? WHERE id = ?`)
     .run(value ? 1 : 0, sessionId);
 }
 

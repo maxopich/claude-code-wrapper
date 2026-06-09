@@ -128,7 +128,7 @@ export function MultiAgentTab(props: {
    *  the next `auto_retry` ServerMsg repopulates the slice. */
   onClearAutoRetry: () => void;
   /** Item #5: setup-screen toggle for pause-on-first-mutation. */
-  onSetDraftPauseOnMutation: (value: boolean) => void;
+  onSetDraftPauseOnDangerous: (value: boolean) => void;
   /**
    * Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input.
    * Forwarded to the matching `ma_set_draft_hop_budget` action; null
@@ -273,7 +273,7 @@ function DraftView(props: {
   onUninstallBus: (projectId: number) => void;
   onSetDraftPrompt: (text: string) => void;
   /** Item #5: setup-screen toggle for pause-on-first-mutation. */
-  onSetDraftPauseOnMutation: (value: boolean) => void;
+  onSetDraftPauseOnDangerous: (value: boolean) => void;
   /** Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input. */
   onSetDraftHopBudget: (value: number | null) => void;
   /** Cluster F Phase D9: server-resolved default for input placeholder. */
@@ -577,8 +577,8 @@ function DraftView(props: {
           >
             <input
               type="checkbox"
-              checked={multiAgent.draftPauseOnMutation}
-              onChange={(e) => props.onSetDraftPauseOnMutation(e.target.checked)}
+              checked={multiAgent.draftPauseOnDangerous}
+              onChange={(e) => props.onSetDraftPauseOnDangerous(e.target.checked)}
             />
             Pause before a worker runs a dangerous command
           </label>
@@ -2182,7 +2182,7 @@ function SessionSettingsPanel(props: {
           <WorkingFiles run={run} />
         </dd>
 
-        {run.pauseOnMutation && (
+        {run.pauseOnDangerous && (
           <>
             <dt>Pause on dangerous</dt>
             <dd>

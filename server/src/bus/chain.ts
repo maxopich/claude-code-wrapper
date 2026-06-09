@@ -53,7 +53,7 @@ import {
   setAwaitingContinue,
   setMutationsAcknowledged,
   setMutationPromoted,
-  setPauseOnMutation,
+  setPauseOnDangerous,
   setPendingMutation,
   setPendingRetry,
   type EventKind,
@@ -132,7 +132,7 @@ export type StartChainOpts = {
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
   /** Item #5: opt-in pause-on-first-mutation (see orchestrator.ts for the
    *  full docstring; same semantics in chain mode). Default false. */
-  pauseOnMutation?: boolean;
+  pauseOnDangerous?: boolean;
   /** Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. */
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
   /** Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`. */
@@ -173,7 +173,7 @@ export type ChainSessionHandle = {
    *  the activity-bar chip. */
   hopBudget: number;
   /** Item #5: resolved pause-on-first-mutation flag for this session. */
-  pauseOnMutation: boolean;
+  pauseOnDangerous: boolean;
   /** Stop the session and tear it down. Idempotent. */
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   /** Detach the WS sink without tearing down — agents keep running
@@ -662,13 +662,13 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   opts.participants.forEach((p, i) => addParticipant(sessionId, p.projectId, 'worker', i));
   prepareIterationDir(iterationId, agentNames, paths);
 
-  // Item #5: persist the opt-in pause-on-mutation flag at session start so
+  // Item #5: persist the opt-in pause-on-dangerous flag at session start so
   // the bus runner's mutation tap can read it from DB on every gate check.
-  if (opts.pauseOnMutation) {
+  if (opts.pauseOnDangerous) {
     try {
-      setPauseOnMutation(sessionId, true);
+      setPauseOnDangerous(sessionId, true);
     } catch (err) {
-      console.error('[chain] persist pause_on_mutation failed', err);
+      console.error('[chain] persist pause_on_dangerous failed', err);
     }
   }
 
@@ -969,9 +969,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     lifecycle,
     sessionFolder: paths.folder,
     hopBudget,
-    pauseOnMutation: opts.pauseOnMutation ?? false,
+    pauseOnDangerous: opts.pauseOnDangerous ?? false,
     async stop(reason) {
-      // Clear any pending-retry / pause-on-mutation slot first so the
+      // Clear any pending-retry / pause-on-dangerous slot first so the
       // teardown leaves a clean row — otherwise a crashed-but-with-non-null-
       // pending row would be dead data that R-B reconstruction can't
       // usefully act on.

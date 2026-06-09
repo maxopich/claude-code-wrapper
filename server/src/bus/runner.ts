@@ -181,7 +181,7 @@ export type AgentRunnerDeps = {
    * on an `assistant` SDKMessage, BEFORE the SDK dispatches the tool. Hooks:
    *   - persists a row into `multi_agent_mutations`,
    *   - emits a `multi_agent_mutation` ServerMsg via `sink.onMutation`,
-   *   - when `pause_on_mutation=1` AND `mutations_acknowledged=0`, persists
+   *   - when `pause_on_dangerous=1` AND `mutations_acknowledged=0`, persists
    *     a pending-mutation slot, emits `multi_agent_pending_mutation`, and
    *     throws `PausedForMutationError` to abort the turn (best-effort —
    *     see the race-window risk in the plan).

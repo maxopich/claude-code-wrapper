@@ -79,7 +79,7 @@ export type ResumeCallbacks = {
   /** Item #5: per-mutation forwarding for AFTER-reconstruct transitions.
    *  Initial mutations array ships on `multi_agent_started.mutations`. */
   onMutation?: BusSink['onMutation'];
-  /** Item #5: pause-on-mutation slot set/clear for AFTER-reconstruct.
+  /** Item #5: pause-on-dangerous slot set/clear for AFTER-reconstruct.
    *  Initial pending value ships on `multi_agent_started.pendingMutation`. */
   onPendingMutation?: BusSink['onPendingMutation'];
   /** Cluster A Phase 3 (D4): dispatcher notification fan-out for router
