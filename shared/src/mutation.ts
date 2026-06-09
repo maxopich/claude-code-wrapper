@@ -14,7 +14,7 @@
  *   - Bus runner stream tap ([`server/src/bus/runner.ts`]) — classifies every
  *     `tool_use` block on assistant messages and (a) persists non-`read`
  *     calls into `multi_agent_mutations`, (b) optionally pauses the worker
- *     before the first mutation when `pause_on_mutation=1`.
+ *     before the first mutation when `pause_on_dangerous=1`.
  *
  * Design rules:
  *   - Pure: no I/O, no side effects, no clock reads. Same input → same output.
@@ -248,7 +248,7 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
 
     case 'AskUserQuestion': {
       // Asks the operator a question — touches no filesystem. Classify as
-      // `read` so it never trips the pause-on-mutation gate or inflates the
+      // `read` so it never trips the pause-on-dangerous gate or inflates the
       // mutations counter (pre-fix it fell through to `default` → `mutate`).
       // In the bus this tool is separately intercepted and surfaced to the
       // operator (see the runner's canUseTool path); the classification here

@@ -722,7 +722,7 @@ describe('store / session_started aggregates bus models (E2.x)', () => {
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/bus-1',
         hopBudget: 30,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       },
@@ -874,7 +874,7 @@ describe('store / eventDefaultCollapsed', () => {
       activity: null,
       hopBudget: 30,
       pendingRetry: null,
-      pauseOnMutation: false,
+      pauseOnDangerous: false,
       mutationsAcknowledged: false,
       mutations: [],
       pendingMutation: null,
@@ -975,7 +975,7 @@ describe('store / agent_activity (ephemeral liveness)', () => {
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/sess-A',
         hopBudget: 30,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       },
@@ -1072,7 +1072,7 @@ describe('store / hop budget', () => {
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/s-budget',
         hopBudget: 42,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       },
@@ -1115,7 +1115,7 @@ describe('store / pending retry', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-pr',
     hopBudget: 30,
-    pauseOnMutation: false,
+    pauseOnDangerous: false,
     mutationsAcknowledged: false,
     mutations: [],
   };
@@ -1255,13 +1255,13 @@ describe('store / pending retry', () => {
 
 // Item #5: mutation visibility + pause-on-first-mutation reducer wiring.
 // The protocol additions are:
-//   - `multi_agent_started.{pauseOnMutation, mutationsAcknowledged, mutations,
+//   - `multi_agent_started.{pauseOnDangerous, mutationsAcknowledged, mutations,
 //     pendingMutation?}` — initial state hydration on R-A/R-B attach.
 //   - `multi_agent_mutation` — append-with-dedupe per session.
 //   - `multi_agent_pending_mutation` — set/clear the pause slot wholesale.
-//   - `ma_set_draft_pause_on_mutation` — setup-screen toggle.
+//   - `ma_set_draft_pause_on_dangerous` — setup-screen toggle.
 //   - `ma_clear_pending_mutation` — optimistic Continue.
-describe('store / pause-on-mutation + mutations', () => {
+describe('store / pause-on-dangerous + mutations', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
     sessionId: 's-pom',
@@ -1271,17 +1271,17 @@ describe('store / pause-on-mutation + mutations', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-pom',
     hopBudget: 30,
-    pauseOnMutation: false,
+    pauseOnDangerous: false,
     mutationsAcknowledged: false,
     mutations: [],
   };
 
-  test('multi_agent_started hydrates pauseOnMutation + mutations array', () => {
+  test('multi_agent_started hydrates pauseOnDangerous + mutations array', () => {
     const s = reduce(initialState, {
       type: 'server',
       msg: {
         ...baseStarted,
-        pauseOnMutation: true,
+        pauseOnDangerous: true,
         mutationsAcknowledged: false,
         mutations: [
           {
@@ -1300,7 +1300,7 @@ describe('store / pause-on-mutation + mutations', () => {
         ],
       },
     });
-    expect(s.multiAgent.active!.pauseOnMutation).toBe(true);
+    expect(s.multiAgent.active!.pauseOnDangerous).toBe(true);
     expect(s.multiAgent.active!.mutations.length).toBe(1);
     expect(s.multiAgent.active!.pendingMutation).toBeNull();
   });
@@ -1321,7 +1321,7 @@ describe('store / pause-on-mutation + mutations', () => {
     };
     const s = reduce(initialState, {
       type: 'server',
-      msg: { ...baseStarted, pauseOnMutation: true, pendingMutation: pending },
+      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutation: pending },
     });
     expect(s.multiAgent.active!.pendingMutation).toEqual(pending);
   });
@@ -1484,7 +1484,7 @@ describe('store / pause-on-mutation + mutations', () => {
     };
     let s = reduce(initialState, {
       type: 'server',
-      msg: { ...baseStarted, pauseOnMutation: true, pendingMutation: pending },
+      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutation: pending },
     });
     expect(s.multiAgent.active!.pendingMutation).not.toBeNull();
     s = reduce(s, { type: 'ma_clear_pending_mutation' });
@@ -1511,7 +1511,7 @@ describe('store / pause-on-mutation + mutations', () => {
     };
     let s = reduce(initialState, {
       type: 'server',
-      msg: { ...baseStarted, pauseOnMutation: true, pendingMutation: pending },
+      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutation: pending },
     });
     s = reduce(s, {
       type: 'server',
@@ -1520,11 +1520,11 @@ describe('store / pause-on-mutation + mutations', () => {
     expect(s.multiAgent.active!.pendingMutation).toBeNull();
   });
 
-  test('ma_set_draft_pause_on_mutation toggles setup-screen state', () => {
-    let s = reduce(initialState, { type: 'ma_set_draft_pause_on_mutation', value: true });
-    expect(s.multiAgent.draftPauseOnMutation).toBe(true);
-    s = reduce(s, { type: 'ma_set_draft_pause_on_mutation', value: false });
-    expect(s.multiAgent.draftPauseOnMutation).toBe(false);
+  test('ma_set_draft_pause_on_dangerous toggles setup-screen state', () => {
+    let s = reduce(initialState, { type: 'ma_set_draft_pause_on_dangerous', value: true });
+    expect(s.multiAgent.draftPauseOnDangerous).toBe(true);
+    s = reduce(s, { type: 'ma_set_draft_pause_on_dangerous', value: false });
+    expect(s.multiAgent.draftPauseOnDangerous).toBe(false);
   });
 });
 
@@ -1572,7 +1572,7 @@ describe('store / recoveryContext (Item #7)', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-rec',
     hopBudget: 30,
-    pauseOnMutation: false,
+    pauseOnDangerous: false,
     mutationsAcknowledged: false,
     mutations: [],
   };
@@ -1661,7 +1661,7 @@ describe('store / router_drop accumulation (Phase 6d)', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-drop',
     hopBudget: 30,
-    pauseOnMutation: false,
+    pauseOnDangerous: false,
     mutationsAcknowledged: false,
     mutations: [],
   };
@@ -1777,7 +1777,7 @@ describe('store / participant control reducer cases', () => {
         lifecycle: 'persistent',
         sessionFolder: '/tmp/.cebab/bus-1',
         hopBudget: 30,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       },
@@ -1971,7 +1971,7 @@ describe('store / countControlledParticipants', () => {
         lifecycle: 'persistent',
         sessionFolder: '/tmp/.cebab/bus-2',
         hopBudget: 30,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       },
@@ -1994,7 +1994,7 @@ describe('store / countControlledParticipants', () => {
         lifecycle: 'persistent',
         sessionFolder: '/tmp/.cebab/bus-3',
         hopBudget: 30,
-        pauseOnMutation: false,
+        pauseOnDangerous: false,
         mutationsAcknowledged: false,
         mutations: [],
       },
@@ -2572,7 +2572,7 @@ describe('store / multi_agent_started.mock projection (Phase 2c)', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/bus-m',
     hopBudget: 30,
-    pauseOnMutation: false,
+    pauseOnDangerous: false,
     mutationsAcknowledged: false,
     mutations: [],
   };

@@ -581,9 +581,9 @@ export type ClientMsg =
        * `awaiting_continue`-style banner before the SDK dispatches the tool.
        * Subsequent mutations auto-allow once the operator clicks Continue.
        * Default `false` (server-side resolution; absent on pre-Item-5 clients).
-       * Persists in `multi_agent_sessions.pause_on_mutation`; survives R-B.
+       * Persists in `multi_agent_sessions.pause_on_dangerous`; survives R-B.
        */
-      pauseOnMutation?: boolean;
+      pauseOnDangerous?: boolean;
       /**
        * PR-7: id of the saved template this run was started FROM, if any.
        * The server stamps it onto `multi_agent_sessions.template_id` so the
@@ -1878,13 +1878,13 @@ export type ServerMsg =
       pendingRetry?: PendingRetryDescriptor;
       /**
        * Item #5: opt-in pause-on-first-mutation flag for this session
-       * (`multi_agent_sessions.pause_on_mutation`). Set by the operator at
+       * (`multi_agent_sessions.pause_on_dangerous`). Set by the operator at
        * session start via the setup-screen checkbox. Survives R-B; the
        * banner reappears on reconstruct if a pause was pending.
        */
-      pauseOnMutation: boolean;
+      pauseOnDangerous: boolean;
       /**
-       * True once the operator has clicked Continue on a pause-on-mutation
+       * True once the operator has clicked Continue on a pause-on-dangerous
        * banner at least once during this session (or set explicitly on
        * subsequent sessions). When true, subsequent mutations auto-allow
        * without further pauses. Mirrors `multi_agent_sessions.mutations_acknowledged`.
@@ -1920,7 +1920,7 @@ export type ServerMsg =
       /**
        * Item #7: server-derived recovery snapshot surfaced ONLY when the
        * session is in `awaiting_continue` state (R-B reconstruct, or a
-       * pause-on-mutation banner that survived a Cebab restart). Powers the
+       * pause-on-dangerous banner that survived a Cebab restart). Powers the
        * "▾ Recovery details" disclosure inside the awaiting-continue banner.
        * Pure render-time derivation from `multi_agent_events` +
        * `multi_agent_agent_sessions`; not persisted. Absent on fresh starts
@@ -2030,7 +2030,7 @@ export type ServerMsg =
   | {
       /**
        * Item #5: live set/clear of the pause-on-first-mutation slot. Emitted
-       * when a worker is about to mutate AND `pause_on_mutation=1` AND
+       * when a worker is about to mutate AND `pause_on_dangerous=1` AND
        * `mutations_acknowledged=0` (set, with the offending mutation row),
        * and again when the operator clicks Continue (cleared,
        * `pending: null`). Initial value on attach travels on

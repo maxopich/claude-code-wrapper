@@ -55,7 +55,7 @@ function mkRun(participantControls: Record<number, ParticipantControlView>): Mul
     activity: null,
     hopBudget: 30,
     pendingRetry: null,
-    pauseOnMutation: false,
+    pauseOnDangerous: false,
     mutationsAcknowledged: false,
     mutations: [],
     pendingMutation: null,

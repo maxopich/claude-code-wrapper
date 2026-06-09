@@ -1,0 +1,25 @@
+-- Truth-in-naming: rename multi_agent_sessions.pause_on_mutation →
+-- pause_on_dangerous.
+--
+-- The per-session "pause before a worker's first DANGEROUS command" opt-in
+-- (migration 011, "Item #5") has fired dangerous-only since PR #200 narrowed
+-- the gate — `shouldPauseForMutation()` returns false for ordinary `mutate`
+-- calls (server/src/bus/pause_gate.ts). But the backing flag was still named
+-- `pause_on_mutation`, which reads as "pause on ANY mutation" and actively
+-- misleads (pause_gate.ts's docstring spends a paragraph un-teaching it).
+-- This renames the column to match what it does; the camelCase wire/web field
+-- `pauseOnMutation` is renamed to `pauseOnDangerous` in the same PR.
+--
+-- SQLite `ALTER TABLE … RENAME COLUMN` (3.25.0+, 2018) preserves the column's
+-- type (INTEGER), NOT NULL, and DEFAULT 0; no index/view/trigger references
+-- this column (the only multi_agent index is on multi_agent_mutations), so the
+-- rename is atomic and lossless. Sequential on both fresh DBs (011 creates →
+-- 027 renames) and existing DBs (027 renames in place).
+--
+-- The mutation-event subsystem keeps its naming on purpose — multi_agent_
+-- mutations, mutations_acknowledged, and the `mutate`/`dangerous` category
+-- classify tool-call EVENTS; they don't claim "pause on mutation".
+--
+-- Re-application: gated by `schema_migrations` like every other ALTER here.
+
+ALTER TABLE multi_agent_sessions RENAME COLUMN pause_on_mutation TO pause_on_dangerous;

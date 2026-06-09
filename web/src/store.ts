@@ -306,7 +306,7 @@ export type MultiAgentRun = {
   /** Item #5: opt-in pause-on-first-mutation flag for this session. Reflects
    *  the operator's choice at session start. UI surfaces it as a read-only
    *  row in Session info (the toggle itself lives in setup). */
-  pauseOnMutation: boolean;
+  pauseOnDangerous: boolean;
   /** Item #5: true once the operator has clicked Continue at least once.
    *  When true, subsequent mutations auto-allow. Mirrored from server. */
   mutationsAcknowledged: boolean;
@@ -317,7 +317,7 @@ export type MultiAgentRun = {
    *  attach can both populate it without doubling rows. */
   mutations: MultiAgentMutationView[];
   /** Item #5: pause-on-first-mutation slot. Populated when a worker is
-   *  about to mutate AND `pauseOnMutation && !mutationsAcknowledged`. Drives
+   *  about to mutate AND `pauseOnDangerous && !mutationsAcknowledged`. Drives
    *  the pause banner; gates `UserPromptInput` (same one-decision-at-a-time
    *  pattern as `awaitingContinue` / `pendingRetry`). Cleared optimistically
    *  on Continue click and authoritatively by
@@ -330,7 +330,7 @@ export type MultiAgentRun = {
    *  from `multi_agent_started.pendingQuestion` (R-A). */
   pendingQuestion: PendingAskUserQuestionView | null;
   /** Item #7: server-derived recovery snapshot, populated ONLY while
-   *  `awaitingContinue` is true (R-B reconstruct, or a pause-on-mutation
+   *  `awaitingContinue` is true (R-B reconstruct, or a pause-on-dangerous
    *  banner that survived a Cebab restart). Drives the "▾ Recovery details"
    *  disclosure inside the awaiting-continue banner. Cleared optimistically
    *  on Continue click via `ma_clear_awaiting` — banner-bound lifetime. */
@@ -546,8 +546,8 @@ export type MultiAgentState = {
   draftPrompt: string;
   /** Item #5: setup-screen opt-in for pause-on-first-mutation. Persists
    *  during the session draft; sent on `start_multi_agent` as
-   *  `pauseOnMutation`. Default false; the operator opts in explicitly. */
-  draftPauseOnMutation: boolean;
+   *  `pauseOnDangerous`. Default false; the operator opts in explicitly. */
+  draftPauseOnDangerous: boolean;
   /** Non-null while a chain (or future orchestrator session) is running, and
    *  until the operator dismisses it. */
   active: MultiAgentRun | null;
@@ -868,7 +868,7 @@ export const initialState: AppState = {
     draftLifecycle: 'persistent',
     draftParticipants: [],
     draftPrompt: '',
-    draftPauseOnMutation: false,
+    draftPauseOnDangerous: false,
     active: null,
     iterations: null,
     templates: null,
@@ -938,7 +938,7 @@ export type Action =
   | { type: 'ma_remove_participant'; projectId: number }
   | { type: 'ma_reorder_participant'; projectId: number; direction: 'up' | 'down' }
   | { type: 'ma_set_draft_prompt'; text: string }
-  | { type: 'ma_set_draft_pause_on_mutation'; value: boolean }
+  | { type: 'ma_set_draft_pause_on_dangerous'; value: boolean }
   /**
    * Cluster F Phase D9 (D9-1..D9-4): operator sets the hop budget override
    * for the next start. `value === null` clears it (input cleared → server
@@ -1219,10 +1219,10 @@ export function reduce(state: AppState, action: Action): AppState {
     case 'ma_set_draft_prompt':
       return { ...state, multiAgent: { ...state.multiAgent, draftPrompt: action.text } };
 
-    case 'ma_set_draft_pause_on_mutation':
+    case 'ma_set_draft_pause_on_dangerous':
       return {
         ...state,
-        multiAgent: { ...state.multiAgent, draftPauseOnMutation: action.value },
+        multiAgent: { ...state.multiAgent, draftPauseOnDangerous: action.value },
       };
 
     case 'ma_apply_template': {
@@ -1581,10 +1581,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             activity: null,
             hopBudget: msg.hopBudget,
             pendingRetry: msg.pendingRetry ?? null,
-            // Item #5: hydrate pause-on-mutation overlay state from
+            // Item #5: hydrate pause-on-dangerous overlay state from
             // `multi_agent_started`. Always populated (server resolves and
             // sends `false` + `[]` for fresh starts; reads DB for R-A/R-B).
-            pauseOnMutation: msg.pauseOnMutation,
+            pauseOnDangerous: msg.pauseOnDangerous,
             mutationsAcknowledged: msg.mutationsAcknowledged,
             mutations: msg.mutations,
             pendingMutation: msg.pendingMutation ?? null,
@@ -1592,7 +1592,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // (R-A) so the card reappears after a browser refresh.
             pendingQuestion: msg.pendingQuestion ?? null,
             // Item #7: server includes `recoveryContext` only when
-            // `awaitingContinue=true` (R-B reconstruct or a pause-on-mutation
+            // `awaitingContinue=true` (R-B reconstruct or a pause-on-dangerous
             // banner that survived a restart). Null in every other case;
             // banner-bound lifetime.
             recoveryContext: msg.recoveryContext ?? null,

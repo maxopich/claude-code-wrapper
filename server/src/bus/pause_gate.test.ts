@@ -7,7 +7,7 @@ import { shouldPauseForMutation } from './pause_gate.js';
 // edits run free" — MCP tool calls and Write/Edit classify as `mutate`.
 describe('shouldPauseForMutation', () => {
   const armed = {
-    pause_on_mutation: 1,
+    pause_on_dangerous: 1,
     mutations_acknowledged: 0,
     pending_mutation_id: null,
   };
@@ -25,7 +25,7 @@ describe('shouldPauseForMutation', () => {
   });
 
   it('does NOT pause when the operator never enabled the gate', () => {
-    expect(shouldPauseForMutation('dangerous', { ...armed, pause_on_mutation: 0 })).toBe(false);
+    expect(shouldPauseForMutation('dangerous', { ...armed, pause_on_dangerous: 0 })).toBe(false);
   });
 
   it('does NOT pause once mutations are acknowledged (Continue clicked)', () => {
