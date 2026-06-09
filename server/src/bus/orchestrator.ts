@@ -46,7 +46,7 @@ import {
   setMultiAgentSessionLifecycle,
   setMutationsAcknowledged,
   setMutationPromoted,
-  setPauseOnMutation,
+  setPauseOnDangerous,
   setPendingMutation,
   setPendingRetry,
   upsertAgentSession,
@@ -173,11 +173,11 @@ export type StartOrchestratorOpts = {
    * Item #5: opt-in pause-on-first-mutation. When `true`, the bus runner's
    * mutation tap fires `awaiting_continue` + a banner before the first
    * non-`read` tool call from any worker. Persisted into
-   * `multi_agent_sessions.pause_on_mutation` at session start; survives R-B.
+   * `multi_agent_sessions.pause_on_dangerous` at session start; survives R-B.
    * Default `false` (resolved at `start_multi_agent` handler from
-   * `msg.pauseOnMutation`).
+   * `msg.pauseOnDangerous`).
    */
-  pauseOnMutation?: boolean;
+  pauseOnDangerous?: boolean;
   /**
    * Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. Fires for
    * every non-`read` tool call observed on the bus, AFTER the row is
@@ -240,7 +240,7 @@ export type OrchestratorSessionHandle = {
    *  hopBudget` for the activity-bar chip. */
   hopBudget: number;
   /** Item #5: resolved pause-on-first-mutation flag for this session. */
-  pauseOnMutation: boolean;
+  pauseOnDangerous: boolean;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   sendUserPrompt: (text: string) => Promise<void>;
   detach: () => void;
@@ -1084,7 +1084,7 @@ export function wireOrchestratorSession(p: {
   initialHopsCount?: number;
   /** Item #5: opt-in pause-on-first-mutation. Surfaced on the handle; read
    *  inside the `onMutation` hook to decide whether to gate. Default false. */
-  pauseOnMutation?: boolean;
+  pauseOnDangerous?: boolean;
   /**
    * Cluster C Phase 4e (R-B reseed): bus_agent_name slugs the operator
    * previously muted, hydrated from `multi_agent_participants.muted` at
@@ -1539,9 +1539,9 @@ export function wireOrchestratorSession(p: {
     lifecycle,
     sessionFolder: paths.folder,
     hopBudget,
-    pauseOnMutation: p.pauseOnMutation ?? false,
+    pauseOnDangerous: p.pauseOnDangerous ?? false,
     async stop(reason) {
-      // Clear any pending-retry / pause-on-mutation slot so the teardown
+      // Clear any pending-retry / pause-on-dangerous slot so the teardown
       // leaves a clean row — a crashed-but-with-non-null-pending row is
       // dead data that R-B reconstruction can't usefully act on.
       try {
@@ -1672,13 +1672,13 @@ export async function startOrchestratorSession(
   opts.workers.forEach((w) => addParticipant(sessionId, w.projectId, 'worker', null));
   prepareIterationDir(iterationId, participantAgentNames, paths);
 
-  // Item #5: persist the opt-in pause-on-mutation flag at session start so
+  // Item #5: persist the opt-in pause-on-dangerous flag at session start so
   // the bus runner's mutation tap can read it from DB on every gate check.
-  if (opts.pauseOnMutation) {
+  if (opts.pauseOnDangerous) {
     try {
-      setPauseOnMutation(sessionId, true);
+      setPauseOnDangerous(sessionId, true);
     } catch (err) {
-      console.error('[orchestrator] persist pause_on_mutation failed', err);
+      console.error('[orchestrator] persist pause_on_dangerous failed', err);
     }
   }
 
@@ -1698,7 +1698,7 @@ export async function startOrchestratorSession(
     sendRouterDrop: opts.sendRouterDrop,
     sendServerMsg: opts.sendServerMsg,
     hopBudget: opts.hopBudget,
-    pauseOnMutation: opts.pauseOnMutation,
+    pauseOnDangerous: opts.pauseOnDangerous,
   });
 
   // Roster prompt + initial user prompt → UI/DB parity, then delivered as
