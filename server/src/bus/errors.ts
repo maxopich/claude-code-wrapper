@@ -22,3 +22,32 @@ export class PausedForMutationError extends Error {
 export function isPausedForMutation(err: unknown): err is PausedForMutationError {
   return err instanceof PausedForMutationError;
 }
+
+/**
+ * Thrown by the runner's stalled-turn watchdog when a turn produces no
+ * SDKMessage for the hard threshold (and no tool is mid-flight). The runner
+ * aborts the in-flight `Query` and throws this so the routers' `deliver()`
+ * `.catch` recovers via the normal worker-failed / pending-retry path
+ * (operator re-issue) instead of the turn hanging silently until a server
+ * restart. It is NOT a transient overload, so `runOneTurn` rethrows it
+ * immediately (no backoff retries).
+ */
+export class TurnStalledError extends Error {
+  readonly __turnStalled = true as const;
+  readonly agentName: string;
+  /** Observed idle duration (ms with no SDKMessage) that tripped the abort. */
+  readonly stallMs: number;
+  constructor(agentName: string, stallMs: number) {
+    super(
+      `turn for ${JSON.stringify(agentName)} auto-aborted after ${stallMs}ms with no activity (stalled)`,
+    );
+    this.name = 'TurnStalledError';
+    this.agentName = agentName;
+    this.stallMs = stallMs;
+    Object.setPrototypeOf(this, TurnStalledError.prototype);
+  }
+}
+
+export function isTurnStalled(err: unknown): err is TurnStalledError {
+  return err instanceof TurnStalledError;
+}

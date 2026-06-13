@@ -15,6 +15,7 @@ import {
   makeBusToolServer,
   type BusEvent,
 } from './runner.js';
+import { TurnStalledError } from './errors.js';
 
 describe('handleBusSend', () => {
   test('valid send stamps the caller-supplied source and forwards the event', () => {
@@ -1131,5 +1132,238 @@ describe('isTransientOverload (Item: 529 absorb)', () => {
 describe('DEFAULT_OVERLOAD_BACKOFF_MS', () => {
   test('matches the production tuning (1s/3s/10s = ~14s cumulative absorb)', () => {
     expect(DEFAULT_OVERLOAD_BACKOFF_MS).toEqual([1000, 3000, 10000]);
+  });
+});
+
+describe('AgentRunner stalled-turn watchdog', () => {
+  // A benign liveness tick (not a tool, not a result) — resets the idle clock.
+  const streamMsg = (): SDKMessage => ({ type: 'stream_event' }) as unknown as SDKMessage;
+  const toolUseMsg = (name: string): SDKMessage =>
+    ({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name, id: 't1', input: {} }] },
+    }) as unknown as SDKMessage;
+
+  // Yields `initial`, then hangs until close()/interrupt() ends the generator —
+  // models a wedged SDK stream that the watchdog's hard-abort tears down.
+  function hangingRunner(initial: SDKMessage[]): Runner {
+    let release: (() => void) | null = null;
+    async function* gen(): AsyncGenerator<SDKMessage> {
+      for (const m of initial) yield m;
+      await new Promise<void>((res) => {
+        release = res;
+      });
+    }
+    const it = gen();
+    return {
+      [Symbol.asyncIterator]: () => it,
+      close: () => release?.(),
+      interrupt: () => release?.(),
+    } as unknown as Runner;
+  }
+
+  // Push-driven runner: `push` emits a message mid-turn; `end` completes it.
+  function controllableRunner() {
+    const buffer: SDKMessage[] = [];
+    let notify: (() => void) | null = null;
+    let ended = false;
+    async function* gen(): AsyncGenerator<SDKMessage> {
+      for (;;) {
+        if (buffer.length) {
+          yield buffer.shift()!;
+          continue;
+        }
+        if (ended) return;
+        await new Promise<void>((res) => {
+          notify = res;
+        });
+      }
+    }
+    const it = gen();
+    const wake = () => {
+      const n = notify;
+      notify = null;
+      n?.();
+    };
+    return {
+      runner: {
+        [Symbol.asyncIterator]: () => it,
+        close: () => {
+          ended = true;
+          wake();
+        },
+      } as unknown as Runner,
+      push: (m: SDKMessage) => {
+        buffer.push(m);
+        wake();
+      },
+      end: () => {
+        ended = true;
+        wake();
+      },
+    };
+  }
+
+  test('[security] auto-aborts a wedged turn (no activity) with TurnStalledError', async () => {
+    vi.useFakeTimers();
+    try {
+      const onTurnStalled = vi.fn();
+      const onTurnResumed = vi.fn();
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onTurnStalled,
+        onTurnResumed,
+        stallNotifyMs: 1_000,
+        stallAbortMs: 5_000,
+        stallToolCeilingMs: 50_000,
+        runnerFactory: () => hangingRunner([]), // yields nothing, then hangs
+      });
+      runner.register({ name: 'orchestrator', cwd: '/tmp/o' });
+      const outcome = runner.deliverTurn('orchestrator', 'go').then(
+        () => 'resolved',
+        (e) => e,
+      );
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(onTurnStalled).toHaveBeenCalledTimes(1);
+      expect(onTurnStalled.mock.calls[0]![0]).toMatchObject({ agentName: 'orchestrator' });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await outcome).toBeInstanceOf(TurnStalledError);
+      expect(onTurnResumed).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a turn that completes promptly never stalls or aborts', async () => {
+    vi.useFakeTimers();
+    try {
+      const onTurnStalled = vi.fn();
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onTurnStalled,
+        stallNotifyMs: 1_000,
+        stallAbortMs: 5_000,
+        runnerFactory: () => fakeRunner([resultMsg('s-quick')]),
+      });
+      runner.register({ name: 'a', cwd: '/tmp/a' });
+      const outcome = runner.deliverTurn('a', 'go').then(
+        () => 'resolved',
+        (e) => e,
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(await outcome).toBe('resolved');
+      expect(onTurnStalled).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a late message clears the stall (onTurnResumed) and the turn finishes', async () => {
+    vi.useFakeTimers();
+    try {
+      const onTurnStalled = vi.fn();
+      const onTurnResumed = vi.fn();
+      const { runner: r, push, end } = controllableRunner();
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onTurnStalled,
+        onTurnResumed,
+        stallNotifyMs: 1_000,
+        stallAbortMs: 60_000,
+        runnerFactory: () => r,
+      });
+      runner.register({ name: 'a', cwd: '/tmp/a' });
+      const outcome = runner.deliverTurn('a', 'go').then(
+        () => 'resolved',
+        (e) => e,
+      );
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(onTurnStalled).toHaveBeenCalledTimes(1);
+      push(streamMsg()); // activity → resume
+      await vi.advanceTimersByTimeAsync(10);
+      expect(onTurnResumed).toHaveBeenCalledTimes(1);
+      end();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await outcome).toBe('resolved');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a long tool in flight uses the lenient ceiling, not the no-tool abort threshold', async () => {
+    vi.useFakeTimers();
+    try {
+      const onTurnStalled = vi.fn();
+      let outcomeVal: unknown = '__pending__';
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onTurnStalled,
+        stallNotifyMs: 1_000,
+        stallAbortMs: 5_000,
+        stallToolCeilingMs: 60_000,
+        runnerFactory: () => hangingRunner([toolUseMsg('Bash')]), // tool mid-flight, then hangs
+      });
+      runner.register({ name: 'w', cwd: '/tmp/w' });
+      void runner.deliverTurn('w', 'go').then(
+        () => (outcomeVal = 'resolved'),
+        (e) => (outcomeVal = e),
+      );
+      // Past the no-tool abort threshold (5s) but within the tool ceiling (60s):
+      // not aborted, and no stall alert while a tool is legitimately running.
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(outcomeVal).toBe('__pending__');
+      expect(onTurnStalled).not.toHaveBeenCalled();
+      // Past the tool ceiling → still bounded, even for a never-returning tool.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(outcomeVal).toBeInstanceOf(TurnStalledError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a turn parked on AskUserQuestion is exempt from the stall watchdog', async () => {
+    vi.useFakeTimers();
+    try {
+      const onTurnStalled = vi.fn();
+      let answer: ((a: string) => void) | null = null;
+      const onAskUserQuestion = () =>
+        new Promise<string>((res) => {
+          answer = res;
+        });
+      // The SDK invokes canUseTool('AskUserQuestion'), which parks the turn on
+      // the operator; once answered, the turn completes.
+      const askingRunner = (opts: RunOptions & Partial<MockOptions>): Runner => {
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          await (
+            opts.canUseTool as unknown as (n: string, i: unknown, o: unknown) => Promise<unknown>
+          )('AskUserQuestion', {}, { toolUseID: 'q1', signal: new AbortController().signal });
+          yield resultMsg('s-ask');
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} } as unknown as Runner;
+      };
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onTurnStalled,
+        onAskUserQuestion,
+        stallNotifyMs: 1_000,
+        stallAbortMs: 3_000,
+        runnerFactory: askingRunner,
+      });
+      runner.register({ name: 'a', cwd: '/tmp/a' });
+      const outcome = runner.deliverTurn('a', 'go').then(
+        () => 'resolved',
+        (e) => e,
+      );
+      // Far past both thresholds while parked — the watchdog must stay silent.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(onTurnStalled).not.toHaveBeenCalled();
+      expect(answer).not.toBeNull();
+      answer!('User selected: X');
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await outcome).toBe('resolved');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
