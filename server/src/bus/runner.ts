@@ -27,6 +27,44 @@ import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusRecipient } from './paths.js';
 import { classifyMutationScope } from './guardrail.js';
+import { TurnStalledError } from './errors.js';
+
+/**
+ * Stalled-turn watchdog thresholds (ms). A turn that yields no SDKMessage for
+ * `DEFAULT_STALL_NOTIFY_MS` fires `onTurnStalled` (operator alert); one that
+ * stays silent for `DEFAULT_STALL_ABORT_MS` with no tool mid-flight is
+ * auto-aborted (the wedged-generation case — e.g. the orchestrator silently
+ * hung composing a reply). While a tool is mid-flight (between `tool_use` and
+ * its `tool_result`, e.g. a long `npm test`) the abort uses the much more
+ * lenient `DEFAULT_STALL_TOOL_CEILING_MS` so a legitimately slow tool isn't
+ * killed, while a tool that never returns is still bounded. All three are
+ * overridable via `AgentRunnerDeps` (tests pass tiny values).
+ */
+export const DEFAULT_STALL_NOTIFY_MS = 60_000;
+export const DEFAULT_STALL_ABORT_MS = 300_000;
+export const DEFAULT_STALL_TOOL_CEILING_MS = 900_000;
+
+/**
+ * Track whether a tool call is mid-flight for the watchdog: an `assistant`
+ * message whose last content block is a `tool_use` means the SDK is about to
+ * (or is) running a tool; the matching `tool_result` on a later `user` message
+ * clears it. Every other SDKMessage (`stream_event`, `result`, …) carries the
+ * prior state forward. Mirrors the tool derivation in `bus/activity.ts`.
+ */
+function deriveToolInFlight(msg: SDKMessage, prev: boolean): boolean {
+  const m = msg as { type?: string; message?: { content?: Array<{ type?: string }> } };
+  if (m.type === 'assistant' && Array.isArray(m.message?.content) && m.message.content.length > 0) {
+    return m.message.content[m.message.content.length - 1]?.type === 'tool_use';
+  }
+  if (
+    m.type === 'user' &&
+    Array.isArray(m.message?.content) &&
+    m.message.content.some((b) => (b as { type?: string }).type === 'tool_result')
+  ) {
+    return false;
+  }
+  return prev;
+}
 
 /** Message kinds the bus understands. Cebab writes `intro`/`prompt`;
  *  agents emit `reply`/`final`. Mirrors the old `--kind` values. */
@@ -308,6 +346,27 @@ export type AgentRunnerDeps = {
     error: unknown;
   }) => void;
   /**
+   * Stalled-turn watchdog (silent-stale-state fix). Fired when an in-flight
+   * turn has produced no SDKMessage for `stallNotifyMs` and is NOT mid-tool
+   * and NOT parked on an AskUserQuestion — i.e. a genuine generation/SDK
+   * wedge. chain.ts / orchestrator.ts wire this to a sticky operator
+   * notification so a stall is loud, not a silent gap. Fires once per silent
+   * gap; `onTurnResumed` follows if the turn recovers.
+   */
+  onTurnStalled?: (info: { agentName: string; idleMs: number; turnStartedAt: number }) => void;
+  /** Fired when a turn that previously fired `onTurnStalled` produces a
+   *  message again — the wiring clears the sticky stall notification. */
+  onTurnResumed?: (agentName: string) => void;
+  /** Watchdog soft (notify) threshold; default `DEFAULT_STALL_NOTIFY_MS`. */
+  stallNotifyMs?: number;
+  /** Watchdog hard (auto-abort) threshold with no tool mid-flight;
+   *  default `DEFAULT_STALL_ABORT_MS`. */
+  stallAbortMs?: number;
+  /** Watchdog hard (auto-abort) threshold while a tool is mid-flight;
+   *  default `DEFAULT_STALL_TOOL_CEILING_MS` (lenient so a slow tool isn't
+   *  killed, but a never-returning one is still bounded). */
+  stallToolCeilingMs?: number;
+  /**
    * Cluster G Phase 3 (G1): the BUS session id this AgentRunner belongs to.
    * Stamped onto every per-hop `registerQuery` call so the lifecycle
    * snapshot rows have the operator-facing session id (NOT the per-hop CLI
@@ -347,6 +406,15 @@ export class AgentRunner {
    * turn just checkpointed. Different agents stay fully parallel.
    */
   private readonly turnTails = new Map<string, Promise<void>>();
+  /**
+   * agentName → count of AskUserQuestion prompts currently parked for the
+   * operator. While > 0 the turn is legitimately blocked waiting on a human
+   * (no SDKMessage flows), so the stalled-turn watchdog must NOT fire — it
+   * would otherwise alert/abort a turn that is correctly awaiting an answer.
+   * A counter (not a boolean) tolerates the pathological case of overlapping
+   * parks within one turn.
+   */
+  private readonly parked = new Map<string, number>();
   /**
    * Cluster C Phase 4c (spec §5.2 + AE-4 + AE-5): per-agent pause gate.
    * `pause(name)` overwrites `turnTails.get(name)` with a never-resolving
@@ -594,6 +662,9 @@ export class AgentRunner {
       if (toolName !== 'AskUserQuestion' || !onAsk) {
         return { behavior: 'allow', updatedInput: input };
       }
+      // Suspend the stalled-turn watchdog while the operator is being asked:
+      // the turn is intentionally blocked on a human, not wedged.
+      this.parked.set(agentName, (this.parked.get(agentName) ?? 0) + 1);
       try {
         const answer = await onAsk(agentName, toolUseID, parseAskUserQuestions(input));
         return { behavior: 'deny', message: answer };
@@ -602,6 +673,10 @@ export class AgentRunner {
           behavior: 'deny',
           message: 'The user dismissed the question without answering.',
         };
+      } finally {
+        const remaining = (this.parked.get(agentName) ?? 1) - 1;
+        if (remaining <= 0) this.parked.delete(agentName);
+        else this.parked.set(agentName, remaining);
       }
     };
   }
@@ -666,8 +741,92 @@ export class AgentRunner {
           }
         : undefined;
     const unregister = registerQuery(runner, meta);
+
+    // --- Stalled-turn watchdog ------------------------------------------------
+    // Reset on every SDKMessage. No message for `stallNotifyMs` (and not
+    // mid-tool, not parked on a question) → fire `onTurnStalled` once (operator
+    // alert). No message for the hard threshold → abort the Query and surface a
+    // `TurnStalledError` so a wedged turn can't hang silently until a server
+    // restart. The abort relies on `Query.close()`/`interrupt()` ending the
+    // stream — the same primitive the single-agent interrupt path uses.
+    const stallNotifyMs = this.deps.stallNotifyMs ?? DEFAULT_STALL_NOTIFY_MS;
+    const stallAbortMs = this.deps.stallAbortMs ?? DEFAULT_STALL_ABORT_MS;
+    const stallToolCeilingMs = this.deps.stallToolCeilingMs ?? DEFAULT_STALL_TOOL_CEILING_MS;
+    const turnStartedAt = Date.now();
+    let lastMsgAt = turnStartedAt;
+    let toolInFlight = false;
+    let softNotified = false;
+    let stalledAbort = false;
+    let stalledAbortMs = 0;
+    let softTimer: ReturnType<typeof setTimeout> | null = null;
+    let hardTimer: ReturnType<typeof setTimeout> | null = null;
+    const isParked = () => (this.parked.get(agentName) ?? 0) > 0;
+    const clearStallTimers = () => {
+      if (softTimer) clearTimeout(softTimer);
+      if (hardTimer) clearTimeout(hardTimer);
+      softTimer = null;
+      hardTimer = null;
+    };
+    const armSoft = (ms: number) => {
+      softTimer = setTimeout(() => {
+        const idle = Date.now() - lastMsgAt;
+        // Parked-on-question or mid-tool → working, not wedged: re-check later.
+        if (isParked() || toolInFlight) return armSoft(stallNotifyMs);
+        if (idle < stallNotifyMs) return armSoft(stallNotifyMs - idle);
+        if (!softNotified) {
+          softNotified = true;
+          try {
+            this.deps.onTurnStalled?.({ agentName, idleMs: idle, turnStartedAt });
+          } catch (e) {
+            console.error(`[runner] onTurnStalled(${agentName}) threw`, e);
+          }
+        }
+        armSoft(stallNotifyMs);
+      }, Math.max(ms, 0));
+      softTimer.unref?.();
+    };
+    const armHard = (ms: number) => {
+      hardTimer = setTimeout(() => {
+        const idle = Date.now() - lastMsgAt;
+        if (isParked()) return armHard(stallNotifyMs);
+        const ceiling = toolInFlight ? stallToolCeilingMs : stallAbortMs;
+        if (idle < ceiling) return armHard(ceiling - idle);
+        stalledAbort = true;
+        stalledAbortMs = idle;
+        clearStallTimers();
+        // Best-effort teardown of the wedged Query; the iterator then ends (or
+        // rejects), and the catch/finally below normalizes to TurnStalledError.
+        try {
+          (runner as { interrupt?: () => void }).interrupt?.();
+        } catch {
+          /* best effort */
+        }
+        try {
+          runner.close?.();
+        } catch {
+          /* best effort */
+        }
+      }, Math.max(ms, 0));
+      hardTimer.unref?.();
+    };
+    armSoft(stallNotifyMs);
+    armHard(stallAbortMs);
+
     try {
       for await (const msg of runner) {
+        // Watchdog liveness: a message means the turn is progressing. Reset the
+        // idle clock, clear a prior stall (operator "resumed"), track tools.
+        lastMsgAt = Date.now();
+        if (softNotified) {
+          softNotified = false;
+          try {
+            this.deps.onTurnResumed?.(agentName);
+          } catch (e) {
+            console.error(`[runner] onTurnResumed(${agentName}) threw`, e);
+          }
+        }
+        toolInFlight = deriveToolInFlight(msg, toolInFlight);
+
         this.deps.onMessage?.(agentName, msg);
 
         // Item #5 mutation tap: every `tool_use` block on an `assistant`
@@ -786,7 +945,22 @@ export class AgentRunner {
           }
         }
       }
+      // Watchdog hard-abort, clean-iterator-return shape: the abort closed the
+      // Query and the iterator finished. Surface it as a stalled turn.
+      if (stalledAbort) throw new TurnStalledError(agentName, stalledAbortMs);
+    } catch (loopErr) {
+      // Watchdog hard-abort, iterator-rejection shape: closing the Query made
+      // the stream throw. Normalize both shapes to TurnStalledError so the
+      // routers' `.catch` recognises the stall uniformly (vs. a generic SDK
+      // abort error). A non-abort error propagates unchanged.
+      if (stalledAbort) {
+        throw loopErr instanceof TurnStalledError
+          ? loopErr
+          : new TurnStalledError(agentName, stalledAbortMs);
+      }
+      throw loopErr;
     } finally {
+      clearStallTimers();
       // Close the per-attempt SDK Query / claude subprocess BEFORE the next
       // attempt spawns its own. Matches the single-agent pattern at
       // ws/server.ts:1547. The prior bus runner only called `unregister()`,

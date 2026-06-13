@@ -69,7 +69,7 @@ import type {
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { PausedForMutationError, isPausedForMutation } from './errors.js';
+import { PausedForMutationError, isPausedForMutation, isTurnStalled } from './errors.js';
 import { shouldPauseForMutation } from './pause_gate.js';
 import {
   archiveAgentHop,
@@ -899,6 +899,52 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         console.error('[chain] appendRecoveryLog auto_retry threw', err);
       }
     },
+    // Stalled-turn watchdog (silent-stale-state fix): mirror orchestrator.ts.
+    // Soft stall → sticky operator alert; the hard abort is surfaced via the
+    // TurnStalledError → deliver().catch path below.
+    onTurnStalled: (info) => {
+      const result = emitNotification(
+        {
+          class: 'operational',
+          severity: 'warn',
+          dedupeKey: `agent_stalled:${sessionId}:${info.agentName}`,
+          title: `${info.agentName} stalled`,
+          message: `\`${info.agentName}\` has produced no activity for ${Math.round(
+            info.idleMs / 1000,
+          )}s. If it stays wedged it will be auto-recovered.`,
+          sessionId,
+          sticky: true,
+        },
+        (msg) => {
+          if (msg.type === 'notification') {
+            opts.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      );
+      if (!result.ok) {
+        console.error('[chain] agent_stalled dispatcher.emit failed', result.error);
+      }
+    },
+    onTurnResumed: (agentName) => {
+      const result = emitNotification(
+        {
+          class: 'operational',
+          severity: 'info',
+          dedupeKey: `agent_stalled:${sessionId}:${agentName}`,
+          title: `${agentName} resumed`,
+          message: `\`${agentName}\` is producing activity again.`,
+          sessionId,
+        },
+        (msg) => {
+          if (msg.type === 'notification') {
+            opts.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      );
+      if (!result.ok) {
+        console.error('[chain] agent_resumed dispatcher.emit failed', result.error);
+      }
+    },
   });
   for (const p of opts.participants) {
     runner.register({
@@ -934,6 +980,20 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       .deliverTurn(agentName, prompt)
       .catch((err) => {
         if (isPausedForMutation(err)) return; // controlled pause, not a failure
+        if (isTurnStalled(err)) {
+          // Watchdog auto-aborted a wedged turn — record the recovery, then
+          // fall through to onWorkerFailed (frees the queue + pending-retry).
+          try {
+            appendRecoveryLog({
+              sessionId,
+              failureClass: 'other',
+              operatorAction: 'abort',
+              timeToRecoveryMs: err.stallMs,
+            });
+          } catch (logErr) {
+            console.error('[chain] appendRecoveryLog stall-abort threw', logErr);
+          }
+        }
         console.error(`[chain] deliverTurn(${agentName}) failed`, err);
         router.onWorkerFailed(agentName, deliveredPrompt, err);
       })

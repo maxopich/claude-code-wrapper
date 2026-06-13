@@ -63,7 +63,7 @@ import type {
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { PausedForMutationError, isPausedForMutation } from './errors.js';
+import { PausedForMutationError, isPausedForMutation, isTurnStalled } from './errors.js';
 import { shouldPauseForMutation } from './pause_gate.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
@@ -1356,6 +1356,55 @@ export function wireOrchestratorSession(p: {
         console.error('[orchestrator] appendRecoveryLog auto_retry threw', err);
       }
     },
+    // Stalled-turn watchdog (silent-stale-state fix): a soft stall raises a
+    // sticky operator alert so a wedged turn (e.g. the orchestrator silently
+    // hung composing a reply) is loud, not a 24-minute gap. The hard abort is
+    // surfaced separately via the TurnStalledError → deliver().catch path
+    // below. `sticky` so the alert persists + replays if the operator's
+    // browser was detached when it fired (R-A).
+    onTurnStalled: (info) => {
+      const result = emitNotification(
+        {
+          class: 'operational',
+          severity: 'warn',
+          dedupeKey: `agent_stalled:${sessionId}:${info.agentName}`,
+          title: `${info.agentName} stalled`,
+          message: `\`${info.agentName}\` has produced no activity for ${Math.round(
+            info.idleMs / 1000,
+          )}s. If it stays wedged it will be auto-recovered.`,
+          sessionId,
+          sticky: true,
+        },
+        (msg) => {
+          if (msg.type === 'notification') {
+            p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      );
+      if (!result.ok) {
+        console.error('[orchestrator] agent_stalled dispatcher.emit failed', result.error);
+      }
+    },
+    onTurnResumed: (agentName) => {
+      const result = emitNotification(
+        {
+          class: 'operational',
+          severity: 'info',
+          dedupeKey: `agent_stalled:${sessionId}:${agentName}`,
+          title: `${agentName} resumed`,
+          message: `\`${agentName}\` is producing activity again.`,
+          sessionId,
+        },
+        (msg) => {
+          if (msg.type === 'notification') {
+            p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      );
+      if (!result.ok) {
+        console.error('[orchestrator] agent_resumed dispatcher.emit failed', result.error);
+      }
+    },
   });
   // Orchestrator stays narrow: its cwd is the empty Cebab-owned
   // <sessionFolder>/orchestrator/ workspace — no `.claude/settings*.json`,
@@ -1447,6 +1496,22 @@ export function wireOrchestratorSession(p: {
         // nothing further so the session stays `running` waiting for
         // Continue.
         if (isPausedForMutation(err)) return;
+        if (isTurnStalled(err)) {
+          // The watchdog auto-aborted a wedged turn. Record the recovery
+          // (closes the forensic gap a stalled turn used to leave) and fall
+          // through to onWorkerFailed, which frees the agent's queue and parks
+          // a pending-retry slot so the operator can re-issue the same prompt.
+          try {
+            appendRecoveryLog({
+              sessionId,
+              failureClass: 'other',
+              operatorAction: 'abort',
+              timeToRecoveryMs: err.stallMs,
+            });
+          } catch (logErr) {
+            console.error('[orchestrator] appendRecoveryLog stall-abort threw', logErr);
+          }
+        }
         console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
         router.onWorkerFailed(agentName, deliveredPrompt, err);
       })
