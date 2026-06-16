@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'vitest';
-import { formatElapsed, formatResultDuration } from './format';
+import type { ContentBlock } from '@cebab/shared/protocol';
+import { formatElapsed, formatResultDuration, messageCopyText } from './format';
+import type { MessageView } from './store';
 
 // Cluster H B5 — pins both formatters' contracts. `formatElapsed` is the
 // live `M:SS` ticker for the thinking indicator; `formatResultDuration` is
@@ -93,5 +95,74 @@ describe('formatResultDuration', () => {
       expect(formatResultDuration(Number.NaN)).toBe('0ms');
       expect(formatResultDuration(Number.POSITIVE_INFINITY)).toBe('0ms');
     });
+  });
+});
+
+// messageCopyText backs the per-message hover copy button in MessageBlock:
+// which kinds are copyable and what text they yield.
+describe('messageCopyText', () => {
+  test('user / command_output / error return their raw text', () => {
+    const user: MessageView = { kind: 'user', id: 'u', text: 'hi there' };
+    const cmd: MessageView = { kind: 'command_output', id: 'c', text: 'cli out' };
+    const err: MessageView = { kind: 'error', id: 'e', errorKind: 'auth_expired', message: 'boom' };
+    expect(messageCopyText(user)).toBe('hi there');
+    expect(messageCopyText(cmd)).toBe('cli out');
+    expect(messageCopyText(err)).toBe('boom');
+  });
+
+  test('empty text yields null (no copy button)', () => {
+    const user: MessageView = { kind: 'user', id: 'u', text: '' };
+    expect(messageCopyText(user)).toBeNull();
+  });
+
+  test('assistant joins its text blocks with blank lines', () => {
+    const blocks: ContentBlock[] = [
+      { type: 'text', text: 'line one' },
+      { type: 'text', text: 'line two' },
+    ];
+    const a: MessageView = { kind: 'assistant', id: 'a', blocks };
+    expect(messageCopyText(a)).toBe('line one\n\nline two');
+  });
+
+  test('assistant drops non-text blocks, keeping only the prose', () => {
+    const blocks: ContentBlock[] = [
+      { type: 'text', text: 'keep me' },
+      { type: 'tool_use', id: 't', name: 'Read', input: {} },
+      { type: 'thinking', text: 'private reasoning' },
+    ];
+    const a: MessageView = { kind: 'assistant', id: 'a', blocks };
+    expect(messageCopyText(a)).toBe('keep me');
+  });
+
+  test('assistant with no prose (tool-only / empty / whitespace) yields null', () => {
+    const toolOnly: MessageView = {
+      kind: 'assistant',
+      id: 'a',
+      blocks: [{ type: 'tool_use', id: 't', name: 'Read', input: {} }],
+    };
+    const empty: MessageView = { kind: 'assistant', id: 'a', blocks: [] };
+    const blank: MessageView = {
+      kind: 'assistant',
+      id: 'a',
+      blocks: [{ type: 'text', text: '   ' }],
+    };
+    expect(messageCopyText(toolOnly)).toBeNull();
+    expect(messageCopyText(empty)).toBeNull();
+    expect(messageCopyText(blank)).toBeNull();
+  });
+
+  test('result / system / permission_request have no copy text', () => {
+    const result: MessageView = { kind: 'result', id: 'r', subtype: 'success', cost: 0 };
+    const system: MessageView = { kind: 'system', id: 's', subtype: 'x', text: 'noise' };
+    const perm: MessageView = {
+      kind: 'permission_request',
+      id: 'p',
+      requestId: 'r1',
+      toolName: 'Bash',
+      input: {},
+    };
+    expect(messageCopyText(result)).toBeNull();
+    expect(messageCopyText(system)).toBeNull();
+    expect(messageCopyText(perm)).toBeNull();
   });
 });

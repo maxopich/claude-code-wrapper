@@ -825,11 +825,33 @@ pre {
   gap: var(--s-3);
   border-left: 2px solid var(--line-2);
   padding: 6px 12px;
+  position: relative;
 }
 .msg.user,
 .msg.assistant {
   border-left: 0;
   padding: 0;
+}
+/* Hover-revealed per-message copy button. Sits in the top-right corner over
+ * message whitespace; the --bg-2 chip keeps it legible if it overlaps the
+ * first line of a long code block. Toggled via opacity (not display) so it
+ * stays focusable and reveals on :focus-within for keyboard users. */
+.msg-copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  opacity: 0;
+  background: var(--bg-2);
+  transition: opacity 120ms ease;
+}
+.msg:hover > .msg-copy,
+.msg:focus-within > .msg-copy {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg-copy {
+    transition: none;
+  }
 }
 .msg-body {
   flex: 1;
@@ -6862,6 +6884,27 @@ pre {
 .authority-panel-refresh {
   font-size: var(--t-xs);
   padding: 2px 8px;
+}
+/* Whole-panel collapse chevron (in-session mount only). Mirrors the
+ * .authority-section-glyph rotate idiom so the disclosure motion matches the
+ * sections inside. */
+.authority-panel-toggle {
+  flex: 0 0 auto;
+  padding: 0 4px;
+}
+.authority-panel-toggle .chev {
+  display: inline-block;
+  color: var(--fg-2);
+  font-size: var(--t-xs);
+  transition: transform 120ms ease;
+}
+.authority-panel-toggle[aria-expanded='true'] .chev {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .authority-panel-toggle .chev {
+    transition: none;
+  }
 }
 .authority-panel-loading,
 .authority-panel-empty {

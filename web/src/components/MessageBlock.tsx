@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ContentBlock } from '@cebab/shared/protocol';
 import type { MessageView } from '../store';
-import { formatResultDuration } from '../format';
+import { formatResultDuration, messageCopyText } from '../format';
 import { Markdown } from './Markdown';
 import { ClaudeMark } from './ClaudeMark';
+import { CopyButton } from './CopyButton';
 import { badgeTooltip, renderPermissionBody } from './PermissionCards';
 import { MaxTurnsResultCard } from './MaxTurnsResultCard';
 
@@ -35,6 +36,10 @@ export function MessageBlock(props: {
   onEndMaxTurnsSession?: () => void;
 }) {
   const { message: m, onPermissionDecide } = props;
+  // Hover-revealed per-message copy (single-chat parity with the multi-agent
+  // transcript). `null` for kinds with nothing worth copying — system
+  // separators, the result footer, the interactive permission card.
+  const copyText = messageCopyText(m);
 
   if (m.kind === 'user') {
     const isCommand = m.text.trimStart().startsWith('/');
@@ -47,6 +52,7 @@ export function MessageBlock(props: {
           <div className="role">{isCommand ? 'command' : 'you'}</div>
           <pre>{m.text}</pre>
         </div>
+        {copyText && <CopyButton text={copyText} className="msg-copy" label="Copy message" />}
       </div>
     );
   }
@@ -63,6 +69,7 @@ export function MessageBlock(props: {
             <BlockRender key={i} block={b} />
           ))}
         </div>
+        {copyText && <CopyButton text={copyText} className="msg-copy" label="Copy message" />}
       </div>
     );
   }
@@ -81,6 +88,7 @@ export function MessageBlock(props: {
           <div className="role">command output</div>
           <Markdown text={m.text} />
         </div>
+        {copyText && <CopyButton text={copyText} className="msg-copy" label="Copy output" />}
       </div>
     );
   }
@@ -144,6 +152,7 @@ export function MessageBlock(props: {
           <div className="role">error · {m.errorKind}</div>
           <pre>{m.message}</pre>
         </div>
+        {copyText && <CopyButton text={copyText} className="msg-copy" label="Copy error" />}
       </div>
     );
   }

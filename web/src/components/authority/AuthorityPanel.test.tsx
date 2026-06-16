@@ -74,6 +74,7 @@ function mountPanel(props: {
   mode: 'preflight' | 'in-session' | 'post-run';
   projectId?: number;
   noAutoRequest?: boolean;
+  collapsible?: boolean;
 }) {
   const sent: ClientMsg[] = [];
   const send = props.send ?? ((m) => sent.push(m));
@@ -87,6 +88,7 @@ function mountPanel(props: {
           projectId={props.projectId ?? 1}
           mode={props.mode}
           noAutoRequest={props.noAutoRequest}
+          collapsible={props.collapsible}
         />
       </AuthorityProvider>,
     );
@@ -432,5 +434,82 @@ describe('AuthorityPanel — status line', () => {
     });
     const status = container.querySelector('.authority-panel-status')?.textContent ?? '';
     expect(status).toMatch(/^cache · \d+s ago$/);
+  });
+});
+
+// Whole-panel collapse — opt-in via `collapsible` (only the inline in-session
+// mount passes it). Default-collapsed, persisted to localStorage; the preflight
+// modal / post-run review leave it off so their DOM is unchanged.
+describe('AuthorityPanel — collapsible (in-session inline)', () => {
+  // Node ≥22 ships an experimental top-level `localStorage` that vitest 4
+  // activates without a backing file, so the real global throws. Mirror the
+  // TemplatePreviewModal tests and back it with a Map — the component reads the
+  // same global through ../../prefs, so this covers both sides of the round-trip.
+  let store: Map<string, string>;
+  beforeEach(() => {
+    store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        store.set(k, v);
+      },
+      removeItem: (k: string) => {
+        store.delete(k);
+      },
+      clear: () => {
+        store.clear();
+      },
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test('not collapsible: no toggle, body rendered inline (unchanged DOM)', () => {
+    mountPanel({ mode: 'in-session', noAutoRequest: true });
+    expect(container.querySelector('.authority-panel-toggle')).toBeNull();
+    expect(container.querySelector('[id^="authority-body-"]')).toBeNull();
+    expect(container.querySelector('.authority-panel-loading')).not.toBeNull();
+  });
+
+  test('collapsible defaults to collapsed: body hidden, chevron aria-expanded=false', () => {
+    mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true, collapsible: true });
+    const toggle = container.querySelector('.authority-panel-toggle') as HTMLButtonElement;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    const body = container.querySelector('#authority-body-1') as HTMLElement;
+    expect(body).not.toBeNull();
+    expect(body.hidden).toBe(true);
+  });
+
+  test('clicking the chevron expands the body and flips aria-expanded', () => {
+    mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true, collapsible: true });
+    const toggle = container.querySelector('.authority-panel-toggle') as HTMLButtonElement;
+    act(() => {
+      toggle.click();
+    });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect((container.querySelector('#authority-body-1') as HTMLElement).hidden).toBe(false);
+  });
+
+  test('persists the collapse choice to localStorage', () => {
+    mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true, collapsible: true });
+    const toggle = container.querySelector('.authority-panel-toggle') as HTMLButtonElement;
+    act(() => {
+      toggle.click(); // expand
+    });
+    expect(localStorage.getItem('cebab.authorityCollapsed')).toBe('false');
+    act(() => {
+      toggle.click(); // collapse again
+    });
+    expect(localStorage.getItem('cebab.authorityCollapsed')).toBe('true');
+  });
+
+  test('reads the persisted choice on mount (starts expanded when stored false)', () => {
+    localStorage.setItem('cebab.authorityCollapsed', 'false');
+    mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true, collapsible: true });
+    const toggle = container.querySelector('.authority-panel-toggle') as HTMLButtonElement;
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect((container.querySelector('#authority-body-1') as HTMLElement).hidden).toBe(false);
   });
 });
