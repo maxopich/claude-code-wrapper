@@ -20,7 +20,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # Pinned to windows-2022 (was windows-latest): the newer windows-latest
+        # image ships Visual Studio 18 (2026), which the node-gyp bundled with
+        # Node 20 can't parse (reads it as version "undefined"). better-sqlite3's
+        # `prebuild-install || node-gyp rebuild` then dies in the compile
+        # fallback at the "Rebuild native modules" step, before any test runs.
+        # VS 2022 on windows-2022 is node-gyp-recognised. Revert to
+        # windows-latest once node-gyp/the image stabilise. The `required`
+        # aggregate below keys off the matrix result, not per-OS names, so this
+        # rename needs no branch-protection change.
+        os: [ubuntu-latest, windows-2022]
     permissions:
       contents: read
 
