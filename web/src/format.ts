@@ -1,3 +1,6 @@
+import type { ContentBlock } from '@cebab/shared/protocol';
+import type { MessageView } from './store';
+
 /**
  * Format an elapsed duration as a live `M:SS` (or `H:MM:SS`) counter for the
  * thinking indicator's timer. Distinct from MultiAgentTab's coarse, past-tense
@@ -38,4 +41,32 @@ export function formatResultDuration(ms: number): string {
   const min = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
   return `${min}m ${sec}s`;
+}
+
+/**
+ * Extract the copyable text for a chat message, or `null` when there's nothing
+ * worth a copy button (system separators, the per-turn result footer, the
+ * interactive permission card). Assistant turns return their joined rendered
+ * text blocks — tool_use / tool_result / thinking blocks are dropped so the
+ * operator copies the prose, not the JSON scaffolding. Drives the hover copy
+ * button in `MessageBlock`.
+ */
+export function messageCopyText(m: MessageView): string | null {
+  switch (m.kind) {
+    case 'user':
+    case 'command_output':
+      return m.text || null;
+    case 'error':
+      return m.message || null;
+    case 'assistant': {
+      const text = m.blocks
+        .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n\n')
+        .trim();
+      return text || null;
+    }
+    default:
+      return null;
+  }
 }

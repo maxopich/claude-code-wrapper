@@ -70,14 +70,15 @@ import {
 import { HELD_MESSAGES_CAP } from './store';
 import type { ActiveRunView } from './store';
 import { downloadSessionLog, isDownloadError } from './exports';
+import { readStored, writeStored } from './prefs';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
 const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
 
-// Sidebar layout prefs. First localStorage usage in the app — kept to two
-// plain keys, no abstraction. Reads/writes are try/catch'd so private mode
-// or a full quota can't break the app over a non-critical preference.
+// Sidebar layout prefs. Reads/writes go through the shared readStored/
+// writeStored helpers (./prefs) so private mode or a full quota can't break
+// the app over a non-critical preference.
 const SIDEBAR_MIN = 170;
 const SIDEBAR_MAX = 480;
 const SIDEBAR_DEFAULT = 220;
@@ -86,21 +87,6 @@ const SIDEBAR_KEY_STEP = 16;
 function clampSidebarWidth(n: number): number {
   if (!Number.isFinite(n)) return SIDEBAR_DEFAULT;
   return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Math.round(n)));
-}
-function readStored<T>(key: string, fallback: T, parse: (raw: string) => T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw == null ? fallback : parse(raw);
-  } catch {
-    return fallback;
-  }
-}
-function writeStored(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    /* non-critical preference — ignore */
-  }
 }
 
 /**
@@ -2224,7 +2210,7 @@ function AppShell({
                  *  operator's chat scrollback isn't pushed down meaningfully
                  *  on first paint. */}
                 {session && !isSessionPending(session.id) && activeProject && (
-                  <AuthorityPanel projectId={activeProject.id} mode="in-session" />
+                  <AuthorityPanel projectId={activeProject.id} mode="in-session" collapsible />
                 )}
                 {/* Cluster D Phase 4c (B2): rate-limit banner. Mounted via
                  *  <BannerStack> so when later phases add the auth-expired

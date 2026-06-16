@@ -1,4 +1,5 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { readStored, writeStored } from '../../prefs';
 import { useAuthorityActions, useAuthoritySlot, type AuthoritySlot } from './AuthorityContext';
 import { AuthoritySection } from './AuthoritySection';
 import { ModelIdentityCard } from './ModelIdentityCard';
@@ -60,6 +61,13 @@ export type AuthorityPanelProps = {
    * `mode: 'probe'` so the operator sees fresh state.
    */
   noAutoRequest?: boolean;
+  /**
+   * When true the whole panel can collapse to its header bar via a chevron
+   * toggle, and the choice persists across reloads (key `cebab.authorityCollapsed`,
+   * default collapsed). Only the inline in-session mount opts in — the preflight
+   * modal and post-run review leave it off, so their DOM is unchanged.
+   */
+  collapsible?: boolean;
 };
 
 function headerForMode(mode: AuthorityPanelMode): string {
@@ -96,9 +104,20 @@ function toolsModeForPanel(mode: AuthorityPanelMode): {
 }
 
 export function AuthorityPanel(props: AuthorityPanelProps) {
-  const { projectId, mode, noAutoRequest = false } = props;
+  const { projectId, mode, noAutoRequest = false, collapsible = false } = props;
   const slot = useAuthoritySlot(projectId);
   const { request } = useAuthorityActions();
+
+  // Whole-panel collapse — opt-in. Default-collapsed so the operator's chat
+  // scrollback owns the viewport on small displays; the choice persists. The
+  // body stays mounted (hidden, not unmounted) so the cache + each section's
+  // open/closed state survive a toggle, and the status line keeps ticking.
+  const [collapsed, setCollapsed] = useState(() =>
+    collapsible ? readStored('cebab.authorityCollapsed', true, (r) => r === 'true') : false,
+  );
+  useEffect(() => {
+    if (collapsible) writeStored('cebab.authorityCollapsed', String(collapsed));
+  }, [collapsible, collapsed]);
 
   // Auto-fire cache request on mount for any panel that hasn't loaded yet.
   // The reducer dedupes — if a previous mount already requested, it stays
@@ -109,9 +128,25 @@ export function AuthorityPanel(props: AuthorityPanelProps) {
     if (slot.status === 'idle') request(projectId, 'cache');
   }, [projectId, slot.status, request, noAutoRequest]);
 
+  const bodyId = `authority-body-${projectId}`;
+
   return (
     <section className={`authority-panel authority-panel-${mode}`} aria-label={headerForMode(mode)}>
       <header className="authority-panel-header">
+        {collapsible && (
+          <button
+            type="button"
+            className="icon-btn authority-panel-toggle"
+            aria-expanded={!collapsed}
+            aria-controls={bodyId}
+            aria-label={collapsed ? 'Expand project authority' : 'Collapse project authority'}
+            onClick={() => setCollapsed((c) => !c)}
+          >
+            <span className="chev" aria-hidden="true">
+              ▸
+            </span>
+          </button>
+        )}
         <h3 className="authority-panel-title">{headerForMode(mode)}</h3>
         <span className="authority-panel-status" aria-live="polite">
           {renderStatus(slot)}
@@ -125,7 +160,13 @@ export function AuthorityPanel(props: AuthorityPanelProps) {
           ↻ Refresh
         </button>
       </header>
-      {renderBody(slot, mode)}
+      {collapsible ? (
+        <div id={bodyId} hidden={collapsed}>
+          {renderBody(slot, mode)}
+        </div>
+      ) : (
+        renderBody(slot, mode)
+      )}
     </section>
   );
 }
