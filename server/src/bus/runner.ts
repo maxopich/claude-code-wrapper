@@ -768,45 +768,58 @@ export class AgentRunner {
       hardTimer = null;
     };
     const armSoft = (ms: number) => {
-      softTimer = setTimeout(() => {
-        const idle = Date.now() - lastMsgAt;
-        // Parked-on-question or mid-tool → working, not wedged: re-check later.
-        if (isParked() || toolInFlight) return armSoft(stallNotifyMs);
-        if (idle < stallNotifyMs) return armSoft(stallNotifyMs - idle);
-        if (!softNotified) {
-          softNotified = true;
-          try {
-            this.deps.onTurnStalled?.({ agentName, idleMs: idle, turnStartedAt });
-          } catch (e) {
-            console.error(`[runner] onTurnStalled(${agentName}) threw`, e);
+      softTimer = setTimeout(
+        () => {
+          const idle = Date.now() - lastMsgAt;
+          // Parked-on-question or mid-tool → working, not wedged: re-check later.
+          if (isParked() || toolInFlight) return armSoft(stallNotifyMs);
+          if (idle < stallNotifyMs) return armSoft(stallNotifyMs - idle);
+          if (!softNotified) {
+            softNotified = true;
+            try {
+              this.deps.onTurnStalled?.({ agentName, idleMs: idle, turnStartedAt });
+            } catch (e) {
+              console.error(`[runner] onTurnStalled(${agentName}) threw`, e);
+            }
           }
-        }
-        armSoft(stallNotifyMs);
-      }, Math.max(ms, 0));
+          armSoft(stallNotifyMs);
+        },
+        Math.max(ms, 0),
+      );
       softTimer.unref?.();
     };
     const armHard = (ms: number) => {
-      hardTimer = setTimeout(() => {
-        const idle = Date.now() - lastMsgAt;
-        if (isParked()) return armHard(stallNotifyMs);
-        const ceiling = toolInFlight ? stallToolCeilingMs : stallAbortMs;
-        if (idle < ceiling) return armHard(ceiling - idle);
-        stalledAbort = true;
-        stalledAbortMs = idle;
-        clearStallTimers();
-        // Best-effort teardown of the wedged Query; the iterator then ends (or
-        // rejects), and the catch/finally below normalizes to TurnStalledError.
-        try {
-          (runner as { interrupt?: () => void }).interrupt?.();
-        } catch {
-          /* best effort */
-        }
-        try {
-          runner.close?.();
-        } catch {
-          /* best effort */
-        }
-      }, Math.max(ms, 0));
+      hardTimer = setTimeout(
+        () => {
+          const idle = Date.now() - lastMsgAt;
+          if (isParked()) return armHard(stallNotifyMs);
+          const ceiling = toolInFlight ? stallToolCeilingMs : stallAbortMs;
+          if (idle < ceiling) return armHard(ceiling - idle);
+          stalledAbort = true;
+          stalledAbortMs = idle;
+          clearStallTimers();
+          // Hard-close the wedged Query to end the stream; the `for await` then
+          // completes (inputStream.done()) and the catch/finally below normalizes
+          // to TurnStalledError.
+          //
+          // We deliberately do NOT call `interrupt()` first. `interrupt()` parks a
+          // control-request promise inside the SDK, and the `close()` below
+          // immediately rejects it with "Query closed before response received".
+          // That rejection is fire-and-forget (no catch), and the try/catch here
+          // only guards *synchronous* throws — so it escaped as an unhandled
+          // rejection and crashed the whole server: the exact opposite of
+          // "auto-recover instead of silent hang". A wedged turn can't be
+          // interrupted gracefully anyway; the hard close reliably reaps it. The
+          // process-level `unhandledRejection` guard in index.ts is the backstop
+          // for any in-flight SDK promise this close() still rejects.
+          try {
+            runner.close?.();
+          } catch {
+            /* best effort */
+          }
+        },
+        Math.max(ms, 0),
+      );
       hardTimer.unref?.();
     };
     armSoft(stallNotifyMs);
