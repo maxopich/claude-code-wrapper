@@ -7,6 +7,11 @@ updates:
       interval: 'weekly'
       day: 'monday'
       time: '06:00'
+    # Supply-chain cooldown: don't propose a version until it's aged 7 days.
+    # Applies to version updates only — security updates still come through
+    # immediately. Mirrors `min-release-age` in .npmrc.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       patch-updates:
@@ -22,6 +27,8 @@ updates:
     schedule:
       interval: 'weekly'
       day: 'monday'
+    cooldown:
+      default-days: 7
     labels:
       - 'dependencies'
       - 'github-actions'
