@@ -1234,6 +1234,70 @@ describe('AgentRunner stalled-turn watchdog', () => {
     }
   });
 
+  test('[security] hard-abort reaps a wedged turn via close() only — no orphaned interrupt() promise', async () => {
+    // Regression for the "Query closed before response received" server crash.
+    // The watchdog used to call interrupt() then close() in the same tick.
+    // interrupt() parks a control-request promise inside the SDK that the
+    // immediately-following close() rejects; fire-and-forget (no catch), that
+    // rejection escaped as an unhandled rejection and killed the whole server —
+    // the opposite of "auto-recover instead of silent hang". The fix reaps a
+    // wedged turn with close() alone. Here interrupt() is wired to a floating
+    // rejected promise (exactly what the SDK does) so a regression both trips
+    // the not-called assertion and surfaces as the same unhandled rejection.
+    vi.useFakeTimers();
+    const seen: unknown[] = [];
+    const onUnhandled = (reason: unknown) => seen.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      let release: (() => void) | null = null;
+      const close = vi.fn(() => release?.());
+      const interrupt = vi.fn(() =>
+        Promise.reject(new Error('Query closed before response received')),
+      );
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        for (const m of [] as SDKMessage[]) yield m; // never runs; satisfies require-yield
+        await new Promise<void>((res) => {
+          release = res;
+        });
+      }
+      const it = gen();
+      const wedged = {
+        [Symbol.asyncIterator]: () => it,
+        close,
+        interrupt,
+      } as unknown as Runner;
+
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        stallNotifyMs: 1_000,
+        stallAbortMs: 5_000,
+        stallToolCeilingMs: 50_000,
+        runnerFactory: () => wedged,
+      });
+      runner.register({ name: 'orchestrator', cwd: '/tmp/o' });
+      const outcome = runner.deliverTurn('orchestrator', 'go').then(
+        () => 'resolved',
+        (e) => e,
+      );
+      await vi.advanceTimersByTimeAsync(6_500);
+
+      expect(await outcome).toBeInstanceOf(TurnStalledError);
+      // close() reaps the wedged stream; interrupt() — the orphan source — is gone.
+      expect(close).toHaveBeenCalled();
+      expect(interrupt).not.toHaveBeenCalled();
+      // Flush microtasks; no "Query closed…" rejection should have leaked.
+      await Promise.resolve();
+      expect(
+        seen.filter(
+          (r) => r instanceof Error && r.message === 'Query closed before response received',
+        ),
+      ).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      vi.useRealTimers();
+    }
+  });
+
   test('a turn that completes promptly never stalls or aborts', async () => {
     vi.useFakeTimers();
     try {

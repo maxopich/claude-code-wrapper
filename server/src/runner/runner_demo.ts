@@ -44,7 +44,11 @@ async function main() {
       );
     } else if (msg.type === 'assistant') {
       const text = msg.message.content
-        .map((b) => (b.type === 'text' ? b.text : `[${b.type}]`))
+        // Annotate explicitly: SDK ≥0.3.201 widened `content`'s element type,
+        // so an unannotated `b` is now an implicit-any (TS7006). This block
+        // only reads `.type` / `.text`, so a structural type is enough and
+        // stays valid across SDK versions.
+        .map((b: { type: string; text?: string }) => (b.type === 'text' ? b.text : `[${b.type}]`))
         .join(' ');
       console.error(`[#${seq} assistant] ${text}`);
     } else if (msg.type === 'result') {

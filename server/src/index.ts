@@ -174,6 +174,21 @@ function main(): void {
   // that SIGINT/SIGTERM give on POSIX. Harmless no-op on non-Windows
   // (the signal is simply never emitted).
   process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+
+  // Last-resort containment: a stray unhandled rejection or uncaught exception
+  // must NOT take down the whole server. The motivating case is the multi-agent
+  // bus — closing a wedged worker Query rejects its in-flight control/MCP
+  // promises with "Query closed before response received", and Node's default is
+  // to terminate the process on an unhandled rejection. One background worker's
+  // teardown should never kill the operator's session (and every sibling agent
+  // with it), so we log and stay up. Deliberate posture for a local single-user
+  // tool; revisit if it ever masks real state corruption.
+  process.on('unhandledRejection', (reason) => {
+    console.error('[cebab] unhandledRejection (contained; server stays up)', reason);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error('[cebab] uncaughtException (contained; server stays up)', err);
+  });
 }
 
 main();
