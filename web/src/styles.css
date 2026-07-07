@@ -1098,6 +1098,24 @@ pre {
   font-weight: 500;
   letter-spacing: 0.01em;
 }
+/* P6.3 review fix: in the COLLAPSED rail the footer's full-width workspace
+ * button was clipped mid-button by the rail's overflow, and its corner got
+ * shaved by the card's rounded corner — reading as "poking out". Collapse it
+ * to a compact, centered gear icon-button that sits cleanly inside the rail
+ * (matches the icon-rail intent); it returns to the full labelled button on
+ * hover / when pinned. */
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .sidebar-footer {
+  padding: 10px 12px;
+}
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn {
+  width: 42px;
+  padding: 9px 0;
+  justify-content: center;
+  gap: 0;
+}
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn-label {
+  display: none;
+}
 .project-list .project-row {
   list-style: none;
 }
