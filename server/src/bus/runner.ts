@@ -45,6 +45,42 @@ export const DEFAULT_STALL_ABORT_MS = 300_000;
 export const DEFAULT_STALL_TOOL_CEILING_MS = 900_000;
 
 /**
+ * Built-in tools removed from a `'delegate-only'` agent's context (SDK
+ * `disallowedTools`) so the orchestrator never even sees a file/shell/analysis
+ * tool to reach for. This is the "remove from context" layer; the authoritative
+ * boundary is the default-deny in `makeCanUseTool` (which also catches any
+ * future built-in not listed here). `bus_send` (an MCP tool) and
+ * `AskUserQuestion` are intentionally NOT here — those are the only two tools a
+ * delegation-only agent may use.
+ */
+export const DELEGATE_ONLY_DISALLOWED: readonly string[] = [
+  'Bash',
+  'BashOutput',
+  'KillShell',
+  'Edit',
+  'Write',
+  'MultiEdit',
+  'NotebookEdit',
+  'Read',
+  'Glob',
+  'Grep',
+  'Task',
+  'WebFetch',
+  'WebSearch',
+  'TodoWrite',
+];
+
+/**
+ * The only tools a `'delegate-only'` agent (the orchestrator) may call:
+ * `AskUserQuestion` (parked for the operator) and the injected `bus_send` MCP
+ * tool. Matching `bus_send` by the `__bus_send` suffix covers both the
+ * `mcp__cebab_bus__bus_send` name and the deprecated `mcp__bus__bus_send` alias.
+ */
+export function isDelegationAllowedTool(toolName: string): boolean {
+  return toolName === 'AskUserQuestion' || toolName.endsWith('__bus_send');
+}
+
+/**
  * Track whether a tool call is mid-flight for the watchdog: an `assistant`
  * message whose last content block is a `tool_use` means the SDK is about to
  * (or is) running a tool; the matching `tool_result` on a later `user` message
@@ -200,6 +236,17 @@ export type AgentSpec = {
    * snapshot, which the dropdown row renders as "no project" gracefully.
    */
   projectId?: number;
+  /**
+   * Tool posture for this agent. `'delegate-only'` hard-locks the agent to a
+   * pure router: its ONLY tools are `bus_send` (delegate work / deliver the
+   * final answer) and `AskUserQuestion` — every file/shell/analysis tool is
+   * both removed from the model's context (`disallowedTools`, see
+   * `DELEGATE_ONLY_DISALLOWED`) AND denied by `makeCanUseTool` as the
+   * authoritative default-deny boundary. Used for the orchestrator, which must
+   * route work to workers rather than act itself. Absent (the default) =
+   * unrestricted, the worker/chain posture (byte-identical to before).
+   */
+  toolPolicy?: 'delegate-only';
 };
 
 export type AgentRunnerDeps = {
@@ -302,6 +349,17 @@ export type AgentRunnerDeps = {
     toolUseId: string,
     questions: AskUserQuestionView[],
   ) => Promise<string>;
+  /**
+   * Called when a `'delegate-only'` agent (the orchestrator) attempts a tool it
+   * is structurally barred from — i.e. anything other than `bus_send` /
+   * `AskUserQuestion`. The call has already been denied by `makeCanUseTool`
+   * (the model receives a nudge to delegate); this hook is the observability
+   * side-channel. orchestrator.ts wires it to the safety dispatcher so the
+   * attempt lands in the hash-chained audit log + an operator notification.
+   * Fire-and-forget: the runner never awaits it and a throw must not affect the
+   * turn (the deny already happened). Absent (the default) → no-op.
+   */
+  onGuardrailViolation?: (agentName: string, toolName: string) => void;
   /** Injectable for tests; defaults to the real `pickRunner` (mock-aware). */
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
   /** Shared cancellation for the whole session's turns. */
@@ -650,15 +708,41 @@ export class AgentRunner {
 
   /**
    * Build the `canUseTool` gate for one agent's query (interactive
-   * AskUserQuestion path). Auto-allows every tool to preserve the bus's
-   * no-human-gate posture; for `AskUserQuestion` it parks via
-   * `onAskUserQuestion` and returns the operator's answer as a `deny` message
-   * — the SDK delivers that to the model as the tool result (validated spike:
-   * the model reads "User selected: X" and continues).
+   * AskUserQuestion path). For an unrestricted agent it auto-allows every tool
+   * to preserve the bus's no-human-gate posture; for `AskUserQuestion` it parks
+   * via `onAskUserQuestion` and returns the operator's answer as a `deny`
+   * message — the SDK delivers that to the model as the tool result (validated
+   * spike: the model reads "User selected: X" and continues).
+   *
+   * For a `'delegate-only'` agent (the orchestrator) this is the AUTHORITATIVE
+   * boundary: every tool except `bus_send` / `AskUserQuestion` is denied with a
+   * nudge to delegate, and the attempt is reported via `onGuardrailViolation`.
+   * This backstops the `disallowedTools` context-removal layer (catching e.g. a
+   * future built-in not in `DELEGATE_ONLY_DISALLOWED`) and never depends on the
+   * SDK's tool-filtering behaviour.
    */
   private makeCanUseTool(agentName: string): NonNullable<RunOptions['canUseTool']> {
     const onAsk = this.deps.onAskUserQuestion;
+    const delegateOnly = this.specs.get(agentName)?.toolPolicy === 'delegate-only';
     return async (toolName, input, { toolUseID }) => {
+      if (delegateOnly && !isDelegationAllowedTool(toolName)) {
+        // Fire-and-forget observability; must not affect the (already-decided)
+        // deny. A throwing hook is swallowed so a bad sink can't wedge the turn.
+        try {
+          this.deps.onGuardrailViolation?.(agentName, toolName);
+        } catch (err) {
+          console.error('[bus] onGuardrailViolation threw', err);
+        }
+        return {
+          behavior: 'deny',
+          message:
+            `You are the orchestrator and cannot use \`${toolName}\`. You have no ` +
+            `file, shell, or analysis tools — your only actions are \`bus_send\` ` +
+            `(to delegate to a worker, or deliver the final answer to \`user\`) and ` +
+            `\`AskUserQuestion\`. Route this work to the appropriate worker via ` +
+            `bus_send instead of doing it yourself.`,
+        };
+      }
       if (toolName !== 'AskUserQuestion' || !onAsk) {
         return { behavior: 'allow', updatedInput: input };
       }
@@ -702,11 +786,19 @@ export class AgentRunner {
       ? { permissionMode: 'default' as const, canUseTool: this.makeCanUseTool(agentName) }
       : { permissionMode: 'bypassPermissions' as const, allowDangerouslySkipPermissions: true };
 
+    // Delegation-only agents (the orchestrator) get the file/shell/analysis
+    // built-ins stripped from the model's context entirely — the "remove from
+    // view" layer complementing the authoritative default-deny in
+    // `makeCanUseTool`. Works in either permission posture.
+    const toolLock =
+      spec.toolPolicy === 'delegate-only' ? { disallowedTools: [...DELEGATE_ONLY_DISALLOWED] } : {};
+
     const runner = factory({
       cwd: spec.cwd,
       prompt: promptText,
       ...(prior ? { resume: prior } : {}),
       ...askGate,
+      ...toolLock,
       settingSources: spec.settingSources ?? ['user'],
       mcpServers: {
         cebab_bus: makeBusToolServer(agentName, this.deps.onEvent),

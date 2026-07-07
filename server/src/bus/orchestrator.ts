@@ -1351,6 +1351,37 @@ export function wireOrchestratorSession(p: {
     onMutation: onMutationHook,
     onToolResult: onToolResultHook,
     onAskUserQuestion: onAskUserQuestionHook,
+    // Delegation-only enforcement: the orchestrator's `canUseTool` denies every
+    // tool except `bus_send` / `AskUserQuestion`. Each blocked attempt lands
+    // here so it's recorded in the hash-chained safety_audit log + an operator
+    // notification (the deny already happened in the runner — this is the
+    // observability side-channel, BE-1 audit-before-WS via the dispatcher).
+    onGuardrailViolation: (agentName, toolName) => {
+      const result = emitNotification(
+        {
+          class: 'safety',
+          severity: 'warn',
+          dedupeKey: `guardrail_block:${sessionId}:${agentName}`,
+          title: `${agentName} tried to act instead of delegate`,
+          message:
+            `\`${agentName}\` attempted \`${toolName}\` directly. Blocked — it may ` +
+            `only delegate via bus_send or ask you a question.`,
+          sessionId,
+          reasonCode: 'orchestrator_non_delegation',
+          auditKind: 'guardrail.orchestrator_tool_block',
+          auditAgentId: agentName,
+          auditPayload: { toolName },
+        },
+        (msg) => {
+          if (msg.type === 'notification') {
+            p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      );
+      if (!result.ok) {
+        console.error('[orchestrator] guardrail_block dispatcher.emit failed', result.error);
+      }
+    },
     abortController,
     runnerFactory: p.runnerFactory,
     // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): mirror the chain.ts
@@ -1438,10 +1469,18 @@ export function wireOrchestratorSession(p: {
   // <sessionFolder>/orchestrator/ workspace — no `.claude/settings*.json`,
   // no CLAUDE.md, nothing to load — so widening would be a no-op. Pinning
   // `['user']` here documents the invariant.
+  //
+  // `toolPolicy: 'delegate-only'` hard-locks it to a pure router: file/shell/
+  // analysis tools are stripped from its context (`disallowedTools`) AND denied
+  // by `makeCanUseTool`, so it can only delegate via `bus_send` or ask the
+  // operator via `AskUserQuestion`. This is the structural brake behind the
+  // roster prompt's consultant-mode text — prose alone let a run start editing
+  // files itself.
   runner.register({
     name: ORCHESTRATOR_AGENT_NAME,
     cwd: paths.orchestratorWorkspace,
     settingSources: ['user'],
+    toolPolicy: 'delegate-only',
   });
   // Workers load their project's full settings stack — MCPs,
   // allowedTools/disallowedTools, env injectors, hooks — exactly as a
