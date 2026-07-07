@@ -62,6 +62,8 @@ function render(
         onClose={onClose}
         send={opts.send ?? vi.fn()}
         subscribeServerMsg={opts.subscribeServerMsg ?? (() => () => {})}
+        theme="daylight"
+        onThemeChange={vi.fn()}
       />,
     );
   });

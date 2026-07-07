@@ -141,6 +141,307 @@
   --border: rgba(255, 255, 255, 0.1);
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * REDESIGN THEME GAMMAS (mockup→prod migration, Phase 1).
+ * Four color gammas over ONE layout. Selected at runtime via
+ * `document.documentElement[data-theme]` (default 'daylight'); persisted to
+ * localStorage 'cebab.theme'; picked from Settings → Appearance.
+ * Each block RE-POINTS prod's existing token names (so the ~2,570 var() refs
+ * need no rewrite) and ADDS the tokens the redesign needs (--panel/-2/--raised,
+ * --font-reading, msg-treatment, --grad-*, …). Blocks are FLAT and un-nested —
+ * templatePreview/cssGate.test.ts regex-scans this file assuming flat rules,
+ * and styleTokens.test.ts asserts all four fill the identical contract.
+ * Source of truth for values: mockups/redesign/css/tokens.css.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* AURORA — airy product · azure accent */
+[data-theme='aurora'] {
+  --bg-0: #eef1f6;
+  --bg-1: #ffffff;
+  --bg-2: #ffffff;
+  --bg-3: #f1f3f8;
+  --bg-4: #e6eaf2;
+  --bg-5: #dde3ee;
+  --bg: #eef1f6;
+  --panel: #ffffff;
+  --panel-2: #f1f3f8;
+  --raised: #ffffff;
+  --canvas: radial-gradient(1100px 500px at 12% -8%, rgba(47, 111, 237, 0.07), transparent 60%), #eef1f6;
+  --header-bg: rgba(255, 255, 255, 0.82);
+  --fg-0: #191b24;
+  --fg-1: #33384a;
+  --fg-2: #5a5f70;
+  --fg-3: #9296a6;
+  --fg: #191b24;
+  --line-1: rgba(20, 24, 50, 0.08);
+  --line-2: rgba(20, 24, 50, 0.14);
+  --line-3: rgba(20, 24, 50, 0.2);
+  --border: rgba(20, 24, 50, 0.14);
+  --accent: #2f6fed;
+  --accent-soft: #2456c8;
+  --accent-glow: rgba(47, 111, 237, 0.1);
+  --accent-ink: #2456c8;
+  --accent-2: #2456c8;
+  --on-accent: #ffffff;
+  --ok: #16a36a;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #d3920f;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #e0584a;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #2f6fed;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #cc785c;
+  --teal: #22a7c4;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 18px;
+  --shadow-sm: 0 1px 3px rgba(30, 40, 90, 0.06);
+  --shadow-md: 0 6px 22px rgba(30, 40, 90, 0.07);
+  --shadow-lg: 0 24px 60px rgba(30, 40, 90, 0.16);
+  --ease: cubic-bezier(0.34, 1.4, 0.5, 1);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: var(--font-sans);
+  --grad-brand: linear-gradient(135deg, var(--accent), var(--teal));
+  --grad-user: linear-gradient(135deg, var(--accent), #3b82f6);
+  --grad-cta: linear-gradient(135deg, var(--accent), var(--teal));
+  --msg-user-bg: var(--grad-user);
+  --msg-user-fg: #ffffff;
+  --msg-user-border: transparent;
+  --msg-user-shadow: 0 8px 20px rgba(47, 111, 237, 0.22);
+  --msg-asst-bg: var(--raised);
+  --msg-asst-border: var(--line-1);
+  --msg-asst-shadow: var(--shadow-md);
+  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
+  --warn-border: rgba(211, 146, 15, 0.3);
+  --warn-bg: linear-gradient(180deg, rgba(211, 146, 15, 0.08), rgba(211, 146, 15, 0.03));
+  --scrollbar-thumb: rgba(20, 24, 50, 0.16);
+  --hover-tint: rgba(20, 24, 50, 0.06);
+}
+
+/* DAYLIGHT — warm light · coral accent (default) */
+[data-theme='daylight'] {
+  --bg-0: #f3f1ea;
+  --bg-1: #fbfaf5;
+  --bg-2: #fbfaf5;
+  --bg-3: #ece8dd;
+  --bg-4: #e7e2d5;
+  --bg-5: #ddd7c6;
+  --bg: #f3f1ea;
+  --panel: #fbfaf5;
+  --panel-2: #ece8dd;
+  --raised: #ffffff;
+  --canvas: #f3f1ea;
+  --header-bg: rgba(251, 250, 245, 0.82);
+  --fg-0: #2a2620;
+  --fg-1: #443f36;
+  --fg-2: #6f685b;
+  --fg-3: #9a9183;
+  --fg: #2a2620;
+  --line-1: rgba(40, 32, 20, 0.1);
+  --line-2: rgba(40, 32, 20, 0.16);
+  --line-3: rgba(40, 32, 20, 0.22);
+  --border: rgba(40, 32, 20, 0.16);
+  --accent: #bf5e3a;
+  --accent-soft: #a44d2c;
+  --accent-glow: rgba(191, 94, 58, 0.12);
+  --accent-ink: #a44d2c;
+  --accent-2: #a44d2c;
+  --on-accent: #ffffff;
+  --ok: #2f9e5f;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #b9851c;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #c0402a;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #3a6db0;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #cc785c;
+  --teal: #22a7c4;
+  --r-sm: 5px;
+  --r-md: 8px;
+  --r-lg: 14px;
+  --shadow-sm: 0 1px 2px rgba(80, 60, 30, 0.06);
+  --shadow-md: 0 2px 12px rgba(80, 60, 30, 0.07);
+  --shadow-lg: 0 18px 50px rgba(80, 60, 30, 0.18);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: 'Newsreader', Georgia, serif;
+  --grad-brand: linear-gradient(135deg, var(--coral), #d99412);
+  --grad-user: linear-gradient(135deg, var(--info), #5a87c9);
+  --grad-cta: var(--accent);
+  --msg-user-bg: #ece8dd;
+  --msg-user-fg: var(--fg);
+  --msg-user-border: rgba(40, 32, 20, 0.1);
+  --msg-user-shadow: 0 1px 2px rgba(60, 50, 30, 0.06);
+  --msg-asst-bg: #ffffff;
+  --msg-asst-border: rgba(40, 32, 20, 0.1);
+  --msg-asst-shadow: 0 1px 2px rgba(60, 50, 30, 0.06);
+  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), 0 14px 36px rgba(80, 60, 30, 0.16);
+  --warn-border: rgba(185, 133, 28, 0.4);
+  --warn-bg: rgba(185, 133, 28, 0.07);
+  --scrollbar-thumb: rgba(40, 32, 20, 0.16);
+  --hover-tint: var(--panel-2);
+}
+
+/* SLATE — refined dark · teal accent (today's Cebab, polished) */
+[data-theme='slate'] {
+  --bg-0: #0c0d10;
+  --bg-1: #121419;
+  --bg-2: #121419;
+  --bg-3: #1a1d24;
+  --bg-4: #20232b;
+  --bg-5: #282c35;
+  --bg: #0c0d10;
+  --panel: #121419;
+  --panel-2: #1a1d24;
+  --raised: #20232b;
+  --canvas: #0c0d10;
+  --header-bg: rgba(18, 20, 25, 0.85);
+  --fg-0: #f4f5f7;
+  --fg-1: #c4c7cf;
+  --fg-2: #888d99;
+  --fg-3: #6b7180;
+  --fg: #f4f5f7;
+  --line-1: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.14);
+  --line-3: rgba(255, 255, 255, 0.2);
+  --border: rgba(255, 255, 255, 0.14);
+  --accent: #2fb6c4;
+  --accent-soft: #1f8e9b;
+  --accent-glow: rgba(47, 182, 196, 0.14);
+  --accent-ink: #8adfe7;
+  --accent-2: #1f8e9b;
+  --on-accent: #05181b;
+  --ok: #34d399;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #fbbf24;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #f87171;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #60a5fa;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #cc785c;
+  --teal: #2fb6c4;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.26);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.45);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: var(--font-sans);
+  --grad-brand: linear-gradient(135deg, #2fb6c4, #cc785c);
+  --grad-user: linear-gradient(135deg, #3b5db0, #2a4a94);
+  --grad-cta: var(--accent);
+  --msg-user-bg: rgba(47, 182, 196, 0.1);
+  --msg-user-fg: var(--fg);
+  --msg-user-border: rgba(47, 182, 196, 0.28);
+  --msg-user-shadow: none;
+  --msg-asst-bg: var(--panel);
+  --msg-asst-border: var(--line-1);
+  --msg-asst-shadow: none;
+  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
+  --warn-border: rgba(251, 191, 36, 0.35);
+  --warn-bg: rgba(251, 191, 36, 0.07);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --hover-tint: rgba(255, 255, 255, 0.05);
+}
+
+/* PHOSPHOR — terminal · monospace green */
+[data-theme='phosphor'] {
+  --bg-0: #04070a;
+  --bg-1: #070c10;
+  --bg-2: #070c10;
+  --bg-3: #0c151a;
+  --bg-4: #0f1c20;
+  --bg-5: #14262b;
+  --bg: #04070a;
+  --panel: #070c10;
+  --panel-2: #0c151a;
+  --raised: #0f1c20;
+  --canvas: #04070a;
+  --header-bg: rgba(4, 7, 10, 0.9);
+  --fg-0: #c9f5dd;
+  --fg-1: #9ad3b5;
+  --fg-2: #6cae8c;
+  --fg-3: #3f6a57;
+  --fg: #c9f5dd;
+  --line-1: rgba(72, 220, 150, 0.13);
+  --line-2: rgba(72, 220, 150, 0.26);
+  --line-3: rgba(72, 220, 150, 0.36);
+  --border: rgba(72, 220, 150, 0.26);
+  --accent: #3ddc84;
+  --accent-soft: #2cb56a;
+  --accent-glow: rgba(61, 220, 132, 0.12);
+  --accent-ink: #7af0aa;
+  --accent-2: #2cb56a;
+  --on-accent: #04140b;
+  --ok: #3ddc84;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #f5b341;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #ff6b5e;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #5cc8ff;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #ff9e7a;
+  --teal: #3ddc84;
+  --r-sm: 2px;
+  --r-md: 2px;
+  --r-lg: 3px;
+  --shadow-sm: 0 0 0 1px rgba(72, 220, 150, 0.08);
+  --shadow-md: 0 0 0 1px rgba(72, 220, 150, 0.1);
+  --shadow-lg: 0 0 0 1px rgba(72, 220, 150, 0.22), 0 20px 50px rgba(0, 0, 0, 0.6);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --font-sans: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: var(--font-sans);
+  --grad-brand: linear-gradient(135deg, #3ddc84, #2cb56a);
+  --grad-user: linear-gradient(135deg, #16442c, #0d2f1e);
+  --grad-cta: var(--accent);
+  --msg-user-bg: rgba(61, 220, 132, 0.05);
+  --msg-user-fg: var(--fg);
+  --msg-user-border: rgba(72, 220, 150, 0.18);
+  --msg-user-shadow: none;
+  --msg-asst-bg: var(--panel);
+  --msg-asst-border: rgba(72, 220, 150, 0.18);
+  --msg-asst-shadow: none;
+  --composer-focus-shadow: 0 0 0 3px var(--accent-glow), 0 0 0 1px rgba(72, 220, 150, 0.3);
+  --warn-border: rgba(245, 179, 65, 0.4);
+  --warn-bg: rgba(245, 179, 65, 0.06);
+  --scrollbar-thumb: rgba(72, 220, 150, 0.2);
+  --hover-tint: rgba(61, 220, 132, 0.06);
+}
+
+/* Mockup-named aliases + shared layout metrics. These resolve THROUGH the
+ * per-theme primitives above (var() is late-bound), so a single declaration
+ * re-themes with the active gamma. Kept out of the [data-theme] blocks so the
+ * parity test only guards the color contract. */
+:root {
+  --font-ui: var(--font-sans);
+  --radius: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --avatar-radius: var(--r-md);
+  --shadow: var(--shadow-md);
+  --agent-orch: var(--agent-0);
+  --agent-ux: var(--agent-1);
+  --agent-qa: var(--agent-2);
+  --agent-4: var(--agent-3);
+  --agent-orch-soft: var(--agent-0-soft);
+  --agent-ux-soft: var(--agent-1-soft);
+  --agent-qa-soft: var(--agent-2-soft);
+  --agent-4-soft: var(--agent-3-soft);
+  --msg-max-w: 640px;
+  --chat-gap: 20px;
+  --avatar-size: 30px;
+  --content-indent: 42px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -1595,6 +1896,62 @@ pre {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* Redesign Phase 1: Settings → Appearance color-gamma picker. Each card
+ * previews a gamma with three swatches (page / panel / accent) driven by
+ * inline styles from theme.ts THEME_META; the frame is token-styled so it
+ * re-themes with whichever gamma is currently active. */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  text-align: left;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  color: var(--fg-0);
+  transition:
+    border-color var(--dur-2) var(--ease),
+    background var(--dur-2) var(--ease);
+}
+.theme-card:hover {
+  border-color: var(--line-3);
+  background: var(--bg-4);
+}
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.theme-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.theme-swatch {
+  display: flex;
+  height: 26px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--line-1);
+}
+.theme-swatch .sw {
+  flex: 1;
+}
+.theme-card-name {
+  font-size: var(--t-md);
+  font-weight: 600;
+}
+.theme-card-desc {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  line-height: 1.35;
 }
 
 /* ---- Cluster E Phase 4 (H1): KeyboardShortcutsModal cheatsheet ----

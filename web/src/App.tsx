@@ -71,6 +71,7 @@ import { HELD_MESSAGES_CAP } from './store';
 import type { ActiveRunView } from './store';
 import { downloadSessionLog, isDownloadError } from './exports';
 import { readStored, writeStored } from './prefs';
+import { applyTheme, readStoredTheme, type Theme } from './theme';
 
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
@@ -511,6 +512,16 @@ function AppShell({
   useEffect(() => {
     writeStored('cebab.sidebarWidth', String(sidebarWidth));
   }, [sidebarWidth]);
+
+  // Redesign color gamma. Pure client display pref (see theme.ts) — never
+  // server/store state. Seeded from localStorage (the index.html boot script
+  // already set document[data-theme] before first paint); this effect keeps
+  // the attribute + storage in sync on runtime switches from the Settings
+  // picker. Default 'daylight'.
+  const [theme, setTheme] = useState<Theme>(() => readStoredTheme());
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
 
   // At ≤md the sidebar isn't user-resizable; unmount the resizer to
   // keep it out of the tab order and out of pointer-event reach. At
@@ -2340,6 +2351,8 @@ function AppShell({
           onSave={saveSettings}
           send={(m) => wsRef.current?.send(m)}
           subscribeServerMsg={subscribeServerMsg}
+          theme={theme}
+          onThemeChange={setTheme}
         />
       )}
       {shortcutsOpen && <KeyboardShortcutsModal onClose={() => setShortcutsOpen(false)} />}

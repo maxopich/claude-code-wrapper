@@ -6,10 +6,27 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;450;500;550;600;700&family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap"
       rel="stylesheet"
     />
     <title>cebab</title>
+    <script>
+      // No-FOUC theme boot: project the persisted color gamma onto the
+      // document root before first paint, so a light default doesn't flash
+      // the base (dark) tokens. Mirrors web/src/theme.ts (DEFAULT_THEME
+      // 'daylight', storage key 'cebab.theme'); React keeps it in sync after
+      // hydration. Kept dependency-free + try/guarded (private mode / no
+      // storage must not block boot).
+      (function () {
+        try {
+          var t = localStorage.getItem('cebab.theme');
+          var ok = ['aurora', 'daylight', 'slate', 'phosphor'].indexOf(t) !== -1;
+          document.documentElement.dataset.theme = ok ? t : 'daylight';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'daylight';
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
