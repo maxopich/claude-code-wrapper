@@ -80,7 +80,7 @@ export function ChatHeaderChip(props: {
         aria-label="See full authority for this project"
         title="Open the AuthorityPanel preflight inspector for this project"
       >
-        Authority…
+        Authority
       </button>
       {authorityOpen && (
         <AuthorityPreflightModal

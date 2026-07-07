@@ -507,6 +507,11 @@ pre {
 .app[data-insp-pinned='true'] {
   --insp-col: var(--insp-exp-w);
 }
+/* P6.1 review: single chat has no inspector — drop the right track so the
+ * workspace reclaims that width (nav rail + workspace only). */
+.app[data-inspector='off']:not([data-tier='narrow']) {
+  grid-template-columns: var(--nav-col) minmax(0, 1fr);
+}
 /* Narrow: one content column; both rails leave the grid → drawers (below). */
 .app[data-tier='narrow'] {
   grid-template-columns: minmax(0, 1fr);
@@ -903,14 +908,13 @@ pre {
   flex-shrink: 0;
 }
 
-.sidebar {
-  position: relative;
-  background: var(--bg-2);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
+/* P6.1 review fix (#1): the pre-redesign `.sidebar { position: relative;
+ * background; border-right; … }` rule used to live here. It came AFTER the
+ * Phase 2 `.sidebar, .inspector { position: absolute; top: 14px }` rule, so
+ * (equal specificity, later wins) it forced the nav back to a relative grid
+ * item — which its own top:14px then offset 14px DOWN, leaving the nav rail
+ * a padding-height below the workspace + inspector. Removed; the Phase 2 rule
+ * is the single source of truth for the nav card. */
 .sidebar-resizer {
   position: absolute;
   top: 0;
@@ -8841,26 +8845,31 @@ pre {
   align-items: center;
   gap: 6px;
 }
-/* P6.1 review fix (#5): render the authority trigger as a real button chip,
- * not an underlined text link. */
+/* P6.1 review fix (#5): the authority trigger is a real button chip that
+ * matches the ModelChip's typography (10px uppercase pill) — same size +
+ * weight as the model/trust tags beside it — tinted accent so it reads as the
+ * one clickable action in the header cluster. */
 .trust-chip-authority-link {
-  background: var(--bg-3);
-  border: 1px solid var(--line-2);
-  color: var(--accent-ink, var(--accent));
-  font-size: var(--t-xs);
+  font-family: var(--font-sans);
+  font-size: 10px;
   font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   text-decoration: none;
-  cursor: pointer;
-  padding: 2px 8px;
-  border-radius: var(--r-sm);
-  line-height: 1.5;
+  color: var(--accent);
+  background: var(--accent-glow);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  line-height: 1.6;
   white-space: nowrap;
+  cursor: pointer;
 }
 .trust-chip-authority-link:hover,
 .trust-chip-authority-link:focus-visible {
-  color: var(--accent);
+  color: var(--on-accent);
+  background: var(--accent);
   border-color: var(--accent);
-  background: var(--accent-glow);
   outline: none;
 }
 

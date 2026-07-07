@@ -48,7 +48,6 @@ import {
 } from './components/notifications';
 import { GateModalsProvider } from './components/authority/GateModalsContext';
 import { AuthorityProvider } from './components/authority/AuthorityContext';
-import { AuthorityPanel } from './components/authority/AuthorityPanel';
 import {
   BannerStack,
   SessionBanner,
@@ -1853,6 +1852,7 @@ function AppShell({
       data-insp-pinned={inspPinned}
       data-nav-open={navOpen}
       data-insp-open={inspOpen}
+      data-inspector={view === 'chat' ? 'off' : 'on'}
     >
       <aside className="sidebar" id="app-sidebar">
         <button
@@ -1958,14 +1958,17 @@ function AppShell({
       >
         ☰
       </button>
-      <button
-        className="drawer-toggle insp"
-        aria-label={inspOpen ? 'Close inspector' : 'Open inspector'}
-        aria-expanded={inspOpen}
-        onClick={() => setInspOpen((v) => !v)}
-      >
-        ⧉
-      </button>
+      {/* Inspector drawer toggle — only when the rail exists (multi-agent). */}
+      {view !== 'chat' && (
+        <button
+          className="drawer-toggle insp"
+          aria-label={inspOpen ? 'Close inspector' : 'Open inspector'}
+          aria-expanded={inspOpen}
+          onClick={() => setInspOpen((v) => !v)}
+        >
+          ⧉
+        </button>
+      )}
       <main className="main">
         {/* Cluster D Phase 6 (UI-D22): app-wide auth-expired banner.
          *  Mounted as the first child of <main> so it sits above
@@ -2268,41 +2271,14 @@ function AppShell({
           </>
         )}
       </main>
-      {/* Redesign Phase 2/3: right-hand inspector rail. Absolute overlay
-       *  sibling of <main>. The chat variant (below) hosts the relocated
-       *  session stats + AuthorityPanel; the multi/chained variants fill in
-       *  Phases 4–5. `undefined` (not a falsy `&&`) on the empty branch so the
-       *  Inspector's neutral placeholder shows through. */}
-      <Inspector view={view} pinned={inspPinned} onTogglePin={() => setInspPinned((v) => !v)}>
-        {view === 'chat' && session && !isSessionPending(session.id) && activeProject ? (
-          <div className="insp-chat">
-            <section className="insp-section">
-              <div className="insp-section-title">This session</div>
-              <div className="insp-stat">
-                <span className="insp-stat-k">Project</span>
-                <span className="insp-stat-v">{activeProject.name}</span>
-              </div>
-              <div className="insp-stat">
-                <span className="insp-stat-k">Model</span>
-                <ModelChip model={session.model} />
-              </div>
-              <div className="insp-stat">
-                <span className="insp-stat-k">Trust</span>
-                <ChatHeaderChip
-                  trusted={activeProject.trusted}
-                  mode={permissionMode}
-                  projectId={activeProject.id}
-                />
-              </div>
-              <div className="insp-stat">
-                <span className="insp-stat-k">Turns</span>
-                <TurnCounterChip messages={session.messages} />
-              </div>
-            </section>
-            <AuthorityPanel projectId={activeProject.id} mode="in-session" collapsible />
-          </div>
-        ) : undefined}
-      </Inspector>
+      {/* Redesign P6.1 (review): the inspector rail is MULTI-AGENT-ONLY. Single
+       *  chat has no right rail — its authority lives on the header's Authority
+       *  button (→ AuthorityPreflightModal), per operator feedback. For the
+       *  multi-agent / chained-chat views the rail hosts the session settings
+       *  MultiAgentTab portals into `#inspector-multi-slot`. */}
+      {view !== 'chat' && (
+        <Inspector view={view} pinned={inspPinned} onTogglePin={() => setInspPinned((v) => !v)} />
+      )}
       {/* Narrow-tier scrim — click closes whichever drawer is open. CSS keeps
        *  it non-interactive unless a drawer is open. */}
       <div
