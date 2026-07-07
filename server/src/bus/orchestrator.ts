@@ -338,6 +338,12 @@ type OrchestratorRouter = {
    *  the pending-retry slot, and emits `onPendingRetry`. Does NOT teardown
    *  — the session stays `running` waiting for Retry or Abandon. */
   onWorkerFailed: (agentName: string, prompt: string, err: unknown) => void;
+  /** Called by `deliver`'s .then when an agent's `deliverTurn` resolves. If a
+   *  pending-retry slot is currently owned by that agent, it is stale (the
+   *  agent just recovered) — clear it and emit `onPendingRetry(null)`. This is
+   *  the "success clears" half documented in migration 010, without which a
+   *  transient-error banner survives even after the agent delivers a `final`. */
+  onTurnSucceeded: (agentName: string) => void;
   /**
    * Cluster C Phase 4b: flip the in-memory mute set. Returns true iff the
    * set changed (re-mute / re-unmute are no-ops returning false — handler
@@ -974,6 +980,27 @@ export function createOrchestratorRouter(params: {
     }
   };
 
+  // "success clears" (migration 010): a resolved turn means the agent recovered,
+  // so a pending-retry slot it OWNS is stale. Symmetric with onWorkerFailed and
+  // uses the same `sink.onPendingRetry` channel so the clear reaches whichever
+  // client is currently attached. Fully guarded: a DB/callback hiccup here must
+  // never bubble into `deliver`'s .catch and be mis-reported as a turn failure.
+  const onTurnSucceeded = (agentName: string) => {
+    if (ended) return;
+    try {
+      const pending = getPendingRetry(sessionId);
+      if (!pending || pending.agentName !== agentName) return;
+      setPendingRetry(sessionId, null);
+      try {
+        sink.onPendingRetry?.(sessionId, null);
+      } catch (sinkErr) {
+        console.error('[orchestrator] turn-succeeded onPendingRetry-null threw', sinkErr);
+      }
+    } catch (err) {
+      console.error('[orchestrator] clear pending-retry on success failed', err);
+    }
+  };
+
   const setMute = (agentName: string, muted: boolean): boolean => {
     const was = mutedSet.has(agentName);
     if (muted === was) return false;
@@ -1017,6 +1044,7 @@ export function createOrchestratorRouter(params: {
     setLifecycle,
     getLifecycle,
     onWorkerFailed,
+    onTurnSucceeded,
     setMute,
     isMuted,
     kickAgent: (agentName) => setKick(agentName, true),
@@ -1489,6 +1517,13 @@ export function wireOrchestratorSession(p: {
     lastPrompt.set(agentName, deliveredPrompt);
     void runner
       .deliverTurn(agentName, prompt)
+      .then(() => {
+        // The turn resolved cleanly — clear any stale pending-retry slot this
+        // agent owned. `.then` runs only on resolution, so a rejection skips
+        // straight to `.catch`; `onTurnSucceeded` is self-guarded and never
+        // throws, so it can't leak into the failure path.
+        router.onTurnSucceeded(agentName);
+      })
       .catch((err) => {
         // Item #5: PausedForMutationError is a sentinel from the mutation
         // tap; it is NOT a worker failure. The pause state (DB + wire) is

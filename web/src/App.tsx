@@ -77,6 +77,19 @@ const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
 const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
 
 /**
+ * Aspect ratio (display width / height) at or above which we treat the monitor
+ * as widescreen and make both side rails permanently expanded (see
+ * `permanentPanels` in AppShell). Keyed on the physical display ratio, which is
+ * invariant to browser-chrome height and OS/Retina scaling — 16:9 (full-HD / 2K
+ * / 4K) ≈ 1.778 sits above this; a 16:10 MacBook ≈ 1.54–1.60 sits below. Tunable.
+ */
+const WIDE_DISPLAY_RATIO = 1.7;
+const isWideDisplay = (): boolean => {
+  if (typeof window === 'undefined' || !window.screen || window.screen.height <= 0) return false;
+  return window.screen.width / window.screen.height >= WIDE_DISPLAY_RATIO;
+};
+
+/**
  * Mint a client-side notification envelope id. Used for connect/disconnect
  * toasts that the client originates (no server roundtrip). Server-dispatched
  * envelopes carry their own UUID (BE-5 dedupe key); this is for the few
@@ -497,6 +510,11 @@ function AppShell({
   const [navOpen, setNavOpen] = useState(false);
   const [inspOpen, setInspOpen] = useState(false);
   const [tier, setTier] = useState<'wide' | 'medium' | 'narrow'>('wide');
+  // Widescreen (16:9-class) display → permanent side rails. Seeded from the
+  // display ratio so there's no collapsed→expanded flash on first paint; kept in
+  // sync by the resize effect below (fires when the window moves between
+  // differently-shaped monitors).
+  const [wideDisplay, setWideDisplay] = useState<boolean>(isWideDisplay);
   useEffect(() => {
     writeStored('cebab.navPinned', String(navPinned));
   }, [navPinned]);
@@ -532,6 +550,19 @@ function AppShell({
     });
     ro.observe(el);
     return () => ro.disconnect();
+  }, []);
+  // Track the display aspect ratio for permanent-panel mode. `resize` fires when
+  // the window is moved to a monitor of a different shape (e.g. MacBook → full-HD
+  // external), which is when `window.screen` flips widescreen/not.
+  useEffect(() => {
+    const update = () =>
+      setWideDisplay((prev) => {
+        const next = isWideDisplay();
+        return next === prev ? prev : next;
+      });
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
   }, []);
   // Drawers exist only at the narrow tier — force them closed on the way out so
   // one can't linger off-screen (and keep pointer-events off the scrim).
@@ -1843,16 +1874,25 @@ function AppShell({
   const inputDisabled = composerStructurallyDisabled || running;
   const view = state.multiAgent.view;
 
+  // On a widescreen display with enough width, force both rails permanently
+  // expanded by reusing the pinned state (widens the grid track + reveals labels
+  // via existing CSS). Display-derived only — never writes the persisted
+  // navPinned/inspPinned prefs, so a narrow window or the MacBook restores the
+  // user's collapsible behavior. The `tier === 'wide'` floor (≥1120px) keeps a
+  // narrow window on a 16:9 monitor collapsible/drawer-based as before.
+  const permanentPanels = wideDisplay && tier === 'wide';
+
   return (
     <div
       className="app"
       ref={appRef}
       data-tier={tier}
-      data-nav-pinned={navPinned}
-      data-insp-pinned={inspPinned}
+      data-nav-pinned={navPinned || permanentPanels}
+      data-insp-pinned={inspPinned || permanentPanels}
       data-nav-open={navOpen}
       data-insp-open={inspOpen}
       data-inspector={view === 'chat' ? 'off' : 'on'}
+      data-permanent-panels={permanentPanels}
     >
       <aside className="sidebar" id="app-sidebar">
         <button

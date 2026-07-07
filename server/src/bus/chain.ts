@@ -203,6 +203,12 @@ type ChainRouter = {
    *  emits `onPendingRetry`. Does NOT teardown — the session stays
    *  `running` waiting for the operator's Retry or Abandon click. */
   onWorkerFailed: (agentName: string, prompt: string, err: unknown) => void;
+  /** Called from the `deliver` .then handler when an agent's `deliverTurn`
+   *  resolves. Clears the pending-retry slot iff that agent owns it (a resolved
+   *  turn means it recovered) and emits `onPendingRetry(null)` — the "success
+   *  clears" half of migration 010, so a transient-error banner doesn't outlive
+   *  the recovery. */
+  onTurnSucceeded: (agentName: string) => void;
 };
 
 /**
@@ -618,7 +624,35 @@ export function createChainRouter(params: {
     }
   };
 
-  return { teardown, handleEvent, forwardCebabEvent, detach, rebind, onWorkerFailed };
+  // "success clears" (migration 010): a resolved turn means the agent recovered,
+  // so a pending-retry slot it OWNS is stale. Mirrors onWorkerFailed and reuses
+  // the same `sink.onPendingRetry` channel. Fully guarded so a DB/callback hiccup
+  // can never bubble into `deliver`'s .catch as a spurious turn failure.
+  const onTurnSucceeded = (agentName: string) => {
+    if (ended) return;
+    try {
+      const pending = getPendingRetry(sessionId);
+      if (!pending || pending.agentName !== agentName) return;
+      setPendingRetry(sessionId, null);
+      try {
+        sink.onPendingRetry?.(sessionId, null);
+      } catch (sinkErr) {
+        console.error('[chain] turn-succeeded onPendingRetry-null threw', sinkErr);
+      }
+    } catch (err) {
+      console.error('[chain] clear pending-retry on success failed', err);
+    }
+  };
+
+  return {
+    teardown,
+    handleEvent,
+    forwardCebabEvent,
+    detach,
+    rebind,
+    onWorkerFailed,
+    onTurnSucceeded,
+  };
 }
 
 function writeTranscript(paths: SessionPaths, iterationId: string, agent: string, msg: SDKMessage) {
@@ -978,6 +1012,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     lastPromptOut.set(agentName, deliveredPrompt);
     void runner
       .deliverTurn(agentName, prompt)
+      .then(() => {
+        // Turn resolved cleanly — clear any stale pending-retry slot this agent
+        // owned. `.then` runs only on resolution (a rejection skips to `.catch`);
+        // `onTurnSucceeded` is self-guarded and never throws.
+        router.onTurnSucceeded(agentName);
+      })
       .catch((err) => {
         if (isPausedForMutation(err)) return; // controlled pause, not a failure
         if (isTurnStalled(err)) {
