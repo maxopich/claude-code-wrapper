@@ -509,3 +509,64 @@ describe('createOrchestratorRouter — onWorkerFailed (Item #4)', () => {
     expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');
   });
 });
+
+// `onTurnSucceeded` is the router-level entry the orchestrator deliver() .then
+// fires when a turn resolves cleanly. It implements the "success clears" half of
+// migration 010: a resolved turn means the agent recovered, so a pending-retry
+// slot it OWNS is stale and must be cleared (DB + `onPendingRetry(null)` delta).
+// Without it a transient-error banner outlives the recovery — the reported bug.
+describe('createOrchestratorRouter — onTurnSucceeded ("success clears")', () => {
+  function buildRouter() {
+    const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
+    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    createMultiAgentSession(sessionId, 'orchestrator', '001', paths.folder, 'persistent');
+    const onPendingRetry = vi.fn();
+    const router = createOrchestratorRouter({
+      sessionId,
+      iterationId: '001',
+      workerNames: ['reviewer', 'editor'],
+      paths,
+      lifecycle: 'persistent',
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      deliver: vi.fn(),
+      hopBudget: 1000,
+      onPendingRetry,
+    });
+    return { router, sessionId, onPendingRetry };
+  }
+
+  test('clears the slot + emits onPendingRetry(null) when the owning agent succeeds', () => {
+    const { router, sessionId, onPendingRetry } = buildRouter();
+    // Fail the orchestrator's own turn (the exact bug: a transient error parks
+    // the slot under the orchestrator), then resolve a later orchestrator turn.
+    router.onWorkerFailed(ORCHESTRATOR_AGENT_NAME, 'check MCPs', new Error('401 Portkey'));
+    expect(getMultiAgentSession(sessionId)!.pending_retry_agent).toBe(ORCHESTRATOR_AGENT_NAME);
+
+    router.onTurnSucceeded(ORCHESTRATOR_AGENT_NAME);
+
+    const row = getMultiAgentSession(sessionId)!;
+    expect(row.pending_retry_agent).toBeNull();
+    expect(row.pending_retry_prompt).toBeNull();
+    // Last onPendingRetry call is the authoritative null clear.
+    expect(onPendingRetry).toHaveBeenLastCalledWith(sessionId, null);
+  });
+
+  test('does NOT clear a slot owned by a different agent', () => {
+    const { router, sessionId, onPendingRetry } = buildRouter();
+    router.onWorkerFailed('reviewer', 'review this', new Error('boom'));
+    onPendingRetry.mockClear();
+
+    router.onTurnSucceeded('editor'); // a different agent's turn resolved
+
+    expect(getMultiAgentSession(sessionId)!.pending_retry_agent).toBe('reviewer');
+    expect(onPendingRetry).not.toHaveBeenCalled();
+  });
+
+  test('is a no-op when no pending-retry slot is set', () => {
+    const { router, sessionId, onPendingRetry } = buildRouter();
+    router.onTurnSucceeded('reviewer');
+    expect(getMultiAgentSession(sessionId)!.pending_retry_agent).toBeNull();
+    expect(onPendingRetry).not.toHaveBeenCalled();
+  });
+});
