@@ -660,6 +660,11 @@ pre {
   opacity: 0;
   pointer-events: none;
 }
+/* Permanent-panel (widescreen) mode: rails can't collapse, so the pin toggle is
+ * meaningless — hide it. */
+.app[data-permanent-panels='true'] .pin-btn {
+  display: none;
+}
 
 /* ── Narrow-tier drawer toggles (fixed; only shown at narrow) ────────────── */
 .drawer-toggle {
@@ -858,22 +863,13 @@ pre {
   }
 }
 
-/* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
- * 2K / 4K monitors; the chat reading column (capped at 90ch by
- * `.chat` padding) drifts to the right edge otherwise. */
-@media (min-width: 1600px) {
+/* Ultra-wide cap. The app fills the viewport up to 4K, so full-HD / 2K have no
+ * side gutters; only beyond 4K does it stop growing and center, to keep the
+ * center panel from stretching edge-to-edge on an ultrawide / 5K span. The
+ * single-chat reading column stays capped at 90ch by `.chat` padding. */
+@media (min-width: 3840px) {
   .app {
-    max-width: 1600px;
-    margin-inline: auto;
-  }
-}
-
-/* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
- * 2K / 4K monitors; the chat reading column (capped at 90ch by
- * `.chat` padding) drifts to the right edge otherwise. */
-@media (min-width: 1600px) {
-  .app {
-    max-width: 1600px;
+    max-width: 3840px;
     margin-inline: auto;
   }
 }
