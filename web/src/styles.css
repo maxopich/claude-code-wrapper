@@ -733,6 +733,53 @@ pre {
   pointer-events: none;
 }
 
+/* Inspector chat variant (Phase 3): compact session stats + relocated
+ * AuthorityPanel. */
+.insp-chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.insp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line-1);
+}
+.insp-section-title {
+  font-size: var(--t-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+}
+.insp-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 22px;
+}
+.insp-stat-k {
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  flex-shrink: 0;
+}
+.insp-stat-v {
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  font-weight: 500;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The relocated AuthorityPanel sits in a 320px rail — let it fill the width. */
+.insp-chat .authority-panel {
+  width: 100%;
+}
+
 /* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
  * 2K / 4K monitors; the chat reading column (capped at 90ch by
  * `.chat` padding) drifts to the right edge otherwise. */

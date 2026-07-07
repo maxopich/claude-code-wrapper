@@ -2143,14 +2143,10 @@ function AppShell({
                     />
                   </div>
                 )}
-                {/* Cluster B Phase 6e (UI-B7): in-session authority disclosure.
-                 *  Sections inside are collapsed by default — the panel
-                 *  header itself is a thin row with Refresh, so the
-                 *  operator's chat scrollback isn't pushed down meaningfully
-                 *  on first paint. */}
-                {session && !isSessionPending(session.id) && activeProject && (
-                  <AuthorityPanel projectId={activeProject.id} mode="in-session" collapsible />
-                )}
+                {/* Redesign Phase 3: the in-session authority disclosure moved
+                 *  out of the chat column into the inspector's chat variant
+                 *  (rendered below, near <Inspector>). Keeping it out of the
+                 *  scrollback is the whole point of the right rail. */}
                 {/* Cluster D Phase 4c (B2): rate-limit banner. Mounted via
                  *  <BannerStack> so when later phases add the auth-expired
                  *  + swept-session banners they slot into the same priority-
@@ -2272,10 +2268,41 @@ function AppShell({
           </>
         )}
       </main>
-      {/* Redesign Phase 2: right-hand inspector rail. Absolute overlay sibling
-       *  of <main>; the frame ships now, the three variants populate in
-       *  Phases 3–5. */}
-      <Inspector view={view} pinned={inspPinned} onTogglePin={() => setInspPinned((v) => !v)} />
+      {/* Redesign Phase 2/3: right-hand inspector rail. Absolute overlay
+       *  sibling of <main>. The chat variant (below) hosts the relocated
+       *  session stats + AuthorityPanel; the multi/chained variants fill in
+       *  Phases 4–5. `undefined` (not a falsy `&&`) on the empty branch so the
+       *  Inspector's neutral placeholder shows through. */}
+      <Inspector view={view} pinned={inspPinned} onTogglePin={() => setInspPinned((v) => !v)}>
+        {view === 'chat' && session && !isSessionPending(session.id) && activeProject ? (
+          <div className="insp-chat">
+            <section className="insp-section">
+              <div className="insp-section-title">This session</div>
+              <div className="insp-stat">
+                <span className="insp-stat-k">Project</span>
+                <span className="insp-stat-v">{activeProject.name}</span>
+              </div>
+              <div className="insp-stat">
+                <span className="insp-stat-k">Model</span>
+                <ModelChip model={session.model} />
+              </div>
+              <div className="insp-stat">
+                <span className="insp-stat-k">Trust</span>
+                <ChatHeaderChip
+                  trusted={activeProject.trusted}
+                  mode={permissionMode}
+                  projectId={activeProject.id}
+                />
+              </div>
+              <div className="insp-stat">
+                <span className="insp-stat-k">Turns</span>
+                <TurnCounterChip messages={session.messages} />
+              </div>
+            </section>
+            <AuthorityPanel projectId={activeProject.id} mode="in-session" collapsible />
+          </div>
+        ) : undefined}
+      </Inspector>
       {/* Narrow-tier scrim — click closes whichever drawer is open. CSS keeps
        *  it non-interactive unless a drawer is open. */}
       <div

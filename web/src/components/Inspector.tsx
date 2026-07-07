@@ -1,8 +1,9 @@
+import type { ReactNode } from 'react';
 import { Icon, type IconName } from './Icon';
 import type { MultiAgentState } from '../store';
 
 /**
- * Right-hand inspector rail (redesign Phase 2 shell).
+ * Right-hand inspector rail (redesign Phase 2 shell; variants populate P3–5).
  *
  * Mirrors the left nav-rail's mechanics: an absolute overlay card that
  * hover-expands, pins (grid reflow), and becomes an off-canvas drawer at the
@@ -11,9 +12,10 @@ import type { MultiAgentState } from '../store';
  * rail animates; the glyph stays visible at rail width, the title/body fade in
  * on expand.
  *
- * Phase 2 renders only the frame + a per-view heading. The three real variants
- * (chat = active-run stats/authority/activity, multi = session settings,
- * artifacts = workspace diff) are populated in Phases 3–5.
+ * The frame is generic: it renders the per-view header (glyph + title) and
+ * hosts whatever variant body App passes as `children` — App owns the content
+ * because the real panels (AuthorityPanel, session settings, artifacts diff)
+ * need its state/context. With no children it shows a neutral placeholder.
  */
 const VIEW_META: Record<MultiAgentState['view'], { glyph: IconName; title: string }> = {
   chat: { glyph: 'chat', title: 'Run' },
@@ -25,6 +27,7 @@ export function Inspector(props: {
   view: MultiAgentState['view'];
   pinned: boolean;
   onTogglePin: () => void;
+  children?: ReactNode;
 }) {
   const meta = VIEW_META[props.view];
   return (
@@ -46,10 +49,11 @@ export function Inspector(props: {
           <span className="insp-title">{meta.title}</span>
         </div>
         <div className="insp-body">
-          <p className="insp-empty">
-            Run stats, session settings, and workspace changes move here in the next steps of the
-            redesign.
-          </p>
+          {props.children ?? (
+            <p className="insp-empty">
+              Session settings and workspace changes surface here as this view fills in.
+            </p>
+          )}
         </div>
       </div>
     </aside>
