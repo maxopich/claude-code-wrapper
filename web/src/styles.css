@@ -754,26 +754,30 @@ pre {
   letter-spacing: 0.04em;
   color: var(--fg-3);
 }
+/* P6.1 review fix (#4): stack label over value so wide chips (ModelChip, the
+ * trust chip + Authority button) get the full rail width instead of colliding
+ * with a right-aligned single-line value. */
 .insp-stat {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 22px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
 }
 .insp-stat-k {
-  font-size: var(--t-sm);
-  color: var(--fg-2);
-  flex-shrink: 0;
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
 }
 .insp-stat-v {
   font-size: var(--t-sm);
   color: var(--fg-0);
   font-weight: 500;
-  text-align: right;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.insp-stat .trust-chip-group {
+  flex-wrap: wrap;
 }
 /* The relocated AuthorityPanel sits in a 320px rail — let it fill the width. */
 .insp-chat .authority-panel {
@@ -794,12 +798,32 @@ pre {
   color: var(--fg-3);
   line-height: 1.55;
 }
-/* Redesign P6: keep the relocated panels contained in the 320px rail — wide
- * content (artifacts table, long paths, code) scrolls inside the body instead
- * of forcing the rail wider. Snug per-row spacing is a review-tweak target. */
-.insp-body .multi-agent-settings,
+/* Redesign P6 + P6.1 review fix (#1): fit the relocated SessionSettingsPanel to
+ * the 320px rail. The panel's `.settings-grid` is `140px 1fr` — in the rail the
+ * value column collapsed and long participant slugs broke ONE CHAR PER LINE.
+ * Stack the grid (label over full-width value), strip the nested card, wrap
+ * participant rows, and let wide content scroll rather than widen the rail. */
+.insp-body .multi-agent-settings {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
 .insp-body .multi-agent-section {
   margin: 0;
+}
+.insp-body .settings-grid {
+  grid-template-columns: 1fr;
+  row-gap: 4px;
+}
+.insp-body .settings-grid dt {
+  padding-top: 10px;
+}
+.insp-body .settings-grid dd {
+  word-break: break-word;
+}
+.insp-body .settings-participant {
+  flex-wrap: wrap;
 }
 .insp-body pre,
 .insp-body table {
@@ -929,7 +953,10 @@ pre {
   align-items: center;
   gap: 8px;
   height: 52px;
-  padding: 0 var(--s-4);
+  /* P6.1 review fix (#3): reserve room on the right for the absolute pin
+   * button (top:10 right:10, 24px) so the notification bell + its badge no
+   * longer collide with / sit under it when the rail is expanded. */
+  padding: 0 40px 0 var(--s-4);
   border-bottom: 1px solid var(--line-1);
 }
 .sidebar h1 {
@@ -2448,7 +2475,12 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: var(--s-2);
-  margin: var(--s-2) var(--s-3) 0;
+  /* P6.1 review fix (#2): sit the tabs in a 52px bar flush to the card top
+   * (no top margin) so the workspace's first row lines up with the 52px
+   * nav-rail and inspector headers — the three panels now read level. */
+  min-height: 52px;
+  padding: var(--s-1) var(--s-3);
+  border-bottom: 1px solid var(--line-1);
   flex-wrap: wrap;
 }
 .main-top-bar-right {
@@ -8809,19 +8841,26 @@ pre {
   align-items: center;
   gap: 6px;
 }
+/* P6.1 review fix (#5): render the authority trigger as a real button chip,
+ * not an underlined text link. */
 .trust-chip-authority-link {
-  background: transparent;
-  border: none;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
   color: var(--accent-ink, var(--accent));
   font-size: var(--t-xs);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  font-weight: 500;
+  text-decoration: none;
   cursor: pointer;
-  padding: 0;
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  line-height: 1.5;
+  white-space: nowrap;
 }
 .trust-chip-authority-link:hover,
 .trust-chip-authority-link:focus-visible {
   color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-glow);
   outline: none;
 }
 
