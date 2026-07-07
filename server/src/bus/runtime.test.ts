@@ -183,8 +183,8 @@ describe('renderRosterPrompt', () => {
 
   test('embeds the consultant-mode guardrail and the relay obligation', () => {
     // Bus workers run headless with bypassPermissions (no approval card),
-    // so the orchestrator must (a) act as a consultant itself and (b) carry
-    // the no-unsolicited-changes constraint into every task it routes.
+    // so the orchestrator must carry the no-unsolicited-changes constraint into
+    // every task it routes.
     const text = renderRosterPrompt({
       workers: [{ agentName: 'reviewer', projectName: 'Reviewer' }],
       hopBudget: 8,
@@ -192,6 +192,23 @@ describe('renderRosterPrompt', () => {
     expect(text).toContain('Consultant mode');
     expect(text).toMatch(/MUST carry this constraint/);
     expect(text).toMatch(/do NOT modify, create, or delete files in any other directory/);
+  });
+
+  test('hard-locks the orchestrator to delegation-only with no escape hatch', () => {
+    // The prompt must MATCH the structural enforcement: the orchestrator has
+    // only bus_send + AskUserQuestion and must delegate everything, even an
+    // explicit change request. The prior "unless the user explicitly directs a
+    // change, every participant — including you — acts as a consultant" escape
+    // hatch is exactly what let a run start editing files itself; it must be gone.
+    const text = renderRosterPrompt({
+      workers: [{ agentName: 'reviewer', projectName: 'Reviewer' }],
+      hopBudget: 8,
+    });
+    expect(text).toContain('pure router');
+    expect(text).toContain('delegation only');
+    expect(text).toMatch(/even when the user explicitly asks for a change/);
+    // The removed escape-hatch phrasing.
+    expect(text).not.toContain('including you');
   });
 });
 

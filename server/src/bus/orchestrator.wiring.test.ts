@@ -23,9 +23,12 @@ import {
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
+import { verifyChain } from '../notifications/safety_audit.js';
 import type { BusEvent } from './runner.js';
 import type { Runner } from '../runner/index.js';
+import type { RunOptions } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { NotificationEnvelope } from '@cebab/shared/protocol';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -430,6 +433,106 @@ describe('wireOrchestratorSession — agent_activity liveness wiring', () => {
       .map((c) => c[1] as { agentName: string; phase: string; currentTool?: string })
       .find((s) => s.phase === 'working');
     expect(working).toMatchObject({ agentName: 'coder', currentTool: 'Bash' });
+
+    unregisterLiveSession(SESSION_ID);
+  });
+});
+
+describe('wireOrchestratorSession — delegation-only guardrail', () => {
+  type Gate = (
+    n: string,
+    i: unknown,
+    o: unknown,
+  ) => Promise<{ behavior: 'allow' | 'deny'; message?: string }>;
+
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  function worker(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  function guardrailRows() {
+    return getDb()
+      .prepare(
+        `SELECT kind, reason_code, agent_id, session_id FROM safety_audit
+         WHERE kind = 'guardrail.orchestrator_tool_block' ORDER BY ts ASC, id ASC`,
+      )
+      .all() as Array<{
+      kind: string;
+      reason_code: string;
+      agent_id: string | null;
+      session_id: string;
+    }>;
+  }
+
+  test('[security] a blocked orchestrator tool attempt denies + audits + notifies', async () => {
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+
+    const captured: Array<{ cwd: string; canUseTool?: Gate }> = [];
+    const notifications: NotificationEnvelope[] = [];
+
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers: [worker('coder')],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      sendNotification: (env) => notifications.push(env),
+      runnerFactory: (opts: RunOptions) => {
+        captured.push({ cwd: opts.cwd, canUseTool: opts.canUseTool as unknown as Gate });
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      },
+    });
+
+    deliver(ORCHESTRATOR_AGENT_NAME, 'do the work yourself');
+    await flush();
+
+    // The orchestrator turn ran under the interactive posture, so it has a
+    // canUseTool gate — and its cwd is the empty Cebab orchestrator workspace.
+    const orchTurn = captured.find((c) => c.cwd === paths.orchestratorWorkspace);
+    expect(orchTurn?.canUseTool).toBeTypeOf('function');
+
+    // Simulate the model reaching for a file tool instead of delegating.
+    const res = await orchTurn!.canUseTool!(
+      'Edit',
+      {},
+      {
+        toolUseID: 'e1',
+        signal: new AbortController().signal,
+      },
+    );
+    expect(res.behavior).toBe('deny');
+    expect(res.message).toContain('bus_send');
+
+    // BE-1: the hash-chained audit row is written (before the WS notification),
+    // and the chain still verifies after the append.
+    const rows = guardrailRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: 'guardrail.orchestrator_tool_block',
+      reason_code: 'orchestrator_non_delegation',
+      agent_id: ORCHESTRATOR_AGENT_NAME,
+      session_id: SESSION_ID,
+    });
+    expect(verifyChain()).toMatchObject({ ok: true });
+
+    // The operator gets a safety notification for the blocked attempt.
+    expect(
+      notifications.some(
+        (n) => n.class === 'safety' && n.reasonCode === 'orchestrator_non_delegation',
+      ),
+    ).toBe(true);
 
     unregisterLiveSession(SESSION_ID);
   });

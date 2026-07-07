@@ -21,6 +21,13 @@ export type RunOptions = {
   settingSources?: SettingSource[];
   /** In-process MCP servers (e.g. the multi-agent `bus_send` tool). */
   mcpServers?: Options['mcpServers'];
+  /**
+   * Tool names removed from the model's context entirely (SDK `disallowedTools`
+   * — the model cannot call them even if it would otherwise be allowed). Used to
+   * hard-lock the bus orchestrator to delegation-only (no file/shell/analysis
+   * tools). Works in any permission mode.
+   */
+  disallowedTools?: string[];
   /** Required by the SDK when permissionMode is 'bypassPermissions'. */
   allowDangerouslySkipPermissions?: boolean;
   /** External cancellation. */
@@ -107,6 +114,8 @@ export function runClaude(opts: RunOptions): Query {
   if (opts.resume) options.resume = opts.resume;
   if (opts.maxTurns !== undefined) options.maxTurns = opts.maxTurns;
   if (opts.mcpServers) options.mcpServers = opts.mcpServers;
+  if (opts.disallowedTools && opts.disallowedTools.length > 0)
+    options.disallowedTools = opts.disallowedTools;
   if (opts.allowDangerouslySkipPermissions) options.allowDangerouslySkipPermissions = true;
 
   return query({ prompt: opts.prompt, options });
