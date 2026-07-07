@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { SettingsView } from '../store';
 import { useModalSurface } from '../useModalSurface';
 import { useStorageStats } from '../useStorageStats';
+import { THEME_META, type Theme } from '../theme';
 import type { ClientMsg, ServerMsg } from '@cebab/shared';
 
 export type SettingsSavePayload = {
@@ -39,6 +40,11 @@ export function SettingsModal(props: {
    *  SessionSearchModal wiring in App.tsx. */
   send: (msg: ClientMsg) => void;
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
+  /** Redesign color gamma. A pure client display pref (see theme.ts) —
+   *  deliberately OUTSIDE the server `onSave` payload; picking a card applies
+   *  it instantly via `onThemeChange` (App owns the state + persistence). */
+  theme: Theme;
+  onThemeChange: (theme: Theme) => void;
 }) {
   // P0-C part 2 (retention visibility): fetch storage stats on open via the
   // WS side-channel; rendered read-only in the "Storage" section below.
@@ -205,6 +211,37 @@ export function SettingsModal(props: {
             env. Per-turn override available in the chat header. Takes effect on the next send.
           </p>
           {!maxTurnsValid && <p className="hint warn">Max turns must be a positive integer.</p>}
+        </section>
+        <section data-testid="appearance-section">
+          {/* Redesign Phase 1: color-gamma picker. Immediate-apply — clicking
+           *  a card calls onThemeChange (App applies + persists to
+           *  localStorage); it is NOT part of the Save payload, so it takes
+           *  effect without a round-trip and without a pending "unsaved"
+           *  state. */}
+          <div className="label">Appearance</div>
+          <div className="theme-grid" role="radiogroup" aria-label="Color theme">
+            {THEME_META.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="radio"
+                aria-checked={props.theme === t.id}
+                className={`theme-card${props.theme === t.id ? ' active' : ''}`}
+                onClick={() => props.onThemeChange(t.id)}
+                title={t.description}
+                data-testid={`theme-card-${t.id}`}
+              >
+                <span className="theme-swatch" aria-hidden="true">
+                  <span className="sw" style={{ background: t.swatch.bg }} />
+                  <span className="sw" style={{ background: t.swatch.panel }} />
+                  <span className="sw" style={{ background: t.swatch.accent }} />
+                </span>
+                <span className="theme-card-name">{t.label}</span>
+                <span className="theme-card-desc">{t.description}</span>
+              </button>
+            ))}
+          </div>
+          <p className="hint">Changes the color palette instantly. Saved to this browser only.</p>
         </section>
         <section data-testid="storage-section">
           <div className="label">Storage</div>

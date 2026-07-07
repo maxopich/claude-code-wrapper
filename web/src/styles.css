@@ -141,6 +141,307 @@
   --border: rgba(255, 255, 255, 0.1);
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * REDESIGN THEME GAMMAS (mockup→prod migration, Phase 1).
+ * Four color gammas over ONE layout. Selected at runtime via
+ * `document.documentElement[data-theme]` (default 'daylight'); persisted to
+ * localStorage 'cebab.theme'; picked from Settings → Appearance.
+ * Each block RE-POINTS prod's existing token names (so the ~2,570 var() refs
+ * need no rewrite) and ADDS the tokens the redesign needs (--panel/-2/--raised,
+ * --font-reading, msg-treatment, --grad-*, …). Blocks are FLAT and un-nested —
+ * templatePreview/cssGate.test.ts regex-scans this file assuming flat rules,
+ * and styleTokens.test.ts asserts all four fill the identical contract.
+ * Source of truth for values: mockups/redesign/css/tokens.css.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/* AURORA — airy product · azure accent */
+[data-theme='aurora'] {
+  --bg-0: #eef1f6;
+  --bg-1: #ffffff;
+  --bg-2: #ffffff;
+  --bg-3: #f1f3f8;
+  --bg-4: #e6eaf2;
+  --bg-5: #dde3ee;
+  --bg: #eef1f6;
+  --panel: #ffffff;
+  --panel-2: #f1f3f8;
+  --raised: #ffffff;
+  --canvas: radial-gradient(1100px 500px at 12% -8%, rgba(47, 111, 237, 0.07), transparent 60%), #eef1f6;
+  --header-bg: rgba(255, 255, 255, 0.82);
+  --fg-0: #191b24;
+  --fg-1: #33384a;
+  --fg-2: #5a5f70;
+  --fg-3: #9296a6;
+  --fg: #191b24;
+  --line-1: rgba(20, 24, 50, 0.08);
+  --line-2: rgba(20, 24, 50, 0.14);
+  --line-3: rgba(20, 24, 50, 0.2);
+  --border: rgba(20, 24, 50, 0.14);
+  --accent: #2f6fed;
+  --accent-soft: #2456c8;
+  --accent-glow: rgba(47, 111, 237, 0.1);
+  --accent-ink: #2456c8;
+  --accent-2: #2456c8;
+  --on-accent: #ffffff;
+  --ok: #16a36a;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #d3920f;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #e0584a;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #2f6fed;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #cc785c;
+  --teal: #22a7c4;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 18px;
+  --shadow-sm: 0 1px 3px rgba(30, 40, 90, 0.06);
+  --shadow-md: 0 6px 22px rgba(30, 40, 90, 0.07);
+  --shadow-lg: 0 24px 60px rgba(30, 40, 90, 0.16);
+  --ease: cubic-bezier(0.34, 1.4, 0.5, 1);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: var(--font-sans);
+  --grad-brand: linear-gradient(135deg, var(--accent), var(--teal));
+  --grad-user: linear-gradient(135deg, var(--accent), #3b82f6);
+  --grad-cta: linear-gradient(135deg, var(--accent), var(--teal));
+  --msg-user-bg: var(--grad-user);
+  --msg-user-fg: #ffffff;
+  --msg-user-border: transparent;
+  --msg-user-shadow: 0 8px 20px rgba(47, 111, 237, 0.22);
+  --msg-asst-bg: var(--raised);
+  --msg-asst-border: var(--line-1);
+  --msg-asst-shadow: var(--shadow-md);
+  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
+  --warn-border: rgba(211, 146, 15, 0.3);
+  --warn-bg: linear-gradient(180deg, rgba(211, 146, 15, 0.08), rgba(211, 146, 15, 0.03));
+  --scrollbar-thumb: rgba(20, 24, 50, 0.16);
+  --hover-tint: rgba(20, 24, 50, 0.06);
+}
+
+/* DAYLIGHT — warm light · coral accent (default) */
+[data-theme='daylight'] {
+  --bg-0: #f3f1ea;
+  --bg-1: #fbfaf5;
+  --bg-2: #fbfaf5;
+  --bg-3: #ece8dd;
+  --bg-4: #e7e2d5;
+  --bg-5: #ddd7c6;
+  --bg: #f3f1ea;
+  --panel: #fbfaf5;
+  --panel-2: #ece8dd;
+  --raised: #ffffff;
+  --canvas: #f3f1ea;
+  --header-bg: rgba(251, 250, 245, 0.82);
+  --fg-0: #2a2620;
+  --fg-1: #443f36;
+  --fg-2: #6f685b;
+  --fg-3: #9a9183;
+  --fg: #2a2620;
+  --line-1: rgba(40, 32, 20, 0.1);
+  --line-2: rgba(40, 32, 20, 0.16);
+  --line-3: rgba(40, 32, 20, 0.22);
+  --border: rgba(40, 32, 20, 0.16);
+  --accent: #bf5e3a;
+  --accent-soft: #a44d2c;
+  --accent-glow: rgba(191, 94, 58, 0.12);
+  --accent-ink: #a44d2c;
+  --accent-2: #a44d2c;
+  --on-accent: #ffffff;
+  --ok: #2f9e5f;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #b9851c;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #c0402a;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #3a6db0;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #cc785c;
+  --teal: #22a7c4;
+  --r-sm: 5px;
+  --r-md: 8px;
+  --r-lg: 14px;
+  --shadow-sm: 0 1px 2px rgba(80, 60, 30, 0.06);
+  --shadow-md: 0 2px 12px rgba(80, 60, 30, 0.07);
+  --shadow-lg: 0 18px 50px rgba(80, 60, 30, 0.18);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: 'Newsreader', Georgia, serif;
+  --grad-brand: linear-gradient(135deg, var(--coral), #d99412);
+  --grad-user: linear-gradient(135deg, var(--info), #5a87c9);
+  --grad-cta: var(--accent);
+  --msg-user-bg: #ece8dd;
+  --msg-user-fg: var(--fg);
+  --msg-user-border: rgba(40, 32, 20, 0.1);
+  --msg-user-shadow: 0 1px 2px rgba(60, 50, 30, 0.06);
+  --msg-asst-bg: #ffffff;
+  --msg-asst-border: rgba(40, 32, 20, 0.1);
+  --msg-asst-shadow: 0 1px 2px rgba(60, 50, 30, 0.06);
+  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), 0 14px 36px rgba(80, 60, 30, 0.16);
+  --warn-border: rgba(185, 133, 28, 0.4);
+  --warn-bg: rgba(185, 133, 28, 0.07);
+  --scrollbar-thumb: rgba(40, 32, 20, 0.16);
+  --hover-tint: var(--panel-2);
+}
+
+/* SLATE — refined dark · teal accent (today's Cebab, polished) */
+[data-theme='slate'] {
+  --bg-0: #0c0d10;
+  --bg-1: #121419;
+  --bg-2: #121419;
+  --bg-3: #1a1d24;
+  --bg-4: #20232b;
+  --bg-5: #282c35;
+  --bg: #0c0d10;
+  --panel: #121419;
+  --panel-2: #1a1d24;
+  --raised: #20232b;
+  --canvas: #0c0d10;
+  --header-bg: rgba(18, 20, 25, 0.85);
+  --fg-0: #f4f5f7;
+  --fg-1: #c4c7cf;
+  --fg-2: #888d99;
+  --fg-3: #6b7180;
+  --fg: #f4f5f7;
+  --line-1: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.14);
+  --line-3: rgba(255, 255, 255, 0.2);
+  --border: rgba(255, 255, 255, 0.14);
+  --accent: #2fb6c4;
+  --accent-soft: #1f8e9b;
+  --accent-glow: rgba(47, 182, 196, 0.14);
+  --accent-ink: #8adfe7;
+  --accent-2: #1f8e9b;
+  --on-accent: #05181b;
+  --ok: #34d399;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #fbbf24;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #f87171;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #60a5fa;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #cc785c;
+  --teal: #2fb6c4;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.26);
+  --shadow-lg: 0 24px 60px rgba(0, 0, 0, 0.45);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: var(--font-sans);
+  --grad-brand: linear-gradient(135deg, #2fb6c4, #cc785c);
+  --grad-user: linear-gradient(135deg, #3b5db0, #2a4a94);
+  --grad-cta: var(--accent);
+  --msg-user-bg: rgba(47, 182, 196, 0.1);
+  --msg-user-fg: var(--fg);
+  --msg-user-border: rgba(47, 182, 196, 0.28);
+  --msg-user-shadow: none;
+  --msg-asst-bg: var(--panel);
+  --msg-asst-border: var(--line-1);
+  --msg-asst-shadow: none;
+  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
+  --warn-border: rgba(251, 191, 36, 0.35);
+  --warn-bg: rgba(251, 191, 36, 0.07);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
+  --hover-tint: rgba(255, 255, 255, 0.05);
+}
+
+/* PHOSPHOR — terminal · monospace green */
+[data-theme='phosphor'] {
+  --bg-0: #04070a;
+  --bg-1: #070c10;
+  --bg-2: #070c10;
+  --bg-3: #0c151a;
+  --bg-4: #0f1c20;
+  --bg-5: #14262b;
+  --bg: #04070a;
+  --panel: #070c10;
+  --panel-2: #0c151a;
+  --raised: #0f1c20;
+  --canvas: #04070a;
+  --header-bg: rgba(4, 7, 10, 0.9);
+  --fg-0: #c9f5dd;
+  --fg-1: #9ad3b5;
+  --fg-2: #6cae8c;
+  --fg-3: #3f6a57;
+  --fg: #c9f5dd;
+  --line-1: rgba(72, 220, 150, 0.13);
+  --line-2: rgba(72, 220, 150, 0.26);
+  --line-3: rgba(72, 220, 150, 0.36);
+  --border: rgba(72, 220, 150, 0.26);
+  --accent: #3ddc84;
+  --accent-soft: #2cb56a;
+  --accent-glow: rgba(61, 220, 132, 0.12);
+  --accent-ink: #7af0aa;
+  --accent-2: #2cb56a;
+  --on-accent: #04140b;
+  --ok: #3ddc84;
+  --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --warn: #f5b341;
+  --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --err: #ff6b5e;
+  --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --info: #5cc8ff;
+  --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --coral: #ff9e7a;
+  --teal: #3ddc84;
+  --r-sm: 2px;
+  --r-md: 2px;
+  --r-lg: 3px;
+  --shadow-sm: 0 0 0 1px rgba(72, 220, 150, 0.08);
+  --shadow-md: 0 0 0 1px rgba(72, 220, 150, 0.1);
+  --shadow-lg: 0 0 0 1px rgba(72, 220, 150, 0.22), 0 20px 50px rgba(0, 0, 0, 0.6);
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --font-sans: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-reading: var(--font-sans);
+  --grad-brand: linear-gradient(135deg, #3ddc84, #2cb56a);
+  --grad-user: linear-gradient(135deg, #16442c, #0d2f1e);
+  --grad-cta: var(--accent);
+  --msg-user-bg: rgba(61, 220, 132, 0.05);
+  --msg-user-fg: var(--fg);
+  --msg-user-border: rgba(72, 220, 150, 0.18);
+  --msg-user-shadow: none;
+  --msg-asst-bg: var(--panel);
+  --msg-asst-border: rgba(72, 220, 150, 0.18);
+  --msg-asst-shadow: none;
+  --composer-focus-shadow: 0 0 0 3px var(--accent-glow), 0 0 0 1px rgba(72, 220, 150, 0.3);
+  --warn-border: rgba(245, 179, 65, 0.4);
+  --warn-bg: rgba(245, 179, 65, 0.06);
+  --scrollbar-thumb: rgba(72, 220, 150, 0.2);
+  --hover-tint: rgba(61, 220, 132, 0.06);
+}
+
+/* Mockup-named aliases + shared layout metrics. These resolve THROUGH the
+ * per-theme primitives above (var() is late-bound), so a single declaration
+ * re-themes with the active gamma. Kept out of the [data-theme] blocks so the
+ * parity test only guards the color contract. */
+:root {
+  --font-ui: var(--font-sans);
+  --radius: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --avatar-radius: var(--r-md);
+  --shadow: var(--shadow-md);
+  --agent-orch: var(--agent-0);
+  --agent-ux: var(--agent-1);
+  --agent-qa: var(--agent-2);
+  --agent-4: var(--agent-3);
+  --agent-orch-soft: var(--agent-0-soft);
+  --agent-ux-soft: var(--agent-1-soft);
+  --agent-qa-soft: var(--agent-2-soft);
+  --agent-4-soft: var(--agent-3-soft);
+  --msg-max-w: 640px;
+  --chat-gap: 20px;
+  --avatar-size: 30px;
+  --content-indent: 42px;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -170,31 +471,401 @@ pre {
   line-height: 1.5;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * REDESIGN Phase 2 — three-pane shell (mockup→prod).
+ * Left nav-rail + center workspace + right inspector over a padded canvas.
+ * Both side rails are hover-expanding overlay cards with a pin (grid reflow);
+ * below the `narrow` tier they become off-canvas drawers + scrim. State lives
+ * on `.app` as data-tier / data-nav-pinned / data-insp-pinned /
+ * data-nav-open / data-insp-open (App.tsx; tier from a ResizeObserver).
+ * Prod's `.sidebar` / `.main` class names are kept (the spatial change is what
+ * matters; a rename would churn ~30 rules for no behavioral gain). */
 .app {
+  position: relative;
   display: grid;
-  /* Column track is set inline from App.tsx (resizable / collapsible). */
+  grid-template-columns: var(--nav-col) minmax(0, 1fr) var(--insp-col);
+  gap: 14px;
+  padding: 14px;
   height: 100dvh;
+  background: var(--canvas);
+  /* Rail (collapsed) + expanded widths. Unpinned rails reserve only the thin
+   * track and overlay on hover (no reflow); pinning widens the track. */
+  --nav-rail-w: 66px;
+  --insp-rail-w: 58px;
+  --nav-exp-w: 250px;
+  --insp-exp-w: 320px;
+  --nav-col: var(--nav-rail-w);
+  --insp-col: var(--insp-rail-w);
+}
+.app[data-tier='medium'] {
+  --nav-exp-w: 212px;
+  --insp-exp-w: 264px;
+}
+.app[data-nav-pinned='true'] {
+  --nav-col: var(--nav-exp-w);
+}
+.app[data-insp-pinned='true'] {
+  --insp-col: var(--insp-exp-w);
+}
+/* P6.1 review: single chat has no inspector — drop the right track so the
+ * workspace reclaims that width (nav rail + workspace only). */
+.app[data-inspector='off']:not([data-tier='narrow']) {
+  grid-template-columns: var(--nav-col) minmax(0, 1fr);
+}
+/* Narrow: one content column; both rails leave the grid → drawers (below). */
+.app[data-tier='narrow'] {
+  grid-template-columns: minmax(0, 1fr);
+  --nav-exp-w: 284px;
+  --insp-exp-w: 300px;
 }
 
-/* PR-3: sidebar icon-rail at ≤sm. The aside is forced to a 48 px
- * column; non-icon affordances (text labels, controls, footer, the
- * session list nested under expanded projects) are hidden. The
- * user's `cebab.sidebarCollapsed` preference is preserved — restored
- * when the viewport widens past sm. */
-.app[data-sidebar-mode='rail'] .sidebar > header > h1,
-.app[data-sidebar-mode='rail'] .sidebar > header > .sidebar-header-controls,
-.app[data-sidebar-mode='rail'] .sidebar-footer,
-.app[data-sidebar-mode='rail'] .session-list,
-.app[data-sidebar-mode='rail'] .project-name,
-.app[data-sidebar-mode='rail'] .trust,
-.app[data-sidebar-mode='rail'] .project-live-dot {
+/* Center pane sits in the middle track (the only in-flow grid child; the rails
+ * are absolute). At narrow it's the sole column. */
+.main {
+  grid-column: 2;
+  min-width: 0;
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: hidden;
+}
+.app[data-tier='narrow'] .main {
+  grid-column: 1;
+}
+
+/* ── Rails: absolute overlay cards inset to their edge ──────────────────── */
+.sidebar,
+.inspector {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  z-index: 20;
+  overflow: hidden;
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  transition:
+    width var(--dur-3) var(--ease),
+    transform var(--dur-3) var(--ease),
+    box-shadow var(--dur-3) var(--ease);
+}
+.sidebar {
+  left: 14px;
+  width: var(--nav-col);
+}
+.inspector {
+  right: 14px;
+  width: var(--insp-col);
+}
+/* Hover-expand (unpinned, non-narrow): overlay to the expanded width WITHOUT
+ * reflowing the center — the grid track stays at the rail width. */
+.app:not([data-tier='narrow'])[data-nav-pinned='false'] .sidebar:hover {
+  width: var(--nav-exp-w);
+  box-shadow: var(--shadow-lg);
+  z-index: 40;
+}
+.app:not([data-tier='narrow'])[data-insp-pinned='false'] .inspector:hover {
+  width: var(--insp-exp-w);
+  box-shadow: var(--shadow-lg);
+  z-index: 40;
+}
+
+/* ── Narrow-tier drawers + scrim ────────────────────────────────────────── */
+.app[data-tier='narrow'] .sidebar,
+.app[data-tier='narrow'] .inspector {
+  z-index: 60;
+  box-shadow: var(--shadow-lg);
+}
+.app[data-tier='narrow'] .sidebar {
+  width: var(--nav-exp-w);
+  transform: translateX(calc(-100% - 18px));
+}
+.app[data-tier='narrow'] .inspector {
+  width: var(--insp-exp-w);
+  transform: translateX(calc(100% + 18px));
+}
+.app[data-tier='narrow'][data-nav-open='true'] .sidebar,
+.app[data-tier='narrow'][data-insp-open='true'] .inspector {
+  transform: none;
+}
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  z-index: 55;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease);
+}
+.app[data-tier='narrow'][data-nav-open='true'] .scrim,
+.app[data-tier='narrow'][data-insp-open='true'] .scrim {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ── Collapsed-rail content treatment ───────────────────────────────────── */
+/* A fixed-width inner keeps sidebar content from reflowing as the rail width
+ * animates; the rail clips it (overflow:hidden above). Text labels/controls
+ * fade unless the rail is expanded (pinned, hovered, or an open drawer). */
+.nav-inner {
+  width: var(--nav-exp-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.sidebar h1,
+.sidebar-header-controls,
+.session-list,
+.project-name,
+.trust,
+.workspace-btn-label,
+.pin-btn {
+  transition: opacity var(--dur-2) var(--ease);
+}
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) :is(h1, .sidebar-header-controls, .session-list, .project-name, .trust, .workspace-btn-label) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Pin button (one per rail; visible only while expanded) ─────────────── */
+.pin-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.pin-btn:hover {
+  color: var(--fg-0);
+  border-color: var(--line-3);
+}
+.pin-btn[aria-pressed='true'] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+/* Hide the pin until the rail is expanded. */
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .pin-btn,
+.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) .pin-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Narrow-tier drawer toggles (fixed; only shown at narrow) ────────────── */
+.drawer-toggle {
   display: none;
 }
-.app[data-sidebar-mode='rail'] .sidebar > header,
-.app[data-sidebar-mode='rail'] .project-header {
-  justify-content: center;
-  padding: var(--s-2);
-  gap: 0;
+.app[data-tier='narrow'] .drawer-toggle {
+  display: grid;
+  place-items: center;
+  position: fixed;
+  top: 18px;
+  z-index: 45;
+  width: 34px;
+  height: 34px;
+  background: var(--panel);
+  color: var(--fg-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+.drawer-toggle.nav {
+  left: 18px;
+}
+.drawer-toggle.insp {
+  right: 18px;
+}
+
+/* ── Inspector content (Phase 2 frame; variants populated Phases 3–5) ────── */
+.insp-inner {
+  width: var(--insp-exp-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.insp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 var(--s-4);
+  border-bottom: 1px solid var(--line-1);
+  flex-shrink: 0;
+}
+.insp-glyph {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  color: var(--fg-2);
+  flex-shrink: 0;
+}
+.insp-title {
+  font-size: var(--t-md);
+  font-weight: 600;
+  color: var(--fg-0);
+}
+.insp-body {
+  padding: var(--s-4);
+  overflow-y: auto;
+  min-height: 0;
+}
+.insp-empty {
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  line-height: 1.55;
+  margin: 0;
+}
+.insp-title,
+.insp-body {
+  transition: opacity var(--dur-2) var(--ease);
+}
+.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) :is(.insp-title, .insp-body) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Inspector chat variant (Phase 3): compact session stats + relocated
+ * AuthorityPanel. */
+.insp-chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.insp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line-1);
+}
+.insp-section-title {
+  font-size: var(--t-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+}
+/* P6.1 review fix (#4): stack label over value so wide chips (ModelChip, the
+ * trust chip + Authority button) get the full rail width instead of colliding
+ * with a right-aligned single-line value. */
+.insp-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+.insp-stat-k {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-3);
+}
+.insp-stat-v {
+  font-size: var(--t-sm);
+  color: var(--fg-0);
+  font-weight: 500;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.insp-stat .trust-chip-group {
+  flex-wrap: wrap;
+}
+/* The relocated AuthorityPanel sits in a 320px rail — let it fill the width. */
+.insp-chat .authority-panel {
+  width: 100%;
+}
+
+/* Inspector multi variant (Phase 4): MultiAgentTab portals its
+ * SessionSettingsPanel into this slot. Empty during draft / no active run.
+ * Fitting the portaled panel snugly to the 320px rail is a Phase 6 polish
+ * task; here it just needs to be present + readable. */
+.insp-multi-slot {
+  min-height: 40px;
+}
+.insp-multi-slot:empty::before {
+  content: 'No active run. Start one to see its session settings here.';
+  display: block;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  line-height: 1.55;
+}
+/* Redesign P6 + P6.1 review fix (#1): fit the relocated SessionSettingsPanel to
+ * the 320px rail. The panel's `.settings-grid` is `140px 1fr` — in the rail the
+ * value column collapsed and long participant slugs broke ONE CHAR PER LINE.
+ * Stack the grid (label over full-width value), strip the nested card, wrap
+ * participant rows, and let wide content scroll rather than widen the rail. */
+.insp-body .multi-agent-settings {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+.insp-body .multi-agent-section {
+  margin: 0;
+}
+.insp-body .settings-grid {
+  grid-template-columns: 1fr;
+  row-gap: 4px;
+}
+.insp-body .settings-grid dt {
+  padding-top: 10px;
+}
+.insp-body .settings-grid dd {
+  word-break: break-word;
+}
+.insp-body .settings-participant {
+  flex-wrap: wrap;
+}
+.insp-body pre,
+.insp-body table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Redesign P6: reduced-motion audit for the three-pane shell. The rail
+ * width/transform/shadow tweens, the scrim fade, and the collapsed-content
+ * opacity fades all collapse to instant when the user asks for less motion.
+ * (Prod already guards its own component animations elsewhere.) */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .inspector,
+  .scrim,
+  .pin-btn,
+  .theme-card,
+  .sidebar h1,
+  .sidebar-header-controls,
+  .session-list,
+  .project-name,
+  .trust,
+  .workspace-btn-label,
+  .insp-title,
+  .insp-body {
+    transition: none;
+  }
+}
+
+/* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
+ * 2K / 4K monitors; the chat reading column (capped at 90ch by
+ * `.chat` padding) drifts to the right edge otherwise. */
+@media (min-width: 1600px) {
+  .app {
+    max-width: 1600px;
+    margin-inline: auto;
+  }
 }
 
 /* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
@@ -237,14 +908,13 @@ pre {
   flex-shrink: 0;
 }
 
-.sidebar {
-  position: relative;
-  background: var(--bg-2);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
+/* P6.1 review fix (#1): the pre-redesign `.sidebar { position: relative;
+ * background; border-right; … }` rule used to live here. It came AFTER the
+ * Phase 2 `.sidebar, .inspector { position: absolute; top: 14px }` rule, so
+ * (equal specificity, later wins) it forced the nav back to a relative grid
+ * item — which its own top:14px then offset 14px DOWN, leaving the nav rail
+ * a padding-height below the workspace + inspector. Removed; the Phase 2 rule
+ * is the single source of truth for the nav card. */
 .sidebar-resizer {
   position: absolute;
   top: 0;
@@ -287,7 +957,10 @@ pre {
   align-items: center;
   gap: 8px;
   height: 52px;
-  padding: 0 var(--s-4);
+  /* P6.1 review fix (#3): reserve room on the right for the absolute pin
+   * button (top:10 right:10, 24px) so the notification bell + its badge no
+   * longer collide with / sit under it when the rail is expanded. */
+  padding: 0 40px 0 var(--s-4);
   border-bottom: 1px solid var(--line-1);
 }
 .sidebar h1 {
@@ -334,7 +1007,7 @@ pre {
 }
 .primary-btn {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: 1px solid var(--accent);
   border-radius: var(--r-sm);
   padding: 6px 14px;
@@ -425,6 +1098,24 @@ pre {
   font-weight: 500;
   letter-spacing: 0.01em;
 }
+/* P6.3 review fix: in the COLLAPSED rail the footer's full-width workspace
+ * button was clipped mid-button by the rail's overflow, and its corner got
+ * shaved by the card's rounded corner — reading as "poking out". Collapse it
+ * to a compact, centered gear icon-button that sits cleanly inside the rail
+ * (matches the icon-rail intent); it returns to the full labelled button on
+ * hover / when pinned. */
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .sidebar-footer {
+  padding: 10px 12px;
+}
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn {
+  width: 42px;
+  padding: 9px 0;
+  justify-content: center;
+  gap: 0;
+}
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn-label {
+  display: none;
+}
 .project-list .project-row {
   list-style: none;
 }
@@ -447,9 +1138,9 @@ pre {
   color: var(--fg);
 }
 .project-header.active {
-  background: linear-gradient(180deg, rgba(139, 92, 246, 0.18), rgba(139, 92, 246, 0.1));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent) 10%, transparent));
   color: var(--fg);
-  box-shadow: inset 0 0 0 1px rgba(139, 92, 246, 0.3);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 /* Claude brand mark, rendered next to projects that contain a CLAUDE.md.
  * The presence/absence of this mark is the sidebar's "is this an agent
@@ -533,7 +1224,7 @@ pre {
   color: var(--fg);
 }
 .session-row.active {
-  background: rgba(139, 92, 246, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--fg);
   box-shadow: inset 2px 0 0 var(--accent);
 }
@@ -808,7 +1499,7 @@ pre {
   flex: 1;
   min-height: 0;
   background:
-    radial-gradient(1200px 600px at 50% -10%, rgba(139, 92, 246, 0.05), transparent 60%), var(--bg);
+    radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--accent) 5%, transparent), transparent 60%), var(--bg);
 }
 .chat.empty {
   align-items: center;
@@ -874,7 +1565,10 @@ pre {
   height: 14px;
 }
 .avatar.user {
-  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  /* Redesign P6: was a hard-coded blue→indigo gradient (indigo #6366f1 is
+   * purple-adjacent + didn't re-theme). Route through the per-theme user
+   * gradient token. */
+  background: var(--grad-user);
 }
 .avatar.assistant {
   background: linear-gradient(135deg, var(--accent), var(--coral));
@@ -887,7 +1581,30 @@ pre {
   background: var(--bg-4);
   color: var(--info);
 }
+/* Redesign P6: message treatment — serif reading bodies (Daylight) + a
+ * per-theme bubble for user turns and a card for assistant turns, driven by
+ * the --msg-* tokens. Code/pre keep mono (their own rules win); the role label
+ * stays in the UI face. The card's balance against nested tool/thinking blocks
+ * is a likely review-tweak target. */
+.msg.user .msg-body,
+.msg.assistant .msg-body {
+  font-family: var(--font-reading);
+  border-radius: var(--radius-lg);
+  padding: 10px 14px;
+}
+.msg.user .msg-body {
+  background: var(--msg-user-bg);
+  color: var(--msg-user-fg);
+  border: 1px solid var(--msg-user-border);
+  box-shadow: var(--msg-user-shadow);
+}
+.msg.assistant .msg-body {
+  background: var(--msg-asst-bg);
+  border: 1px solid var(--msg-asst-border);
+  box-shadow: var(--msg-asst-shadow);
+}
 .msg .role {
+  font-family: var(--font-ui);
   font-size: var(--t-sm);
   font-weight: 600;
   color: var(--fg-1);
@@ -1190,7 +1907,7 @@ pre {
 }
 .grow-textarea-wrap textarea:focus {
   outline: none;
-  border-color: rgba(139, 92, 246, 0.5);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   box-shadow: 0 0 0 4px var(--accent-glow);
 }
 .grow-textarea-wrap textarea:disabled {
@@ -1225,7 +1942,7 @@ pre {
   align-items: center;
   gap: 6px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: 0;
   border-radius: var(--r-sm);
   padding: 0 16px;
@@ -1597,6 +2314,62 @@ pre {
   gap: 8px;
 }
 
+/* Redesign Phase 1: Settings → Appearance color-gamma picker. Each card
+ * previews a gamma with three swatches (page / panel / accent) driven by
+ * inline styles from theme.ts THEME_META; the frame is token-styled so it
+ * re-themes with whichever gamma is currently active. */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+.theme-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  text-align: left;
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  color: var(--fg-0);
+  transition:
+    border-color var(--dur-2) var(--ease),
+    background var(--dur-2) var(--ease);
+}
+.theme-card:hover {
+  border-color: var(--line-3);
+  background: var(--bg-4);
+}
+.theme-card.active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.theme-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.theme-swatch {
+  display: flex;
+  height: 26px;
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  border: 1px solid var(--line-1);
+}
+.theme-swatch .sw {
+  flex: 1;
+}
+.theme-card-name {
+  font-size: var(--t-md);
+  font-weight: 600;
+}
+.theme-card-desc {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  line-height: 1.35;
+}
+
 /* ---- Cluster E Phase 4 (H1): KeyboardShortcutsModal cheatsheet ----
  *
  * Sectioned list + searchable filter. Reuses the .modal scaffolding so
@@ -1724,7 +2497,12 @@ pre {
   align-items: center;
   justify-content: space-between;
   gap: var(--s-2);
-  margin: var(--s-2) var(--s-3) 0;
+  /* P6.1 review fix (#2): sit the tabs in a 52px bar flush to the card top
+   * (no top margin) so the workspace's first row lines up with the 52px
+   * nav-rail and inspector headers — the three panels now read level. */
+  min-height: 52px;
+  padding: var(--s-1) var(--s-3);
+  border-bottom: 1px solid var(--line-1);
   flex-wrap: wrap;
 }
 .main-top-bar-right {
@@ -3349,7 +4127,7 @@ pre {
   place-items: center;
   overflow: hidden;
   background-image:
-    radial-gradient(circle at center, rgba(139, 92, 246, 0.04), transparent 60%),
+    radial-gradient(circle at center, color-mix(in srgb, var(--accent) 4%, transparent), transparent 60%),
     linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
   background-size:
@@ -3451,8 +4229,8 @@ pre {
 /* Hub = an --accent tint at the mockup's alpha stops (no token exposes
  * these exact alphas). */
 .tpl-hub-rect {
-  fill: rgba(139, 92, 246, 0.2);
-  stroke: rgba(139, 92, 246, 0.55);
+  fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  stroke: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 .tpl-node-name {
   fill: var(--fg);
@@ -4278,7 +5056,7 @@ pre {
 }
 .multi-agent-prompt:focus {
   outline: none;
-  border-color: rgba(139, 92, 246, 0.5);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
@@ -4479,8 +5257,8 @@ pre {
 
 .run-status-running {
   color: var(--accent-ink);
-  border-color: rgba(139, 92, 246, 0.35);
-  background: rgba(139, 92, 246, 0.12);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .run-status-completed {
   color: var(--ok);
@@ -4846,7 +5624,7 @@ pre {
 }
 .multi-agent-input-textarea:focus {
   outline: none;
-  border-color: rgba(139, 92, 246, 0.5);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
@@ -8085,19 +8863,31 @@ pre {
   align-items: center;
   gap: 6px;
 }
+/* P6.1 review fix (#5): the authority trigger is a real button chip that
+ * matches the ModelChip's typography (10px uppercase pill) — same size +
+ * weight as the model/trust tags beside it — tinted accent so it reads as the
+ * one clickable action in the header cluster. */
 .trust-chip-authority-link {
-  background: transparent;
-  border: none;
-  color: var(--accent-ink, var(--accent));
-  font-size: var(--t-xs);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  color: var(--accent);
+  background: var(--accent-glow);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 2px 10px;
+  line-height: 1.6;
+  white-space: nowrap;
   cursor: pointer;
-  padding: 0;
 }
 .trust-chip-authority-link:hover,
 .trust-chip-authority-link:focus-visible {
-  color: var(--accent);
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
   outline: none;
 }
 
@@ -9681,18 +10471,18 @@ pre {
   margin-left: 0;
   cursor: pointer;
   color: var(--accent-ink);
-  border-color: rgba(139, 92, 246, 0.35);
-  background: rgba(139, 92, 246, 0.12);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   font-weight: 600;
 }
 .runs-badge:hover,
 .runs-badge:focus-visible {
   outline: none;
-  border-color: rgba(139, 92, 246, 0.55);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   box-shadow: 0 0 0 2px var(--accent-glow);
 }
 .runs-badge[aria-expanded='true'] {
-  border-color: rgba(139, 92, 246, 0.55);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 }
 
 /* Positioned wrapper around the badge + its popover (RunsBadge.tsx) so the
