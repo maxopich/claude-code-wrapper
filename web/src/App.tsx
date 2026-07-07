@@ -28,6 +28,7 @@ import { SlashCommandButtons } from './components/SlashCommandButtons';
 import { LogsButton } from './components/sessionLog';
 import { logsHashFor } from './components/sessionLog/logsHash';
 import { SettingsModal } from './components/SettingsModal';
+import { Inspector } from './components/Inspector';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 import { SessionSearchModal } from './components/SessionSearchModal';
 import { ArtifactContentProvider } from './components/ArtifactContentContext';
@@ -37,7 +38,6 @@ import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/Mu
 import { ClaudeMark } from './components/ClaudeMark';
 import { MockBadge } from './components/MockBadge';
 import { Icon } from './components/Icon';
-import { mqBelow } from './breakpoints';
 import {
   InboxProvider,
   NotificationBell,
@@ -76,19 +76,6 @@ import { applyTheme, readStoredTheme, type Theme } from './theme';
 const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
 const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
-
-// Sidebar layout prefs. Reads/writes go through the shared readStored/
-// writeStored helpers (./prefs) so private mode or a full quota can't break
-// the app over a non-critical preference.
-const SIDEBAR_MIN = 170;
-const SIDEBAR_MAX = 480;
-const SIDEBAR_DEFAULT = 220;
-const SIDEBAR_KEY_STEP = 16;
-
-function clampSidebarWidth(n: number): number {
-  if (!Number.isFinite(n)) return SIDEBAR_DEFAULT;
-  return Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, Math.round(n)));
-}
 
 /**
  * Mint a client-side notification envelope id. Used for connect/disconnect
@@ -497,21 +484,26 @@ function AppShell({
     {},
   );
 
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    readStored('cebab.sidebarCollapsed', false, (r) => r === 'true'),
+  // Redesign Phase 2: three-pane shell layout state (replaces the old sidebar
+  // collapse/resize model). Pins are a persisted client pref, like the widths
+  // they replace; drawer-open is narrow-tier-only and not persisted; `tier` is
+  // derived from a ResizeObserver on `.app` (effect below).
+  const appRef = useRef<HTMLDivElement>(null);
+  const [navPinned, setNavPinned] = useState(() =>
+    readStored('cebab.navPinned', false, (r) => r === 'true'),
   );
-  const [sidebarWidth, setSidebarWidth] = useState(() =>
-    readStored('cebab.sidebarWidth', SIDEBAR_DEFAULT, (r) => clampSidebarWidth(Number(r))),
+  const [inspPinned, setInspPinned] = useState(() =>
+    readStored('cebab.inspPinned', false, (r) => r === 'true'),
   );
-  const [sidebarResizing, setSidebarResizing] = useState(false);
-  const sidebarResizingRef = useRef(false);
-
+  const [navOpen, setNavOpen] = useState(false);
+  const [inspOpen, setInspOpen] = useState(false);
+  const [tier, setTier] = useState<'wide' | 'medium' | 'narrow'>('wide');
   useEffect(() => {
-    writeStored('cebab.sidebarCollapsed', String(sidebarCollapsed));
-  }, [sidebarCollapsed]);
+    writeStored('cebab.navPinned', String(navPinned));
+  }, [navPinned]);
   useEffect(() => {
-    writeStored('cebab.sidebarWidth', String(sidebarWidth));
-  }, [sidebarWidth]);
+    writeStored('cebab.inspPinned', String(inspPinned));
+  }, [inspPinned]);
 
   // Redesign color gamma. Pure client display pref (see theme.ts) — never
   // server/store state. Seeded from localStorage (the index.html boot script
@@ -523,91 +515,33 @@ function AppShell({
     applyTheme(theme);
   }, [theme]);
 
-  // At ≤md the sidebar isn't user-resizable; unmount the resizer to
-  // keep it out of the tab order and out of pointer-event reach. At
-  // ≤sm the sidebar auto-collapses to an icon rail (PR-3), so the
-  // resizer is also gone there. Both states are derived from
-  // matchMedia and re-subscribed on resize.
-  const [resizerSuppressed, setResizerSuppressed] = useState(() =>
-    typeof window === 'undefined' ? false : window.matchMedia(mqBelow('md')).matches,
-  );
-  const [isBelowSm, setIsBelowSm] = useState(() =>
-    typeof window === 'undefined' ? false : window.matchMedia(mqBelow('sm')).matches,
-  );
+  // Redesign Phase 2: responsive tier from a ResizeObserver on `.app`
+  // (replaces the matchMedia sidebar logic). wide ≥1120 · medium ≥830 · narrow
+  // below — below narrow both rails become off-canvas drawers. Threshold on the
+  // app's own box so the ultra-wide 1600px cap is respected.
   useEffect(() => {
-    const mqMd = window.matchMedia(mqBelow('md'));
-    const mqSm = window.matchMedia(mqBelow('sm'));
-    const onMd = (e: MediaQueryListEvent) => setResizerSuppressed(e.matches);
-    const onSm = (e: MediaQueryListEvent) => setIsBelowSm(e.matches);
-    mqMd.addEventListener('change', onMd);
-    mqSm.addEventListener('change', onSm);
-    return () => {
-      mqMd.removeEventListener('change', onMd);
-      mqSm.removeEventListener('change', onSm);
-    };
+    const el = appRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const classify = (w: number): 'wide' | 'medium' | 'narrow' =>
+      w >= 1120 ? 'wide' : w >= 830 ? 'medium' : 'narrow';
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? el.clientWidth;
+      setTier((prev) => {
+        const next = classify(w);
+        return next === prev ? prev : next;
+      });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
-
-  // Tri-state sidebar mode. `rail` forces an icon-only column at ≤sm
-  // regardless of the stored `cebab.sidebarCollapsed` preference (which
-  // we deliberately do NOT mutate — the stored value is restored when
-  // the viewport widens past sm again).
-  const sidebarMode: 'rail' | 'collapsed' | 'open' = isBelowSm
-    ? 'rail'
-    : sidebarCollapsed
-      ? 'collapsed'
-      : 'open';
-
-  function onResizerPointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    e.preventDefault();
-    const target = e.currentTarget;
-    try {
-      target.setPointerCapture(e.pointerId);
-    } catch {
-      /* not all environments support pointer capture */
+  // Drawers exist only at the narrow tier — force them closed on the way out so
+  // one can't linger off-screen (and keep pointer-events off the scrim).
+  useEffect(() => {
+    if (tier !== 'narrow') {
+      setNavOpen(false);
+      setInspOpen(false);
     }
-    sidebarResizingRef.current = true;
-    setSidebarResizing(true);
-    // Sidebar's left edge is viewport x=0, so pointer x is the new width.
-    const onMove = (ev: PointerEvent) => {
-      if (sidebarResizingRef.current) setSidebarWidth(clampSidebarWidth(ev.clientX));
-    };
-    const onUp = (ev: PointerEvent) => {
-      sidebarResizingRef.current = false;
-      setSidebarResizing(false);
-      target.removeEventListener('pointermove', onMove);
-      target.removeEventListener('pointerup', onUp);
-      target.removeEventListener('pointercancel', onUp);
-      try {
-        target.releasePointerCapture(ev.pointerId);
-      } catch {
-        /* idempotent on most browsers */
-      }
-    };
-    target.addEventListener('pointermove', onMove);
-    target.addEventListener('pointerup', onUp);
-    target.addEventListener('pointercancel', onUp);
-  }
-
-  function onResizerKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    switch (e.key) {
-      case 'ArrowLeft':
-        e.preventDefault();
-        setSidebarWidth((w) => clampSidebarWidth(w - SIDEBAR_KEY_STEP));
-        return;
-      case 'ArrowRight':
-        e.preventDefault();
-        setSidebarWidth((w) => clampSidebarWidth(w + SIDEBAR_KEY_STEP));
-        return;
-      case 'Home':
-        e.preventDefault();
-        setSidebarWidth(SIDEBAR_MIN);
-        return;
-      case 'End':
-        e.preventDefault();
-        setSidebarWidth(SIDEBAR_MAX);
-        return;
-    }
-  }
+  }, [tier]);
 
   // WS lifecycle bookkeeping for the reconnect toast (UX-11):
   //   - `hasOpenedRef`: skip the success toast on the FIRST open (initial
@@ -1913,21 +1847,28 @@ function AppShell({
   return (
     <div
       className="app"
-      data-sidebar-mode={sidebarMode}
-      style={{
-        gridTemplateColumns:
-          sidebarMode === 'rail'
-            ? '48px 1fr'
-            : sidebarMode === 'collapsed'
-              ? '0 1fr'
-              : `${sidebarWidth}px 1fr`,
-      }}
+      ref={appRef}
+      data-tier={tier}
+      data-nav-pinned={navPinned}
+      data-insp-pinned={inspPinned}
+      data-nav-open={navOpen}
+      data-insp-open={inspOpen}
     >
       <aside className="sidebar" id="app-sidebar">
-        <header>
-          <ClaudeMark className="brand-mark" />
-          <h1>cebab</h1>
-          {/*
+        <button
+          className="pin-btn"
+          aria-pressed={navPinned}
+          onClick={() => setNavPinned((v) => !v)}
+          title={navPinned ? 'Unpin sidebar' : 'Pin sidebar open'}
+          aria-label={navPinned ? 'Unpin sidebar' : 'Pin sidebar open'}
+        >
+          {navPinned ? '⇥' : '⇤'}
+        </button>
+        <div className="nav-inner">
+          <header>
+            <ClaudeMark className="brand-mark" />
+            <h1>cebab</h1>
+            {/*
             Cluster G Phase 2a (UI-A3): MOCK runtime badge. Mount immediately
             right of the brand (per ux-agent §5: "immediately right of Cebab
             logo") so it reads as the FIRST status signal the operator sees,
@@ -1938,17 +1879,17 @@ function AppShell({
             settings haven't arrived yet) renders nothing rather than
             falsely advertising "not mock".
           */}
-          {state.settings?.mockMode === true && <MockBadge />}
-          <div className="sidebar-header-controls">
-            {/* RunsBadge ("▶ N active") now lives in the main top bar — it's
+            {state.settings?.mockMode === true && <MockBadge />}
+            <div className="sidebar-header-controls">
+              {/* RunsBadge ("▶ N active") now lives in the main top bar — it's
                 global run/session activity, not sidebar chrome, and its
                 dropdown was overlaying (and blocking clicks on) the project
                 list when anchored here. */}
-            <span
-              className={state.connected ? 'dot on' : 'dot off'}
-              title={state.connected ? 'connected' : 'disconnected'}
-            />
-            {/*
+              <span
+                className={state.connected ? 'dot on' : 'dot off'}
+                title={state.connected ? 'connected' : 'disconnected'}
+              />
+              {/*
               Cluster A Phase 5: notifications inbox bell. Per DEC-1 (XCT-3
               chrome lock), the bell ideally lives in an app-shell header
               — but Cebab has no such header today. The validation report's
@@ -1957,87 +1898,74 @@ function AppShell({
               actually lands. Order matches XCT-3's left-to-right intent:
               ConnectionDot (state) → Bell (events).
             */}
-            <NotificationBell onAck={onAck} />
-            {/*
+              <NotificationBell onAck={onAck} />
+              {/*
               Cluster D Phase 8b: recovery_log inspector trigger. Same
               chrome placement as the bell (XCT-3 fallback — no app-
               shell header yet). The button surfaces an opaque history
               of every recovery action; unlike the bell it has no
               badge because the log isn't unread/acked.
             */}
-            <RecoveryLogButton />
-            <button
-              className="icon-btn sidebar-collapse-btn"
-              title="Hide sidebar"
-              aria-label="Hide sidebar"
-              onClick={() => setSidebarCollapsed(true)}
-            >
-              «
-            </button>
-          </div>
-        </header>
-        <ProjectList
-          projects={state.projects}
-          activeProjectId={state.activeProjectId}
-          activeSessionByProject={state.activeSessionByProject}
-          knownSessions={state.knownSessions}
-          liveSessions={state.liveSessions}
-          onSelectProject={selectProject}
-          onSelectSession={selectSession}
-          onNewSession={newSession}
-          onToggleTrust={toggleTrust}
-          onRenameSession={renameSession}
-          onDownloadSession={downloadSession}
-          onBulkSessionOp={bulkSessionOp}
-          onBulkExportSessions={bulkExportSessions}
-        />
-        <footer className="sidebar-footer">
-          <button
-            className={`workspace-btn ${
-              state.settings && !state.settings.workspaceRootValid ? 'warn' : ''
-            }`}
-            title={
-              state.settings?.workspaceRoot
-                ? `${state.settings.workspaceRoot}\nClick to change workspace`
-                : 'Pick a workspace folder'
-            }
-            onClick={() => setSettingsOpen(true)}
-          >
-            <span className="workspace-btn-icon" aria-hidden="true">
-              ⚙
-            </span>
-            <span className="workspace-btn-label">
-              {workspaceLabel(state.settings?.workspaceRoot ?? null)}
-            </span>
-          </button>
-        </footer>
-        {!sidebarCollapsed && !resizerSuppressed && (
-          <div
-            className={`sidebar-resizer ${sidebarResizing ? 'dragging' : ''}`}
-            onPointerDown={onResizerPointerDown}
-            onKeyDown={onResizerKeyDown}
-            role="separator"
-            aria-orientation="vertical"
-            aria-valuemin={SIDEBAR_MIN}
-            aria-valuemax={SIDEBAR_MAX}
-            aria-valuenow={sidebarWidth}
-            aria-controls="app-sidebar"
-            aria-label="Resize sidebar"
-            tabIndex={0}
-            title="Drag or use arrow keys to resize sidebar"
+              <RecoveryLogButton />
+            </div>
+          </header>
+          <ProjectList
+            projects={state.projects}
+            activeProjectId={state.activeProjectId}
+            activeSessionByProject={state.activeSessionByProject}
+            knownSessions={state.knownSessions}
+            liveSessions={state.liveSessions}
+            onSelectProject={selectProject}
+            onSelectSession={selectSession}
+            onNewSession={newSession}
+            onToggleTrust={toggleTrust}
+            onRenameSession={renameSession}
+            onDownloadSession={downloadSession}
+            onBulkSessionOp={bulkSessionOp}
+            onBulkExportSessions={bulkExportSessions}
           />
-        )}
+          <footer className="sidebar-footer">
+            <button
+              className={`workspace-btn ${
+                state.settings && !state.settings.workspaceRootValid ? 'warn' : ''
+              }`}
+              title={
+                state.settings?.workspaceRoot
+                  ? `${state.settings.workspaceRoot}\nClick to change workspace`
+                  : 'Pick a workspace folder'
+              }
+              onClick={() => setSettingsOpen(true)}
+            >
+              <span className="workspace-btn-icon" aria-hidden="true">
+                ⚙
+              </span>
+              <span className="workspace-btn-label">
+                {workspaceLabel(state.settings?.workspaceRoot ?? null)}
+              </span>
+            </button>
+          </footer>
+        </div>
       </aside>
-      {sidebarMode === 'collapsed' && (
-        <button
-          className="sidebar-reopen-btn"
-          title="Show sidebar"
-          aria-label="Show sidebar"
-          onClick={() => setSidebarCollapsed(false)}
-        >
-          »
-        </button>
-      )}
+      {/* Redesign Phase 2: narrow-tier drawer toggles (fixed; CSS shows them
+       *  only at the narrow tier). The hamburger opens the nav drawer even on
+       *  the empty "choose a workspace" screen, so the operator is never
+       *  stranded with both rails off-canvas. */}
+      <button
+        className="drawer-toggle nav"
+        aria-label={navOpen ? 'Close sidebar' : 'Open sidebar'}
+        aria-expanded={navOpen}
+        onClick={() => setNavOpen((v) => !v)}
+      >
+        ☰
+      </button>
+      <button
+        className="drawer-toggle insp"
+        aria-label={inspOpen ? 'Close inspector' : 'Open inspector'}
+        aria-expanded={inspOpen}
+        onClick={() => setInspOpen((v) => !v)}
+      >
+        ⧉
+      </button>
       <main className="main">
         {/* Cluster D Phase 6 (UI-D22): app-wide auth-expired banner.
          *  Mounted as the first child of <main> so it sits above
@@ -2344,6 +2272,20 @@ function AppShell({
           </>
         )}
       </main>
+      {/* Redesign Phase 2: right-hand inspector rail. Absolute overlay sibling
+       *  of <main>; the frame ships now, the three variants populate in
+       *  Phases 3–5. */}
+      <Inspector view={view} pinned={inspPinned} onTogglePin={() => setInspPinned((v) => !v)} />
+      {/* Narrow-tier scrim — click closes whichever drawer is open. CSS keeps
+       *  it non-interactive unless a drawer is open. */}
+      <div
+        className="scrim"
+        aria-hidden="true"
+        onClick={() => {
+          setNavOpen(false);
+          setInspOpen(false);
+        }}
+      />
       {settingsOpen && state.settings && (
         <SettingsModal
           settings={state.settings}

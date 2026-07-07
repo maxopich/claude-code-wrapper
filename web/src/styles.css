@@ -471,31 +471,276 @@ pre {
   line-height: 1.5;
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * REDESIGN Phase 2 — three-pane shell (mockup→prod).
+ * Left nav-rail + center workspace + right inspector over a padded canvas.
+ * Both side rails are hover-expanding overlay cards with a pin (grid reflow);
+ * below the `narrow` tier they become off-canvas drawers + scrim. State lives
+ * on `.app` as data-tier / data-nav-pinned / data-insp-pinned /
+ * data-nav-open / data-insp-open (App.tsx; tier from a ResizeObserver).
+ * Prod's `.sidebar` / `.main` class names are kept (the spatial change is what
+ * matters; a rename would churn ~30 rules for no behavioral gain). */
 .app {
+  position: relative;
   display: grid;
-  /* Column track is set inline from App.tsx (resizable / collapsible). */
+  grid-template-columns: var(--nav-col) minmax(0, 1fr) var(--insp-col);
+  gap: 14px;
+  padding: 14px;
   height: 100dvh;
+  background: var(--canvas);
+  /* Rail (collapsed) + expanded widths. Unpinned rails reserve only the thin
+   * track and overlay on hover (no reflow); pinning widens the track. */
+  --nav-rail-w: 66px;
+  --insp-rail-w: 58px;
+  --nav-exp-w: 250px;
+  --insp-exp-w: 320px;
+  --nav-col: var(--nav-rail-w);
+  --insp-col: var(--insp-rail-w);
+}
+.app[data-tier='medium'] {
+  --nav-exp-w: 212px;
+  --insp-exp-w: 264px;
+}
+.app[data-nav-pinned='true'] {
+  --nav-col: var(--nav-exp-w);
+}
+.app[data-insp-pinned='true'] {
+  --insp-col: var(--insp-exp-w);
+}
+/* Narrow: one content column; both rails leave the grid → drawers (below). */
+.app[data-tier='narrow'] {
+  grid-template-columns: minmax(0, 1fr);
+  --nav-exp-w: 284px;
+  --insp-exp-w: 300px;
 }
 
-/* PR-3: sidebar icon-rail at ≤sm. The aside is forced to a 48 px
- * column; non-icon affordances (text labels, controls, footer, the
- * session list nested under expanded projects) are hidden. The
- * user's `cebab.sidebarCollapsed` preference is preserved — restored
- * when the viewport widens past sm. */
-.app[data-sidebar-mode='rail'] .sidebar > header > h1,
-.app[data-sidebar-mode='rail'] .sidebar > header > .sidebar-header-controls,
-.app[data-sidebar-mode='rail'] .sidebar-footer,
-.app[data-sidebar-mode='rail'] .session-list,
-.app[data-sidebar-mode='rail'] .project-name,
-.app[data-sidebar-mode='rail'] .trust,
-.app[data-sidebar-mode='rail'] .project-live-dot {
+/* Center pane sits in the middle track (the only in-flow grid child; the rails
+ * are absolute). At narrow it's the sole column. */
+.main {
+  grid-column: 2;
+  min-width: 0;
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  overflow: hidden;
+}
+.app[data-tier='narrow'] .main {
+  grid-column: 1;
+}
+
+/* ── Rails: absolute overlay cards inset to their edge ──────────────────── */
+.sidebar,
+.inspector {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  z-index: 20;
+  overflow: hidden;
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  transition:
+    width var(--dur-3) var(--ease),
+    transform var(--dur-3) var(--ease),
+    box-shadow var(--dur-3) var(--ease);
+}
+.sidebar {
+  left: 14px;
+  width: var(--nav-col);
+}
+.inspector {
+  right: 14px;
+  width: var(--insp-col);
+}
+/* Hover-expand (unpinned, non-narrow): overlay to the expanded width WITHOUT
+ * reflowing the center — the grid track stays at the rail width. */
+.app:not([data-tier='narrow'])[data-nav-pinned='false'] .sidebar:hover {
+  width: var(--nav-exp-w);
+  box-shadow: var(--shadow-lg);
+  z-index: 40;
+}
+.app:not([data-tier='narrow'])[data-insp-pinned='false'] .inspector:hover {
+  width: var(--insp-exp-w);
+  box-shadow: var(--shadow-lg);
+  z-index: 40;
+}
+
+/* ── Narrow-tier drawers + scrim ────────────────────────────────────────── */
+.app[data-tier='narrow'] .sidebar,
+.app[data-tier='narrow'] .inspector {
+  z-index: 60;
+  box-shadow: var(--shadow-lg);
+}
+.app[data-tier='narrow'] .sidebar {
+  width: var(--nav-exp-w);
+  transform: translateX(calc(-100% - 18px));
+}
+.app[data-tier='narrow'] .inspector {
+  width: var(--insp-exp-w);
+  transform: translateX(calc(100% + 18px));
+}
+.app[data-tier='narrow'][data-nav-open='true'] .sidebar,
+.app[data-tier='narrow'][data-insp-open='true'] .inspector {
+  transform: none;
+}
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  z-index: 55;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease);
+}
+.app[data-tier='narrow'][data-nav-open='true'] .scrim,
+.app[data-tier='narrow'][data-insp-open='true'] .scrim {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ── Collapsed-rail content treatment ───────────────────────────────────── */
+/* A fixed-width inner keeps sidebar content from reflowing as the rail width
+ * animates; the rail clips it (overflow:hidden above). Text labels/controls
+ * fade unless the rail is expanded (pinned, hovered, or an open drawer). */
+.nav-inner {
+  width: var(--nav-exp-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.sidebar h1,
+.sidebar-header-controls,
+.session-list,
+.project-name,
+.trust,
+.workspace-btn-label,
+.pin-btn {
+  transition: opacity var(--dur-2) var(--ease);
+}
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) :is(h1, .sidebar-header-controls, .session-list, .project-name, .trust, .workspace-btn-label) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Pin button (one per rail; visible only while expanded) ─────────────── */
+.pin-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+.pin-btn:hover {
+  color: var(--fg-0);
+  border-color: var(--line-3);
+}
+.pin-btn[aria-pressed='true'] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+/* Hide the pin until the rail is expanded. */
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .pin-btn,
+.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) .pin-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Narrow-tier drawer toggles (fixed; only shown at narrow) ────────────── */
+.drawer-toggle {
   display: none;
 }
-.app[data-sidebar-mode='rail'] .sidebar > header,
-.app[data-sidebar-mode='rail'] .project-header {
-  justify-content: center;
-  padding: var(--s-2);
-  gap: 0;
+.app[data-tier='narrow'] .drawer-toggle {
+  display: grid;
+  place-items: center;
+  position: fixed;
+  top: 18px;
+  z-index: 45;
+  width: 34px;
+  height: 34px;
+  background: var(--panel);
+  color: var(--fg-1);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+.drawer-toggle.nav {
+  left: 18px;
+}
+.drawer-toggle.insp {
+  right: 18px;
+}
+
+/* ── Inspector content (Phase 2 frame; variants populated Phases 3–5) ────── */
+.insp-inner {
+  width: var(--insp-exp-w);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.insp-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 0 var(--s-4);
+  border-bottom: 1px solid var(--line-1);
+  flex-shrink: 0;
+}
+.insp-glyph {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  color: var(--fg-2);
+  flex-shrink: 0;
+}
+.insp-title {
+  font-size: var(--t-md);
+  font-weight: 600;
+  color: var(--fg-0);
+}
+.insp-body {
+  padding: var(--s-4);
+  overflow-y: auto;
+  min-height: 0;
+}
+.insp-empty {
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  line-height: 1.55;
+  margin: 0;
+}
+.insp-title,
+.insp-body {
+  transition: opacity var(--dur-2) var(--ease);
+}
+.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) :is(.insp-title, .insp-body) {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
+ * 2K / 4K monitors; the chat reading column (capped at 90ch by
+ * `.chat` padding) drifts to the right edge otherwise. */
+@media (min-width: 1600px) {
+  .app {
+    max-width: 1600px;
+    margin-inline: auto;
+  }
 }
 
 /* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
