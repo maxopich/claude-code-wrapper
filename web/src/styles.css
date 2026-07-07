@@ -794,6 +794,40 @@ pre {
   color: var(--fg-3);
   line-height: 1.55;
 }
+/* Redesign P6: keep the relocated panels contained in the 320px rail — wide
+ * content (artifacts table, long paths, code) scrolls inside the body instead
+ * of forcing the rail wider. Snug per-row spacing is a review-tweak target. */
+.insp-body .multi-agent-settings,
+.insp-body .multi-agent-section {
+  margin: 0;
+}
+.insp-body pre,
+.insp-body table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* Redesign P6: reduced-motion audit for the three-pane shell. The rail
+ * width/transform/shadow tweens, the scrim fade, and the collapsed-content
+ * opacity fades all collapse to instant when the user asks for less motion.
+ * (Prod already guards its own component animations elsewhere.) */
+@media (prefers-reduced-motion: reduce) {
+  .sidebar,
+  .inspector,
+  .scrim,
+  .pin-btn,
+  .theme-card,
+  .sidebar h1,
+  .sidebar-header-controls,
+  .session-list,
+  .project-name,
+  .trust,
+  .workspace-btn-label,
+  .insp-title,
+  .insp-body {
+    transition: none;
+  }
+}
 
 /* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
  * 2K / 4K monitors; the chat reading column (capped at 90ch by
@@ -942,7 +976,7 @@ pre {
 }
 .primary-btn {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: 1px solid var(--accent);
   border-radius: var(--r-sm);
   padding: 6px 14px;
@@ -1482,7 +1516,10 @@ pre {
   height: 14px;
 }
 .avatar.user {
-  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  /* Redesign P6: was a hard-coded blue→indigo gradient (indigo #6366f1 is
+   * purple-adjacent + didn't re-theme). Route through the per-theme user
+   * gradient token. */
+  background: var(--grad-user);
 }
 .avatar.assistant {
   background: linear-gradient(135deg, var(--accent), var(--coral));
@@ -1495,7 +1532,30 @@ pre {
   background: var(--bg-4);
   color: var(--info);
 }
+/* Redesign P6: message treatment — serif reading bodies (Daylight) + a
+ * per-theme bubble for user turns and a card for assistant turns, driven by
+ * the --msg-* tokens. Code/pre keep mono (their own rules win); the role label
+ * stays in the UI face. The card's balance against nested tool/thinking blocks
+ * is a likely review-tweak target. */
+.msg.user .msg-body,
+.msg.assistant .msg-body {
+  font-family: var(--font-reading);
+  border-radius: var(--radius-lg);
+  padding: 10px 14px;
+}
+.msg.user .msg-body {
+  background: var(--msg-user-bg);
+  color: var(--msg-user-fg);
+  border: 1px solid var(--msg-user-border);
+  box-shadow: var(--msg-user-shadow);
+}
+.msg.assistant .msg-body {
+  background: var(--msg-asst-bg);
+  border: 1px solid var(--msg-asst-border);
+  box-shadow: var(--msg-asst-shadow);
+}
 .msg .role {
+  font-family: var(--font-ui);
   font-size: var(--t-sm);
   font-weight: 600;
   color: var(--fg-1);
@@ -1833,7 +1893,7 @@ pre {
   align-items: center;
   gap: 6px;
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
   border: 0;
   border-radius: var(--r-sm);
   padding: 0 16px;
