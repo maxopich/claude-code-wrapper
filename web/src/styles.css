@@ -780,6 +780,21 @@ pre {
   width: 100%;
 }
 
+/* Inspector multi variant (Phase 4): MultiAgentTab portals its
+ * SessionSettingsPanel into this slot. Empty during draft / no active run.
+ * Fitting the portaled panel snugly to the 320px rail is a Phase 6 polish
+ * task; here it just needs to be present + readable. */
+.insp-multi-slot {
+  min-height: 40px;
+}
+.insp-multi-slot:empty::before {
+  content: 'No active run. Start one to see its session settings here.';
+  display: block;
+  font-size: var(--t-sm);
+  color: var(--fg-3);
+  line-height: 1.55;
+}
+
 /* PR-3: ultra-wide cap. Stops the app from flowing edge-to-edge on
  * 2K / 4K monitors; the chat reading column (capped at 90ch by
  * `.chat` padding) drifts to the right edge otherwise. */

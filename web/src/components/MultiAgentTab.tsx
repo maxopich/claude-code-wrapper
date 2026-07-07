@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { CSSProperties } from 'react';
 import type {
   ControlReasonCode,
@@ -1530,6 +1531,19 @@ function ActiveRunView(props: {
   // short pulse so it reads as "this is the row I just jumped to".
   const [highlightedEventId, setHighlightedEventId] = useState<number | null>(null);
 
+  // Redesign Phase 4: the SessionSettingsPanel is portaled into the right-hand
+  // inspector's `multi` variant (App renders the `#inspector-multi-slot`
+  // target). Portaling relocates only its DOM — it stays a child of
+  // ActiveRunView in the React tree, so highlightedEventId/jumpToEvent still
+  // couple the routing trail to the scrollback with no prop-threading. A
+  // layout effect (runs after the whole commit's DOM is in place) resolves the
+  // slot; if it's ever absent the panel falls back to rendering inline, so the
+  // relocation can never break the run view.
+  const [inspSlot, setInspSlot] = useState<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    setInspSlot(document.getElementById('inspector-multi-slot'));
+  });
+
   // Cluster H D8: client-only kind filter for the scrollback. State holds the
   // currently *hidden* kinds (empty = everything visible) — matches the
   // useLogFilters convention so the same mental model applies to both the
@@ -1584,43 +1598,53 @@ function ActiveRunView(props: {
         </p>
       )}
 
-      <SessionSettingsPanel
-        run={run}
-        projects={props.projects}
-        canEdit={isRunning && isOrchestrator}
-        // A paused run (R-B awaiting Continue, a worker-failure pending
-        // retry, or a pause-on-first-mutation gate) isn't actually executing —
-        // show no fake activity until the operator resolves the banner.
-        activeAgent={
-          run.awaitingContinue || run.pendingRetry || run.pendingMutation ? null : activeAgent(run)
-        }
-        onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
-        onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
-        onMuteParticipant={(projectId, reasonCode, reasonText) =>
-          props.onMuteParticipant(run.sessionId, projectId, reasonCode, reasonText)
-        }
-        onUnmuteParticipant={(projectId, reasonCode, reasonText) =>
-          props.onUnmuteParticipant(run.sessionId, projectId, reasonCode, reasonText)
-        }
-        onPauseParticipant={(projectId, reasonCode, reasonText, timeoutMs, expiryAction) =>
-          props.onPauseParticipant(
-            run.sessionId,
-            projectId,
-            reasonCode,
-            reasonText,
-            timeoutMs,
-            expiryAction,
-          )
-        }
-        onResumeParticipant={(projectId, reasonCode, reasonText) =>
-          props.onResumeParticipant(run.sessionId, projectId, reasonCode, reasonText)
-        }
-        onKickParticipant={(projectId, reasonCode, reasonText, mode) =>
-          props.onKickParticipant(run.sessionId, projectId, reasonCode, reasonText, mode)
-        }
-        highlightedEventId={highlightedEventId}
-        onJump={jumpToEvent}
-      />
+      {(() => {
+        const settingsPanel = (
+          <SessionSettingsPanel
+            run={run}
+            projects={props.projects}
+            canEdit={isRunning && isOrchestrator}
+            // A paused run (R-B awaiting Continue, a worker-failure pending
+            // retry, or a pause-on-first-mutation gate) isn't actually
+            // executing — show no fake activity until the operator resolves the
+            // banner.
+            activeAgent={
+              run.awaitingContinue || run.pendingRetry || run.pendingMutation
+                ? null
+                : activeAgent(run)
+            }
+            onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
+            onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
+            onMuteParticipant={(projectId, reasonCode, reasonText) =>
+              props.onMuteParticipant(run.sessionId, projectId, reasonCode, reasonText)
+            }
+            onUnmuteParticipant={(projectId, reasonCode, reasonText) =>
+              props.onUnmuteParticipant(run.sessionId, projectId, reasonCode, reasonText)
+            }
+            onPauseParticipant={(projectId, reasonCode, reasonText, timeoutMs, expiryAction) =>
+              props.onPauseParticipant(
+                run.sessionId,
+                projectId,
+                reasonCode,
+                reasonText,
+                timeoutMs,
+                expiryAction,
+              )
+            }
+            onResumeParticipant={(projectId, reasonCode, reasonText) =>
+              props.onResumeParticipant(run.sessionId, projectId, reasonCode, reasonText)
+            }
+            onKickParticipant={(projectId, reasonCode, reasonText, mode) =>
+              props.onKickParticipant(run.sessionId, projectId, reasonCode, reasonText, mode)
+            }
+            highlightedEventId={highlightedEventId}
+            onJump={jumpToEvent}
+          />
+        );
+        // Relocate into the inspector's multi slot when present; otherwise
+        // render inline (safe fallback — the panel always appears somewhere).
+        return inspSlot ? createPortal(settingsPanel, inspSlot) : settingsPanel;
+      })()}
 
       <section className="multi-agent-section">
         <h3>Scrollback</h3>

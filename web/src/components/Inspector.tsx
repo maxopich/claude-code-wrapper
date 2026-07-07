@@ -49,10 +49,17 @@ export function Inspector(props: {
           <span className="insp-title">{meta.title}</span>
         </div>
         <div className="insp-body">
-          {props.children ?? (
-            <p className="insp-empty">
-              Session settings and workspace changes surface here as this view fills in.
-            </p>
+          {props.view === 'chat' ? (
+            (props.children ?? (
+              <p className="insp-empty">
+                Open a session to see its authority, model, and turn budget here.
+              </p>
+            ))
+          ) : (
+            // multi-agent / chained-chat: MultiAgentTab's ActiveRunView portals
+            // its SessionSettingsPanel into this slot (redesign Phase 4). Empty
+            // in draft / no-run → the CSS `:empty` placeholder shows through.
+            <div id="inspector-multi-slot" className="insp-multi-slot" />
           )}
         </div>
       </div>
