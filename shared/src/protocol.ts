@@ -585,6 +585,16 @@ export type ClientMsg =
        */
       pauseOnDangerous?: boolean;
       /**
+       * Opt-in to "Execute mode" (orchestrator mode only): flips worker
+       * briefings from consultant (analyze-only) to execute, letting each
+       * worker create/modify/delete files WITHIN ITS OWN PROJECT FOLDER to do
+       * the work. Writes outside a worker's own folder stay discouraged +
+       * flagged post-hoc (advisory, not hard-blocked). Default `false` (the
+       * safe consultant posture). Persists in
+       * `multi_agent_sessions.execute_mode`; survives R-B.
+       */
+      executeMode?: boolean;
+      /**
        * PR-7: id of the saved template this run was started FROM, if any.
        * The server stamps it onto `multi_agent_sessions.template_id` so the
        * "Last run" rail can SELECT by template at list time. Absent for
@@ -1883,6 +1893,16 @@ export type ServerMsg =
        * banner reappears on reconstruct if a pause was pending.
        */
       pauseOnDangerous: boolean;
+      /**
+       * Execute-mode flag for this session (`multi_agent_sessions.execute_mode`).
+       * Set by the operator at session start; when true, orchestrator-mode
+       * workers may make changes within their own project folder. Survives R-B.
+       * Drives the running-session "Execute mode" banner in place of the
+       * consultant-mode banner. Optional on the wire (the server always sends
+       * it; the reducer defaults absent → `false`) so pre-execute-mode message
+       * fixtures/producers keep type-checking.
+       */
+      executeMode?: boolean;
       /**
        * True once the operator has clicked Continue on a pause-on-dangerous
        * banner at least once during this session (or set explicitly on

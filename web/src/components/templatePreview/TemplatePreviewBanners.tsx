@@ -153,7 +153,31 @@ export function CustomModeBanner() {
  * banner sits below in the stack since it's the higher-severity signal).
  * Non-dismissible — the guardrail is always-on for the entire session.
  */
-export function ConsultantModeBanner() {
+export function ConsultantModeBanner({ executeMode = false }: { executeMode?: boolean } = {}) {
+  if (executeMode) {
+    return (
+      <SessionBanner
+        id="consultant-mode-banner"
+        tier="info"
+        glyph="ⓘ"
+        title="Execute mode"
+        body={
+          <>
+            Workers in this orchestrator session may <strong>make changes</strong>: each agent can
+            create, modify, or delete files <strong>within its own project folder</strong> to do the
+            work, not just advise. They must <strong>not</strong> modify, create, or delete files in
+            any other directory. The constraint is advisory (relayed in the prompt to each agent)
+            and out-of-folder writes are flagged post-hoc; there's no server-side enforcement.
+          </>
+        }
+        role="status"
+        ariaLive="off"
+        classStem="tpl-banner"
+        compatClass="is-info"
+        stealsFocus={false}
+      />
+    );
+  }
   return (
     <SessionBanner
       id="consultant-mode-banner"

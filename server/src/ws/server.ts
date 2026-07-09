@@ -2102,6 +2102,7 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   // pending-retry hydration above.
   const sessionRow = getMultiAgentSession(resumed.handle.sessionId);
   const pauseOnDangerous = sessionRow?.pause_on_dangerous === 1;
+  const executeMode = sessionRow?.execute_mode === 1;
   const mutationsAcknowledged = sessionRow?.mutations_acknowledged === 1;
   const mutationsList = listMultiAgentMutations(resumed.handle.sessionId);
   const pendingMutationRow = getPendingMutation(resumed.handle.sessionId);
@@ -2137,6 +2138,7 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     awaitingContinue,
     ...(pendingRetry ? { pendingRetry } : {}),
     pauseOnDangerous,
+    executeMode,
     mutationsAcknowledged,
     mutations,
     ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
@@ -3538,6 +3540,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             sendServerMsg,
             hopBudget,
             pauseOnDangerous: msg.pauseOnDangerous === true,
+            // Execute mode (orchestrator only): flips worker briefings from
+            // consultant to "may change your own project". Persisted + survives R-B.
+            executeMode: msg.executeMode === true,
             // PR-7: stamp template provenance onto the row so the rail can
             // SELECT by template post-teardown. Absent on ad-hoc runs.
             templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
@@ -3562,6 +3567,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             // ack flag false. `pauseOnDangerous` echoes the operator's choice
             // so the UI mirrors its own setup checkbox.
             pauseOnDangerous: handle.pauseOnDangerous,
+            executeMode: handle.executeMode,
             mutationsAcknowledged: false,
             mutations: [],
             ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
@@ -3629,6 +3635,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           sessionFolder: handle.sessionFolder,
           hopBudget: handle.hopBudget,
           pauseOnDangerous: handle.pauseOnDangerous,
+          // Execute mode is orchestrator-only (chain briefings have no
+          // consultant clause to relax) — always false for chain sessions.
+          executeMode: false,
           mutationsAcknowledged: false,
           mutations: [],
           ...(chainRow?.mock === 1 ? { mock: true } : {}),

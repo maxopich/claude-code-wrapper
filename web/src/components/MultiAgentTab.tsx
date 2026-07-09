@@ -130,6 +130,8 @@ export function MultiAgentTab(props: {
   onClearAutoRetry: () => void;
   /** Item #5: setup-screen toggle for pause-on-first-mutation. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
+  /** Setup-screen toggle for Execute mode (orchestrator only). */
+  onSetDraftExecuteMode: (value: boolean) => void;
   /**
    * Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input.
    * Forwarded to the matching `ma_set_draft_hop_budget` action; null
@@ -275,6 +277,8 @@ function DraftView(props: {
   onSetDraftPrompt: (text: string) => void;
   /** Item #5: setup-screen toggle for pause-on-first-mutation. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
+  /** Setup-screen toggle for Execute mode (orchestrator only). */
+  onSetDraftExecuteMode: (value: boolean) => void;
   /** Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input. */
   onSetDraftHopBudget: (value: number | null) => void;
   /** Cluster F Phase D9: server-resolved default for input placeholder. */
@@ -379,7 +383,7 @@ function DraftView(props: {
             mode's renderChainBriefing has no equivalent constraint, so
             we don't render the banner there — surfacing it would mislead
             operators about a guardrail that doesn't exist. */}
-        {isOrch && <ConsultantModeBanner />}
+        {isOrch && <ConsultantModeBanner executeMode={multiAgent.draftExecuteMode} />}
         <header className="multi-agent-header">
           <h2>{isOrch ? 'Multi-Agent' : 'Chained Chat'}</h2>
           <p className="multi-agent-subtitle">
@@ -583,6 +587,28 @@ function DraftView(props: {
             />
             Pause before a worker runs a dangerous command
           </label>
+          {/* Execute mode opt-in — orchestrator only (chain has no consultant
+              mode to relax). Off by default: sessions advise unless the operator
+              opts in. Turning it on also arms pause-on-dangerous as a safety
+              pairing (still independently uncheckable). */}
+          {isOrch && (
+            <label
+              className="ma-pause-mutation-checkbox"
+              title="By default an orchestrator session is consultant-only: workers analyze and advise but don't change files. Enable this to let each worker create, modify, or delete files WITHIN ITS OWN PROJECT FOLDER to actually do the work. Writes outside a worker's own folder are still discouraged and flagged after the fact — this is advisory (relayed in the prompt), not a hard block."
+            >
+              <input
+                type="checkbox"
+                checked={multiAgent.draftExecuteMode}
+                onChange={(e) => {
+                  props.onSetDraftExecuteMode(e.target.checked);
+                  // Safety pairing: arm pause-on-dangerous when enabling execute
+                  // mode so a worker's first dangerous command still stops for you.
+                  if (e.target.checked) props.onSetDraftPauseOnDangerous(true);
+                }}
+              />
+              Let agents make changes in their own project (execute mode)
+            </label>
+          )}
           {/* Cluster F Phase D9 (UI-D9): per-run hop-budget override. The
               wire was complete (start_multi_agent.hopBudget + template
               field + resolver precedence) but no UI input existed. This
@@ -2217,6 +2243,17 @@ function SessionSettingsPanel(props: {
           </>
         )}
 
+        {run.mode === 'orchestrator' && (
+          <>
+            <dt>Agent mode</dt>
+            <dd>
+              {run.executeMode
+                ? 'Execute · workers may change their own project'
+                : 'Consultant · analyze and advise only'}
+            </dd>
+          </>
+        )}
+
         <dt>Session folder</dt>
         <dd>
           <code>{run.sessionFolder}</code>
@@ -2627,7 +2664,7 @@ export function MultiAgentActivityBar(props: {
        *  surfacing the chip there would misrepresent agent posture. Trails
        *  the controls counter so the bar reads capacity → activity →
        *  exceptions → controls → guardrail. */}
-      {run.mode === 'orchestrator' && <ConsultantModeChip />}
+      {run.mode === 'orchestrator' && <ConsultantModeChip executeMode={run.executeMode} />}
     </div>
   );
 }

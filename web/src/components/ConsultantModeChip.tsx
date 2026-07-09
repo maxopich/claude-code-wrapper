@@ -21,7 +21,26 @@
  * Geometry mirrors `ma-hop-budget-chip` / `ma-mutations-chip` so the
  * activity-bar lines up visually with the existing chip family.
  */
-export function ConsultantModeChip() {
+export function ConsultantModeChip({ executeMode = false }: { executeMode?: boolean } = {}) {
+  if (executeMode) {
+    return (
+      <span
+        className="ma-consultant-chip"
+        aria-label="Execute mode: agents may change their own project"
+        title={
+          'Execute mode is active for this orchestrator session. Each worker may ' +
+          'create, modify, or delete files within its own project folder to do the ' +
+          'work — but must not touch files in any other directory. The constraint is ' +
+          'advisory (the model interprets the prompt) and out-of-folder writes are ' +
+          'flagged post-hoc; there is no server-side enforcement. See the banner at ' +
+          'the top of the session for full detail.'
+        }
+      >
+        <span aria-hidden="true">ⓘ</span>
+        Execute
+      </span>
+    );
+  }
   return (
     <span
       className="ma-consultant-chip"

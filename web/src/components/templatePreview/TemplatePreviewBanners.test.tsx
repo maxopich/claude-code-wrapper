@@ -210,4 +210,14 @@ describe('ConsultantModeBanner', () => {
     // SessionBanner wrapper attaches it on the root. This pins the value.
     expect(el?.id).toBe('consultant-mode-banner');
   });
+
+  test('executeMode variant retitles to "Execute mode" and states the own-folder rule', () => {
+    act(() => root.render(<ConsultantModeBanner executeMode />));
+    expect(container.querySelector('.tpl-banner-title')?.textContent).toBe('Execute mode');
+    const body = container.querySelector('.tpl-banner-body');
+    expect(body?.textContent).toMatch(/within its own project folder/i);
+    expect(body?.textContent).toMatch(/advisory/i);
+    // Same stable id so the banner stack still dedupes across a mode flip.
+    expect(container.querySelector('.tpl-banner')?.id).toBe('consultant-mode-banner');
+  });
 });
