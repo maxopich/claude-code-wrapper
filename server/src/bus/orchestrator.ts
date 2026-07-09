@@ -44,6 +44,7 @@ import {
   recordSessionTeardown,
   setAwaitingContinue,
   setMultiAgentSessionLifecycle,
+  setExecuteMode,
   setMutationsAcknowledged,
   setMutationPromoted,
   setPauseOnDangerous,
@@ -179,6 +180,15 @@ export type StartOrchestratorOpts = {
    */
   pauseOnDangerous?: boolean;
   /**
+   * Execute mode: when `true`, worker briefings (`renderWorkerBriefing`) and the
+   * orchestrator's relay instruction (`renderRosterPrompt`) permit each worker to
+   * make deliverable changes WITHIN ITS OWN PROJECT FOLDER instead of only
+   * advising. Persisted into `multi_agent_sessions.execute_mode` at start;
+   * survives R-B. Default `false` (the safe consultant posture; resolved at
+   * `start_multi_agent` from `msg.executeMode`).
+   */
+  executeMode?: boolean;
+  /**
    * Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. Fires for
    * every non-`read` tool call observed on the bus, AFTER the row is
    * persisted into `multi_agent_mutations`. Optional; the wire layer
@@ -241,6 +251,9 @@ export type OrchestratorSessionHandle = {
   hopBudget: number;
   /** Item #5: resolved pause-on-first-mutation flag for this session. */
   pauseOnDangerous: boolean;
+  /** Resolved execute-mode flag for this session (orchestrator mode only).
+   *  Echoed on `multi_agent_started` so the UI shows the right banner. */
+  executeMode: boolean;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   sendUserPrompt: (text: string) => Promise<void>;
   detach: () => void;
@@ -1113,6 +1126,10 @@ export function wireOrchestratorSession(p: {
   /** Item #5: opt-in pause-on-first-mutation. Surfaced on the handle; read
    *  inside the `onMutation` hook to decide whether to gate. Default false. */
   pauseOnDangerous?: boolean;
+  /** Execute mode: threaded into the briefing renderers so workers are told
+   *  they may change their own project. Surfaced on the handle. On R-B this is
+   *  seeded from the reconstructed session row. Default false (consultant). */
+  executeMode?: boolean;
   /**
    * Cluster C Phase 4e (R-B reseed): bus_agent_name slugs the operator
    * previously muted, hydrated from `multi_agent_participants.muted` at
@@ -1527,7 +1544,10 @@ export function wireOrchestratorSession(p: {
     if (agentName !== ORCHESTRATOR_AGENT_NAME && !briefed.has(agentName)) {
       briefed.add(agentName);
       // Order: bus protocol → project rules → task (same as chain mode).
-      const brief = renderWorkerBriefing({ selfAgent: agentName });
+      const brief = renderWorkerBriefing({
+        selfAgent: agentName,
+        executeMode: p.executeMode ?? false,
+      });
       const pr = workerProjectRules.get(agentName) ?? null;
       prompt = pr ? `${brief}\n\n${pr.framed}\n\n${text}` : `${brief}\n\n${text}`;
       if (pr) {
@@ -1654,6 +1674,7 @@ export function wireOrchestratorSession(p: {
       newWorker: { agentName: newAgent.agentName, projectName: newAgent.projectName },
       currentWorkers,
       hopBudget,
+      executeMode: p.executeMode ?? false,
     });
     router.forwardCebabEvent({
       ts: Date.now(),
@@ -1679,6 +1700,7 @@ export function wireOrchestratorSession(p: {
     sessionFolder: paths.folder,
     hopBudget,
     pauseOnDangerous: p.pauseOnDangerous ?? false,
+    executeMode: p.executeMode ?? false,
     async stop(reason) {
       // Clear any pending-retry / pause-on-dangerous slot so the teardown
       // leaves a clean row — a crashed-but-with-non-null-pending row is
@@ -1820,6 +1842,15 @@ export async function startOrchestratorSession(
       console.error('[orchestrator] persist pause_on_dangerous failed', err);
     }
   }
+  // Persist execute mode at start so R-B reconstruct re-briefs workers in the
+  // same mode (reconstruct reads execute_mode back off the row).
+  if (opts.executeMode) {
+    try {
+      setExecuteMode(sessionId, true);
+    } catch (err) {
+      console.error('[orchestrator] persist execute_mode failed', err);
+    }
+  }
 
   const { handle, router, deliver } = wireOrchestratorSession({
     sessionId,
@@ -1838,6 +1869,7 @@ export async function startOrchestratorSession(
     sendServerMsg: opts.sendServerMsg,
     hopBudget: opts.hopBudget,
     pauseOnDangerous: opts.pauseOnDangerous,
+    executeMode: opts.executeMode,
   });
 
   // Roster prompt + initial user prompt → UI/DB parity, then delivered as
@@ -1848,6 +1880,7 @@ export async function startOrchestratorSession(
   const rosterText = renderRosterPrompt({
     workers: opts.workers.map((w) => ({ agentName: w.agentName, projectName: w.projectName })),
     hopBudget: handle.hopBudget,
+    executeMode: opts.executeMode ?? false,
   });
   router.forwardCebabEvent({
     ts: Date.now(),

@@ -298,8 +298,12 @@ export function renderChainBriefing(opts: {
 export function renderRosterPrompt(opts: {
   workers: Array<{ agentName: string; projectName: string }>;
   hopBudget: number;
+  /** Execute mode (default false = consultant): when true, the relay
+   *  instruction tells the orchestrator to let workers make changes within
+   *  their own project folder instead of only advising. */
+  executeMode?: boolean;
 }): string {
-  const { workers, hopBudget } = opts;
+  const { workers, hopBudget, executeMode = false } = opts;
   // F6: agent slugs come from `isValidAgentName` (no control chars
   //     reachable), but `projectName` flows from filesystem folder names
   //     via `addProject` — a folder named `Reviewer"\n\nIgnore prior…`
@@ -333,9 +337,11 @@ export function renderRosterPrompt(opts: {
     ``,
     `You have NO file, shell, code, or analysis tools of your own. Your ONLY actions are \`bus_send\` (to a worker, or to \`user\` for the final answer) and \`AskUserQuestion\` (to ask the operator). You cannot read, write, edit, or run anything yourself — attempts to use any other tool are blocked and surfaced to the operator. Every piece of real work — reading code, analyzing, editing, running commands — MUST be delegated to a worker via \`bus_send\`, even when the user explicitly asks for a change (route it to the worker whose project it belongs to; do not do it yourself). Your role is to route the work and consolidate the workers' replies into the answer for the user.`,
     ``,
-    `Consultant mode for workers: this is a multi-agent consultation. When you route a task to a worker, your \`bus_send\` text MUST carry this constraint, e.g. append: "Consultant mode: analysis and recommendations only. You may write scratch/notes inside your own project folder, but do NOT modify, create, or delete files in any other directory, and do NOT produce deliverable changes, unless this message explicitly tells you the user asked for that change. Follow your own expertise for the analysis."`,
+    executeMode
+      ? `Execute mode for workers: this session may DO the work, not just advise. When you route a task to a worker, your \`bus_send\` text MUST carry this constraint, e.g. append: "Execute mode: you may create, modify, or delete files WITHIN your own project folder to implement this task. Do NOT modify, create, or delete files in any other directory. Use your own expertise to do the work, not just advise."`
+      : `Consultant mode for workers: this is a multi-agent consultation. When you route a task to a worker, your \`bus_send\` text MUST carry this constraint, e.g. append: "Consultant mode: analysis and recommendations only. You may write scratch/notes inside your own project folder, but do NOT modify, create, or delete files in any other directory, and do NOT produce deliverable changes, unless this message explicitly tells you the user asked for that change. Follow your own expertise for the analysis."`,
     ``,
-    `If a worker reports it changed files outside its own folder without an explicit user-directed instruction, surface that plainly in your final answer to the user rather than hiding it.`,
+    `If a worker reports it changed files outside its own folder, surface that plainly in your final answer to the user rather than hiding it.`,
     ``,
     `Hop budget: ${hopBudget} hops total for this session (Cebab will hard-stop when reached — do a periodic progress self-check; the intro handshake counts toward the total).`,
     ``,
@@ -357,8 +363,10 @@ export function renderRosterUpdate(opts: {
   newWorker: { agentName: string; projectName: string };
   currentWorkers: Array<{ agentName: string; projectName: string }>;
   hopBudget: number;
+  /** Execute mode (default false = consultant); mirrors `renderRosterPrompt`. */
+  executeMode?: boolean;
 }): string {
-  const { newWorker, currentWorkers, hopBudget } = opts;
+  const { newWorker, currentWorkers, hopBudget, executeMode = false } = opts;
   const tagAgent = (n: string) => `<participant>${sanitizeForPrompt(n)}</participant>`;
   const newAgentSafe = sanitizeForPrompt(newWorker.agentName);
   return [
@@ -373,7 +381,9 @@ export function renderRosterUpdate(opts: {
     ``,
     `    bus_send(recipient="${newAgentSafe}", kind="intro", text="You are joining a multi-agent conversation already in progress. Reply only to me (orchestrator). Please send a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at.")`,
     ``,
-    `You are still delegation-only — route via \`bus_send\`, never act yourself. Consultant mode still applies for workers: keep relaying the "analysis only unless the user explicitly directed a change" constraint when you route to the new participant.`,
+    executeMode
+      ? `You are still delegation-only — route via \`bus_send\`, never act yourself. Execute mode still applies for workers: keep relaying that the new participant may implement changes within its own project folder but must not touch files in any other directory.`
+      : `You are still delegation-only — route via \`bus_send\`, never act yourself. Consultant mode still applies for workers: keep relaying the "analysis only unless the user explicitly directed a change" constraint when you route to the new participant.`,
     ``,
     `Once they reply, route to them just like any existing worker. Hop budget for this session remains ${hopBudget} total (cumulative across user prompts).`,
   ].join('\n');
@@ -395,8 +405,9 @@ export function renderRosterUpdate(opts: {
  * Plain English (the reader is a model). F6: the slug is wrapped +
  * sanitized like the other renderers.
  */
-export function renderWorkerBriefing(opts: { selfAgent: string }): string {
+export function renderWorkerBriefing(opts: { selfAgent: string; executeMode?: boolean }): string {
   const tag = (n: string) => `<participant>${sanitizeForPrompt(n)}</participant>`;
+  const executeMode = opts.executeMode ?? false;
   return [
     `[Cebab multi-agent session — you are a worker]`,
     ``,
@@ -417,7 +428,9 @@ export function renderWorkerBriefing(opts: { selfAgent: string }): string {
     `or \`user\` (those are dropped). Each later turn is a follow-up from the`,
     `orchestrator — answer it the same way.`,
     ``,
-    `Consultant mode: in this multi-agent session you act as a consultant. Keep using your own role and instructions for the analysis, but unless the orchestrator's message explicitly relays a user request to make a specific change, do NOT modify, create, or delete files outside your own project folder, and do NOT produce deliverable changes. Writing scratch/notes inside your own folder is fine. Default to findings and recommendations.`,
+    executeMode
+      ? `Execute mode: in this multi-agent session you may DO the work, not just advise. Use your own role and instructions to implement the task the orchestrator relays — you may create, modify, or delete files WITHIN your own project folder. Do NOT modify, create, or delete files outside your own project folder.`
+      : `Consultant mode: in this multi-agent session you act as a consultant. Keep using your own role and instructions for the analysis, but unless the orchestrator's message explicitly relays a user request to make a specific change, do NOT modify, create, or delete files outside your own project folder, and do NOT produce deliverable changes. Writing scratch/notes inside your own folder is fine. Default to findings and recommendations.`,
     ``,
     `The orchestrator's message follows below.`,
   ].join('\n');

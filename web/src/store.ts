@@ -307,6 +307,10 @@ export type MultiAgentRun = {
    *  the operator's choice at session start. UI surfaces it as a read-only
    *  row in Session info (the toggle itself lives in setup). */
   pauseOnDangerous: boolean;
+  /** Execute mode for this session (orchestrator only). When true, workers may
+   *  change their own project; drives the "Execute mode" banner/chip in place
+   *  of the consultant-mode one. Mirrored from `multi_agent_started`. */
+  executeMode: boolean;
   /** Item #5: true once the operator has clicked Continue at least once.
    *  When true, subsequent mutations auto-allow. Mirrored from server. */
   mutationsAcknowledged: boolean;
@@ -548,6 +552,9 @@ export type MultiAgentState = {
    *  during the session draft; sent on `start_multi_agent` as
    *  `pauseOnDangerous`. Default false; the operator opts in explicitly. */
   draftPauseOnDangerous: boolean;
+  /** Setup-screen opt-in for Execute mode (orchestrator only). Sent on
+   *  `start_multi_agent` as `executeMode`. Default false (consultant). */
+  draftExecuteMode: boolean;
   /** Non-null while a chain (or future orchestrator session) is running, and
    *  until the operator dismisses it. */
   active: MultiAgentRun | null;
@@ -869,6 +876,7 @@ export const initialState: AppState = {
     draftParticipants: [],
     draftPrompt: '',
     draftPauseOnDangerous: false,
+    draftExecuteMode: false,
     active: null,
     iterations: null,
     templates: null,
@@ -939,6 +947,7 @@ export type Action =
   | { type: 'ma_reorder_participant'; projectId: number; direction: 'up' | 'down' }
   | { type: 'ma_set_draft_prompt'; text: string }
   | { type: 'ma_set_draft_pause_on_dangerous'; value: boolean }
+  | { type: 'ma_set_draft_execute_mode'; value: boolean }
   /**
    * Cluster F Phase D9 (D9-1..D9-4): operator sets the hop budget override
    * for the next start. `value === null` clears it (input cleared → server
@@ -1223,6 +1232,12 @@ export function reduce(state: AppState, action: Action): AppState {
       return {
         ...state,
         multiAgent: { ...state.multiAgent, draftPauseOnDangerous: action.value },
+      };
+
+    case 'ma_set_draft_execute_mode':
+      return {
+        ...state,
+        multiAgent: { ...state.multiAgent, draftExecuteMode: action.value },
       };
 
     case 'ma_apply_template': {
@@ -1585,6 +1600,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // `multi_agent_started`. Always populated (server resolves and
             // sends `false` + `[]` for fresh starts; reads DB for R-A/R-B).
             pauseOnDangerous: msg.pauseOnDangerous,
+            // Execute mode (orchestrator only) — server sends false for chain
+            // and for consultant-mode orchestrator sessions. Default false if a
+            // pre-execute-mode server omits it.
+            executeMode: msg.executeMode ?? false,
             mutationsAcknowledged: msg.mutationsAcknowledged,
             mutations: msg.mutations,
             pendingMutation: msg.pendingMutation ?? null,

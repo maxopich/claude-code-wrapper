@@ -250,6 +250,10 @@ export function reconstructOrchestratorSession(
       // always DB-fresh inside `onMutationHook`; this is purely the handle's
       // self-report.
       pauseOnDangerous: row.pause_on_dangerous === 1,
+      // Re-seed execute mode from the persisted row so a worker briefed for the
+      // first time after the restart gets the same execute/consultant clause
+      // the session started with.
+      executeMode: row.execute_mode === 1,
       // Phase 4e: forward mute + kick seeds into the rebuilt router.
       initialMutedAgents,
       initialKickedAgents,

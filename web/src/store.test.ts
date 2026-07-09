@@ -875,6 +875,7 @@ describe('store / eventDefaultCollapsed', () => {
       hopBudget: 30,
       pendingRetry: null,
       pauseOnDangerous: false,
+      executeMode: false,
       mutationsAcknowledged: false,
       mutations: [],
       pendingMutation: null,
@@ -1305,6 +1306,17 @@ describe('store / pause-on-dangerous + mutations', () => {
     expect(s.multiAgent.active!.pendingMutation).toBeNull();
   });
 
+  test('multi_agent_started hydrates executeMode (and defaults to false when omitted)', () => {
+    const on = reduce(initialState, {
+      type: 'server',
+      msg: { ...baseStarted, executeMode: true },
+    });
+    expect(on.multiAgent.active!.executeMode).toBe(true);
+    // Omitted on the wire → safe consultant default.
+    const off = reduce(initialState, { type: 'server', msg: baseStarted });
+    expect(off.multiAgent.active!.executeMode).toBe(false);
+  });
+
   test('multi_agent_started with pendingMutation hydrates the banner (R-A/R-B)', () => {
     const pending = {
       id: 7,
@@ -1525,6 +1537,13 @@ describe('store / pause-on-dangerous + mutations', () => {
     expect(s.multiAgent.draftPauseOnDangerous).toBe(true);
     s = reduce(s, { type: 'ma_set_draft_pause_on_dangerous', value: false });
     expect(s.multiAgent.draftPauseOnDangerous).toBe(false);
+  });
+
+  test('ma_set_draft_execute_mode toggles setup-screen state', () => {
+    let s = reduce(initialState, { type: 'ma_set_draft_execute_mode', value: true });
+    expect(s.multiAgent.draftExecuteMode).toBe(true);
+    s = reduce(s, { type: 'ma_set_draft_execute_mode', value: false });
+    expect(s.multiAgent.draftExecuteMode).toBe(false);
   });
 });
 

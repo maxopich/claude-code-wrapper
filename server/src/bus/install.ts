@@ -11,9 +11,10 @@
  * scripts, no Stop hook, no chmod. The bus protocol reaches a worker via
  * the per-turn briefing Cebab prepends (`renderChainBriefing` /
  * `renderRosterPrompt`), and message transport is the in-process
- * `bus_send` tool injected by the AgentRunner at run time. Worker `claude`
- * sessions run with `settingSources: ['user']`, so a project settings.json
- * would never be read even if we wrote one.
+ * `bus_send` tool injected by the AgentRunner at run time. (Workers now run
+ * with `settingSources: ['user', 'project', 'local']`, so a worker DOES load
+ * its own project's `.claude/settings*.json` at run time — but Cebab still
+ * writes nothing into the project; it just doesn't suppress what's there.)
  *
  * This is the security + portability win of the rewrite: opting a project
  * into the bus can no longer change how that project's own `claude`

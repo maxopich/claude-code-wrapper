@@ -210,6 +210,20 @@ describe('renderRosterPrompt', () => {
     // The removed escape-hatch phrasing.
     expect(text).not.toContain('including you');
   });
+
+  test('executeMode flips the relay instruction from consultant to own-folder execute', () => {
+    const base = { workers: [{ agentName: 'reviewer', projectName: 'Reviewer' }], hopBudget: 8 };
+    const consultant = renderRosterPrompt(base);
+    const execute = renderRosterPrompt({ ...base, executeMode: true });
+    // Default relays consultant/analysis-only.
+    expect(consultant).toContain('Consultant mode for workers');
+    // Execute mode relays "change your own project folder only" instead.
+    expect(execute).not.toContain('Consultant mode for workers');
+    expect(execute).toContain('Execute mode for workers');
+    expect(execute).toContain('WITHIN your own project folder');
+    // The orchestrator itself stays delegation-only in both.
+    expect(execute).toContain('pure router');
+  });
 });
 
 describe('renderWorkerBriefing', () => {
@@ -231,6 +245,28 @@ describe('renderWorkerBriefing', () => {
     const text = renderWorkerBriefing({ selfAgent: 'reviewer' });
     expect(text).toContain('Consultant mode');
     expect(text).toContain('outside your own project folder');
+  });
+
+  test('defaults to consultant mode when executeMode is omitted or false', () => {
+    expect(renderWorkerBriefing({ selfAgent: 'reviewer' })).toContain('Consultant mode');
+    expect(renderWorkerBriefing({ selfAgent: 'reviewer', executeMode: false })).toContain(
+      'Consultant mode',
+    );
+  });
+
+  test('executeMode swaps the consultant clause for an own-folder execute clause', () => {
+    const text = renderWorkerBriefing({ selfAgent: 'reviewer', executeMode: true });
+    // The consultant analysis-only framing is gone...
+    expect(text).not.toContain('Consultant mode');
+    expect(text).not.toContain('Default to findings and recommendations');
+    // ...replaced by permission to change ONLY the worker's own project folder.
+    expect(text).toContain('Execute mode');
+    expect(text).toMatch(/within your own project folder/i);
+    expect(text).toContain(
+      'Do NOT modify, create, or delete files outside your own project folder',
+    );
+    // The bus-protocol wiring is unaffected.
+    expect(text).toMatch(/bus_send\(recipient="orchestrator", kind="reply"/);
   });
 });
 

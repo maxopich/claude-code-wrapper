@@ -108,6 +108,14 @@ export type MultiAgentSessionRow = {
    *  so a historical bus session still carries the MOCK tag long after
    *  the server has been restarted under live mode. */
   mock: number;
+  /** Migration 028: per-session "Execute mode" opt-in. 1 iff the operator
+   *  enabled the setup-screen checkbox at session start, which flips the
+   *  orchestrator-mode briefings from consultant (analyze-only) to execute
+   *  (workers may create/modify/delete files within their OWN project folder).
+   *  0 for every pre-028 row and every un-opted session (the safe consultant
+   *  default). Narrowed to boolean at the boundary. Orchestrator-mode only —
+   *  chain briefings have no consultant clause to relax. */
+  execute_mode: number;
 };
 
 /**
@@ -738,6 +746,15 @@ export function getMultiAgentMutation(id: number): MutationRecord | null {
 export function setPauseOnDangerous(sessionId: string, value: boolean): void {
   getDb()
     .prepare(`UPDATE multi_agent_sessions SET pause_on_dangerous = ? WHERE id = ?`)
+    .run(value ? 1 : 0, sessionId);
+}
+
+/** Persist the operator's setup-screen execute-mode choice (migration 028).
+ *  Idempotent. Set once at session start; read back on R-B reconstruct so a
+ *  post-restart session re-briefs workers in the same mode. */
+export function setExecuteMode(sessionId: string, value: boolean): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET execute_mode = ? WHERE id = ?`)
     .run(value ? 1 : 0, sessionId);
 }
 

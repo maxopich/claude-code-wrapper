@@ -238,6 +238,7 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
     workers: ResolvedAgent[],
     captured: Array<{ cwd: string; prompt: string }>,
     briefedAgents?: string[],
+    executeMode?: boolean,
   ) {
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
@@ -251,6 +252,7 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       briefedAgents,
+      executeMode,
       runnerFactory: fakeFactory(captured),
     });
   }
@@ -316,6 +318,37 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
     expect(turns[1]!.prompt).not.toContain('<project_claude_md>');
     expect(turns[1]!.prompt).toBe('turn two');
     expect(markers('coder')).toHaveLength(1);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test("executeMode=true briefs the worker's first turn with the own-folder execute clause", async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const coder = worker('coder', null);
+    const { deliver } = wire([coder], captured, undefined, true);
+
+    deliver('coder', 'implement the fix');
+    await flush();
+
+    const coderTurn = captured.find((c) => c.cwd === coder.cwd)!;
+    expect(coderTurn.prompt).toContain('Execute mode');
+    expect(coderTurn.prompt).toMatch(/within your own project folder/i);
+    expect(coderTurn.prompt).not.toContain('Consultant mode');
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('default (no executeMode) briefs the worker in consultant mode', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const coder = worker('coder', null);
+    const { deliver } = wire([coder], captured);
+
+    deliver('coder', 'look at the fix');
+    await flush();
+
+    const coderTurn = captured.find((c) => c.cwd === coder.cwd)!;
+    expect(coderTurn.prompt).toContain('Consultant mode');
+    expect(coderTurn.prompt).not.toContain('Execute mode');
 
     unregisterLiveSession(SESSION_ID);
   });

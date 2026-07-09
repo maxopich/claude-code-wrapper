@@ -1594,6 +1594,7 @@ function AppShell({
       draftPrompt,
       draftLifecycle,
       draftPauseOnDangerous,
+      draftExecuteMode,
       draftTemplateId,
       draftHopBudget,
     } = state.multiAgent;
@@ -1608,6 +1609,8 @@ function AppShell({
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
       pauseOnDangerous: draftPauseOnDangerous,
+      // Execute mode is orchestrator-only; consultant is the default.
+      executeMode: draftExecuteMode,
       ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
       ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
     });
@@ -1704,6 +1707,11 @@ function AppShell({
     // Item #5: setup-screen toggle. Persists only in client state until
     // `start_multi_agent` sends it as `pauseOnDangerous`.
     dispatch({ type: 'ma_set_draft_pause_on_dangerous', value });
+  }
+  function setDraftExecuteMode(value: boolean) {
+    // Setup-screen toggle (orchestrator only). Client state until
+    // `start_multi_agent` sends it as `executeMode`.
+    dispatch({ type: 'ma_set_draft_execute_mode', value });
   }
   function setDraftHopBudget(value: number | null) {
     // Cluster F Phase D9 (UI-D9): operator-typed hop-budget override.
@@ -2284,6 +2292,7 @@ function AppShell({
                   onAnswerQuestion={answerQuestion}
                   onClearAutoRetry={clearAutoRetry}
                   onSetDraftPauseOnDangerous={setDraftPauseOnDangerous}
+                  onSetDraftExecuteMode={setDraftExecuteMode}
                   onSetDraftHopBudget={setDraftHopBudget}
                   defaultHopBudget={state.settings?.defaultHopBudget ?? null}
                   onSetActiveLifecycle={setActiveLifecycle}
