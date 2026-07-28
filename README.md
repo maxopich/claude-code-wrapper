@@ -167,9 +167,17 @@ Worth knowing before you run one:
   you.
 - The orchestrator is **delegation-only**. It has no file, shell, or analysis
   tools at all; every blocked attempt is logged and shown to you.
-- Workers run in **consultant mode** by default — analysis and recommendations,
-  no edits outside their own project folder, unless your request explicitly asks
-  for a change.
+- In **orchestrator** mode, workers run in **consultant mode** by default —
+  analysis and recommendations, no edits outside their own project folder,
+  unless your request explicitly asks for a change. So an orchestrated session
+  advises by default rather than doing the work.
+- **Execute mode** is the opt-in that changes that: tick it at setup and workers
+  may create, modify and delete files **inside their own project folder**.
+  Writes outside it are still discouraged, and flagged afterwards rather than
+  blocked. Orchestrator mode only — **chain participants are never under
+  consultant mode in the first place**, so a chain session is the least
+  restricted way to run the bus. Enabling Execute mode auto-arms pause on
+  dangerous.
 - **Pause on dangerous** is an opt-in per-session toggle that halts a worker for
   your approval before anything classified dangerous (`rm`, `sudo`, force-push,
   `curl | sh`, writes to system/secret paths, and the Windows equivalents).
