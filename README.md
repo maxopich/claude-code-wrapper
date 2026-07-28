@@ -112,6 +112,10 @@ npm run smoke
 # WS protocol against mock server (start `MOCK=1 npm run dev:server` first)
 npm --workspace server exec tsx src/ws_smoke.ts
 
+# Same thing, self-contained: spawns the mock server, runs ws_smoke, tears down.
+# Pure Node, no shell — this is what CI runs on Linux and Windows alike.
+npm --workspace server exec tsx src/ci_smoke.ts
+
 # Live integration: spawns real claude, exercises permission + resume flows
 # (start `MOCK=0 npm run dev:server` first)
 PROJECT=Cebab npm --workspace server exec tsx src/live_smoke.ts
@@ -135,6 +139,57 @@ The "asks" / "trusted" toggle per project flips between `permissionMode:
 "default"` (every restricted tool prompts) and `"acceptEdits"` (file edits +
 common filesystem commands auto-approve). For a single-session override there's
 also an inline pill above the chat that flips the same modes mid-flight.
+
+## Multi-agent bus
+
+The **Multi-agent** tab runs several of your projects together in one session,
+in either of two modes:
+
+- **chain** — each participant takes a turn in a fixed order, passing context along
+- **orchestrator** — a router agent delegates to workers and consolidates their replies
+
+A project has to be opted in once via **Install bus** in that tab. That is pure
+database metadata: Cebab assigns the project a stable agent slug and marks it
+bus-eligible, and writes **nothing** into the project itself — no `CLAUDE.md`
+edit, no `.claude/settings.json` merge, no scripts, no hooks. The first install
+of any project asks for approval (trust-on-first-use) and the decision is
+remembered.
+
+Agents talk to each other through an in-process `bus_send` tool; there is no
+tmux, no shell scripts and no file IPC, which is why the bus behaves identically
+on all three OSes. Frequently used line-ups can be saved as **templates** and
+re-launched later.
+
+Worth knowing before you run one:
+
+- Bus agents run **headless** — tool calls are auto-approved, with no
+  human-in-the-loop for `Bash` or `Edit`. Only `AskUserQuestion` is surfaced to
+  you.
+- The orchestrator is **delegation-only**. It has no file, shell, or analysis
+  tools at all; every blocked attempt is logged and shown to you.
+- Workers run in **consultant mode** by default — analysis and recommendations,
+  no edits outside their own project folder, unless your request explicitly asks
+  for a change.
+- **Pause on dangerous** is an opt-in per-session toggle that halts a worker for
+  your approval before anything classified dangerous (`rm`, `sudo`, force-push,
+  `curl | sh`, writes to system/secret paths, and the Windows equivalents).
+  Ordinary edits and MCP calls are _not_ gated by it.
+- You can **mute**, **pause**, or **kick** any participant mid-run.
+
+Every trust decision, pause, kick, dangerous mutation, and guardrail violation
+is written to a hash-chained audit log in SQLite, which is verified on each boot.
+
+## Other things in the UI
+
+- **Appearance** — Settings has four color themes (`daylight` is the default).
+  It's a local display preference, stored in the browser, not on the server.
+- **Session search & archive** — search across past sessions, archive or delete
+  them in bulk, export a transcript, and see how much disk the local data uses.
+- **Artifacts** — during a multi-agent run, the files the agents actually
+  produced, with an opt-in "view latest content" (nothing is loaded until you
+  ask for it).
+- **Keyboard shortcuts** — press `?` for the full list; `/` opens the
+  slash-command palette.
 
 ## Contributing
 
