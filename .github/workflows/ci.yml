@@ -74,9 +74,19 @@ jobs:
       - name: Audit dependencies
         # Fails the job on high or critical advisories. Moderate/low are
         # reported but don't block — dependabot handles those on a weekly
-        # cadence. If a sustained `high` CVE has no fix yet, temporarily
-        # set `continue-on-error: true` here on a per-PR basis.
-        run: npm audit --audit-level=high
+        # cadence.
+        #
+        # Wraps `npm audit --json` rather than calling `npm audit
+        # --audit-level=high` directly, because npm has no per-advisory
+        # ignore: when one high advisory has no usable fix, the only
+        # native responses are to drop a whole severity band or to
+        # `continue-on-error` the entire gate. The wrapper reads the
+        # allowlist from osv-scanner.toml — the same file the OSV scan
+        # already honours — so an excused advisory is one dated, reasoned
+        # entry that both required checks respect, and everything else
+        # keeps blocking at full strength. An entry whose `ignoreUntil`
+        # has lapsed fails the job.
+        run: node scripts/audit-gate.mjs
 
       - name: Test
         run: npm test

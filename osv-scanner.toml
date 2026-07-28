@@ -1,51 +1,38 @@
-# Baseline ignore-list for OSV-Scanner. Matches the existing
-# `npm audit --audit-level=high` policy in ci.yml — medium/low advisories
-# are reported but don't block. Each entry has an `ignoreUntil` so this
-# file forces a re-evaluation in 3 months if Dependabot hasn't already
-# retired the entry by bumping the affected dep.
+# Shared advisory allowlist. Read by BOTH required security checks:
+#
+#   - the `OSV scan` workflow, natively (this is osv-scanner's own config)
+#   - the `Audit dependencies` step in ci.yml, via `scripts/audit-gate.mjs`
+#
+# npm audit has no per-advisory ignore of its own, so the gate script wraps
+# `npm audit --json` and applies these entries. That keeps one reviewable
+# place to excuse an advisory instead of two mechanisms with different
+# powers. Severity policy is unchanged: high/critical block, medium/low are
+# reported but don't. Each entry has an `ignoreUntil` so this file forces a
+# re-evaluation if Dependabot hasn't already retired the entry by bumping
+# the affected dep — and the date is enforced, not decorative: once it
+# lapses, the audit gate fails until the entry is fixed or re-dated.
 #
 # When Dependabot opens a PR to bump one of these packages past its
 # `FIXED VERSION`, REMOVE the entry rather than extending the date.
 #
-# Inventory captured at PR #39 (T2.2, 2026-05-14):
-#   @anthropic-ai/sdk 0.81.0 → 0.91.1
-#   hono              4.12.17 → 4.12.18
-#   ip-address        10.1.0 → 10.1.1
-#   brace-expansion   5.0.5  → 5.0.6   (added 2026-05-18, newly disclosed)
-#   qs                6.14.2 → 6.15.2  (added 2026-05-22, newly disclosed)
-# All transitives; no direct package.json change required.
+# OSV-Scanner fails the job on UNUSED ignores, so a stale entry breaks CI
+# just as loudly as an unignored vuln — prune this file in the same PR
+# that lands the fixing bump.
+#
+# Inventory refreshed 2026-07-28. The original PR #39 batch (T2.2,
+# 2026-05-14: @anthropic-ai/sdk, hono, ip-address, brace-expansion 5.0.5,
+# qs) was fully retired by upstream bumps and is removed here — all seven
+# entries had gone unused, which is what was failing the scan. The
+# lockfile bump in this same commit fixes body-parser 2.2.2 → 2.3.0,
+# fast-uri 3.1.2 → 3.1.4 and postcss 8.5.16 → 8.5.21. The two entries
+# below are what remains.
 
 [[IgnoredVulns]]
-id = "GHSA-p7fg-763f-g4gf"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "@anthropic-ai/sdk 0.81.0 (transitive of @anthropic-ai/claude-agent-sdk). Medium (CVSS 4.8). Fix in 0.91.1. Awaiting upstream bump."
+id = "GHSA-mh99-v99m-4gvg"
+ignoreUntil = "2026-08-07T00:00:00Z"
+reason = "brace-expansion 5.0.7 (dev, transitive of eslint → minimatch). High (CVSS 7.5, unbounded expansion → OOM crash). Fix in 5.0.8, published 2026-07-23 — the repo's .npmrc min-release-age=7 refuses to resolve it until 2026-07-30, so this is a ~38h supply-chain cooldown hold, not an unfixed CVE. Short date on purpose: drop this entry in the same PR that bumps to 5.0.8. Dev-only; not present in any shipped artifact."
 
 [[IgnoredVulns]]
-id = "GHSA-hm8q-7f3q-5f36"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "hono 4.12.17 (transitive). Medium (CVSS 3.8). Fix in 4.12.18."
-
-[[IgnoredVulns]]
-id = "GHSA-p77w-8qqv-26rm"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "hono 4.12.17 (transitive). Medium (CVSS 5.3). Fix in 4.12.18."
-
-[[IgnoredVulns]]
-id = "GHSA-qp7p-654g-cw7p"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "hono 4.12.17 (transitive). Medium (CVSS 4.3). Fix in 4.12.18."
-
-[[IgnoredVulns]]
-id = "GHSA-v2v4-37r5-5v8g"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "ip-address 10.1.0 (transitive). Medium (CVSS 5.3). Fix in 10.1.1."
-
-[[IgnoredVulns]]
-id = "GHSA-jxxr-4gwj-5jf2"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "brace-expansion 5.0.5 (dev, transitive). Medium (CVSS 6.5, ReDoS). Fix in 5.0.6. Disclosed 2026-05-18; awaiting Dependabot bump."
-
-[[IgnoredVulns]]
-id = "GHSA-q8mj-m7cp-5q26"
-ignoreUntil = "2026-08-22T00:00:00Z"
-reason = "qs 6.14.2 (transitive of express 5.2.1 → body-parser 2.2.2). Medium (CVSS 6.3). Fix in 6.15.2. Disclosed 2026-05-22; awaiting express upstream bump."
+id = "GHSA-frvp-7c67-39w9"
+ignoreUntil = "2026-10-28T00:00:00Z"
+reason = "@hono/node-server 1.19.14 (transitive of @modelcontextprotocol/sdk ← @anthropic-ai/claude-agent-sdk). Moderate (CVSS 5.9, serve-static path traversal on Windows via encoded backslash). The only npm-offered fix downgrades the agent SDK to 0.2.85 — a breaking change to the core runner — so we wait for the upstream bump instead. Cebab never mounts hono serve-static; the vulnerable code path is unreachable here."
