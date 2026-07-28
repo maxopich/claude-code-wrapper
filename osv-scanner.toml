@@ -1,8 +1,16 @@
-# Baseline ignore-list for OSV-Scanner. Matches the existing
-# `npm audit --audit-level=high` policy in ci.yml — medium/low advisories
-# are reported but don't block. Each entry has an `ignoreUntil` so this
-# file forces a re-evaluation in 3 months if Dependabot hasn't already
-# retired the entry by bumping the affected dep.
+# Shared advisory allowlist. Read by BOTH required security checks:
+#
+#   - the `OSV scan` workflow, natively (this is osv-scanner's own config)
+#   - the `Audit dependencies` step in ci.yml, via `scripts/audit-gate.mjs`
+#
+# npm audit has no per-advisory ignore of its own, so the gate script wraps
+# `npm audit --json` and applies these entries. That keeps one reviewable
+# place to excuse an advisory instead of two mechanisms with different
+# powers. Severity policy is unchanged: high/critical block, medium/low are
+# reported but don't. Each entry has an `ignoreUntil` so this file forces a
+# re-evaluation if Dependabot hasn't already retired the entry by bumping
+# the affected dep — and the date is enforced, not decorative: once it
+# lapses, the audit gate fails until the entry is fixed or re-dated.
 #
 # When Dependabot opens a PR to bump one of these packages past its
 # `FIXED VERSION`, REMOVE the entry rather than extending the date.
