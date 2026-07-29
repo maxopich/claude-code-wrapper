@@ -532,6 +532,43 @@ describe('startChainSession — project CLAUDE.md injection', () => {
     unregisterLiveSession(handle.sessionId);
   });
 
+  test('a completed chain turn bills the hop to the agent and the session', async () => {
+    // F7: before this, an N-agent run recorded no cost anywhere — the only
+    // capacity signal was the hop count, which weighs a 2k-token routing turn
+    // the same as a 180k-token analysis turn.
+    const workspace = path.join(tmpRoot, 'ws-cost');
+    fs.mkdirSync(workspace, { recursive: true });
+    function costFactory() {
+      return (): Runner => {
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield {
+            type: 'result',
+            subtype: 'success',
+            session_id: 's1',
+            total_cost_usd: 0.125,
+          } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      };
+    }
+    const handle = await startChainSession({
+      participants: [participant('cost-a', null), participant('cost-b', null)],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: costFactory(),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const rows = listAgentSessions(handle.sessionId);
+    expect(rows.map((r) => [r.agent_name, r.cost_usd])).toEqual([['cost-a', 0.125]]);
+    expect(getMultiAgentSession(handle.sessionId)!.total_cost_usd).toBeCloseTo(0.125, 10);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
   test('participant without a CLAUDE.md is briefed normally, no marker', async () => {
     const workspace = path.join(tmpRoot, 'ws2');
     fs.mkdirSync(workspace, { recursive: true });

@@ -4531,6 +4531,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
           hopsUsed: row.hops_used,
           hopBudget: row.hop_budget,
+          // F7. Sent only when > 0: a pre-029 row (or one whose hops all
+          // predate the column) has cost 0 because nothing was recorded, not
+          // because the run was free. Omitting lets the rail say "cost n/a"
+          // rather than assert "$0.0000".
+          ...(row.total_cost_usd > 0 ? { totalCostUsd: row.total_cost_usd } : {}),
           ...(row.first_error ? { firstError: row.first_error } : {}),
           ...(artifactsDir ? { artifactsDir } : {}),
         },

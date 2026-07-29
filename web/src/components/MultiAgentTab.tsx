@@ -1164,7 +1164,7 @@ function TemplatePreview(props: {
  *     <chip>" with a color-coded chip derived from
  *     (status, hopsUsed === hopBudget) per the decision-log table U2.
  */
-function TemplateLastRunRail(props: {
+export function TemplateLastRunRail(props: {
   template: MultiAgentTemplate;
   lastRun: TemplateLastRun | null | undefined;
 }) {
@@ -1205,6 +1205,22 @@ function TemplateLastRunRail(props: {
           {agoText}
         </span>
         <span className="tpl-preview-rail-hops">· {hopsText} hops ·</span>
+        {/* F7: hops alone are a poor capacity signal — they count a 2k-token
+         *  routing turn the same as a 180k-token analysis turn. `totalCostUsd`
+         *  is ABSENT (not 0) when the run predates cost accounting, so the
+         *  rail says "cost n/a" rather than claiming the run was free. */}
+        <span
+          className="tpl-preview-rail-cost"
+          title={
+            typeof lastRun.totalCostUsd === 'number'
+              ? 'Total spend across every participant in this run.'
+              : 'This run finished before Cebab recorded multi-agent cost, so its spend is unknown (not zero).'
+          }
+        >
+          {typeof lastRun.totalCostUsd === 'number'
+            ? `$${lastRun.totalCostUsd.toFixed(4)} ·`
+            : 'cost n/a ·'}
+        </span>
         <span className={`tpl-preview-rail-chip tpl-preview-rail-chip--${label.kind}`}>
           {label.text}
         </span>

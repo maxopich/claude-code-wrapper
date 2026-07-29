@@ -31,6 +31,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  addAgentCost,
   appendMultiAgentEvent,
   appendMultiAgentMutation,
   addParticipant,
@@ -1363,6 +1364,16 @@ export function wireOrchestratorSession(p: {
         upsertAgentSession(sessionId, agent, cli);
       } catch (err) {
         console.error('[orchestrator] persist agent session failed', err);
+      }
+    },
+    onTurnCost: (agent, costUsd) => {
+      // F7: accumulate the hop's cost per agent AND into the session total.
+      // Best-effort like every other persistence hook here — a DB hiccup must
+      // not abort the turn, it just loses that hop from the accounting.
+      try {
+        addAgentCost(sessionId, agent, costUsd);
+      } catch (err) {
+        console.error('[orchestrator] persist agent cost failed', err);
       }
     },
     onMutation: onMutationHook,

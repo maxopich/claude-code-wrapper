@@ -19,6 +19,8 @@ import { CEBAB_SOURCE, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import { registerLiveSession, unregisterLiveSession } from './session_registry.js';
 import {
   createMultiAgentSession,
+  getMultiAgentSession,
+  listAgentSessions,
   listMultiAgentEvents,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
@@ -466,6 +468,57 @@ describe('wireOrchestratorSession — agent_activity liveness wiring', () => {
       .map((c) => c[1] as { agentName: string; phase: string; currentTool?: string })
       .find((s) => s.phase === 'working');
     expect(working).toMatchObject({ agentName: 'coder', currentTool: 'Bash' });
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('F7: a delivered worker turn bills the hop to the agent and the session', async () => {
+    const dir = path.join(tmpRoot, 'coder-cost');
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject('coder-cost', dir);
+    const coder: ResolvedAgent = {
+      projectId: proj.id,
+      agentName: 'coder-cost',
+      cwd: dir,
+      projectName: 'coder-cost',
+    };
+    const workspace = path.join(tmpRoot, 'workspace-cost');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+
+    function costFactory() {
+      return (): Runner => {
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield {
+            type: 'result',
+            subtype: 'success',
+            session_id: 's-c',
+            total_cost_usd: 0.0625,
+          } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      };
+    }
+
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers: [coder],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: costFactory(),
+    });
+
+    deliver('coder-cost', 'do the thing');
+    await flush();
+    await flush();
+
+    const row = listAgentSessions(SESSION_ID).find((r) => r.agent_name === 'coder-cost');
+    expect(row?.cost_usd).toBeCloseTo(0.0625, 10);
+    expect(getMultiAgentSession(SESSION_ID)!.total_cost_usd).toBeCloseTo(0.0625, 10);
 
     unregisterLiveSession(SESSION_ID);
   });

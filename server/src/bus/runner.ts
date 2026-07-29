@@ -297,6 +297,22 @@ export type AgentRunnerDeps = {
    */
   onSessionId?: (agentName: string, cliSessionId: string) => void;
   /**
+   * F7: called with one completed hop's `result.total_cost_usd` — the cost of
+   * THAT invocation, not a running total (it equals `sum(modelUsage[*].costUSD)`,
+   * which are per-invocation counters), so the receiver accumulates.
+   *
+   * chain.ts / orchestrator.ts wire this to `addAgentCost`, which is the only
+   * cost signal the bus has: a hop count treats a 2k-token routing turn and a
+   * 180k-token analysis turn identically. Optional — unit tests omit it.
+   *
+   * Fires even when the turn failed (`subtype !== 'success'`), and before the
+   * throw that normalizes that into a router-visible error: a turn that burned
+   * quota and then errored still cost money, and dropping it would make the
+   * total silently under-report exactly the runs an operator most wants to
+   * account for.
+   */
+  onTurnCost?: (agentName: string, costUsd: number) => void;
+  /**
    * Item #5: called for every classified non-`read` `tool_use` block observed
    * on an `assistant` SDKMessage, BEFORE the SDK dispatches the tool. Hooks:
    *   - persists a row into `multi_agent_mutations`,
@@ -1062,7 +1078,23 @@ export class AgentRunner {
           }
         }
 
-        const m = msg as { type?: string; session_id?: string; subtype?: string };
+        const m = msg as {
+          type?: string;
+          session_id?: string;
+          subtype?: string;
+          total_cost_usd?: number;
+        };
+        // F7: bill the hop. Deliberately NOT nested inside the session_id
+        // branch below — a result without a session id still cost money, and
+        // deliberately above the non-success throw, so a turn that burned
+        // quota and then errored is still counted.
+        if (m.type === 'result' && typeof m.total_cost_usd === 'number') {
+          try {
+            this.deps.onTurnCost?.(agentName, m.total_cost_usd);
+          } catch (err) {
+            console.error(`[runner] onTurnCost(${agentName}) failed`, err);
+          }
+        }
         if (m.type === 'result' && typeof m.session_id === 'string') {
           this.sessions.set(agentName, m.session_id);
           // Persist the checkpoint. A DB hiccup must never abort a turn —
