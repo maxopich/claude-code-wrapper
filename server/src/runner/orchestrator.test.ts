@@ -5,14 +5,26 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 // without touching disk or SQLite — we only care about the onLogFailure wiring.
 vi.mock('./logger.js', () => ({ logEvent: vi.fn() }));
 vi.mock('../repo/events.js', () => ({ insertEvent: vi.fn(), nextSeq: vi.fn(() => 1) }));
-vi.mock('../repo/sessions.js', () => ({ setSessionCost: vi.fn(), bumpSession: vi.fn() }));
+vi.mock('../repo/sessions.js', () => ({ bumpSession: vi.fn() }));
 
 import { logEvent } from './logger.js';
 import { insertEvent } from '../repo/events.js';
+import { bumpSession } from '../repo/sessions.js';
 import { persistMessage } from './orchestrator.js';
 
 const mockLogEvent = vi.mocked(logEvent);
 const mockInsertEvent = vi.mocked(insertEvent);
+const mockBumpSession = vi.mocked(bumpSession);
+
+function resultMsg(totalCostUsd: unknown, numTurns = 1): SDKMessage {
+  return {
+    type: 'result',
+    subtype: 'success',
+    session_id: 's1',
+    num_turns: numTurns,
+    total_cost_usd: totalCostUsd,
+  } as unknown as SDKMessage;
+}
 
 const assistantMsg = {
   type: 'assistant',
@@ -61,5 +73,52 @@ describe('persistMessage', () => {
     // No callback passed — the optional-chaining call must not throw.
     await expect(persistMessage('s1', assistantMsg)).resolves.toBe(1);
     expect(mockInsertEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('persistMessage — session cost accumulation', () => {
+  // `result.total_cost_usd` is the cost of THAT invocation, not a running
+  // session total: it equals `sum(modelUsage[*].costUSD)`, which are
+  // per-invocation token counters. This used to call `setSessionCost`
+  // (absolute assignment), so a multi-turn session's recorded cost was
+  // whatever its LAST turn happened to cost. Migration 029 backfills the
+  // sessions that were mis-recorded; these tests keep it from regressing.
+
+  test('each result ADDS its cost rather than overwriting the total', async () => {
+    await persistMessage('s1', resultMsg(0.42052775));
+    await persistMessage('s1', resultMsg(0.057099));
+
+    expect(mockBumpSession.mock.calls).toEqual([
+      ['s1', 0.42052775],
+      ['s1', 0.057099],
+    ]);
+    // The regression this pins: with absolute assignment the session would
+    // report the smaller, later number instead of the sum.
+    const total = mockBumpSession.mock.calls.reduce((a, c) => a + (c[1] as number), 0);
+    expect(total).toBeCloseTo(0.47762675, 8);
+    expect(total).toBeGreaterThan(0.057099);
+  });
+
+  test("a trailing zero-cost slash-command result cannot wipe the session's total", async () => {
+    await persistMessage('s1', resultMsg(0.03987175));
+    // Slash commands close out with `num_turns: 0, total_cost_usd: 0`. Under
+    // absolute assignment this set the session to exactly $0.00 — a real
+    // observed case in captured transcripts.
+    await persistMessage('s1', resultMsg(0, 0));
+
+    expect(mockBumpSession.mock.calls).toEqual([
+      ['s1', 0.03987175],
+      ['s1', 0],
+    ]);
+  });
+
+  test('a result with no usable cost still bumps last_event_at, adding 0', async () => {
+    await persistMessage('s1', resultMsg(undefined));
+    await persistMessage('s1', resultMsg(Number.NaN));
+
+    expect(mockBumpSession.mock.calls).toEqual([
+      ['s1', 0],
+      ['s1', 0],
+    ]);
   });
 });

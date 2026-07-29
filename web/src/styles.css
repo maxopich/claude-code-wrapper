@@ -3692,6 +3692,12 @@ pre {
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
+/* F7: run cost, same weight as the hop counter beside it — a secondary
+   capacity fact, not a headline. */
+.tpl-preview-rail-cost {
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
 .tpl-preview-rail-chip {
   display: inline-block;
   padding: 1px 6px;

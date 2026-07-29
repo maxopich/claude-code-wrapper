@@ -51,6 +51,7 @@ import path from 'node:path';
 import {
   appendMultiAgentEvent,
   appendMultiAgentMutation,
+  addAgentCost,
   addParticipant,
   confirmMutationByToolUseId,
   createMultiAgentSession,
@@ -913,6 +914,15 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         upsertAgentSession(sessionId, agent, cli);
       } catch (err) {
         console.error('[chain] persist agent session failed', err);
+      }
+    },
+    onTurnCost: (agent, costUsd) => {
+      // F7: same accounting as orchestrator mode — chain hops cost exactly as
+      // much and were equally invisible.
+      try {
+        addAgentCost(sessionId, agent, costUsd);
+      } catch (err) {
+        console.error('[chain] persist agent cost failed', err);
       }
     },
     onMutation: onMutationHook,

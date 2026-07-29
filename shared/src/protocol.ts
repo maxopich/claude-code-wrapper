@@ -3927,6 +3927,13 @@ export type TemplateLastRun = {
   /** The hop budget that was in force for this run (post-resolution).
    *  `null` for pre-013 rows whose hop_budget column was never populated. */
   hopBudget: number | null;
+  /** F7 (migration 029): total USD across every participant's hops.
+   *
+   *  ABSENT means "not recorded", not "free" — pre-029 rows, and rows whose
+   *  hops all ran before the column existed, have no figure to report. The
+   *  server omits the field rather than sending 0 so the rail can distinguish
+   *  the two; render "cost n/a", never "$0.0000". */
+  totalCostUsd?: number;
   /** First operator-facing error text observed during the run (~200 chars).
    *  Used for the "failed · <excerpt>" line in the rail. Absent on clean
    *  runs and on pre-013 rows. */

@@ -208,6 +208,68 @@ describe('AgentRunner', () => {
     expect(servers.cebab_bus?.name).toBe('cebab_bus');
   });
 
+  test('onTurnCost fires with the hop cost, including on a failed turn', async () => {
+    // F7. Two things are pinned here beyond "the hook is called":
+    //   - the value is the raw per-invocation `total_cost_usd`, forwarded
+    //     unaggregated (the repo layer accumulates), and
+    //   - a NON-SUCCESS result still bills. A turn that burned quota and then
+    //     errored cost real money; skipping it would make the recorded total
+    //     under-report exactly the runs an operator wants to account for.
+    const costs: Array<[string, number]> = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onTurnCost: (agent, usd) => costs.push([agent, usd]),
+      // `error_during_execution` is on the transient-overload retry heuristic;
+      // disable backoff so the test doesn't sit through the schedule (same
+      // reason as the checkpoint-ordering tests below).
+      overloadBackoffMs: [],
+      runnerFactory: () =>
+        fakeRunner([
+          {
+            type: 'result',
+            subtype: 'error_during_execution',
+            session_id: 's-cost',
+            total_cost_usd: 0.1234,
+          } as unknown as SDKMessage,
+        ]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    // The non-success subtype is normalized into a throw for the routers;
+    // the cost hook must already have fired by then.
+    await expect(runner.deliverTurn('alpha', 'go')).rejects.toThrow(/error_during_execution/);
+    expect(costs).toEqual([['alpha', 0.1234]]);
+  });
+
+  test('onTurnCost is skipped when the result carries no numeric cost', async () => {
+    const costs: Array<[string, number]> = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onTurnCost: (agent, usd) => costs.push([agent, usd]),
+      runnerFactory: () =>
+        fakeRunner([
+          { type: 'result', subtype: 'success', session_id: 's-nocost' } as unknown as SDKMessage,
+        ]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await runner.deliverTurn('alpha', 'go');
+    expect(costs).toEqual([]);
+  });
+
+  test('a throwing onTurnCost cannot abort the turn', async () => {
+    // Same best-effort posture as onSessionId: accounting is not worth losing
+    // a turn over.
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onTurnCost: () => {
+        throw new Error('db down');
+      },
+      runnerFactory: () => fakeRunner([resultMsg('s-ok')]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await expect(runner.deliverTurn('alpha', 'go')).resolves.toBeUndefined();
+  });
+
   test('register passes the spec.settingSources through to the SDK', async () => {
     // Chain participants and orchestrator workers register with
     // ['user', 'project', 'local'] so their `.claude/settings*.json` (MCPs,

@@ -75,17 +75,15 @@ export function listSessionsForProject(
   const includeArchived = opts?.includeArchived === true;
   if (includeArchived) {
     return getDb()
-      .prepare<
-        [number],
-        SessionRow
-      >('SELECT * FROM sessions WHERE project_id = ? AND deleted_at IS NULL ORDER BY last_event_at DESC')
+      .prepare<[number], SessionRow>(
+        'SELECT * FROM sessions WHERE project_id = ? AND deleted_at IS NULL ORDER BY last_event_at DESC',
+      )
       .all(projectId);
   }
   return getDb()
-    .prepare<
-      [number],
-      SessionRow
-    >('SELECT * FROM sessions WHERE project_id = ? AND archived = 0 AND deleted_at IS NULL ORDER BY last_event_at DESC')
+    .prepare<[number], SessionRow>(
+      'SELECT * FROM sessions WHERE project_id = ? AND archived = 0 AND deleted_at IS NULL ORDER BY last_event_at DESC',
+    )
     .all(projectId);
 }
 
@@ -104,10 +102,9 @@ export function listSessionsForProject(
  */
 export function archiveSession(id: string): boolean {
   const result = getDb()
-    .prepare<
-      [string],
-      unknown
-    >('UPDATE sessions SET archived = 1 WHERE id = ? AND archived = 0 AND deleted_at IS NULL')
+    .prepare<[string], unknown>(
+      'UPDATE sessions SET archived = 1 WHERE id = ? AND archived = 0 AND deleted_at IS NULL',
+    )
     .run(id);
   return result.changes > 0;
 }
@@ -126,10 +123,9 @@ export function archiveSession(id: string): boolean {
  */
 export function softDeleteSession(id: string, ts: number = Date.now()): boolean {
   const result = getDb()
-    .prepare<
-      [number, string],
-      unknown
-    >('UPDATE sessions SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
+    .prepare<[number, string], unknown>(
+      'UPDATE sessions SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL',
+    )
     .run(ts, id);
   return result.changes > 0;
 }
@@ -200,18 +196,23 @@ export function hardDeleteSession(id: string): number {
   return tx(id) as number;
 }
 
+/**
+ * Touch `last_event_at`, and ADD `totalCostUsdDelta` to the running total.
+ *
+ * Additive is the only correct shape: the SDK's `result.total_cost_usd` is the
+ * cost of that one invocation, not a running total for the CLI session (it
+ * equals `sum(modelUsage[*].costUSD)`, which are per-invocation counters). The
+ * absolute-assignment sibling this replaced (`setSessionCost`) therefore left
+ * `sessions.total_cost_usd` holding only the last turn's cost — and holding 0
+ * whenever a session ended on a `num_turns: 0` slash-command result. See
+ * migration 029, which backfills the damage from the `events` table.
+ */
 export function bumpSession(id: string, totalCostUsdDelta = 0): void {
   getDb()
     .prepare(
       'UPDATE sessions SET last_event_at = ?, total_cost_usd = total_cost_usd + ? WHERE id = ?',
     )
     .run(Date.now(), totalCostUsdDelta, id);
-}
-
-export function setSessionCost(id: string, totalCostUsd: number): void {
-  getDb()
-    .prepare('UPDATE sessions SET last_event_at = ?, total_cost_usd = ? WHERE id = ?')
-    .run(Date.now(), totalCostUsd, id);
 }
 
 /** Read the user's last in-session mode preference, or null if unset. */

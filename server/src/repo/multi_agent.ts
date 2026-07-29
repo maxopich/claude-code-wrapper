@@ -116,6 +116,13 @@ export type MultiAgentSessionRow = {
    *  default). Narrowed to boolean at the boundary. Orchestrator-mode only —
    *  chain briefings have no consultant clause to relax. */
   execute_mode: number;
+  /** Migration 029: cumulative USD across every participant's completed hops,
+   *  accumulated by `addAgentCost` and equal by construction to the sum of
+   *  this session's `multi_agent_agent_sessions.cost_usd`. 0 for pre-029 rows
+   *  and for sessions whose hops all predate the column — those are genuinely
+   *  unknown rather than free, and the UI says so rather than rendering
+   *  "$0.0000". */
+  total_cost_usd: number;
 };
 
 /**
@@ -224,6 +231,10 @@ export type MultiAgentAgentSessionRow = {
   /** Last completed claude CLI session id for `--resume` on reconstruction. */
   cli_session_id: string;
   updated_at: number;
+  /** Cumulative USD this agent has spent in this bus session (migration 029).
+   *  Sum of every completed hop's `result.total_cost_usd`, which the SDK
+   *  reports per invocation. 0 for pre-029 rows. */
+  cost_usd: number;
 };
 
 export type MultiAgentParticipantRow = {
@@ -688,18 +699,16 @@ export function confirmMutationByToolUseId(
     // confirmed. Fetch any matching row so an already-confirmed row still
     // round-trips its current state to the caller for a sanity re-emit.
     const row = getDb()
-      .prepare<
-        [string, string],
-        MultiAgentMutationRow
-      >('SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?')
+      .prepare<[string, string], MultiAgentMutationRow>(
+        'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?',
+      )
       .get(sessionId, toolUseId);
     return row ? rowToMutation(row) : null;
   }
   const row = getDb()
-    .prepare<
-      [string, string],
-      MultiAgentMutationRow
-    >('SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?')
+    .prepare<[string, string], MultiAgentMutationRow>(
+      'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?',
+    )
     .get(sessionId, toolUseId);
   return row ? rowToMutation(row) : null;
 }
@@ -726,10 +735,9 @@ export function setMutationPromoted(id: number, value: boolean): MutationRecord 
  */
 export function listMultiAgentMutations(sessionId: string): MutationRecord[] {
   return getDb()
-    .prepare<
-      [string],
-      MultiAgentMutationRow
-    >(`SELECT * FROM multi_agent_mutations WHERE session_id = ? ORDER BY ts ASC, id ASC`)
+    .prepare<[string], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations WHERE session_id = ? ORDER BY ts ASC, id ASC`,
+    )
     .all(sessionId)
     .map(rowToMutation);
 }
@@ -786,10 +794,9 @@ export function setPendingMutation(sessionId: string, mutationId: number | null)
  */
 export function getPendingMutation(sessionId: string): MutationRecord | null {
   const row = getDb()
-    .prepare<
-      [string],
-      { pending_mutation_id: number | null }
-    >('SELECT pending_mutation_id FROM multi_agent_sessions WHERE id = ?')
+    .prepare<[string], { pending_mutation_id: number | null }>(
+      'SELECT pending_mutation_id FROM multi_agent_sessions WHERE id = ?',
+    )
     .get(sessionId);
   if (!row || row.pending_mutation_id === null) return null;
   return getMultiAgentMutation(row.pending_mutation_id);
@@ -808,19 +815,17 @@ export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefin
  */
 export function getActiveMultiAgentSession(): MultiAgentSessionRow | undefined {
   return getDb()
-    .prepare<
-      [],
-      MultiAgentSessionRow
-    >(`SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`)
+    .prepare<[], MultiAgentSessionRow>(
+      `SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`,
+    )
     .get();
 }
 
 export function listMultiAgentSessions(): MultiAgentSessionRow[] {
   return getDb()
-    .prepare<
-      [],
-      MultiAgentSessionRow
-    >('SELECT * FROM multi_agent_sessions ORDER BY started_at DESC')
+    .prepare<[], MultiAgentSessionRow>(
+      'SELECT * FROM multi_agent_sessions ORDER BY started_at DESC',
+    )
     .all();
 }
 
@@ -876,10 +881,9 @@ export function listMultiAgentSessionsWithIteration(opts?: {
  */
 export function archiveMultiAgentSession(id: string): boolean {
   const result = getDb()
-    .prepare<
-      [string],
-      unknown
-    >('UPDATE multi_agent_sessions SET archived = 1 WHERE id = ? AND archived = 0')
+    .prepare<[string], unknown>(
+      'UPDATE multi_agent_sessions SET archived = 1 WHERE id = ? AND archived = 0',
+    )
     .run(id);
   return result.changes > 0;
 }
@@ -891,10 +895,9 @@ export function archiveMultiAgentSession(id: string): boolean {
  */
 export function unarchiveMultiAgentSession(id: string): boolean {
   const result = getDb()
-    .prepare<
-      [string],
-      unknown
-    >('UPDATE multi_agent_sessions SET archived = 0 WHERE id = ? AND archived = 1')
+    .prepare<[string], unknown>(
+      'UPDATE multi_agent_sessions SET archived = 0 WHERE id = ? AND archived = 1',
+    )
     .run(id);
   return result.changes > 0;
 }
@@ -1043,10 +1046,9 @@ export function appendMultiAgentEvent(
 
 export function listMultiAgentEvents(sessionId: string, sinceId = 0): MultiAgentEventRow[] {
   return getDb()
-    .prepare<
-      [string, number],
-      MultiAgentEventRow
-    >('SELECT * FROM multi_agent_events WHERE session_id = ? AND id > ? ORDER BY id ASC')
+    .prepare<[string, number], MultiAgentEventRow>(
+      'SELECT * FROM multi_agent_events WHERE session_id = ? AND id > ? ORDER BY id ASC',
+    )
     .all(sessionId, sinceId);
 }
 
@@ -1076,14 +1078,50 @@ export function upsertAgentSession(
     .run(sessionId, agentName, cliSessionId, Date.now());
 }
 
+/**
+ * Add one completed hop's cost to both the per-agent row and the session total
+ * (migration 029). Called from `AgentRunner` via the injected `onTurnCost` dep,
+ * with the `result.total_cost_usd` of the hop that just finished — which the
+ * SDK reports per invocation, so it accumulates.
+ *
+ * Both writes happen in one transaction: the session total is by definition
+ * the sum of the per-agent rows, and a crash between the two would leave a
+ * number that disagrees with its own breakdown. The per-agent INSERT carries a
+ * placeholder `cli_session_id` only for the case where cost arrives before the
+ * checkpoint has ever been written for this agent; the normal ordering in
+ * `runOneAttempt` writes the session id first, so the UPDATE branch is what
+ * runs in practice and the placeholder never survives.
+ *
+ * A non-finite or negative delta is dropped rather than persisted — cost is
+ * monotonic, and an agent-influenced NaN reaching a SUM would poison every
+ * later read of the total.
+ */
+export function addAgentCost(sessionId: string, agentName: string, costUsd: number): void {
+  if (!Number.isFinite(costUsd) || costUsd <= 0) return;
+  const db = getDb();
+  const tx = db.transaction((sid: string, agent: string, delta: number) => {
+    db.prepare(
+      `INSERT INTO multi_agent_agent_sessions
+         (session_id, agent_name, cli_session_id, updated_at, cost_usd)
+       VALUES (?, ?, '', ?, ?)
+       ON CONFLICT (session_id, agent_name)
+       DO UPDATE SET cost_usd   = cost_usd + excluded.cost_usd,
+                     updated_at = excluded.updated_at`,
+    ).run(sid, agent, Date.now(), delta);
+    db.prepare(
+      'UPDATE multi_agent_sessions SET total_cost_usd = total_cost_usd + ? WHERE id = ?',
+    ).run(delta, sid);
+  });
+  tx(sessionId, agentName, costUsd);
+}
+
 /** Every persisted (agent_name → cli_session_id) for a session, used to
  *  seed `AgentRunner.sessions` on reconstruction. */
 export function listAgentSessions(sessionId: string): MultiAgentAgentSessionRow[] {
   return getDb()
-    .prepare<
-      [string],
-      MultiAgentAgentSessionRow
-    >('SELECT * FROM multi_agent_agent_sessions WHERE session_id = ?')
+    .prepare<[string], MultiAgentAgentSessionRow>(
+      'SELECT * FROM multi_agent_agent_sessions WHERE session_id = ?',
+    )
     .all(sessionId);
 }
 
@@ -1149,10 +1187,9 @@ export type ProjectBusState = {
 
 export function getProjectBusState(projectId: number): ProjectBusState {
   const row = getDb()
-    .prepare<
-      [number],
-      { bus_installed: number; bus_agent_name: string | null }
-    >('SELECT bus_installed, bus_agent_name FROM projects WHERE id = ?')
+    .prepare<[number], { bus_installed: number; bus_agent_name: string | null }>(
+      'SELECT bus_installed, bus_agent_name FROM projects WHERE id = ?',
+    )
     .get(projectId);
   if (!row) return { installed: false, agentName: null };
   return { installed: row.bus_installed === 1, agentName: row.bus_agent_name };
@@ -1172,18 +1209,16 @@ export function setProjectBusInstalled(
 export function isAgentNameTaken(agentName: string, excludingProjectId?: number): boolean {
   if (excludingProjectId === undefined) {
     const row = getDb()
-      .prepare<
-        [string],
-        { c: number }
-      >('SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ?')
+      .prepare<[string], { c: number }>(
+        'SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ?',
+      )
       .get(agentName);
     return (row?.c ?? 0) > 0;
   }
   const row = getDb()
-    .prepare<
-      [string, number],
-      { c: number }
-    >('SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ? AND id != ?')
+    .prepare<[string, number], { c: number }>(
+      'SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ? AND id != ?',
+    )
     .get(agentName, excludingProjectId);
   return (row?.c ?? 0) > 0;
 }
