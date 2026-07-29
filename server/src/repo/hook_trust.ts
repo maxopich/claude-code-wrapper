@@ -99,13 +99,28 @@ export function resolveHookScriptSha(command: string, projectPath: string): stri
     return null;
   }
 
+  // Open once and both stat and read through the SAME descriptor. A
+  // `statSync` followed by `readFileSync(path)` is a TOCTOU: the path could be
+  // replaced between the two calls, and this function's entire job is to say
+  // what a given file contained — hashing bytes from a different inode than
+  // the one that was checked is precisely the failure it exists to detect.
+  let fd: number | undefined;
   try {
-    const st = fs.statSync(candidate);
-    if (!st.isFile()) return null;
-    return createHash('sha256').update(fs.readFileSync(candidate)).digest('hex');
+    fd = fs.openSync(candidate, 'r');
+    if (!fs.fstatSync(fd).isFile()) return null;
+    return createHash('sha256').update(fs.readFileSync(fd)).digest('hex');
   } catch {
     // Missing, unreadable, a directory — unresolvable, same as a bare command.
     return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Already closed or invalid; nothing useful to do, and leaking the
+        // error would turn a successful hash into a failed resolve.
+      }
+    }
   }
 }
 
