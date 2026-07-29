@@ -29,6 +29,36 @@ import { getOperatorId } from './operator.js';
 const CHAIN_RESET_KIND = 'audit.chain_reset';
 
 /**
+ * Ids of the chain-reset markers inserted by migrations. `verifyChain()`
+ * requires the newest marker row to be one of these AND to carry the fixed
+ * sentinel `hash_self`.
+ *
+ * Why an allowlist and not just `kind = 'audit.chain_reset'`: the anchor's
+ * `hash_self` is trusted verbatim as the chain head (it is a sentinel, not a
+ * computed digest), and the walk only covers rows AFTER it. So a process with
+ * direct write access could append its own row with that `kind` and shrink the
+ * verified range to zero while `verifyChain()` still reported `ok`. Pinning the
+ * id turns the prose contract in `015_safety_audit.sql`'s header into something
+ * the verifier actually checks.
+ *
+ * CONTRACT — every future migration that ALTERs `safety_audit` must do BOTH:
+ *   1. insert a fresh `audit.chain_reset` marker (see 015's header), and
+ *   2. append that marker's id here.
+ * Skipping (2) makes every boot after that migration report `forged_anchor`.
+ */
+const KNOWN_CHAIN_RESET_IDS: ReadonlySet<string> = new Set([
+  'chain-reset-015', // 015_safety_audit.sql — genesis
+  'chain-reset-023', // 023_mock_flag.sql — added the `mode` column
+]);
+
+/**
+ * The fixed anchor `hash_self` every marker migration writes (`X'00'`). Not a
+ * digest — the marker is the trusted chain head, so its stored value is a
+ * constant the verifier can assert rather than recompute.
+ */
+const CHAIN_RESET_SENTINEL = Buffer.from([0]);
+
+/**
  * Safety sub-codes that require a typed `ackReason` when the operator
  * acknowledges the corresponding notification (spec BE-7). These are the
  * highest-sub-class events where a forensic "why I acked this" trail
@@ -83,7 +113,23 @@ export type SafetyAuditRow = {
   mode: SafetyAuditMode;
 };
 
-export type VerifyChainResult = { ok: true; rowsChecked: number } | { ok: false; brokenAt: string };
+/**
+ * Why the chain failed to verify.
+ *
+ *   - `row_mismatch`  — a post-anchor row's recomputed digest differs from the
+ *                       stored one. `brokenAt` names the first such row.
+ *   - `no_anchor`     — no `audit.chain_reset` row exists at all. Impossible by
+ *                       construction (markers are inserted by migrations gated
+ *                       on `schema_migrations`), so absence means the table was
+ *                       tampered with — NOT a healthy empty chain.
+ *   - `forged_anchor` — the newest marker is not one this build knows about, or
+ *                       its `hash_self` is not the sentinel. `brokenAt` names it.
+ */
+export type VerifyChainFailureReason = 'row_mismatch' | 'no_anchor' | 'forged_anchor';
+
+export type VerifyChainResult =
+  | { ok: true; rowsChecked: number }
+  | { ok: false; reason: VerifyChainFailureReason; brokenAt?: string };
 
 /**
  * Canonical byte representation of a row for hashing. Fields are in
@@ -171,10 +217,9 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
 
   const insert = db.transaction((): { id: string; hash_self: Buffer } => {
     const tip = db
-      .prepare<
-        [],
-        { hash_self: Buffer }
-      >('SELECT hash_self FROM safety_audit ORDER BY rowid DESC LIMIT 1')
+      .prepare<[], { hash_self: Buffer }>(
+        'SELECT hash_self FROM safety_audit ORDER BY rowid DESC LIMIT 1',
+      )
       .get();
     const hashPrev = tip?.hash_self ?? null;
     const row = {
@@ -241,7 +286,20 @@ export function appendSafetyAuditAck(
  *
  * The genesis marker itself is trusted as the anchor — its hash_self is
  * a fixed sentinel (X'00') and is not recomputed. Subsequent rows chain
- * from the marker's hash_self normally.
+ * from the marker's hash_self normally. Because the anchor is trusted, its
+ * IDENTITY is validated instead: it must be a marker this build knows about
+ * (`KNOWN_CHAIN_RESET_IDS`) carrying the sentinel. Otherwise appending a
+ * forged `audit.chain_reset` row would silently shrink the verified range.
+ *
+ * Fails CLOSED. A missing anchor is reported as tampering rather than as a
+ * clean empty chain — "no marker" cannot happen on a migrated DB.
+ *
+ * KNOWN GAP — tail truncation. Deleting every row after the anchor yields
+ * `{ ok: true, rowsChecked: 0 }`, indistinguishable from a fresh DB. No
+ * self-contained in-DB hash chain can detect this: each row's digest commits
+ * only to its predecessors, never to its successors. Closing it requires a tip
+ * commitment stored outside the sqlite file (an append-only `~/.cebab` tip
+ * mirror compared on boot). Deliberately not attempted here.
  *
  * Cheap enough to call on server boot in Phase 1 (rows ≪ 1000); Phase 3
  * will additionally call it on every WS attach once safety sources start
@@ -250,13 +308,18 @@ export function appendSafetyAuditAck(
 export function verifyChain(): VerifyChainResult {
   const db = getDb();
   const lastMarker = db
-    .prepare<
-      [string],
-      { rowid: number; hash_self: Buffer }
-    >(`SELECT rowid, hash_self FROM safety_audit WHERE kind = ? ORDER BY rowid DESC LIMIT 1`)
+    .prepare<[string], { rowid: number; id: string; hash_self: Buffer }>(
+      `SELECT rowid, id, hash_self FROM safety_audit WHERE kind = ? ORDER BY rowid DESC LIMIT 1`,
+    )
     .get(CHAIN_RESET_KIND);
   if (!lastMarker) {
-    return { ok: true, rowsChecked: 0 };
+    return { ok: false, reason: 'no_anchor' };
+  }
+  if (
+    !KNOWN_CHAIN_RESET_IDS.has(lastMarker.id) ||
+    !CHAIN_RESET_SENTINEL.equals(lastMarker.hash_self)
+  ) {
+    return { ok: false, reason: 'forged_anchor', brokenAt: lastMarker.id };
   }
   const rows = db
     .prepare<[number], SafetyAuditRow>(
@@ -272,7 +335,7 @@ export function verifyChain(): VerifyChainResult {
   for (const row of rows) {
     const expected = computeHashSelf(row, prevHash);
     if (!expected.equals(row.hash_self)) {
-      return { ok: false, brokenAt: row.id };
+      return { ok: false, reason: 'row_mismatch', brokenAt: row.id };
     }
     prevHash = row.hash_self;
     rowsChecked++;
