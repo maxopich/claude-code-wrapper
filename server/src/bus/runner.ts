@@ -484,6 +484,27 @@ export type AgentRunnerDeps = {
    * the single-agent sessionId).
    */
   sessionId?: string;
+  /**
+   * MOCK MODE ONLY — the scenario directory under `fixtures/bus/` that
+   * `runMock` replays for this session's participants. `runClaude` ignores
+   * both this and the per-turn hints derived from it, so it is forwarded
+   * unconditionally rather than behind a `config.mock` branch: one code path
+   * for both runners, and a test that flips `config.mock` needs no other
+   * change.
+   *
+   * A bus session cannot replay from a single fixture the way a single-agent
+   * turn can — each participant has to say something different, and which
+   * hop it is decides whether it hands off or finishes. `runMock` therefore
+   * resolves a file per (agent, turn); the runner supplies both halves.
+   */
+  mockScenario?: string;
+  /**
+   * MOCK MODE ONLY — `${NAME}` values for the agent's fixture text. A shipped
+   * scenario cannot name the operator's projects, so it writes
+   * `"recipient": "${NEXT}"` and the router (which owns the topology) fills
+   * in the slug. Called once per turn.
+   */
+  mockVars?: (agentName: string) => Record<string, string>;
 };
 
 /**
@@ -552,6 +573,14 @@ export class AgentRunner {
    * stuck behind this agent right now."
    */
   private readonly pendingDeliveries = new Map<string, number>();
+  /**
+   * agentName → hops taken so far. Mock-mode fixture routing only: it selects
+   * which script in the scenario the next turn replays, so a participant can
+   * hand off on its first hop and finish on its second. Counted per HOP, not
+   * per attempt — a transient-overload retry re-runs the same turn and must
+   * replay the same script.
+   */
+  private readonly turnCounts = new Map<string, number>();
 
   constructor(private readonly deps: AgentRunnerDeps) {}
 
@@ -700,6 +729,11 @@ export class AgentRunner {
     const spec = this.specs.get(agentName);
     if (!spec) throw new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`);
 
+    // Claimed once per hop, before the retry loop, so every attempt of this
+    // turn replays the same mock script (see `turnCounts`).
+    const turnIndex = this.turnCounts.get(agentName) ?? 0;
+    this.turnCounts.set(agentName, turnIndex + 1);
+
     // Retry-with-backoff for transient API overloads ("API Error: 529",
     // "Overloaded"). The interactive CLI absorbs these internally; the SDK
     // propagates them raw to our iterator. Without this layer, Item #4's
@@ -719,7 +753,7 @@ export class AgentRunner {
     let lastErr: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        await this.runOneAttempt(agentName, promptText, spec);
+        await this.runOneAttempt(agentName, promptText, spec, turnIndex);
         return; // success
       } catch (err) {
         lastErr = err;
@@ -820,6 +854,7 @@ export class AgentRunner {
     agentName: string,
     promptText: string,
     spec: AgentSpec,
+    turnIndex: number,
   ): Promise<void> {
     const factory = this.deps.runnerFactory ?? pickRunner;
     // Read INSIDE the serialized turn (not when `deliverTurn` was called) so
@@ -862,6 +897,16 @@ export class AgentRunner {
         cebab_bus: makeBusToolServer(agentName, this.deps.onEvent),
       },
       abortController: this.deps.abortController,
+      // Mock-mode fixture routing. Inert under `runClaude`, which reads only
+      // the RunOptions fields above.
+      ...(this.deps.mockScenario !== undefined
+        ? {
+            mockScenario: this.deps.mockScenario,
+            mockAgent: agentName,
+            mockTurn: turnIndex,
+            ...(this.deps.mockVars ? { mockVars: this.deps.mockVars(agentName) } : {}),
+          }
+        : {}),
     });
 
     // Cluster G Phase 3 (G1): tag the lifecycle entry with bus-run metadata

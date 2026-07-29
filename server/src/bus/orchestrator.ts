@@ -58,6 +58,7 @@ import {
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
 import type { BashClassifierReason } from '@cebab/shared';
+import { config } from '../config.js';
 import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
@@ -1412,6 +1413,22 @@ export function wireOrchestratorSession(p: {
     },
     abortController,
     runnerFactory: p.runnerFactory,
+    // Mock replay (MOCK=1). The orchestrator's own slug is fixed, so a shipped
+    // fixture addresses it by name; the workers' slugs are the operator's
+    // project names, so their scripts address `${ORCHESTRATOR}` and the
+    // orchestrator's script addresses `${NEXT}` (its first worker) or
+    // `${USER}` (the terminal answer). Read from the live roster so a mid-run
+    // `addWorker` is routable too.
+    mockScenario: config.mockScenario ?? 'orchestrator',
+    mockVars: (agent) => ({
+      SELF: agent,
+      NEXT:
+        agent === ORCHESTRATOR_AGENT_NAME
+          ? (router.getWorkerNames()[0] ?? USER_RECIPIENT)
+          : ORCHESTRATOR_AGENT_NAME,
+      ORCHESTRATOR: ORCHESTRATOR_AGENT_NAME,
+      USER: USER_RECIPIENT,
+    }),
     // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): mirror the chain.ts
     // wiring — every transient-overload retry emits an `auto_retry`
     // ServerMsg + writes a `recovery_log` row. Identical shape; both
