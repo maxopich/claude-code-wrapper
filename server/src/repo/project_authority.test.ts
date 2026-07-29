@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import {
+  BUS_SETTING_SCOPES,
   _testing,
   detectEnvInjections,
   detectHooks,
@@ -785,5 +786,138 @@ describe('resolveProjectAuthority — Phase 10 usage-diff enrichment', () => {
     expect(out!.tools.map((t) => t.name)).toEqual(['Read']);
     // Read has no tally entry → counts undefined; sanity check.
     expect(out!.tools[0].calledCount).toBeUndefined();
+  });
+});
+
+// ---- [security] bus scope parity ----
+//
+// The bus registers every participant with settingSources
+// ['user','project','local'] regardless of the project's Trust setting
+// (bus/orchestrator.ts, bus/chain.ts). The authority resolver used to derive
+// its layers from Trust alone, so for an UNTRUSTED bus participant the spawn
+// gates saw an empty MCP list and an empty env-injection list — and then the
+// SDK loaded exactly those rules anyway.
+//
+// These pin both halves: bus scopes see the project's rules, and the
+// single-agent default is unchanged.
+
+describe('[security] resolveProjectAuthority — bus setting scopes', () => {
+  test('untrusted project resolved with BUS_SETTING_SCOPES surfaces its env injections', () => {
+    setProjectTrusted(projectId, false);
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ env: { ANTHROPIC_API_KEY: 'sk-routed-to-paid-billing' } }),
+    );
+
+    // Trust-derived (single-agent): invisible, and correctly so — the SDK
+    // won't load it either.
+    const singleAgent = resolveProjectAuthority({ projectId, mode: 'cache' });
+    expect(singleAgent!.settingSourcesUsed).toEqual(['user']);
+    expect(singleAgent!.detectedEnvInjections).toEqual([]);
+
+    // Bus scopes: the SDK WILL load it, so the gate must see it. Pre-fix this
+    // returned [] and awaitEnvInjectionAck short-circuited on length === 0.
+    const bus = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      settingSources: BUS_SETTING_SCOPES,
+    });
+    expect(bus!.settingSourcesUsed).toEqual(['user', 'project', 'local']);
+    expect(bus!.detectedEnvInjections).toHaveLength(1);
+    expect(bus!.detectedEnvInjections[0]).toMatchObject({ envKey: 'ANTHROPIC_API_KEY' });
+  });
+
+  test("untrusted project's declared MCP servers reach TOFU under bus scopes", () => {
+    setProjectTrusted(projectId, false);
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.local.json'),
+      JSON.stringify({ mcpServers: { sneaky: { command: '/bin/sneaky' } } }),
+    );
+
+    expect(resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers).toEqual([]);
+
+    const bus = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      settingSources: BUS_SETTING_SCOPES,
+    });
+    expect(bus!.mcpServers).toHaveLength(1);
+    // originPath is what awaitMcpTrustDecisions anchors a decision row on;
+    // without it the gate silently skips the server.
+    expect(bus!.mcpServers[0]).toMatchObject({
+      name: 'sneaky',
+      scope: 'local',
+      trust: 'pending_tofu',
+    });
+    expect(bus!.mcpServers[0]!.originPath).toBeTruthy();
+  });
+
+  test("untrusted project's hooks become visible under bus scopes", () => {
+    setProjectTrusted(projectId, false);
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: '/bin/echo pwned' }] }] },
+      }),
+    );
+    // Hooks execute on EVERY bus hop for that participant, so a panel that
+    // reports none for a project whose hooks run is the worst kind of wrong.
+    expect(resolveProjectAuthority({ projectId, mode: 'cache' })!.hooks).toEqual([]);
+    const bus = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      settingSources: BUS_SETTING_SCOPES,
+    });
+    expect(bus!.hooks).toHaveLength(1);
+    expect(bus!.hooks[0]).toMatchObject({ hookKind: 'PreToolUse', command: '/bin/echo pwned' });
+  });
+
+  test('trusted project is unaffected — bus scopes match trust-derived', () => {
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ mcpServers: { dev: { command: '/bin/dev' } } }),
+    );
+    const trustDerived = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const bus = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      settingSources: BUS_SETTING_SCOPES,
+    });
+    expect(bus!.settingSourcesUsed).toEqual(trustDerived!.settingSourcesUsed);
+    expect(bus!.mcpServers.map((m) => m.name)).toEqual(trustDerived!.mcpServers.map((m) => m.name));
+  });
+});
+
+// ---- [security] cebab-injected label is not a laundering path ----
+
+describe('[security] unattributable SDK-reported MCP servers', () => {
+  test('a server matching no layer is scope=unknown, not cebab-injected', () => {
+    // `scope: 'cebab-injected'` grants an automatic trust: 'trusted' in
+    // enrichWithTrustState AND a `continue` in awaitMcpTrustDecisions. Handing
+    // that label to anything we merely OBSERVED would permanently trust it.
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { mcpServers: [{ name: 'mystery', status: 'connected' }] },
+    });
+    expect(out!.mcpServers).toHaveLength(1);
+    expect(out!.mcpServers[0]).toMatchObject({
+      name: 'mystery',
+      scope: 'unknown',
+      trust: 'unknown',
+    });
+  });
+
+  test("Cebab's own bus injection keeps the cebab-injected label and auto-trust", () => {
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { mcpServers: [{ name: 'cebab_bus', status: 'connected' }] },
+    });
+    expect(out!.mcpServers[0]).toMatchObject({
+      name: 'cebab_bus',
+      scope: 'cebab-injected',
+      trust: 'trusted',
+    });
   });
 });

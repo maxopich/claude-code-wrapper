@@ -8179,6 +8179,13 @@ pre {
   color: var(--fg-2);
   font-style: italic;
 }
+/* SDK-reported but unattributable to any settings layer. Muted, and
+   deliberately not styled like .mcp-scope-cebab — that chip means
+   "Cebab-managed", which server-side implies an automatic trust grant. */
+.mcp-scope-unknown {
+  color: var(--fg-2);
+  border-style: dashed;
+}
 .mcp-trust-ok {
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 35%, var(--line-3));
