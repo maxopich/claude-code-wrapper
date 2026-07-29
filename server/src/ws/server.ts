@@ -2246,6 +2246,34 @@ function resolveHopBudget(): number {
  * **Exported** so tests can verify the precedence chain without
  * round-tripping through `emitSettings` or a WS connection.
  */
+/** The four outcomes an operator can pick on an MCP trust prompt. */
+export type McpTrustDecisionKind = 'trust' | 'trust_pinned' | 'deny_once' | 'deny_remember';
+
+/**
+ * [security] May this `mcp_trust_decision` be persisted with NO parked gate
+ * entry behind it (the `mcp_trust_decision` handler's "path B")?
+ *
+ * Only decisions that REDUCE authority may. An ungated `trust` / `trust_pinned`
+ * writes an `mcp_trust` row that nobody was prompted for, and those rows are
+ * exactly what `awaitMcpTrustDecisions` consults — so a pre-seeded row silently
+ * passes the operator's NEXT session-start gate, self-approving past the TOFU
+ * check. Denials need no prompt: refusing authority you were never granted is
+ * always safe.
+ *
+ * Pure + exported so the invariant is pinned by a test rather than living only
+ * inside the WS switch. A new decision kind must be classified here explicitly.
+ */
+export function isUngatedTrustDecisionAllowed(decision: McpTrustDecisionKind): boolean {
+  switch (decision) {
+    case 'deny_once':
+    case 'deny_remember':
+      return true;
+    case 'trust':
+    case 'trust_pinned':
+      return false;
+  }
+}
+
 export function resolveMaxTurns(override?: number): number {
   if (typeof override === 'number' && Number.isFinite(override) && override >= 1) {
     return Math.floor(override);
@@ -2497,6 +2525,50 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'set_trusted': {
+      // [security] Trust drives both the initial permissionMode and the
+      // settingSources scope for this project's future single-agent runs, so
+      // flipping it is an authority change and belongs in the hash-chained
+      // audit log alongside every other trust decision. It had no audit row.
+      //
+      // Audit BEFORE the state change (the BE-1 dual-write ordering that
+      // `recordTrustDecision` also follows): if the append fails we refuse to
+      // proceed rather than leaving an unrecorded authority change behind.
+      //
+      // This does not PREVENT an ungated flip — anything holding the auth
+      // token can send this verb, and a bus agent runs as the operator's uid
+      // (see server/src/auth.ts). Detection is what is achievable here.
+      const beforeRow = getProject(msg.projectId);
+      const auditResult = emitNotification(
+        {
+          class: 'safety',
+          severity: 'warn',
+          dedupeKey: `project.trust_decided:${msg.projectId}`,
+          title: msg.trusted ? 'Project marked trusted' : 'Project trust revoked',
+          message: beforeRow ? `${beforeRow.name} (${beforeRow.path})` : `project ${msg.projectId}`,
+          projectId: msg.projectId,
+          reasonCode: msg.trusted ? 'project_trusted' : 'project_untrusted',
+          auditKind: 'project.trust_decided',
+          auditPayload: {
+            projectId: msg.projectId,
+            path: beforeRow?.path ?? null,
+            from: beforeRow?.trusted === 1,
+            to: msg.trusted,
+          },
+          // Operational visibility is the audit row; a sticky toast for every
+          // Trust toggle would be noise the operator just dismissed.
+          sticky: false,
+        },
+        (m) => send(conn.ws, m),
+      );
+      if (!auditResult.ok) {
+        console.error('[ws] set_trusted audit append failed', auditResult.error);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: `set_trusted: could not record the authority change (${auditResult.error}); trust unchanged.`,
+        });
+        return;
+      }
       setProjectTrusted(msg.projectId, msg.trusted);
       const rows = await syncWorkspaceProjects();
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
@@ -2686,14 +2758,27 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       //      mcp_trust + safety_audit dual-write and unblocks the spawn.
       //   B) Operator-initiated (no `pendingId`, OR pendingId stale/unknown):
       //      decision came from the AuthorityPanel Trust/Deny affordance
-      //      with no parked spawn. We persist directly here. trust_pinned
-      //      still validates binarySha. deny_once with no parked gate is
-      //      a no-op (in-memory state has no anchor without a project id;
-      //      the next gate pass will re-prompt anyway).
+      //      with no parked spawn. Path B may only ever REDUCE authority.
+      //      deny_once with no parked gate is a no-op (in-memory state has
+      //      no anchor without a project id; the next gate pass re-prompts
+      //      anyway); deny_remember persists.
       //
       // Path A always wins when both could apply — the parked spawn needs
       // to be unstuck before any other side effect, and the gate handles
       // the dual-write internally with the right project id + sessionKey.
+      //
+      // [security] Why `trust` / `trust_pinned` are path-A-only: path B used
+      // to persist them too, so ANY client on this socket could write
+      // `mcp_trust` rows for a server name of its choosing with no operator
+      // prompt in the loop. Those rows are exactly what
+      // `awaitMcpTrustDecisions` consults, so a pre-seeded row silently
+      // passes the operator's NEXT session-start gate — a self-approving
+      // bypass of the TOFU gate. That matters because a bus worker runs as
+      // the operator's uid: it can read ~/.cebab/auth-token and open its own
+      // WS connection (see server/src/auth.ts's residual note). Requiring a
+      // live parked entry means an escalating decision can only ever answer a
+      // prompt Cebab itself raised. Denials stay reachable from path B —
+      // reducing authority needs no gate.
       if (msg.pendingId) {
         const entry = conn.trustGate.pending.get(msg.pendingId);
         if (entry) {
@@ -2733,7 +2818,26 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // case: the operator's client retried a decision after the gate
         // already resolved (or the spawn aborted upstream).
       }
-      // Path B: operator-initiated persistence.
+      // Path B: operator-initiated persistence — denials only.
+      //
+      // [security] An escalating decision that reaches here has no parked
+      // gate behind it, so nothing proves an operator was ever asked.
+      // Refuse it rather than persisting a trust row nobody approved. The
+      // AuthorityPanel's Trust affordance must go through a gate; the
+      // wrapper_error tells it (and a scripted caller) why.
+      if (!isUngatedTrustDecisionAllowed(msg.decision)) {
+        console.warn(
+          `[mcp_trust] refused ungated ${msg.decision} for ${msg.serverName} @ ${msg.originPath} — no parked gate`,
+        );
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message:
+            `mcp_trust_decision: ${msg.decision} requires a live trust prompt ` +
+            `(server=${msg.serverName}). Start the session and answer the prompt it raises.`,
+        });
+        return;
+      }
       if (msg.decision === 'deny_once') {
         // deny_once without a parked gate has nowhere to land (no project
         // anchor for the in-memory set). Log and acknowledge silently — the
@@ -2744,30 +2848,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         );
         return;
       }
-      const persisted =
-        msg.decision === 'trust'
-          ? 'trusted'
-          : msg.decision === 'trust_pinned'
-            ? 'trusted_pinned_hash'
-            : 'denied_remember';
-      // trust_pinned without a binarySha is a UX bug (the client should
-      // grey out the affordance) AND a meaningless lookup state — reject
-      // explicitly so the operator gets a wrapper_error instead of a
-      // silently-stored junk row.
-      if (persisted === 'trusted_pinned_hash' && !msg.binarySha) {
-        send(conn.ws, {
-          type: 'wrapper_error',
-          kind: 'process_crashed',
-          message: `mcp_trust_decision: trust_pinned requires binarySha (server=${msg.serverName})`,
-        });
-        return;
-      }
+      // Only `deny_remember` reaches here — the two escalating decisions
+      // returned above and `deny_once` returned just now.
       try {
         recordTrustDecision({
           serverName: msg.serverName,
           originPath: msg.originPath,
           binarySha: msg.binarySha ?? null,
-          decision: persisted,
+          decision: 'denied_remember',
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
