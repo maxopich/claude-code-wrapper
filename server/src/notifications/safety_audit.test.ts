@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import {
   HIGHEST_SUBCODES,
-  _getSafetyAuditRow,
+  getSafetyAuditRow,
   appendSafetyAudit,
   appendSafetyAuditAck,
   verifyChain,
@@ -70,7 +70,7 @@ describe('appendSafetyAudit', () => {
     expect(hash_self).toBeInstanceOf(Buffer);
     expect(hash_self.length).toBe(32); // sha256 = 32 bytes
 
-    const row = _getSafetyAuditRow(id)!;
+    const row = getSafetyAuditRow(id)!;
     expect(row.kind).toBe('router.drop');
     expect(row.reason_code).toBe('worker_to_worker');
     expect(row.operator_id).toBeTruthy(); // populated from os.userInfo() or 'local-user'
@@ -94,7 +94,7 @@ describe('appendSafetyAudit', () => {
       reasonCode: 'unknown_recipient',
       payload: {},
     });
-    const secondRow = _getSafetyAuditRow(second.id)!;
+    const secondRow = getSafetyAuditRow(second.id)!;
     expect(secondRow.hash_prev?.equals(first.hash_self)).toBe(true);
   });
 
@@ -105,7 +105,7 @@ describe('appendSafetyAudit', () => {
       reasonCode: 'api_key_scrubbed',
       payload: { vars: ['ANTHROPIC_API_KEY'] },
     });
-    const row = _getSafetyAuditRow(id)!;
+    const row = getSafetyAuditRow(id)!;
     // Cannot pin to a literal username (varies by environment), but the
     // column must be populated and non-empty.
     expect(row.operator_id.length).toBeGreaterThan(0);
@@ -120,7 +120,7 @@ describe('appendSafetyAudit', () => {
       reasonCode: 'superseded',
       payload: { sweep: true },
     });
-    const row = _getSafetyAuditRow(id)!;
+    const row = getSafetyAuditRow(id)!;
     expect(row.session_id).toBe('sess-new');
     expect(row.parent_session_id).toBe('sess-parent');
   });
@@ -293,7 +293,7 @@ describe('safety_audit.mode (Cluster G Phase 1 / migration 023)', () => {
         reasonCode: 'worker_to_worker',
         payload: {},
       });
-      const row = _getSafetyAuditRow(id)!;
+      const row = getSafetyAuditRow(id)!;
       expect(row.mode).toBe('live');
     } finally {
       config.mock = originalMock;
@@ -310,7 +310,7 @@ describe('safety_audit.mode (Cluster G Phase 1 / migration 023)', () => {
         reasonCode: 'worker_to_worker',
         payload: {},
       });
-      const row = _getSafetyAuditRow(id)!;
+      const row = getSafetyAuditRow(id)!;
       expect(row.mode).toBe('mock');
     } finally {
       config.mock = originalMock;

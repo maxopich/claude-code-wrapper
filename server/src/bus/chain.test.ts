@@ -17,6 +17,7 @@ import {
 import {
   createMultiAgentSession,
   getMultiAgentSession,
+  listAgentSessions,
   listMultiAgentEvents,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
@@ -496,6 +497,37 @@ describe('startChainSession — project CLAUDE.md injection', () => {
     expect(marker!.text).toMatch(/Cebab injected coder\/CLAUDE\.md \(\d+\.\d KB\) into coder/);
     // No persisted scrollback event leaks the actual rule text.
     expect(events.some((e) => e.text.includes('Never touch prod'))).toBe(false);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  test('a completed chain turn persists the participant --resume checkpoint', async () => {
+    // Orchestrator mode has always written these rows; chain mode never did,
+    // so `multi_agent_agent_sessions` was empty for every chain session. Two
+    // consequences, both independent of chain R-B (still unbuilt): the
+    // checkpoint a reconstruction would need is unrecoverable after the fact,
+    // and `computeRecoveryContext` reads a missing row as `?? 0`, scoring
+    // every chain participant "possibly interrupted".
+    const workspace = path.join(tmpRoot, 'ws-ckpt');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: string[] = [];
+    const participants = [participant('ckpt-a', null), participant('ckpt-b', null)];
+
+    const handle = await startChainSession({
+      participants,
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: fakeRunnerFactory(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Only participant[0] has taken a turn (the chain head); the checkpoint
+    // is the session id the faked runner reported on its `result` message.
+    const rows = listAgentSessions(handle.sessionId);
+    expect(rows.map((r) => r.agent_name)).toEqual(['ckpt-a']);
+    expect(rows[0]!.cli_session_id).toBe('s1');
 
     unregisterLiveSession(handle.sessionId);
   });
