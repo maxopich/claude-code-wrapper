@@ -5,11 +5,17 @@
  *
  * Browser threat model (per CLAUDE.md): the WS must reject cross-origin
  * connections (CSWSH) — browsers ALWAYS set `Origin` on WS upgrades, so
- * an absent Origin can't be a cross-site hijack. The same rule applies
- * to the `/auth-token` GET: a browser cross-origin fetch would carry
- * a non-allowed `Origin`, and any local non-browser client (smoke
- * tests, curl) must instead read the token directly from
- * `~/.cebab/auth-token`. See `auth.ts`.
+ * an absent Origin can't be a cross-site hijack, and the WS upgrade
+ * therefore ALLOWS an empty Origin (the `?token=` param is the real gate
+ * there).
+ *
+ * `/auth-token` is stricter and REQUIRES a non-empty allow-listed Origin.
+ * Its only job is handing the token to the browser, which always sets one;
+ * a local non-browser client (smoke tests, curl) must read
+ * `~/.cebab/auth-token` directly instead. Serving the token to empty-Origin
+ * callers would hand out WS control-plane access to any local process
+ * without it even needing filesystem access. See `auth.ts` for the residual
+ * this does and does not close.
  */
 import { config } from './config.js';
 

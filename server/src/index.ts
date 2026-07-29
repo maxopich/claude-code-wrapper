@@ -7,9 +7,8 @@ import { closeAllQueries } from './runner/lifecycle.js';
 import { verifyChain } from './notifications/safety_audit.js';
 import { startWsServer } from './ws/server.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
-import { authTokenPath, getAuthToken, initAuthToken } from './auth.js';
-import { buildAllowedOrigins, isAllowedHost } from './origin.js';
-import { recordRejection } from './notifications/origin_rejections.js';
+import { authTokenPath, initAuthToken } from './auth.js';
+import { mountAuthTokenRoute } from './auth_token_route.js';
 import { mountSessionLogExport } from './session_log_export.js';
 import { getSession } from './repo/sessions.js';
 import { getMultiAgentSession } from './repo/multi_agent.js';
@@ -49,69 +48,11 @@ function main(): void {
   initAuthToken();
   console.log(`[cebab] auth-token written to ${authTokenPath()}`);
 
-  const allowedOrigins = buildAllowedOrigins();
-
   const app = express();
   app.get('/health', (_req, res) => {
     res.json({ ok: true, mock: config.mock });
   });
-  app.get('/auth-token', (req, res) => {
-    // Same Origin+Host gate as the WS upgrade — a browser tab from
-    // another origin trying to read the token would carry a disallowed
-    // Origin. Non-browser clients (smoke tests, curl) get no Origin
-    // header and must read ~/.cebab/auth-token from disk instead.
-    const origin = String(req.headers.origin ?? '');
-    const host = String(req.headers.host ?? '');
-    if (origin && !allowedOrigins.has(origin)) {
-      console.warn(`[http] /auth-token reject: bad origin ${JSON.stringify(origin)}`);
-      // Cluster G E3 (server-side): dual-write to the diagnostic ring +
-      // disk log. The X-Cebab-Reject-Reason response header lets a
-      // debugging operator see the reason in the browser's Network tab
-      // without spelunking the server log. recordRejection is sync so
-      // the disk line lands before the 403 leaves.
-      recordRejection({
-        origin: origin || null,
-        host: host || null,
-        reason: 'origin_not_allowed',
-        channel: 'http',
-      });
-      res.setHeader('X-Cebab-Reject-Reason', 'origin_not_allowed');
-      res.status(403).end();
-      return;
-    }
-    if (!isAllowedHost(host)) {
-      console.warn(`[http] /auth-token reject: bad host ${JSON.stringify(host)}`);
-      recordRejection({
-        origin: origin || null,
-        host: host || null,
-        reason: 'host_not_allowed',
-        channel: 'http',
-      });
-      res.setHeader('X-Cebab-Reject-Reason', 'host_not_allowed');
-      res.status(403).end();
-      return;
-    }
-    // Empty Origin: a non-browser local client. Same trust model as the
-    // WS upgrade — they could read the file directly anyway if running
-    // under the operator's uid, so this branch isn't a hole.
-    if (!origin) {
-      console.warn('[http] /auth-token: serving to empty-Origin client');
-    }
-    // CORS: in dev the web origin is :5173 but the API is :4319, so a
-    // bare fetch fails the browser's same-origin check. Echo back the
-    // (already allow-listed above) Origin so the browser permits the
-    // page to read the response. No preflight is involved — the fetch
-    // sends no custom headers.
-    if (origin) {
-      // Reflective CORS is the canonical safe pattern when the value is
-      // already gated against allowedOrigins (line 46 above). Semgrep's
-      // generic rule can't see the upstream check.
-      // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-    }
-    res.type('text/plain').send(getAuthToken());
-  });
+  mountAuthTokenRoute(app);
 
   // Cluster I C2 backend: per-session JSONL download. Reads the on-disk
   // log written by runner/logger.ts, applies LogsModal redaction line by
