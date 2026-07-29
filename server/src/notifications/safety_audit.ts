@@ -344,13 +344,20 @@ export function verifyChain(): VerifyChainResult {
 }
 
 /**
- * Test-only: full row fetch by id. Production code does NOT need direct
- * row reads — the dispatcher receives the id at append time and the
- * notifications table mirrors the relevant fields. Exported strictly so
- * tests can assert canonical-form behavior without re-implementing
- * canonicalRowBytes.
+ * Full row fetch by id.
+ *
+ * Was named `getSafetyAuditRow` and documented "test-only: production code
+ * does NOT need direct row reads". That stopped being true when kick forensics
+ * shipped: `ws/server.ts`'s `executeKickForensicsSnapshot` joins the audit row
+ * behind `controllability_forensics.safety_audit_id` to recover the kick's
+ * `reason_code` and payload, which the notifications table does not mirror.
+ * The underscore and the claim were both wrong, so both are gone.
+ *
+ * Read-only by construction — a SELECT cannot violate the append-only
+ * invariant. This module still exports no UPDATE or DELETE, which is where
+ * that invariant actually lives.
  */
-export function _getSafetyAuditRow(id: string): SafetyAuditRow | undefined {
+export function getSafetyAuditRow(id: string): SafetyAuditRow | undefined {
   return getDb()
     .prepare<[string], SafetyAuditRow>(
       `SELECT id, ts, session_id, parent_session_id, operator_id, agent_id, kind, reason_code,

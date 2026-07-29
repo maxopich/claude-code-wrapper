@@ -920,4 +920,22 @@ describe('[security] unattributable SDK-reported MCP servers', () => {
       trust: 'trusted',
     });
   });
+
+  test('a server named `bus` is NOT auto-trusted (the alias is gone)', () => {
+    // `bus` was on CEBAB_INJECTED_MCP_NAMES only because `runOneAttempt`
+    // registered a second, aliased copy of the bus tool server under that key.
+    // With the alias removed, a server named `bus` can only be someone else's
+    // — and auto-trusting it would skip the TOFU gate for a server Cebab does
+    // not control. The allowlist must track what is actually injected.
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { mcpServers: [{ name: 'bus', status: 'connected' }] },
+    });
+    expect(out!.mcpServers[0]).toMatchObject({
+      name: 'bus',
+      scope: 'unknown',
+      trust: 'unknown',
+    });
+  });
 });

@@ -70,14 +70,23 @@ export const DELEGATE_ONLY_DISALLOWED: readonly string[] = [
   'TodoWrite',
 ];
 
+/** The single MCP tool Cebab injects, under the namespaced `cebab_bus` key. */
+export const BUS_SEND_TOOL = 'mcp__cebab_bus__bus_send';
+
 /**
  * The only tools a `'delegate-only'` agent (the orchestrator) may call:
  * `AskUserQuestion` (parked for the operator) and the injected `bus_send` MCP
- * tool. Matching `bus_send` by the `__bus_send` suffix covers both the
- * `mcp__cebab_bus__bus_send` name and the deprecated `mcp__bus__bus_send` alias.
+ * tool.
+ *
+ * Matched by exact name. The previous `endsWith('__bus_send')` test dated from
+ * when Cebab registered the tool under two server keys (`cebab_bus` + the `bus`
+ * deprecation alias); with the alias gone there is exactly one legitimate name,
+ * and a suffix match would also admit `mcp__<anything>__bus_send` from an
+ * operator's own user-scope MCP config — i.e. a second, unpinned bus reachable
+ * by the one agent whose entire containment is "you may only call bus_send".
  */
 export function isDelegationAllowedTool(toolName: string): boolean {
-  return toolName === 'AskUserQuestion' || toolName.endsWith('__bus_send');
+  return toolName === 'AskUserQuestion' || toolName === BUS_SEND_TOOL;
 }
 
 /**
@@ -128,6 +137,27 @@ function toolError(text: string): ToolResult {
 }
 
 /**
+ * Hard cap on one `bus_send` body, in UTF-8 bytes.
+ *
+ * Every bus message is three things at once: a row in `multi_agent_events`, a
+ * WS frame to the browser, and — the one that matters — the *prompt* for the
+ * recipient's next turn. Nothing else bounds that third use: the sender writes
+ * it, Cebab forwards it verbatim, and the recipient pays for it in context. A
+ * worker that dumps a whole file (or loops appending to its reply) otherwise
+ * silently burns the peer's context window and the operator's quota.
+ *
+ * 128 KiB ≈ 32k tokens — far above any legitimate hand-written hop (the longest
+ * real replies observed are a few KB) and far below "a repo pasted into a
+ * message". Measured in bytes, not codepoints, because the DB row and the WS
+ * frame are what the ceiling protects.
+ *
+ * Over-limit is REJECTED, not truncated: truncation loses the tail silently and
+ * can cut a code block mid-fence, whereas the error result is readable by the
+ * model, names the actual size, and lets it resend something shorter.
+ */
+export const BUS_SEND_TEXT_MAX_BYTES = 128 * 1024;
+
+/**
  * Pure `bus_send` logic — no SDK, unit-testable in isolation.
  *
  * `source` is supplied by the caller (pinned per-agent in `makeBusToolServer`),
@@ -153,6 +183,14 @@ export function handleBusSend(
   if (typeof args.text !== 'string' || args.text.length === 0) {
     return toolError('bus_send rejected: text must be a non-empty string');
   }
+  const textBytes = Buffer.byteLength(args.text, 'utf8');
+  if (textBytes > BUS_SEND_TEXT_MAX_BYTES) {
+    return toolError(
+      `bus_send rejected: text is ${textBytes} bytes, over the ${BUS_SEND_TEXT_MAX_BYTES}-byte ` +
+        `limit for one message. Summarize, or split the work across several messages — do not ` +
+        `paste file contents you could point at by path instead.`,
+    );
+  }
   const ev: BusEvent = {
     ts: Date.now(),
     source,
@@ -174,19 +212,10 @@ export function handleBusSend(
  * cannot collide with — or worse, clobber — this identity-pinned injection
  * once `settingSources` widens to `['user', 'project', 'local']` for
  * workers/chain participants.
- *
- * `serverName` parameterizes the MCP server's metadata `name:` so the helper
- * can build TWO instances at runtime — one for the canonical `cebab_bus` key
- * and one for the deprecation-shim `bus` key (see `runOneAttempt`). Defaults
- * to `'cebab_bus'` so existing callers stay unchanged.
  */
-export function makeBusToolServer(
-  agentName: string,
-  onEvent: (ev: BusEvent) => void,
-  serverName = 'cebab_bus',
-) {
+export function makeBusToolServer(agentName: string, onEvent: (ev: BusEvent) => void) {
   return createSdkMcpServer({
-    name: serverName,
+    name: 'cebab_bus',
     version: '0.0.0',
     tools: [
       tool(
@@ -199,7 +228,13 @@ export function makeBusToolServer(
           kind: z
             .enum(BUS_KINDS)
             .describe('reply = hand off / answer a peer; final = terminal answer'),
-          text: z.string().min(1).describe('the message body'),
+          text: z
+            .string()
+            .min(1)
+            .describe(
+              `the message body (max ${BUS_SEND_TEXT_MAX_BYTES} bytes — summarize or split ` +
+                `rather than pasting large files)`,
+            ),
         },
         async (args) => handleBusSend(agentName, args, onEvent),
       ),
@@ -801,18 +836,14 @@ export class AgentRunner {
       ...toolLock,
       settingSources: spec.settingSources ?? ['user'],
       mcpServers: {
+        // Sole registration. The `bus` alias that shimmed the
+        // `bus` → `cebab_bus` rename (e04769e, 2026-05-25) is gone: it only
+        // ever mattered for a CLI session resumed across that commit, and it
+        // cost more than it bought — Cebab's registration under the bare `bus`
+        // key CLOBBERED any `mcpServers.bus` a participant declares in its own
+        // `.claude/settings*.json`, which is precisely the collision the
+        // namespaced key was introduced to avoid.
         cebab_bus: makeBusToolServer(agentName, this.deps.onEvent),
-        // Deprecation shim for the `bus` → `cebab_bus` MCP-server rename
-        // (e04769e). A resumed CLI session whose JSONL history contains
-        // `mcp__bus__bus_send` calls will keep calling that name by reflex;
-        // without this alias the SDK returns "No such tool available" and the
-        // agent falls back to plain assistant text — which the bus router
-        // discards (only `bus_send` tool calls forward). Identity-pinning is
-        // preserved: each registration captures `agentName` in its own
-        // closure, so neither alias can be used to spoof a `source`. Remove
-        // after one release once no in-flight resumed sessions reference the
-        // old name.
-        bus: makeBusToolServer(agentName, this.deps.onEvent, 'bus'),
       },
       abortController: this.deps.abortController,
     });

@@ -73,10 +73,13 @@ const USER_SCOPE_PATH = path.join(os.homedir(), '.claude', 'settings.json');
  * (`enrichWithTrustState`) and a skip in `awaitMcpTrustDecisions`.
  *
  * Keep in sync with the `mcpServers` keys in `bus/runner.ts`'s
- * `runOneAttempt`. `bus` is the deprecated alias kept for resumed sessions
- * whose transcripts still reference `mcp__bus__bus_send`.
+ * `runOneAttempt` — and keep it MINIMAL. `bus` used to be listed here for the
+ * deprecation alias; now that the alias is gone, leaving it would mean a
+ * participant's own server named `bus` — one Cebab does not inject and never
+ * saw in a settings layer — is laundered into permanently-trusted and skipped
+ * by TOFU. Only add a name here when `runOneAttempt` actually registers it.
  */
-const CEBAB_INJECTED_MCP_NAMES: ReadonlySet<string> = new Set(['cebab_bus', 'bus']);
+const CEBAB_INJECTED_MCP_NAMES: ReadonlySet<string> = new Set(['cebab_bus']);
 
 /**
  * Read + parse a `.claude/settings.json` (or `.claude/settings.local.json`).

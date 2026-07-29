@@ -9,6 +9,7 @@ import type { MockOptions, RunOptions, Runner } from '../runner/index.js';
 import {
   AgentRunner,
   BUS_KINDS,
+  BUS_SEND_TEXT_MAX_BYTES,
   DEFAULT_OVERLOAD_BACKOFF_MS,
   handleBusSend,
   isTransientOverload,
@@ -67,6 +68,41 @@ describe('handleBusSend', () => {
     expect(onEvent).not.toHaveBeenCalled();
   });
 
+  test('[security] a text body over the byte cap is rejected, not truncated', () => {
+    const onEvent = vi.fn();
+    const justUnder = 'a'.repeat(BUS_SEND_TEXT_MAX_BYTES);
+    expect(
+      handleBusSend('a', { recipient: 'b', kind: 'reply', text: justUnder }, onEvent).isError,
+    ).toBeFalsy();
+    expect(onEvent).toHaveBeenCalledTimes(1);
+
+    onEvent.mockClear();
+    const over = 'a'.repeat(BUS_SEND_TEXT_MAX_BYTES + 1);
+    const res = handleBusSend('a', { recipient: 'b', kind: 'reply', text: over }, onEvent);
+    expect(res.isError).toBe(true);
+    // Rejected outright — a truncated body would reach the peer looking
+    // complete, so the router must never see the event at all.
+    expect(onEvent).not.toHaveBeenCalled();
+    // The message has to be actionable: the model reads this tool result and
+    // is expected to resend something shorter.
+    expect(res.content[0]!.text).toContain(String(BUS_SEND_TEXT_MAX_BYTES + 1));
+    expect(res.content[0]!.text).toContain(String(BUS_SEND_TEXT_MAX_BYTES));
+  });
+
+  test('[security] the cap counts UTF-8 bytes, not codepoints', () => {
+    const onEvent = vi.fn();
+    // Every char here is 4 bytes, so a string one quarter the cap in
+    // codepoints is exactly at it — a `.length` check would let 4x through.
+    const fourByteChar = '𝄞';
+    expect(Buffer.byteLength(fourByteChar, 'utf8')).toBe(4);
+    const over = fourByteChar.repeat(BUS_SEND_TEXT_MAX_BYTES / 4 + 1);
+    expect(over.length).toBeLessThan(BUS_SEND_TEXT_MAX_BYTES);
+    expect(handleBusSend('a', { recipient: 'b', kind: 'reply', text: over }, onEvent).isError).toBe(
+      true,
+    );
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
   test('[security] an agent cannot forge its source identity', () => {
     // The agent only controls recipient/kind/text. Even if it injects a
     // `source` (or `from`) field, the signature drops it — the stamped
@@ -86,22 +122,12 @@ describe('handleBusSend', () => {
   });
 });
 
-test('makeBusToolServer builds a `cebab_bus` MCP server by default', () => {
+test('makeBusToolServer builds a `cebab_bus` MCP server', () => {
   const server = makeBusToolServer('alpha', () => {}) as { type: string; name: string };
   expect(server).toBeTruthy();
   expect(server.type).toBe('sdk');
   expect(server.name).toBe('cebab_bus');
   expect(BUS_KINDS).toEqual(['intro', 'prompt', 'reply', 'final']);
-});
-
-test('makeBusToolServer honors a custom server name (used for the `bus` deprecation shim)', () => {
-  // runOneAttempt registers a second instance under the `bus` key to keep
-  // resumed CLI sessions whose JSONL history calls `mcp__bus__bus_send`
-  // resolving after PR #99 renamed the canonical key. The metadata `name`
-  // must match the mcpServers key so the SDK advertises the prefix that
-  // the resumed history references.
-  const server = makeBusToolServer('alpha', () => {}, 'bus') as { type: string; name: string };
-  expect(server.name).toBe('bus');
 });
 
 // --- AgentRunner ---------------------------------------------------------
@@ -143,27 +169,28 @@ describe('AgentRunner', () => {
     expect(calls[0]!.allowDangerouslySkipPermissions).toBe(true);
     // Canonical key is `cebab_bus` (the rename was deliberate so a worker's
     // own project-defined `mcpServers.bus` cannot collide with the identity-
-    // pinned bus_send injection). `bus` is ALSO registered as a deprecation
-    // shim so resumed CLI sessions whose JSONL history calls
-    // `mcp__bus__bus_send` keep resolving — see the alias coverage below.
+    // pinned bus_send injection).
     expect(calls[0]!.mcpServers).toHaveProperty('cebab_bus');
-    expect(calls[0]!.mcpServers).toHaveProperty('bus');
     expect(calls[1]!.resume).toBe('sess-7');
   });
 
-  test('both `cebab_bus` and `bus` mcpServers expose identity-pinned bus_send (rename deprecation shim)', async () => {
-    // Regression for the silent-stall bug seen on Cebab session
-    // 67a5e371: PR #99 renamed `bus` → `cebab_bus`, and resumed CLI
-    // sessions that still called `mcp__bus__bus_send` from their JSONL
-    // history hit "No such tool available", fell back to plain assistant
-    // text, and the router dropped the reply. Registering `bus` under the
-    // same identity-pinned handler keeps those resumed turns working.
+  test('[security] `cebab_bus` is the ONLY mcpServer Cebab injects (no `bus` alias)', async () => {
+    // PR #99 renamed `bus` → `cebab_bus` and a second registration under the
+    // bare `bus` key was kept as a deprecation shim, so CLI sessions resumed
+    // across that commit — whose JSONL history calls `mcp__bus__bus_send` —
+    // would not hit "No such tool available". That window closed; the shim
+    // is now a liability rather than a convenience, in two ways:
     //
-    // The alias must remain identity-pinned: each registration is a
-    // separately-built McpSdkServerConfigWithInstance with its own closure
-    // capturing the agent name. They are NOT the same object reference, so
-    // the two instances cannot share mutable state that an agent could
-    // poison.
+    //   1. It clobbers a legitimate `mcpServers.bus` in a participant's own
+    //      `.claude/settings*.json` — the exact collision the namespaced key
+    //      was introduced to prevent, now reachable because workers load
+    //      project + local scopes.
+    //   2. `bus` had to be allow-listed in `project_authority`'s
+    //      CEBAB_INJECTED_MCP_NAMES, and anything on that list is granted
+    //      `trust: 'trusted'` and skipped by the MCP TOFU gate.
+    //
+    // Pinned as a set-equality (not just `not.toHaveProperty('bus')`) so any
+    // future injection has to be added here deliberately.
     const calls: (RunOptions & Partial<MockOptions>)[] = [];
     const runner = new AgentRunner({
       onEvent: () => {},
@@ -176,11 +203,9 @@ describe('AgentRunner', () => {
     await runner.deliverTurn('alpha', 'go');
 
     const servers = calls[0]!.mcpServers as Record<string, { type: string; name: string }>;
+    expect(Object.keys(servers)).toEqual(['cebab_bus']);
     expect(servers.cebab_bus?.type).toBe('sdk');
     expect(servers.cebab_bus?.name).toBe('cebab_bus');
-    expect(servers.bus?.type).toBe('sdk');
-    expect(servers.bus?.name).toBe('bus');
-    expect(servers.cebab_bus).not.toBe(servers.bus);
   });
 
   test('register passes the spec.settingSources through to the SDK', async () => {

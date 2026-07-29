@@ -35,6 +35,15 @@
  * chain run still does NOT survive a server restart (the old R-A behavior);
  * orchestrated runs do (R-B, see `reconstruct.ts`). Single-agent resume is
  * unaffected; that is a different path.
+ *
+ * Chain runs DO persist each participant's `--resume` checkpoint
+ * (`onSessionId` → `upsertAgentSession`), even though nothing reads them
+ * back yet. Two reasons the write is not deferred until reconstruction is
+ * built: it is the missing prerequisite for it (a checkpoint can only be
+ * recorded while the run is live — after the restart the value is gone), and
+ * `computeRecoveryContext` derives "possibly interrupted" from
+ * checkpoint-vs-last-event timestamps, so with no rows at all every chain
+ * participant scores as interrupted.
  */
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -56,6 +65,7 @@ import {
   setPauseOnDangerous,
   setPendingMutation,
   setPendingRetry,
+  upsertAgentSession,
   type EventKind,
   type MultiAgentLifecycle,
   type MutationRecord,
@@ -890,6 +900,20 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);
       activity.onMessage(agent, msg);
+    },
+    onSessionId: (agent, cli) => {
+      // Persist each participant's `--resume` checkpoint. Orchestrator mode
+      // has always done this (orchestrator.ts); chain mode did not, so a
+      // chain session's `multi_agent_agent_sessions` rows never existed —
+      // which is *why* chain reconstruction could not be built, and why
+      // `computeRecoveryContext` would report every chain participant as
+      // possibly-interrupted (no checkpoint row ⇒ `?? 0`). Writing the rows
+      // is independent of, and a prerequisite for, chain R-B.
+      try {
+        upsertAgentSession(sessionId, agent, cli);
+      } catch (err) {
+        console.error('[chain] persist agent session failed', err);
+      }
     },
     onMutation: onMutationHook,
     onToolResult: onToolResultHook,

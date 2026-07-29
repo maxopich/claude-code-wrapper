@@ -97,7 +97,7 @@ import {
 } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import { appendForensics, getLatestForensicsForAgent } from '../repo/controllability_forensics.js';
-import { _getSafetyAuditRow } from '../notifications/safety_audit.js';
+import { getSafetyAuditRow } from '../notifications/safety_audit.js';
 import {
   isControlReasonCode,
   isKickMode,
@@ -924,7 +924,7 @@ export function executeKickForensicsSnapshot(args: {
   // forensics FK guarantees the row exists; we still guard with
   // optional chaining + defensive parse because the payload shape is
   // by-convention, not schema-enforced.
-  const auditRow = _getSafetyAuditRow(row.safety_audit_id);
+  const auditRow = getSafetyAuditRow(row.safety_audit_id);
   let kickReasonText: string | null = null;
   let kickMode: KickForensicsSnapshot['kickMode'] = null;
   let kickReasonCode: KickForensicsSnapshot['kickReasonCode'] = null;
