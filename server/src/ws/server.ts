@@ -259,8 +259,13 @@ export function cleanupPendingPermissionsForSession(
  * async runner cancel — F12's guarantee is that the permission map
  * doesn't leak even if the runner cancellation hangs.
  */
+// Structural subset of the real in-flight record — just enough for
+// `executeInterrupt`, so tests can drive it with a stub. `interrupt`
+// resolves to `unknown` to stay in step with `Runner` (see runner/index.ts:
+// the SDK returns a response object here, and we use the promise only as a
+// completion signal — `emitAck` takes no arguments).
 type InterruptInFlight = {
-  runner: { interrupt?: () => Promise<void> };
+  runner: { interrupt?: () => Promise<unknown> };
   ac: AbortController;
 };
 
