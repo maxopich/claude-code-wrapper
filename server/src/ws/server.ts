@@ -12,6 +12,7 @@ import {
 } from '@cebab/shared';
 import { config } from '../config.js';
 import { getProject, setProjectTrusted, touchProject } from '../repo/projects.js';
+import { observeProjectHooks } from '../repo/hook_trust.js';
 import {
   createSession,
   getSession,
@@ -37,6 +38,7 @@ import {
 } from '../workspace.js';
 import type {
   AuthTransitionReasonCode,
+  HookView,
   MultiAgentLifecycle,
   NotificationAction,
   NotificationEnvelope,
@@ -1633,7 +1635,7 @@ function send(ws: WebSocket, msg: ServerMsg): void {
  * we skip silently — `getProject` upstream already rejected the start, so
  * this case is structurally unreachable in practice.
  */
-async function gateProjectsForSpawn(
+export async function gateProjectsForSpawn(
   conn: Conn,
   projectIds: number[],
   settingSources?: readonly SettingScope[],
@@ -1669,6 +1671,95 @@ async function gateProjectsForSpawn(
       send: (m) => send(conn.ws, m),
       injections: authority.detectedEnvInjections,
     });
+    // F6: record the hooks this spawn will run and report anything new or
+    // changed. Runs LAST and does NOT park: unlike the two gates above it has
+    // no operator prompt, so awaiting it would hang forever. See
+    // `reportHookObservations`.
+    reportHookObservations(projectId, authority.hooks, (m) => send(conn.ws, m));
+  }
+}
+
+/**
+ * F6: observe a project's hooks on the way to a spawn, and tell the operator
+ * about anything they have not already seen.
+ *
+ * Hooks are the one authority surface with no gate at all. An MCP server is a
+ * process the model must choose to call; a hook is a shell command the CLI
+ * runs on its own schedule — `SessionStart` before the model acts,
+ * `PreToolUse`/`PostToolUse` around every tool call — and none of them pass
+ * through `canUseTool`, so none can be approved or denied. Since #260 widened
+ * bus participants to `['user', 'project', 'local']`, a participant project's
+ * hooks execute on every hop with no record anywhere.
+ *
+ * DETECTION, NOT PREVENTION — and deliberately so. The two gates above park
+ * the spawn on a promise that only an operator decision resolves. There is no
+ * operator prompt for hooks (a hooks UI is out of v1 scope), so a blocking
+ * hook gate would hang every spawn forever. What lands instead: a durable
+ * `hook_trust` row, a hash-chained `safety_audit` entry, and a notification —
+ * the operator learns, and the forensic trail exists, even though the hook
+ * still runs. Whether to add the blocking prompt is a separate decision with
+ * its own UI cost.
+ *
+ * Failures here can never block a spawn. A DB error while recording what a
+ * hook does must not stop the run the operator asked for; it is logged and
+ * the spawn proceeds, which is the same posture every other best-effort
+ * persistence path in the bus takes.
+ */
+export function reportHookObservations(
+  projectId: number,
+  hooks: HookView[],
+  send: (msg: ServerMsg) => void,
+): void {
+  if (hooks.length === 0) return;
+  const project = getProject(projectId);
+  if (!project) return;
+
+  let observations;
+  try {
+    observations = observeProjectHooks(projectId, hooks, project.path);
+  } catch (err) {
+    console.error('[ws] hook observation failed', err);
+    return;
+  }
+
+  for (const obs of observations) {
+    const isNew = obs.change === 'first_seen';
+    const label = `${obs.hookKind} hook in ${project.name}`;
+    const result = emitNotification(
+      {
+        class: 'safety',
+        severity: isNew ? 'warn' : 'danger',
+        // Per (project, kind, command) so two different hooks both surface;
+        // safety-class events are never coalesced anyway (BE-2), this only
+        // keys the client-side replace.
+        dedupeKey: `hook.${obs.change}:${projectId}:${obs.hookKind}:${obs.command}`,
+        title: isNew ? `New ${label}` : `Changed script behind ${label}`,
+        message: isNew
+          ? `\`${obs.command}\` will run automatically for this project — hooks are not gated by tool approval. Declared in ${obs.originPath}.`
+          : `\`${obs.command}\` is unchanged in ${obs.originPath}, but the file it runs was rewritten since Cebab last saw it.`,
+        projectId,
+        reasonCode: obs.change,
+        auditKind: `hook.${obs.change}`,
+        auditPayload: {
+          projectId,
+          hookKind: obs.hookKind,
+          originPath: obs.originPath,
+          command: obs.command,
+          args: obs.args,
+          scriptSha: obs.scriptSha,
+          ...(obs.previousScriptSha !== undefined
+            ? { previousScriptSha: obs.previousScriptSha }
+            : {}),
+        },
+      },
+      send,
+    );
+    if (!result.ok) {
+      // The audit row is the obligation; if it could not be written the
+      // operator got no notification either. Loud in the log — this is the
+      // BE-1 failure mode, not a routine miss.
+      console.error('[ws] hook observation dispatch failed', result.error);
+    }
   }
 }
 
