@@ -1501,11 +1501,12 @@ export function wireOrchestratorSession(p: {
   });
   // Workers load their project's full settings stack — MCPs,
   // allowedTools/disallowedTools, env injectors, hooks — exactly as a
-  // standalone `claude` session in the same cwd would. Combined with
-  // `permissionMode: 'bypassPermissions'` (no human gate), this means a
-  // worker's project-defined hooks auto-execute on every bus turn for that
-  // worker; the consultant-mode guardrail in `runtime.ts` is the only
-  // behavioral brake.
+  // standalone `claude` session in the same cwd would. Because the runner's
+  // `canUseTool` auto-allows every tool except `AskUserQuestion` for agents
+  // without `toolPolicy: 'delegate-only'` (i.e. every worker), there is no
+  // human gate on any of it: a worker's project-defined hooks auto-execute on
+  // every bus turn for that worker. The consultant-mode guardrail in
+  // `runtime.ts` is the only behavioral brake.
   for (const w of p.workers) {
     runner.register({
       name: w.agentName,

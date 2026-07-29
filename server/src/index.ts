@@ -5,6 +5,7 @@ import { closeDb, getDb } from './db.js';
 import { closeLogger } from './runner/logger.js';
 import { closeAllQueries } from './runner/lifecycle.js';
 import { verifyChain } from './notifications/safety_audit.js';
+import { emit as emitNotification } from './notifications/dispatcher.js';
 import { startWsServer } from './ws/server.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
 import { authTokenPath, getAuthToken, initAuthToken } from './auth.js';
@@ -24,17 +25,48 @@ function main(): void {
 
   getDb();
 
-  // Cluster A Phase 1: walk the safety_audit hash chain at boot. Phase 1
-  // just logs the outcome — a broken chain in Phase 3 will additionally
-  // emit an `audit.tamper_detected` danger notification and refuse further
-  // safety emissions until acknowledged. The walk is cheap (the genesis
-  // marker anchors verification, so the chain length equals real-event
-  // count since the last migration).
+  // Cluster A Phase 1: walk the safety_audit hash chain at boot. The walk is
+  // cheap (the genesis marker anchors verification, so the chain length equals
+  // real-event count since the last migration).
+  //
+  // A failure now emits an `audit.tamper_detected` safety notification, not
+  // just a stderr line: `emit()` persists the row (sticky) and the operator
+  // picks it up from the inbox snapshot seeded on WS connect. There is no WS
+  // client at boot, so `send` is a no-op — persistence is what carries it.
+  //
+  // Boot deliberately CONTINUES. Refusing to start on a suspected tamper turns
+  // this fail-open into a fail-closed that bricks the whole app over a stale
+  // marker allowlist; "refuse further safety emissions until acknowledged" is
+  // still Phase 3 and still unimplemented.
   const chainResult = verifyChain();
   if (chainResult.ok) {
     console.log(`[cebab] safety_audit chain ok (${chainResult.rowsChecked} rows)`);
   } else {
-    console.error(`[cebab] safety_audit chain BROKEN at ${chainResult.brokenAt}`);
+    const where = chainResult.brokenAt ? ` at ${chainResult.brokenAt}` : '';
+    console.error(`[cebab] safety_audit chain BROKEN (${chainResult.reason})${where}`);
+    const result = emitNotification(
+      {
+        severity: 'danger',
+        class: 'safety',
+        dedupeKey: 'audit.tamper_detected',
+        title: 'Safety audit chain failed verification',
+        message:
+          chainResult.reason === 'no_anchor'
+            ? 'The safety audit log has no chain-reset anchor. Migrations always insert one, so it was removed.'
+            : chainResult.reason === 'forged_anchor'
+              ? `The newest chain-reset anchor (${chainResult.brokenAt}) is not one this build wrote.`
+              : `Row ${chainResult.brokenAt} no longer matches its recorded hash.`,
+        reasonCode: chainResult.reason,
+        auditKind: 'audit.tamper_detected',
+        auditPayload: { reason: chainResult.reason, brokenAt: chainResult.brokenAt ?? null },
+      },
+      () => {},
+    );
+    if (!result.ok) {
+      // The audit append itself failed — the chain is unwritable as well as
+      // unverifiable. Nothing left but the log line.
+      console.error(`[cebab] could not record tamper notification: ${result.error}`);
+    }
   }
 
   const root = resolveWorkspaceRoot();

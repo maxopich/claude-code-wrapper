@@ -41,10 +41,9 @@ describe('safety_audit genesis marker', () => {
   test('migration 015 inserts a chain-reset marker', () => {
     const db = getDb();
     const row = db
-      .prepare<
-        [],
-        { id: string; kind: string; reason_code: string }
-      >(`SELECT id, kind, reason_code FROM safety_audit WHERE kind = 'audit.chain_reset'`)
+      .prepare<[], { id: string; kind: string; reason_code: string }>(
+        `SELECT id, kind, reason_code FROM safety_audit WHERE kind = 'audit.chain_reset'`,
+      )
       .get();
     expect(row).toBeDefined();
     expect(row?.id).toBe('chain-reset-015');
@@ -184,6 +183,65 @@ describe('[security][A] verifyChain', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.brokenAt).toBe(id);
   });
+
+  test('a row mismatch reports reason=row_mismatch', () => {
+    const { id } = appendSafetyAudit({ ts: 1, kind: 'k', reasonCode: 'r', payload: {} });
+    getDb().prepare(`UPDATE safety_audit SET reason_code = 'x' WHERE id = ?`).run(id);
+    const result = verifyChain();
+    expect(result).toEqual({ ok: false, reason: 'row_mismatch', brokenAt: id });
+  });
+
+  // ---- fail-closed: anchor removal / forgery ----
+  //
+  // The anchor is TRUSTED (its hash_self is a sentinel, not a digest) and the
+  // walk only covers rows after it. So attacks on the anchor itself are not
+  // caught by the digest cascade — they need explicit checks.
+
+  test('[security] deleting every chain-reset marker is tampering, not health', () => {
+    for (let i = 0; i < 5; i++) {
+      appendSafetyAudit({ ts: 1000 + i, kind: 'k', reasonCode: 'r', payload: { i } });
+    }
+    // Red-team: drop the anchors. Pre-fix this returned {ok:true,rowsChecked:0}
+    // — a wiped audit log was indistinguishable from a clean one.
+    getDb().prepare(`DELETE FROM safety_audit WHERE kind = 'audit.chain_reset'`).run();
+    const result = verifyChain();
+    expect(result).toEqual({ ok: false, reason: 'no_anchor' });
+  });
+
+  test('[security] a forged chain-reset row appended at the tail is rejected', () => {
+    const { id } = appendSafetyAudit({ ts: 1, kind: 'k', reasonCode: 'r', payload: {} });
+    getDb().prepare(`UPDATE safety_audit SET payload_json = '{"t":1}' WHERE id = ?`).run(id);
+    // Red-team: hide the tampering by appending a new anchor past it. Pre-fix
+    // this narrowed the verified range to zero rows and reported ok.
+    getDb()
+      .prepare(
+        `INSERT INTO safety_audit (id, ts, kind, reason_code, payload_json, hash_prev, hash_self, mode)
+         VALUES ('chain-reset-forged', 0, 'audit.chain_reset', 'forged', '{}', NULL, X'00', 'live')`,
+      )
+      .run();
+    const result = verifyChain();
+    expect(result).toEqual({
+      ok: false,
+      reason: 'forged_anchor',
+      brokenAt: 'chain-reset-forged',
+    });
+  });
+
+  test('[security] a known marker id with a non-sentinel hash_self is rejected', () => {
+    // Red-team: keep the allowlisted id but swap the anchor hash, so every
+    // following row would have to chain from an attacker-chosen head.
+    // `chain-reset-023` is the newest marker (migration 023 added `mode`), so
+    // it is the one verifyChain anchors on.
+    getDb()
+      .prepare(`UPDATE safety_audit SET hash_self = X'ff' WHERE kind = 'audit.chain_reset'`)
+      .run();
+    const result = verifyChain();
+    expect(result).toEqual({
+      ok: false,
+      reason: 'forged_anchor',
+      brokenAt: 'chain-reset-023',
+    });
+  });
 });
 
 // ---- ack ----
@@ -200,10 +258,9 @@ describe('appendSafetyAuditAck', () => {
     appendSafetyAuditAck(auditId, 200, 'bob', 'never mind');
 
     const row = getDb()
-      .prepare<
-        [string],
-        { acked_at: number; acked_by: string; acked_reason: string }
-      >(`SELECT acked_at, acked_by, acked_reason FROM safety_audit_ack WHERE audit_id = ?`)
+      .prepare<[string], { acked_at: number; acked_by: string; acked_reason: string }>(
+        `SELECT acked_at, acked_by, acked_reason FROM safety_audit_ack WHERE audit_id = ?`,
+      )
       .get(auditId)!;
     expect(row.acked_at).toBe(100);
     expect(row.acked_by).toBe('alice');
@@ -316,10 +373,7 @@ describe('safety_audit.mode (Cluster G Phase 1 / migration 023)', () => {
     // is caught at review time.
     const db = getDb();
     const latest = db
-      .prepare<
-        [],
-        { id: string; reason_code: string; mode: string }
-      >(
+      .prepare<[], { id: string; reason_code: string; mode: string }>(
         `SELECT id, reason_code, mode FROM safety_audit
          WHERE kind = 'audit.chain_reset'
          ORDER BY rowid DESC LIMIT 1`,

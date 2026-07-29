@@ -10,10 +10,23 @@
  * `renderRosterPrompt` / `renderWorkerBriefing` tells every bus
  * participant to read/analyze/advise and NOT mutate files outside its
  * own project folder unless the operator's relayed request explicitly
- * directs that change. The constraint is purely advisory — the model
- * interprets the prompt, and Cebab can't deny tool calls in the bus
- * (workers run with `bypassPermissions`). This classifier surfaces
+ * directs that change. The constraint is advisory — the model interprets
+ * the prompt, and nothing denies the tool call. This classifier surfaces
  * violations post-hoc so the operator sees them.
+ *
+ * Note on WHY it is advisory, since the obvious reading is wrong: it is
+ * NOT that the bus runs headless. Both routers wire `onAskUserQuestion`
+ * (`orchestrator.ts` / `chain.ts`), so every production bus turn runs
+ * `permissionMode: 'default'` with a live `canUseTool` — the
+ * `bypassPermissions` branch in `runner.ts`'s `runOneAttempt` is reached
+ * only by callers that skip the hook (i.e. tests). The gate exists; it
+ * just returns `allow` for every tool except `AskUserQuestion` on any
+ * agent without `toolPolicy: 'delegate-only'`, which today means every
+ * worker and every chain participant. So a deny seam IS available if
+ * enforcement is ever wanted — but wiring this classifier into it would
+ * cover Write/Edit/MultiEdit/NotebookEdit only, while `Bash` (no
+ * `filePath`, see below) and symlinked paths still escape. Enforcing a
+ * guarantee with those holes open is worse than not claiming one.
  *
  * Why server-side and not in `shared/`: path resolution depends on
  * `node:path` (`resolve`, `sep`) and `~` expansion depends on

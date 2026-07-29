@@ -958,8 +958,11 @@ export class AgentRunner {
               const toolUseId = typeof block.id === 'string' ? block.id : undefined;
               // Cluster F Phase D5+: classify path scope vs agent cwd. The
               // consultant-mode prompt forbids out-of-scope mutations; this
-              // surfaces violations post-hoc (workers run with
-              // bypassPermissions, so we can't deny at the SDK gate). The
+              // surfaces violations post-hoc rather than denying them. (Not
+              // because there is no gate — `makeCanUseTool` above IS live on
+              // every production turn; it allows everything for agents without
+              // `toolPolicy: 'delegate-only'`. See guardrail.ts's header for
+              // why turning that seam into enforcement is not free.) The
               // verdict rides on the hook payload — the orchestrator/chain
               // sink persists it on the mutation row and the WS broadcast
               // fan-out fires the safety_audit dispatcher. In-scope

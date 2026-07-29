@@ -219,13 +219,16 @@ function buildEffectivePrompt(
 //                               against the participant's project cwd.
 //   - `activePermissions`     — kept undefined for multi-agent: a
 //                               participant's permissionMode is
-//                               session-wide (`bypassPermissions` for
-//                               bus turns per CLAUDE.md), not
+//                               session-wide (`default` for bus turns,
+//                               set once in `bus/runner.ts`), not
 //                               per-participant. Surfacing it would
 //                               be redundant across the per-agent rows.
-//   - `pendingToolCalls`      — null for multi-agent: bus turns run
-//                               headless with bypassPermissions, so no
-//                               pending `canUseTool` requests exist.
+//   - `pendingToolCalls`      — null for multi-agent: bus turns DO run a
+//                               `canUseTool`, but it auto-allows every
+//                               tool except `AskUserQuestion`, so nothing
+//                               ever parks in `pendingPermissions`. The
+//                               parked questions live in the bus's own
+//                               `pending_questions` table instead.
 //
 // The action-specific metadata (kick mode, reasonCode, trigger ref for
 // auto-kick) lives in the parent safety_audit row's payload — the
@@ -394,8 +397,7 @@ export function captureMultiAgentForensics(
 }
 
 type MultiAgentEffectivePromptShape =
-  | { source: 'last-bus-inbox'; text: string; eventId: number; from: string }
-  | { source: 'none' };
+  { source: 'last-bus-inbox'; text: string; eventId: number; from: string } | { source: 'none' };
 
 function buildMultiAgentEffectivePrompt(
   agentSlug: string,

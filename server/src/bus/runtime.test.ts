@@ -182,9 +182,9 @@ describe('renderRosterPrompt', () => {
   });
 
   test('embeds the consultant-mode guardrail and the relay obligation', () => {
-    // Bus workers run headless with bypassPermissions (no approval card),
-    // so the orchestrator must carry the no-unsolicited-changes constraint into
-    // every task it routes.
+    // Bus workers get no approval card — the runner's canUseTool auto-allows
+    // every tool except AskUserQuestion — so the orchestrator must carry the
+    // no-unsolicited-changes constraint into every task it routes.
     const text = renderRosterPrompt({
       workers: [{ agentName: 'reviewer', projectName: 'Reviewer' }],
       hopBudget: 8,
