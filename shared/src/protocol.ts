@@ -85,11 +85,7 @@ export const RESULT_SUBTYPES: ReadonlySet<ResultSubtype> = new Set([
 ]);
 
 export type WrapperErrorKind =
-  | 'claude_not_found'
-  | 'auth_expired'
-  | 'rate_limited'
-  | 'process_crashed'
-  | 'parse_error';
+  'claude_not_found' | 'auth_expired' | 'rate_limited' | 'process_crashed' | 'parse_error';
 
 /**
  * Cluster A Phase 3: enumerated sub-codes for router-drop safety events.
@@ -204,10 +200,7 @@ export type AuthTransitionReasonCode =
   | 'reauth_complete';
 
 export type SessionRecoveredReasonCode =
-  | 'reconstructed'
-  | 'reconstruction_failed'
-  | 'superseded'
-  | 'swept_competing';
+  'reconstructed' | 'reconstruction_failed' | 'superseded' | 'swept_competing';
 
 export type RateLimitReasonCode = 'hit' | 'cleared';
 
@@ -227,12 +220,7 @@ export type RateLimitReasonCode = 'hit' | 'cleared';
  * agentic-reviewer recommendation in §4.2.
  */
 export type StopReasonCode =
-  | 'incorrect_output'
-  | 'runaway_loop'
-  | 'off_task'
-  | 'cost'
-  | 'done_early'
-  | 'other';
+  'incorrect_output' | 'runaway_loop' | 'off_task' | 'cost' | 'done_early' | 'other';
 
 export const STOP_REASON_CODES: ReadonlySet<StopReasonCode> = new Set([
   'incorrect_output',
@@ -451,10 +439,7 @@ export type SearchResult = {
  *                            EACCES, ELOOP, …). The preview is unavailable.
  */
 export type ArtifactContentError =
-  | 'mutation_not_found'
-  | 'no_file_path'
-  | 'not_a_file'
-  | 'read_failed';
+  'mutation_not_found' | 'no_file_path' | 'not_a_file' | 'read_failed';
 
 // ---- Browser → Server ----
 export type ClientMsg =
@@ -1646,12 +1631,7 @@ export type ServerMsg =
       // the snapshot without re-spawning the SDK.
       cwd?: string;
       permissionMode?:
-        | 'default'
-        | 'acceptEdits'
-        | 'bypassPermissions'
-        | 'plan'
-        | 'dontAsk'
-        | 'auto';
+        'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
       apiKeySource?: 'user' | 'project' | 'org' | 'temporary' | 'oauth';
       claudeCodeVersion?: string;
       outputStyle?: string;
@@ -3201,6 +3181,13 @@ export type ToolView = {
  * per-agent from `bus/runner.ts` — distinct from operator-declared MCPs so
  * the UI can mark it as "Cebab-managed, not editable here".
  *
+ * `'unknown'` means the SDK reported the server but it matched no settings
+ * layer Cebab read and is not a Cebab injection. It exists as its own value
+ * because `'cebab-injected'` carries an automatic `trust: 'trusted'` and a
+ * skip in `awaitMcpTrustDecisions` — labelling an unattributable server that
+ * way would launder it into permanently trusted-and-never-prompted. An
+ * `'unknown'` row is shown to the operator as exactly what it is.
+ *
  * `status` is the SDK's `mcp_servers[i].status` string verbatim
  * (`'connected' | 'needs-auth' | 'failed' | 'disabled' | 'unknown'` in the
  * current SDK; we accept any string for forward-compat with new SDK
@@ -3218,7 +3205,7 @@ export type ToolView = {
 export type McpServerView = {
   name: string;
   status: string;
-  scope: 'user' | 'project' | 'local' | 'cebab-injected';
+  scope: 'user' | 'project' | 'local' | 'cebab-injected' | 'unknown';
   originPath?: string;
   tools: string[];
   config?: {
@@ -3973,11 +3960,7 @@ export function isMultiAgentEventKind(v: unknown): v is MultiAgentEventKind {
  *                      this union rather than reusing 'other' silently.
  */
 export type RecoveryFailureClass =
-  | 'rate_limit'
-  | 'auth_expired'
-  | 'sweep'
-  | 'chain_crash'
-  | 'other';
+  'rate_limit' | 'auth_expired' | 'sweep' | 'chain_crash' | 'other';
 
 /**
  * Cluster D Phase 8a: enumerated operator_action column. Mirrors the

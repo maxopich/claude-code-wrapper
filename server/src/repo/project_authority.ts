@@ -55,13 +55,28 @@ type RawSettings = {
   >;
 };
 
+/** A `settings.json` scope the SDK can be told to layer in. Structurally the
+ *  same set as `runner/claude.ts`'s `SettingSource`. */
+export type SettingScope = 'user' | 'project' | 'local';
+
 type SettingsLayer = {
-  scope: 'user' | 'project' | 'local';
+  scope: SettingScope;
   scopePath: string;
   data: RawSettings | null;
 };
 
 const USER_SCOPE_PATH = path.join(os.homedir(), '.claude', 'settings.json');
+
+/**
+ * MCP server names Cebab itself injects. Only these may carry
+ * `scope: 'cebab-injected'`, which grants an automatic `trust: 'trusted'`
+ * (`enrichWithTrustState`) and a skip in `awaitMcpTrustDecisions`.
+ *
+ * Keep in sync with the `mcpServers` keys in `bus/runner.ts`'s
+ * `runOneAttempt`. `bus` is the deprecated alias kept for resumed sessions
+ * whose transcripts still reference `mcp__bus__bus_send`.
+ */
+const CEBAB_INJECTED_MCP_NAMES: ReadonlySet<string> = new Set(['cebab_bus', 'bus']);
 
 /**
  * Read + parse a `.claude/settings.json` (or `.claude/settings.local.json`).
@@ -82,34 +97,65 @@ function readSettingsFile(p: string): RawSettings | null {
 }
 
 /**
- * Collect the three settings layers for a project. User scope is always
- * read (whether the project is trusted or not — `~/.claude/settings.json`
- * is operator-controlled). Project + local scopes are only read for
- * trusted projects, matching the SDK's settingSources widening — see
- * `runner/claude.ts:76-80`. The inspector's `settingSourcesUsed` field
- * reflects this so the AuthorityPanel doesn't lie about layers that
- * weren't actually applied.
+ * Collect the settings layers for a project, for a GIVEN scope set.
+ *
+ * The scope set must be the one the spawn this resolution gates will
+ * actually pass to the SDK — that is the whole contract. Reading fewer
+ * layers than the spawn loads makes the inspector and, far worse, the
+ * spawn gates (`awaitMcpTrustDecisions` / `awaitEnvInjectionAck`) blind to
+ * rules that then execute.
+ *
+ * Two callers, two scope sets, and they genuinely differ:
+ *   - single-agent — trust-derived, matching `ws/server.ts`'s
+ *     `trusted ? ['user','project','local'] : ['user']`.
+ *   - bus participants — always `['user','project','local']`, because
+ *     `bus/{orchestrator,chain}.ts` register every worker with that literal
+ *     regardless of trust.
+ *
+ * `settingSourcesUsed` on the resolved authority reflects whatever was
+ * passed, so the AuthorityPanel never claims a layer that wasn't applied.
  */
-function loadSettingsLayers(projectPath: string, trusted: boolean): SettingsLayer[] {
-  const layers: SettingsLayer[] = [
-    { scope: 'user', scopePath: USER_SCOPE_PATH, data: readSettingsFile(USER_SCOPE_PATH) },
-  ];
-  if (trusted) {
-    const projectScopePath = path.join(projectPath, '.claude', 'settings.json');
-    const localScopePath = path.join(projectPath, '.claude', 'settings.local.json');
-    layers.push({
-      scope: 'project',
-      scopePath: projectScopePath,
-      data: readSettingsFile(projectScopePath),
-    });
-    layers.push({
-      scope: 'local',
-      scopePath: localScopePath,
-      data: readSettingsFile(localScopePath),
-    });
+function loadSettingsLayers(projectPath: string, scopes: readonly SettingScope[]): SettingsLayer[] {
+  const layers: SettingsLayer[] = [];
+  for (const scope of scopes) {
+    if (scope === 'user') {
+      layers.push({
+        scope: 'user',
+        scopePath: USER_SCOPE_PATH,
+        data: readSettingsFile(USER_SCOPE_PATH),
+      });
+      continue;
+    }
+    const scopePath = path.join(
+      projectPath,
+      '.claude',
+      scope === 'project' ? 'settings.json' : 'settings.local.json',
+    );
+    layers.push({ scope, scopePath, data: readSettingsFile(scopePath) });
   }
   return layers;
 }
+
+/**
+ * The scope set a project's SINGLE-AGENT run would use, derived from Trust.
+ * Mirrors `ws/server.ts`'s `const settingSources = trusted ? [...] : [...]`.
+ * Bus callers must NOT use this — see `BUS_SETTING_SCOPES`.
+ */
+export function trustDerivedScopes(trusted: boolean): readonly SettingScope[] {
+  return trusted ? (['user', 'project', 'local'] as const) : (['user'] as const);
+}
+
+/**
+ * The scope set every bus participant runs under, irrespective of Trust.
+ * Pinned here so the gate and the spawn read from one definition instead of
+ * three hardcoded literals drifting apart — the exact divergence that let an
+ * untrusted worker's project-declared MCP servers and `env:` block load
+ * without ever reaching a gate.
+ *
+ * Keep in sync with the `runner.register({ settingSources: ... })` calls in
+ * `bus/orchestrator.ts` and `bus/chain.ts`.
+ */
+export const BUS_SETTING_SCOPES: readonly SettingScope[] = ['user', 'project', 'local'];
 
 /**
  * Normalize a permissions.allow / .deny entry to the tool name it
@@ -535,6 +581,16 @@ function bumpDenied(t: ToolUsageTally, name: string): void {
 export type ResolverInput = {
   projectId: number;
   mode: 'cache' | 'probe';
+  /**
+   * Scope set to resolve against. Omit for the trust-derived default, which
+   * is what the AuthorityPanel and the single-agent spawn gate want.
+   *
+   * A BUS spawn gate must pass `BUS_SETTING_SCOPES` — bus participants run
+   * with all three layers regardless of Trust, so resolving trust-derived
+   * here would hand the gates an empty MCP/env list for an untrusted project
+   * whose rules the SDK then loads anyway.
+   */
+  settingSources?: readonly SettingScope[];
   latestSessionStarted?: {
     tools?: string[];
     model?: string;
@@ -562,7 +618,8 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   }
 
   const trusted = project.trusted === 1;
-  const layers = loadSettingsLayers(project.path, trusted);
+  const scopes = input.settingSources ?? trustDerivedScopes(trusted);
+  const layers = loadSettingsLayers(project.path, scopes);
   const settingSourcesUsed = layers.map((l) => l.scope);
 
   // MCP servers: declared shape from layers, overlaid with effective status
@@ -573,14 +630,25 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
     const init = initMcp.find((m) => m.name === dm.name);
     if (init) dm.status = init.status;
   }
-  // SDK-reported servers that aren't in any settings layer (e.g. the
-  // cebab_bus injection) get appended with scope='cebab-injected'.
+  // SDK-reported servers that aren't in any settings layer get appended.
+  //
+  // `scope: 'cebab-injected'` means "Cebab itself injected this", and
+  // `enrichWithTrustState` grants those `trust: 'trusted'` unconditionally
+  // while `mcp_trust_gate` skips them entirely. So the label must be reserved
+  // for servers Cebab actually injects — otherwise a server merely OBSERVED in
+  // a prior session's `session_started` (e.g. a project-scope one that the
+  // trust-truncated layer read missed) gets laundered into permanently
+  // trusted-and-never-prompted.
+  //
+  // Anything else unattributable stays `scope: 'unknown'` + `trust: 'unknown'`
+  // so it is visible in the panel and still reaches TOFU.
   for (const im of initMcp) {
     if (!declaredMcp.some((d) => d.name === im.name)) {
+      const isCebabInjected = CEBAB_INJECTED_MCP_NAMES.has(im.name);
       declaredMcp.push({
         name: im.name,
         status: im.status,
-        scope: 'cebab-injected',
+        scope: isCebabInjected ? 'cebab-injected' : 'unknown',
         tools: [],
         trust: 'unknown',
       });

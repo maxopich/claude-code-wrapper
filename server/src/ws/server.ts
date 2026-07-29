@@ -50,7 +50,11 @@ import type {
 import { computeWorkspaceDiff } from '../workspace_diff.js';
 import { cancelAuthRefresh, startAuthRefresh, type AuthRefreshCallbacks } from '../auth_refresh.js';
 import { translate } from './translate.js';
-import { resolveProjectAuthority } from '../repo/project_authority.js';
+import {
+  BUS_SETTING_SCOPES,
+  resolveProjectAuthority,
+  type SettingScope,
+} from '../repo/project_authority.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import {
   awaitMcpTrustDecisions,
@@ -1608,17 +1612,32 @@ function send(ws: WebSocket, msg: ServerMsg): void {
  * runs, then decide what credentials it sees."
  *
  * Duplicates are deduped here so a chain with `[A, A, B]` only re-prompts
- * once for A. Caller (`start_multi_agent` for bus, `runOneTurn` for
- * single-agent) MUST `await` this before calling `pickRunner` /
- * `startOrchestratorSession` / `startChainSession`. The await is the
- * structural block — if the operator never replies, the spawn never
- * happens.
+ * once for A. Every caller MUST `await` this before anything can spawn a
+ * `query()`. The await is the structural block — if the operator never
+ * replies, the spawn never happens.
+ *
+ * The five call sites, i.e. every path to a spawn:
+ *   - `start_multi_agent` orchestrator + chain — bus scopes.
+ *   - `add_multi_agent_participant` — bus scopes. A mid-run add reaches the
+ *     same widened `runner.register`, and used to reach it with NO gate at
+ *     all (the bus-install TOFU it did run answers a different question).
+ *   - `continue_multi_agent` — bus scopes. R-B reconstruction rebuilds the
+ *     runner read-only; Continue is where a turn actually spawns, and a
+ *     restart is exactly when a participant's settings may have changed.
+ *   - `runOneTurn` (single-agent) — trust-derived scopes, the default.
+ *
+ * `settingSources` must match what the spawn will pass the SDK. See the
+ * note on the parameter.
  *
  * On a project_authority resolution miss (project row deleted mid-flight),
  * we skip silently — `getProject` upstream already rejected the start, so
  * this case is structurally unreachable in practice.
  */
-async function gateProjectsForSpawn(conn: Conn, projectIds: number[]): Promise<void> {
+async function gateProjectsForSpawn(
+  conn: Conn,
+  projectIds: number[],
+  settingSources?: readonly SettingScope[],
+): Promise<void> {
   const seen = new Set<number>();
   for (const projectId of projectIds) {
     if (seen.has(projectId)) continue;
@@ -1627,6 +1646,14 @@ async function gateProjectsForSpawn(conn: Conn, projectIds: number[]): Promise<v
     const authority = resolveProjectAuthority({
       projectId,
       mode: 'cache',
+      // [security] Resolve against the scopes the SPAWN will use, not the
+      // project's Trust setting. Bus callers pass BUS_SETTING_SCOPES because
+      // bus/{orchestrator,chain}.ts register every participant with all three
+      // layers regardless of Trust; resolving trust-derived here would hand
+      // both gates below an empty list for an untrusted project whose
+      // project-declared MCP servers and `env:` block the SDK then loads.
+      // Omitted (single-agent) keeps the trust-derived default.
+      ...(settingSources !== undefined && { settingSources }),
       ...(cached !== undefined && { latestSessionStarted: cached }),
     });
     if (!authority) continue;
@@ -3615,6 +3642,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         await gateProjectsForSpawn(
           conn,
           workers.map((w) => w.projectId),
+          BUS_SETTING_SCOPES,
         );
         try {
           const handle = await startOrchestratorSession({
@@ -3692,6 +3720,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       await gateProjectsForSpawn(
         conn,
         participants.map((p) => p.projectId),
+        BUS_SETTING_SCOPES,
       );
       try {
         const handle = await startChainSession({
@@ -3855,6 +3884,29 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       if (!row || row.awaiting_continue !== 1) {
         // Already continued (or never a recovered session). Idempotent
         // no-op so a double-click can't double-deliver the nudge.
+        return;
+      }
+      // [security] R-B reconstruction rebuilds the runner with the widened
+      // bus `settingSources` but is READ-ONLY — it delivers nothing. This
+      // Continue is the moment a `query()` actually spawns, so it is where
+      // the spawn gates belong. They matter more here than at the original
+      // start: a server restart is exactly the window in which a
+      // participant's `.claude/settings*.json` can have gained an MCP server,
+      // a hook, or an `env:` key since the operator last approved anything.
+      //
+      // Runs BEFORE `setAwaitingContinue(false)` so a refused/unanswered gate
+      // leaves the session in its recovered state rather than half-continued.
+      try {
+        await gateProjectsForSpawn(
+          conn,
+          listResolvedParticipants(msg.sessionId)
+            .filter((p) => p.role === 'worker')
+            .map((p) => p.project_id),
+          BUS_SETTING_SCOPES,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
         return;
       }
       try {
@@ -4074,6 +4126,18 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           });
           return;
         }
+        // [security] Same MCP-TOFU + env-injection gates the two session-start
+        // paths run. This path had NONE of them: a worker added mid-run
+        // reached `runner.register({ settingSources: ['user','project',
+        // 'local'] })` in orchestrator.ts without the operator ever being
+        // prompted about that project's declared MCP servers or credential-
+        // class `env:` keys — for trusted and untrusted projects alike. The
+        // bus-install TOFU above governs whether the project gets a bus slug,
+        // which is a different question.
+        //
+        // Ordering matches the start paths: trust decisions first, then the
+        // credential prompt (see gateProjectsForSpawn's header).
+        await gateProjectsForSpawn(conn, [msg.projectId], BUS_SETTING_SCOPES);
         const result = await active.addWorker(msg.projectId);
         send(conn.ws, {
           type: 'multi_agent_participant_added',

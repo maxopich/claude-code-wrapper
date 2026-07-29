@@ -53,6 +53,11 @@ const SCOPE_CHIP_CLASS: Record<McpServerView['scope'], string> = {
   project: 'mcp-scope-project',
   local: 'mcp-scope-local',
   'cebab-injected': 'mcp-scope-cebab',
+  // Reported by the SDK but matching no settings layer Cebab read, and not a
+  // Cebab injection. Shares the muted styling of an unresolved row — it is
+  // deliberately NOT dressed as Cebab-managed, because that label carries an
+  // automatic trust grant server-side.
+  unknown: 'mcp-scope-unknown',
 };
 
 function statusDotClass(status: string): string {
