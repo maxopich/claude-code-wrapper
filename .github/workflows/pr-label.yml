@@ -21,7 +21,18 @@ on:
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Keyed on the PR number, NOT `github.ref`. On `pull_request_target`,
+  # `github.ref` is the BASE ref — `refs/heads/main` for every PR — so the
+  # group collapsed into a single repo-wide bucket and `cancel-in-progress`
+  # made unrelated PRs cancel each other. Observed on 2026-07-28T19:31:16Z:
+  # three runs, two different head branches, two cancelled.
+  #
+  # That matters more here than in the `pull_request` workflows (whose
+  # `github.ref` is the per-PR `refs/pull/N/merge` and is already unique):
+  # `Fixture review gate` is a required check, and a cancelled run leaves the
+  # PR blocked with no automatic retry — it only regenerates on the next
+  # push or label change.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
