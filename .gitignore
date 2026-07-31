@@ -32,3 +32,39 @@ logs/
 # npm/yarn output
 *.tgz
 .npm/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local issue-tracking setup — Beads + Kanban Pro. Deliberately NOT in git.
+#
+# This is one developer's local workflow, not part of the project: the issue
+# graph lives in an embedded Dolt DB under .beads/ and is mirrored to a Kanban
+# Pro board outside the repo (~/Kanban/Cebab). None of it is needed to build,
+# test or run Cebab, and committing it would push one person's task list onto
+# everyone who clones.
+#
+# Note `bd init` also repoints `core.hooksPath` at .beads/hooks (a local git
+# config, so nothing to ignore here). It copies .husky/pre-commit rather than
+# replacing it, so lint-staged + gitleaks still run. `npm run setup` re-runs
+# husky and points hooks back at .husky/_ if you want beads' hooks gone.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Beads / Dolt
+.beads/
+.dolt/
+*.db
+.beads-credential-key
+.agents/skills/beads/
+.codex/config.toml
+.codex/hooks.json
+AGENTS.md
+
+# Kanban Pro mirror — the sync script, its test, the workflow doc and the
+# slash commands / SessionEnd hook that drive it.
+scripts/kanban-sync.mjs
+scripts/kanban-sync.test.mjs
+docs/BEADS_KANBAN_WORKFLOW.md
+.claude/commands/plan-feature.md
+.claude/commands/sync-board.md
+.claude/hooks/kanban-sync-on-end.sh
+.claude/settings.json.bak-before-kanban
+_to_delete/
