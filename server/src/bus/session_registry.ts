@@ -41,9 +41,10 @@ export type BusSink = {
   /** Item #5: a new mutation row appended to `multi_agent_mutations`. Live
    *  forwarding for the Session-info disclosure + activity-bar counter. */
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
-  /** Item #5: pause-on-first-mutation slot set (with the offending row) or
-   *  cleared (`pending: null`). Mirrors `onPendingRetry`'s shape. */
-  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /** Item #5: the set of workers halted by the pause-on-dangerous gate changed.
+   *  Carries the whole current set (`[]` when nothing is waiting) — the gate is
+   *  per-agent, so several workers can be halted at once (migration 031). */
+  onPendingMutation?: (sessionId: string, pending: MutationRecord[]) => void;
   /**
    * Cluster A Phase 3 (D4): the dispatcher's notification envelope for a
    * router-drop safety event (or a future operational toast originating from
@@ -115,13 +116,13 @@ export type BusSessionHandle = {
    */
   retry: () => Promise<void>;
   /**
-   * Item #5: operator clicked Continue on the pause-on-first-mutation
-   * banner. Clears the pending-mutation slot, sets
-   * `mutations_acknowledged=1`, clears `awaiting_continue`, and re-delivers
-   * the paused worker's last captured prompt. Subsequent mutations in this
-   * session auto-allow. No-op when no pause is active (idempotent).
+   * Item #5: operator clicked Continue on one pause-on-dangerous banner.
+   * Moves that mutation from `pending` to `approved` — the one-shot grant the
+   * replayed turn spends — and re-delivers the paused worker's last captured
+   * prompt. The gate re-arms: every later dangerous command pauses again.
+   * No-op when `mutationId` isn't currently pending (idempotent).
    */
-  continueThroughMutation: () => Promise<void>;
+  continueThroughMutation: (mutationId: number) => Promise<void>;
 };
 
 export type LiveBusSession = {

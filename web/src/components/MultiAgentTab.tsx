@@ -115,8 +115,8 @@ export function MultiAgentTab(props: {
    *  notification's Archive action. The reducer's `iteration_archived`
    *  handler drops the row from the iterations list. */
   onArchiveSession: (sessionId: string) => void;
-  /** Item #5: operator clicked Continue on the pause-on-first-mutation banner. */
-  onContinueThroughMutation: (sessionId: string) => void;
+  /** Item #5: operator clicked Continue on the pause-on-dangerous banner. */
+  onContinueThroughMutation: (sessionId: string, mutationId: number) => void;
   /** Interactive AskUserQuestion: the operator answered a parked question. */
   onAnswerQuestion: (
     sessionId: string,
@@ -128,7 +128,7 @@ export function MultiAgentTab(props: {
    *  auto-retry slice so the banner unmounts. If attempt N+1 also fails,
    *  the next `auto_retry` ServerMsg repopulates the slice. */
   onClearAutoRetry: () => void;
-  /** Item #5: setup-screen toggle for pause-on-first-mutation. */
+  /** Item #5: setup-screen toggle for pause-on-dangerous. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
   /** Setup-screen toggle for Execute mode (orchestrator only). */
   onSetDraftExecuteMode: (value: boolean) => void;
@@ -275,7 +275,7 @@ function DraftView(props: {
   onInstallBus: (projectId: number) => void;
   onUninstallBus: (projectId: number) => void;
   onSetDraftPrompt: (text: string) => void;
-  /** Item #5: setup-screen toggle for pause-on-first-mutation. */
+  /** Item #5: setup-screen toggle for pause-on-dangerous. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
   /** Setup-screen toggle for Execute mode (orchestrator only). */
   onSetDraftExecuteMode: (value: boolean) => void;
@@ -574,7 +574,7 @@ function DraftView(props: {
               participant. Project files are untouched.
             </p>
           )}
-          {/* Item #5: pause-on-first-mutation opt-in. Off by default; the
+          {/* Item #5: pause-on-dangerous opt-in. Off by default; the
               operator opts in explicitly per session. Survives R-B once set. */}
           <label
             className="ma-pause-mutation-checkbox"
@@ -1533,9 +1533,9 @@ function ActiveRunView(props: {
    *  notification's Archive action. Server idempotency means double-
    *  clicks are benign. */
   onArchiveSession: (sessionId: string) => void;
-  /** Item #5: operator clicked Continue on the pause-on-first-mutation
+  /** Item #5: operator clicked Continue on the pause-on-dangerous
    *  banner. Stateless from the client's POV — server reads the slot. */
-  onContinueThroughMutation: (sessionId: string) => void;
+  onContinueThroughMutation: (sessionId: string, mutationId: number) => void;
   /** Interactive AskUserQuestion: the operator answered a parked question. */
   onAnswerQuestion: (
     sessionId: string,
@@ -1647,11 +1647,11 @@ function ActiveRunView(props: {
             projects={props.projects}
             canEdit={isRunning && isOrchestrator}
             // A paused run (R-B awaiting Continue, a worker-failure pending
-            // retry, or a pause-on-first-mutation gate) isn't actually
-            // executing — show no fake activity until the operator resolves the
-            // banner.
+            // retry, or a pause-on-dangerous gate holding a worker) isn't
+            // actually executing — show no fake activity until the operator
+            // resolves the banner.
             activeAgent={
-              run.awaitingContinue || run.pendingRetry || run.pendingMutation
+              run.awaitingContinue || run.pendingRetry || run.pendingMutations.length > 0
                 ? null
                 : activeAgent(run)
             }
@@ -1873,48 +1873,53 @@ function ActiveRunView(props: {
         />
       )}
 
-      {isRunning && run.pendingMutation && (
-        <SessionBanner
-          id={`multi-agent-warning-mutation-${run.sessionId}`}
-          tier="warn"
-          classStem="multi-agent-warning"
-          layout="flat"
-          role="status"
-          ariaLive="polite"
-          stealsFocus={false}
-          body={
-            <>
-              <p>
-                <strong>
-                  <code>{run.pendingMutation.agentName}</code> is about to{' '}
-                  <span className={`mutation-summary mutation-${run.pendingMutation.category}`}>
-                    {run.pendingMutation.summary}
-                  </span>
-                  .
-                </strong>
-              </p>
-              <p>
-                You enabled "Pause before a worker runs a dangerous command" for this session. This
-                is the first dangerous command. Continue to allow this call and let subsequent
-                dangerous commands auto-allow.
-              </p>
-            </>
-          }
-          actions={[
-            {
-              label: 'Continue with this command',
-              variant: 'primary',
-              onClick: () => props.onContinueThroughMutation(run.sessionId),
-              title: 'Allow this tool call and any subsequent mutations in this session.',
-            },
-            {
-              label: 'Stop session',
-              onClick: () => props.onAbandonSession(run.sessionId),
-              title: 'End the session as Stopped. The session folder and trail are preserved.',
-            },
-          ]}
-        />
-      )}
+      {/* One banner per worker the gate is holding. The gate is per-agent
+          (migration 031), so in an orchestrator run with parallel workers
+          several can be waiting at once — each is its own decision, and
+          releasing one leaves the others held. */}
+      {isRunning &&
+        run.pendingMutations.map((pending) => (
+          <SessionBanner
+            key={pending.id}
+            id={`multi-agent-warning-mutation-${run.sessionId}-${pending.id}`}
+            tier="warn"
+            classStem="multi-agent-warning"
+            layout="flat"
+            role="status"
+            ariaLive="polite"
+            stealsFocus={false}
+            body={
+              <>
+                <p>
+                  <strong>
+                    <code>{pending.agentName}</code> is about to{' '}
+                    <span className={`mutation-summary mutation-${pending.category}`}>
+                      {pending.summary}
+                    </span>
+                    .
+                  </strong>
+                </p>
+                <p>
+                  You enabled "Pause before a worker runs a dangerous command" for this session.
+                  Continue allows this one command; the next dangerous command pauses again.
+                </p>
+              </>
+            }
+            actions={[
+              {
+                label: 'Continue with this command',
+                variant: 'primary',
+                onClick: () => props.onContinueThroughMutation(run.sessionId, pending.id),
+                title: `Allow this one tool call from ${pending.agentName}. Later dangerous commands still pause.`,
+              },
+              {
+                label: 'Stop session',
+                onClick: () => props.onAbandonSession(run.sessionId),
+                title: 'End the session as Stopped. The session folder and trail are preserved.',
+              },
+            ]}
+          />
+        ))}
 
       {isRunning && (
         <AskUserQuestionCard
@@ -1929,7 +1934,7 @@ function ActiveRunView(props: {
         isRunning &&
         !run.awaitingContinue &&
         !run.pendingRetry &&
-        !run.pendingMutation &&
+        run.pendingMutations.length === 0 &&
         !run.pendingQuestion && (
           <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
         )}
@@ -2252,9 +2257,11 @@ function SessionSettingsPanel(props: {
           <>
             <dt>Pause on dangerous</dt>
             <dd>
-              {run.mutationsAcknowledged
-                ? 'On · acknowledged (subsequent dangerous commands auto-allow)'
-                : 'On · pending first dangerous command'}
+              {run.pendingMutations.length > 0
+                ? `On · holding ${run.pendingMutations.length} worker${
+                    run.pendingMutations.length === 1 ? '' : 's'
+                  }`
+                : 'On · every dangerous command needs approval'}
             </dd>
           </>
         )}

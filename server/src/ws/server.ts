@@ -155,7 +155,7 @@ import {
   endMultiAgentSession,
   getLastRunForTemplate,
   getMultiAgentSession,
-  getPendingMutation,
+  listPendingMutations,
   getPendingRetry,
   listMultiAgentEvents,
   listMultiAgentMutations,
@@ -749,6 +749,31 @@ export function resolveRetryRateLimited(
  * "row archived, folder still on disk" (operator can `rm -rf` by hand)
  * rather than "folder gone, row not archived" (confusing zombie).
  */
+/**
+ * [security] Register B05. Guard for the RECOVERY Continue
+ * (`continue_multi_agent`): refuse while the pause-on-dangerous gate is
+ * holding a worker, and say which. Returns the operator-facing message, or
+ * `null` when the session is free to continue.
+ *
+ * The two Continues used to be confusable — a mutation pause also set
+ * `awaiting_continue`, so both banners rendered and clicking the recovery one
+ * cleared the recovery flag while leaving the pause in place, silently
+ * disarming the gate for the rest of the session and stranding the worker.
+ * The pause no longer sets `awaiting_continue`, so the states are disjoint on
+ * fresh pauses; they can still coexist legitimately when a pause was live at
+ * restart, and refusing is the honest answer there: resuming the session while
+ * a worker is held at a dangerous command is the operator's decision to make
+ * explicitly, on that worker's own banner.
+ *
+ * Exported for direct testing — the case body is one `send` around it.
+ */
+export function describeHeldWorkers(sessionId: string): string | null {
+  const held = listPendingMutations(sessionId);
+  if (held.length === 0) return null;
+  const names = [...new Set(held.map((m) => m.agentName))].join(', ');
+  return `Cannot continue the session while a worker is held at a dangerous command (${names}). Use the Continue button on that worker's banner, or stop the session.`;
+}
+
 export async function executeArchiveSession(args: {
   sessionId: string;
   removeArtifacts: boolean;
@@ -2047,9 +2072,9 @@ function resumeCallbacks(
     },
     onPendingMutation: (sessionId, pending) => {
       send(conn.ws, {
-        type: 'multi_agent_pending_mutation',
+        type: 'multi_agent_pending_mutations',
         sessionId,
-        pending: pending ? mutationRecordToView(pending) : null,
+        pending: pending.map(mutationRecordToView),
       });
     },
     // Cluster A Phase 3 (D4): rebound on every reconnect so router-drop
@@ -2226,13 +2251,12 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   const sessionRow = getMultiAgentSession(resumed.handle.sessionId);
   const pauseOnDangerous = sessionRow?.pause_on_dangerous === 1;
   const executeMode = sessionRow?.execute_mode === 1;
-  const mutationsAcknowledged = sessionRow?.mutations_acknowledged === 1;
   const mutationsList = listMultiAgentMutations(resumed.handle.sessionId);
-  const pendingMutationRow = getPendingMutation(resumed.handle.sessionId);
   const mutations: MultiAgentMutationView[] = mutationsList.map(mutationRecordToView);
-  const pendingMutationView = pendingMutationRow
-    ? mutationRecordToView(pendingMutationRow)
-    : undefined;
+  // Migration 031: every worker the gate is currently holding, not just one.
+  const pendingMutations: MultiAgentMutationView[] = listPendingMutations(
+    resumed.handle.sessionId,
+  ).map(mutationRecordToView);
   // Interactive AskUserQuestion: a parked question (if any) so the card
   // reappears on R-A re-attach. The Promise lives in the in-process registry
   // (survives the sink swap); one card at a time.
@@ -2262,9 +2286,8 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     ...(pendingRetry ? { pendingRetry } : {}),
     pauseOnDangerous,
     executeMode,
-    mutationsAcknowledged,
     mutations,
-    ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
+    pendingMutations,
     ...(pendingQuestion
       ? {
           pendingQuestion: {
@@ -3642,13 +3665,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // toast independent of the dangerous-category dispatch.
         dispatchGuardrailViolationForConn(sessionId, mutation, conn);
       };
-      // Item #5: pause-on-dangerous slot set/clear → wire. Fresh starts never
-      // carry a pending slot on `multi_agent_started`; this is the delta.
-      const onPendingMutation = (sessionId: string, pending: MutationRecord | null) => {
+      // Item #5: the set of gate-halted workers changed → wire. Fresh starts
+      // never carry pending rows on `multi_agent_started`; this is the delta.
+      // Whole-set, not a delta-of-a-delta, so a re-attach re-emit is idempotent.
+      const onPendingMutation = (sessionId: string, pending: MutationRecord[]) => {
         send(conn.ws, {
-          type: 'multi_agent_pending_mutation',
+          type: 'multi_agent_pending_mutations',
           sessionId,
-          pending: pending ? mutationRecordToView(pending) : null,
+          pending: pending.map(mutationRecordToView),
         });
       };
       // Cluster A Phase 3 (D4): the orchestrator/chain router calls these
@@ -3775,13 +3799,13 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
             hopBudget: handle.hopBudget,
-            // Item #5: fresh start — no mutations recorded yet, no pending,
-            // ack flag false. `pauseOnDangerous` echoes the operator's choice
-            // so the UI mirrors its own setup checkbox.
+            // Item #5: fresh start — no mutations recorded yet and nothing
+            // held by the gate. `pauseOnDangerous` echoes the operator's
+            // choice so the UI mirrors its own setup checkbox.
             pauseOnDangerous: handle.pauseOnDangerous,
             executeMode: handle.executeMode,
-            mutationsAcknowledged: false,
             mutations: [],
+            pendingMutations: [],
             ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
           });
         } catch (err) {
@@ -3851,8 +3875,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           // Execute mode is orchestrator-only (chain briefings have no
           // consultant clause to relax) — always false for chain sessions.
           executeMode: false,
-          mutationsAcknowledged: false,
           mutations: [],
+          pendingMutations: [],
           ...(chainRow?.mock === 1 ? { mock: true } : {}),
         });
       } catch (err) {
@@ -3977,6 +4001,30 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // no-op so a double-click can't double-deliver the nudge.
         return;
       }
+      // [security] Register B05. This is the RECOVERY Continue (R-B: the
+      // session was rebuilt read-only after a restart). The pause-on-dangerous
+      // banner has its own Continue — `continue_through_mutation` — and the two
+      // used to be confusable: a mutation pause also set `awaiting_continue`,
+      // so both banners rendered and clicking this one cleared the recovery
+      // flag while leaving the pause in place. That silently disarmed the gate
+      // for the rest of the session AND stranded the paused worker.
+      //
+      // The pause no longer sets `awaiting_continue`, so the two states are
+      // disjoint on fresh pauses. They can still coexist legitimately: a pause
+      // that was live when Cebab restarted comes back alongside R-B's own
+      // `awaiting_continue`. Refuse rather than guess — resuming the session
+      // while a worker is held at a dangerous command is exactly the decision
+      // the operator has to make explicitly.
+      const heldMessage = describeHeldWorkers(msg.sessionId);
+      if (heldMessage) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: heldMessage,
+        });
+        return;
+      }
       // [security] R-B reconstruction rebuilds the runner with the widened
       // bus `settingSources` but is READ-ONLY — it delivers nothing. This
       // Continue is the moment a `query()` actually spawns, so it is where
@@ -4077,16 +4125,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'continue_through_mutation': {
-      // Item #5: operator clicked Continue on the pause-on-first-mutation
-      // banner. Idempotent — the handle reads its own pending slot and no-ops
-      // if cleared. Clearing `awaiting_continue` happens inside the handle's
-      // `continueThroughMutation` (it set it on pause; clears it on resume).
+      // Item #5: operator clicked Continue on one pause-on-dangerous banner.
+      // `mutationId` says which worker it releases — a session can hold one
+      // pause per worker. Idempotent: the handle looks the id up among the
+      // CURRENTLY pending rows, so a double-click (or a stale id from a client
+      // that missed a broadcast) finds nothing and no-ops.
       const active = conn.multiAgent;
       if (!active || active.sessionId !== msg.sessionId) {
         return;
       }
       try {
-        await active.continueThroughMutation();
+        await active.continueThroughMutation(msg.mutationId);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, {

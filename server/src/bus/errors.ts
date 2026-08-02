@@ -4,7 +4,7 @@
  */
 
 /**
- * Thrown by the runner's `onMutation` hook when the pause-on-first-mutation
+ * Thrown by the runner's `onMutation` hook when the pause-on-dangerous
  * gate fires. The router's `deliver()` `.catch` recognises this class and
  * does NOT take the worker-failed path: this is a controlled pause, not a
  * crash. The pause state (DB row + wire) is persisted before the throw, so
