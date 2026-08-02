@@ -193,8 +193,17 @@ export function observeProjectHooks(
           first_seen_at, last_seen_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    // Register D07: COALESCE, so a spawn that could NOT resolve the script
+    // (deleted, renamed, permissions) refreshes `last_seen_at` but leaves the
+    // recorded hash alone. Writing `script_sha` unconditionally let one
+    // unresolvable spawn overwrite a good baseline with NULL — and once the
+    // baseline is NULL the `changed` comparison below can never be true
+    // again, so a script modified and later restored silently re-baselines
+    // and `script_changed` never fires. An unresolvable script is not
+    // evidence of tampering (see below); it must not destroy the evidence
+    // either.
     const touchRow = db.prepare(
-      'UPDATE hook_trust SET last_seen_at = ?, script_sha = ? WHERE id = ?',
+      'UPDATE hook_trust SET last_seen_at = ?, script_sha = COALESCE(?, script_sha) WHERE id = ?',
     );
 
     for (const hook of hooks) {

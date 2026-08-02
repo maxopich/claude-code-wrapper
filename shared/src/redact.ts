@@ -203,7 +203,20 @@ function walk(value: unknown, path: string, depth: number, fields: string[]): un
 
     if (isSensitiveKey(key)) {
       fields.push(childPath);
-      out[key] = typeof raw === 'string' || typeof raw === 'number' ? REDACTED_TOKEN : raw;
+      // Register D05: mask the value WHOLESALE, whatever its type. This used
+      // to mask only `string | number` and copy objects/arrays through
+      // verbatim — so `{credentials: {password: 'hunter2'}}` returned the
+      // password intact while the `fields.push` above attested that it had
+      // been redacted. A leak plus a false attestation, on the path that
+      // `session_log_export` runs over every exported transcript line.
+      //
+      // Wholesale rather than recursing, deliberately: `walk` returns values
+      // verbatim past MAX_DEPTH, so recursion under a sensitive key would
+      // still leak anything nested deeper than that — and would leak it while
+      // continuing to report the field as masked, which is the exact failure
+      // being fixed here. A single token is depth-independent, and matches
+      // what the sibling-masking branch below already does.
+      out[key] = REDACTED_TOKEN;
       continue;
     }
 
