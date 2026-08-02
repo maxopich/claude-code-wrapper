@@ -184,3 +184,85 @@ describe('redactSensitive — structural', () => {
     expect((redacted as Record<string, unknown>).password).toBe('<redacted>');
   });
 });
+
+// Register D05 [security]. Under a sensitive key only `string | number` was
+// masked; objects and arrays were copied through VERBATIM — while the same
+// branch pushed the path onto `fields`, attesting that it had been redacted.
+// A leak plus a false attestation, and `redactSensitive` is what
+// `session_log_export` runs over every line of an exported transcript, so it
+// sits on the path by which data leaves the machine.
+//
+// The contract now: a sensitive key masks its value WHOLESALE, whatever the
+// type. Every path in `fields` corresponds to something actually masked.
+describe('redactSensitive — non-scalar values under a sensitive key [security]', () => {
+  it('masks an object under a sensitive key instead of passing it through', () => {
+    const { redacted, fields } = redactSensitive({ credentials: { password: 'hunter2' } });
+    expect(redacted).toEqual({ credentials: '<redacted>' });
+    expect(fields).toEqual(['credentials']);
+    // The regression in one line: the secret must not survive anywhere.
+    expect(JSON.stringify(redacted)).not.toContain('hunter2');
+  });
+
+  it('masks an array under a sensitive key', () => {
+    const { redacted } = redactSensitive({ tokens: ['sk-aaa', 'sk-bbb'] });
+    expect(redacted).toEqual({ tokens: '<redacted>' });
+    expect(JSON.stringify(redacted)).not.toContain('sk-aaa');
+  });
+
+  it('masks a deeply structured credential blob', () => {
+    const { redacted } = redactSensitive({
+      user: 'alice',
+      secret: { aws: { access_key: 'AKIAIOSFODNN7EXAMPLE', nested: ['deep-secret'] } },
+    });
+    expect(redacted).toEqual({ user: 'alice', secret: '<redacted>' });
+    expect(JSON.stringify(redacted)).not.toContain('deep-secret');
+    expect(JSON.stringify(redacted)).not.toContain('AKIAIOSFODNN7EXAMPLE');
+  });
+
+  it('every reported field really was masked — no false attestation', () => {
+    const { redacted, fields } = redactSensitive({
+      apiKey: { primary: 'sk-1', backup: 'sk-2' },
+      authorization: ['Bearer a'],
+      harmless: { a: 1 },
+    });
+    const blob = redacted as Record<string, unknown>;
+    for (const f of fields) {
+      // Only top-level paths here; that is the shape a wholesale mask produces.
+      expect(blob[f]).toBe('<redacted>');
+    }
+    expect(fields.sort()).toEqual(['apiKey', 'authorization']);
+    expect(blob.harmless).toEqual({ a: 1 });
+  });
+
+  it('masks past MAX_DEPTH — the reason this is wholesale, not recursive', () => {
+    // `walk` returns values verbatim past MAX_DEPTH (12). Recursing into a
+    // sensitive key would therefore still leak anything nested deeper than
+    // that, while continuing to report the field as masked. Masking the whole
+    // subtree in one step is depth-independent, so this holds at any nesting.
+    let deep: Record<string, unknown> = { leaf: 'deep-secret' };
+    for (let i = 0; i < 30; i++) deep = { child: deep };
+    const { redacted } = redactSensitive({ password: deep });
+    expect(redacted).toEqual({ password: '<redacted>' });
+    expect(JSON.stringify(redacted)).not.toContain('deep-secret');
+  });
+
+  it('still recurses normally under a NON-sensitive key', () => {
+    // The fix must not turn into "mask any object" — ordinary structure has to
+    // keep its shape so the Logs view stays readable.
+    const { redacted, fields } = redactSensitive({
+      request: { url: 'https://example.test', headers: { token: 'abc' } },
+    });
+    expect(redacted).toEqual({
+      request: { url: 'https://example.test', headers: { token: '<redacted>' } },
+    });
+    expect(fields).toEqual(['request.headers.token']);
+  });
+
+  it('null and undefined under a sensitive key mask to the token', () => {
+    // Previously these fell into the `: raw` branch and passed through as
+    // null/undefined while being reported as redacted. Harmless in itself, but
+    // the attestation should not be able to disagree with the value.
+    const { redacted } = redactSensitive({ password: null, secret: undefined });
+    expect(redacted).toEqual({ password: '<redacted>', secret: '<redacted>' });
+  });
+});

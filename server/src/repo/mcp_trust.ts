@@ -219,6 +219,37 @@ export function checkTrust(
     }
     if (exact.decision === 'denied_remember') return { decision: 'denied_remember' };
   }
+  // Register D08: a denial applies at ANY sha — the rule this module's own
+  // header states ("denied_remember (any sha) → silent refusal"). The exact
+  // lookup above filters on `binary_sha = ?`, so a denial recorded against a
+  // different binary was invisible and the server fell through to
+  // `first_seen`, re-prompting the operator for something they had already
+  // denied — and, worse, offering them a fresh chance to approve it.
+  //
+  // Scoped to the operator's MOST RECENT decision for this name+origin rather
+  // than "any denial anywhere in history". `INSERT OR REPLACE` is keyed per
+  // sha, so rows at different shas coexist; an unconditional probe would mean
+  // that denying one build permanently poisons the server, and an operator
+  // who denied build A and later trusted build B could never be prompted
+  // about build C. Recency keeps both directions of "changed their mind"
+  // working, and still catches the case this bug is about (denied, then the
+  // binary changed).
+  //
+  // Ordered BEFORE the pinned-hash probe: if the latest decision is a denial,
+  // it outranks an older pin.
+  // `id DESC` is the tie-break, not decoration: `ts` is `Date.now()`, so two
+  // decisions in the same millisecond (an operator correcting a misclick) tie
+  // and the winner would be whatever SQLite felt like. `id` is AUTOINCREMENT
+  // and `INSERT OR REPLACE` mints a fresh one, so it is true write order.
+  const latest = db
+    .prepare<[string, string], { decision: PersistedDecision }>(
+      `SELECT decision FROM mcp_trust
+        WHERE server_name = ? AND origin_path = ?
+     ORDER BY ts DESC, id DESC LIMIT 1`,
+    )
+    .get(serverName, originPath);
+  if (latest?.decision === 'denied_remember') return { decision: 'denied_remember' };
+
   // No exact match — check for a pinned-hash row at the same name+origin
   // with a DIFFERENT sha. Only triggers when the candidate sha is real
   // (null candidates can't meaningfully mismatch).

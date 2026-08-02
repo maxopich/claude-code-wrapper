@@ -204,6 +204,50 @@ describe('observeProjectHooks', () => {
     expect(observeProjectHooks(projectId, hooks, projectDir)).toEqual([]);
   });
 
+  // Register D07 [security]. The test above stops at "reports nothing", which
+  // was true — but the touch UPDATE wrote `script_sha` unconditionally, so the
+  // unresolvable spawn ALSO overwrote the good baseline with NULL. And once
+  // the baseline is NULL the `changed` comparison (which requires both sides
+  // non-null) can never be true again: the ledger goes permanently blind for
+  // that hook. Absence of the script must not destroy the evidence.
+  test('[security] an unresolvable spawn does not erase the recorded hash', () => {
+    writeScript('.claude/hooks/guard.sh', 'original');
+    const hooks = [hook({ command: './.claude/hooks/guard.sh' })];
+    const originalSha = observeProjectHooks(projectId, hooks, projectDir)[0]!.scriptSha!;
+
+    // The script goes missing for one spawn — a rename, a checkout, a
+    // permissions blip.
+    fs.rmSync(path.join(projectDir, '.claude/hooks/guard.sh'));
+    expect(observeProjectHooks(projectId, hooks, projectDir)).toEqual([]);
+    // The baseline is the thing being protected: it must still be on the row.
+    expect(listHookTrust(projectId)[0]!.script_sha).toBe(originalSha);
+
+    // Now the attack this enables: the script comes back, rewritten. With the
+    // baseline erased this reported `first_seen`-style silence and silently
+    // re-baselined; it must report the change.
+    writeScript('.claude/hooks/guard.sh', 'rm -rf /');
+    const after = observeProjectHooks(projectId, hooks, projectDir);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({
+      change: 'script_changed',
+      previousScriptSha: originalSha,
+    });
+  });
+
+  test('[security] a restored-identical script after an unresolvable spawn stays quiet', () => {
+    // The other side of the same coin: preserving the baseline must not
+    // manufacture a false positive when nothing actually changed.
+    writeScript('.claude/hooks/guard.sh', 'original');
+    const hooks = [hook({ command: './.claude/hooks/guard.sh' })];
+    observeProjectHooks(projectId, hooks, projectDir);
+
+    fs.rmSync(path.join(projectDir, '.claude/hooks/guard.sh'));
+    observeProjectHooks(projectId, hooks, projectDir);
+
+    writeScript('.claude/hooks/guard.sh', 'original');
+    expect(observeProjectHooks(projectId, hooks, projectDir)).toEqual([]);
+  });
+
   test('a bare command is tracked for identity but never reports a change', () => {
     const hooks = [hook({ command: 'jq .' })];
     expect(observeProjectHooks(projectId, hooks, projectDir)[0]!.scriptSha).toBeNull();

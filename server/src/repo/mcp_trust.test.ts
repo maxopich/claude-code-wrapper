@@ -102,10 +102,9 @@ describe('recordTrustDecision — dual-write contract', () => {
       decision: 'trusted_pinned_hash',
     });
     const audit = getDb()
-      .prepare<
-        [],
-        { kind: string; reason_code: string; payload_json: string }
-      >(`SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'mcp.trust_decided'`)
+      .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
+        `SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'mcp.trust_decided'`,
+      )
       .all();
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({
@@ -178,10 +177,9 @@ describe('recordTrustDecision — dual-write contract', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].decision).toBe('denied_remember');
     const audits = getDb()
-      .prepare<
-        [],
-        { reason_code: string }
-      >(`SELECT reason_code FROM safety_audit WHERE kind = 'mcp.trust_decided' ORDER BY ts`)
+      .prepare<[], { reason_code: string }>(
+        `SELECT reason_code FROM safety_audit WHERE kind = 'mcp.trust_decided' ORDER BY ts`,
+      )
       .all();
     expect(audits.map((a) => a.reason_code)).toEqual(['trusted', 'denied_remember']);
   });
@@ -257,7 +255,15 @@ describe('checkTrust — spec §4.4 decision table', () => {
     });
   });
 
-  test('denied_remember always wins regardless of sha (no future spawn)', () => {
+  // Register D08 [security]. This test's NAME was the contract — "regardless
+  // of sha" — but it only ever probed `sha-1`, the very sha it recorded, so it
+  // exercised the exact-match branch and never the rule it claimed to cover.
+  // The exact lookup filters on `binary_sha = ?`, so a denial recorded against
+  // a different binary was invisible: the server fell through to `first_seen`
+  // and the operator was re-prompted about something they had already denied —
+  // and handed a fresh chance to approve it. The module header (line 16) has
+  // always documented `denied_remember (any sha) → silent refusal`.
+  test('[security] denied_remember wins at the sha it was recorded at', () => {
     recordTrustDecision({
       serverName: 'svr',
       originPath: '/p/settings.json',
@@ -265,6 +271,85 @@ describe('checkTrust — spec §4.4 decision table', () => {
       decision: 'denied_remember',
     });
     expect(checkTrust('svr', '/p/settings.json', 'sha-1')).toEqual({ decision: 'denied_remember' });
+  });
+
+  test('[security] denied_remember wins at a DIFFERENT sha — the upgraded binary', () => {
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    // The denied server ships a new build. Re-prompting here is the bug: the
+    // operator already said no, and a rebuild is not a reason to ask again.
+    expect(checkTrust('svr', '/p/settings.json', 'sha-2')).toEqual({
+      decision: 'denied_remember',
+    });
+  });
+
+  test('[security] denied_remember wins when the new binary is unresolvable', () => {
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    expect(checkTrust('svr', '/p/settings.json', null)).toEqual({ decision: 'denied_remember' });
+  });
+
+  test('[security] a denial outranks an older pin on the same server', () => {
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'pinned-sha',
+      decision: 'trusted_pinned_hash',
+    });
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'bad-sha',
+      decision: 'denied_remember',
+    });
+    // Without the ordering this returns `hash_changed` and prompts, which
+    // offers an approve button for a server whose latest verdict was "no".
+    expect(checkTrust('svr', '/p/settings.json', 'third-sha')).toEqual({
+      decision: 'denied_remember',
+    });
+  });
+
+  test('an operator who changes their mind is not trapped by an old denial', () => {
+    // The reason the probe is scoped to the operator's MOST RECENT decision
+    // rather than "any denial ever". `INSERT OR REPLACE` is keyed per sha, so
+    // rows at different shas coexist; an unconditional probe would mean that
+    // denying one build poisons the server permanently and no later build
+    // could ever be approved.
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-2',
+      decision: 'trusted',
+    });
+    expect(checkTrust('svr', '/p/settings.json', 'sha-2')).toEqual({ decision: 'trusted' });
+    // A third, unseen build prompts rather than being silently refused.
+    expect(checkTrust('svr', '/p/settings.json', 'sha-3')).toEqual({ decision: 'first_seen' });
+  });
+
+  test("a denial on one server does not leak to another server's lookup", () => {
+    recordTrustDecision({
+      serverName: 'denied-one',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    expect(checkTrust('other-one', '/p/settings.json', 'sha-9')).toEqual({
+      decision: 'first_seen',
+    });
   });
 
   test('null candidate sha (unresolvable target) never triggers hash_changed', () => {
