@@ -5,6 +5,7 @@ import {
   initialState,
   isSessionPending,
   reduce,
+  sessionPhase,
   trustChipState,
 } from './store';
 import type { MultiAgentEventView, MultiAgentRun } from './store';
@@ -2943,5 +2944,128 @@ describe('store / result reducer carries durationMs (Cluster H B5)', () => {
     const last = sess.messages[sess.messages.length - 1];
     if (!last || last.kind !== 'result') throw new Error('expected result kind');
     expect(last.durationMs).toBeUndefined();
+  });
+});
+
+/**
+ * Register W01. Only `assistant_message` and `command_output` cleared the
+ * streaming buffer. `result`, `wrapper_error` and `user_send` all spread
+ * `...session` and kept it, so a turn that ended any other way — a Stop
+ * mid-stream, an error — left its partial text behind.
+ *
+ * `sessionPhase` checks status === 'done' | 'error' FIRST, so the litter stays
+ * hidden while the turn is over. That is why this survived casual use. Then the
+ * next `user_send` flips status back to 'running', `sessionPhase` falls through
+ * to its `streamingText.length > 0 -> 'streaming'` branch, and ChatView renders
+ * the PREVIOUS turn's abandoned answer as if it were arriving now.
+ */
+describe('store / W01 — the streaming buffer retires with its turn', () => {
+  const SID = 'sid-w01';
+
+  /** Open a project, start a session, and stream a partial answer into it. */
+  function streamPartial(text = 'partial answer so f') {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'question' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: SID,
+        projectId: PID,
+        model: 'opus-4',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'stream_delta',
+        sessionId: SID,
+        uuid: 'u-w01',
+        delta: { kind: 'text', blockIndex: 0, text },
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe(text);
+    return s;
+  }
+
+  test('a result clears it', () => {
+    let s = streamPartial();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: SID,
+        subtype: 'success',
+        durationMs: 1200,
+        totalCostUsd: 0.01,
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('an errored result clears it too', () => {
+    // The path a stopped turn takes — and the one that made this reachable.
+    let s = streamPartial();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: SID,
+        subtype: 'error_during_execution',
+        durationMs: 800,
+        totalCostUsd: 0.004,
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('a wrapper_error clears it', () => {
+    let s = streamPartial();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'wrapper_error',
+        sessionId: SID,
+        kind: 'process_crashed',
+        message: 'boom',
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('a fresh user_send never inherits the previous turn s text', () => {
+    // The backstop, covering any turn-ending path that emits neither envelope.
+    let s = streamPartial();
+    s = reduce(s, { type: 'user_send', text: 'follow-up' });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('the aborted answer does not replay as live output on the next send', () => {
+    // The user-visible symptom, pinned end to end rather than by field: after
+    // an ended turn and a fresh send, the session must NOT read as 'streaming'
+    // — that phase is what mounts <StreamingPlaceholder> with the stale text.
+    let s = streamPartial('a half-finished sentence that the operator stopped');
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: SID,
+        subtype: 'error_during_execution',
+        durationMs: 800,
+        totalCostUsd: 0.004,
+      },
+    });
+    s = reduce(s, { type: 'user_send', text: 'never mind, different question' });
+
+    const sess = activeSession(s)!;
+    expect(sess.status).toBe('running');
+    expect(sessionPhase(sess, true)).not.toBe('streaming');
+  });
+
+  test('a genuinely streaming turn still reads as streaming', () => {
+    // Guard against over-correcting into "never streams".
+    const s = streamPartial();
+    expect(sessionPhase(activeSession(s)!, true)).toBe('streaming');
   });
 });
