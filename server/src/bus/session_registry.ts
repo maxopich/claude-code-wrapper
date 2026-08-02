@@ -105,7 +105,20 @@ export type BusSessionHandle = {
   lifecycle: MultiAgentLifecycle;
   sessionFolder: string;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
-  detach: () => void;
+  /**
+   * Silence the WS sink without tearing the session down.
+   *
+   * Register B01: pass the `sinkEpoch` you were handed by `rebind` and the
+   * detach is IGNORED unless you still own the sink. Two browser windows on
+   * one session used to be a trap — window B re-attaches (rebind), then
+   * window A's close fires `detach()` and blanks B's live stream, including
+   * `multi_agent_ended`, while B's UI still shows an active run.
+   *
+   * Calling it with NO epoch silences unconditionally, which is what a
+   * deliberate switch-away wants (`executeReopenSessionConfirmed`). Only the
+   * WS-close path should pass an epoch.
+   */
+  detach: (sinkEpoch?: number) => void;
   /**
    * Re-deliver the captured prompt of the worker named in this session's
    * persisted pending-retry slot. No-op when the slot is empty (idempotent
@@ -129,8 +142,13 @@ export type LiveBusSession = {
   sessionId: string;
   mode: 'chain' | 'orchestrator';
   handle: BusSessionHandle;
-  /** Swap the live WS sink (reconnect) or silence it (detach). */
-  rebind: (sink: BusSink) => void;
+  /**
+   * Swap the live WS sink (reconnect). Returns the new **sink epoch** — a
+   * monotonic per-session counter identifying who owns the sink right now.
+   * Hand it back to `handle.detach(epoch)` so a stale window's close can't
+   * silence a newer window's stream (register B01).
+   */
+  rebind: (sink: BusSink) => number;
 };
 
 const live = new Map<string, LiveBusSession>();
@@ -149,4 +167,20 @@ export function unregisterLiveSession(sessionId: string): void {
 
 export function hasLiveSession(sessionId: string): boolean {
   return live.has(sessionId);
+}
+
+/**
+ * Every session still live in THIS process, in registration order.
+ *
+ * Register B02: `start_multi_agent` guards on this, not just on the starting
+ * connection's own `conn.multiAgent`. The per-connection guard let two browser
+ * windows each start a session; both then stayed live, and the next resume
+ * sweep reported the older one `crashed` while its agents kept taking turns.
+ *
+ * Rows left `running` by a dead process are NOT in here (the map is
+ * process-local and empty after a restart), so a stale DB row can never block
+ * a new session — only a genuinely live one can.
+ */
+export function listLiveSessionIds(): string[] {
+  return [...live.keys()];
 }

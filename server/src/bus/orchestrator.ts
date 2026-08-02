@@ -254,7 +254,9 @@ export type OrchestratorSessionHandle = {
   executeMode: boolean;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   sendUserPrompt: (text: string) => Promise<void>;
-  detach: () => void;
+  /** Register B01: pass the epoch `rebind` handed you and a stale window's
+   *  close can't silence the live one. Bare call is unconditional. */
+  detach: (sinkEpoch?: number) => void;
   addWorker: (projectId: number) => Promise<AddWorkerResult>;
   setLifecycle: (lifecycle: MultiAgentLifecycle) => Promise<void>;
   getCurrentWorkerNames: () => readonly string[];
@@ -338,8 +340,11 @@ type OrchestratorRouter = {
   handleEvent: (ev: BusEvent) => void;
   forwardCebabEvent: (ev: BusEvent) => void;
   sendUserPrompt: (text: string) => Promise<void>;
-  detach: () => void;
-  rebind: (sink: BusSink) => void;
+  /** Register B01: no-op unless `epoch` still owns the sink. Bare call
+   *  silences unconditionally — see `BusSessionHandle.detach`. */
+  detach: (epoch?: number) => void;
+  /** Returns the new sink epoch (register B01). */
+  rebind: (sink: BusSink) => number;
   registerWorker: (agentName: string) => void;
   getWorkerNames: () => readonly string[];
   setLifecycle: (lifecycle: MultiAgentLifecycle) => void;
@@ -506,6 +511,10 @@ export function createOrchestratorRouter(params: {
     sendRouterDrop: params.sendRouterDrop,
     sendServerMsg: params.sendServerMsg,
   };
+  // Register B01: monotonic owner token for `sink`. Starts at 0 (the sink
+  // installed at construction, owned by the window that started the run);
+  // every `rebind` mints a fresh one.
+  let sinkEpoch = 0;
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Bumped on every successful append (both `handleEvent` and
@@ -896,11 +905,18 @@ export function createOrchestratorRouter(params: {
     deliver?.(ORCHESTRATOR_AGENT_NAME, text);
   };
 
-  const detach = () => {
+  // Register B01: who currently owns the sink. Bumped on every rebind, so a
+  // window that re-attached later holds a higher epoch than the one that
+  // attached before it. `detach(epoch)` silences only if the caller's epoch is
+  // still the current one — otherwise a closing stale window would blank the
+  // live window's event stream.
+  const detach = (epoch?: number) => {
+    if (epoch !== undefined && epoch !== sinkEpoch) return;
     sink = NOOP_SINK;
   };
-  const rebind = (next: BusSink) => {
+  const rebind = (next: BusSink): number => {
     sink = next;
+    return ++sinkEpoch;
   };
   const registerWorker = (agentName: string) => {
     if (workerSet.has(agentName)) return;
@@ -1719,8 +1735,8 @@ export function wireOrchestratorSession(p: {
       await router.teardown(reason);
     },
     sendUserPrompt: (text) => router.sendUserPrompt(text),
-    detach() {
-      router.detach();
+    detach(sinkEpoch) {
+      router.detach(sinkEpoch);
     },
     addWorker,
     setLifecycle: setLifecycleHandle,

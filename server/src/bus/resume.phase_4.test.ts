@@ -6,7 +6,7 @@ import type { ServerMsg } from '@cebab/shared/protocol';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { attemptResumeMultiAgent } from './resume.js';
-import { hasLiveSession, unregisterLiveSession } from './session_registry.js';
+import { hasLiveSession, registerLiveSession, unregisterLiveSession } from './session_registry.js';
 import { createMultiAgentSession, getMultiAgentSession } from '../repo/multi_agent.js';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
 
@@ -121,6 +121,107 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
     });
 
     expect(sent.find((m) => m.type === 'session_superseded')).toBeUndefined();
+  });
+});
+
+// Register B02 [security]. The sweep above assumes every older `running` row
+// is a dead orphan. It wasn't: `start_multi_agent`'s guard was
+// per-CONNECTION, so two browser windows could each start a session and both
+// stay live in this process. Marking the older one `crashed` while its
+// AgentRunner kept delivering turns told the operator a lie AND left agents
+// executing with no session the UI could stop.
+//
+// Two halves: the sweep now tears down a live orphan before reporting it
+// crashed (here), and the start guard is process-wide (see
+// `ws/start_guard_global.test.ts`) so the overlap can't be created any more.
+describe('[B02] the supersede sweep does not crash-mark a still-live session [security]', () => {
+  /** Register a fake live session whose stop() we can observe. */
+  function registerFakeLive(sessionId: string, stop: () => Promise<void>) {
+    registerLiveSession({
+      sessionId,
+      mode: 'orchestrator',
+      handle: {
+        sessionId,
+        iterationId: 'iter-1',
+        participantAgentNames: [],
+        lifecycle: 'temp',
+        sessionFolder: '',
+        stop,
+        detach: () => {},
+        retry: async () => {},
+        continueThroughMutation: async () => {},
+      },
+      rebind: () => 1,
+    });
+  }
+
+  test('a live older session is STOPPED before it is marked crashed', async () => {
+    createMultiAgentSession(OLDER_SID, 'orchestrator');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    createMultiAgentSession(NEWER_SID, 'orchestrator');
+
+    const stopped: string[] = [];
+    registerFakeLive(OLDER_SID, async () => {
+      // Assert ordering from inside stop(): the row must still be `running`
+      // here. If the sweep marked it crashed first, the operator would have
+      // been told the session died while its agents were mid-teardown.
+      expect(getMultiAgentSession(OLDER_SID)!.status).toBe('running');
+      stopped.push(OLDER_SID);
+    });
+
+    await attemptResumeMultiAgent({
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      sendServerMsg: vi.fn(),
+    });
+
+    expect(stopped).toEqual([OLDER_SID]);
+    expect(getMultiAgentSession(OLDER_SID)!.status).toBe('crashed');
+  });
+
+  test('a dead older row still sweeps without a stop (unchanged behaviour)', async () => {
+    // Nothing registered → nothing to stop. This is the ordinary
+    // server-restart case and must not regress.
+    createMultiAgentSession(OLDER_SID, 'orchestrator');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    createMultiAgentSession(NEWER_SID, 'orchestrator');
+
+    const sent: ServerMsg[] = [];
+    await attemptResumeMultiAgent({
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      sendServerMsg: (m) => sent.push(m),
+    });
+
+    expect(getMultiAgentSession(OLDER_SID)!.status).toBe('crashed');
+    expect(sent.find((m) => m.type === 'session_superseded')).toBeDefined();
+  });
+
+  test('a stop() that throws still leaves the row crashed, never running', async () => {
+    // The row must not stay `running` — that is the state that makes a dead
+    // session look resumable and re-enter this sweep forever.
+    createMultiAgentSession(OLDER_SID, 'orchestrator');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    createMultiAgentSession(NEWER_SID, 'orchestrator');
+
+    registerFakeLive(OLDER_SID, async () => {
+      throw new Error('teardown exploded');
+    });
+
+    const sent: ServerMsg[] = [];
+    await expect(
+      attemptResumeMultiAgent({
+        onEvent: vi.fn(),
+        onEnded: vi.fn(),
+        hopBudget: 1000,
+        sendServerMsg: (m) => sent.push(m),
+      }),
+    ).resolves.not.toThrow();
+
+    expect(getMultiAgentSession(OLDER_SID)!.status).toBe('crashed');
+    expect(sent.find((m) => m.type === 'session_superseded')).toBeDefined();
   });
 });
 

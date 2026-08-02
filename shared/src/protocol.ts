@@ -314,6 +314,11 @@ export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
  * audit `reasonCode`s — they're operator-facing diagnostic codes.
  *
  *   - chain_mute_unsupported    — Mute requested in chain mode (spec §5.3)
+ *   - chain_pause_unsupported   — Pause/resume requested in chain mode.
+ *     Register B03: this used to report SUCCESS in chain mode — the DB
+ *     flipped, an expiry timer was scheduled and safety_audit recorded
+ *     `agent_control.paused`, while the chain worker kept taking turns,
+ *     because only orchestrator handles expose the pause wire.
  *   - chain_topology_broken     — Kick of a chain-middle participant
  *   - hard_kill_unsupported_v1  — Kick mode='hard' before AbortController refactor
  *   - already_in_state          — Mute on muted / pause on paused / etc.
@@ -325,6 +330,7 @@ export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
  */
 export type ControllabilityFailureCode =
   | 'chain_mute_unsupported'
+  | 'chain_pause_unsupported'
   | 'chain_topology_broken'
   | 'hard_kill_unsupported_v1'
   | 'already_in_state'
@@ -336,6 +342,7 @@ export type ControllabilityFailureCode =
 
 export const CONTROLLABILITY_FAILURE_CODES: ReadonlySet<ControllabilityFailureCode> = new Set([
   'chain_mute_unsupported',
+  'chain_pause_unsupported',
   'chain_topology_broken',
   'hard_kill_unsupported_v1',
   'already_in_state',
@@ -1384,6 +1391,7 @@ export type ClientMsg =
    * Topology guards (Phase 4b enforces, codes defined in
    * `ControllabilityFailureCode` above):
    *   - Mute in chain mode → `chain_mute_unsupported`
+   *   - Pause/resume in chain mode → `chain_pause_unsupported`
    *   - Kick of chain-middle participant → `chain_topology_broken`
    *   - Kick mode='hard' (v1) → `hard_kill_unsupported_v1`
    *   - Kick of orchestrator row → `orchestrator_cannot_kick`

@@ -110,10 +110,9 @@ describe('executeMuteParticipant — happy path', () => {
     expect(handle.setMute).toHaveBeenCalledWith('worker-slug', true);
     // safety_audit row written with kind='agent_control.muted'
     const audit = getDb()
-      .prepare<
-        [string],
-        { kind: string; reason_code: string; agent_id: string }
-      >('SELECT kind, reason_code, agent_id FROM safety_audit WHERE kind = ?')
+      .prepare<[string], { kind: string; reason_code: string; agent_id: string }>(
+        'SELECT kind, reason_code, agent_id FROM safety_audit WHERE kind = ?',
+      )
       .get('agent_control.muted');
     expect(audit?.kind).toBe('agent_control.muted');
     expect(audit?.reason_code).toBe('runaway_loop');
@@ -128,10 +127,9 @@ describe('executeMuteParticipant — happy path', () => {
       sessionMode: 'orchestrator',
     });
     const audit = getDb()
-      .prepare<
-        [],
-        { payload_json: string }
-      >("SELECT payload_json FROM safety_audit WHERE kind = 'agent_control.muted'")
+      .prepare<[], { payload_json: string }>(
+        "SELECT payload_json FROM safety_audit WHERE kind = 'agent_control.muted'",
+      )
       .get();
     const payload = JSON.parse(audit!.payload_json) as { reasonText: string };
     expect(payload.reasonText).toBe('spammy outbound');
@@ -265,10 +263,9 @@ describe('executeUnmuteParticipant', () => {
     expect(getControlState('sess-1', workerId)?.muted).toBe(false);
     expect(handle.setMute).toHaveBeenLastCalledWith('worker-slug', false);
     const audit = getDb()
-      .prepare<
-        [],
-        { reason_code: string }
-      >("SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.unmuted'")
+      .prepare<[], { reason_code: string }>(
+        "SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.unmuted'",
+      )
       .get();
     expect(audit?.reason_code).toBe('topology_repair');
   });
@@ -400,10 +397,9 @@ describe('executePauseParticipant — happy path', () => {
     expect(getControlState('sess-1', workerId)?.pausedUntil).toBe(1_700_000_000_000 + 5 * 60_000);
     expect(handle.pauseAgent).toHaveBeenCalledWith('worker-slug');
     const audit = getDb()
-      .prepare<
-        [],
-        { kind: string; reason_code: string; payload_json: string }
-      >("SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'agent_control.paused'")
+      .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
+        "SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'agent_control.paused'",
+      )
       .get();
     expect(audit?.kind).toBe('agent_control.paused');
     const payload = JSON.parse(audit!.payload_json) as { timeoutMs: number; expiryAction: string };
@@ -415,6 +411,84 @@ describe('executePauseParticipant — happy path', () => {
     const { workerId } = seedSession();
     const result = executePauseParticipant({
       msg: pauseMsg({ projectId: workerId, expiryAction: 'auto_kick' }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+// Register B03 [security]. `executePauseParticipant` accepted `sessionMode`
+// and never read it. In chain mode `orchestratorHandle` is simply undefined,
+// so the code fell through: DB column flipped, expiry timer scheduled by the
+// caller, an `agent_control.paused` audit row written, `ok` echoed — and the
+// chain worker kept taking turns, because only orchestrator handles expose
+// the pause wire. Mute (`chain_mute_unsupported`) and kick
+// (`chain_topology_broken`) already refused chain; pause now does too.
+//
+// The assertions below are as much about the RESIDUE as the return value: a
+// rejection that still flipped the column or wrote the audit row would leave
+// durable state claiming a pause that was never in force — which is what R-B
+// reconstruction and the operator's UI both read back.
+describe('executePauseParticipant — chain mode is refused [security]', () => {
+  test('chain pause returns chain_pause_unsupported', () => {
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
+      orchestratorHandle: undefined, // exactly what a chain session yields
+      sessionMode: 'chain',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return; // type guard
+    expect(result.failureCode).toBe('chain_pause_unsupported');
+  });
+
+  test('chain pause writes NO pause column and NO audit row', () => {
+    const { workerId } = seedSession();
+    executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
+      orchestratorHandle: undefined,
+      sessionMode: 'chain',
+    });
+
+    expect(getControlState('sess-1', workerId)?.pausedUntil ?? null).toBeNull();
+    const audit = getDb()
+      .prepare<[], { n: number }>(
+        "SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'agent_control.paused'",
+      )
+      .get();
+    expect(audit?.n).toBe(0);
+  });
+
+  test('chain resume is refused too — nothing is ever held there to release', () => {
+    const { workerId } = seedSession();
+    const result = executeResumeParticipant({
+      msg: resumeMsgFor({ projectId: workerId }),
+      orchestratorHandle: undefined,
+      sessionMode: 'chain',
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return; // type guard
+    expect(result.failureCode).toBe('chain_pause_unsupported');
+  });
+
+  test('the refusal is decided on sessionMode, not on the handle being absent', () => {
+    // A torn-down ORCHESTRATOR session also has no handle, but that is a
+    // different condition and keeps its own code — the operator's intent is
+    // still recorded there. Conflating the two would lose that distinction.
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
+      orchestratorHandle: undefined,
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  test('orchestrator mode is unaffected', () => {
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
       orchestratorHandle: makeFakePauseHandle(),
       sessionMode: 'orchestrator',
     });
@@ -535,10 +609,9 @@ describe('executeResumeParticipant', () => {
     expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
     expect(handle.resumeAgent).toHaveBeenCalledWith('worker-slug');
     const audit = getDb()
-      .prepare<
-        [],
-        { reason_code: string }
-      >("SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.resumed'")
+      .prepare<[], { reason_code: string }>(
+        "SELECT reason_code FROM safety_audit WHERE kind = 'agent_control.resumed'",
+      )
       .get();
     expect(audit?.reason_code).toBe('topology_repair');
   });
@@ -656,10 +729,9 @@ describe('executeKickParticipant — happy path (drain mode)', () => {
     expect(getControlState('sess-1', workerId)?.kickedMode).toBe('drain');
     expect(handle.kickAgent).toHaveBeenCalledWith('worker-slug');
     const audit = getDb()
-      .prepare<
-        [],
-        { kind: string; reason_code: string; payload_json: string; agent_id: string }
-      >("SELECT kind, reason_code, payload_json, agent_id FROM safety_audit WHERE kind = 'agent_control.kicked'")
+      .prepare<[], { kind: string; reason_code: string; payload_json: string; agent_id: string }>(
+        "SELECT kind, reason_code, payload_json, agent_id FROM safety_audit WHERE kind = 'agent_control.kicked'",
+      )
       .get();
     expect(audit?.kind).toBe('agent_control.kicked');
     expect(audit?.reason_code).toBe('runaway_loop');
@@ -687,10 +759,9 @@ describe('executeKickParticipant — happy path (drain mode)', () => {
       sessionMode: 'orchestrator',
     });
     const audit = getDb()
-      .prepare<
-        [],
-        { payload_json: string }
-      >("SELECT payload_json FROM safety_audit WHERE kind = 'agent_control.kicked'")
+      .prepare<[], { payload_json: string }>(
+        "SELECT payload_json FROM safety_audit WHERE kind = 'agent_control.kicked'",
+      )
       .get();
     const payload = JSON.parse(audit!.payload_json) as { reasonText: string };
     expect(payload.reasonText).toBe('persistent off-task replies after pause');
@@ -929,10 +1000,9 @@ describe('executeExpireParticipant — auto_resume', () => {
     expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
     expect(handle.resumeAgent).toHaveBeenCalledWith('worker-slug');
     const audit = getDb()
-      .prepare<
-        [],
-        { kind: string; reason_code: string; payload_json: string; agent_id: string }
-      >("SELECT kind, reason_code, payload_json, agent_id FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+      .prepare<[], { kind: string; reason_code: string; payload_json: string; agent_id: string }>(
+        "SELECT kind, reason_code, payload_json, agent_id FROM safety_audit WHERE kind = 'pause.expired_without_resume'",
+      )
       .get();
     expect(audit?.kind).toBe('pause.expired_without_resume');
     expect(audit?.reason_code).toBe('off_task');
@@ -958,10 +1028,9 @@ describe('executeExpireParticipant — auto_resume', () => {
       orchestratorHandle: makeFakeExpireHandle(),
     });
     const audit = getDb()
-      .prepare<
-        [],
-        { payload_json: string }
-      >("SELECT payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+      .prepare<[], { payload_json: string }>(
+        "SELECT payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'",
+      )
       .get();
     const payload = JSON.parse(audit!.payload_json) as { reasonText: string };
     expect(payload.reasonText).toBe('tokens hitting ceiling');
@@ -999,10 +1068,9 @@ describe('executeExpireParticipant — auto_kick', () => {
 
     // Two safety_audit rows: the trigger + the resulting kick.
     const audits = getDb()
-      .prepare<
-        [],
-        { kind: string; reason_code: string; payload_json: string }
-      >("SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked' ORDER BY ts ASC")
+      .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
+        "SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked' ORDER BY ts ASC",
+      )
       .all();
     expect(audits.map((r) => r.kind)).toEqual([
       'pause.expired_without_resume',
@@ -1040,10 +1108,9 @@ describe('executeExpireParticipant — diverged state (defense-in-depth)', () =>
     // Trigger audit STILL wrote so the forensic trail captures the
     // timer fire (even though no state changed).
     const audit = getDb()
-      .prepare<
-        [],
-        { payload_json: string }
-      >("SELECT payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+      .prepare<[], { payload_json: string }>(
+        "SELECT payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'",
+      )
       .get();
     const payload = JSON.parse(audit!.payload_json) as { divergedState: string };
     expect(payload.divergedState).toBe('resumed');
@@ -1177,10 +1244,9 @@ describe('executeKickParticipant — forensic capture (Phase 4f)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const auditCount = getDb()
-      .prepare<
-        [],
-        { c: number }
-      >("SELECT COUNT(*) as c FROM safety_audit WHERE kind = 'agent_control.kicked'")
+      .prepare<[], { c: number }>(
+        "SELECT COUNT(*) as c FROM safety_audit WHERE kind = 'agent_control.kicked'",
+      )
       .get()!.c;
     expect(auditCount).toBe(1);
     // Forensic writer was called + threw; the error log fired.
@@ -1212,10 +1278,9 @@ describe('executeKickParticipant — forensic capture (Phase 4f)', () => {
     if (!result.ok) return;
 
     const row = getDb()
-      .prepare<
-        [string],
-        { mutation_rationale_json: string }
-      >('SELECT mutation_rationale_json FROM controllability_forensics WHERE safety_audit_id = ?')
+      .prepare<[string], { mutation_rationale_json: string }>(
+        'SELECT mutation_rationale_json FROM controllability_forensics WHERE safety_audit_id = ?',
+      )
       .get(result.auditId)!;
     const mr = JSON.parse(row.mutation_rationale_json) as {
       recentMutations: Array<{ toolName: string; summary: string }>;
@@ -1245,10 +1310,9 @@ describe('executeExpireParticipant auto_kick — forensic capture (Phase 4f)', (
 
     // The forensic row is keyed to the KICK audit, not the trigger audit.
     const row = getDb()
-      .prepare<
-        [string],
-        { agent_slug: string; bus_inbox_outbox_json: string }
-      >('SELECT agent_slug, bus_inbox_outbox_json FROM controllability_forensics WHERE safety_audit_id = ?')
+      .prepare<[string], { agent_slug: string; bus_inbox_outbox_json: string }>(
+        'SELECT agent_slug, bus_inbox_outbox_json FROM controllability_forensics WHERE safety_audit_id = ?',
+      )
       .get(result.kickAuditId!);
     expect(row).toBeDefined();
     expect(row?.agent_slug).toBe('worker-slug');
@@ -1261,10 +1325,9 @@ describe('executeExpireParticipant auto_kick — forensic capture (Phase 4f)', (
     // (pause.expired_without_resume) — that audit captures the trigger
     // event; the state-at-kick bundle hangs off the kick audit row.
     const triggerRow = getDb()
-      .prepare<
-        [string],
-        { c: number }
-      >('SELECT COUNT(*) as c FROM controllability_forensics WHERE safety_audit_id = ?')
+      .prepare<[string], { c: number }>(
+        'SELECT COUNT(*) as c FROM controllability_forensics WHERE safety_audit_id = ?',
+      )
       .get(result.triggerAuditId)!;
     expect(triggerRow.c).toBe(0);
   });

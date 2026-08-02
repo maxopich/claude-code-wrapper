@@ -75,6 +75,7 @@ function makeStubbedResumed(sessionId: string, mode: 'chain' | 'orchestrator'): 
     mode,
     row,
     replayEvents: [],
+    sinkEpoch: 1, // register B01: whoever resumed owns this sink generation
   };
 }
 

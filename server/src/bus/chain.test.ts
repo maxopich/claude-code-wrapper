@@ -396,6 +396,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
       handle: originalHandle,
       rebind: (s) => {
         bound = s;
+        return 1; // register B01: rebind mints a sink-ownership epoch
       },
     });
 

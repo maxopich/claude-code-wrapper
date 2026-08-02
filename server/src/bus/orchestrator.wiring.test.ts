@@ -177,6 +177,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
       handle: originalHandle,
       rebind: () => {
         bound = true;
+        return 1; // register B01: rebind mints a sink-ownership epoch
       },
     });
     const resumed = await resumeOrchestratorSession({

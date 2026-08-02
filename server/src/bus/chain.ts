@@ -186,8 +186,12 @@ export type ChainSessionHandle = {
   /** Stop the session and tear it down. Idempotent. */
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   /** Detach the WS sink without tearing down — agents keep running
-   *  in-process; a reconnect re-attaches via the session registry. */
-  detach: () => void;
+   *  in-process; a reconnect re-attaches via the session registry.
+   *
+   *  Register B01: pass the epoch `rebind` handed you and the detach is
+   *  ignored unless you still own the sink, so a stale window's close can't
+   *  blank the live one. Bare call is unconditional. */
+  detach: (sinkEpoch?: number) => void;
   /** Re-deliver the captured prompt of the worker named in this session's
    *  pending-retry slot. No-op when the slot is empty (idempotent). The
    *  slot is cleared BEFORE re-delivery so a racing second click sees the
@@ -204,8 +208,10 @@ type ChainRouter = {
   teardown: (reason: MultiAgentEndedReason) => Promise<void>;
   handleEvent: (ev: BusEvent) => void;
   forwardCebabEvent: (ev: BusEvent) => void;
-  detach: () => void;
-  rebind: (sink: BusSink) => void;
+  /** Register B01: no-op unless `epoch` still owns the sink. */
+  detach: (epoch?: number) => void;
+  /** Returns the new sink epoch (register B01). */
+  rebind: (sink: BusSink) => number;
   /** Called from the `deliver` .catch handler when a worker's `deliverTurn`
    *  rejects (iterator throw OR non-success `result.subtype` — the runner
    *  unifies both into a thrown error). Persists a synthetic
@@ -275,6 +281,10 @@ export function createChainRouter(params: {
     sendRouterDrop: params.sendRouterDrop,
     sendServerMsg: params.sendServerMsg,
   };
+  // Register B01: monotonic owner token for `sink`, bumped on every rebind.
+  // Epoch 0 is the sink installed here, owned by the window that started the
+  // run.
+  let sinkEpoch = 0;
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Incremented on every successful append (handleEvent + forwardCebabEvent)
@@ -546,12 +556,17 @@ export function createChainRouter(params: {
     }
   };
 
-  const detach = () => {
+  const detach = (epoch?: number) => {
+    // Register B01: a window that re-attached later holds a higher epoch. If
+    // the caller no longer owns the sink, its close is stale — ignore it
+    // rather than blanking the live window's stream.
+    if (epoch !== undefined && epoch !== sinkEpoch) return;
     // Keep persisting/routing; just stop forwarding to the (now dead) WS.
     sink = NOOP_SINK;
   };
-  const rebind = (next: BusSink) => {
+  const rebind = (next: BusSink): number => {
     sink = next;
+    return ++sinkEpoch;
   };
 
   // Worker failure handler — same shape in both routers (Item #4). The
@@ -1109,8 +1124,8 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       runner.stop();
       await router.teardown(reason);
     },
-    detach() {
-      router.detach();
+    detach(sinkEpoch) {
+      router.detach(sinkEpoch);
     },
     async retry() {
       const pending = getPendingRetry(sessionId);

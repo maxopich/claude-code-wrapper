@@ -99,6 +99,13 @@ export type ResumedSession = {
   mode: 'chain' | 'orchestrator';
   row: MultiAgentSessionRow;
   replayEvents: PersistedEvent[];
+  /**
+   * Register B01: the sink-ownership token minted by the `rebind` that just
+   * bound THIS caller's sink. Hand it to `handle.detach(sinkEpoch)` on WS
+   * close so a stale window's teardown can't silence a window that
+   * re-attached after it.
+   */
+  sinkEpoch: number;
 };
 
 function replayFor(sessionId: string): PersistedEvent[] {
@@ -130,8 +137,13 @@ export async function attemptResumeMultiAgent(
   // "Reopen" CTA so the operator can recover (UX-6). The orphan row is
   // still marked `crashed` (same as the pre-Phase 4 silent sweep) — the
   // notification is additive, not a state change.
+  //
+  // Register B02: awaited, because the sweep now tears down any orphan that
+  // is genuinely still live before it reports the crash. Doing that
+  // fire-and-forget would let the candidate re-attach while a superseded
+  // session's agents were still mid-teardown.
   for (const r of activeRows.slice(1)) {
-    markCrashedAndAnnounceSuperseded(r.id, candidate.id, candidate.started_at, callbacks);
+    await markCrashedAndAnnounceSuperseded(r.id, candidate.id, candidate.started_at, callbacks);
   }
 
   let live = getLiveSession(candidate.id);
@@ -183,13 +195,14 @@ export async function attemptResumeMultiAgent(
     sendRouterDrop: callbacks.sendRouterDrop,
     sendServerMsg: callbacks.sendServerMsg,
   };
-  live.rebind(sink);
+  const sinkEpoch = live.rebind(sink);
 
   return {
     handle: live.handle as unknown as ChainSessionHandle | OrchestratorSessionHandle,
     mode: live.mode,
     row: candidate,
     replayEvents: replayFor(candidate.id),
+    sinkEpoch,
   };
 }
 
@@ -197,8 +210,7 @@ export async function attemptResumeMultiAgent(
 export type TargetResumeFailure = 'not-found' | 'already-running' | 'reattach-failed';
 
 export type TargetResumeResult =
-  | { ok: true; resumed: ResumedSession }
-  | { ok: false; reason: TargetResumeFailure };
+  { ok: true; resumed: ResumedSession } | { ok: false; reason: TargetResumeFailure };
 
 /**
  * Operator-triggered re-attach for ONE session (the Iterations "Resume"
@@ -259,8 +271,9 @@ export async function resumeMultiAgentTarget(
 
   const prevStatus = row.status as MultiAgentStatus;
   reactivateMultiAgentSession(sessionId);
+  let sinkEpoch: number;
   try {
-    live.rebind({
+    sinkEpoch = live.rebind({
       onEvent: callbacks.onEvent,
       onEnded: callbacks.onEnded,
       onPendingRetry: callbacks.onPendingRetry,
@@ -283,6 +296,7 @@ export async function resumeMultiAgentTarget(
       mode: row.mode as 'chain' | 'orchestrator',
       row,
       replayEvents: replayFor(sessionId),
+      sinkEpoch,
     },
   };
 }
@@ -290,10 +304,9 @@ export async function resumeMultiAgentTarget(
 /** List every running multi-agent session, most recent first. */
 function listActiveMultiAgentSessions(): MultiAgentSessionRow[] {
   return getDb()
-    .prepare<
-      [],
-      MultiAgentSessionRow
-    >(`SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC`)
+    .prepare<[], MultiAgentSessionRow>(
+      `SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC`,
+    )
     .all();
 }
 
@@ -315,12 +328,34 @@ function markCrashedSilent(sessionId: string): void {
  * persist the crash state still logs (matches `markCrashedSilent`); the
  * notification is best-effort.
  */
-function markCrashedAndAnnounceSuperseded(
+async function markCrashedAndAnnounceSuperseded(
   orphanSessionId: string,
   supersedingSessionId: string,
   supersedingTs: number,
   callbacks: ResumeCallbacks,
-): void {
+): Promise<void> {
+  // Step 0 (register B02): the orphan may not be an orphan at all. The
+  // `start_multi_agent` guard used to be per-CONNECTION, so two browser
+  // windows could each start a session and both stay live in this process.
+  // Marking the older one `crashed` while its AgentRunner keeps delivering
+  // turns tells the operator a lie AND leaves the agents executing with no
+  // session the UI can stop. Tear it down for real first, so the
+  // `session_superseded` notice below is true by the time it ships.
+  //
+  // A `stop()` that throws is logged and swallowed: the row must not be left
+  // `running`, which is the state that made it look resumable.
+  const liveOrphan = getLiveSession(orphanSessionId);
+  if (liveOrphan) {
+    console.warn(
+      `[resume] superseding session ${orphanSessionId} is still LIVE in this process; stopping it before marking crashed`,
+    );
+    try {
+      await liveOrphan.handle.stop('crashed');
+    } catch (err) {
+      console.error(`[resume] failed to stop live superseded session ${orphanSessionId}`, err);
+    }
+  }
+
   // Step 1: state change (unchanged from `markCrashedSilent`). If this
   // fails we still try to ship the notification so the operator at least
   // sees that something supplanted the orphan row — but log loudly so the
