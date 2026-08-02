@@ -317,8 +317,9 @@ export type AgentRunnerDeps = {
    * on an `assistant` SDKMessage, BEFORE the SDK dispatches the tool. Hooks:
    *   - persists a row into `multi_agent_mutations`,
    *   - emits a `multi_agent_mutation` ServerMsg via `sink.onMutation`,
-   *   - when `pause_on_dangerous=1` AND `mutations_acknowledged=0`, persists
-   *     a pending-mutation slot, emits `multi_agent_pending_mutation`, and
+   *   - when `pause_on_dangerous=1` and this agent has neither a live pause
+   *     nor an unspent Continue grant for this exact call, flips the row to
+   *     `pause_state='pending'`, emits `multi_agent_pending_mutations`, and
    *     throws `PausedForMutationError` to abort the turn (best-effort —
    *     see the race-window risk in the plan).
    *
@@ -985,7 +986,7 @@ export class AgentRunner {
         // SDKMessage represents a tool the SDK is about to dispatch.
         // Classify each; for non-`read` calls, fire `onMutation` BEFORE the
         // SDK runs the tool. The hook can throw `PausedForMutationError` to
-        // abort the turn (pause-on-first-mutation gate). The cwd-side race
+        // abort the turn (pause-on-dangerous gate). The cwd-side race
         // window — SDK may dispatch the tool before the throw lands — is
         // documented as a best-effort caveat in the plan.
         if (this.deps.onMutation) {

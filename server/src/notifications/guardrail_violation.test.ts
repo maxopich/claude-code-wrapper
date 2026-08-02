@@ -78,6 +78,8 @@ function makeMutation(overrides: Partial<MutationRecord> = {}): MutationRecord {
     // Migration 026: full tool I/O — not relevant to this guardrail fixture.
     toolInput: null,
     toolResult: null,
+    // Migration 031: `mutate` never reaches the pause gate.
+    pauseState: 'none',
     ...overrides,
   };
 }

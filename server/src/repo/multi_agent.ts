@@ -67,13 +67,16 @@ export type MultiAgentSessionRow = {
    *  command flag. 1 if the operator enabled the setup-screen checkbox at
    *  session start. Narrowed to boolean at the boundary. */
   pause_on_dangerous: number;
-  /** Item #5: 1 once the operator has clicked Continue on a pause-on-dangerous
-   *  banner at least once during this session. Subsequent mutations
-   *  auto-allow when this is 1. */
+  /** SUPERSEDED by migration 031 — no longer read or written. Was: 1 once the
+   *  operator had clicked Continue once, after which every later dangerous
+   *  command auto-allowed (register B07). The gate now re-arms per command and
+   *  keeps its state on `multi_agent_mutations.pause_state`. Kept only so an
+   *  old DB still shows what the previous model recorded. */
   mutations_acknowledged: number;
-  /** Item #5: soft FK to `multi_agent_mutations.id` — the mutation row that
-   *  caused the current pause. NULL when no pause active. Read by the WS
-   *  `continue_through_mutation` handler to find which agent to re-deliver. */
+  /** SUPERSEDED by migration 031 — no longer read or written. Was: a single
+   *  session-wide soft FK to the paused mutation, which is why a second
+   *  worker's dangerous command ran unapproved while the first was held
+   *  (register B06). Pauses are now per-agent, on the mutation row. */
   pending_mutation_id: number | null;
   /** PR-7 (migration 013): soft FK to the saved template id this run was
    *  started FROM. NULL for ad-hoc runs and for every pre-013 row (those
@@ -196,6 +199,37 @@ export type MutationRecord = {
    *  the matching `tool_result` lands (same UPDATE that flips `confirmedAt`).
    *  Same cap. NULL until the result arrives / for pre-026 rows. */
   toolResult: unknown;
+  /** Migration 031: this mutation's pause-on-dangerous state. See
+   *  `MutationPauseState`. `'none'` for every mutation the gate never
+   *  touched, which is all of them when the toggle is off. */
+  pauseState: MutationPauseState;
+};
+
+/**
+ * Migration 031: where a mutation sits in the pause-on-dangerous gate.
+ *
+ * - `none` — never gated (the toggle was off, or the call wasn't `dangerous`).
+ * - `pending` — the agent's turn is halted; the operator has to decide.
+ * - `approved` — the operator clicked Continue. Resuming a pause is a REPLAY
+ *   (the gate killed the turn; Continue re-delivers the captured prompt), so
+ *   the approval has to survive as a one-shot grant or the replayed turn
+ *   re-issues the same command and pauses again forever.
+ * - `consumed` — that grant let the replayed call through. Terminal.
+ */
+export type MutationPauseState = 'none' | 'pending' | 'approved' | 'consumed';
+
+const PAUSE_STATE_TO_DB: Record<MutationPauseState, number> = {
+  none: 0,
+  pending: 1,
+  approved: 2,
+  consumed: 3,
+};
+
+const PAUSE_STATE_FROM_DB: Record<number, MutationPauseState> = {
+  0: 'none',
+  1: 'pending',
+  2: 'approved',
+  3: 'consumed',
 };
 
 export type MultiAgentMutationRow = {
@@ -222,6 +256,8 @@ export type MultiAgentMutationRow = {
   // Migration 026 — full tool input/output JSON; NULL for pre-026 rows.
   tool_input_json: string | null;
   tool_result_json: string | null;
+  // Migration 031 — 0 none | 1 pending | 2 approved | 3 consumed.
+  pause_state: number;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -515,6 +551,10 @@ function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
     // malformed value) keeps the projector total.
     toolInput: parseToolIoJson(row.tool_input_json),
     toolResult: parseToolIoJson(row.tool_result_json),
+    // Migration 031 — an out-of-range value (hand-edited DB) reads as `none`,
+    // the safe direction: an unrecognised state must not look like a live
+    // approval grant.
+    pauseState: PAUSE_STATE_FROM_DB[row.pause_state] ?? 'none',
   };
 }
 
@@ -766,40 +806,94 @@ export function setExecuteMode(sessionId: string, value: boolean): void {
     .run(value ? 1 : 0, sessionId);
 }
 
-/** Flip `mutations_acknowledged`. Idempotent. Called from the WS
- *  `continue_through_mutation` handler when the operator clicks Continue. */
-export function setMutationsAcknowledged(sessionId: string, value: boolean): void {
+/**
+ * Migration 031: move a mutation through the pause states. Returns the updated
+ * record, or `null` if the row is gone (a `clear_iterations` race — treat as
+ * "nothing to move" rather than throwing).
+ */
+export function setMutationPauseState(
+  id: number,
+  state: MutationPauseState,
+): MutationRecord | null {
   getDb()
-    .prepare(`UPDATE multi_agent_sessions SET mutations_acknowledged = ? WHERE id = ?`)
-    .run(value ? 1 : 0, sessionId);
+    .prepare(`UPDATE multi_agent_mutations SET pause_state = ? WHERE id = ?`)
+    .run(PAUSE_STATE_TO_DB[state], id);
+  return getMultiAgentMutation(id);
 }
 
 /**
- * Set or clear the pending-mutation slot. Pass `null` to clear. Mirrors
- * `setPendingRetry`'s API (PR #71). The mutation row referenced by `id`
- * must already be persisted (the bus tap calls `appendMultiAgentMutation`
- * first, then this) so the soft FK always resolves.
+ * Every mutation currently halting an agent, oldest first. One row per paused
+ * agent — the gate refuses to open a second pause for an agent whose turn is
+ * already dead — so the length of this list is the number of workers waiting on
+ * the operator. Drives the banner stack and the `continue_multi_agent` refusal.
  */
-export function setPendingMutation(sessionId: string, mutationId: number | null): void {
-  getDb()
-    .prepare(`UPDATE multi_agent_sessions SET pending_mutation_id = ? WHERE id = ?`)
-    .run(mutationId, sessionId);
-}
-
-/**
- * Read the pending-mutation slot, resolving the soft FK to a full
- * `MutationRecord`. Returns `null` when no pause is active OR when the
- * referenced row is missing (defensive — e.g. after a manual `clear_iterations`
- * race; treat as "no pause" rather than throwing).
- */
-export function getPendingMutation(sessionId: string): MutationRecord | null {
-  const row = getDb()
-    .prepare<[string], { pending_mutation_id: number | null }>(
-      'SELECT pending_mutation_id FROM multi_agent_sessions WHERE id = ?',
+export function listPendingMutations(sessionId: string): MutationRecord[] {
+  return getDb()
+    .prepare<[string], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations
+        WHERE session_id = ? AND pause_state = ${PAUSE_STATE_TO_DB.pending}
+        ORDER BY ts ASC, id ASC`,
     )
-    .get(sessionId);
-  if (!row || row.pending_mutation_id === null) return null;
-  return getMultiAgentMutation(row.pending_mutation_id);
+    .all(sessionId)
+    .map(rowToMutation);
+}
+
+/** Does this agent already have a halted turn? The gate uses it to avoid
+ *  opening a second pause for an agent that is already waiting. */
+export function hasPendingMutation(sessionId: string, agentName: string): boolean {
+  const row = getDb()
+    .prepare<[string, string], { n: number }>(
+      `SELECT COUNT(*) AS n FROM multi_agent_mutations
+        WHERE session_id = ? AND agent_name = ? AND pause_state = ${PAUSE_STATE_TO_DB.pending}`,
+    )
+    .get(sessionId, agentName);
+  return (row?.n ?? 0) > 0;
+}
+
+/**
+ * Find an unconsumed Continue grant covering this exact call, or `null`.
+ *
+ * Keyed on (agent, tool, summary) rather than on the row id because resuming a
+ * pause REPLAYS the turn: the halted call never ran, and the fresh turn issues
+ * a brand-new tool_use that gets its own row. `summary` is a sound key —
+ * `classifyToolCall` derives it deterministically from the tool input (for
+ * Bash, the truncated command plus the description suffix).
+ *
+ * Oldest grant first, so repeated approvals of the same command are consumed in
+ * the order they were given.
+ */
+export function findUnconsumedApproval(
+  sessionId: string,
+  agentName: string,
+  toolName: string,
+  summary: string,
+): MutationRecord | null {
+  const row = getDb()
+    .prepare<[string, string, string, string], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations
+        WHERE session_id = ? AND agent_name = ? AND tool_name = ? AND summary = ?
+          AND pause_state = ${PAUSE_STATE_TO_DB.approved}
+        ORDER BY ts ASC, id ASC
+        LIMIT 1`,
+    )
+    .get(sessionId, agentName, toolName, summary);
+  return row ? rowToMutation(row) : null;
+}
+
+/**
+ * Drop every live pause + unconsumed grant for a session. Called on teardown:
+ * a stopped session's pending rows are dead data that R-B reconstruction would
+ * otherwise resurrect as banners nobody can act on. Approved-but-unconsumed
+ * grants go too — a grant outliving its session would silently pre-approve a
+ * command in a reconstructed run.
+ */
+export function clearPendingMutations(sessionId: string): void {
+  getDb()
+    .prepare(
+      `UPDATE multi_agent_mutations SET pause_state = ${PAUSE_STATE_TO_DB.none}
+        WHERE session_id = ? AND pause_state IN (${PAUSE_STATE_TO_DB.pending}, ${PAUSE_STATE_TO_DB.approved})`,
+    )
+    .run(sessionId);
 }
 
 export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefined {

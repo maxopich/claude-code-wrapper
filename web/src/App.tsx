@@ -1673,16 +1673,15 @@ function AppShell({
     // post-mortem). Idempotent server-side (Phase 5).
     wsRef.current?.send({ type: 'archive_session', sessionId });
   }
-  function continueThroughMutation(sessionId: string) {
-    // Item #5: operator clicked Continue on the pause-on-first-mutation
-    // banner. Optimistically clear the slot + flip ack so the UI doesn't
-    // double-render or re-pause mid-flight; server echoes
-    // `multi_agent_pending_mutation { pending: null }` and re-delivers the
-    // captured prompt. A re-fail mid-replay would re-pause via the runner's
-    // mutation tap (gated on `mutations_acknowledged=0`, which is now 1 —
-    // subsequent mutations auto-allow, per the original review's intent).
-    dispatch({ type: 'ma_clear_pending_mutation' });
-    wsRef.current?.send({ type: 'continue_through_mutation', sessionId });
+  function continueThroughMutation(sessionId: string, mutationId: number) {
+    // Item #5: operator clicked Continue on ONE pause-on-dangerous banner.
+    // Optimistically drop just that banner so it can't be double-clicked;
+    // the server echoes the whole remaining set on
+    // `multi_agent_pending_mutations` and re-delivers that worker's captured
+    // prompt. The replayed turn re-issues the approved command once (the
+    // server's one-shot grant); anything else dangerous pauses again.
+    dispatch({ type: 'ma_clear_pending_mutation', mutationId });
+    wsRef.current?.send({ type: 'continue_through_mutation', sessionId, mutationId });
   }
   function answerQuestion(
     sessionId: string,

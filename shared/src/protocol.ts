@@ -561,10 +561,12 @@ export type ClientMsg =
       initialPrompt: string;
       lifecycle?: MultiAgentLifecycle;
       /**
-       * Opt-in to "pause-on-first-mutation": the first non-`read` tool call
-       * from any worker (anywhere in the session) is gated by an
-       * `awaiting_continue`-style banner before the SDK dispatches the tool.
-       * Subsequent mutations auto-allow once the operator clicks Continue.
+       * Opt-in to "pause-on-dangerous": EVERY `dangerous`-classified tool call,
+       * from every worker, is gated by a banner before the SDK dispatches the
+       * tool. The gate is per-agent and re-arms — approving one command does
+       * not pre-approve the next one, and a paused worker does not suppress the
+       * gate for its peers (migration 031; before that it was one pause per
+       * session, hence the old "pause-on-first-mutation" name).
        * Default `false` (server-side resolution; absent on pre-Item-5 clients).
        * Persists in `multi_agent_sessions.pause_on_dangerous`; survives R-B.
        */
@@ -666,16 +668,20 @@ export type ClientMsg =
     }
   | {
       /**
-       * Operator clicked Continue on the pause-on-first-mutation banner.
-       * Server clears the `pending_mutation_id` slot, sets
-       * `mutations_acknowledged=1` (so subsequent mutations in this session
-       * auto-allow), clears `awaiting_continue`, and re-delivers the paused
-       * worker's last captured prompt (briefing-and-rules preserved — same
-       * bytes as PR #71's retry path). Idempotent: a second click with the
-       * slot empty is a no-op.
+       * Operator clicked Continue on one pause-on-dangerous banner.
+       * `mutationId` names which — a session can have one pause per worker, so
+       * the click has to say which worker it releases.
+       *
+       * The server moves that mutation from `pending` to `approved` and
+       * re-delivers the paused worker's last captured prompt (briefing-and-
+       * rules preserved — same bytes as PR #71's retry path). The replayed turn
+       * re-issues the same command; the `approved` row is the one-shot grant
+       * that lets it through exactly once, after which the gate is armed again.
+       * Idempotent: a second click on an already-approved row is a no-op.
        */
       type: 'continue_through_mutation';
       sessionId: string;
+      mutationId: number;
     }
   | {
       /**
@@ -1884,13 +1890,6 @@ export type ServerMsg =
        */
       executeMode?: boolean;
       /**
-       * True once the operator has clicked Continue on a pause-on-dangerous
-       * banner at least once during this session (or set explicitly on
-       * subsequent sessions). When true, subsequent mutations auto-allow
-       * without further pauses. Mirrors `multi_agent_sessions.mutations_acknowledged`.
-       */
-      mutationsAcknowledged: boolean;
-      /**
        * Initial batch of recorded mutations for this session, ordered by `ts`
        * ascending. Empty on fresh starts; populated on R-A re-attach and R-B
        * reconstruct so the Session-info "Mutations" disclosure and the
@@ -1899,15 +1898,15 @@ export type ServerMsg =
        */
       mutations: MultiAgentMutationView[];
       /**
-       * Populated when a worker has been paused mid-turn by the
-       * pause-on-first-mutation gate. Cleared once the operator clicks
-       * Continue. Restored from the persisted `pending_mutation_id` slot on
-       * R-A re-attach + R-B reconstruct so the banner survives reconnects
-       * and Cebab restarts. Absent on fresh starts and after a successful
-       * Continue. Co-exists with `awaitingContinue` and `pendingRetry`; the
-       * UI stacks all three banners.
+       * Every worker currently halted mid-turn by the pause-on-dangerous gate,
+       * oldest first — one entry per paused worker, since the gate is per-agent
+       * (migration 031). Empty when nothing is waiting on the operator.
+       * Rebuilt from `multi_agent_mutations.pause_state` on R-A re-attach and
+       * R-B reconstruct, so the banners survive reconnects and Cebab restarts.
+       * Co-exists with `awaitingContinue` and `pendingRetry`; the UI stacks
+       * them all.
        */
-      pendingMutation?: MultiAgentMutationView;
+      pendingMutations: MultiAgentMutationView[];
       /**
        * Populated when a bus agent's turn is parked on an AskUserQuestion the
        * operator hasn't answered yet. Survives R-A re-attach (the parked
@@ -2029,17 +2028,20 @@ export type ServerMsg =
     }
   | {
       /**
-       * Item #5: live set/clear of the pause-on-first-mutation slot. Emitted
-       * when a worker is about to mutate AND `pause_on_dangerous=1` AND
-       * `mutations_acknowledged=0` (set, with the offending mutation row),
-       * and again when the operator clicks Continue (cleared,
-       * `pending: null`). Initial value on attach travels on
-       * `multi_agent_started.pendingMutation`; this is for in-session
+       * Item #5: live update of the set of workers halted by the
+       * pause-on-dangerous gate. Emitted whenever the set changes — a worker
+       * hits a `dangerous` call with the gate armed, or the operator releases
+       * one with `continue_through_mutation`.
+       *
+       * Carries the WHOLE current set rather than a delta, so the reducer
+       * replaces wholesale and a re-attach re-emit is idempotent. `[]` means
+       * nothing is waiting. Initial value on attach travels on
+       * `multi_agent_started.pendingMutations`; this is for in-session
        * transitions.
        */
-      type: 'multi_agent_pending_mutation';
+      type: 'multi_agent_pending_mutations';
       sessionId: string;
-      pending: MultiAgentMutationView | null;
+      pending: MultiAgentMutationView[];
     }
   | {
       /**

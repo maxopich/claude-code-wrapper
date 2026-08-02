@@ -303,7 +303,7 @@ export type MultiAgentRun = {
    *  click via `ma_clear_pending_retry` and authoritatively by
    *  `multi_agent_pending_retry { pending: null }` on success/abandon. */
   pendingRetry: PendingRetryDescriptor | null;
-  /** Item #5: opt-in pause-on-first-mutation flag for this session. Reflects
+  /** Item #5: opt-in pause-on-dangerous flag for this session. Reflects
    *  the operator's choice at session start. UI surfaces it as a read-only
    *  row in Session info (the toggle itself lives in setup). */
   pauseOnDangerous: boolean;
@@ -311,24 +311,22 @@ export type MultiAgentRun = {
    *  change their own project; drives the "Execute mode" banner/chip in place
    *  of the consultant-mode one. Mirrored from `multi_agent_started`. */
   executeMode: boolean;
-  /** Item #5: true once the operator has clicked Continue at least once.
-   *  When true, subsequent mutations auto-allow. Mirrored from server. */
-  mutationsAcknowledged: boolean;
   /** Item #5: all classified non-'read' tool calls observed during this
    *  session, ordered by ts ascending. Drives the Session-info "Mutations"
    *  disclosure + activity-bar counter chip. Deduped by `mutation.id` so
    *  the live `multi_agent_mutation` ServerMsg + the initial replay on
    *  attach can both populate it without doubling rows. */
   mutations: MultiAgentMutationView[];
-  /** Item #5: pause-on-first-mutation slot. Populated when a worker is
-   *  about to mutate AND `pauseOnDangerous && !mutationsAcknowledged`. Drives
-   *  the pause banner; gates `UserPromptInput` (same one-decision-at-a-time
-   *  pattern as `awaitingContinue` / `pendingRetry`). Cleared optimistically
-   *  on Continue click and authoritatively by
-   *  `multi_agent_pending_mutation { pending: null }`. */
-  pendingMutation: MultiAgentMutationView | null;
+  /** Item #5: every worker currently halted by the pause-on-dangerous gate,
+   *  oldest first. One entry per paused worker — the gate is per-agent
+   *  (migration 031), so several can be waiting at once. Drives the pause
+   *  banner stack; a non-empty list gates `UserPromptInput` (same
+   *  one-decision-at-a-time pattern as `awaitingContinue` / `pendingRetry`).
+   *  An entry is dropped optimistically on its Continue click and the whole
+   *  list is replaced authoritatively by `multi_agent_pending_mutations`. */
+  pendingMutations: MultiAgentMutationView[];
   /** Interactive AskUserQuestion: the active question awaiting the operator,
-   *  or null. Mirrors `pendingMutation` — gates `UserPromptInput`, cleared
+   *  or null. Mirrors `pendingMutations` — gates `UserPromptInput`, cleared
    *  optimistically on submit (`ma_clear_pending_question`) and
    *  authoritatively by `multi_agent_ask_user_resolved`. Hydrated on attach
    *  from `multi_agent_started.pendingQuestion` (R-A). */
@@ -548,7 +546,7 @@ export type MultiAgentState = {
   /** The seed input the operator types before clicking Start. In chain
    *  mode it rides the first participant's opening turn. */
   draftPrompt: string;
-  /** Item #5: setup-screen opt-in for pause-on-first-mutation. Persists
+  /** Item #5: setup-screen opt-in for pause-on-dangerous. Persists
    *  during the session draft; sent on `start_multi_agent` as
    *  `pauseOnDangerous`. Default false; the operator opts in explicitly. */
   draftPauseOnDangerous: boolean;
@@ -959,7 +957,7 @@ export type Action =
   | { type: 'ma_dismiss_active' }
   | { type: 'ma_clear_awaiting' }
   | { type: 'ma_clear_pending_retry' }
-  | { type: 'ma_clear_pending_mutation' }
+  | { type: 'ma_clear_pending_mutation'; mutationId: number }
   | { type: 'ma_clear_pending_question' }
   /** Cluster D Phase 4d: drop the bus auto-retry slice (the CountdownChip's
    *  onElapsed fires this — the retry has fired, banner should unmount.
@@ -1343,21 +1341,19 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case 'ma_clear_pending_mutation': {
-      // Item #5: optimistic clear on Continue click. Also sets
-      // `mutationsAcknowledged: true` locally so subsequent mutations don't
-      // re-pause the UI in the brief window before the server's
-      // `multi_agent_pending_mutation { pending: null }` echo arrives.
+      // Item #5: optimistic drop of the ONE banner the operator just released,
+      // ahead of the server's `multi_agent_pending_mutations` echo. Only that
+      // entry goes — any other worker the gate is holding stays on screen, and
+      // the gate stays armed for whatever this worker does next.
       const active = state.multiAgent.active;
-      if (!active || !active.pendingMutation) return state;
+      if (!active) return state;
+      const remaining = active.pendingMutations.filter((m) => m.id !== action.mutationId);
+      if (remaining.length === active.pendingMutations.length) return state;
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: {
-            ...active,
-            pendingMutation: null,
-            mutationsAcknowledged: true,
-          },
+          active: { ...active, pendingMutations: remaining },
         },
       };
     }
@@ -1604,9 +1600,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // and for consultant-mode orchestrator sessions. Default false if a
             // pre-execute-mode server omits it.
             executeMode: msg.executeMode ?? false,
-            mutationsAcknowledged: msg.mutationsAcknowledged,
             mutations: msg.mutations,
-            pendingMutation: msg.pendingMutation ?? null,
+            pendingMutations: msg.pendingMutations,
             // Interactive AskUserQuestion: hydrate a parked question on attach
             // (R-A) so the card reappears after a browser refresh.
             pendingQuestion: msg.pendingQuestion ?? null,
@@ -1710,9 +1705,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // client also drops the descriptor so the banner doesn't
             // linger on a stopped/crashed row.
             pendingRetry: null,
-            // Item #5: same reasoning for pending-mutation; the row's pause
-            // slot is no longer actionable once the session has ended.
-            pendingMutation: null,
+            // Item #5: same reasoning for the pause banners; a held worker is
+            // no longer releasable once the session has ended.
+            pendingMutations: [],
             // Interactive AskUserQuestion: a stopped/crashed session can't be
             // answered either — drop any parked question.
             pendingQuestion: null,
@@ -1758,17 +1753,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case 'multi_agent_pending_mutation': {
-      // Item #5: pause slot set/clear. `pending: null` = operator-Continue;
-      // a populated value = worker is paused awaiting Continue. Replaces
-      // wholesale (never merge) for the same reason as pending_retry.
+    case 'multi_agent_pending_mutations': {
+      // Item #5: the set of gate-halted workers changed. The server sends the
+      // whole set, so this replaces wholesale (never merges) — same reason as
+      // pending_retry, and it makes a re-attach re-emit idempotent.
       const active = state.multiAgent.active;
       if (!active || active.sessionId !== msg.sessionId) return state;
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: { ...active, pendingMutation: msg.pending },
+          active: { ...active, pendingMutations: msg.pending },
         },
       };
     }
@@ -2552,18 +2547,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // state shape identical to the wire shape for the snapshot test.
       return {
         ...state,
-        activeRuns: msg.runs.map(
-          (r): ActiveRunView => ({
-            sessionId: r.sessionId,
-            ...(r.projectId !== undefined ? { projectId: r.projectId } : {}),
-            ...(r.projectName !== undefined ? { projectName: r.projectName } : {}),
-            kind: r.kind,
-            startedAt: r.startedAt,
-            elapsedMs: r.elapsedMs,
-            ...(r.activeAgentName !== undefined ? { activeAgentName: r.activeAgentName } : {}),
-            ...(r.currentActivity !== undefined ? { currentActivity: r.currentActivity } : {}),
-          }),
-        ),
+        activeRuns: msg.runs.map((r): ActiveRunView => ({
+          sessionId: r.sessionId,
+          ...(r.projectId !== undefined ? { projectId: r.projectId } : {}),
+          ...(r.projectName !== undefined ? { projectName: r.projectName } : {}),
+          kind: r.kind,
+          startedAt: r.startedAt,
+          elapsedMs: r.elapsedMs,
+          ...(r.activeAgentName !== undefined ? { activeAgentName: r.activeAgentName } : {}),
+          ...(r.currentActivity !== undefined ? { currentActivity: r.currentActivity } : {}),
+        })),
       };
 
     case 'env_scrubbed':
@@ -3057,13 +3050,7 @@ export function trustChipState(trusted: boolean, mode: SessionPermissionMode): T
  * backstops the optimistic `status:'running'` set in `user_send`.
  */
 export type SessionPhase =
-  | 'idle'
-  | 'thinking'
-  | 'tool-running'
-  | 'streaming'
-  | 'awaiting-permission'
-  | 'done'
-  | 'error';
+  'idle' | 'thinking' | 'tool-running' | 'streaming' | 'awaiting-permission' | 'done' | 'error';
 
 export function sessionPhase(s: SessionView, isLive: boolean): SessionPhase {
   if (s.status === 'error') return 'error';
@@ -3136,12 +3123,13 @@ export const MA_SENTINELS: ReadonlySet<string> = new Set(['_sink', 'user', 'ceba
  * orchestrator (re-activation is free — stateless over the tail).
  *
  * Callers must additionally gate on `!run.awaitingContinue` (an R-B
- * read-only recovered run is not actually executing) and `!run.pendingMutation`
- * (the pause-on-first-mutation gate has held the worker mid-turn).
+ * read-only recovered run is not actually executing) and on an empty
+ * `run.pendingMutations` (the pause-on-dangerous gate is holding a worker
+ * mid-turn).
  */
 export function activeAgent(run: MultiAgentRun): string | null {
   if (run.status !== 'running') return null;
-  if (run.awaitingContinue || run.pendingRetry || run.pendingMutation) return null;
+  if (run.awaitingContinue || run.pendingRetry || run.pendingMutations.length > 0) return null;
   const evs = run.events;
   if (evs.length === 0) return null;
   const last = evs[evs.length - 1];

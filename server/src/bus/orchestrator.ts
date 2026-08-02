@@ -35,21 +35,17 @@ import {
   appendMultiAgentEvent,
   appendMultiAgentMutation,
   addParticipant,
+  clearPendingMutations,
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
-  getMultiAgentSession,
-  getPendingMutation,
   getPendingRetry,
   getProjectBusState,
   recordSessionTeardown,
-  setAwaitingContinue,
   setMultiAgentSessionLifecycle,
   setExecuteMode,
-  setMutationsAcknowledged,
   setMutationPromoted,
   setPauseOnDangerous,
-  setPendingMutation,
   setPendingRetry,
   upsertAgentSession,
   type EventKind,
@@ -65,8 +61,8 @@ import type {
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { PausedForMutationError, isPausedForMutation, isTurnStalled } from './errors.js';
-import { shouldPauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled } from './errors.js';
+import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
@@ -172,7 +168,7 @@ export type StartOrchestratorOpts = {
    *  before invoking. */
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
   /**
-   * Item #5: opt-in pause-on-first-mutation. When `true`, the bus runner's
+   * Item #5: opt-in pause-on-dangerous. When `true`, the bus runner's
    * mutation tap fires `awaiting_continue` + a banner before the first
    * non-`read` tool call from any worker. Persisted into
    * `multi_agent_sessions.pause_on_dangerous` at session start; survives R-B.
@@ -197,12 +193,13 @@ export type StartOrchestratorOpts = {
    */
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
   /**
-   * Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`
-   * ServerMsg. Fires when a worker is paused (set, with the offending
-   * mutation row) and when the operator clicks Continue (cleared,
-   * `pending: null`). Optional; the wire layer null-checks.
+   * Item #5: the set of workers halted by the pause-on-dangerous gate changed
+   * → `multi_agent_pending_mutations` ServerMsg. Fires when a worker is paused
+   * and when the operator releases one. Carries the whole current set (`[]`
+   * when nothing is waiting) because the gate is per-agent — several workers
+   * can be halted at once. Optional; the wire layer null-checks.
    */
-  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  onPendingMutation?: (sessionId: string, pending: MutationRecord[]) => void;
   /**
    * Cluster A Phase 3 (D4): dispatcher notification fan-out — the orchestrator
    * router calls this on every F2/F3 source-allowlist drop AFTER the
@@ -250,7 +247,7 @@ export type OrchestratorSessionHandle = {
    *  it on the wire in `multi_agent_started`; UI reads `events.length /
    *  hopBudget` for the activity-bar chip. */
   hopBudget: number;
-  /** Item #5: resolved pause-on-first-mutation flag for this session. */
+  /** Item #5: resolved pause-on-dangerous flag for this session. */
   pauseOnDangerous: boolean;
   /** Resolved execute-mode flag for this session (orchestrator mode only).
    *  Echoed on `multi_agent_started` so the UI shows the right banner. */
@@ -267,12 +264,13 @@ export type OrchestratorSessionHandle = {
    *  slot is cleared BEFORE re-delivery so a racing second click no-ops. */
   retry: () => Promise<void>;
   /**
-   * Item #5: operator clicked Continue on the pause-on-first-mutation
-   * banner. Clears the pending-mutation slot, sets
-   * `mutations_acknowledged=1`, clears `awaiting_continue`, re-delivers the
-   * paused worker's last captured prompt. No-op when no pause is active.
+   * Item #5: operator clicked Continue on one pause-on-dangerous banner.
+   * Moves that mutation from `pending` to `approved` (the one-shot grant the
+   * replayed turn spends) and re-delivers the paused worker's last captured
+   * prompt. No-op when `mutationId` isn't currently pending — which is what
+   * makes a double-click safe.
    */
-  continueThroughMutation: () => Promise<void>;
+  continueThroughMutation: (mutationId: number) => Promise<void>;
   /**
    * Cluster C Phase 4b: flip the orchestrator router's in-memory mute set
    * for an agent. Returns the router's `setMute` result — true iff the
@@ -1124,7 +1122,7 @@ export function wireOrchestratorSession(p: {
    *  starts from this value so enforcement carries over a server restart.
    *  Defaults to 0 (fresh start). */
   initialHopsCount?: number;
-  /** Item #5: opt-in pause-on-first-mutation. Surfaced on the handle; read
+  /** Item #5: opt-in pause-on-dangerous. Surfaced on the handle; read
    *  inside the `onMutation` hook to decide whether to gate. Default false. */
   pauseOnDangerous?: boolean;
   /** Execute mode: threaded into the briefing renderers so workers are told
@@ -1214,9 +1212,10 @@ export function wireOrchestratorSession(p: {
   // Item #5: mutation tap closure. Fired by the runner's stream tap for every
   // classified non-`read` `tool_use` block, BEFORE the SDK dispatches the
   // tool. Persists the row, fires the live `multi_agent_mutation` sink, and
-  // — when pause-on-first-mutation is armed and not yet acknowledged — sets
-  // the pending slot, emits `multi_agent_pending_mutation`, and throws
-  // `PausedForMutationError` to abort the turn cleanly.
+  // — when pause-on-dangerous is armed and this agent has no unspent
+  // Continue grant for this exact call — marks the row pending, emits
+  // `multi_agent_pending_mutations`, and throws `PausedForMutationError`
+  // to abort the turn cleanly.
   const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cwd, cls) => {
     let row: MutationRecord;
     try {
@@ -1258,25 +1257,12 @@ export function wireOrchestratorSession(p: {
       console.error('[orchestrator] onMutation sink threw', err);
     }
     // Pause gate — fires only on `dangerous`-category mutations (see
-    // `shouldPauseForMutation`). MCP calls and ordinary edits classify as
-    // `mutate` and run free. Fresh DB read each time — handles the operator
-    // flipping `mutations_acknowledged` mid-turn via Continue, and R-B
-    // reconstructed sessions where the in-memory closure has no value to read.
-    const session = getMultiAgentSession(sessionId);
-    if (shouldPauseForMutation(cls.category, session)) {
-      try {
-        setPendingMutation(sessionId, row.id);
-        setAwaitingContinue(sessionId, true);
-      } catch (err) {
-        console.error('[orchestrator] persist pending-mutation failed', err);
-      }
-      try {
-        p.onPendingMutation?.(sessionId, row);
-      } catch (err) {
-        console.error('[orchestrator] onPendingMutation sink threw', err);
-      }
-      throw new PausedForMutationError(`paused before ${cls.summary}`);
-    }
+    // `decidePauseForMutation`). MCP calls and ordinary edits classify as
+    // `mutate` and run free. Fresh DB reads each time — handles a Continue
+    // landing mid-turn, and R-B reconstructed sessions where the in-memory
+    // closure has no value to read. Per-agent (migration 031): another
+    // worker's pause does not suppress this one's gate.
+    applyPauseGate(row, p.onPendingMutation);
   };
 
   // Migration 012: tool-result tap. Flips `confirmed_at` on the matching
@@ -1723,9 +1709,11 @@ export function wireOrchestratorSession(p: {
         console.error('[orchestrator] clear pending-retry on stop failed', err);
       }
       try {
-        setPendingMutation(sessionId, null);
+        // Live pauses AND unconsumed Continue grants: a grant that outlived its
+        // session would silently pre-approve a command in a reconstructed run.
+        clearPendingMutations(sessionId);
       } catch (err) {
-        console.error('[orchestrator] clear pending-mutation on stop failed', err);
+        console.error('[orchestrator] clear pending-mutations on stop failed', err);
       }
       runner.stop();
       await router.teardown(reason);
@@ -1765,23 +1753,12 @@ export function wireOrchestratorSession(p: {
       // re-delivering the same wire bytes.
       deliver(pending.agentName, pending.prompt);
     },
-    async continueThroughMutation() {
-      // Item #5: idempotent operator-Continue path. Slot is read by id so a
-      // racing second click returns null and no-ops.
-      const pending = getPendingMutation(sessionId);
+    async continueThroughMutation(mutationId: number) {
+      // Item #5: idempotent operator-Continue path. The row is looked up among
+      // the CURRENTLY pending ones, so a racing second click (or a stale id
+      // from a client that missed a broadcast) finds nothing and no-ops.
+      const pending = releasePauseForMutation(sessionId, mutationId, p.onPendingMutation);
       if (!pending) return;
-      try {
-        setPendingMutation(sessionId, null);
-        setMutationsAcknowledged(sessionId, true);
-        setAwaitingContinue(sessionId, false);
-      } catch (err) {
-        console.error('[orchestrator] persist continue-through-mutation failed', err);
-      }
-      try {
-        p.onPendingMutation?.(sessionId, null);
-      } catch (err) {
-        console.error('[orchestrator] continue onPendingMutation-null callback threw', err);
-      }
       const replayPrompt = lastPrompt.get(pending.agentName);
       if (!replayPrompt) {
         console.warn(
@@ -1790,9 +1767,10 @@ export function wireOrchestratorSession(p: {
         return;
       }
       // Same idempotency rules as `retry()`: re-deliver the captured
-      // post-briefing bytes. A second mutation in the same session does NOT
-      // re-pause because `mutations_acknowledged=1` is read inside
-      // `onMutationHook`.
+      // post-briefing bytes. The replayed turn re-issues the approved command;
+      // the `approved` row left behind by `releasePauseForMutation` is the
+      // one-shot grant that lets it through. Any OTHER dangerous command in
+      // that turn pauses again — the gate re-arms per command.
       deliver(pending.agentName, replayPrompt);
     },
     setMute: (agentName, muted) => router.setMute(agentName, muted),

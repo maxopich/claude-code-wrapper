@@ -187,8 +187,8 @@ describe('ReopenProvider — happy probe→confirm→commit flow', () => {
         hopBudget: 100,
         awaitingContinue: false,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       });
     });
     expect(getCaptured().state).toEqual({ kind: 'idle' });
@@ -338,8 +338,8 @@ describe('ReopenProvider — race safety', () => {
         hopBudget: 100,
         awaitingContinue: false,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       });
     });
     expect(getCaptured().state.kind).toBe('confirming');

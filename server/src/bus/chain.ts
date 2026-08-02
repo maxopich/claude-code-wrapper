@@ -53,18 +53,14 @@ import {
   appendMultiAgentMutation,
   addAgentCost,
   addParticipant,
+  clearPendingMutations,
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
-  getMultiAgentSession,
-  getPendingMutation,
   getPendingRetry,
   recordSessionTeardown,
-  setAwaitingContinue,
-  setMutationsAcknowledged,
   setMutationPromoted,
   setPauseOnDangerous,
-  setPendingMutation,
   setPendingRetry,
   upsertAgentSession,
   type EventKind,
@@ -80,8 +76,8 @@ import type {
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { PausedForMutationError, isPausedForMutation, isTurnStalled } from './errors.js';
-import { shouldPauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled } from './errors.js';
+import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
 import {
   archiveAgentHop,
   CEBAB_SOURCE,
@@ -141,13 +137,15 @@ export type StartChainOpts = {
    *  abandon); a descriptor sets/replaces. Optional so tests can skip it;
    *  the router null-checks before invoking. */
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
-  /** Item #5: opt-in pause-on-first-mutation (see orchestrator.ts for the
+  /** Item #5: opt-in pause-on-dangerous (see orchestrator.ts for the
    *  full docstring; same semantics in chain mode). Default false. */
   pauseOnDangerous?: boolean;
   /** Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. */
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
-  /** Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`. */
-  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /** Item #5: the set of workers halted by the pause-on-dangerous gate changed
+   *  → `multi_agent_pending_mutations`. Carries the whole current set (`[]`
+   *  when nothing is waiting) — the gate is per-agent (migration 031). */
+  onPendingMutation?: (sessionId: string, pending: MutationRecord[]) => void;
   /** Cluster A Phase 3 (D4): dispatcher notification fan-out. */
   sendNotification?: BusSink['sendNotification'];
   /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
@@ -183,7 +181,7 @@ export type ChainSessionHandle = {
    *  `multi_agent_started`; the UI reads `events.length / hopBudget` for
    *  the activity-bar chip. */
   hopBudget: number;
-  /** Item #5: resolved pause-on-first-mutation flag for this session. */
+  /** Item #5: resolved pause-on-dangerous flag for this session. */
   pauseOnDangerous: boolean;
   /** Stop the session and tear it down. Idempotent. */
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
@@ -195,10 +193,11 @@ export type ChainSessionHandle = {
    *  slot is cleared BEFORE re-delivery so a racing second click sees the
    *  cleared slot. A re-fail re-asserts the slot with a fresh reason. */
   retry: () => Promise<void>;
-  /** Item #5: operator clicked Continue on the pause-on-first-mutation
-   *  banner. Clears the slot, sets `mutations_acknowledged=1`, re-delivers
-   *  the paused worker's last captured prompt. No-op when no pause active. */
-  continueThroughMutation: () => Promise<void>;
+  /** Item #5: operator clicked Continue on one pause-on-dangerous banner.
+   *  Moves that mutation from `pending` to `approved` (the one-shot grant the
+   *  replayed turn spends) and re-delivers the paused worker's last captured
+   *  prompt. No-op when `mutationId` isn't currently pending. */
+  continueThroughMutation: (mutationId: number) => Promise<void>;
 };
 
 type ChainRouter = {
@@ -817,23 +816,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       console.error('[chain] onMutation sink threw', err);
     }
     // Pause gate — fires only on `dangerous`-category mutations (see
-    // `shouldPauseForMutation`, shared with orchestrator.ts). MCP calls and
-    // ordinary edits classify as `mutate` and run free.
-    const session = getMultiAgentSession(sessionId);
-    if (shouldPauseForMutation(cls.category, session)) {
-      try {
-        setPendingMutation(sessionId, row.id);
-        setAwaitingContinue(sessionId, true);
-      } catch (err) {
-        console.error('[chain] persist pending-mutation failed', err);
-      }
-      try {
-        opts.onPendingMutation?.(sessionId, row);
-      } catch (err) {
-        console.error('[chain] onPendingMutation sink threw', err);
-      }
-      throw new PausedForMutationError(`paused before ${cls.summary}`);
-    }
+    // `applyPauseGate`, shared with orchestrator.ts so the two routers cannot
+    // drift). MCP calls and ordinary edits classify as `mutate` and run free.
+    applyPauseGate(row, opts.onPendingMutation);
   };
 
   // Migration 012 + Phase E: tool-result tap (mirrors orchestrator.ts's
@@ -1115,9 +1100,11 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         console.error('[chain] clear pending-retry on stop failed', err);
       }
       try {
-        setPendingMutation(sessionId, null);
+        // Live pauses AND unconsumed Continue grants: a grant that outlived its
+        // session would silently pre-approve a command in a reconstructed run.
+        clearPendingMutations(sessionId);
       } catch (err) {
-        console.error('[chain] clear pending-mutation on stop failed', err);
+        console.error('[chain] clear pending-mutations on stop failed', err);
       }
       runner.stop();
       await router.teardown(reason);
@@ -1149,21 +1136,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       // double-prepend the briefing.
       deliver(pending.agentName, pending.prompt);
     },
-    async continueThroughMutation() {
-      const pending = getPendingMutation(sessionId);
+    async continueThroughMutation(mutationId: number) {
+      const pending = releasePauseForMutation(sessionId, mutationId, opts.onPendingMutation);
       if (!pending) return;
-      try {
-        setPendingMutation(sessionId, null);
-        setMutationsAcknowledged(sessionId, true);
-        setAwaitingContinue(sessionId, false);
-      } catch (err) {
-        console.error('[chain] persist continue-through-mutation failed', err);
-      }
-      try {
-        opts.onPendingMutation?.(sessionId, null);
-      } catch (err) {
-        console.error('[chain] continue onPendingMutation-null callback threw', err);
-      }
       const replayPrompt = lastPromptOut.get(pending.agentName);
       if (!replayPrompt) {
         console.warn(
