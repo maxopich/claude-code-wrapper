@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { redactSensitive } from './redact.js';
+import { redactSensitive, isSensitiveKey } from './redact.js';
 
 describe('redactSensitive — key-based', () => {
   it('masks values for sensitive-named keys', () => {
@@ -264,5 +264,51 @@ describe('redactSensitive — non-scalar values under a sensitive key [security]
     // the attestation should not be able to disagree with the value.
     const { redacted } = redactSensitive({ password: null, secret: undefined });
     expect(redacted).toEqual({ password: '<redacted>', secret: '<redacted>' });
+  });
+});
+
+/**
+ * Register H05. `isSensitiveKey` was module-private; it is exported now
+ * because `repo/project_authority.ts`'s `detectEnvInjections` uses the SAME
+ * judgement to decide whether an env key declared in a project's
+ * settings.json should park the session-start gate. One list means a name
+ * masked in a transcript is a name prompted for before it reaches an agent's
+ * environment — rather than two heuristics drifting apart.
+ */
+describe('isSensitiveKey — shared with the env-injection gate (H05)', () => {
+  it.each([
+    'password',
+    'PASSWD',
+    'client_secret',
+    'GITHUB_TOKEN',
+    'apiKey',
+    'API_KEY',
+    'AWS_ACCESS_KEY_ID',
+    'PRIVATE_KEY',
+    'Authorization',
+    'auth_token',
+    'BEARER',
+    'credentials',
+    'cookie',
+    'session_id',
+  ])('%s is credential-shaped', (key) => {
+    expect(isSensitiveKey(key)).toBe(true);
+  });
+
+  it.each(['NODE_ENV', 'PORT', 'HOME', 'LANG', 'author', 'AUTHOR_NAME', 'path'])(
+    '%s is not',
+    (key) => {
+      expect(isSensitiveKey(key)).toBe(false);
+    },
+  );
+
+  it('the author / authorization boundary the pattern deliberately encodes', () => {
+    // `/auth(?:orization)?(?!or)/i` exists to catch 'auth' and 'authorization'
+    // while sparing 'author'. Asserted directly now that the function is part
+    // of the API surface, because a regex tweak here silently changes which
+    // env keys prompt the operator.
+    expect(isSensitiveKey('author')).toBe(false);
+    expect(isSensitiveKey('authorization')).toBe(true);
+    expect(isSensitiveKey('auth')).toBe(true);
   });
 });

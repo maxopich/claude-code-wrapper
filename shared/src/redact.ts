@@ -122,7 +122,21 @@ const SENSITIVE_VALUE_PATTERNS: readonly RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
 ];
 
-function isSensitiveKey(key: string): boolean {
+/**
+ * Does this key NAME look like it holds a credential?
+ *
+ * Exported (register H05) because the redactor is not the only consumer that
+ * needs this judgement: `repo/project_authority.ts`'s `detectEnvInjections`
+ * decides whether a key declared in a project's `settings.json` `env:` block
+ * should park the session-start gate for operator acknowledgement. Sharing
+ * one pattern list means a name that gets masked in a transcript is also a
+ * name that gets a prompt before it reaches an agent's environment — rather
+ * than two heuristics drifting apart.
+ *
+ * Name-only, deliberately: no value is ever inspected here (the BE-B12
+ * invariant that env VALUES never leave the server).
+ */
+export function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEY_PATTERNS.some((re) => re.test(key));
 }
 
