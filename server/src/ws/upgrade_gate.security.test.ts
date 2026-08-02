@@ -34,6 +34,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { WebSocketServer } from 'ws';
 import { config } from '../config.js';
 import { initAuthToken } from '../auth.js';
+import { closeDb } from '../db.js';
 import { startWsServer } from './server.js';
 
 const TEST_HOST = '127.0.0.1';
@@ -69,6 +70,14 @@ beforeEach(async () => {
 afterEach(async () => {
   wss.close();
   if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+  // An ACCEPTED upgrade reaches `onConnection`, which emits through the
+  // notification dispatcher and so opens the SQLite handle against the temp
+  // dataDir. `getDb` caches it in module state, and on Windows `rmSync` cannot
+  // unlink an open file — windows-2022 failed here with
+  // `EBUSY: resource busy or locked, unlink ...\cebab.sqlite` until this
+  // close was added. POSIX happily unlinks open files, which is exactly why
+  // it passed locally and only broke on CI.
+  closeDb();
   config.dataDir = originalDataDir;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });

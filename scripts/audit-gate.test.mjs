@@ -176,17 +176,29 @@ describe('evaluate', () => {
 // These cases pin the replacement predicate directly, so they are meaningful
 // on every Node version rather than only on the one where the bug bites.
 describe('[security] isDirectInvocation — the entry guard', () => {
-  const MODULE_URL = 'file:///repo/scripts/audit-gate.mjs';
+  // Paths have to be platform-shaped, and the module URL DERIVED from the
+  // path rather than hand-written. A hardcoded `file:///repo/...` fixture is
+  // POSIX-only: on Windows `pathToFileURL('/repo/x')` resolves against the
+  // current DRIVE and yields `file:///D:/repo/x`, so the comparison fails and
+  // the test reports a bug that isn't there. (It did exactly that on
+  // windows-2022 before this was fixed.)
+  const ENTRY_PATH =
+    process.platform === 'win32' ? 'C:\\repo\\scripts\\audit-gate.mjs' : '/repo/scripts/audit-gate.mjs';
+  const MODULE_URL = pathToFileURL(ENTRY_PATH).href;
 
   it('runs main() when the script IS the process entry point', () => {
-    expect(isDirectInvocation(MODULE_URL, '/repo/scripts/audit-gate.mjs')).toBe(true);
+    expect(isDirectInvocation(MODULE_URL, ENTRY_PATH)).toBe(true);
   });
 
   it('stays inert when the module is merely imported (the vitest case)', () => {
     // This very test file imports audit-gate.mjs. If the guard returned true
     // here, importing the module would run `npm audit` as a side effect of
     // collecting tests.
-    expect(isDirectInvocation(MODULE_URL, '/repo/node_modules/.bin/vitest')).toBe(false);
+    const vitestBin =
+      process.platform === 'win32'
+        ? 'C:\\repo\\node_modules\\.bin\\vitest'
+        : '/repo/node_modules/.bin/vitest';
+    expect(isDirectInvocation(MODULE_URL, vitestBin)).toBe(false);
   });
 
   it('stays inert when argv[1] is absent', () => {
@@ -201,12 +213,12 @@ describe('[security] isDirectInvocation — the entry guard', () => {
     // import.meta.url is `file:///C:/repo/...`. A `===` on the raw strings
     // would never match, silently disabling the gate on windows-2022 — the
     // same class of bug as the original, just on the other OS.
-    const realPath = process.platform === 'win32' ? 'C:\\repo\\scripts\\x.mjs' : '/repo/scripts/x.mjs';
-    expect(isDirectInvocation(pathToFileURL(realPath).href, realPath)).toBe(true);
+    expect(MODULE_URL).not.toBe(ENTRY_PATH);
+    expect(isDirectInvocation(MODULE_URL, ENTRY_PATH)).toBe(true);
   });
 
   it('does not match a different file with a similar path', () => {
-    expect(isDirectInvocation(MODULE_URL, '/repo/scripts/audit-gate.mjs.bak')).toBe(false);
+    expect(isDirectInvocation(MODULE_URL, `${ENTRY_PATH}.bak`)).toBe(false);
   });
 });
 
