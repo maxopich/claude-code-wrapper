@@ -216,3 +216,24 @@ describe('disk log', () => {
     expect(recentRejections()).toHaveLength(1);
   });
 });
+
+// [security] Register H01 — the rejection log used the ambient umask.
+//
+// Rejection records name the origins and hosts that tried to reach the WS
+// gate, and they sit in `~/.cebab/logs/` beside the transcripts. They get the
+// same owner-only treatment. Windows-gated as `auth.test.ts:32` gates its own
+// mode assertions — Node maps only the write bit there.
+describe('[security] rejection log permissions', () => {
+  test('the log and its directory are owner-only', () => {
+    if (process.platform === 'win32') return;
+    recordRejection({
+      origin: 'http://evil.test',
+      host: '127.0.0.1:4319',
+      reason: 'origin_not_allowed',
+      channel: 'http',
+    });
+
+    expect(fs.statSync(rejectionLogPath()).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(path.dirname(rejectionLogPath())).mode & 0o777).toBe(0o700);
+  });
+});

@@ -2,6 +2,7 @@ import http from 'node:http';
 import express from 'express';
 import { config } from './config.js';
 import { closeDb, getDb } from './db.js';
+import { runDataPermsBootCheck } from './data_perms_boot.js';
 import { closeLogger } from './runner/logger.js';
 import { closeAllQueries } from './runner/lifecycle.js';
 import { verifyChain } from './notifications/safety_audit.js';
@@ -23,6 +24,19 @@ function main(): void {
   console.log(`[cebab] data=${config.dataDir}`);
 
   getDb();
+
+  // Register H01: bring `~/.cebab` to owner-only. `getDb()` above already
+  // created the directory and the database with the right modes, but that does
+  // nothing for an install written by an earlier build — `mkdirSync` ignores
+  // its `mode` for a directory that already exists. This is the retrofit, and
+  // it is what actually protects the database you already have.
+  //
+  // Must run after `getDb()`: the "have I already swept?" flag lives in the
+  // `settings` table. Everything — the sweep decision, the log line, and the
+  // notification when it could not finish — sits behind this one call, because
+  // `main()` is not reachable from a unit test and a sequence here could
+  // silently lose a step.
+  runDataPermsBootCheck();
 
   // Cluster A Phase 1: walk the safety_audit hash chain at boot. The walk is
   // cheap (the genesis marker anchors verification, so the chain length equals

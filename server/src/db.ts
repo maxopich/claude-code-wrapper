@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { config } from './config.js';
+import { precreateDbFile, secureMkdir } from './data_perms.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
@@ -11,7 +12,12 @@ let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
   if (_db) return _db;
-  fs.mkdirSync(config.dataDir, { recursive: true });
+  // H01: 0700 directory, and the database file pre-created 0600 so SQLite
+  // opens an already-tight file. The pre-create must happen BEFORE the WAL
+  // pragma below — SQLite derives the `-wal`/`-shm` permissions from the main
+  // database file, so this one call covers all three.
+  secureMkdir(config.dataDir);
+  precreateDbFile(config.dbPath);
   const db = new Database(config.dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');

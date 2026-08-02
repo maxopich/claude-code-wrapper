@@ -98,6 +98,7 @@ import { createAgentActivityObserver, type ActivitySnapshot } from './activity.j
 import { DEFAULT_HOP_BUDGET } from './orchestrator.js';
 import { uninstallBusForProject } from './install.js';
 import { computeSessionPaths, type SessionPaths } from './paths.js';
+import { secureMkdir } from '../data_perms.js';
 import {
   getLiveSession,
   NOOP_SINK,
@@ -713,7 +714,14 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   const hopBudget = opts.hopBudget ?? DEFAULT_HOP_BUDGET;
 
   const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
-  fs.mkdirSync(paths.folder, { recursive: true });
+  // H01: the session folder holds every hop's prompt/reply and the transcript
+  // log, so it is created owner-only. The mode on this one directory is the
+  // whole protection — everything below inherits the traversal gate, so the
+  // per-file writes underneath deliberately stay at the ambient mode.
+  // Existing session folders are NOT retrofitted: they live under the
+  // operator's workspace root, and silently re-permissioning directories in
+  // their tree could break a deliberately shared setup.
+  secureMkdir(paths.folder);
 
   const iterationId = nextIterationId(paths);
 

@@ -57,6 +57,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
+import { secureMkdir } from './data_perms.js';
 
 let token: string | null = null;
 
@@ -70,7 +71,7 @@ export function authTokenPath(): string {
  * value. Always call once at server boot before mounting routes.
  */
 export function initAuthToken(): string {
-  fs.mkdirSync(config.dataDir, { recursive: true });
+  secureMkdir(config.dataDir);
   token = crypto.randomBytes(32).toString('hex');
   const p = authTokenPath();
   // writeFileSync + mode: ensure file is created 0600 even if it pre-exists

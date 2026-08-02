@@ -64,6 +64,7 @@ import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { isPausedForMutation, isTurnStalled } from './errors.js';
 import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
+import { secureMkdir } from '../data_perms.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
   CEBAB_SOURCE,
@@ -1857,7 +1858,10 @@ export async function startOrchestratorSession(
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...opts.workers.map((w) => w.agentName)];
 
   const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
-  fs.mkdirSync(paths.folder, { recursive: true });
+  // H01: owner-only. See the matching comment in `chain.ts` — the mode on this
+  // one directory gates everything written beneath it, and pre-existing
+  // session folders in the operator's workspace are left alone.
+  secureMkdir(paths.folder);
   ensureOrchestratorWorkspace(paths.orchestratorWorkspace);
 
   const iterationId = nextIterationId(paths);
