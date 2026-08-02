@@ -43,13 +43,17 @@
  * block, moderate/low are reported and don't. Dependabot handles the rest
  * on its weekly cadence.
  *
- * Cross-platform: no shell, no deps, runs identically on ubuntu-latest and
- * windows-2022. `npm audit` exits non-zero whenever it finds anything at
- * all, so its exit code is ignored on purpose — stdout is the signal.
+ * Cross-platform: no deps, runs on ubuntu-latest and windows-2022. Windows
+ * needs `shell: true` to spawn `npm.cmd` at all (see `runNpmAudit`) — this
+ * file used to claim "no shell, runs identically", which was never true: it
+ * threw `spawnSync npm.cmd EINVAL` on Windows and nobody could tell, because
+ * the entry guard (register C01) meant the script never ran on CI in the
+ * first place. `npm audit` exits non-zero whenever it finds anything at all,
+ * so its exit code is ignored on purpose — stdout is the signal.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const BLOCKING = new Set(['high', 'critical']);
@@ -152,6 +156,20 @@ function runNpmAudit() {
       cwd: REPO_ROOT,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
+      // Windows: `npm` is `npm.cmd`, and since the CVE-2024-27980 fix
+      // (Node >=18.20.2 / 20.12.2 / 21.7.3, and all 22/24) Node REFUSES to
+      // spawn a .cmd/.bat without `shell: true`, throwing a synchronous
+      // `spawnSync npm.cmd EINVAL`. scripts/bootstrap.mjs has carried this
+      // workaround for a while; this file never got it because — per
+      // register C01 — the gate had never actually executed on CI, so the
+      // Windows path had no way to fail loudly. Arming the entry guard in
+      // this same PR is what surfaced it: windows-2022 went red on the very
+      // first run with exactly that EINVAL.
+      //
+      // The POSIX path keeps its exact no-shell behaviour. Args here are two
+      // fixed literals with no spaces or shell metacharacters, so the shell
+      // adds no injection surface.
+      shell: process.platform === 'win32',
     });
   } catch (err) {
     // Non-zero exit is the NORMAL path — `npm audit` returns 1 whenever it
@@ -208,4 +226,26 @@ function main() {
   );
 }
 
-if (import.meta.main) main();
+/**
+ * Register C01: is this module the process entry point, or was it imported?
+ *
+ * This used to be `import.meta.main`, which landed in Node 22.18 and is
+ * `undefined` on older runtimes. ci.yml pins Node 20 — so on CI the guard was
+ * always falsy, `main()` never ran, and the `Audit dependencies` step printed
+ * nothing and exited 0. The gate had never once run in the environment it was
+ * written for; it only ever worked on a maintainer's newer local Node.
+ *
+ * `pathToFileURL` rather than a string compare so a Windows `C:\…` argv and
+ * `import.meta.url`'s `file:///C:/…` form still match.
+ *
+ * The guard still has to hold when imported: audit-gate.test.mjs imports this
+ * module, and under vitest `process.argv[1]` is vitest's own entry, so the
+ * comparison fails and `main()` stays inert — which is the whole point of
+ * having a guard rather than a bare call.
+ */
+export function isDirectInvocation(moduleUrl, argv1) {
+  if (!argv1) return false;
+  return moduleUrl === pathToFileURL(argv1).href;
+}
+
+if (isDirectInvocation(import.meta.url, process.argv[1])) main();
