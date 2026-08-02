@@ -42,6 +42,19 @@ export const config = {
    */
   workspaceRootDefaultSource: (process.env.WORKSPACE_ROOT ? 'env' : 'builtin') as 'env' | 'builtin',
   mock: process.env.MOCK === '1',
+  /**
+   * Bus replay scenario directory under `fixtures/bus/` (`MOCK_SCENARIO`).
+   * null → each router uses its own built-in default (`chain` /
+   * `orchestrator`), which is what an operator running plain `MOCK=1` wants.
+   * Set it to replay a hand-written scenario instead. Ignored outside mock.
+   */
+  mockScenario: process.env.MOCK_SCENARIO || null,
+  /**
+   * Delay between replayed fixture events (`MOCK_INTERVAL_MS`). The 50 ms
+   * default paces a single-agent replay so the UI streams visibly; a bus
+   * session multiplies it by every hop, and tests set it to 0.
+   */
+  mockIntervalMs: Number(process.env.MOCK_INTERVAL_MS ?? 50),
   dataDir: path.join(os.homedir(), '.cebab'),
   /** Hard cap on agent turns per user message. Prevents runaway loops. */
   maxTurns: Number(process.env.MAX_TURNS ?? 50),

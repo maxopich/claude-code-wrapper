@@ -69,6 +69,7 @@ import {
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
 import type { BashClassifierReason } from '@cebab/shared';
+import { config } from '../config.js';
 import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
@@ -774,9 +775,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   // doesn't surface). The duplication is a small token cost, intentional.
   const briefings = new Map<string, string>();
   const projectRules = new Map<string, ProjectRules | null>();
+  /** agentName → where its hop goes. Mock replay reads it (see `mockVars`). */
+  const nextHops = new Map<string, string>();
   opts.participants.forEach((p, i) => {
     const nextHop =
       i === opts.participants.length - 1 ? SINK_RECIPIENT : opts.participants[i + 1]!.agentName;
+    nextHops.set(p.agentName, nextHop);
     briefings.set(
       p.agentName,
       renderChainBriefing({
@@ -944,6 +948,20 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onAskUserQuestion: onAskUserQuestionHook,
     abortController,
     runnerFactory: opts.runnerFactory,
+    // Mock replay (MOCK=1). A shipped fixture cannot name the operator's
+    // projects, so it addresses `${NEXT}` and the chain — which owns the
+    // pipeline order — resolves it. `${KIND}` distinguishes a hand-off
+    // (`reply`) from the terminal hop into `_sink` (`final`), the difference
+    // that decides whether the run writes final.md and completes.
+    mockScenario: config.mockScenario ?? 'chain',
+    mockVars: (agent) => {
+      const next = nextHops.get(agent) ?? SINK_RECIPIENT;
+      return {
+        SELF: agent,
+        NEXT: next,
+        KIND: next === SINK_RECIPIENT ? 'final' : 'reply',
+      };
+    },
     // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): every transient-
     // overload retry fans out an `auto_retry` ServerMsg AND writes a
     // `recovery_log` row. The row is the durable record the
