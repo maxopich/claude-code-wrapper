@@ -367,14 +367,127 @@ describe('InputBox — slash command palette (E1)', () => {
       ta.focus();
       pressKeyOnTextarea(ta, { key: 'k', metaKey: true });
     });
-    const sectionTitles = Array.from(
-      document.querySelectorAll('.slash-palette-section-title'),
-    ).map((e) => e.textContent);
+    const sectionTitles = Array.from(document.querySelectorAll('.slash-palette-section-title')).map(
+      (e) => e.textContent,
+    );
     expect(sectionTitles).toContain('Discovered from session');
     const cmds = Array.from(document.querySelectorAll('.slash-palette-row code')).map(
       (e) => e.textContent,
     );
     expect(cmds).toContain('/ide');
     expect(cmds).toContain('/init');
+  });
+});
+
+/**
+ * Register W02 [security]. `send()` checked only that the text was non-empty.
+ * While a turn runs the button is Stop, so Enter was the only way to submit —
+ * and it submitted: the second turn clobbered the first's `inFlight` entry and
+ * orphaned it from Stop, leaving a running agent the operator could no longer
+ * stop from the UI.
+ *
+ * The server refuses this too now (register S02, `describeTurnInFlight`, PR
+ * #271). That fix turned a silent wedge into an error toast; this one is the
+ * client half, so the operator is prevented rather than corrected.
+ *
+ * Tagged [security] to match S02: this is the controllability surface.
+ */
+describe('InputBox — no second send while a turn runs (W02) [security]', () => {
+  /** Type into the controlled textarea the way React will notice. */
+  function typeInto(ta: HTMLTextAreaElement, value: string) {
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      setter?.call(ta, value);
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  function pressEnter(ta: HTMLTextAreaElement) {
+    act(() => {
+      ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+  }
+
+  test('Enter while running does NOT fire onSend', () => {
+    const onSend = vi.fn();
+    act(() => {
+      root.render(<InputBox onSend={onSend} isRunning onStop={() => {}} />);
+    });
+    const ta = getTextarea();
+    typeInto(ta, 'second message');
+    pressEnter(ta);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  test('the draft survives the refused send (the UI-6 guarantee)', () => {
+    // UI-6 keeps the textarea enabled mid-turn precisely so the operator can
+    // compose the follow-up. Clearing it on a refused Enter would destroy the
+    // thing the guard exists to protect — so the early return must come
+    // BEFORE setText('').
+    const onSend = vi.fn();
+    act(() => {
+      root.render(<InputBox onSend={onSend} isRunning onStop={() => {}} />);
+    });
+    const ta = getTextarea();
+    typeInto(ta, 'half-written follow-up');
+    pressEnter(ta);
+    expect(ta.value).toBe('half-written follow-up');
+  });
+
+  test('the same Enter sends normally once the turn ends', () => {
+    // The guard must be state-dependent, not a permanent mute.
+    const onSend = vi.fn();
+    act(() => {
+      root.render(<InputBox onSend={onSend} isRunning onStop={() => {}} />);
+    });
+    const ta = getTextarea();
+    typeInto(ta, 'queued up');
+    pressEnter(ta);
+    expect(onSend).not.toHaveBeenCalled();
+
+    act(() => {
+      root.render(<InputBox onSend={onSend} />);
+    });
+    pressEnter(getTextarea());
+    expect(onSend).toHaveBeenCalledWith('queued up');
+    expect(getTextarea().value).toBe('');
+  });
+
+  test('the Send button is unreachable while running, so Enter was the only hole', () => {
+    // Pins the premise: if a future change brings back a Send button during a
+    // run, this test fails and whoever did it has to think about the guard.
+    act(() => {
+      root.render(<InputBox onSend={() => {}} isRunning onStop={() => {}} />);
+    });
+    expect(getButton().classList.contains('input-box-btn-stop')).toBe(true);
+  });
+
+  test('the placeholder stops promising Enter-to-send while running', () => {
+    act(() => {
+      root.render(<InputBox onSend={() => {}} isRunning onStop={() => {}} />);
+    });
+    const running = getTextarea().placeholder;
+    expect(running).toContain('Esc to stop');
+
+    act(() => {
+      root.render(<InputBox onSend={() => {}} />);
+    });
+    expect(getTextarea().placeholder).toContain('Enter to send');
+  });
+
+  test('the accessible name is unchanged by the running state', () => {
+    // Only the affordance hint moves; the field's identity must not, or a
+    // screen-reader user hears the control rename itself mid-turn.
+    act(() => {
+      root.render(<InputBox onSend={() => {}} isRunning onStop={() => {}} />);
+    });
+    const runningLabel = getTextarea().getAttribute('aria-label');
+    act(() => {
+      root.render(<InputBox onSend={() => {}} />);
+    });
+    expect(getTextarea().getAttribute('aria-label')).toBe(runningLabel);
   });
 });

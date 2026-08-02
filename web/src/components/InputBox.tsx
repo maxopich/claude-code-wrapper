@@ -77,6 +77,18 @@ export function InputBox(props: {
   function send() {
     const v = text.trim();
     if (!v) return;
+    // Register W02: a turn is already running. While running the button is
+    // Stop, so Enter was the only way to submit — and it did, clobbering the
+    // first turn's in-flight entry and orphaning it from Stop. The server now
+    // refuses this too (register S02, `describeTurnInFlight`); this is the
+    // client half, so the operator is PREVENTED rather than shown an error
+    // toast for something the UI let them do.
+    //
+    // Returning BEFORE `setText('')` is deliberate: UI-6 keeps the textarea
+    // enabled while a turn runs precisely so the operator can compose the
+    // follow-up. Discarding that draft on a stray Enter would break the
+    // intent this guard exists to protect.
+    if (props.isRunning) return;
     props.onSend(v);
     setText('');
   }
@@ -189,8 +201,7 @@ export function InputBox(props: {
   //   - running → Stop button (always enabled regardless of textarea)
   //   - idle → Send button (enabled iff textarea non-empty)
   const showStop = props.isRunning === true;
-  const buttonDisabled =
-    props.disabled === true ? true : showStop ? stopping : !text.trim();
+  const buttonDisabled = props.disabled === true ? true : showStop ? stopping : !text.trim();
 
   return (
     <div className="input-box" ref={wrapRef}>
@@ -209,7 +220,16 @@ export function InputBox(props: {
         // operator can compose the follow-up. Only "structurally
         // disabled" (no project / workspace bad) makes it read-only.
         disabled={props.disabled}
-        placeholder="Message Claude. Enter to send, Shift+Enter for newline."
+        // Register W02: the idle copy promises "Enter to send", which the
+        // guard in `send()` makes false mid-turn. Swallowing Enter under a
+        // label that says it works trades a wrong action for a confusing
+        // one, so the hint tracks the state. `ariaLabel` stays constant — the
+        // field's identity hasn't changed, only its affordance.
+        placeholder={
+          showStop
+            ? 'Claude is responding. Esc to stop — Enter sends once it finishes.'
+            : 'Message Claude. Enter to send, Shift+Enter for newline.'
+        }
         ariaLabel="Message Claude"
       />
       {showStop ? (

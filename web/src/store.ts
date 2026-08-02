@@ -1121,6 +1121,14 @@ export function reduce(state: AppState, action: Action): AppState {
         // New turn begins now — anchor the elapsed timer at send time so it
         // counts the full wait, including the pre-first-token gap.
         runStartedAt: Date.now(),
+        // Register W01: a new turn never inherits the previous one's partial
+        // text. The turn-end cases above are the primary fix; this is the
+        // backstop, and it guards the exact moment the staleness becomes
+        // VISIBLE — flipping status to 'running' is what lets `sessionPhase`
+        // fall through to its `streamingText.length > 0 → 'streaming'` branch
+        // and re-render the old answer. Any future turn-ending path that
+        // emits neither `result` nor `wrapper_error` is covered here too.
+        streamingText: '',
         messages: [...session.messages, { kind: 'user', id: nextId(), text: action.text }],
         // Cluster C Phase 2: operator moved on — the previous Stop's
         // marker + reason prompt should no longer hang around in the
@@ -2330,6 +2338,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         status: msg.subtype === 'success' ? 'done' : 'error',
         // Turn over — stop the elapsed timer.
         runStartedAt: null,
+        // Register W01: retire the streaming buffer with the turn that owns
+        // it. `assistant_message` and `command_output` already did; `result`
+        // did not, so a turn that ended any other way (a Stop mid-stream, an
+        // error) left its partial text behind. `sessionPhase` hides that
+        // while status is done/error — then the next `user_send` flips status
+        // back to 'running' and the abandoned answer replays as if it were
+        // streaming now.
+        streamingText: '',
         messages: [
           ...session.messages,
           {
@@ -2832,6 +2848,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           status: 'error',
           // Turn aborted — stop the elapsed timer.
           runStartedAt: null,
+          // Register W01: and retire the streaming buffer with it. The `''`
+          // in the `existing ??` fallback above only covers a session we're
+          // inventing here; an EXISTING session spreads through `...session`
+          // and kept its partial text.
+          streamingText: '',
           messages: [
             ...session.messages,
             {
