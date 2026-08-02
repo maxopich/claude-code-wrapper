@@ -99,3 +99,50 @@ describe('logEvent', () => {
     expect(errSpy).toHaveBeenCalledTimes(1);
   });
 });
+
+// [security] Register H01 — transcripts were created with the ambient umask.
+//
+// The JSONL files hold the full conversation for every session. `auth.ts`
+// guarded the 64-byte token beside them at 0600 while these sat at 0644,
+// readable by any other local account. Windows-gated exactly as
+// `auth.test.ts:32` gates its own mode assertions: Node maps only the write
+// bit there, so the check would fail on a difference that means nothing.
+describe('[security] transcript permissions', () => {
+  test('a new transcript is created owner-only', async () => {
+    if (process.platform === 'win32') return;
+    // A real stream, since the mode on disk is the point — but captured, so
+    // the assertion can wait for the fd. `createWriteStream` opens
+    // asynchronously and `closeLogger()`'s `end()` does not block, so statting
+    // straight afterwards races the open. The opts still come from
+    // `streamFor`, so this exercises the production mode, not the test's.
+    let captured: fs.WriteStream | null = null;
+    __setStreamFactoryForTests((filePath, opts) => {
+      captured = fs.createWriteStream(filePath, opts);
+      return captured;
+    });
+
+    await logEvent('sess-perm', { n: 1 });
+    await new Promise<void>((resolve) => captured!.end(resolve));
+
+    const p = path.join(config.logsDir, 'sess-perm.jsonl');
+    expect(fs.statSync(p).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(config.logsDir).mode & 0o777).toBe(0o700);
+  });
+
+  test('a transcript left 0644 by an earlier build is tightened on next use', async () => {
+    // `createWriteStream`'s `mode` applies only on create, so appending to an
+    // existing transcript would otherwise keep it world-readable forever.
+    if (process.platform === 'win32') return;
+    fs.mkdirSync(config.logsDir, { recursive: true });
+    const p = path.join(config.logsDir, 'sess-old.jsonl');
+    fs.writeFileSync(p, '{"old":1}\n');
+    fs.chmodSync(p, 0o644);
+
+    await logEvent('sess-old', { n: 2 });
+    closeLogger();
+
+    expect(fs.statSync(p).mode & 0o777).toBe(0o600);
+    // And the pre-existing content is still there — tightening, not clobbering.
+    expect(fs.readFileSync(p, 'utf8')).toContain('"old":1');
+  });
+});

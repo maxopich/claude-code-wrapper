@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
+import { newFileMode, secureFile, secureMkdir } from '../data_perms.js';
 
 export type LogFailureReason = 'stream_error' | 'drain_timeout';
 export type LogWriteResult = { ok: true } | { ok: false; reason: LogFailureReason };
@@ -13,7 +14,7 @@ const streams = new Map<string, StreamEntry>();
 // Test seam: overridable so a unit test can inject a fake WriteStream that
 // emits 'error' or stays `writableNeedDrain` deterministically, rather than
 // relying on OS-specific unwritable paths (CI runs ubuntu + windows).
-let createStream: (filePath: string, opts: { flags: string }) => fs.WriteStream = (
+let createStream: (filePath: string, opts: { flags: string; mode?: number }) => fs.WriteStream = (
   filePath,
   opts,
 ) => fs.createWriteStream(filePath, opts);
@@ -26,10 +27,13 @@ export function __setStreamFactoryForTests(fn: typeof createStream | null): void
 function streamFor(sessionId: string): StreamEntry {
   let entry = streams.get(sessionId);
   if (entry) return entry;
-  fs.mkdirSync(config.logsDir, { recursive: true });
-  const stream = createStream(path.join(config.logsDir, `${sessionId}.jsonl`), {
-    flags: 'a',
-  });
+  // H01: transcripts hold the full conversation, so they are owner-only. The
+  // `mode` applies on creation; `secureFile` covers a transcript written by a
+  // build that predates this (the boot sweep gets the rest).
+  secureMkdir(config.logsDir);
+  const logPath = path.join(config.logsDir, `${sessionId}.jsonl`);
+  const stream = createStream(logPath, { flags: 'a', mode: newFileMode() });
+  secureFile(logPath);
   entry = { stream, failed: false };
   stream.on('error', (err) => {
     if (!entry!.failed) {

@@ -641,3 +641,54 @@ describe('startChainSession — project CLAUDE.md injection', () => {
     unregisterLiveSession(handle.sessionId);
   });
 });
+
+// [security] Register H01 — bus session folders used the ambient umask.
+//
+// `<workspaceRoot>/.cebab-session-<id>/` accumulates every hop's prompt.md and
+// reply.md plus the transcript log — the same conversation content the
+// `~/.cebab` transcripts hold. The mode on this ONE directory is the whole
+// protection: everything written beneath it inherits the traversal gate, so
+// the per-file writes underneath deliberately stay at the ambient mode.
+//
+// Scope note: only folders Cebab CREATES are tightened. Pre-existing session
+// folders are left alone — they live in the operator's workspace root, and
+// silently re-permissioning directories in their tree could break a
+// deliberately shared setup. Windows-gated as auth.test.ts:32 is.
+describe('[security] chain session folder permissions', () => {
+  function nullRunnerFactory() {
+    return (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  test('the session folder is created owner-only', async () => {
+    if (process.platform === 'win32') return;
+    const workspace = path.join(tmpRoot, 'ws-perm');
+    fs.mkdirSync(workspace, { recursive: true });
+    const mk = (name: string): ResolvedAgent => {
+      const dir = path.join(tmpRoot, `p-${name}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const proj = upsertProject(name, dir);
+      return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+    };
+
+    const handle = await startChainSession({
+      participants: [mk('a1'), mk('a2')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: nullRunnerFactory(),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const folder = computeSessionPaths(handle.sessionId, workspace).folder;
+    expect(fs.statSync(folder).mode & 0o777).toBe(0o700);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+});
