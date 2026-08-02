@@ -733,3 +733,138 @@ describe('classifyBashCommand — Windows-native dangerous detection [security]'
     expect(classifyBashCommand('powershell -File deploy.ps1').category).toBe('mutate');
   });
 });
+
+/**
+ * Laundering holes from the 1 Aug 2026 issue register (D01–D04). Each of the
+ * first three let a genuinely destructive command classify BELOW `dangerous`,
+ * and `shouldPauseForMutation` fires only on `dangerous` — while `read` is
+ * skipped wholesale by the bus mutation tap (no row, no badge, no audit, no
+ * pause). So these are not missed warnings; they are calls the operator was
+ * never offered the chance to stop. D04 is the mirror image: a false positive
+ * on the most common redirect idiom in the shell, which trains the operator to
+ * click through the prompt the other three make fire.
+ */
+describe('classifyBashCommand — register D01–D04 laundering holes [security]', () => {
+  // D01: escalating rules matched the raw token, so an absolute or relative
+  // path missed every dangerous list and fell through to `mutate`.
+  describe('D01: a command invoked by path is matched on its basename', () => {
+    it.each([
+      '/bin/rm -rf /tmp/x',
+      '/usr/bin/sudo id',
+      '/usr/bin/git push --force origin main',
+      '/sbin/mkfs.ext4 /dev/sdb1',
+      '/bin/kill -9 1234',
+      '/usr/local/bin/bash -c "rm -rf ~"',
+      '/bin/chmod 777 /etc/passwd',
+      './rm -rf build',
+    ])('%s → dangerous', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    it('the reason reports the basename that matched', () => {
+      const r = classifyBashCommand('/bin/rm -rf /tmp/x');
+      expect(r.reason?.rule).toBe('dangerous_first_token');
+      expect(r.reason?.matched).toBe('rm');
+      // …while `detail` keeps the verbatim token the agent actually ran.
+      expect(r.reason?.detail).toContain('/bin/rm');
+    });
+
+    // The de-escalating allowlists are deliberately NOT normalised: an
+    // unrecognised absolute path stays on the conservative `mutate` default.
+    it('/bin/ls stays mutate (read-only lists are not basename-matched)', () => {
+      expect(classifyBashCommand('/bin/ls -la').category).toBe('mutate');
+    });
+  });
+
+  // D02: `env` was on the read-only allowlist and `stripEnvAssignments` only
+  // removed KEY=VAL prefixes, so the wrapper laundered anything to `read`.
+  describe('D02: the env wrapper is peeled before classification', () => {
+    it.each([
+      'env rm -rf /tmp/x',
+      'env FOO=1 rm -rf /x',
+      'env -i rm -rf /x',
+      'env -u PATH rm -rf /x',
+      'env --unset=PATH rm -rf /x',
+      'env -i FOO=1 sudo apt install foo',
+      '/usr/bin/env rm -rf /x',
+      'env env rm -rf /x',
+    ])('%s → dangerous', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    it.each(['env', 'env FOO=1', 'env -i'])('%s → read (prints the environment)', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('read');
+    });
+
+    it('an unrecognised env flag fails safe to mutate, never read', () => {
+      // `-S`/`--split-string` embeds a command the classifier doesn't parse;
+      // the scan stops without consuming the flag, so the tail is unknown.
+      expect(classifyBashCommand("env -S 'rm -rf /'").category).not.toBe('read');
+    });
+
+    it('env keeps a read-only tail read', () => {
+      expect(classifyBashCommand('env FOO=1 git status').category).toBe('read');
+    });
+  });
+
+  // D03: splitTopLevel handled only ; && || | — a multi-line Bash command (or
+  // a backgrounded one) was a single piece judged by its first token.
+  describe('D03: newline, CR and a lone & are top-level separators', () => {
+    it('a newline-separated dangerous piece is not masked by a benign first line', () => {
+      expect(classifyBashCommand('ls\nrm -rf /tmp/x').category).toBe('dangerous');
+    });
+
+    it('CRLF line endings split too', () => {
+      expect(classifyBashCommand('ls\r\nrm -rf /x').category).toBe('dangerous');
+    });
+
+    it('a backgrounding & splits', () => {
+      expect(classifyBashCommand('ls & rm -rf /tmp/x').category).toBe('dangerous');
+    });
+
+    it('the reason points at the piece that pinned the category', () => {
+      const r = classifyBashCommand('git status\nrm -rf build');
+      expect(r.reason?.rule).toBe('dangerous_first_token');
+      expect(r.reason?.matched).toBe('rm');
+    });
+
+    // Regression guards: `&` in fd-duplication / combined-redirect position is
+    // not a separator, and quoted separators still don't split.
+    it.each(['echo hi 2>&1', 'echo "a & b"', "echo 'x\ny'"])('%s → read', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('read');
+    });
+
+    it('a backslash line-continuation keeps one piece', () => {
+      expect(classifyBashCommand('echo one \\\ntwo').category).toBe('read');
+    });
+  });
+
+  // D04: any `/dev/` prefix counted as a secret-store write, so the single
+  // most common redirect in the shell pinned the pause gate at `dangerous`.
+  describe('D04: the null and std devices are not a write', () => {
+    it.each([
+      'ls > /dev/null',
+      'ls > /dev/null 2>&1',
+      'echo x > /dev/stderr',
+      'cat f >> /dev/null',
+    ])('%s → read', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('read');
+    });
+
+    it('the first token still decides — rm x > /dev/null stays dangerous', () => {
+      expect(classifyBashCommand('rm x > /dev/null').category).toBe('dangerous');
+    });
+
+    it('a later system-path redirect is not hidden behind a null device', () => {
+      // Every target is scanned, not just the first: without that, exempting
+      // /dev/null would newly launder this command to `read`.
+      const r = classifyBashCommand('echo x > /dev/null > /etc/passwd');
+      expect(r.category).toBe('dangerous');
+      expect(r.reason?.matched).toBe('/etc/passwd');
+    });
+
+    it.each(['echo x > /dev/sda', 'echo bad > /etc/hosts'])('%s → dangerous (unchanged)', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+  });
+});

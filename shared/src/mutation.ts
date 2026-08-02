@@ -20,14 +20,18 @@
  *   - Pure: no I/O, no side effects, no clock reads. Same input → same output.
  *   - Unknown tool name → `mutate` (conservative). Better to ask once than miss
  *     a write that auto-allowed.
- *   - Bash sub-classifier: split on top-level `;`/`&&`/`||`/`|`, classify each
- *     piece by first token (after stripping env-var prefixes), reduce to worst.
- *     Unknown first token → `mutate`. Output redirection (`>`/`>>`) bumps any
- *     read to at least `mutate`. Shell substitution (`$(...)`, backticks) bumps
- *     to `dangerous` (we don't try to parse what's inside). Windows-native
- *     commands (cmd builtins + PowerShell cmdlets/aliases, `powershell -c`,
- *     redirects to `C:\Windows`) are matched case-insensitively — Cebab
- *     targets Windows without WSL.
+ *   - Bash sub-classifier: split on top-level `;`/newline/`&`/`&&`/`||`/`|`,
+ *     classify each piece by first token (after stripping env-var prefixes and
+ *     exec-wrappers like `env`), reduce to worst. Unknown first token →
+ *     `mutate`. Output redirection (`>`/`>>`) bumps any read to at least
+ *     `mutate`, except to the null/std devices (`/dev/null`, `/dev/stdout`,
+ *     `/dev/stderr`), which write nothing and are left to the first token.
+ *     Shell substitution (`$(...)`, backticks) bumps to `dangerous` (we don't
+ *     try to parse what's inside). Escalating first-token rules match the
+ *     command BASENAME, so `/bin/rm` is `rm`. Windows-native commands (cmd
+ *     builtins + PowerShell cmdlets/aliases, `powershell -c`, redirects to
+ *     `C:\Windows`) are matched case-insensitively — Cebab targets Windows
+ *     without WSL.
  */
 
 export type MutationCategory = 'read' | 'mutate' | 'dangerous';
@@ -99,9 +103,9 @@ export type ToolClassification = {
    * or `dangerous`, the rule that fired + the matched fragment. Undefined
    * for non-Bash tools (the tool name itself is the rationale) and for
    * Bash commands classified as `read` (the operator never sees a badge).
-   * When a command compounds multiple top-level pieces (`;`/`&&`/`||`/`|`),
-   * this is the reason for the *worst* piece — the piece that pinned the
-   * overall category.
+   * When a command compounds multiple top-level pieces (`;`/newline/`&`/`&&`/
+   * `||`/`|`), this is the reason for the *worst* piece — the piece that
+   * pinned the overall category.
    */
   reason?: BashClassifierReason;
 };
@@ -274,7 +278,8 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
 
 /**
  * Dangerous Bash patterns — destructive, privilege-escalating, or remote-
- * code-executing. Matched as the first token (after env-var prefix stripping).
+ * code-executing. Matched as the first token's BASENAME (after env-var prefix
+ * and exec-wrapper stripping), so `/bin/rm` and `./rm` both match `rm`.
  * `kill -9` / `pkill` / `killall` are dangerous because they can knock out the
  * Cebab server itself if misdirected. Adding to this list is conservative — a
  * dangerous-classified read is one extra Allow click away.
@@ -346,6 +351,10 @@ const READONLY_FIRST_TOKENS: ReadonlySet<string> = new Set([
   'date',
   'echo',
   'printf',
+  // Bare `env` (no command) prints the environment — genuinely read-only.
+  // `env <cmd>` is NOT: it execs `<cmd>`. `stripCommandWrappers` peels the
+  // wrapper off before this lookup runs, so the only way to reach this entry
+  // is the argument-less form (register D02).
   'env',
   'set',
   'unset',
@@ -634,38 +643,33 @@ function classifyBashPiece(piece: string): Verdict {
   if (!stripped) return { category: 'read', reason: null };
 
   // Output redirection (`> file`, `>> file`) — at least `mutate`; targets to
-  // sensitive system paths → `dangerous`.
-  const redirMatch = /(?:^|\s)>>?\s*(\S+)/.exec(stripped);
-  if (redirMatch) {
-    const target = redirMatch[1] ?? '';
-    if (
-      target.startsWith('/etc/') ||
-      target.startsWith('/usr/') ||
-      target.startsWith('/var/') ||
-      target.startsWith('/boot/') ||
-      target.startsWith('/dev/') ||
-      target.startsWith('/sys/') ||
-      target.startsWith('/proc/') ||
-      target === '/dev/sda' || // catch literal
-      /^~\/\.ssh\b/.test(target) ||
-      /^~\/\.aws\b/.test(target) ||
-      /^~\/\.kube\b/.test(target) ||
-      // Shell-init / persistence / credential dotfiles — a redirect here is
-      // an RCE-on-next-shell or secret-overwrite vector.
-      /^~\/\.(zshrc|bashrc|bash_profile|zprofile|profile|gitconfig|npmrc)\b/.test(target) ||
-      // Windows system locations (case-insensitive; `\` or `/` separators).
-      /^[a-z]:[\\/]windows(?:[\\/]|$)/i.test(target) ||
-      /^%(?:systemroot|windir)%/i.test(target)
-    ) {
-      return {
-        category: 'dangerous',
-        reason: {
-          rule: 'redirect_system_path',
-          detail: `output redirect (>, >>) to system or secret-store path '${target}'`,
-          matched: target,
-        },
-      };
-    }
+  // sensitive system paths → `dangerous`. EVERY target is scanned, not just
+  // the first: `echo x > /dev/null > /etc/passwd` must not be judged by the
+  // harmless one (register D04).
+  const targets = [...stripped.matchAll(/(?:^|\s)>>?\s*(\S+)/g)]
+    .map((m) => m[1] ?? '')
+    .filter(Boolean);
+  // The null / std devices consume their input and write nothing, so they are
+  // not a redirect at all as far as the operator is concerned. Dropping them
+  // here (rather than exempting them inside the system-path test) means
+  // `ls > /dev/null` falls through to the first token and classifies `read` —
+  // the most common idiom in the shell used to pin the pause gate at
+  // `dangerous` via the `/dev/` prefix below (register D04). `rm x > /dev/null`
+  // is still dangerous: the fall-through classifies `rm`.
+  const written = targets.filter((t) => !NULL_DEVICE_TARGETS.has(t));
+  const sysTarget = written.find(isSensitiveRedirectTarget);
+  if (sysTarget) {
+    return {
+      category: 'dangerous',
+      reason: {
+        rule: 'redirect_system_path',
+        detail: `output redirect (>, >>) to system or secret-store path '${sysTarget}'`,
+        matched: sysTarget,
+      },
+    };
+  }
+  const target = written[0];
+  if (target !== undefined) {
     // Any other redirect target → mutate (at least). Run the token-level
     // classifier too in case the redirect *target* is benign but the
     // *first token* is dangerous (`sudo something > /tmp/x`).
@@ -684,15 +688,61 @@ function classifyBashPiece(piece: string): Verdict {
   return classifyByTokens(stripped);
 }
 
-function classifyByTokens(stripped: string): Verdict {
+/**
+ * Redirect targets that write nothing — the shell's discard/echo devices.
+ * See the D04 note in `classifyBashPiece`.
+ */
+const NULL_DEVICE_TARGETS: ReadonlySet<string> = new Set([
+  '/dev/null',
+  '/dev/stdout',
+  '/dev/stderr',
+]);
+
+/**
+ * System, device, or secret-store redirect targets: writing here is an
+ * RCE-on-next-shell, secret-overwrite, or device-destroying vector.
+ */
+function isSensitiveRedirectTarget(target: string): boolean {
+  return (
+    target.startsWith('/etc/') ||
+    target.startsWith('/usr/') ||
+    target.startsWith('/var/') ||
+    target.startsWith('/boot/') ||
+    target.startsWith('/dev/') ||
+    target.startsWith('/sys/') ||
+    target.startsWith('/proc/') ||
+    target === '/dev/sda' || // catch literal
+    /^~\/\.ssh\b/.test(target) ||
+    /^~\/\.aws\b/.test(target) ||
+    /^~\/\.kube\b/.test(target) ||
+    // Shell-init / persistence / credential dotfiles — a redirect here is
+    // an RCE-on-next-shell or secret-overwrite vector.
+    /^~\/\.(zshrc|bashrc|bash_profile|zprofile|profile|gitconfig|npmrc)\b/.test(target) ||
+    // Windows system locations (case-insensitive; `\` or `/` separators).
+    /^[a-z]:[\\/]windows(?:[\\/]|$)/i.test(target) ||
+    /^%(?:systemroot|windir)%/i.test(target)
+  );
+}
+
+function classifyByTokens(command: string): Verdict {
+  // Peel `env`-style exec wrappers so the classifier judges what actually
+  // runs, not the wrapper (register D02).
+  const stripped = stripCommandWrappers(command);
   const tokens = stripped.split(/\s+/);
   const first = tokens[0] ?? '';
   const second = tokens[1] ?? '';
-  const pair = second ? `${first} ${second}` : first;
-  const triple = tokens[2] ? `${first} ${second} ${tokens[2]}` : pair;
+  // A command can be invoked by path (`/bin/rm`, `./tools/rm`), so every
+  // ESCALATING rule below matches the basename — mirroring what the Windows
+  // branch has always done via `firstBase` (register D01). Deliberately NOT
+  // applied to the read-only allowlists (rules 7 and 8): those DE-escalate,
+  // and normalising there would demote `/bin/ls` from the conservative
+  // `mutate` default down to `read`. Don't "fix" that asymmetry.
+  const firstName = basename(first);
+  const pair = second ? `${firstName} ${second}` : firstName;
+  const triple = tokens[2] ? `${firstName} ${second} ${tokens[2]}` : pair;
   // Windows commands are case-insensitive; compare lowercased forms (and the
   // shell basename so a full-path `C:\…\cmd.exe` still matches).
-  const firstBase = first.toLowerCase().replace(/^.*[\\/]/, '');
+  const firstBase = firstName.toLowerCase();
   const winPair = second ? `${firstBase} ${second.toLowerCase()}` : firstBase;
 
   // 1) Universal version/help check: `<anything> --version` / `-V` /
@@ -724,25 +774,25 @@ function classifyByTokens(stripped: string): Verdict {
   }
 
   // 3) Plain `rm` (any args) is dangerous.
-  if (DANGEROUS_FIRST_TOKENS.has(first)) {
+  if (DANGEROUS_FIRST_TOKENS.has(firstName)) {
     return {
       category: 'dangerous',
       reason: {
         rule: 'dangerous_first_token',
         detail: `first token '${first}' is always dangerous (destructive, privilege-escalating, or remote-code-executing)`,
-        matched: first,
+        matched: firstName,
       },
     };
   }
 
   // 4) `mkfs*` (mkfs.ext4, mkfs.xfs, etc.) — any filesystem-create variant.
-  if (first.startsWith('mkfs.') || first === 'mkfs') {
+  if (firstName.startsWith('mkfs.') || firstName === 'mkfs') {
     return {
       category: 'dangerous',
       reason: {
         rule: 'mkfs_variant',
         detail: `'${first}' creates a filesystem — irreversible data loss on the target device`,
-        matched: first,
+        matched: firstName,
       },
     };
   }
@@ -753,14 +803,14 @@ function classifyByTokens(stripped: string): Verdict {
   //    - `bash -c '<arbitrary>'`: arbitrary code. Dangerous.
   //    - `bash script.sh`: running a script. We can't introspect — mutate
   //      (operator sees the script path and decides).
-  if (first === 'sh' || first === 'bash' || first === 'zsh') {
+  if (firstName === 'sh' || firstName === 'bash' || firstName === 'zsh') {
     if (tokens.length === 1) {
       return {
         category: 'dangerous',
         reason: {
           rule: 'shell_invocation_bare',
           detail: `bare '${first}' with no arguments — typically the receiving end of a 'curl | sh' pipe`,
-          matched: first,
+          matched: firstName,
         },
       };
     }
@@ -770,7 +820,7 @@ function classifyByTokens(stripped: string): Verdict {
         reason: {
           rule: 'shell_invocation_dash_c',
           detail: `'${first} -c' runs an arbitrary command string from its argument`,
-          matched: `${first} -c`,
+          matched: `${firstName} -c`,
         },
       };
     }
@@ -779,13 +829,13 @@ function classifyByTokens(stripped: string): Verdict {
       reason: {
         rule: 'shell_invocation_script',
         detail: `'${first} ${second}' runs the named script — its contents aren't parsed by the classifier`,
-        matched: `${first} ${second}`,
+        matched: `${firstName} ${second}`,
       },
     };
   }
 
   // 6) `kill` with `-9` / `-KILL` is dangerous; plain `kill` is mutate.
-  if (first === 'kill') {
+  if (firstName === 'kill') {
     if (tokens.includes('-9') || tokens.includes('-KILL')) {
       const signal = tokens.includes('-9') ? '-9' : '-KILL';
       return {
@@ -906,9 +956,9 @@ function classifyByTokens(stripped: string): Verdict {
   }
 
   // 9) Mutating allowlist.
-  if (MUTATING_FIRST_TOKENS.has(first)) {
+  if (MUTATING_FIRST_TOKENS.has(firstName)) {
     // `chmod` / `chown` on system paths → dangerous.
-    if ((first === 'chmod' || first === 'chown') && hasSystemPath(tokens)) {
+    if ((firstName === 'chmod' || firstName === 'chown') && hasSystemPath(tokens)) {
       const sysToken =
         tokens.find(
           (t) =>
@@ -926,7 +976,7 @@ function classifyByTokens(stripped: string): Verdict {
         reason: {
           rule: 'chmod_chown_system_path',
           detail: `'${first}' targets system path '${sysToken}'`,
-          matched: `${first} ${sysToken}`,
+          matched: `${firstName} ${sysToken}`,
         },
       };
     }
@@ -935,7 +985,7 @@ function classifyByTokens(stripped: string): Verdict {
       reason: {
         rule: 'mutating_first_token',
         detail: `first token '${first}' is in the mutating-token list (filesystem, VCS, packages, or download)`,
-        matched: first,
+        matched: firstName,
       },
     };
   }
@@ -966,6 +1016,84 @@ function hasSystemPath(tokens: string[]): boolean {
   );
 }
 
+/** Last path segment of a command token: `/bin/rm` → `rm`, `C:\…\cmd.exe` →
+ *  `cmd.exe`. Both separators, because a Bash-tool string can be a Windows
+ *  command line (see the Windows sets above). */
+function basename(token: string): string {
+  return token.replace(/^.*[\\/]/, '');
+}
+
+/**
+ * Exec-wrappers: binaries whose job is to run the command in their argument
+ * tail. The classifier has to judge the WRAPPED command — `env` used to sit in
+ * the read-only allowlist, which made `env rm -rf /tmp/x` classify as `read`,
+ * and `read` is skipped wholesale by the bus mutation tap (register D02).
+ *
+ * Only `env` is registered. `nohup` / `timeout` / `nice` / `command` /
+ * `stdbuf` / `setsid` / `xargs` launder the same way but land on `mutate`
+ * (they're in no allowlist), so they're a lower-severity variant of the same
+ * hole — tracked separately rather than widened into this fix.
+ */
+const COMMAND_WRAPPERS: ReadonlySet<string> = new Set(['env']);
+
+/** Wrapper flags that take no value — skipped while looking for the command. */
+const WRAPPER_NOVALUE_FLAGS: ReadonlySet<string> = new Set([
+  '-i',
+  '--ignore-environment',
+  '-0',
+  '--null',
+  '-v',
+  '--debug',
+]);
+
+/** Wrapper flags that consume the FOLLOWING token as their value. */
+const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set(['-u', '--unset', '-C', '--chdir']);
+
+/**
+ * Peel leading exec-wrappers so `env -i FOO=1 rm -rf x` classifies as `rm`.
+ * Returns the wrapped command, or the input unchanged when there is no wrapper
+ * to peel.
+ *
+ * Both exits are fail-safe, never towards `read`:
+ *   - an UNRECOGNISED flag stops the scan without consuming it, so the tail
+ *     begins with e.g. `-S` and falls through to `unknown_first_token` →
+ *     `mutate` (`env -S '<anything>'` is not something this classifier tries
+ *     to parse);
+ *   - an EMPTY tail (bare `env`, or only flags/assignments) returns the input
+ *     untouched, so plain `env` still reaches the read-only allowlist.
+ *
+ * Bounded iteration so `env env env …` terminates.
+ */
+function stripCommandWrappers(command: string): string {
+  let rest = command;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const tokens = rest.split(/\s+/);
+    if (!COMMAND_WRAPPERS.has(basename(tokens[0] ?? ''))) return rest;
+    let i = 1;
+    while (i < tokens.length) {
+      const t = tokens[i] ?? '';
+      if (WRAPPER_VALUE_FLAGS.has(t)) {
+        i += 2;
+        continue;
+      }
+      if (
+        WRAPPER_NOVALUE_FLAGS.has(t) ||
+        t.startsWith('--unset=') ||
+        t.startsWith('--chdir=') ||
+        /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)
+      ) {
+        i += 1;
+        continue;
+      }
+      break;
+    }
+    const tail = tokens.slice(i).join(' ').trim();
+    if (!tail) return rest;
+    rest = tail;
+  }
+  return rest;
+}
+
 /**
  * Strip leading env-var assignments (`FOO=bar BAZ=qux <cmd>`). Returns the
  * substring starting at the first real command token. If the string IS just
@@ -982,10 +1110,16 @@ function stripEnvAssignments(piece: string): string {
 }
 
 /**
- * Split a Bash command on top-level `;`, `&&`, `||`, `|` boundaries. Does NOT
- * try to be fully shell-correct — single quotes, double quotes, and escaped
- * characters are roughly handled; heredocs, $(...) and backticks are caught
- * by the caller before this runs.
+ * Split a Bash command on top-level `;`, newline, `&`, `&&`, `||`, `|`
+ * boundaries. Does NOT try to be fully shell-correct — single quotes, double
+ * quotes, and escaped characters are roughly handled; $(...) and backticks are
+ * caught by the caller before this runs.
+ *
+ * Newlines are separators for the same reason `;` is: a multi-line Bash
+ * command is N commands, and treating it as one let `ls\nrm -rf /tmp/x`
+ * classify by `ls` (register D03). Heredoc bodies get split too, so a `<<EOF`
+ * body whose line starts with `rm` over-flags — accepted: that's the
+ * fail-safe direction, and one extra Allow click.
  */
 function splitTopLevel(command: string): string[] {
   const pieces: string[] = [];
@@ -1016,7 +1150,7 @@ function splitTopLevel(command: string): string[] {
       continue;
     }
     if (!inSingle && !inDouble) {
-      if (ch === ';') {
+      if (ch === ';' || ch === '\n' || ch === '\r') {
         if (buf.trim()) pieces.push(buf);
         buf = '';
         i += 1;
@@ -1026,6 +1160,15 @@ function splitTopLevel(command: string): string[] {
         if (buf.trim()) pieces.push(buf);
         buf = '';
         i += 2;
+        continue;
+      }
+      // A lone `&` backgrounds the preceding command — a separator, same as
+      // `;`. It is NOT one in fd-duplication (`2>&1`, `>&2`) or the bash
+      // combined redirect (`&>file`), so those two shapes are excluded.
+      if (ch === '&' && command[i - 1] !== '>' && command[i - 1] !== '<' && next !== '>') {
+        if (buf.trim()) pieces.push(buf);
+        buf = '';
+        i += 1;
         continue;
       }
       if (ch === '|') {
