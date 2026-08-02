@@ -111,6 +111,12 @@ export type StartChainOpts = {
   participants: ResolvedAgent[];
   initialPrompt: string;
   workspaceRoot: string;
+  /**
+   * Register H04: projectId → MCP server names the operator denied at the
+   * pre-spawn TOFU gate. Mirror of `StartOrchestratorOpts.mcpDenials` —
+   * applied at `register()` so a denial binds on the participant's first hop.
+   */
+  mcpDenials?: ReadonlyMap<number, readonly string[]>;
   lifecycle?: MultiAgentLifecycle;
   /** Per-event callback → `multi_agent_event` ServerMsg. `sessionId` is
    *  passed explicitly so callbacks firing during the awaited start (the
@@ -1015,6 +1021,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     },
   });
   for (const p of opts.participants) {
+    // H04: see the orchestrator mirror — the denial has to be on the spec
+    // before the first hop, not applied after the session is running.
+    const denied = opts.mcpDenials?.get(p.projectId);
     runner.register({
       name: p.agentName,
       cwd: p.cwd,
@@ -1023,6 +1032,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       // lifecycle registry's per-hop snapshot can name it for the
       // active-runs sidebar dropdown.
       projectId: p.projectId,
+      ...(denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {}),
     });
   }
 

@@ -31,15 +31,22 @@ import { appendSafetyAudit } from '../notifications/safety_audit.js';
 // (start_multi_agent / runOneTurn) awaits before calling pickRunner so the
 // spawn cannot race a decision.
 //
-// Cebab cannot today surgically prevent a single project-declared MCP from
-// loading once the SDK starts (the SDK reads settingSources + merges its own
-// mcpServers param). What the gate guarantees IS:
+// Register H04 (2026-08-02): a denial now STOPS THE BINARY. This block used to
+// say Cebab could not "surgically prevent a single project-declared MCP from
+// loading" and filed it as "future work (Phase 5+): …get an SDK option for
+// per-server disable." That option exists as of SDK 0.3.201, so the gate no
+// longer just records denials — `refused` below is returned to the caller,
+// which hands it to the spawn as `settings.deniedMcpServers` (measured: the
+// server is absent from `mcp_servers` entirely, the process never starts) plus
+// `disallowedTools: mcp__<name>__*` as a second layer. Nothing is written to
+// disk; the denial rides the SDK's inline flag-settings layer.
+//
+// What the gate guarantees:
 //   - The operator sees first_seen / hash_changed BEFORE the run begins.
 //   - Every decision is dual-written to mcp_trust + safety_audit (BE-1).
+//   - A refusal is ENFORCED on the spawn it gated, not merely logged.
 //   - Per-session deny_once is honored for THIS connection's subsequent
 //     start_session calls (re-prompts on the next connection).
-// Future work (Phase 5+): write decisions back to settings.json or get an
-// SDK option for per-server disable, so "denied" actually stops the binary.
 
 /**
  * Per-connection gate state. Lives on the `Conn` (in ws/server.ts) so the
@@ -309,12 +316,24 @@ function applyDecision(args: {
 }
 
 /**
+ * What Cebab does to a refused server, recorded on every refusal row.
+ * Mirrors `runner/claude.ts`'s `mcpDenialOptions`: the server is blocked from
+ * loading via `settings.deniedMcpServers` and its tools are stripped via
+ * `disallowedTools`.
+ */
+const ENFORCEMENT = 'denied_mcp_servers+disallowed_tools';
+
+/**
  * Append a `mcp.trust_silent_refusal` row to safety_audit. Called every time
  * the gate decides NOT to prompt because a prior decision (denied_remember)
- * or per-session deny_once already covers this server. The chain entry is
- * how XCT-1 forensics later reconstructs "the operator denied this server
- * but the binary still ran" — Phase 4b can't prevent the spawn, but the
- * audit row makes the gap visible to the inspector.
+ * or per-session deny_once already covers this server.
+ *
+ * The row used to exist because the refusal could not be acted on — it made
+ * "the operator denied this server but the binary still ran" visible to the
+ * inspector after the fact. Since H04 the refusal IS acted on, so the payload
+ * carries `enforcement` to say which of those two worlds a given row belongs
+ * to. Rows written before that change have no `enforcement` key, which is
+ * itself the honest signal: absent means the spawn went ahead anyway.
  */
 function recordSilentRefusal(
   projectId: number,
@@ -326,6 +345,6 @@ function recordSilentRefusal(
     ts: Date.now(),
     kind: 'mcp.trust_silent_refusal',
     reasonCode,
-    payload: { projectId, serverName, originPath },
+    payload: { projectId, serverName, originPath, enforcement: ENFORCEMENT },
   });
 }

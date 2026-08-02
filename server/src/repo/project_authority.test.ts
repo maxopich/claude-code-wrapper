@@ -1101,3 +1101,117 @@ describe('detectEnvInjections — non-Anthropic credentials (H05)', () => {
     expect(out.map((e) => e.scope).sort()).toEqual(['local', 'project', 'user']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cebab-x1n.6.22: the gate has to watch the file the CLI actually reads.
+//
+// MEASURED against @anthropic-ai/claude-agent-sdk 0.3.201 with a real MCP
+// stdio server, reading `system/init.mcp_servers`:
+//
+//   <proj>/.claude/settings.json    → mcpServers → NOT loaded
+//   ...+ enableAllProjectMcpServers → NOT loaded
+//   ~/.claude/settings.json         → mcpServers → NOT loaded
+//   <proj>/.mcp.json                             → LOADED, 'connected'
+//
+// So before `readMcpJsonServers` the TOFU gate could only prompt about
+// declarations that never run, while every server that DOES run reached the
+// spawn with no prompt, no mcp_trust row and no safety_audit row.
+// ---------------------------------------------------------------------------
+describe('[security] .mcp.json is the declaration that actually loads', () => {
+  function writeMcpJson(servers: Record<string, unknown>): void {
+    fs.writeFileSync(path.join(projectPath, '.mcp.json'), JSON.stringify({ mcpServers: servers }));
+  }
+
+  test('a .mcp.json server reaches the authority view with its own scope', () => {
+    writeMcpJson({ probe: { command: '/bin/echo', args: ['hi'] } });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const probe = out!.mcpServers.find((m) => m.name === 'probe');
+    expect(probe).toBeDefined();
+    expect(probe!.scope).toBe('mcp-json');
+    // originPath is the trust anchor: without it `awaitMcpTrustDecisions`
+    // skips the row outright (mcp_trust_gate.ts:143), which is exactly how
+    // SDK-observed servers slip past the gate today.
+    expect(probe!.originPath).toBe(path.join(projectPath, '.mcp.json'));
+    expect(probe!.config?.command).toBe('/bin/echo');
+  });
+
+  test('it is gated on TOFU rather than silently trusted', () => {
+    writeMcpJson({ probe: { command: '/bin/echo' } });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const probe = out!.mcpServers.find((m) => m.name === 'probe');
+    // pending_tofu is what makes the gate PROMPT. 'unknown' or 'trusted'
+    // would both mean the operator is never asked.
+    expect(probe!.trust).toBe('pending_tofu');
+  });
+
+  test('an untrusted project does not read it — the spawn will not load it either', () => {
+    // The contract for every reader here is "read exactly what the spawn
+    // loads". Measured: .mcp.json loads under settingSources ['user',
+    // 'project','local'] and NOT under ['user'], so an untrusted single-agent
+    // project must not be prompted about a server its Trust setting already
+    // blocks.
+    setProjectTrusted(projectId, false);
+    writeMcpJson({ probe: { command: '/bin/echo' } });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    expect(out!.mcpServers.find((m) => m.name === 'probe')).toBeUndefined();
+  });
+
+  test('a bus spawn reads it even for an untrusted project', () => {
+    // Bus participants always run with all three scopes regardless of Trust,
+    // so the gate must see .mcp.json for them or the blindness persists
+    // exactly where the multi-agent blast radius is largest.
+    setProjectTrusted(projectId, false);
+    writeMcpJson({ probe: { command: '/bin/echo' } });
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      settingSources: BUS_SETTING_SCOPES,
+    });
+    expect(out!.mcpServers.find((m) => m.name === 'probe')).toBeDefined();
+  });
+
+  test('.mcp.json wins over a same-named settings.json entry', () => {
+    // The settings.json row describes a server the CLI never starts. Anchoring
+    // the trust decision to it would pin the wrong file and the wrong binary.
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ mcpServers: { probe: { command: '/bin/false' } } }),
+    );
+    writeMcpJson({ probe: { command: '/bin/echo' } });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const rows = out!.mcpServers.filter((m) => m.name === 'probe');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.scope).toBe('mcp-json');
+    expect(rows[0]!.config?.command).toBe('/bin/echo');
+  });
+
+  test('env keys are reported as NAMES only (BE-B12)', () => {
+    writeMcpJson({ probe: { command: '/bin/echo', env: { SECRET_TOKEN: 'hunter2' } } });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const probe = out!.mcpServers.find((m) => m.name === 'probe');
+    expect(probe!.config?.envKeys).toEqual(['SECRET_TOKEN']);
+    expect(JSON.stringify(probe)).not.toContain('hunter2');
+  });
+
+  test('absent, malformed and non-file .mcp.json all resolve to no servers', () => {
+    // Absent
+    expect(_testing.readMcpJsonServers(projectPath, ['project'])).toEqual([]);
+    // Malformed
+    fs.writeFileSync(path.join(projectPath, '.mcp.json'), '{ not json');
+    expect(_testing.readMcpJsonServers(projectPath, ['project'])).toEqual([]);
+    // Present but no mcpServers key
+    fs.writeFileSync(path.join(projectPath, '.mcp.json'), JSON.stringify({ other: 1 }));
+    expect(_testing.readMcpJsonServers(projectPath, ['project'])).toEqual([]);
+    // A directory where the file should be — must refuse, not throw.
+    fs.rmSync(path.join(projectPath, '.mcp.json'));
+    fs.mkdirSync(path.join(projectPath, '.mcp.json'));
+    expect(_testing.readMcpJsonServers(projectPath, ['project'])).toEqual([]);
+  });
+
+  test('an oversized .mcp.json is refused rather than read into memory', () => {
+    // Same H03 ceiling and the same reasoning: a project-controlled file read
+    // on the way into a spawn must not be able to exhaust the server.
+    fs.writeFileSync(path.join(projectPath, '.mcp.json'), 'x'.repeat(1024 * 1024 + 1));
+    expect(_testing.readMcpJsonServers(projectPath, ['project'])).toEqual([]);
+  });
+});

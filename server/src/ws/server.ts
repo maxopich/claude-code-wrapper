@@ -1717,6 +1717,11 @@ function send(ws: WebSocket, msg: ServerMsg): void {
  * `query()`. The await is the structural block — if the operator never
  * replies, the spawn never happens.
  *
+ * H04: callers must also PASS THE RETURN VALUE to the spawn. Awaiting alone
+ * only guarantees the operator was asked; the returned `McpDenials` is what
+ * makes their answer bind. A caller that drops it silently reintroduces the
+ * exact defect this fixed — the operator clicks Deny and the binary loads.
+ *
  * The five call sites, i.e. every path to a spawn:
  *   - `start_multi_agent` orchestrator + chain — bus scopes.
  *   - `add_multi_agent_participant` — bus scopes. A mid-run add reaches the
@@ -1734,11 +1739,23 @@ function send(ws: WebSocket, msg: ServerMsg): void {
  * we skip silently — `getProject` upstream already rejected the start, so
  * this case is structurally unreachable in practice.
  */
+/**
+ * H04: projectId → MCP server names the operator refused for that project.
+ *
+ * Every spawn path threads this from its gate call to the runner, where
+ * `runClaude` turns each name into `settings.deniedMcpServers` (the server
+ * does not load) plus `disallowedTools: mcp__<name>__*` (its tools are not in
+ * the model's context). An empty map is the overwhelmingly common case and
+ * produces byte-identical run options to before.
+ */
+export type McpDenials = Map<number, string[]>;
+
 export async function gateProjectsForSpawn(
   conn: Conn,
   projectIds: number[],
   settingSources?: readonly SettingScope[],
-): Promise<void> {
+): Promise<McpDenials> {
+  const denials: McpDenials = new Map();
   const seen = new Set<number>();
   for (const projectId of projectIds) {
     if (seen.has(projectId)) continue;
@@ -1758,12 +1775,18 @@ export async function gateProjectsForSpawn(
       ...(cached !== undefined && { latestSessionStarted: cached }),
     });
     if (!authority) continue;
-    await awaitMcpTrustDecisions({
+    const gateOutcome = await awaitMcpTrustDecisions({
       projectId,
       gate: conn.trustGate,
       send: (m) => send(conn.ws, m),
       servers: authority.mcpServers,
     });
+    // H04: the refusal list used to be computed and thrown away — this
+    // function returned `void`. Carrying it out is what turns Deny from a
+    // logged opinion into something the spawn obeys.
+    if (gateOutcome.refused.length > 0) {
+      denials.set(projectId, [...new Set(gateOutcome.refused.map((r) => r.serverName))]);
+    }
     await awaitEnvInjectionAck({
       projectId,
       gate: conn.startGate,
@@ -1776,6 +1799,7 @@ export async function gateProjectsForSpawn(
     // `reportHookObservations`.
     reportHookObservations(projectId, authority.hooks, (m) => send(conn.ws, m));
   }
+  return denials;
 }
 
 /**
@@ -3847,7 +3871,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // isn't currently 'trusted'. Awaiting blocks the spawn until every
         // decision arrives. The orchestrator itself runs from an empty
         // cwd (no MCPs to gate); only workers carry project-declared MCPs.
-        await gateProjectsForSpawn(
+        const orchestratorDenials = await gateProjectsForSpawn(
           conn,
           workers.map((w) => w.projectId),
           BUS_SETTING_SCOPES,
@@ -3855,6 +3879,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         try {
           const handle = await startOrchestratorSession({
             workers,
+            mcpDenials: orchestratorDenials,
             initialPrompt: msg.initialPrompt,
             workspaceRoot,
             lifecycle,
@@ -3930,7 +3955,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // Cluster B Phase 4b (§4.4): TOFU spawn-gate, mirror of the
       // orchestrator path. Chain participants may repeat (e.g. [A, B, A])
       // and the helper dedupes on projectId so A is gated once.
-      await gateProjectsForSpawn(
+      const chainDenials = await gateProjectsForSpawn(
         conn,
         participants.map((p) => p.projectId),
         BUS_SETTING_SCOPES,
@@ -3938,6 +3963,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       try {
         const handle = await startChainSession({
           participants,
+          mcpDenials: chainDenials,
           initialPrompt: msg.initialPrompt,
           workspaceRoot,
           lifecycle,
@@ -4137,13 +4163,19 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // Runs BEFORE `setAwaitingContinue(false)` so a refused/unanswered gate
       // leaves the session in its recovered state rather than half-continued.
       try {
-        await gateProjectsForSpawn(
+        const continueDenials = await gateProjectsForSpawn(
           conn,
           listResolvedParticipants(msg.sessionId)
             .filter((p) => p.role === 'worker')
             .map((p) => p.project_id),
           BUS_SETTING_SCOPES,
         );
+        // H04: this session's specs already exist (R-B rebuilt them), so the
+        // denial is merged into them rather than passed at registration. It
+        // binds on the next turn — which is the one Continue is about to run.
+        for (const [projectId, serverNames] of continueDenials) {
+          active.applyMcpDenials(projectId, serverNames);
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
@@ -4378,8 +4410,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         //
         // Ordering matches the start paths: trust decisions first, then the
         // credential prompt (see gateProjectsForSpawn's header).
-        await gateProjectsForSpawn(conn, [msg.projectId], BUS_SETTING_SCOPES);
-        const result = await active.addWorker(msg.projectId);
+        const addDenials = await gateProjectsForSpawn(conn, [msg.projectId], BUS_SETTING_SCOPES);
+        // H04: `addWorker` registers the participant and delivers its first
+        // turn in one call, so the denial must go in as an argument — applying
+        // it afterwards would be one turn too late.
+        const result = await active.addWorker(msg.projectId, addDenials.get(msg.projectId) ?? []);
         send(conn.ws, {
           type: 'multi_agent_participant_added',
           sessionId: msg.sessionId,
@@ -4934,7 +4969,9 @@ async function runOneTurn(
   // every declared MCP is already 'trusted' it's a silent no-op (one
   // checkTrust lookup per row). On first_seen / hash_changed the operator
   // is prompted and the spawn awaits their decision before pickRunner.
-  await gateProjectsForSpawn(conn, [project.id]);
+  // H04: the return value is not optional bookkeeping — it is what makes a
+  // Deny bind on this turn. Threaded into `pickRunner` below.
+  const turnDenials = await gateProjectsForSpawn(conn, [project.id]);
 
   const ac = new AbortController();
 
@@ -5040,6 +5077,13 @@ async function runOneTurn(
     settingSources: [...settingSources],
     canUseTool,
     abortController: ac,
+    // H04: MCP servers the operator refused at the gate above. `runClaude`
+    // turns these into `settings.deniedMcpServers` (the server does not load)
+    // + `disallowedTools` (its tools are not in context). Empty in the common
+    // case, which leaves the options byte-identical to before.
+    ...(turnDenials.get(project.id)?.length
+      ? { deniedMcpServers: turnDenials.get(project.id) }
+      : {}),
     // Cluster F Phase A1a (UI-A1): resolver picks the per-turn
     // override (msg.maxTurns) over the persisted setting over the env
     // default. Re-read on every send so a SettingsModal change between

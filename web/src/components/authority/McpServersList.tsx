@@ -6,8 +6,13 @@ import type { McpServerView } from '@cebab/shared/protocol';
 //
 // One card per declared MCP server. Each card answers:
 //   - WHO    — `name` + tools it exposes
-//   - WHERE  — `scope` chip (user / project / local / cebab-injected) +
-//              `originPath` (which settings.json declared it)
+//   - WHERE  — `scope` chip (user / project / local / mcp-json /
+//              cebab-injected) + `originPath` (which file declared it).
+//              `mcp-json` is the project-root `.mcp.json`, and it is the
+//              scope that actually runs: measured against SDK 0.3.201,
+//              `mcpServers` in `.claude/settings.json` is not loaded at any
+//              scope, so a `project`-scoped row describes a declaration the
+//              CLI ignores while an `mcp-json` row describes a live server.
 //   - WHAT   — `command` + `args` from `config`
 //   - TRUST  — `trust` chip from the mcp_trust JOIN (Phase 4):
 //                trusted / pending_tofu / hash_changed / denied / unknown
@@ -52,6 +57,10 @@ const SCOPE_CHIP_CLASS: Record<McpServerView['scope'], string> = {
   user: 'mcp-scope-user',
   project: 'mcp-scope-project',
   local: 'mcp-scope-local',
+  // The project-root `.mcp.json` — the only project-scoped file the CLI
+  // actually loads MCP servers from. Styled like `project` because that is
+  // what an operator reads it as; the chip LABEL carries the distinction.
+  'mcp-json': 'mcp-scope-project',
   'cebab-injected': 'mcp-scope-cebab',
   // Reported by the SDK but matching no settings layer Cebab read, and not a
   // Cebab injection. Shares the muted styling of an unresolved row — it is

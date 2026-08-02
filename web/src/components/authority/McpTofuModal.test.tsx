@@ -234,3 +234,43 @@ describe('McpTofuModal — accessibility', () => {
     expect(document.activeElement).toBe(denyOnce);
   });
 });
+
+// Register H04. Until 2026-08-02 Deny recorded a decision and the binary
+// loaded anyway, and the modal said nothing about it. The enforcement and this
+// copy have to move together — if a future change stops passing
+// `settings.deniedMcpServers` to the spawn, this assertion is what makes the
+// now-false promise fail CI instead of shipping.
+describe('[security] McpTofuModal — Deny copy matches what Deny does', () => {
+  function bodyText(): string {
+    return container.textContent ?? '';
+  }
+
+  test('states that Deny stops the server from starting', () => {
+    act(() => {
+      root.render(<McpTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+    });
+    expect(bodyText()).toContain('stops this server from starting');
+  });
+
+  test('distinguishes deny once from deny & remember', () => {
+    act(() => {
+      root.render(<McpTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+    });
+    const text = bodyText();
+    expect(text).toContain('re-asks on your next connection');
+    expect(text).toContain('persists the decision');
+  });
+
+  test('does not promise more than the audit trail actually gives', () => {
+    act(() => {
+      root.render(<McpTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+    });
+    // The audit row is a real guarantee (dispatcher dual-write, BE-1), so
+    // saying so is honest. Anything stronger — "blocked everywhere", "removed
+    // from your project" — would not be: Cebab writes nothing into the
+    // operator's files.
+    const text = bodyText();
+    expect(text).toContain('recorded in the audit log');
+    expect(text).not.toMatch(/removed from your project|blocked everywhere/i);
+  });
+});
