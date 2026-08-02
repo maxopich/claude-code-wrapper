@@ -6,7 +6,7 @@ import { closeLogger } from './runner/logger.js';
 import { closeAllQueries } from './runner/lifecycle.js';
 import { verifyChain } from './notifications/safety_audit.js';
 import { emit as emitNotification } from './notifications/dispatcher.js';
-import { startWsServer } from './ws/server.js';
+import { describeChainFailure, startWsServer } from './ws/server.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
 import { authTokenPath, initAuthToken } from './auth.js';
 import { mountAuthTokenRoute } from './auth_token_route.js';
@@ -49,12 +49,9 @@ function main(): void {
         class: 'safety',
         dedupeKey: 'audit.tamper_detected',
         title: 'Safety audit chain failed verification',
-        message:
-          chainResult.reason === 'no_anchor'
-            ? 'The safety audit log has no chain-reset anchor. Migrations always insert one, so it was removed.'
-            : chainResult.reason === 'forged_anchor'
-              ? `The newest chain-reset anchor (${chainResult.brokenAt}) is not one this build wrote.`
-              : `Row ${chainResult.brokenAt} no longer matches its recorded hash.`,
+        // H07: shared with the attach path so boot and re-verify cannot drift
+        // into describing the same condition differently.
+        message: describeChainFailure(chainResult.reason, chainResult.brokenAt),
         reasonCode: chainResult.reason,
         auditKind: 'audit.tamper_detected',
         auditPayload: { reason: chainResult.reason, brokenAt: chainResult.brokenAt ?? null },

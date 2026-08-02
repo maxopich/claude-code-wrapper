@@ -256,3 +256,52 @@ describe('[security] WS upgrade gate — check order', () => {
     expect(res.headers['x-cebab-reject-reason']).toBe('origin_not_allowed');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Register H07: an ACCEPTED upgrade must re-verify the audit chain.
+//
+// `chain_reverify.security.test.ts` covers `reverifyChainOnAttach` itself —
+// the reporting, the throttle, the fail-open posture. What it cannot cover is
+// whether `onConnection` still CALLS it: that function is not exported, so the
+// one line wiring the two together is only exercised by a real connection.
+// Deleting it broke nothing until this case existed.
+// ---------------------------------------------------------------------------
+describe('[security] H07 — attach re-verifies the audit chain', () => {
+  test('a real accepted upgrade reports a chain broken during uptime', async () => {
+    const { appendSafetyAudit } = await import('../notifications/safety_audit.js');
+    const { getDb } = await import('../db.js');
+    const { _resetChainVerifyThrottle } = await import('./server.js');
+    // The throttle is process-global (one chain, one walk, shared by every
+    // socket), so the accepted upgrades in the cases above already consumed
+    // this window. Clear it so this case observes a real verification.
+    _resetChainVerifyThrottle();
+
+    // Break the chain the way tampering would: mutate a row in place.
+    appendSafetyAudit({ ts: 1, kind: 'test.event', reasonCode: 'r', payload: {} });
+    getDb()
+      .prepare(`UPDATE safety_audit SET payload_json = '{"tampered":1}' WHERE kind = 'test.event'`)
+      .run();
+
+    const before = (
+      getDb()
+        .prepare(`SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'audit.tamper_detected'`)
+        .get() as { n: number }
+    ).n;
+
+    const res = await probeUpgrade({
+      origin: `http://${TEST_HOST}:5173`,
+      hostHeader: allowedHost(),
+      token,
+    });
+    expect(res.status).toBe(101);
+
+    // The audit row is the obligation — it must exist whether or not the
+    // browser stayed connected long enough to receive the notification.
+    const after = (
+      getDb()
+        .prepare(`SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'audit.tamper_detected'`)
+        .get() as { n: number }
+    ).n;
+    expect(after).toBeGreaterThan(before);
+  });
+});
