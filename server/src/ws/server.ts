@@ -168,7 +168,7 @@ import {
 } from '../repo/multi_agent.js';
 import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
-import { getLiveSession, hasLiveSession } from '../bus/session_registry.js';
+import { getLiveSession, hasLiveSession, listLiveSessionIds } from '../bus/session_registry.js';
 import {
   resolveQuestion,
   listParkedQuestions,
@@ -772,6 +772,27 @@ export function describeHeldWorkers(sessionId: string): string | null {
   if (held.length === 0) return null;
   const names = [...new Set(held.map((m) => m.agentName))].join(', ');
   return `Cannot continue the session while a worker is held at a dangerous command (${names}). Use the Continue button on that worker's banner, or stop the session.`;
+}
+
+/**
+ * Register B02: the process-wide half of the single-active invariant.
+ *
+ * `start_multi_agent`'s original guard was `if (conn.multiAgent)` — per
+ * CONNECTION. Two browser windows could therefore each start a session and
+ * both stay live in this process; the next resume sweep then reported the
+ * older one `crashed` while its AgentRunner kept delivering turns, leaving
+ * agents executing with no session the UI could stop.
+ *
+ * Returns the operator-facing refusal, or `null` when starting is safe. Only
+ * genuinely live sessions block: a `running` row orphaned by a dead process
+ * is not in the registry, so a stale DB row can never wedge new starts.
+ *
+ * Exported for direct testing — the case body is one `send` around it.
+ */
+export function describeLiveSessionConflict(): string | null {
+  const ids = listLiveSessionIds();
+  if (ids.length === 0) return null;
+  return `another multi-agent session is already running in this Cebab (${ids.join(', ')}); stop it first — possibly from another browser window.`;
 }
 
 export async function executeArchiveSession(args: {
@@ -1485,6 +1506,13 @@ type Conn = {
    *  `sendUserPrompt` method; the WS handler narrows via `'sendUserPrompt'
    *  in active` rather than carrying a separate mode discriminator here. */
   multiAgent: ChainSessionHandle | OrchestratorSessionHandle | null;
+  /**
+   * Register B01: this connection's sink-ownership token for `multiAgent`.
+   * Minted by the `rebind` that bound this conn's sink (0 for a session this
+   * conn started itself). Passed to `detach()` on WS close so a stale
+   * window's teardown is ignored once a newer window has re-attached.
+   */
+  multiAgentSinkEpoch: number;
   /** Cluster B Phase 3: per-project authority cache; see CachedSessionStarted. */
   authorityCache: Map<number, CachedSessionStarted>;
   /**
@@ -1811,6 +1839,7 @@ function onConnection(ws: WebSocket): void {
     pendingPermissions: new Map(),
     inFlight: new Map(),
     multiAgent: null,
+    multiAgentSinkEpoch: 0,
     authorityCache: new Map(),
     trustGate: makeTrustGateState(),
     busTrustGate: makeBusTrustGateState(),
@@ -1982,8 +2011,12 @@ function onConnection(ws: WebSocket): void {
     // intentionally tears a session down. (A Cebab server restart empties
     // the registry; an orchestrated run is then rebuilt from persisted
     // state and re-attached READ-ONLY — R-B — pending an operator Continue.)
+    //
+    // Register B01: pass THIS conn's sink epoch. If another window has since
+    // re-attached (bumping the epoch), the detach is ignored — closing an
+    // older window must not blank the live window's event stream.
     if (conn.multiAgent) {
-      conn.multiAgent.detach();
+      conn.multiAgent.detach(conn.multiAgentSinkEpoch);
       conn.multiAgent = null;
     }
   });
@@ -2222,6 +2255,9 @@ function dispatchGuardrailViolationForConn(
  */
 function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   conn.multiAgent = resumed.handle;
+  // Register B01: remember which sink generation this conn owns, so its WS
+  // close only silences the stream if nobody re-attached in the meantime.
+  conn.multiAgentSinkEpoch = resumed.sinkEpoch;
   // Fresh read: R-B reconstruction sets `awaiting_continue` AFTER the
   // resume sweep snapshots its `candidate` row, so `resumed.row` can be
   // stale. The DB is authoritative.
@@ -3558,6 +3594,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         });
         return;
       }
+      // Register B02: the guard above is per-CONNECTION; this one is
+      // process-wide. See `describeLiveSessionConflict`.
+      const liveConflict = describeLiveSessionConflict();
+      if (liveConflict) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: liveConflict,
+        });
+        return;
+      }
       if (!Array.isArray(msg.participants) || msg.participants.length === 0) {
         send(conn.ws, {
           type: 'wrapper_error',
@@ -3784,6 +3831,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
           });
           conn.multiAgent = handle;
+          // Register B01: a freshly-built router's sink epoch is 0 and this
+          // conn owns it. Reset explicitly — a conn that previously re-attached
+          // to some other session would otherwise carry a stale non-zero epoch
+          // and its own close would no-op, leaking events to a dead WS.
+          conn.multiAgentSinkEpoch = 0;
           // Cluster G Phase 2c (UI-A3): read the freshly-inserted session
           // row to project the `mock` column onto the wire. `createMultiAgentSession`
           // (called inside `startOrchestratorSession`) stamps `mock` from
@@ -3858,6 +3910,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
         });
         conn.multiAgent = handle;
+        // Register B01: see the orchestrator path — reset to the fresh
+        // router's epoch 0 so this conn's own close still silences its sink.
+        conn.multiAgentSinkEpoch = 0;
         // Cluster G Phase 2c (UI-A3): same per-session MOCK projection as
         // the orchestrator path — chain sessions also stamp `mock` at row
         // INSERT (via `createMultiAgentSession` inside `startChainSession`).

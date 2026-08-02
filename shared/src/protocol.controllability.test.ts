@@ -92,6 +92,9 @@ describe('ControllabilityFailureCode', () => {
   test('enum exhaustiveness: every union arm appears in the runtime set', () => {
     const codes: ControllabilityFailureCode[] = [
       'chain_mute_unsupported',
+      // Register B03: chain pause/resume used to report SUCCESS while pausing
+      // nothing — only orchestrator handles expose the pause wire.
+      'chain_pause_unsupported',
       'chain_topology_broken',
       'hard_kill_unsupported_v1',
       'already_in_state',
