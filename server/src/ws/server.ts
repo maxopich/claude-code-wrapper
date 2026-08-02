@@ -593,11 +593,24 @@ type WrapperErrorDispatch = {
   action?: NotificationAction;
 };
 
+/**
+ * Returns `null` when the kind should produce NO operator notification at all.
+ *
+ * Register S02b: `aborted` is that case. The operator pressing Stop, or their
+ * browser going away mid-turn, is not news to report back to them — and
+ * because this notification is `operational` + `sticky`, the dispatcher
+ * PERSISTS it (`persistNotification`), so every Stop left a durable "Turn
+ * failed" inbox row with a Restart button for a turn nobody lost. The
+ * decision lives here, with every other kind's, rather than as another
+ * special case at the call site.
+ */
 export function wrapperErrorDispatch(
   kind: WrapperErrorKind,
   sessionId: string,
-): WrapperErrorDispatch {
+): WrapperErrorDispatch | null {
   switch (kind) {
+    case 'aborted':
+      return null;
     case 'auth_expired':
       return {
         severity: 'error',
@@ -654,13 +667,24 @@ export function wrapperErrorDispatch(
  * signal — the SDK is back under the rate budget, or never crossed it).
  *
  * Heuristic:
- *   - resetsAt in the future → hit (warn)
- *   - resetsAt absent OR already in the past → cleared (info)
+ *   - resetsAtMs in the future → hit (warn)
+ *   - resetsAtMs absent OR already in the past → cleared (info)
  *
  * The SDK's `status` string is forward-compat noise and may differ per
- * provider; relying on `resetsAt` keeps the branch resilient. Pure
+ * provider; relying on the reset timestamp keeps the branch resilient. Pure
  * function so the runOneTurn live-stream call site stays a thin wrapper
  * and this branch can be unit-tested without spinning up the WS stack.
+ *
+ * Register S01: the parameter is `resetsAtMs`, with the unit in the NAME, and
+ * that is the whole fix. It used to be `resetsAt`, and the event carries both
+ * that (raw SDK **seconds**, ~1.7e9) and `resetsAtMs` — so the call site
+ * spread the event in and the seconds field silently won. Seconds are always
+ * "in the past" against a millisecond clock, so `isActiveLimit` was NEVER
+ * true: every rate-limit event dispatched as `cleared`/info, telling the
+ * operator the limit lifted at the exact moment they hit it. `translate.ts`
+ * already declares the convention ("Every consumer wants ms … code uses
+ * `resetsAtMs`"); this call site just never got the memo. Naming the unit is
+ * what stops the next caller repeating it.
  */
 export type RateLimitDispatch = {
   subCode: 'hit' | 'cleared';
@@ -670,12 +694,12 @@ export type RateLimitDispatch = {
 };
 
 export function rateLimitDispatch(
-  out: { status?: string; resetsAt?: number },
+  out: { status?: string; resetsAtMs?: number },
   now: number = Date.now(),
 ): RateLimitDispatch {
-  const isActiveLimit = typeof out.resetsAt === 'number' && out.resetsAt > now;
-  if (isActiveLimit && typeof out.resetsAt === 'number') {
-    const resetText = ` Retry after ${new Date(out.resetsAt).toLocaleTimeString()}.`;
+  const isActiveLimit = typeof out.resetsAtMs === 'number' && out.resetsAtMs > now;
+  if (isActiveLimit && typeof out.resetsAtMs === 'number') {
+    const resetText = ` Retry after ${new Date(out.resetsAtMs).toLocaleTimeString()}.`;
     return {
       subCode: 'hit',
       severity: 'warn',
@@ -793,6 +817,28 @@ export function describeLiveSessionConflict(): string | null {
   const ids = listLiveSessionIds();
   if (ids.length === 0) return null;
   return `another multi-agent session is already running in this Cebab (${ids.join(', ')}); stop it first — possibly from another browser window.`;
+}
+
+/**
+ * Register S02: is there already a turn running for this session?
+ *
+ * `runOneTurn` used to go straight from resolving `sessionId` to
+ * `conn.inFlight.set(...)` with no check between. Two `send_message`s for one
+ * session then started parallel SDK queries against the same `--resume` id,
+ * and turn one's `finally` (`conn.inFlight.delete(sessionId)`) removed TURN
+ * TWO's entry — after which Stop, permission-mode changes and the active-runs
+ * badge all silently targeted nothing. `resolveRetryRateLimited` already
+ * guards the identical hazard for the retry path.
+ *
+ * Returns the operator-facing refusal, or `null` when it is safe to start.
+ * Exported for direct testing — the case body is one `send` around it.
+ */
+export function describeTurnInFlight(
+  inFlight: ReadonlyMap<string, unknown>,
+  sessionId: string,
+): string | null {
+  if (!inFlight.has(sessionId)) return null;
+  return 'that session already has a turn running; wait for it to finish or stop it first.';
 }
 
 export async function executeArchiveSession(args: {
@@ -4858,6 +4904,28 @@ async function runOneTurn(
   }
 
   const sessionId = msg.sessionId ?? randomUUID();
+  // Register S02: refuse a second turn on a session that already has one in
+  // flight. Without this, two `send_message`s for one session start parallel
+  // SDK queries against the same `--resume` id, and turn one's `finally`
+  // (`conn.inFlight.delete(sessionId)`) removes TURN TWO's entry — after
+  // which Stop, permission-mode changes and the active-runs badge all
+  // silently target nothing. `resolveRetryRateLimited` already guards the
+  // identical hazard for the retry path; this is the same rule at the main
+  // entry point.
+  //
+  // Before any side effect (no session row, no project touch, no spawn gate).
+  // A brand-new session takes a fresh `randomUUID()` and can never collide,
+  // so only a genuine resume is ever rejected.
+  const inFlightConflict = describeTurnInFlight(conn.inFlight, sessionId);
+  if (inFlightConflict) {
+    send(conn.ws, {
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: inFlightConflict,
+    });
+    return;
+  }
   if (!msg.sessionId) createSession(sessionId, project.id);
   touchProject(project.id);
 
@@ -5150,21 +5218,28 @@ async function runOneTurn(
     // stream via the typed `rate_limit_event` path; we skip it here to
     // avoid double-toasting.
     if (wrap.kind !== 'rate_limited') {
+      // Register S02b: `null` means "this ended deliberately, say nothing" —
+      // see `wrapperErrorDispatch`. The `wrapper_error` above still reaches
+      // the client (so the session banner can show it stopped) and the turn is
+      // still persisted to the transcript; what's suppressed is the sticky,
+      // durable inbox row that claimed a failure.
       const dispatch = wrapperErrorDispatch(wrap.kind, sessionId);
-      emitNotification(
-        {
-          class: 'operational',
-          severity: dispatch.severity,
-          dedupeKey: `${dispatch.auditKind}:${sessionId}`,
-          title: dispatch.title,
-          message: wrap.message,
-          sessionId,
-          sticky: true,
-          reasonCode: dispatch.reasonCode,
-          ...(dispatch.action ? { action: dispatch.action } : {}),
-        },
-        (out) => send(conn.ws, out),
-      );
+      if (dispatch) {
+        emitNotification(
+          {
+            class: 'operational',
+            severity: dispatch.severity,
+            dedupeKey: `${dispatch.auditKind}:${sessionId}`,
+            title: dispatch.title,
+            message: wrap.message,
+            sessionId,
+            sticky: true,
+            reasonCode: dispatch.reasonCode,
+            ...(dispatch.action ? { action: dispatch.action } : {}),
+          },
+          (out) => send(conn.ws, out),
+        );
+      }
     }
     // Cluster D Phase 4b: rate-limited classification → keep the
     // captured prompt for `retry_rate_limited` to find. Other kinds

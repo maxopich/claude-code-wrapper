@@ -189,6 +189,8 @@ function request(opts: {
   origin?: string;
   hostHeader?: string;
   extraHeaders?: Record<string, string>;
+  /** Register S03: the CORS preflight is an OPTIONS request. */
+  method?: 'GET' | 'OPTIONS';
 }): Promise<RawResponse> {
   const headers: Record<string, string> = {};
   if (opts.origin !== undefined) headers['Origin'] = opts.origin;
@@ -200,7 +202,7 @@ function request(opts: {
         host: TEST_HOST,
         port: serverPort,
         path: opts.path,
-        method: 'GET',
+        method: opts.method ?? 'GET',
         headers,
       },
       (res) => {
@@ -416,7 +418,9 @@ describe('[security] /session-log :: forensic safety_audit', () => {
       .prepare<
         [],
         { kind: string; reason_code: string; session_id: string | null; payload_json: string }
-      >('SELECT kind, reason_code, session_id, payload_json FROM safety_audit ORDER BY ts DESC LIMIT 1')
+      >(
+        'SELECT kind, reason_code, session_id, payload_json FROM safety_audit ORDER BY ts DESC LIMIT 1',
+      )
       .get()!;
     expect(row.kind).toBe('session.exported');
     expect(row.reason_code).toBe('exported_redacted');
@@ -436,10 +440,9 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     });
     expect(res.status).toBe(200);
     const row = getDb()
-      .prepare<
-        [],
-        { reason_code: string; payload_json: string }
-      >("SELECT reason_code, payload_json FROM safety_audit WHERE session_id = 'sess-raw'")
+      .prepare<[], { reason_code: string; payload_json: string }>(
+        "SELECT reason_code, payload_json FROM safety_audit WHERE session_id = 'sess-raw'",
+      )
       .get()!;
     expect(row.reason_code).toBe('exported_raw');
     expect(JSON.parse(row.payload_json).format).toBe('raw');
@@ -476,5 +479,82 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     expect(res.status).toBe(500);
     expect(res.body).not.toContain('sk-leak-me');
     expect(spy).toHaveBeenCalled();
+  });
+});
+
+// Register S03. The raw format requires the custom `x-cebab-acknowledge-raw`
+// header, which is NOT CORS-safelisted, so a browser fetch preflights first.
+// There was no OPTIONS route and no `Access-Control-Allow-Headers`, so the
+// preflight failed and the raw-export privilege path was unreachable from the
+// very web origin it exists for. curl worked, which is how it passed review.
+//
+// `Content-Disposition` was set but never exposed, so even a successful export
+// left the page unable to read the filename it was being sent.
+describe('[security] /session-log :: CORS preflight + exposed headers', () => {
+  test('an OPTIONS preflight from an allowed origin permits the ack header', async () => {
+    const res = await request({
+      method: 'OPTIONS',
+      path: `/session-log/sess-1?token=${token}`,
+      origin: 'http://localhost:5173',
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+    // The whole point: without this the browser never sends the real request.
+    expect(String(res.headers['access-control-allow-headers']).toLowerCase()).toContain(
+      RAW_ACK_HEADER,
+    );
+    expect(String(res.headers['access-control-allow-methods'])).toContain('GET');
+  });
+
+  test('the preflight is NOT a looser way in — a bad origin is refused', async () => {
+    // A preflight route that skipped the origin gate would hand an attacker
+    // page the CORS grant the GET withholds.
+    const res = await request({
+      method: 'OPTIONS',
+      path: `/session-log/sess-1?token=${token}`,
+      origin: 'https://evil.example',
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers['x-cebab-reject-reason']).toBe('origin_not_allowed');
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  test('the preflight applies the same Host gate as the GET', async () => {
+    const res = await request({
+      method: 'OPTIONS',
+      path: `/session-log/sess-1?token=${token}`,
+      origin: 'http://localhost:5173',
+      hostHeader: 'wrong.host:9999',
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers['x-cebab-reject-reason']).toBe('host_not_allowed');
+  });
+
+  test('the GET exposes Content-Disposition so the page can read the filename', async () => {
+    writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
+    const res = await request({
+      path: `/session-log/sess-1?token=${token}`,
+      origin: 'http://localhost:5173',
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain('attachment');
+    expect(String(res.headers['access-control-expose-headers'])).toContain('Content-Disposition');
+  });
+
+  test('the raw export actually completes with the ack header present', async () => {
+    // End-to-end for the path the preflight unblocks: header accepted, raw
+    // (unredacted) bytes served.
+    writeJsonl('sess-1', [{ apiKey: 'sk-raw-visible' }]);
+    const res = await request({
+      path: `/session-log/sess-1?token=${token}&format=raw`,
+      origin: 'http://localhost:5173',
+      hostHeader: defaultHostHeader(),
+      extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('sk-raw-visible');
   });
 });

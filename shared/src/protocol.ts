@@ -84,8 +84,24 @@ export const RESULT_SUBTYPES: ReadonlySet<ResultSubtype> = new Set([
   'error_max_structured_output_retries',
 ]);
 
+/**
+ * Why a turn ended badly.
+ *
+ * `aborted` is the odd one out and register S02b is why it exists: it means
+ * the turn was ENDED ON PURPOSE — the operator pressed Stop, or their browser
+ * went away mid-turn — not that anything failed. It used to classify as
+ * `process_crashed`, which meant a normal Stop left a sticky "Turn failed"
+ * inbox item with a Restart button, for a turn nobody lost — and sticky
+ * operational notifications are persisted, so it survived reload. Consumers
+ * should treat it as information, never as an error state.
+ */
 export type WrapperErrorKind =
-  'claude_not_found' | 'auth_expired' | 'rate_limited' | 'process_crashed' | 'parse_error';
+  | 'claude_not_found'
+  | 'auth_expired'
+  | 'rate_limited'
+  | 'process_crashed'
+  | 'parse_error'
+  | 'aborted';
 
 /**
  * Cluster A Phase 3: enumerated sub-codes for router-drop safety events.
