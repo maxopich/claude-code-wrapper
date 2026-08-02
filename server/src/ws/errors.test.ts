@@ -10,9 +10,22 @@ describe('classifyError', () => {
     expect(classifyError(err).kind).toBe('claude_not_found');
   });
 
-  test('AbortError (instance shape) → process_crashed', () => {
+  // Register S02b [security]. This asserted `process_crashed`, which is how a
+  // deliberate Stop — or a browser closing mid-turn — came to be recorded as a
+  // failure: the mapper turned that kind into a sticky, persisted "Turn
+  // failed" inbox row with a Restart button. An abort is an intentional end,
+  // and the classifier is where that distinction belongs.
+  test('[security] AbortError (instance shape) → aborted, not process_crashed', () => {
     const err = Object.assign(new Error('aborted'), { name: 'AbortError' });
-    expect(classifyError(err).kind).toBe('process_crashed');
+    expect(classifyError(err).kind).toBe('aborted');
+  });
+
+  test('the abort branch is keyed on the name, not on the message text', () => {
+    // A genuine crash whose message happens to contain "abort" must still be
+    // a crash — otherwise the narrow fix becomes a broad suppression.
+    expect(classifyError(new Error('the process aborted unexpectedly')).kind).toBe(
+      'process_crashed',
+    );
   });
 
   test('rate-limit phrasing → rate_limited', () => {

@@ -163,11 +163,16 @@ export function sessionLogFilePath(sessionId: string): string {
 export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {}): void {
   const allowedOrigins = buildAllowedOrigins();
 
-  app.get('/session-log/:sid', (req: Request, res: Response): void => {
+  /**
+   * The Origin + Host gate (same as /auth-token). Extracted so the GET and the
+   * OPTIONS preflight below cannot drift — a preflight route with a looser
+   * origin check would be a way in that the GET doesn't have.
+   *
+   * Returns false and has already answered 403 when the request is rejected.
+   */
+  const passesOriginHostGate = (req: Request, res: Response): boolean => {
     const origin = String(req.headers.origin ?? '');
     const host = String(req.headers.host ?? '');
-
-    // ── Origin + Host gate (same as /auth-token). ────────────────────
     if (origin && !allowedOrigins.has(origin)) {
       console.warn(`[http] /session-log reject: bad origin ${JSON.stringify(origin)}`);
       recordRejection({
@@ -178,7 +183,7 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       });
       res.setHeader('X-Cebab-Reject-Reason', 'origin_not_allowed');
       res.status(403).end();
-      return;
+      return false;
     }
     if (!isAllowedHost(host)) {
       console.warn(`[http] /session-log reject: bad host ${JSON.stringify(host)}`);
@@ -190,8 +195,44 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       });
       res.setHeader('X-Cebab-Reject-Reason', 'host_not_allowed');
       res.status(403).end();
-      return;
+      return false;
     }
+    return true;
+  };
+
+  /**
+   * Register S03: CORS preflight for the export.
+   *
+   * The raw format requires the custom `x-cebab-acknowledge-raw` header, which
+   * is NOT CORS-safelisted — so a browser fetch preflights. There was no
+   * OPTIONS route and no `Access-Control-Allow-Headers`, so the preflight
+   * failed and the raw-export privilege path was unreachable from the very
+   * web origin it was built for. (curl worked, which is how it passed review.)
+   *
+   * Gated on the same Origin + Host check as the GET. Deliberately NOT gated
+   * on the auth token: a preflight response carries no data, and requiring the
+   * token here only adds a failure mode. The GET still requires it.
+   */
+  app.options('/session-log/:sid', (req: Request, res: Response): void => {
+    if (!passesOriginHostGate(req, res)) return;
+    const origin = String(req.headers.origin ?? '');
+    if (origin) {
+      // Reflective CORS, gated on allowedOrigins immediately above.
+      // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', RAW_ACK_HEADER);
+    res.setHeader('Access-Control-Max-Age', '600');
+    res.status(204).end();
+  });
+
+  app.get('/session-log/:sid', (req: Request, res: Response): void => {
+    const origin = String(req.headers.origin ?? '');
+
+    // ── Origin + Host gate (same as /auth-token, shared with OPTIONS). ──
+    if (!passesOriginHostGate(req, res)) return;
     if (!origin) {
       console.warn('[http] /session-log: serving to empty-Origin client');
     }
@@ -270,6 +311,10 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
+      // Register S03: without this the page gets the file but cannot read the
+      // filename it was sent — `Content-Disposition` is not a CORS-safelisted
+      // RESPONSE header, so cross-origin JS can't see it unless it's exposed.
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     }
     const startMs = deps.getSessionStartMs?.(sid) ?? null;
     const filename = exportFilename(sid, startMs);

@@ -20,8 +20,14 @@ export function classifyError(err: unknown): { kind: WrapperErrorKind; message: 
   if (e.code === 'ENOENT' && (e.syscall === 'spawn' || /claude/i.test(message))) {
     return { kind: 'claude_not_found', message };
   }
+  // Register S02b: an abort is a deliberate end, not a failure. This used to
+  // return `process_crashed`, so closing the browser mid-turn — or a Stop
+  // whose interrupt rejects — left the operator a sticky "Turn failed" inbox
+  // row with a Restart button for a turn they ended themselves. Sticky
+  // operational notifications are persisted by the dispatcher, so the false
+  // failure survived reload.
   if (e.name === 'AbortError') {
-    return { kind: 'process_crashed', message };
+    return { kind: 'aborted', message };
   }
 
   if (/(^|\s)(claude.*not.*found|spawn.*claude.*ENOENT)/i.test(message)) {
