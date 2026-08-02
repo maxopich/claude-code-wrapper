@@ -39,7 +39,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
-import { newFileMode, secureMkdir } from '../data_perms.js';
+import { secureFile, secureMkdir } from '../data_perms.js';
 
 /** FIFO cap on the in-process ring. Comfortably exceeds the 5-min window
  *  for any realistic rate (a misconfigured client retry-loop at 1Hz only
@@ -114,12 +114,12 @@ export function recordRejection(rec: Omit<RejectionRecord, 'ts'> & { ts?: number
   // normally created at server boot but tests may swap it under us.
   try {
     // H01: rejection records name origins and hosts, so they get the same
-    // owner-only treatment as the transcripts they sit beside.
+    // owner-only treatment as the transcripts they sit beside. Tightening
+    // AFTER the append rather than passing a create `mode` also covers a log
+    // left 0644 by a build that predates this — `mode` only applies on create.
     secureMkdir(rejectionLogDir());
-    fs.appendFileSync(rejectionLogPath(), JSON.stringify(entry) + '\n', {
-      encoding: 'utf8',
-      mode: newFileMode(),
-    });
+    fs.appendFileSync(rejectionLogPath(), JSON.stringify(entry) + '\n', { encoding: 'utf8' });
+    secureFile(rejectionLogPath());
   } catch (err) {
     console.warn(`[origin_rejections] disk log append failed: ${(err as Error).message}`);
   }

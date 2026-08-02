@@ -141,8 +141,12 @@ describe('[security] transcript permissions', () => {
     await logEvent('sess-old', { n: 2 });
     closeLogger();
 
+    // Read before stat: a stat-then-read pair on one path is the check-then-use
+    // shape CodeQL's js/file-system-race flags, and the ordering is arbitrary
+    // here anyway.
+    const contents = fs.readFileSync(p, 'utf8');
     expect(fs.statSync(p).mode & 0o777).toBe(0o600);
     // And the pre-existing content is still there — tightening, not clobbering.
-    expect(fs.readFileSync(p, 'utf8')).toContain('"old":1');
+    expect(contents).toContain('"old":1');
   });
 });
