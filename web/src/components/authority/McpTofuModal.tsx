@@ -140,6 +140,18 @@ export function McpTofuModal(props: {
             ? 'The binary at this path has a different sha than the one you previously trusted. Approve only if you expect the change (e.g. a legitimate upgrade).'
             : 'The Cebab session resolver has never seen this MCP server declaration before. Approve only if you intentionally added it.'}
         </p>
+        {/*
+          Register H04. Until 2026-08-02 Deny recorded a decision and the
+          binary loaded anyway — the operator was never told. It now blocks the
+          server from starting, so this line says plainly what the buttons do.
+          If the enforcement ever regresses, this copy has to change with it.
+        */}
+        <p className="gate-modal-help gate-modal-help-secondary">
+          Either Deny stops this server from starting for the run being gated, and withholds its
+          tools. <strong>Deny once</strong> re-asks on your next connection;{' '}
+          <strong>Deny &amp; remember</strong> persists the decision and applies it silently from
+          then on. Every choice is recorded in the audit log.
+        </p>
         <div className="gate-modal-buttons">
           <button
             type="button"

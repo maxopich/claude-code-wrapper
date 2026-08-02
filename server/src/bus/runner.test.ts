@@ -1518,3 +1518,125 @@ describe('AgentRunner stalled-turn watchdog', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Register H04: a denied MCP server must not reach a bus agent's spawn.
+//
+// The bus is where this matters most — every worker and chain participant runs
+// with settingSources ['user','project','local'], so a participant project's
+// `.mcp.json` loads on every hop with no human gate on any tool call.
+// ---------------------------------------------------------------------------
+describe('[security] AgentRunner — MCP denials reach the spawn', () => {
+  test('no denials leaves the options untouched', async () => {
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-none')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await runner.deliverTurn('alpha', 'go');
+    // Byte-identical to before H04 for the common case.
+    expect(calls[0]!.deniedMcpServers).toBeUndefined();
+  });
+
+  test('a denial registered up-front binds on the FIRST turn', async () => {
+    // Not the second: a worker's first hop is exactly where a hostile
+    // `.mcp.json` would land, so applying the denial after start would be too
+    // late by the only turn that matters.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-first')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', deniedMcpServers: ['evil'] });
+    await runner.deliverTurn('alpha', 'go');
+    expect(calls[0]!.deniedMcpServers).toEqual(['evil']);
+  });
+
+  test('applyMcpDenials tightens a LIVE agent from its next turn', async () => {
+    // The mid-session paths — `addWorker` and `continue_multi_agent` — re-gate
+    // a session whose specs already exist. Re-registering would clobber the
+    // rest of a live spec, so denials are merged in place instead.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-live')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', projectId: 42 });
+    await runner.deliverTurn('alpha', 'before');
+    expect(calls[0]!.deniedMcpServers).toBeUndefined();
+
+    runner.applyMcpDenials(42, ['evil']);
+    await runner.deliverTurn('alpha', 'after');
+    expect(calls[1]!.deniedMcpServers).toEqual(['evil']);
+  });
+
+  test('applyMcpDenials only touches agents of that project', async () => {
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-scope')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', projectId: 1 });
+    runner.register({ name: 'beta', cwd: '/tmp/beta', projectId: 2 });
+    runner.applyMcpDenials(1, ['evil']);
+
+    await runner.deliverTurn('alpha', 'a');
+    await runner.deliverTurn('beta', 'b');
+    expect(calls[0]!.deniedMcpServers).toEqual(['evil']);
+    // A denial for project 1 must not silently strip project 2's servers.
+    expect(calls[1]!.deniedMcpServers).toBeUndefined();
+  });
+
+  test('applyMcpDenials unions rather than replaces', async () => {
+    // A deny_once is scoped to the operator's connection, so a later gate pass
+    // may not re-report it. Forgetting it mid-session would silently re-admit
+    // a server the operator already refused.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-union')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', projectId: 9, deniedMcpServers: ['one'] });
+    runner.applyMcpDenials(9, ['two']);
+    await runner.deliverTurn('alpha', 'go');
+    expect([...calls[0]!.deniedMcpServers!].sort()).toEqual(['one', 'two']);
+  });
+
+  test('a denial composes with the orchestrator delegate-only tool lock', async () => {
+    // Both restrictions have to survive together — `runClaude` unions the two
+    // disallowedTools lists rather than letting either overwrite the other.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-both')]);
+      },
+    });
+    runner.register({
+      name: 'orch',
+      cwd: '/tmp/orch',
+      toolPolicy: 'delegate-only',
+      deniedMcpServers: ['evil'],
+    });
+    await runner.deliverTurn('orch', 'go');
+    expect(calls[0]!.deniedMcpServers).toEqual(['evil']);
+    expect(calls[0]!.disallowedTools).toContain('Bash');
+  });
+});

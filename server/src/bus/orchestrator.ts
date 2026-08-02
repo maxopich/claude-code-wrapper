@@ -147,6 +147,13 @@ export type StartOrchestratorOpts = {
   workers: ResolvedAgent[];
   initialPrompt: string;
   workspaceRoot: string;
+  /**
+   * Register H04: projectId → MCP server names the operator denied at the
+   * pre-spawn TOFU gate. Applied to each worker's spec at `register()` time,
+   * so the denial is in force on the worker's very first turn rather than
+   * from the second one on. Omit when nothing was denied (the common case).
+   */
+  mcpDenials?: ReadonlyMap<number, readonly string[]>;
   lifecycle?: MultiAgentLifecycle;
   onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
@@ -257,7 +264,17 @@ export type OrchestratorSessionHandle = {
   /** Register B01: pass the epoch `rebind` handed you and a stale window's
    *  close can't silence the live one. Bare call is unconditional. */
   detach: (sinkEpoch?: number) => void;
-  addWorker: (projectId: number) => Promise<AddWorkerResult>;
+  /** `deniedMcpServers`: register H04 — the gate result for THIS project,
+   *  applied at register time because the new worker is delivered a turn in
+   *  the same call. */
+  addWorker: (projectId: number, deniedMcpServers?: readonly string[]) => Promise<AddWorkerResult>;
+  /**
+   * Register H04: apply MCP denials to already-registered participants of
+   * `projectId`. Used by `continue_multi_agent`, which re-gates a session
+   * rebuilt by R-B reconstruction — the specs already exist there, so the
+   * denial is merged in rather than passed at registration.
+   */
+  applyMcpDenials: (projectId: number, serverNames: readonly string[]) => void;
   setLifecycle: (lifecycle: MultiAgentLifecycle) => Promise<void>;
   getCurrentWorkerNames: () => readonly string[];
   getCurrentLifecycle: () => MultiAgentLifecycle;
@@ -1113,6 +1130,9 @@ export function wireOrchestratorSession(p: {
   lifecycle: MultiAgentLifecycle;
   paths: SessionPaths;
   workers: ResolvedAgent[];
+  /** Register H04 — see `StartOrchestratorOpts.mcpDenials`. Also reaches the
+   *  R-B reconstruct path, which calls this directly. */
+  mcpDenials?: StartOrchestratorOpts['mcpDenials'];
   onEvent: StartOrchestratorOpts['onEvent'];
   onEnded: StartOrchestratorOpts['onEnded'];
   onActivity?: StartOrchestratorOpts['onActivity'];
@@ -1521,6 +1541,9 @@ export function wireOrchestratorSession(p: {
   // every bus turn for that worker. The consultant-mode guardrail in
   // `runtime.ts` is the only behavioral brake.
   for (const w of p.workers) {
+    // H04: denials must be on the spec BEFORE the first turn — a worker's
+    // first hop is where a hostile `.mcp.json` would land.
+    const denied = p.mcpDenials?.get(w.projectId);
     runner.register({
       name: w.agentName,
       cwd: w.cwd,
@@ -1528,6 +1551,7 @@ export function wireOrchestratorSession(p: {
       // Cluster G Phase 3 (G1): see chain.ts mirror — per-participant
       // project for the active-runs registry snapshot.
       projectId: w.projectId,
+      ...(denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {}),
     });
   }
 
@@ -1653,7 +1677,10 @@ export function wireOrchestratorSession(p: {
     initialKickedAgents: p.initialKickedAgents,
   });
 
-  async function addWorker(projectId: number): Promise<AddWorkerResult> {
+  async function addWorker(
+    projectId: number,
+    deniedMcpServers?: readonly string[],
+  ): Promise<AddWorkerResult> {
     if (workerProjectIds.includes(projectId)) {
       throw new Error(`project ${projectId} is already a participant in this session`);
     }
@@ -1671,6 +1698,12 @@ export function wireOrchestratorSession(p: {
       // initial-workers loop so mid-run added workers also appear in the
       // active-runs snapshot with the right project.
       projectId,
+      // H04: this function registers and then `deliver`s in the same breath,
+      // so the caller's gate result has to arrive HERE — applying it after
+      // the call would land one turn too late.
+      ...(deniedMcpServers && deniedMcpServers.length > 0
+        ? { deniedMcpServers: [...deniedMcpServers] }
+        : {}),
     });
     router.registerWorker(newAgent.agentName);
     addParticipant(sessionId, projectId, 'worker', null);
@@ -1739,6 +1772,7 @@ export function wireOrchestratorSession(p: {
       router.detach(sinkEpoch);
     },
     addWorker,
+    applyMcpDenials: (projectId, serverNames) => runner.applyMcpDenials(projectId, serverNames),
     setLifecycle: setLifecycleHandle,
     getCurrentWorkerNames: () => router.getWorkerNames(),
     getCurrentLifecycle: () => router.getLifecycle(),
@@ -1864,6 +1898,7 @@ export async function startOrchestratorSession(
     lifecycle,
     paths,
     workers: opts.workers,
+    ...(opts.mcpDenials ? { mcpDenials: opts.mcpDenials } : {}),
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onActivity: opts.onActivity,

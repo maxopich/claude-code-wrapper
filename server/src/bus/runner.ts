@@ -282,6 +282,17 @@ export type AgentSpec = {
    * unrestricted, the worker/chain posture (byte-identical to before).
    */
   toolPolicy?: 'delegate-only';
+  /**
+   * Register H04: MCP server names the operator denied for this agent's
+   * project at the TOFU gate. Read fresh from the spec on every turn, so
+   * `applyMcpDenials` can tighten a live session (mid-run `addWorker`, or a
+   * `continue_multi_agent` after a restart re-gates the participants) without
+   * re-registering the agent.
+   *
+   * Absent (the default) = no denials, and the run options are byte-identical
+   * to before this existed.
+   */
+  deniedMcpServers?: string[];
 };
 
 export type AgentRunnerDeps = {
@@ -569,6 +580,30 @@ export class AgentRunner {
   }
 
   /**
+   * Register H04: apply the operator's MCP denials to every registered agent
+   * rooted in `projectId`. Takes effect on that agent's NEXT turn.
+   *
+   * Exists because two spawn paths re-gate a session that is already running —
+   * `addWorker` (mid-run participant) and `continue_multi_agent` (R-B
+   * reconstruction, where a participant's `.mcp.json` may have changed across
+   * the restart). Re-`register()`ing to carry the denial would clobber the
+   * rest of a live spec, so denials are merged in place instead.
+   *
+   * Union, never replace: a server denied earlier in the session stays denied
+   * even if a later gate pass does not re-report it (a `deny_once` is scoped
+   * to the connection, and forgetting it mid-session would silently re-admit
+   * a server the operator refused).
+   */
+  applyMcpDenials(projectId: number, serverNames: readonly string[]): void {
+    if (serverNames.length === 0) return;
+    for (const [name, spec] of this.specs.entries()) {
+      if (spec.projectId !== projectId) continue;
+      const merged = new Set([...(spec.deniedMcpServers ?? []), ...serverNames]);
+      this.specs.set(name, { ...spec, deniedMcpServers: [...merged] });
+    }
+  }
+
+  /**
    * Pre-load an agent's last-completed CLI session id so the NEXT
    * `deliverTurn` resumes its real transcript instead of starting fresh.
    * Used by R-B reconstruction to rehydrate the in-memory map from the
@@ -845,12 +880,19 @@ export class AgentRunner {
     const toolLock =
       spec.toolPolicy === 'delegate-only' ? { disallowedTools: [...DELEGATE_ONLY_DISALLOWED] } : {};
 
+    // H04: MCP servers this agent's operator denied. Read from `this.specs`
+    // at turn time (not captured at register time) so a denial applied
+    // mid-session takes effect on the very next hop.
+    const denied = this.specs.get(agentName)?.deniedMcpServers ?? spec.deniedMcpServers;
+    const mcpDenial = denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {};
+
     const runner = factory({
       cwd: spec.cwd,
       prompt: promptText,
       ...(prior ? { resume: prior } : {}),
       ...askGate,
       ...toolLock,
+      ...mcpDenial,
       settingSources: spec.settingSources ?? ['user'],
       mcpServers: {
         // Sole registration. The `bus` alias that shimmed the

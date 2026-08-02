@@ -28,6 +28,28 @@ export type RunOptions = {
    * tools). Works in any permission mode.
    */
   disallowedTools?: string[];
+  /**
+   * Register H04: MCP server NAMES the operator denied at the TOFU gate.
+   *
+   * Before this existed, a denial was persisted and audited and then ignored —
+   * the operator clicked Deny and the binary loaded anyway. Callers pass the
+   * names; `runClaude` owns how they are enforced, so no call site can get
+   * half of it right.
+   *
+   * Two layers, both measured against SDK 0.3.201 with a real MCP stdio
+   * server (reading `system/init.mcp_servers`):
+   *
+   *   settings.deniedMcpServers  → server ABSENT from mcp_servers, tools 0.
+   *                                The process never starts. The real gate.
+   *   disallowedTools mcp__x__*  → server still 'connected', tools 0. Strips
+   *                                the tools but does NOT stop startup side
+   *                                effects. Defense-in-depth only.
+   *
+   * Passed through the SDK's inline `settings` (flag) layer, so nothing is
+   * written to disk — the CLAUDE.md "Cebab writes nothing into the operator
+   * project" guarantee is preserved.
+   */
+  deniedMcpServers?: string[];
   /** Required by the SDK when permissionMode is 'bypassPermissions'. */
   allowDangerouslySkipPermissions?: boolean;
   /** External cancellation. */
@@ -96,6 +118,29 @@ export function getScrubbedEnvVars(env: NodeJS.ProcessEnv): string[] {
   return SCRUBBED_ENV_VAR_NAMES.filter((name) => typeof env[name] === 'string' && env[name] !== '');
 }
 
+/**
+ * Register H04: turn denied MCP server names into the two SDK knobs that
+ * enforce them. Exported so tests can assert the exact shape without spawning.
+ *
+ * Returns `{}` for an empty list so a run with no denials is byte-identical to
+ * before — the common case must not gain a `settings` layer it didn't have.
+ */
+export function mcpDenialOptions(names: readonly string[] | undefined): {
+  settings?: Options['settings'];
+  disallowedTools?: string[];
+} {
+  if (!names || names.length === 0) return {};
+  // De-duplicate: the same server can be refused for two reasons in one pass
+  // (a persisted denied_remember AND a per-session deny_once).
+  const unique = [...new Set(names)];
+  return {
+    settings: { deniedMcpServers: unique.map((serverName) => ({ serverName })) },
+    // Server-level wildcard is native SDK syntax (`mcp__server__*` removes
+    // every tool from that server) — no need to enumerate tool names.
+    disallowedTools: unique.map((n) => `mcp__${n}__*`),
+  };
+}
+
 export function runClaude(opts: RunOptions): Query {
   const options: Options = {
     cwd: opts.cwd,
@@ -114,8 +159,13 @@ export function runClaude(opts: RunOptions): Query {
   if (opts.resume) options.resume = opts.resume;
   if (opts.maxTurns !== undefined) options.maxTurns = opts.maxTurns;
   if (opts.mcpServers) options.mcpServers = opts.mcpServers;
-  if (opts.disallowedTools && opts.disallowedTools.length > 0)
-    options.disallowedTools = opts.disallowedTools;
+  // H04: fold the operator's MCP denials in. Union with any caller-supplied
+  // `disallowedTools` (the bus orchestrator's delegate-only lock) rather than
+  // overwriting either — both restrictions must survive together.
+  const denial = mcpDenialOptions(opts.deniedMcpServers);
+  const allDisallowed = [...(opts.disallowedTools ?? []), ...(denial.disallowedTools ?? [])];
+  if (allDisallowed.length > 0) options.disallowedTools = allDisallowed;
+  if (denial.settings) options.settings = denial.settings;
   if (opts.allowDangerouslySkipPermissions) options.allowDangerouslySkipPermissions = true;
 
   return query({ prompt: opts.prompt, options });

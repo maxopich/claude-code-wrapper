@@ -3201,11 +3201,20 @@ export type ToolView = {
 /**
  * Cluster B Phase 3 (BE-B5 / §4.2): MCP server view in the AuthorityPanel.
  *
- * `scope` attributes which `settings*.json` layer declared the server (Cebab
- * applies project > local > user precedence; see resolver §4.3). The
+ * `scope` attributes which file declared the server (Cebab applies
+ * project > local > user precedence; see resolver §4.3). The
  * `'cebab-injected'` scope is reserved for the bus_send MCP that Cebab pins
  * per-agent from `bus/runner.ts` — distinct from operator-declared MCPs so
  * the UI can mark it as "Cebab-managed, not editable here".
+ *
+ * `'mcp-json'` is the project-root `.mcp.json`, and it is the scope that
+ * matters most: measured against SDK 0.3.201, it is the ONLY project-scoped
+ * location the CLI actually loads MCP servers from. `mcpServers` written into
+ * `.claude/settings.json` is not read at any scope — user, project or local —
+ * so a `'project'`-scoped row here describes a declaration that never runs,
+ * while an `'mcp-json'` row describes one that does. It loads iff the spawn's
+ * `settingSources` includes `'project'`, which is every bus participant and
+ * every trusted single-agent project.
  *
  * `'unknown'` means the SDK reported the server but it matched no settings
  * layer Cebab read and is not a Cebab injection. It exists as its own value
@@ -3231,7 +3240,7 @@ export type ToolView = {
 export type McpServerView = {
   name: string;
   status: string;
-  scope: 'user' | 'project' | 'local' | 'cebab-injected' | 'unknown';
+  scope: 'user' | 'project' | 'local' | 'mcp-json' | 'cebab-injected' | 'unknown';
   originPath?: string;
   tools: string[];
   config?: {

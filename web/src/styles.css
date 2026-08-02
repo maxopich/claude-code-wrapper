@@ -7435,6 +7435,15 @@ pre {
   line-height: 1.45;
 }
 
+/* Register H04: the "what Deny actually does" line under the primary help
+   text. Quieter than the warning above it — it is reassurance about the
+   controls, not another alarm — but it must stay legible, so it uses the
+   same --fg-1 rather than the muted token (which fails AA; see register U04). */
+.gate-modal-help-secondary {
+  margin-top: var(--s-2);
+  opacity: 0.9;
+}
+
 .gate-modal-facts {
   margin: 0;
   display: grid;
