@@ -1,9 +1,24 @@
 import { createHash } from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { getDb } from '../db.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
+import { readFileBounded } from '../safe_fs.js';
+
+/**
+ * Register H02: ceiling on a binary we will hash for TOFU pinning.
+ *
+ * 64 MiB is far above any real MCP server target (node scripts, python
+ * entry points, modest native binaries) and far below "wedges the box".
+ *
+ * Over the cap we return `null` — we do NOT hash a bounded prefix. That
+ * distinction is the whole point: `binarySha` exists so a later spawn can be
+ * compared against a pin, and a prefix hash would make two different binaries
+ * that share their first N bytes compare EQUAL. Refusing to identify a file
+ * is a state this code already handles correctly; silently weakening what
+ * identification means is not.
+ */
+const MAX_HASHABLE_BINARY_BYTES = 64 * 1024 * 1024;
 
 // Cluster B Phase 4 (§4.4): TOFU repository for MCP server trust decisions.
 //
@@ -84,16 +99,23 @@ export function computeBinarySha(command: string): string | null {
   // `python3` are deliberately treated as unresolvable.
   const isAbsolute = path.isAbsolute(command);
   if (!isAbsolute) return null;
-  try {
-    const bytes = fs.readFileSync(command);
-    return createHash('sha256').update(bytes).digest('hex');
-  } catch {
-    // File missing, permission denied, anything else — treat as
-    // unresolvable. The inspector will render the server with binarySha
-    // absent and the TOFU gate (Phase 4b) will fire a `first_seen` event
-    // (the operator should investigate why the path doesn't resolve).
+
+  // Register H02: `command` comes from a PROJECT's `.claude/settings*.json`,
+  // so it is attacker-chosen on an untrusted project. This used to be a bare
+  // `fs.readFileSync(command)` — no type check, no size cap, no O_NONBLOCK —
+  // reached from `project_authority.resolveMcpAuthority` on the way into
+  // every session start. `command: "/dev/zero"` was enough to park the
+  // event loop for the whole server; a huge file exhausted memory.
+  const read = readFileBounded(command, MAX_HASHABLE_BINARY_BYTES);
+  if (!read.ok) {
+    // Every refusal collapses to the SAME `null` this function already
+    // returned for a missing or unreadable path, so nothing downstream
+    // changes shape: the inspector renders the server without a pinned
+    // hash and the TOFU gate (Phase 4b) fires `first_seen`, which is the
+    // correct posture for "we could not identify this binary".
     return null;
   }
+  return createHash('sha256').update(read.bytes).digest('hex');
 }
 
 // ---- write path ----

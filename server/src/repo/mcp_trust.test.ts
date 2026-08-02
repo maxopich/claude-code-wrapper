@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -420,5 +421,87 @@ describe('listForServer — history ordering', () => {
 
   test('returns empty when no decisions recorded', () => {
     expect(listForServer('nope', '/p/settings.json')).toEqual([]);
+  });
+});
+
+/**
+ * [security] Register H02. `computeBinarySha` used to be a bare
+ * `fs.readFileSync(command)` on an ABSOLUTE PATH TAKEN FROM A PROJECT's
+ * `.claude/settings*.json`, reached from `resolveProjectAuthority` on the way
+ * into every session start. No file-type check, no size cap, no O_NONBLOCK.
+ *
+ * Reproduced before fixing: a bare `readFileSync` on a named pipe with no
+ * writer never returns — a child process doing it had to be SIGKILLed after
+ * 5s, while the bounded reader returns in ~1ms. On a single-threaded server
+ * that is the whole process, not one request.
+ */
+describe('[security] computeBinarySha — hostile paths from project settings', () => {
+  const posixOnly = process.platform === 'win32' ? test.skip : test;
+
+  test('an ordinary binary still hashes to the same value as before', () => {
+    // The regression that matters most: pins are compared across sessions, so
+    // the hash of a normal file must not change with this refactor.
+    const p = path.join(tmpRoot, 'ordinary.bin');
+    const contents = Buffer.from('#!/usr/bin/env node\nconsole.log(1)\n');
+    fs.writeFileSync(p, contents);
+    const expected = createHash('sha256').update(contents).digest('hex');
+    expect(computeBinarySha(p)).toBe(expected);
+  });
+
+  test('refuses an oversized file rather than hashing a prefix', () => {
+    // The register suggested "read a bounded prefix". That would silently
+    // change what binarySha MEANS — two different binaries sharing their first
+    // N bytes would pin identically, defeating the TOFU comparison the value
+    // exists for. `null` is an outcome this code already handles correctly.
+    const p = path.join(tmpRoot, 'huge.bin');
+    const fd = fs.openSync(p, 'w');
+    try {
+      // Sparse: 65 MiB of address space, ~no bytes written.
+      fs.ftruncateSync(fd, 65 * 1024 * 1024);
+    } finally {
+      fs.closeSync(fd);
+    }
+    expect(computeBinarySha(p)).toBeNull();
+  }, 30_000);
+
+  test('a modest binary is still hashed — the cap must not reject real ones', () => {
+    const p = path.join(tmpRoot, 'modest.bin');
+    fs.writeFileSync(p, Buffer.alloc(1024 * 1024, 0x41));
+    expect(computeBinarySha(p)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('refuses a directory', () => {
+    expect(computeBinarySha(tmpRoot)).toBeNull();
+  });
+
+  posixOnly(
+    'refuses a FIFO without hanging — the DoS',
+    () => {
+      const fifo = path.join(tmpRoot, 'mcp-pipe');
+      execFileSync('mkfifo', [fifo]);
+      const started = Date.now();
+      expect(computeBinarySha(fifo)).toBeNull();
+      // A blocking open would sit here indefinitely, not for two seconds.
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+    10_000,
+  );
+
+  posixOnly(
+    'refuses an infinite character device',
+    () => {
+      expect(computeBinarySha('/dev/zero')).toBeNull();
+    },
+    10_000,
+  );
+
+  test('bare commands are still unresolvable (unchanged)', () => {
+    expect(computeBinarySha('npx')).toBeNull();
+    expect(computeBinarySha('node')).toBeNull();
+    expect(computeBinarySha('')).toBeNull();
+  });
+
+  test('a missing absolute path is still unresolvable (unchanged)', () => {
+    expect(computeBinarySha(path.join(tmpRoot, 'does-not-exist'))).toBeNull();
   });
 });

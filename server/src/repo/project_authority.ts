@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type {
@@ -8,7 +7,18 @@ import type {
   ProjectAuthority,
   ToolView,
 } from '@cebab/shared/protocol';
+import { isSensitiveKey } from '@cebab/shared';
 import { SCRUBBED_ENV_POSTURES, SCRUBBED_ENV_VAR_NAMES } from '../runner/claude.js';
+import { readTextBounded } from '../safe_fs.js';
+
+/**
+ * Register H03: ceiling on a project's `.claude/settings*.json`.
+ *
+ * Real ones are a few KB. 1 MiB leaves enormous headroom for a legitimately
+ * baroque config while refusing the multi-gigabyte file that would otherwise
+ * be read whole into memory during a pre-spawn resolve.
+ */
+const MAX_SETTINGS_BYTES = 1024 * 1024;
 import { getProject } from './projects.js';
 import { checkTrust, computeBinarySha, listForServer } from './mcp_trust.js';
 import { listSessionsForProject } from './sessions.js';
@@ -89,12 +99,29 @@ const CEBAB_INJECTED_MCP_NAMES: ReadonlySet<string> = new Set(['cebab_bus']);
  * once on session start.
  */
 function readSettingsFile(p: string): RawSettings | null {
+  // Register H03: this file belongs to the PROJECT, so on an untrusted one it
+  // is attacker-controlled, and this runs during the pre-spawn authority
+  // resolve — on the way into every session start. It used to be a bare
+  // `fs.readFileSync(p, 'utf8')`: a FIFO left at `.claude/settings.json`
+  // parked the single-threaded event loop for the whole server, and a
+  // multi-gigabyte file exhausted memory. `readFileBounded` opens once with
+  // O_NONBLOCK, fstats that descriptor (not the path — closing the TOCTOU
+  // swap window), rejects non-regular files and caps the size.
+  const read = readTextBounded(p, MAX_SETTINGS_BYTES);
+  if (!read.ok) {
+    // 'unreadable' covers the ENOENT case this function has always treated
+    // as a silent "no rules from this scope". The other refusals mean the
+    // path exists but is hostile or absurd, which the operator should hear
+    // about exactly once — same posture as malformed JSON below.
+    if (read.refusal !== 'unreadable') {
+      console.warn(`[project_authority] refused to read ${p}: ${read.refusal}`);
+    }
+    return null;
+  }
   try {
-    const raw = fs.readFileSync(p, 'utf8');
-    return JSON.parse(raw) as RawSettings;
+    return JSON.parse(read.text) as RawSettings;
   } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    console.warn(`[project_authority] could not read ${p}: ${String(e)}`);
+    console.warn(`[project_authority] could not parse ${p}: ${String(e)}`);
     return null;
   }
 }
@@ -274,7 +301,20 @@ export function detectEnvInjections(layers: SettingsLayer[]): EnvInjection[] {
   for (const layer of layers) {
     if (!layer.data?.env) continue;
     for (const envKey of Object.keys(layer.data.env)) {
-      if (!scrubbed.has(envKey)) continue;
+      // Register H05: this used to be `if (!scrubbed.has(envKey)) continue`,
+      // i.e. only the five Anthropic/cloud-backend switches counted. But this
+      // list is what `session_start_gate.awaitEnvInjectionAck` gates on, and
+      // it returns immediately when the list is EMPTY — so a project
+      // declaring `env: { GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY, NPM_TOKEN }`
+      // produced no gate, no operator prompt and no audit row, while the SDK
+      // layered those values straight into the agent's spawn env.
+      //
+      // `isSensitiveKey` is the redactor's own key heuristic, shared rather
+      // than re-implemented, so a name masked in a transcript is a name
+      // prompted for here. Fail-closed by design: it will also match things
+      // like AUTH_ENABLED or TOKEN_LIMIT, and asking about a non-credential
+      // is a far cheaper mistake than silently shipping a real one.
+      if (!scrubbed.has(envKey) && !isSensitiveKey(envKey)) continue;
       out.push({
         envKey,
         scope: layer.scope,

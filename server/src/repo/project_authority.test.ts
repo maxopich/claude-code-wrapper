@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -937,5 +938,166 @@ describe('[security] unattributable SDK-reported MCP servers', () => {
       scope: 'unknown',
       trust: 'unknown',
     });
+  });
+});
+
+/**
+ * [security] Register H03. `readSettingsFile` was a bare
+ * `fs.readFileSync(p, 'utf8')` on a file the PROJECT owns, run during the
+ * pre-spawn authority resolve — i.e. on the way into every session start.
+ * No regular-file check, no size cap, no O_NONBLOCK.
+ *
+ * Reproduced before fixing: a bare readFileSync on a FIFO with no writer
+ * never returns (a child process doing it had to be SIGKILLed at 5s). On a
+ * single-threaded server that is the whole process wedged by a sibling repo.
+ */
+describe('[security] readSettingsFile — hostile settings files', () => {
+  const posixOnly = process.platform === 'win32' ? test.skip : test;
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-h03-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('an ordinary settings file still parses (unchanged)', () => {
+    const p = path.join(dir, 'settings.json');
+    fs.writeFileSync(p, JSON.stringify({ env: { NODE_ENV: 'production' } }));
+    expect(_testing.readSettingsFile(p)).toEqual({ env: { NODE_ENV: 'production' } });
+  });
+
+  test('a missing file is still "no rules from this scope" (unchanged)', () => {
+    expect(_testing.readSettingsFile(path.join(dir, 'absent.json'))).toBeNull();
+  });
+
+  test('malformed JSON is still null (unchanged)', () => {
+    const p = path.join(dir, 'bad.json');
+    fs.writeFileSync(p, '{ not json');
+    expect(_testing.readSettingsFile(p)).toBeNull();
+  });
+
+  test('refuses an oversized settings file instead of reading it whole', () => {
+    const p = path.join(dir, 'huge.json');
+    const fd = fs.openSync(p, 'w');
+    try {
+      // 2 MiB, over the 1 MiB cap. Sparse — the point is the declared size.
+      fs.ftruncateSync(fd, 2 * 1024 * 1024);
+    } finally {
+      fs.closeSync(fd);
+    }
+    expect(_testing.readSettingsFile(p)).toBeNull();
+  }, 30_000);
+
+  test('refuses a directory where a settings file should be', () => {
+    const p = path.join(dir, 'settings.json');
+    fs.mkdirSync(p);
+    expect(_testing.readSettingsFile(p)).toBeNull();
+  });
+
+  posixOnly(
+    'refuses a FIFO without hanging — the DoS',
+    () => {
+      const p = path.join(dir, 'settings.json');
+      execFileSync('mkfifo', [p]);
+      const started = Date.now();
+      expect(_testing.readSettingsFile(p)).toBeNull();
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+    10_000,
+  );
+
+  posixOnly(
+    'a FIFO in a real layer load degrades to no rules, it does not wedge',
+    () => {
+      // End to end through the actual resolver entry point, not just the reader:
+      // a hostile project must yield "no rules from this scope" and return.
+      const claudeDir = path.join(dir, '.claude');
+      fs.mkdirSync(claudeDir, { recursive: true });
+      execFileSync('mkfifo', [path.join(claudeDir, 'settings.json')]);
+      const started = Date.now();
+      const layers = _testing.loadSettingsLayers(dir, ['project']);
+      expect(Date.now() - started).toBeLessThan(2000);
+      expect(layers).toHaveLength(1);
+      expect(layers[0].data).toBeNull();
+    },
+    10_000,
+  );
+});
+
+/**
+ * Register H05. `detectEnvInjections` filtered on the five-name
+ * SCRUBBED_ENV_VAR_NAMES list, and `session_start_gate.awaitEnvInjectionAck`
+ * returns immediately when that list comes back EMPTY. So a project declaring
+ * GITHUB_TOKEN / AWS_SECRET_ACCESS_KEY / NPM_TOKEN produced no gate, no
+ * operator prompt and no audit row, while the SDK layered those values into
+ * the agent's spawn env.
+ */
+describe('detectEnvInjections — non-Anthropic credentials (H05)', () => {
+  test('a GitHub token now produces an injection row', () => {
+    const layers: Layer[] = [fixtureLayer('project', { env: { GITHUB_TOKEN: 'ghp_xxx' } })];
+    const out = detectEnvInjections(layers);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ envKey: 'GITHUB_TOKEN', scope: 'project' });
+  });
+
+  test.each([
+    'AWS_SECRET_ACCESS_KEY',
+    'NPM_TOKEN',
+    'DATABASE_PASSWORD',
+    'STRIPE_API_KEY',
+    'MY_CLIENT_SECRET',
+    'SESSION_ID',
+    'PRIVATE_KEY',
+  ])('%s is detected', (key) => {
+    const out = detectEnvInjections([fixtureLayer('project', { env: { [key]: 'v' } })]);
+    expect(out.map((e) => e.envKey)).toEqual([key]);
+  });
+
+  test('heuristic matches carry the generic posture', () => {
+    // The fallback string at the posture lookup was previously UNREACHABLE —
+    // nothing outside the five names could get there. The code anticipated
+    // this widening.
+    const out = detectEnvInjections([fixtureLayer('project', { env: { GITHUB_TOKEN: 'x' } })]);
+    expect(out[0].posture).toBe('credential-class env injection');
+  });
+
+  test('the five scrubbed names keep their SPECIFIC postures', () => {
+    // The high-signal class must stay distinguishable from the heuristic one.
+    const out = detectEnvInjections([
+      fixtureLayer('project', { env: { ANTHROPIC_API_KEY: 'x', CLAUDE_CODE_USE_BEDROCK: '1' } }),
+    ]);
+    const byKey = Object.fromEntries(out.map((e) => [e.envKey, e.posture]));
+    expect(byKey.ANTHROPIC_API_KEY).toContain('Subscription auth');
+    expect(byKey.CLAUDE_CODE_USE_BEDROCK).toContain('Bedrock');
+  });
+
+  test.each(['NODE_ENV', 'PORT', 'HOME', 'LANG', 'EDITOR'])(
+    'plainly-innocent key %s is still ignored',
+    (key) => {
+      expect(detectEnvInjections([fixtureLayer('project', { env: { [key]: 'v' } })])).toEqual([]);
+    },
+  );
+
+  test('[security] widening did not start leaking VALUES (BE-B12)', () => {
+    // The whole point of the gate is the operator seeing a NAME, never the
+    // secret. Re-asserted on the new path, not just the old one.
+    const out = detectEnvInjections([
+      fixtureLayer('local', { env: { GITHUB_TOKEN: 'ghp_super_secret_value' } }),
+    ]);
+    expect(JSON.stringify(out)).not.toContain('ghp_super_secret_value');
+    expect(Object.keys(out[0]).sort()).toEqual(
+      ['envKey', 'isSet', 'posture', 'scope', 'scopePath'].sort(),
+    );
+  });
+
+  test('a credential key at every scope is reported once per scope', () => {
+    const out = detectEnvInjections([
+      fixtureLayer('user', { env: { GITHUB_TOKEN: 'a' } }),
+      fixtureLayer('project', { env: { GITHUB_TOKEN: 'b' } }),
+      fixtureLayer('local', { env: { GITHUB_TOKEN: 'c' } }),
+    ]);
+    expect(out.map((e) => e.scope).sort()).toEqual(['local', 'project', 'user']);
   });
 });
