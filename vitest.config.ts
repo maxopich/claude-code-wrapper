@@ -9,7 +9,20 @@ import { configDefaults, defineConfig } from 'vitest/config';
  */
 export default defineConfig({
   test: {
-    passWithNoTests: true,
+    // Register C02: `passWithNoTests: true` used to live here (and as a flag
+    // on the `test` script). It turned a discovery failure into a green
+    // build: a bad include glob or workspace path found zero test files and
+    // vitest printed "No test files found, exiting with code 0". Verified —
+    // `vitest run --dir=<nonexistent>` exited 0 before this change and exits
+    // 1 after it. Vitest's default is already fail-on-empty, so the fix is
+    // simply not to opt out.
+    //
+    // This does NOT cover the other half: `test:security` filters by test
+    // NAME (`-t '[security]'`), and a renamed tag leaves every file
+    // discovered but every test skipped — which vitest exits 0 on no matter
+    // what this flag says. `scripts/security-test-gate.mjs` is the guard for
+    // that case; see its header.
+    //
     // Discovery runs from the repo root, so without an explicit exclude
     // vitest's default include glob descends into the sibling checkouts
     // under `.claude/worktrees/**` — each a full copy of the repo (~9k

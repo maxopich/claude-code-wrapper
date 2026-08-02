@@ -49,7 +49,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const BLOCKING = new Set(['high', 'critical']);
@@ -208,4 +208,26 @@ function main() {
   );
 }
 
-if (import.meta.main) main();
+/**
+ * Register C01: is this module the process entry point, or was it imported?
+ *
+ * This used to be `import.meta.main`, which landed in Node 22.18 and is
+ * `undefined` on older runtimes. ci.yml pins Node 20 — so on CI the guard was
+ * always falsy, `main()` never ran, and the `Audit dependencies` step printed
+ * nothing and exited 0. The gate had never once run in the environment it was
+ * written for; it only ever worked on a maintainer's newer local Node.
+ *
+ * `pathToFileURL` rather than a string compare so a Windows `C:\…` argv and
+ * `import.meta.url`'s `file:///C:/…` form still match.
+ *
+ * The guard still has to hold when imported: audit-gate.test.mjs imports this
+ * module, and under vitest `process.argv[1]` is vitest's own entry, so the
+ * comparison fails and `main()` stays inert — which is the whole point of
+ * having a guard rather than a bare call.
+ */
+export function isDirectInvocation(moduleUrl, argv1) {
+  if (!argv1) return false;
+  return moduleUrl === pathToFileURL(argv1).href;
+}
+
+if (isDirectInvocation(import.meta.url, process.argv[1])) main();

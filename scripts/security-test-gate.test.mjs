@@ -1,0 +1,94 @@
+/**
+ * [security] Register C02 — the guard that stops `npm run test:security` from
+ * passing while running nothing.
+ *
+ * The shapes below are real vitest JSON-reporter output from this repo, not
+ * invented fixtures:
+ *
+ *   with the tag intact      numTotalTests 3048, numPassedTests  337
+ *   with the tag renamed     numTotalTests 3048, numPassedTests    0   → exit 0
+ *
+ * That second row is the whole problem. Vitest exits 0 when a `-t` filter
+ * matches nothing, so renaming the tag silently disarms the security suite on
+ * a REQUIRED check while CI stays green — and `numTotalTests` is IDENTICAL in
+ * both rows, so a guard that read the total would report 3048 tests and wave
+ * the disarmed run straight through.
+ */
+import { describe, expect, it } from 'vitest';
+
+import { evaluateRun, SECURITY_TAG_PATTERN } from './security-test-gate.mjs';
+
+describe('[security] evaluateRun — the disarmed-suite guard', () => {
+  it('passes a healthy run', () => {
+    const v = evaluateRun({ numTotalTests: 3048, numPassedTests: 337, numFailedTests: 0 });
+    expect(v.ok).toBe(true);
+    expect(v.executed).toBe(337);
+  });
+
+  it('FAILS when the tag matched nothing, despite a large collected total', () => {
+    // The exact captured shape of a renamed tag. `numTotalTests` is 3048 —
+    // reading that field is how this bug survives a "fix".
+    const v = evaluateRun({ numTotalTests: 3048, numPassedTests: 0, numFailedTests: 0 });
+    expect(v.ok).toBe(false);
+    expect(v.executed).toBe(0);
+    // The message has to point at the cause, or the next person reads
+    // "0 tests" as an infrastructure blip and reruns the job.
+    expect(v.reason).toMatch(/renamed or removed/);
+  });
+
+  it('fails an empty report rather than treating it as nothing-to-do', () => {
+    const v = evaluateRun({ numTotalTests: 0, numPassedTests: 0, numFailedTests: 0 });
+    expect(v.ok).toBe(false);
+  });
+
+  it('fails closed when vitest produced no parseable summary', () => {
+    // A missing or corrupt report means we cannot prove anything ran, and
+    // this gate exists precisely to refuse unproven runs.
+    expect(evaluateRun(null).ok).toBe(false);
+    expect(evaluateRun(undefined).ok).toBe(false);
+  });
+
+  it('fails when security tests actually failed', () => {
+    const v = evaluateRun({ numTotalTests: 3048, numPassedTests: 330, numFailedTests: 7 });
+    expect(v.ok).toBe(false);
+    expect(v.reason).toMatch(/7 security test\(s\) failed/);
+  });
+
+  it('counts a failed test as executed — the gate is not "did anything pass"', () => {
+    // Distinguishes the two failure modes: 0-executed is a DISARMED suite,
+    // which is a different emergency from a suite that ran and found bugs.
+    const v = evaluateRun({ numTotalTests: 3048, numPassedTests: 0, numFailedTests: 5 });
+    expect(v.executed).toBe(5);
+    expect(v.reason).not.toMatch(/renamed or removed/);
+  });
+
+  it('treats missing counter fields as zero rather than NaN', () => {
+    // A reporter-shape change must fail closed, not produce NaN > 0 === false
+    // by accident and pass for the wrong reason.
+    const v = evaluateRun({});
+    expect(v.ok).toBe(false);
+    expect(v.executed).toBe(0);
+  });
+});
+
+describe('[security] the -t pattern stays regex-escaped', () => {
+  it('escapes the brackets', () => {
+    // Caught during implementation: passing a bare `[security]` to `-t` makes
+    // vitest read it as the CHARACTER CLASS [security], which matches any
+    // test name containing s, e, c, u, r, i, t or y — i.e. nearly all 3028 of
+    // them. The gate then "passes" having run the entire suite under the
+    // security check's name. The old npm script got this escaping from the
+    // shell; spawning vitest directly means it has to live in the script.
+    expect(SECURITY_TAG_PATTERN).toBe('\\[security\\]');
+    // Pinned against a regex LITERAL rather than `new RegExp(pattern)`: the
+    // literal is what the assertion is really about, and building one
+    // dynamically here would only be re-deriving the value under test.
+    const escaped = /\[security\]/;
+    expect(escaped.source).toBe(SECURITY_TAG_PATTERN);
+    expect(escaped.test('does a thing [security]')).toBe(true);
+    // The load-bearing assertion: a name with no tag must NOT match. The
+    // unescaped form — the character class [security] — matches this.
+    expect(escaped.test('renders the sidebar')).toBe(false);
+    expect(/[security]/.test('renders the sidebar')).toBe(true);
+  });
+});

@@ -5,4 +5,24 @@
 set -e
 
 npx lint-staged
-gitleaks protect --staged --redact --no-banner
+
+# Register C04: gitleaks is not an npm dependency and `npm run setup` doesn't
+# install it, but setup DOES install this hook — so a fresh clone following
+# CONTRIBUTING hit exit 127 here on every single commit, with no hint that the
+# missing piece was a binary they were never told to install.
+#
+# `command -v` sits in the `if` CONDITION, which `set -e` exempts, while
+# `gitleaks protect` sits in the BODY, which it does not. So a real finding
+# still aborts the commit exactly as before; only absence is tolerated.
+#
+# Skipping locally is safe for the repo because .github/workflows/security.yml
+# runs gitleaks on every PR and every push to main with fetch-depth: 0. What
+# it costs the individual contributor is real, though: without the binary you
+# find out about a committed secret from CI instead of before the commit —
+# after it is already in your local history. Install it (see CONTRIBUTING).
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --redact --no-banner
+else
+  echo "pre-commit: gitleaks not found — skipping local secret scan." >&2
+  echo "            CI still enforces it; see CONTRIBUTING.md to install." >&2
+fi

@@ -19,18 +19,20 @@
 # just as loudly as an unignored vuln — prune this file in the same PR
 # that lands the fixing bump.
 #
-# Inventory refreshed 2026-07-28. The original PR #39 batch (T2.2,
-# 2026-05-14: @anthropic-ai/sdk, hono, ip-address, brace-expansion 5.0.5,
-# qs) was fully retired by upstream bumps and is removed here — all seven
-# entries had gone unused, which is what was failing the scan. The
-# lockfile bump in this same commit fixes body-parser 2.2.2 → 2.3.0,
-# fast-uri 3.1.2 → 3.1.4 and postcss 8.5.16 → 8.5.21. The two entries
-# below are what remains.
-
-[[IgnoredVulns]]
-id = "GHSA-mh99-v99m-4gvg"
-ignoreUntil = "2026-08-07T00:00:00Z"
-reason = "brace-expansion 5.0.7 (dev, transitive of eslint → minimatch). High (CVSS 7.5, unbounded expansion → OOM crash). Fix in 5.0.8, published 2026-07-23 — the repo's .npmrc min-release-age=7 refuses to resolve it until 2026-07-30, so this is a ~38h supply-chain cooldown hold, not an unfixed CVE. Short date on purpose: drop this entry in the same PR that bumps to 5.0.8. Dev-only; not present in any shipped artifact."
+# Inventory refreshed 2026-08-02 (register C32). The original PR #39 batch
+# (T2.2, 2026-05-14: @anthropic-ai/sdk, hono, ip-address, brace-expansion
+# 5.0.5, qs) was fully retired by upstream bumps — all seven entries had
+# gone unused, which is what was failing the scan.
+#
+# The brace-expansion hold (GHSA-mh99-v99m-4gvg, high) is retired here: it
+# was a supply-chain cooldown wait, not an unfixed CVE, and 5.0.8 cleared
+# `.npmrc`'s min-release-age on 2026-07-30. The lockfile bump 5.0.7 → 5.0.8
+# lands in this same commit, exactly as the entry's own reason instructed —
+# it had to, because OSV-Scanner hard-fails on unused ignores, so bump and
+# delete cannot be split across two PRs. (5.0.9 exists but is still inside
+# the 7-day cooldown until 2026-08-06; 5.0.8 is the fixed version.)
+#
+# One entry remains.
 
 [[IgnoredVulns]]
 id = "GHSA-frvp-7c67-39w9"
