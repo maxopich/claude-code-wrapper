@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import {
+  HIGHEST_AUDIT_KINDS,
   HIGHEST_SUBCODES,
   getSafetyAuditRow,
   appendSafetyAudit,
@@ -268,15 +269,44 @@ describe('appendSafetyAuditAck', () => {
   });
 });
 
-// ---- HIGHEST_SUBCODES enum stability ----
+// ---- typed-ack sets: reason codes vs audit kinds (register H13) ----
+//
+// This describe previously asserted all three names lived in HIGHEST_SUBCODES,
+// which pinned the DEFECT rather than the contract: `audit.tamper_detected` is
+// an audit KIND and never appears as a reason code, so its membership in a
+// set tested against `notifications.reason_code` could never match. The split
+// below is the thing worth pinning — put a kind back in the reason-code set
+// and the typed-ack requirement silently stops applying to it.
 
-describe('HIGHEST_SUBCODES', () => {
-  test('Phase 1 set is forged_source / defang.bypass_suspected / audit.tamper_detected', () => {
+describe('[security] typed-ack classification', () => {
+  test('HIGHEST_SUBCODES holds reason codes only', () => {
     expect(HIGHEST_SUBCODES.has('forged_source')).toBe(true);
     expect(HIGHEST_SUBCODES.has('defang.bypass_suspected')).toBe(true);
-    expect(HIGHEST_SUBCODES.has('audit.tamper_detected')).toBe(true);
     expect(HIGHEST_SUBCODES.has('worker_to_worker')).toBe(false);
     expect(HIGHEST_SUBCODES.has('api_key_scrubbed')).toBe(false);
+  });
+
+  test('the tamper alarm is classified as an audit KIND, not a reason code', () => {
+    expect(HIGHEST_AUDIT_KINDS.has('audit.tamper_detected')).toBe(true);
+    // The regression guard: back in the reason-code set it would match nothing.
+    expect(HIGHEST_SUBCODES.has('audit.tamper_detected')).toBe(false);
+  });
+
+  test('no tamper reason code is enumerated in either set', () => {
+    // Matching the KIND is what makes this survive a new failure mode. If a
+    // future change lists today's reasons individually instead, tomorrow's
+    // sixth reason silently loses the typed-ack requirement — the exact bug
+    // H13 fixed. Every reason `verifyChain` can return is checked here.
+    for (const reason of [
+      'row_mismatch',
+      'no_anchor',
+      'forged_anchor',
+      'tail_truncated',
+      'tip_mirror_missing',
+    ]) {
+      expect(HIGHEST_SUBCODES.has(reason)).toBe(false);
+      expect(HIGHEST_AUDIT_KINDS.has(reason)).toBe(false);
+    }
   });
 });
 

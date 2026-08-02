@@ -90,12 +90,15 @@ import {
   emit as emitNotification,
   getNotification,
   markNotificationAcked,
+  type NotificationRow,
 } from '../notifications/dispatcher.js';
 import { getScrubbedEnvVars } from '../runner/claude.js';
 import {
   appendSafetyAudit,
   appendSafetyAuditAck,
+  HIGHEST_AUDIT_KINDS,
   HIGHEST_SUBCODES,
+  verifyChain,
 } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import { appendForensics, getLatestForensicsForAgent } from '../repo/controllability_forensics.js';
@@ -1902,8 +1905,108 @@ function cacheSessionStartedIfNeeded(conn: Conn, out: ServerMsg): void {
   conn.authorityCache.set(out.projectId, snapshot);
 }
 
+/**
+ * Register H07: minimum gap between chain verifications outside boot.
+ *
+ * `verifyChain` walks every row after the anchor, one SHA-256 each. A measured
+ * install had 1784 rows after 8 weeks (~32/day), so a reconnect storm — a
+ * browser reload loop, or several tabs — could otherwise re-walk a growing
+ * chain on every socket. 60s keeps "tampering during a long uptime is noticed"
+ * without turning attach into a hot path.
+ */
+const CHAIN_REVERIFY_MIN_INTERVAL_MS = 60_000;
+/** Process-global on purpose: the cost being throttled is one walk of one
+ *  chain, shared by every socket. Per-connection state would let N tabs cost N
+ *  walks, which is the case that motivated the throttle. */
+let lastChainVerifyAt = 0;
+
+/** Test-only: clear the throttle so a case can observe a fresh verification.
+ *  Needed because the state is module-global and therefore survives between
+ *  tests in the same worker. */
+export function _resetChainVerifyThrottle(): void {
+  lastChainVerifyAt = 0;
+}
+
+/**
+ * Register H07: re-verify the audit chain on attach.
+ *
+ * Verification used to run at exactly one place — server boot — so tampering
+ * during a long uptime went unnoticed until the next restart. A Cebab instance
+ * that stays up for weeks (the normal case) would never re-check.
+ *
+ * Still FAILS OPEN, deliberately: this reports and continues, exactly as boot
+ * does. `index.ts` reasons that refusing to run on suspected tamper "bricks the
+ * whole app over a stale marker allowlist", and that argument holds here with
+ * more force — locking the operator out of their own tool because a migration
+ * forgot to register its chain-reset id would be a worse failure than the one
+ * being guarded against. The fix for H07 is that detection happens more than
+ * once, not that detection starts blocking.
+ *
+ * Exported for tests; the throttle is module state, reset via `_testing`.
+ */
+export function reverifyChainOnAttach(send: (msg: ServerMsg) => void, now = Date.now()): void {
+  if (now - lastChainVerifyAt < CHAIN_REVERIFY_MIN_INTERVAL_MS) return;
+  lastChainVerifyAt = now;
+
+  let result;
+  try {
+    result = verifyChain();
+  } catch (err) {
+    // A verification that throws must not take the attach down with it — the
+    // operator would lose the UI over a diagnostic.
+    console.error('[ws] chain re-verification failed to run', err);
+    return;
+  }
+  if (result.ok) return;
+
+  const where = result.brokenAt ? ` at ${result.brokenAt}` : '';
+  console.error(`[ws] safety_audit chain BROKEN (${result.reason})${where}`);
+  const emitted = emitNotification(
+    {
+      class: 'safety',
+      severity: 'danger',
+      // Same key boot uses: the dispatcher collapses repeats in the UI while
+      // every occurrence still writes its own audit row (BE-2).
+      dedupeKey: 'audit.tamper_detected',
+      title: 'Safety audit chain failed verification',
+      message: describeChainFailure(result.reason, result.brokenAt),
+      reasonCode: result.reason,
+      auditKind: 'audit.tamper_detected',
+      auditPayload: { reason: result.reason, brokenAt: result.brokenAt ?? null, at: 'attach' },
+    },
+    send,
+  );
+  if (!emitted.ok) {
+    // The chain is unverifiable AND unwritable. Nothing left but the log.
+    console.error(`[ws] could not record tamper notification: ${emitted.error}`);
+  }
+}
+
+/**
+ * Operator-facing text for each verification failure. Shared by the boot path
+ * (`index.ts`) and the attach path so the two cannot drift into describing the
+ * same condition differently.
+ */
+export function describeChainFailure(reason: string, brokenAt?: string): string {
+  switch (reason) {
+    case 'no_anchor':
+      return 'The safety audit log has no chain-reset anchor. Migrations always insert one, so it was removed.';
+    case 'forged_anchor':
+      return `The newest chain-reset anchor (${brokenAt}) is not one this build wrote.`;
+    case 'tail_truncated':
+      return `Audit rows were deleted: the chain ends before ${brokenAt}, which Cebab recorded outside the database. Entries the log should contain are gone.`;
+    case 'tip_mirror_missing':
+      return 'The out-of-database record of the audit chain tip is gone, so deletions from the log can no longer be detected. It was present before.';
+    default:
+      return `Row ${brokenAt} no longer matches its recorded hash.`;
+  }
+}
+
 function onConnection(ws: WebSocket): void {
   console.log('[ws] client connected');
+  // H07: re-check the chain whenever a browser attaches, so tampering during a
+  // long uptime surfaces without waiting for a restart.
+  reverifyChainOnAttach((msg) => send(ws, msg));
   const conn: Conn = {
     ws,
     pendingPermissions: new Map(),
@@ -2493,6 +2596,38 @@ function resolveHopBudget(): number {
  * **Exported** so tests can verify the precedence chain without
  * round-tripping through `emitSettings` or a WS connection.
  */
+/**
+ * Register H13 (BE-7): does acknowledging this notification demand a typed
+ * reason?
+ *
+ * Two independent sources, because the highest sub-class is identified two
+ * different ways and conflating them is the bug this fixes:
+ *
+ *   REASON CODE — `forged_source`, `defang.bypass_suspected`. Carried directly
+ *                 on the notification row.
+ *   AUDIT KIND  — `audit.tamper_detected`. Never appears as a reason code: the
+ *                 tamper emitter puts the specific failure
+ *                 (`row_mismatch` / `no_anchor` / `tail_truncated` / …) in
+ *                 `reasonCode` and the kind in `auditKind`. Testing only
+ *                 `reason_code` meant the audit-chain alarm — the most severe
+ *                 event Cebab raises — needed no justification at all.
+ *
+ * The kind is read from the `safety_audit` row behind `audit_row_id`, which
+ * every safety-class notification carries (the dispatcher writes the audit row
+ * first and stores its id, BE-1). One extra SELECT on a path that runs once per
+ * operator click.
+ *
+ * Pure-ish + exported so the invariant is pinned by a test rather than living
+ * only inside the WS switch, matching `isUngatedTrustDecisionAllowed` below.
+ */
+export function requiresTypedAckReason(row: NotificationRow): boolean {
+  if (row.class !== 'safety') return false;
+  if (row.reason_code && HIGHEST_SUBCODES.has(row.reason_code)) return true;
+  if (!row.audit_row_id) return false;
+  const audit = getSafetyAuditRow(row.audit_row_id);
+  return audit ? HIGHEST_AUDIT_KINDS.has(audit.kind) : false;
+}
+
 /** The four outcomes an operator can pick on an MCP trust prompt. */
 export type McpTrustDecisionKind = 'trust' | 'trust_pinned' | 'deny_once' | 'deny_remember';
 
@@ -2906,12 +3041,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // BE-7: highest sub-class safety events require a typed reason. Without
       // it, the typed-ack affordance hasn't been collected — reject so the
       // UI can re-prompt rather than silently logging an empty acked_reason.
-      if (
-        row.class === 'safety' &&
-        row.reason_code &&
-        HIGHEST_SUBCODES.has(row.reason_code) &&
-        (!msg.ackReason || msg.ackReason.trim() === '')
-      ) {
+      //
+      // Register H13: the test used to be reason-code-only, and
+      // `audit.tamper_detected` — an audit KIND that never appears as a reason
+      // code — sat in the reason-code set. The audit-chain tamper alarm
+      // therefore required nothing, while lesser events required a
+      // justification. Both fields are consulted now; see
+      // `requiresTypedAckReason`.
+      if (requiresTypedAckReason(row) && (!msg.ackReason || msg.ackReason.trim() === '')) {
         send(conn.ws, {
           type: 'wrapper_error',
           kind: 'process_crashed',
