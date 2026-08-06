@@ -142,9 +142,15 @@ describe('[a11y] collapsible rails respond to focus, not only hover', () => {
  * would let a future edit move one without failing.
  */
 function zIndexOf(selector: string): number {
-  const at = stylesCss.indexOf(`\n${selector} {`);
+  // Line endings are normalised first: the repo has no `.gitattributes`, so a
+  // Windows runner checks the stylesheet out as CRLF, and a lookup for a
+  // selector that spans lines (`.sidebar,\n.inspector`) then matches nothing.
+  // That is not hypothetical — it is how this line failed on windows-2022
+  // while passing on macOS and ubuntu.
+  const css = stylesCss.replace(/\r\n/g, '\n');
+  const at = css.indexOf(`\n${selector} {`);
   if (at === -1) throw new Error(`rule not found: ${selector}`);
-  const body = stylesCss.slice(at, stylesCss.indexOf('}', at));
+  const body = css.slice(at, css.indexOf('}', at));
   const m = /z-index:\s*(-?\d+)\s*;/.exec(body);
   if (!m) throw new Error(`no z-index in ${selector}`);
   return Number(m[1]);
