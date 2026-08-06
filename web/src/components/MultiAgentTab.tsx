@@ -1301,10 +1301,17 @@ function TemplateNameModal(props: {
     canConfirm: canSave,
   });
   return (
-    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+    <div
+      ref={overlayRef}
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="template-name-modal-title"
+      onMouseDown={onBackdropMouseDown}
+    >
       <div className="modal modal-surface">
         <header>
-          <h2>Save as template</h2>
+          <h2 id="template-name-modal-title">Save as template</h2>
           <button className="icon-btn" onClick={props.onClose} title="Close">
             ✕
           </button>
@@ -1471,7 +1478,12 @@ function formatDuration(ms: number): string {
   return `${hr}h`;
 }
 
-function ActiveRunView(props: {
+/** Exported for `MultiAgentTab.blockingOrder.test.tsx`, which pins the DOM
+ *  order of the blocking banners against the scrollback. Same reason
+ *  `TopRunBar` / `MultiAgentActivityBar` are exported — mounting the whole
+ *  tab to assert one subtree's ordering would test the props plumbing, not
+ *  the ordering. Not imported by app code. */
+export function ActiveRunView(props: {
   run: MultiAgentRun;
   /** The tab this view is mounted under; used only for a cross-tab notice. */
   tabMode: 'chain' | 'orchestrator';
@@ -1688,48 +1700,27 @@ function ActiveRunView(props: {
         return inspSlot ? createPortal(settingsPanel, inspSlot) : settingsPanel;
       })()}
 
-      <section className="multi-agent-section">
-        <h3>Scrollback</h3>
-        {run.events.length === 0 ? (
-          <p className="iterations-empty">
-            Waiting for the first event.{' '}
-            {isOrchestrator
-              ? "The orchestrator agent is starting up; it'll receive the roster + first prompt momentarily."
-              : 'The first participant agent is starting up.'}
-          </p>
-        ) : (
-          <>
-            {/* Cluster H D8: scrollback kind-filter chips. Client-only —
-             *  every `multi_agent_event` already carries `kind`, no backend
-             *  involvement needed. Hides chip kinds from the scrollback below
-             *  while leaving the underlying events untouched (so the spine,
-             *  exports, and Logs modal still see them all). */}
-            <MultiAgentScrollbackFilter
-              hiddenKinds={hiddenKinds}
-              counts={kindCounts}
-              onToggle={toggleHiddenKind}
-              onReset={resetHiddenKinds}
-            />
-            {visibleEvents.length === 0 ? (
-              <p className="iterations-empty">
-                All event kinds are hidden. Click a chip above or Clear to show events.
-              </p>
-            ) : (
-              <ol className="event-list">
-                {visibleEvents.map((ev) => (
-                  <EventRow
-                    key={ev.eventId}
-                    event={ev}
-                    defaultCollapsed={eventDefaultCollapsed(run, ev)}
-                    highlighted={highlightedEventId === ev.eventId}
-                  />
-                ))}
-              </ol>
-            )}
-          </>
-        )}
-      </section>
-
+      {/* ---- Banners, ABOVE the scrollback ----------------------------------
+       *
+       * Register U10. These used to render *after* the scrollback `<section>`.
+       * `.multi-agent` is `overflow-y: auto` and the event list is uncapped, so
+       * a run with a few hundred events pushed every one of these off-screen —
+       * including the pause-on-dangerous gate, which is the whole point of the
+       * toggle, and the AskUserQuestion card, which is the orchestrator's only
+       * human-in-the-loop hook. The run looked idle while it was in fact
+       * halted, waiting on a decision the operator had to scroll to find. Being
+       * last in the DOM also made them last in tab order.
+       *
+       * Their order *relative to each other* is unchanged — the per-banner
+       * comments below still describe the same posture. Only `UserPromptInput`
+       * stays below the scrollback; a composer belongs at the bottom, and it is
+       * mounted only when none of these banners is up (see the guard at the end
+       * of this component).
+       *
+       * DOM order alone fixes the operator who has just arrived. For the one
+       * already scrolled into the scrollback when a gate fires, the three
+       * decision banners also steal focus once — see the note on `stealsFocus`
+       * below. */}
       {/* Cluster D Phase 5e (UI-D17): swept-session danger-tier banner.
        * Mounted only when the iteration row is `status === 'crashed'`
        * — i.e. the operator landed here after a sweep (Phase 4 auto-
@@ -1785,9 +1776,30 @@ function ActiveRunView(props: {
        * `.multi-agent-warning-actions` classes are preserved so existing
        * CSS keeps the colour + action-row layout byte-equivalent. Tier
        * = "warn" for all three; a11y role is pinned to "status" to
-       * match the pre-migration markup (the banner-stack focus-steal
-       * contract isn't in play here — these are mounted directly, not
-       * inside a <BannerStack>). */}
+       * match the pre-migration markup.
+       *
+       * `stealsFocus` (register U10). These three are the only banners in the
+       * app that HALT the run pending an operator decision, so each moves
+       * focus to its primary action once. Three things make that safe rather
+       * than rude:
+       *
+       *   - `consumeFocusOnce` (SessionBanner) keys on the banner id in
+       *     sessionStorage, so it fires once per decision — not on re-render,
+       *     not on remount, not in the second window.
+       *   - `UserPromptInput` is mounted ONLY when none of these is up (guard
+       *     at the end of this component), so there is no in-progress typing
+       *     to interrupt. That is the whole reason the same treatment is
+       *     refused for toast notifications, which arrive unannounced.
+       *   - The ids distinguish decisions: awaiting-continue happens once per
+       *     session; mutation banners carry the mutation id; pending-retry
+       *     carries the failing event's id so a SECOND worker failure in the
+       *     same session is a new decision and re-announces (it previously
+       *     reused a consumed key and stayed silent).
+       *
+       * This is deliberately not a BannerStack concern — the steal lives in
+       * SessionBanner itself and works for directly-mounted banners. The
+       * comment that used to sit here claimed otherwise, which is why these
+       * three shipped with the cue switched off. */}
       {isOrchestrator && isRunning && run.awaitingContinue && (
         <SessionBanner
           id={`multi-agent-warning-awaiting-${run.sessionId}`}
@@ -1796,7 +1808,7 @@ function ActiveRunView(props: {
           layout="flat"
           role="status"
           ariaLive="polite"
-          stealsFocus={false}
+          stealsFocus
           body={
             <>
               <p>
@@ -1827,13 +1839,13 @@ function ActiveRunView(props: {
 
       {isRunning && run.pendingRetry && (
         <SessionBanner
-          id={`multi-agent-warning-retry-${run.sessionId}`}
+          id={`multi-agent-warning-retry-${run.sessionId}-${run.pendingRetry.errorEventId}`}
           tier="warn"
           classStem="multi-agent-warning"
           layout="flat"
           role="status"
           ariaLive="polite"
-          stealsFocus={false}
+          stealsFocus
           body={
             <>
               <p>
@@ -1887,7 +1899,7 @@ function ActiveRunView(props: {
             layout="flat"
             role="status"
             ariaLive="polite"
-            stealsFocus={false}
+            stealsFocus
             body={
               <>
                 <p>
@@ -1929,6 +1941,48 @@ function ActiveRunView(props: {
           }
         />
       )}
+
+      <section className="multi-agent-section">
+        <h3>Scrollback</h3>
+        {run.events.length === 0 ? (
+          <p className="iterations-empty">
+            Waiting for the first event.{' '}
+            {isOrchestrator
+              ? "The orchestrator agent is starting up; it'll receive the roster + first prompt momentarily."
+              : 'The first participant agent is starting up.'}
+          </p>
+        ) : (
+          <>
+            {/* Cluster H D8: scrollback kind-filter chips. Client-only —
+             *  every `multi_agent_event` already carries `kind`, no backend
+             *  involvement needed. Hides chip kinds from the scrollback below
+             *  while leaving the underlying events untouched (so the spine,
+             *  exports, and Logs modal still see them all). */}
+            <MultiAgentScrollbackFilter
+              hiddenKinds={hiddenKinds}
+              counts={kindCounts}
+              onToggle={toggleHiddenKind}
+              onReset={resetHiddenKinds}
+            />
+            {visibleEvents.length === 0 ? (
+              <p className="iterations-empty">
+                All event kinds are hidden. Click a chip above or Clear to show events.
+              </p>
+            ) : (
+              <ol className="event-list">
+                {visibleEvents.map((ev) => (
+                  <EventRow
+                    key={ev.eventId}
+                    event={ev}
+                    defaultCollapsed={eventDefaultCollapsed(run, ev)}
+                    highlighted={highlightedEventId === ev.eventId}
+                  />
+                ))}
+              </ol>
+            )}
+          </>
+        )}
+      </section>
 
       {isOrchestrator &&
         isRunning &&
@@ -2813,11 +2867,19 @@ function EventRow(props: {
 function EventModal(props: { event: MultiAgentEventView; onClose: () => void }) {
   const { event } = props;
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: props.onClose });
+  const titleId = `event-modal-title-${event.eventId}`;
   return (
-    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+    <div
+      ref={overlayRef}
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      onMouseDown={onBackdropMouseDown}
+    >
       <div className="modal event-modal modal-surface">
         <header>
-          <h2>
+          <h2 id={titleId}>
             {event.source} → {event.destination} · {event.kind} · {formatTs(event.ts)}
           </h2>
           <button className="icon-btn" onClick={props.onClose} title="Close">

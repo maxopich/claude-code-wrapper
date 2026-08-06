@@ -1687,7 +1687,9 @@ pre {
 .msg.permission .actions {
   margin-top: 6px;
   display: flex;
+  align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
 .msg.permission button {
   background: var(--bg-3);
@@ -1697,18 +1699,44 @@ pre {
   padding: 4px 12px;
   cursor: pointer;
 }
-.msg.permission .actions button:first-child {
+/* Register U09: keyed on the class, not on `:first-child`. The affirmative
+ * button used to be green purely because it came first in the DOM, so
+ * reordering the pair would have repainted Deny as the safe-looking one with
+ * no CSS change to notice in review. */
+.msg.permission .actions .permission-allow {
   background: var(--ok);
   border-color: var(--ok);
   color: #0c1a12;
   font-weight: 600;
 }
-.msg.permission .actions button:first-child:hover {
-  background: #2bbf86;
+.msg.permission .actions .permission-allow:hover {
+  background: color-mix(in srgb, var(--ok) 88%, #000);
 }
-.msg.permission .actions button:last-child:hover {
+/* Armed half of the two-step `dangerous` confirm. Recoloured to the error hue
+ * so the button the operator is about to press a second time does not look
+ * like the ordinary safe-green Allow.
+ *
+ * Darkened to 70% before white is laid on it — the same recipe the MOCK badge
+ * uses, and for the same reason: `--err` is tuned to be read AS INK ON a
+ * panel, so using it raw as a BACKDROP behind white fails AA in three of the
+ * four gammas (measured 2.77-3.71 in #283). At 70% toward black, white clears
+ * 5.2:1 in every gamma. `styleContrast.test.ts` holds both ends of this. */
+.msg.permission .actions .permission-allow.is-armed {
+  background: color-mix(in srgb, var(--err) 70%, #000);
+  border-color: color-mix(in srgb, var(--err) 70%, #000);
+  color: #fff;
+}
+.msg.permission .actions .permission-allow.is-armed:hover {
+  background: color-mix(in srgb, var(--err) 60%, #000);
+  border-color: color-mix(in srgb, var(--err) 60%, #000);
+}
+.msg.permission .actions .permission-deny:hover {
   background: var(--bg-4);
   border-color: var(--line-3);
+}
+.msg.permission .permission-arm-hint {
+  font-size: 11px;
+  color: var(--fg-2);
 }
 .msg.permission .decided {
   color: var(--fg-3);
@@ -5663,10 +5691,15 @@ pre {
 
 /* ---------- Orchestrator user-prompt input (active runs only) ---------- */
 .multi-agent-input-section {
-  /* Stick to bottom of the multi-agent pane so the input is always reachable
-   * as the scrollback grows. The parent (.multi-agent) doesn't flex, but
-   * scrolling lands inside the scrollback list — this margin keeps a small
-   * gap from the events without colliding. */
+  /* Push the composer to the bottom of the pane when the content is SHORTER
+   * than the viewport — an `auto` margin in a flex column absorbs the free
+   * space. Once the scrollback overflows there is no free space left, so this
+   * does nothing and the composer simply follows the last event; scrolling to
+   * the bottom is how you reach it. (The comment here used to claim the
+   * composer sticks to the bottom "as the scrollback grows", i.e. exactly the
+   * case where an auto margin has no effect. It is not sticky. The blocking
+   * banners, which must be reachable without scrolling, are handled by DOM
+   * order instead — see the banner group in `ActiveRunView`.) */
   margin-top: auto;
 }
 .multi-agent-input {
