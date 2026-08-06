@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { SettingsView } from '../store';
 import { SettingsModal } from './SettingsModal';
+import type { Theme } from '../theme';
 import type { ClientMsg, ServerMsg } from '@cebab/shared';
 
 // Cluster E Phase 3 (A4) — SettingsModal contract additions:
@@ -329,5 +330,97 @@ describe('SettingsModal — Storage section', () => {
     expect(text).toContain('Auto-reclaim: on');
     expect(text).toContain('30d');
     expect(text).toContain('reclaimed 4');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The theme picker as a radio group.
+//
+// Not a register finding — surfaced by `widgetRoles.test.ts` while fixing U17/
+// U18/U26/U30. It declared `role="radiogroup"` with correct `aria-checked` and
+// none of the keyboard model that role obliges: four native buttons meant four
+// tab stops where a radio group promises one, and the arrow keys did nothing.
+//
+// Arrows SELECT as they move here, which is correct radiogroup behaviour and
+// safe for a theme: it applies instantly, costs nothing and arrowing back
+// undoes it. (ModeToggle deliberately does NOT work this way — there,
+// select-on-move would flip a live session's permission posture.)
+// ---------------------------------------------------------------------------
+
+describe('SettingsModal — theme radio group keyboard model', () => {
+  function renderThemes(theme: Theme, onThemeChange = vi.fn<(t: Theme) => void>()) {
+    act(() => {
+      root.render(
+        <SettingsModal
+          settings={settings()}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+          send={vi.fn()}
+          subscribeServerMsg={() => () => {}}
+          theme={theme}
+          onThemeChange={onThemeChange}
+        />,
+      );
+    });
+    return onThemeChange;
+  }
+  const cards = () =>
+    Array.from(document.querySelectorAll<HTMLElement>('.theme-grid [role="radio"]'));
+  const group = () => document.querySelector('[role="radiogroup"]') as HTMLElement;
+
+  function arrow(key: string) {
+    act(() => {
+      group().dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    });
+  }
+
+  test('the group is one tab stop: only the checked card is tabbable', () => {
+    renderThemes('daylight');
+    expect(cards().length).toBeGreaterThanOrEqual(4);
+    const tabbable = cards().filter((c) => c.getAttribute('tabindex') === '0');
+    expect(tabbable).toHaveLength(1);
+    expect(tabbable[0]!.getAttribute('aria-checked')).toBe('true');
+  });
+
+  test('the roving index follows the checked card', () => {
+    renderThemes('slate');
+    const states = cards().map((c) => [c.getAttribute('aria-checked'), c.getAttribute('tabindex')]);
+    // Exactly one card is both checked and tabbable, and they are the same one.
+    expect(states.filter(([checked]) => checked === 'true')).toHaveLength(1);
+    for (const [checked, tabindex] of states) {
+      expect(tabindex).toBe(checked === 'true' ? '0' : '-1');
+    }
+  });
+
+  test('arrow keys move the selection in both axes', () => {
+    // 'both' orientation, because the cards wrap into a visual grid — Up/Down
+    // and Left/Right are equally natural gestures over it.
+    const onChange = renderThemes('aurora'); // index 1 of [daylight, aurora, slate, phosphor]
+    arrow('ArrowDown');
+    expect(onChange).toHaveBeenLastCalledWith('slate');
+    arrow('ArrowRight');
+    expect(onChange).toHaveBeenLastCalledWith('slate');
+    arrow('ArrowUp');
+    expect(onChange).toHaveBeenLastCalledWith('daylight');
+    arrow('ArrowLeft');
+    expect(onChange).toHaveBeenLastCalledWith('daylight');
+  });
+
+  test('the selection wraps, as a radio group does', () => {
+    const first = renderThemes('daylight');
+    arrow('ArrowUp');
+    expect(first).toHaveBeenLastCalledWith('phosphor');
+    const last = renderThemes('phosphor');
+    arrow('ArrowDown');
+    expect(last).toHaveBeenLastCalledWith('daylight');
+  });
+
+  test('keys the group does not own are left alone', () => {
+    // Escape must still reach useModalKeys and close the modal; Tab must still
+    // leave the group. Swallowing every keystroke is the usual way a roving
+    // handler breaks the rest of the dialog.
+    const onChange = renderThemes('daylight');
+    for (const key of ['Escape', 'Tab', 'a']) arrow(key);
+    expect(onChange).not.toHaveBeenCalled();
   });
 });

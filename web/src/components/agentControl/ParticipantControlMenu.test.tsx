@@ -174,16 +174,26 @@ describe('ParticipantControlMenu — items by state', () => {
 });
 
 describe('ParticipantControlMenu — chain mode hides Mute/Unmute', () => {
-  test('chain mode renders the hint instead of Mute…', () => {
+  test('chain mode renders a disabled Mute item instead of an actionable one', () => {
+    // U26 changed the SHAPE of this explanation, not its presence. It used to
+    // be a `<p class="ma-control-menu-hint">` sitting inside `role="menu"` — a
+    // child that role forbids, and one a screen reader in menu-browsing mode
+    // never reached. It is now a disabled menu item: same sentence, in the
+    // accessibility tree, reachable by the arrow keys.
     render({ sessionMode: 'chain' });
     openMenu();
-    expect(container.querySelector('.ma-control-menu-hint')).not.toBeNull();
-    const texts = Array.from(container.querySelectorAll('.ma-control-menu-item')).map(
-      (i) => i.textContent?.trim() ?? '',
-    );
-    expect(texts.some((t) => t.includes('Mute') || t.includes('Unmute'))).toBe(false);
+    const unavailable = container.querySelector('.ma-control-menu-item[aria-disabled="true"]');
+    expect(unavailable).not.toBeNull();
+    expect(unavailable?.textContent).toContain('Mute');
+    expect(unavailable?.textContent).toMatch(/chain mode/i);
+
+    // What must NOT be there is an *actionable* Mute/Unmute.
+    const actionable = Array.from(
+      container.querySelectorAll('.ma-control-menu-item:not([aria-disabled="true"])'),
+    ).map((i) => i.textContent?.trim() ?? '');
+    expect(actionable.some((t) => t.includes('Mute') || t.includes('Unmute'))).toBe(false);
     // Pause… is still available in chain mode.
-    expect(texts.some((t) => t.includes('Pause…'))).toBe(true);
+    expect(actionable.some((t) => t.includes('Pause…'))).toBe(true);
   });
 });
 

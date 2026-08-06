@@ -2288,6 +2288,14 @@ pre {
 .mode-toggle.is-disabled .pill {
   cursor: not-allowed;
 }
+/* U17: the pills use `aria-disabled` rather than the native attribute so the
+ * explanation stays reachable by keyboard. The shared press animation is keyed
+ * on `:not(:disabled)`, which no longer excludes them — suppress it here so a
+ * read-only pill doesn't animate as though the click did something. */
+.mode-toggle.is-disabled .pill:active {
+  transform: none;
+  opacity: 1;
+}
 
 /* ---- Streaming caret ---- */
 .streaming-text {
@@ -6165,6 +6173,15 @@ pre {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* U30: the rows were focusable long before they were a grid, and had no focus
+ * style at all — only :hover and .is-selected. `outline-offset` is negative so
+ * the ring draws INSIDE the row; a positive offset on a <tr> is clipped by the
+ * scroll container and the sticky header. */
+.artifacts-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .artifacts-row td {
   padding: var(--s-2) var(--s-3);
   border-bottom: 1px solid var(--line-1);
@@ -9846,12 +9863,19 @@ pre {
   color: var(--accent);
 }
 
-.ma-control-menu-hint {
-  padding: 6px 10px;
-  margin: 0;
-  font-size: var(--t-xs, 11px);
+/* U26: the chain-mode explanation used to be a `<p class="ma-control-menu-hint">`
+ * inside `role="menu"` — an illegal child that no screen reader reached. It is
+ * now a disabled menu item, so it keeps the item's box and picks up the
+ * dimming here. Not `:disabled`: a natively disabled button is unfocusable,
+ * and the whole point is that the arrow keys can land on it and read it out. */
+.ma-control-menu-item[aria-disabled='true'] {
   color: var(--fg-2, var(--fg));
   font-style: italic;
+  cursor: default;
+}
+.ma-control-menu-item[aria-disabled='true']:hover {
+  background: transparent;
+  border-color: transparent;
 }
 
 /* Cluster C Phase 4g2: divider between the everyday actions (mute/pause)
@@ -11176,6 +11200,17 @@ pre {
   padding: var(--s-3);
   margin: 0;
   text-align: center;
+}
+/* U18: the options moved from <button> to <li> so the combobox input keeps
+ * focus. The list itself carries the flex column the results container used to
+ * provide directly, and the two <p> hints are now its siblings. */
+.session-search-result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .session-search-result {
   display: flex;
