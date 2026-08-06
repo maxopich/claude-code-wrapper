@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ConnectionLostView } from '../../store';
+import { INERT_EXEMPT_ATTR } from '../../useModalSurface';
 import { formatDiagnostic, type ConnectionLostReason } from './connectionLostReason';
 
 /**
@@ -14,8 +15,9 @@ import { formatDiagnostic, type ConnectionLostReason } from './connectionLostRea
  * - **Affordances.** Always: "Copy diagnostic" (timestamp + reason +
  *   url + close code, no credentials). For `server_unreachable`:
  *   "Retry" plus an auto-retry tag showing the next backoff window.
- * - **A11y.** `role="alert"`, announces on appearance, focus moves to
- *   the primary action. `prefers-reduced-motion` suppresses transition.
+ * - **A11y.** `role="alert"` on the title+body (NOT the whole card — see
+ *   U27 below), announces once on appearance, focus moves to the
+ *   primary action. `prefers-reduced-motion` suppresses transition.
  * - **Dismiss.** Operator may dismiss to expose the sidebar; the
  *   slice clears on dismissal AND on the next successful `ws_open`.
  *
@@ -146,29 +148,52 @@ export function ConnectionLostOverlay({ view, onDismiss, onRetry }: ConnectionLo
   );
 
   return (
-    <div className="connection-lost-overlay" role="presentation">
-      <div
-        ref={cardRef}
-        className="connection-lost-card"
-        role="alert"
-        aria-live="assertive"
-        aria-labelledby="connection-lost-title"
-        aria-describedby="connection-lost-body"
-      >
+    <div
+      className="connection-lost-overlay"
+      role="presentation"
+      // U28, second half: `useModalSurface` marks every sibling of an open
+      // modal `inert`, and this overlay IS a sibling (both are children of
+      // `.app`). So a modal opened while the overlay is already up left the
+      // one surface saying "the server is unreachable" not merely dimmed but
+      // non-interactive — Retry, Copy diagnostic and Dismiss all dead. This
+      // attribute is the single exemption the walk honours. The opposite
+      // order escaped it, because the inert effect has `[]` deps and this
+      // component renders null until a failure — which is exactly why the
+      // bug would read as intermittent.
+      {...{ [INERT_EXEMPT_ATTR]: '' }}
+    >
+      <div ref={cardRef} className="connection-lost-card">
         <div className="connection-lost-stripe" aria-hidden="true" />
-        <h2 id="connection-lost-title" className="connection-lost-title">
-          {copy.title}
-        </h2>
-        <p id="connection-lost-body" className="connection-lost-body">
-          {copy.body}
-        </p>
-        {copy.docsHref ? (
-          <p className="connection-lost-docs">
-            <a href={copy.docsHref} target="_blank" rel="noopener noreferrer">
-              {copy.docsLabel ?? 'Learn more'}
-            </a>
+        {/* U27: the alert is the MESSAGE, not the dialog.
+         *
+         *  `role="alert"` carries an implicit `aria-atomic="true"`, so a
+         *  region marked that way is re-read IN FULL whenever any part of it
+         *  changes. This used to wrap the whole card — including the Retry
+         *  button, whose label holds a countdown that ticks once a second. So
+         *  every tick assertively re-announced the title, the body, the docs
+         *  link and all three button labels, interrupting whatever the
+         *  operator was listening to, once a second, until they acted.
+         *
+         *  Scoped to the title + body, the region holds only what changed
+         *  when the overlay appeared, and that content is static for the
+         *  overlay's whole life — so it announces exactly once, on mount.
+         *  The countdown stays in the button label, which is where a sighted
+         *  operator reads it. */}
+        <div className="connection-lost-message" role="alert" aria-live="assertive">
+          <h2 id="connection-lost-title" className="connection-lost-title">
+            {copy.title}
+          </h2>
+          <p id="connection-lost-body" className="connection-lost-body">
+            {copy.body}
           </p>
-        ) : null}
+          {copy.docsHref ? (
+            <p className="connection-lost-docs">
+              <a href={copy.docsHref} target="_blank" rel="noopener noreferrer">
+                {copy.docsLabel ?? 'Learn more'}
+              </a>
+            </p>
+          ) : null}
+        </div>
         <div className="connection-lost-actions">
           {showRetry && onRetry ? (
             <button

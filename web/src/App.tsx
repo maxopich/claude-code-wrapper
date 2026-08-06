@@ -37,6 +37,7 @@ import { SHORTCUTS } from './shortcutRegistry';
 import { findShortcut, useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
+import { ConnectionStatus } from './components/ConnectionStatus';
 import { MockBadge } from './components/MockBadge';
 import { Icon } from './components/Icon';
 import {
@@ -1934,10 +1935,11 @@ function AppShell({
                 global run/session activity, not sidebar chrome, and its
                 dropdown was overlaying (and blocking clicks on) the project
                 list when anchored here. */}
-              <span
-                className={state.connected ? 'dot on' : 'dot off'}
-                title={state.connected ? 'connected' : 'disconnected'}
-              />
+              {/* Register U11: was an inline 6×6 span carrying only a
+                  `title`, i.e. connection state signalled by colour alone.
+                  See `ConnectionStatus` for what replaced it and why it is
+                  deliberately not a live region. */}
+              <ConnectionStatus connected={state.connected} />
               {/*
               Cluster A Phase 5: notifications inbox bell. Per DEC-1 (XCT-3
               chrome lock), the bell ideally lives in an app-shell header
