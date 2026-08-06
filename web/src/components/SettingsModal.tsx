@@ -110,10 +110,17 @@ export function SettingsModal(props: {
   });
 
   return (
-    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+    <div
+      ref={overlayRef}
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-modal-title"
+      onMouseDown={onBackdropMouseDown}
+    >
       <div className="modal modal-surface">
         <header>
-          <h2>Settings</h2>
+          <h2 id="settings-modal-title">Settings</h2>
           <button className="icon-btn" onClick={props.onClose} title="Close">
             ✕
           </button>

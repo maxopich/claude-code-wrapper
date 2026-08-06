@@ -228,6 +228,65 @@ describe('[a11y] theme contrast — the MOCK badge', () => {
   });
 });
 
+describe('[a11y] theme contrast — the permission card’s Allow/Deny', () => {
+  // The app's highest-stakes buttons: in an untrusted project this pair is the
+  // last thing between the model and a `Bash("rm -rf …")`. Neither was in the
+  // pair list until register U09 sent us here, so nothing measured them — the
+  // affirmative button's ink is a literal (`#0c1a12`) chosen once, against a
+  // `--ok` that each gamma redefines.
+  const cases = [
+    { label: 'Allow', selector: '.msg.permission .actions .permission-allow' },
+    {
+      label: 'Allow (armed for a dangerous call)',
+      selector: '.msg.permission .actions .permission-allow.is-armed',
+    },
+    { label: 'Deny', selector: '.msg.permission .actions .permission-deny' },
+  ] as const;
+
+  // `.permission-deny` has no rule of its own beyond `:hover` — it takes the
+  // shared `.msg.permission button` fill and ink — so a missing rule is a
+  // legitimate "inherits the base" here, not a lookup failure.
+  const optionalRuleBody = (selector: string): string =>
+    stylesCss.includes(`\n${selector} {`) ? ruleBody(selector) : '';
+  /** The property as declared on this rule, or '' when the rule leaves it to
+   *  the base — `declaration` throws on absence, which is right for a rule
+   *  that is supposed to carry the property and wrong for a fallback chain. */
+  const optionalDeclaration = (body: string, prop: string): string =>
+    body === '' || !body.includes(prop) ? '' : declaration(body, prop);
+
+  for (const { label, selector } of cases) {
+    const own = optionalRuleBody(selector);
+    const base = ruleBody('.msg.permission button');
+    const ink = optionalDeclaration(own, 'color') || declaration(base, 'color');
+    const fill = optionalDeclaration(own, 'background') || declaration(base, 'background');
+
+    test(`${label} declares both an ink and a fill`, () => {
+      // Without this the theme loop below would measure an empty string and
+      // `parseColor` would throw — but a future refactor could just as easily
+      // leave one side blank in a way that silently resolves. Pin both.
+      expect(ink).not.toBe('');
+      expect(fill).not.toBe('');
+    });
+
+    test.each(THEMES)(`%s: ${label} ink clears AA on its own fill`, (theme) => {
+      const tokens = blocks[theme]!;
+      const fg = parseColor(resolveVar(tokens, ink));
+      const bg = composite(parseColor(resolveVar(tokens, fill)), resolveColor(tokens, '--panel'));
+      expect(contrastRatio(fg, bg)).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+    });
+  }
+
+  test('the affirmative button is coloured by class, not by DOM position', () => {
+    // U09's actual mechanism: the green came from `:first-child`, so swapping
+    // the two buttons would have repainted Deny as the safe-looking one with
+    // no CSS diff to notice. Both directions are asserted — the class rule
+    // must exist AND the positional one must be gone.
+    expect(ruleBody('.msg.permission .actions .permission-allow')).toContain('var(--ok)');
+    expect(stylesCss).not.toContain('.msg.permission .actions button:first-child');
+    expect(stylesCss).not.toContain('.msg.permission .actions button:last-child');
+  });
+});
+
 describe('[a11y] warning banners do not signal by colour alone (WCAG 1.4.1)', () => {
   test('.multi-agent-warning carries a background, a border and a glyph', () => {
     const body = ruleBody('.multi-agent-warning');

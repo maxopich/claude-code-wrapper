@@ -5,7 +5,7 @@ import { formatResultDuration, messageCopyText } from '../format';
 import { Markdown } from './Markdown';
 import { ClaudeMark } from './ClaudeMark';
 import { CopyButton } from './CopyButton';
-import { badgeTooltip, renderPermissionBody } from './PermissionCards';
+import { badgeTooltip, PermissionActions, renderPermissionBody } from './PermissionCards';
 import { MaxTurnsResultCard } from './MaxTurnsResultCard';
 
 export function MessageBlock(props: {
@@ -199,10 +199,11 @@ export function MessageBlock(props: {
           {m.decided ? (
             <div className="decided">decided: {m.decided}</div>
           ) : (
-            <div className="actions">
-              <button onClick={() => onPermissionDecide?.(m.requestId, 'allow')}>Allow</button>
-              <button onClick={() => onPermissionDecide?.(m.requestId, 'deny')}>Deny</button>
-            </div>
+            <PermissionActions
+              toolName={m.toolName}
+              category={category}
+              onDecide={(decision) => onPermissionDecide?.(m.requestId, decision)}
+            />
           )}
         </div>
       </div>
