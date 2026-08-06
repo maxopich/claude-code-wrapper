@@ -134,3 +134,52 @@ describe('[a11y] collapsible rails respond to focus, not only hover', () => {
     }
   });
 });
+
+/**
+ * `z-index` of the first rule matching `selector` that declares one. Read from
+ * the sheet rather than restated here: the point of the assertion below is
+ * that the two numbers stay in the right order, and hardcoding either of them
+ * would let a future edit move one without failing.
+ */
+function zIndexOf(selector: string): number {
+  // Line endings are normalised first: the repo has no `.gitattributes`, so a
+  // Windows runner checks the stylesheet out as CRLF, and a lookup for a
+  // selector that spans lines (`.sidebar,\n.inspector`) then matches nothing.
+  // That is not hypothetical — it is how this line failed on windows-2022
+  // while passing on macOS and ubuntu.
+  const css = stylesCss.replace(/\r\n/g, '\n');
+  const at = css.indexOf(`\n${selector} {`);
+  if (at === -1) throw new Error(`rule not found: ${selector}`);
+  const body = css.slice(at, css.indexOf('}', at));
+  const m = /z-index:\s*(-?\d+)\s*;/.exec(body);
+  if (!m) throw new Error(`no z-index in ${selector}`);
+  return Number(m[1]);
+}
+
+describe('[a11y] the drawer toggle is above the scrim it toggles (U25)', () => {
+  test('the toggle outranks the scrim', () => {
+    // It sat at 45 under a scrim at 55, so once a drawer opened the click
+    // landed on the scrim. That looked harmless on the hamburger — the
+    // scrim's own handler closes both drawers, so the sidebar shut anyway —
+    // and wrong on the inspector toggle, which closed the sidebar instead of
+    // opening the inspector. Meanwhile the keyboard could work both, because
+    // `pointer-events` never blocked focus.
+    const toggle = zIndexOf(".app[data-tier='narrow'] .drawer-toggle");
+    const scrim = zIndexOf('.scrim');
+    expect({ toggle, scrim, ordered: toggle > scrim }).toEqual({
+      toggle,
+      scrim,
+      ordered: true,
+    });
+  });
+
+  test('and above the rails, so it stays reachable over an open drawer', () => {
+    // Both toggles keep an `aria-expanded` and flip their label to "Close …",
+    // i.e. the markup always intended them to be operable while open.
+    const toggle = zIndexOf(".app[data-tier='narrow'] .drawer-toggle");
+    const rail = zIndexOf(
+      ".app[data-tier='narrow'] .sidebar,\n.app[data-tier='narrow'] .inspector",
+    );
+    expect(toggle).toBeGreaterThan(rail);
+  });
+});

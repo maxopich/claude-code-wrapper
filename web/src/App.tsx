@@ -16,6 +16,7 @@ import type {
 } from '@cebab/shared/protocol';
 import { connectWs, type WsHandle } from './ws';
 import { activeSession, initialState, isSessionPending, reduce } from './store';
+import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
 import { ProjectList } from './components/ProjectList';
 import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
@@ -507,8 +508,12 @@ function AppShell({
   const [inspPinned, setInspPinned] = useState(() =>
     readStored('cebab.inspPinned', false, (r) => r === 'true'),
   );
-  const [navOpen, setNavOpen] = useState(false);
-  const [inspOpen, setInspOpen] = useState(false);
+  // Register U25: one piece of state for both narrow-tier drawers, so "only
+  // one is open" is an invariant of `toggleDrawer` rather than something two
+  // independent setters happen to preserve. See `drawerState.ts`.
+  const [drawers, setDrawers] = useState<DrawerState>(DRAWERS_CLOSED);
+  const navOpen = drawers.nav;
+  const inspOpen = drawers.insp;
   const [tier, setTier] = useState<'wide' | 'medium' | 'narrow'>('wide');
   // Widescreen (16:9-class) display → permanent side rails. Seeded from the
   // display ratio so there's no collapsed→expanded flash on first paint; kept in
@@ -567,10 +572,7 @@ function AppShell({
   // Drawers exist only at the narrow tier — force them closed on the way out so
   // one can't linger off-screen (and keep pointer-events off the scrim).
   useEffect(() => {
-    if (tier !== 'narrow') {
-      setNavOpen(false);
-      setInspOpen(false);
-    }
+    if (tier !== 'narrow') setDrawers(closeDrawers());
   }, [tier]);
 
   // WS lifecycle bookkeeping for the reconnect toast (UX-11):
@@ -2001,7 +2003,7 @@ function AppShell({
         className="drawer-toggle nav"
         aria-label={navOpen ? 'Close sidebar' : 'Open sidebar'}
         aria-expanded={navOpen}
-        onClick={() => setNavOpen((v) => !v)}
+        onClick={() => setDrawers((d) => toggleDrawer(d, 'nav'))}
       >
         ☰
       </button>
@@ -2011,7 +2013,7 @@ function AppShell({
           className="drawer-toggle insp"
           aria-label={inspOpen ? 'Close inspector' : 'Open inspector'}
           aria-expanded={inspOpen}
-          onClick={() => setInspOpen((v) => !v)}
+          onClick={() => setDrawers((d) => toggleDrawer(d, 'insp'))}
         >
           ⧉
         </button>
@@ -2329,14 +2331,7 @@ function AppShell({
       )}
       {/* Narrow-tier scrim — click closes whichever drawer is open. CSS keeps
        *  it non-interactive unless a drawer is open. */}
-      <div
-        className="scrim"
-        aria-hidden="true"
-        onClick={() => {
-          setNavOpen(false);
-          setInspOpen(false);
-        }}
-      />
+      <div className="scrim" aria-hidden="true" onClick={() => setDrawers(closeDrawers())} />
       {settingsOpen && state.settings && (
         <SettingsModal
           settings={state.settings}
