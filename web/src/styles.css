@@ -569,13 +569,23 @@ pre {
   width: var(--insp-col);
 }
 /* Hover-expand (unpinned, non-narrow): overlay to the expanded width WITHOUT
- * reflowing the center — the grid track stays at the rail width. */
-.app:not([data-tier='narrow'])[data-nav-pinned='false'] .sidebar:hover {
+ * reflowing the center — the grid track stays at the rail width.
+ *
+ * Register U02: `:focus-within` sits beside `:hover` in EVERY rail rule, here
+ * and in the fade rules below. `pointer-events: none` stops the mouse but not
+ * the keyboard, so an unpinned rail used to take Tab focus into controls it
+ * had faded to `opacity: 0`, with hover the only way to reveal them — an
+ * operator on a keyboard could reach the sidebar and never see it. The
+ * alternative the register floats, `inert`, would have made the collapsed rail
+ * unreachable instead, including the pin button that is the only self-rescue.
+ * Focus parity with hover is the fix; `railFocus.test.ts` holds the pairing
+ * for all nine rules. */
+.app:not([data-tier='narrow'])[data-nav-pinned='false'] .sidebar:is(:hover, :focus-within) {
   width: var(--nav-exp-w);
   box-shadow: var(--shadow-lg);
   z-index: 40;
 }
-.app:not([data-tier='narrow'])[data-insp-pinned='false'] .inspector:hover {
+.app:not([data-tier='narrow'])[data-insp-pinned='false'] .inspector:is(:hover, :focus-within) {
   width: var(--insp-exp-w);
   box-shadow: var(--shadow-lg);
   z-index: 40;
@@ -634,7 +644,7 @@ pre {
 .pin-btn {
   transition: opacity var(--dur-2) var(--ease);
 }
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) :is(h1, .sidebar-header-controls, .session-list, .project-name, .trust, .workspace-btn-label) {
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover):not(:focus-within) :is(h1, .sidebar-header-controls, .session-list, .project-name, .trust, .workspace-btn-label) {
   opacity: 0;
   pointer-events: none;
 }
@@ -666,8 +676,8 @@ pre {
   border-color: var(--accent);
 }
 /* Hide the pin until the rail is expanded. */
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .pin-btn,
-.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) .pin-btn {
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover):not(:focus-within) .pin-btn,
+.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover):not(:focus-within) .pin-btn {
   opacity: 0;
   pointer-events: none;
 }
@@ -749,7 +759,7 @@ pre {
 .insp-body {
   transition: opacity var(--dur-2) var(--ease);
 }
-.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) :is(.insp-title, .insp-body) {
+.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover):not(:focus-within) :is(.insp-title, .insp-body) {
   opacity: 0;
   pointer-events: none;
 }
@@ -1111,16 +1121,16 @@ pre {
  * to a compact, centered gear icon-button that sits cleanly inside the rail
  * (matches the icon-rail intent); it returns to the full labelled button on
  * hover / when pinned. */
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .sidebar-footer {
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover):not(:focus-within) .sidebar-footer {
   padding: 10px 12px;
 }
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn {
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover):not(:focus-within) .workspace-btn {
   width: 42px;
   padding: 9px 0;
   justify-content: center;
   gap: 0;
 }
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn-label {
+.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover):not(:focus-within) .workspace-btn-label {
   display: none;
 }
 .project-list .project-row {
@@ -1159,6 +1169,35 @@ pre {
   /* Slight vertical nudge so the 8-spoke star aligns with the text baseline
    * rather than sitting heavy on the top of the line box. */
   margin-top: 1px;
+}
+/* Register U01: `.project-name` and `.session-name` became real <button>s so
+ * the sidebar has a keyboard path at all. Both already sat at `flex: 1` inside
+ * their flex row, so the geometry is unchanged — this only strips the UA
+ * button chrome so they still read as row labels. The row itself could not
+ * become the button: `<button>` and `role="button"` both forbid interactive
+ * descendants, and these rows contain two or three real buttons each.
+ *
+ * Declared BEFORE both classes on purpose: `font: inherit` is a shorthand, so
+ * if this sat after them it would wipe `.project-name`'s own weight/size and
+ * `.session-name`'s mono face. Reset first, then let each class re-state its
+ * own typography. */
+.project-name,
+.session-name {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: inherit;
+}
+.project-name:focus-visible,
+.session-name:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
 }
 .project-name {
   font-weight: 500;
@@ -1263,6 +1302,10 @@ pre {
 }
 .session-name {
   flex: 1;
+  /* A flex item defaults to `min-width: auto`; as a <button> that resolves
+   * against the label's intrinsic width and would stop the row from shrinking.
+   * Explicit 0 keeps the ellipsis working, matching `.project-name`. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -5300,6 +5343,28 @@ pre {
 }
 .add-participant-empty {
   margin-top: 8px;
+}
+/* Register U03: the draft view's keyboard/touch path into the participant
+ * list. Collapsed once the run has participants so the composed list stays the
+ * focus, open while it is empty because that is when there is nothing else to
+ * do. `<details>` gives the disclosure a real keyboard affordance for free. */
+.ma-draft-add {
+  margin-top: 8px;
+}
+.ma-draft-add > summary {
+  cursor: pointer;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  padding: 4px 2px;
+  border-radius: var(--r-sm);
+  list-style-position: inside;
+}
+.ma-draft-add > summary:hover {
+  color: var(--fg-0);
+}
+.ma-draft-add > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .add-participant-list {
   list-style: none;

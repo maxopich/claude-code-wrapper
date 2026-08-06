@@ -94,7 +94,6 @@ export function ProjectList(props: {
                     ? p.name
                     : `${p.name}\n\nNo CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
                 }
-                aria-label={p.name}
                 draggable
                 onDragStart={(e) => {
                   // JSON payload with a kind tag so the Multi-Agent drop zone
@@ -105,6 +104,13 @@ export function ProjectList(props: {
                   );
                   e.dataTransfer.effectAllowed = 'copy';
                 }}
+                // Register U01: the row's own click is a MOUSE CONVENIENCE for
+                // its dead space (padding, the live dot, the Claude mark). The
+                // accessible control is `.project-name` below — a real button,
+                // so it is in tab order and activates on Enter/Space for free.
+                // The header itself cannot be the button: `<button>` and
+                // `role="button"` both forbid interactive descendants, and this
+                // row already contains two of them (Select…, trust).
                 onClick={() => props.onSelectProject(p.id)}
               >
                 <span
@@ -116,7 +122,20 @@ export function ProjectList(props: {
                 ) : (
                   <span className="claude-mark-spacer" aria-hidden="true" />
                 )}
-                <span className="project-name">{p.name}</span>
+                <button
+                  type="button"
+                  className="project-name"
+                  aria-expanded={expanded}
+                  onClick={(e) => {
+                    // Without this the click bubbles to the header and selects
+                    // twice — harmless in the reducer, but it ships a second
+                    // `open_project` over the wire for no reason.
+                    e.stopPropagation();
+                    props.onSelectProject(p.id);
+                  }}
+                >
+                  {p.name}
+                </button>
                 {/* Cluster I C5 UI: Select-mode toggle. Only meaningful when the
                  *  project is expanded (its session list is visible), so it's
                  *  gated on `expanded`. Hidden when the project has no sessions
@@ -178,10 +197,24 @@ export function ProjectList(props: {
                   ) : (
                     <li
                       className={`session-row new ${!activeSessionId ? 'active' : ''}`}
+                      // U01: mouse convenience for the row's dead space; the
+                      // button below is the control. See the project header.
                       onClick={() => props.onNewSession(p.id)}
                     >
-                      <span className="session-marker">+</span>
-                      <span className="session-name">new chat</span>
+                      <span className="session-marker" aria-hidden="true">
+                        +
+                      </span>
+                      <button
+                        type="button"
+                        className="session-name"
+                        aria-label={`Start a new chat in ${p.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onNewSession(p.id);
+                        }}
+                      >
+                        new chat
+                      </button>
                       {/* Cluster B Phase 6e (UI-B5): trailing ⓘ button opens the
                        *  AuthorityPreflightModal scoped to this project. stopPropagation
                        *  so the click doesn't also fire onNewSession. */}
@@ -413,12 +446,16 @@ function SessionRow(props: {
       className={`session-row ${props.active ? 'active' : ''} ${editing ? 'editing' : ''} ${
         props.selectMode ? 'selecting' : ''
       } ${props.selectMode && props.selected ? 'selected' : ''}`}
-      aria-selected={props.selectMode ? props.selected : undefined}
       title={
         editing || props.selectMode
           ? undefined
           : `${s.id}\n${formatRelative(s.lastEventAt)} • $${s.totalCostUsd.toFixed(4)}\nDouble-click name to rename`
       }
+      // Register U01: mouse convenience only — `.session-name` below is the
+      // real control. The row previously carried `aria-selected` here, which
+      // assistive tech ignores on a bare <li> (that attribute needs an
+      // option/row/tab role, and this list has none); the state now rides on
+      // the button as `aria-pressed`, which is what a toggle actually maps to.
       onClick={() => {
         if (props.selectMode) props.onToggleSelect();
         else if (!editing) props.onSelect();
@@ -466,18 +503,28 @@ function SessionRow(props: {
           onBlur={commit}
         />
       ) : (
-        <span
+        <button
+          type="button"
           className="session-name"
+          aria-pressed={props.selectMode ? props.selected : undefined}
+          aria-current={!props.selectMode && props.active ? 'true' : undefined}
+          aria-label={props.selectMode ? `Select session ${label}` : `Open session ${label}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (props.selectMode) props.onToggleSelect();
+            else props.onSelect();
+          }}
           onDoubleClick={(e) => {
             // Rename is disabled in select mode — the double-click would
-            // otherwise fight the selection toggle.
+            // otherwise fight the selection toggle. The keyboard path to
+            // rename is the ✎ button below, not this.
             if (props.selectMode) return;
             e.stopPropagation();
             startEdit();
           }}
         >
           {label}
-        </span>
+        </button>
       )}
       {/* Per-row action buttons (rename + download) are hidden in select
        *  mode: the row is a selection target there, not an action surface. */}

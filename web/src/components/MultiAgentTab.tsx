@@ -255,7 +255,11 @@ export function MultiAgentTab(props: {
   return <DraftView {...props} />;
 }
 
-function DraftView(props: {
+/** Exported for `MultiAgentTab.draftPicker.test.tsx`, which pins the
+ *  non-drag path into the participant list. Same reason `ActiveRunView` /
+ *  `TopRunBar` are exported — mounting the whole tab to reach one section
+ *  would test the props plumbing, not the section. Not imported by app code. */
+export function DraftView(props: {
   mode: 'chain' | 'orchestrator';
   projects: Project[];
   /**
@@ -443,7 +447,7 @@ function DraftView(props: {
           >
             {participants.length === 0 ? (
               <div className="drop-zone-placeholder">
-                Drag a project here to add it as a participant.
+                Drag a project here, or add one from the list below.
               </div>
             ) : (
               <ol className="participant-list">
@@ -545,6 +549,22 @@ function DraftView(props: {
               </ol>
             )}
           </div>
+          {/* Register U03: the keyboard/touch path into the participant list.
+           *  The drop zone above was the only way to compose a run, and HTML5
+           *  drag-and-drop reaches neither. Same component the active-run view
+           *  uses, in its `draft` voice — nothing is installed or announced
+           *  here, the list is just a draft until Start. */}
+          <details className="ma-draft-add" open={participants.length === 0}>
+            <summary>Add a participant</summary>
+            <AddParticipantPicker
+              eligibleProjects={projects.filter(
+                (p) => !multiAgent.draftParticipants.includes(p.id),
+              )}
+              pendingId={null}
+              onPick={props.onAddParticipant}
+              context="draft"
+            />
+          </details>
           <div className="ma-lifecycle-inline">
             <span className="ma-lifecycle-label">Lifecycle</span>
             <div className="lifecycle-toggle" role="group" aria-label="Lifecycle">
@@ -2249,6 +2269,7 @@ function SessionSettingsPanel(props: {
                   eligibleProjects={eligibleProjects}
                   pendingId={pendingAddId}
                   onPick={handleAddClick}
+                  context="live"
                 />
               )}
             </div>
@@ -2389,16 +2410,37 @@ function SessionSettingsPanel(props: {
  * the participants list grows past the pending project (handled by the
  * parent's pending-tracking).
  */
+/**
+ * Button-per-project list for adding a participant.
+ *
+ * Two callers, two meanings, one component (register U03). In a **live**
+ * session an Add registers a new in-process agent, installs bus metadata if
+ * the project lacks it, and notifies the orchestrator — a WS round-trip, hence
+ * `pendingId`. In a **draft** it only appends to `draftParticipants` in the
+ * store; nothing is installed and nobody is notified until Start. The two
+ * differ by exactly two strings, so they share the component rather than
+ * growing a near-copy that drifts.
+ *
+ * The draft used to have no picker at all: a drop zone reading "Drag a project
+ * here" was the only way to compose a run, which meant keyboard and touch
+ * users could not compose one. Drag-and-drop still works — this is an
+ * additional path, not a replacement.
+ */
 function AddParticipantPicker(props: {
   eligibleProjects: Project[];
   pendingId: number | null;
   onPick: (projectId: number) => void;
+  /** Which of the two meanings above applies. Drives the hint + button title
+   *  only; the markup and the keyboard behaviour are identical. */
+  context: 'draft' | 'live';
 }) {
+  const isDraft = props.context === 'draft';
   if (props.eligibleProjects.length === 0) {
     return (
       <p className="settings-hint add-participant-empty">
-        No eligible projects. Every project in the workspace is already a participant in this
-        session.
+        {isDraft
+          ? 'No projects left to add. Every project in the workspace is already a participant.'
+          : 'No eligible projects. Every project in the workspace is already a participant in this session.'}
       </p>
     );
   }
@@ -2416,7 +2458,9 @@ function AddParticipantPicker(props: {
                 {installed ? (
                   <code>{p.busAgentName}</code>
                 ) : (
-                  <span className="hint">bus will be installed on add</span>
+                  <span className="hint">
+                    {isDraft ? 'no bus integration yet' : 'bus will be installed on add'}
+                  </span>
                 )}
               </span>
             </div>
@@ -2425,10 +2469,13 @@ function AddParticipantPicker(props: {
               className="ghost-btn add-participant-pick-btn"
               disabled={isPending}
               onClick={() => props.onPick(p.id)}
+              aria-label={`Add ${p.name} as a participant`}
               title={
-                installed
-                  ? `Register ${p.busAgentName} as a new in-process agent and notify the orchestrator.`
-                  : `Install bus integration for ${p.name} (DB metadata), then register its agent and notify the orchestrator.`
+                isDraft
+                  ? `Add ${p.name} to this run's participant list. Nothing is installed or started until you press Start.`
+                  : installed
+                    ? `Register ${p.busAgentName} as a new in-process agent and notify the orchestrator.`
+                    : `Install bus integration for ${p.name} (DB metadata), then register its agent and notify the orchestrator.`
               }
             >
               {isThis ? 'Adding…' : 'Add'}
