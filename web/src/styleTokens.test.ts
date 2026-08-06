@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 // Vite's ?raw suffix returns the file contents as a string at build time
 // (declared in vite-env.d.ts). No Node fs dependency — runs in jsdom.
 import stylesCss from './styles.css?raw';
+import { parseThemeBlocks } from './cssColor.js';
 
 /**
  * Design-migration guard (redesign → prod, Phase 0).
@@ -23,6 +24,12 @@ import stylesCss from './styles.css?raw';
  *     drops a token and falls back to an inherited (wrong-gamma) value.
  *     The parity assertion is inert until ≥2 theme blocks exist; it goes
  *     live the moment Phase 1 adds them, in the same file.
+ *
+ * Both obligations are about token NAMES; neither has ever looked at a
+ * value, which is how `--fg-3` came to fail WCAG AA in all four gammas
+ * under a green build (register U04). Value-level checks — contrast, ramp
+ * ordering — live in `styleContrast.test.ts` and share this file's block
+ * parser so the two cannot disagree about what the stylesheet declares.
  */
 
 /** Strip `/* … *\/` comments so documentation prose that *names* a
@@ -65,35 +72,19 @@ describe('style tokens — no baked AI-purple', () => {
  */
 const EXPECTED_THEMES = ['aurora', 'daylight', 'slate', 'phosphor'] as const;
 
-/** Extract `[data-theme='NAME'] { … }` blocks → { name: Set<--token> }.
- *  Balanced-brace scan from each opener (theme blocks are flat — a
- *  requirement kept for templatePreview/cssGate.test.ts's flat-rule
- *  regex — so a single-level body match is sufficient). */
-function parseThemeBlocks(css: string): Record<string, Set<string>> {
-  const out: Record<string, Set<string>> = {};
-  const openRe = /\[data-theme=['"]([a-z]+)['"]\]\s*\{/g;
-  let m: RegExpExecArray | null;
-  while ((m = openRe.exec(css)) !== null) {
-    const name = m[1]!;
-    let depth = 1;
-    let i = m.index + m[0].length;
-    const start = i;
-    while (i < css.length && depth > 0) {
-      const ch = css[i];
-      if (ch === '{') depth++;
-      else if (ch === '}') depth--;
-      i++;
-    }
-    const inner = css.slice(start, i - 1);
-    const tokens = new Set<string>();
-    for (const t of inner.matchAll(/(--[a-z0-9-]+)\s*:/gi)) tokens.add(t[1]!);
-    out[name] = tokens;
-  }
-  return out;
+/** Token NAMES per gamma. The block scan itself lives in `cssColor.ts`, which
+ *  needs the same walk to read token *values* for `styleContrast.test.ts` —
+ *  two copies of a parser is two things that can disagree about what the
+ *  stylesheet says, and the parity claim and the contrast claim have to be
+ *  talking about the same blocks. */
+function themeTokenNames(css: string): Record<string, Set<string>> {
+  return Object.fromEntries(
+    Object.entries(parseThemeBlocks(css)).map(([name, tokens]) => [name, new Set(tokens.keys())]),
+  );
 }
 
 describe('style tokens — theme parity', () => {
-  const blocks = parseThemeBlocks(stripComments(stylesCss));
+  const blocks = themeTokenNames(stripComments(stylesCss));
   const names = Object.keys(blocks);
 
   test('every declared gamma fills the identical token contract', () => {

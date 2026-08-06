@@ -50,7 +50,7 @@ export const THEME_META: Array<{
     id: 'daylight',
     label: 'Daylight',
     description: 'Warm light, serif reading bodies, coral accent.',
-    swatch: { bg: '#f3f1ea', panel: '#fbfaf5', accent: '#bf5e3a' },
+    swatch: { bg: '#f3f1ea', panel: '#fbfaf5', accent: '#b85a38' },
   },
   {
     id: 'aurora',
