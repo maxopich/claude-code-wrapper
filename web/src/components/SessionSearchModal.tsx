@@ -203,8 +203,16 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
                   type="text"
                   value={rawAck}
                   onChange={(e) => setRawAck(e.target.value)}
-                  placeholder={RAW_ACK_PHRASE}
-                  aria-label="Type the acknowledgment phrase to enable raw search"
+                  autoComplete="off"
+                  spellCheck={false}
+                  /* U29's defect, second site — unfiled, found while fixing the
+                   * bulk-delete gate. This printed RAW_ACK_PHRASE as the
+                   * placeholder: the phrase that arms an audited, unredacted
+                   * search across session content, sitting greyed-out inside the
+                   * field asking you to type it. The warning above still names
+                   * the phrase, which is the point — the friction is deliberate
+                   * typing, not secrecy. Inside the input it is neither. */
+                  aria-label={`Type "${RAW_ACK_PHRASE}" to enable unredacted search`}
                 />
                 <button
                   type="button"

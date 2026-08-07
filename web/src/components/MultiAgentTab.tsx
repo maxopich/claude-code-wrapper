@@ -24,6 +24,7 @@ import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalSurface } from '../useModalSurface';
 import { useCopyFeedback } from '../useCopyFeedback';
+import { useConfirmGate } from '../useConfirmGate';
 import { AgentTag } from './AgentTag';
 import { AskUserQuestionCard } from './AskUserQuestionCard';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
@@ -311,6 +312,10 @@ export function DraftView(props: {
   const participants = multiAgent.draftParticipants
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
+  // U16: this view owns two of the app's four ex-`window.confirm` gates
+  // (bus install, clear iterations) plus the one U15 adds (bus uninstall).
+  // One hook, one dialog slot, rendered at the bottom of the view.
+  const { gate, requestConfirm } = useConfirmGate();
   const [namingOpen, setNamingOpen] = useState(false);
   // In-flight signals for async WS round-trips. Cleared on success (this
   // view unmounts when a session becomes active) or on wrapperErrorSeq
@@ -508,7 +513,44 @@ export function DraftView(props: {
                         <button
                           className="ghost-btn"
                           title="Uninstall bus integration. This is pure DB metadata — Cebab wrote nothing into the project, so nothing in it is touched; the project just stops being eligible for multi-agent sessions."
-                          onClick={() => props.onUninstallBus(p.id)}
+                          onClick={() =>
+                            /* U15: Uninstall fired directly while Install, one
+                             * slot away in the same row, opened a six-line
+                             * dialog. The register calls uninstall "the more
+                             * consequential half"; it is the opposite — install
+                             * GRANTS the capability (headless bypassPermissions,
+                             * the project's own hooks auto-executing on every
+                             * bus hop), uninstall revokes it. Confirming the
+                             * grant and not the revoke is the right direction.
+                             *
+                             * The real case for a gate here is narrower: two
+                             * adjacent buttons in the same slot, and pulling a
+                             * project mid-draft breaks the draft. So the copy
+                             * says the action is CHEAP — `install.ts` re-derives
+                             * the same slug deterministically, so reinstalling
+                             * restores the name. A gate that overstates
+                             * consequence teaches operators to click through the
+                             * ones that matter. */
+                            requestConfirm({
+                              title: `Uninstall bus integration for "${p.name}"?`,
+                              body: (
+                                <>
+                                  <p>
+                                    The project stops being eligible for multi-agent sessions.
+                                    Nothing inside it is touched — Cebab only clears a database
+                                    flag.
+                                  </p>
+                                  <p>
+                                    Reinstalling restores the same agent name (
+                                    <code>{p.busAgentName ?? '?'}</code>), so this is reversible in
+                                    one click.
+                                  </p>
+                                </>
+                              ),
+                              confirmLabel: 'Uninstall',
+                              onConfirm: () => props.onUninstallBus(p.id),
+                            })
+                          }
                         >
                           Uninstall
                         </button>
@@ -516,18 +558,30 @@ export function DraftView(props: {
                         <button
                           className="primary-btn"
                           title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless with bypassPermissions (tool calls auto-approved — no human-in-the-loop)."
-                          onClick={() => {
-                            const ok = window.confirm(
-                              `Install bus integration for "${p.name}"?\n\n` +
-                                'This is pure DB metadata: Cebab assigns a stable\n' +
-                                'agent slug and marks the project bus-eligible.\n' +
-                                'Nothing is written into the project itself.\n\n' +
-                                "During multi-agent sessions this project's agent\n" +
-                                'runs headless with `bypassPermissions` — tool calls\n' +
-                                'are auto-approved (no human-in-the-loop).',
-                            );
-                            if (ok) props.onInstallBus(p.id);
-                          }}
+                          onClick={() =>
+                            // U16: was a `window.confirm`. Same words, same
+                            // friction — an in-app dialog the theme reaches.
+                            requestConfirm({
+                              title: `Install bus integration for "${p.name}"?`,
+                              body: (
+                                <>
+                                  <p>
+                                    Pure database metadata: Cebab assigns a stable agent slug and
+                                    marks the project bus-eligible. Nothing is written into the
+                                    project itself.
+                                  </p>
+                                  <p>
+                                    During multi-agent sessions this project&apos;s agent runs
+                                    headless with <code>bypassPermissions</code> — tool calls are
+                                    auto-approved, with no human in the loop.
+                                  </p>
+                                </>
+                              ),
+                              confirmLabel: 'Install bus',
+                              danger: true,
+                              onConfirm: () => props.onInstallBus(p.id),
+                            })
+                          }
                         >
                           Install bus
                         </button>
@@ -679,20 +733,36 @@ export function DraftView(props: {
                   // server preserves the running row, so a click would be a
                   // no-op, but the affordance reads as misleading.
                   disabled={clearPending || tabIterations === null || clearableCount === 0}
-                  onClick={() => {
-                    // Browser-native confirm keeps this lightweight; disk
-                    // artifacts survive, so this is destructive-but-recoverable.
-                    if (
-                      window.confirm(
-                        `Clear ${clearableCount} iteration${clearableCount === 1 ? '' : 's'} from the list?\n\n` +
-                          `Removes finished session rows (events + participants + the session itself) from the Cebab database. The active session, if any, is preserved.\n\n` +
-                          `On-disk transcripts and iteration files inside each session folder stay where they are; you can still inspect them by path.`,
-                      )
-                    ) {
-                      setClearPending(true);
-                      props.onClearIterations();
-                    }
-                  }}
+                  onClick={() =>
+                    /* U16: the old comment said "browser-native confirm keeps
+                     * this lightweight". It did the opposite — a native dialog
+                     * is the one thing here the theme cannot reach, and three
+                     * other actions in this app asked in three other ways.
+                     * Still a plain confirm: disk artifacts survive, so the
+                     * friction level is unchanged. */
+                    requestConfirm({
+                      title: `Clear ${clearableCount} iteration${clearableCount === 1 ? '' : 's'} from the list?`,
+                      body: (
+                        <>
+                          <p>
+                            Removes finished session rows — events, participants and the session
+                            itself — from the Cebab database. The active session, if any, is
+                            preserved.
+                          </p>
+                          <p>
+                            On-disk transcripts and iteration files inside each session folder stay
+                            where they are; you can still inspect them by path.
+                          </p>
+                        </>
+                      ),
+                      confirmLabel: 'Clear',
+                      danger: true,
+                      onConfirm: () => {
+                        setClearPending(true);
+                        props.onClearIterations();
+                      },
+                    })
+                  }
                   title="Remove finished iterations from the list (DB rows only). On-disk artifacts are preserved; the active session, if any, is kept."
                 >
                   {clearPending ? (
@@ -754,6 +824,9 @@ export function DraftView(props: {
           }}
         />
       )}
+      {/* U15/U16: bus install, bus uninstall and clear-iterations all resolve
+       *  through this one slot. `null` when nothing is pending. */}
+      {gate}
     </div>
   );
 }
@@ -2547,6 +2620,7 @@ export function TopRunBar(props: {
   const isOrchestrator = run.mode === 'orchestrator';
   const isTemp = run.lifecycle === 'temp';
   const [stopPending, setStopPending] = useState(false);
+  const { gate, requestConfirm } = useConfirmGate();
 
   function handleStop() {
     if (!isTemp) {
@@ -2557,15 +2631,35 @@ export function TopRunBar(props: {
     const workerCount = isOrchestrator
       ? Math.max(0, run.participantAgentNames.length - 1)
       : run.participantAgentNames.length;
-    const ok = window.confirm(
-      `End this temp session?\n\nCebab will:\n  • Clear bus integration from ${workerCount} participant${
-        workerCount === 1 ? '' : 's'
-      } (DB flag only)\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, iteration files) are wiped.`,
-    );
-    if (ok) {
-      setStopPending(true);
-      props.onStop(run.sessionId);
-    }
+    // U16: was a `window.confirm`. Kept a plain confirm — the friction level
+    // is unchanged, only the mechanism.
+    requestConfirm({
+      title: 'End this temp session?',
+      body: (
+        <>
+          <p>Cebab will:</p>
+          <ul>
+            <li>
+              Clear bus integration from {workerCount} participant
+              {workerCount === 1 ? '' : 's'} (database flag only)
+            </li>
+            <li>
+              Delete the session folder at <code>{run.sessionFolder}</code>
+            </li>
+          </ul>
+          <p>
+            Persisted events in the database stay; on-disk artifacts — transcripts and iteration
+            files — are wiped.
+          </p>
+        </>
+      ),
+      confirmLabel: 'End & clean up',
+      danger: true,
+      onConfirm: () => {
+        setStopPending(true);
+        props.onStop(run.sessionId);
+      },
+    });
   }
 
   // Cluster E Phase 2.x (B4-1): summarize per-participant models for the
@@ -2639,6 +2733,8 @@ export function TopRunBar(props: {
           Close
         </button>
       )}
+      {/* U16: the temp-session end gate. `null` unless pending. */}
+      {gate}
     </div>
   );
 }

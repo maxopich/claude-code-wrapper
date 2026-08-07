@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { SettingsView } from '../store';
 import { useModalSurface } from '../useModalSurface';
 import { useStorageStats } from '../useStorageStats';
@@ -95,6 +95,42 @@ export function SettingsModal(props: {
     props.settings.workspaceRoot === null && trimmed === props.settings.defaultWorkspaceRoot;
   const fallbackSource = props.settings.defaultWorkspaceRootSource;
 
+  /**
+   * U14: the theme applies instantly and is deliberately outside the save
+   * payload — that part is right, because previewing a colour gamma is the
+   * whole point of the picker. What was wrong is that **Cancel did not
+   * cancel it**: the footer offers a two-button contract over the modal's
+   * contents, and one of those contents ignored it.
+   *
+   * #287 sharpened this by my own hand. The theme group became a proper
+   * radiogroup with arrow-key navigation, and arrows SELECT as they move —
+   * justified at the time with "the theme applies instantly, costs nothing,
+   * and arrowing back undoes it". True only if you remember where you
+   * started. An operator arrowing across four gammas and then pressing
+   * Cancel kept whichever one they last passed over.
+   *
+   * Snapshot on mount, restore on every path that closes without saving.
+   *
+   * Save needs no counterpart: `saveSettings` in App.tsx calls
+   * `setSettingsOpen(false)`, so the modal unmounts and `cancel` never runs.
+   * A `themeOnOpen.current = null` in `save()` looked like the matching half
+   * of this and was unreachable — the exact shape of machinery this series
+   * keeps finding, so it is not here. The "Save keeps the previewed theme"
+   * test is the live guard if that host contract ever changes.
+   */
+  const themeOnOpen = useRef<Theme>(props.theme);
+
+  const cancel = useCallback(() => {
+    // Only restore when there is something to restore. `onThemeChange` writes
+    // through to localStorage, so firing it to set the value already in effect
+    // is a spurious write — and it would make every Esc-to-close look like a
+    // theme change to anything observing the callback.
+    if (themeOnOpen.current !== props.theme) props.onThemeChange(themeOnOpen.current);
+    props.onClose();
+    // `props` is read through the closure on every call, so the identity of
+    // the callbacks is all that matters for correctness here.
+  }, [props]);
+
   const save = () => {
     if (!canSave) return;
     props.onSave({
@@ -105,7 +141,9 @@ export function SettingsModal(props: {
   };
 
   const { overlayRef, onBackdropMouseDown } = useModalSurface({
-    onClose: props.onClose,
+    // Esc and backdrop-click route here, so they revert too — all four exits
+    // (button, ✕, Esc, backdrop) mean the same thing.
+    onClose: cancel,
     onConfirm: save,
     canConfirm: canSave,
   });
@@ -143,7 +181,7 @@ export function SettingsModal(props: {
       <div className="modal modal-surface">
         <header>
           <h2 id="settings-modal-title">Settings</h2>
-          <button className="icon-btn" onClick={props.onClose} title="Close">
+          <button className="icon-btn" onClick={cancel} title="Close">
             ✕
           </button>
         </header>
@@ -285,7 +323,13 @@ export function SettingsModal(props: {
               </button>
             ))}
           </div>
-          <p className="hint">Changes the color palette instantly. Saved to this browser only.</p>
+          {/* U14: this used to say only "Changes the color palette instantly",
+           *  which was true and was the whole problem — instantly, and then
+           *  permanently, whatever the footer said next. Now that Cancel
+           *  reverts, the line says both halves. */}
+          <p className="hint">
+            Previews instantly; Cancel restores the current theme. Saved to this browser only.
+          </p>
         </section>
         <section data-testid="storage-section">
           <div className="label">Storage</div>
@@ -331,7 +375,7 @@ export function SettingsModal(props: {
           )}
         </section>
         <footer>
-          <button className="ghost-btn" onClick={props.onClose}>
+          <button className="ghost-btn" onClick={cancel}>
             Cancel
           </button>
           <button className="primary-btn" disabled={!canSave} onClick={save}>
