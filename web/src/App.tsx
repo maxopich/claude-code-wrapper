@@ -1882,6 +1882,14 @@ function AppShell({
   // are themselves new prompts.
   const composerStructurallyDisabled = !state.activeProjectId || !workspaceReady;
   const inputDisabled = composerStructurallyDisabled || running;
+  // U33: the composer's disabled state and its stated reason are the same
+  // value, computed once. `null` = usable.
+  const composerReason = composerDisabledReason({
+    hasActiveProject: !!state.activeProjectId,
+    workspaceReady,
+    rateLimited: !!session?.rateLimit,
+    heldCount: session?.heldMessages.length ?? 0,
+  });
   const view = state.multiAgent.view;
 
   // On a widescreen display with enough width, force both rails permanently
@@ -2248,13 +2256,12 @@ function AppShell({
                    * project, workspace bad). `running` no longer hard-
                    * disables the composer — InputBox owns the running-
                    * state UI now (Send→Stop swap, textarea stays usable
-                   * for the next prompt). */
-                  disabled={
-                    composerStructurallyDisabled ||
-                    (session?.rateLimit && session.heldMessages.length >= HELD_MESSAGES_CAP
-                      ? true
-                      : false)
-                  }
+                   * for the next prompt).
+                   *
+                   * U33: the same conditions as before, now carrying the
+                   * sentence that says which one applies. See
+                   * `composerDisabledReason`. */
+                  disabled={composerReason ? { reason: composerReason } : undefined}
                   isRunning={running}
                   onSend={sendMessage}
                   onStop={interruptSession}
@@ -2373,14 +2380,68 @@ function AppShell({
 }
 
 /**
- * Label for the sidebar footer's workspace button: the trailing folder name of
- * the workspace path (e.g. `/Users/foo/agents` → `agents`). The server resolves
- * `~`-paths and relative paths server-side, so by the time we see them here
- * they're absolute POSIX paths — split-pop is enough.
+ * U33: why the composer is disabled, or `null` when it isn't.
+ *
+ * Returns non-null for exactly the conditions that used to produce a bare
+ * `disabled` boolean, so this PR changes what the composer *says* and never
+ * what it *enables*. `InputBox` takes `{ reason }` rather than a boolean, so
+ * the two cannot drift: a disable with no reason no longer type-checks.
+ *
+ * On the workspace branch. It is unreachable today — `!workspaceReady`
+ * replaces the whole chat column with the "Choose a folder" screen, so the
+ * composer is never rendered in that state. It keeps its condition and its
+ * copy anyway: dropping it would be the one behavioural change in this
+ * change-set, and if the layout ever renders the composer there, it explains
+ * itself rather than regressing to the silence this finding is about.
+ *
+ * On the rate-limit branch. The banner above already says "N held messages
+ * waiting to send when this clears" — but it never names the cap, never links
+ * it to the dead composer, and never says that its own per-row Drop button is
+ * what re-opens it. The operator was looking at the explanation and the
+ * symptom simultaneously with nothing joining them.
+ *
+ * Exported for the gate — a pure function beats driving all of App.tsx
+ * through jsdom to enumerate four states.
  */
-function workspaceLabel(workspaceRoot: string | null): string {
+export function composerDisabledReason(s: {
+  hasActiveProject: boolean;
+  workspaceReady: boolean;
+  rateLimited: boolean;
+  heldCount: number;
+}): string | null {
+  if (!s.hasActiveProject) return 'Pick a project in the sidebar to start a session.';
+  if (!s.workspaceReady) return 'No workspace folder is set. Open Settings to choose one.';
+  if (s.rateLimited && s.heldCount >= HELD_MESSAGES_CAP) {
+    return `Rate limited, and the queue is full at ${HELD_MESSAGES_CAP} messages. Drop one from the banner above to compose another.`;
+  }
+  return null;
+}
+
+/**
+ * Label for the sidebar footer's workspace button: the trailing folder name of
+ * the workspace path (e.g. `/Users/foo/agents` → `agents`).
+ *
+ * U41: this used to split on `/` alone, justified by a comment asserting that
+ * server-resolved paths are "absolute POSIX paths". They are absolute; they are
+ * not POSIX. The server builds this string with `path.resolve(path.join(...))`
+ * (`server/src/config.ts`), which is backslash-separated on Windows — a
+ * supported platform that CI exercises on every push. So a Windows operator saw
+ * `C:\Users\foo\agents` where the design called for `agents`, overflowing the
+ * rail. Splitting on either separator is correct on all three platforms: a
+ * literal backslash cannot appear inside a POSIX path component that this label
+ * would ever receive (the server produces it from its own `path` module, not
+ * from operator free-text).
+ *
+ * Exported for the gate — the alternative is driving all of App.tsx through
+ * jsdom to assert on one pure string transform.
+ */
+export function workspaceLabel(workspaceRoot: string | null): string {
   if (!workspaceRoot) return 'Set workspace';
-  const trimmed = workspaceRoot.replace(/\/+$/, '');
-  const base = trimmed.split('/').pop();
-  return base && base.length > 0 ? base : trimmed;
+  const trimmed = workspaceRoot.replace(/[/\\]+$/, '');
+  const base = trimmed.split(/[/\\]/).pop();
+  // Fall back to the ORIGINAL, not the trimmed value: a root of `/` trims to
+  // the empty string, and the fallback's whole purpose is "no folder name, so
+  // show the path" — which an empty button does not do. Pre-existing, found
+  // while pinning the Windows cases below.
+  return base && base.length > 0 ? base : workspaceRoot;
 }

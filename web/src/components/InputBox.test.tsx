@@ -95,7 +95,7 @@ describe('InputBox — idle (not running)', () => {
 
   test('structural disabled disables both textarea and button', () => {
     act(() => {
-      root.render(<InputBox onSend={() => {}} disabled />);
+      root.render(<InputBox onSend={() => {}} disabled={{ reason: 'no project' }} />);
     });
     expect(getTextarea().disabled).toBe(true);
     expect(getButton().disabled).toBe(true);
@@ -185,7 +185,14 @@ describe('InputBox — running (Stop variant)', () => {
 
   test('Stop button disabled when structurally disabled prop is also true', () => {
     act(() => {
-      root.render(<InputBox onSend={() => {}} isRunning onStop={() => {}} disabled />);
+      root.render(
+        <InputBox
+          onSend={() => {}}
+          isRunning
+          onStop={() => {}}
+          disabled={{ reason: 'no project' }}
+        />,
+      );
     });
     // Even though isRunning, the structural `disabled` wins for both
     // textarea and Stop button.

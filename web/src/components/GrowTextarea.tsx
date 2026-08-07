@@ -23,6 +23,12 @@ export function GrowTextarea(props: {
    *  where Enter must insert a newline and saving is explicit. */
   submitOnEnter?: boolean;
   ariaLabel?: string;
+  /** Id of an element describing the field's current state — used by the
+   *  composer to point at its disabled-reason line (U33). Note that a
+   *  `disabled` textarea is not focusable, so an AT reading in focus order
+   *  never reaches the description; this association is for browse-mode
+   *  readers, and the visible line is what does the real work. */
+  ariaDescribedBy?: string;
 }) {
   const { onChange, onSubmit, minRows = 3, maxHeightPx = 320, submitOnEnter = true } = props;
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -102,6 +108,7 @@ export function GrowTextarea(props: {
         placeholder={props.placeholder}
         disabled={props.disabled}
         aria-label={props.ariaLabel}
+        aria-describedby={props.ariaDescribedBy}
       />
     </div>
   );

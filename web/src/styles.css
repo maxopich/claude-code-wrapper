@@ -2024,6 +2024,17 @@ pre {
   gap: var(--s-2);
   background: linear-gradient(180deg, transparent, var(--bg) 40%);
 }
+/* U33: the one-line reason a disabled composer is disabled. Spans both grid
+ * tracks so it reads as a sentence above the field rather than a caption
+ * squeezed beside the Send button. `--fg-1` (not `--err`) — see the note in
+ * InputBox.tsx: a colour-only or low-contrast answer to "the UI told me
+ * nothing" is not an answer. */
+.input-box-disabled-reason {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
 .input-box textarea {
   background: var(--bg-3);
   color: var(--fg);
@@ -2626,14 +2637,9 @@ pre {
   font-size: var(--t-sm);
   color: var(--ink, inherit);
 }
-.keyboard-shortcuts-modal-footer {
-  padding: 12px 18px;
-  border-top: 1px solid var(--line-1);
-}
-.keyboard-shortcuts-modal-footer .hint {
-  margin: 0;
-  font-size: var(--t-xs, 11px);
-}
+/* U40 removed `.keyboard-shortcuts-modal-footer` — its only content was a
+ * contributor note telling the operator to edit a source file. Rules deleted
+ * with it rather than left orphaned. */
 
 /* Shared .kbd chip — keycap styling used by the cheatsheet and (later)
  * any inline shortcut hint in tooltips/banners. Monospace + a subtle

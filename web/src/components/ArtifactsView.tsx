@@ -28,6 +28,7 @@ import { logsHashFor } from './sessionLog/logsHash';
 import { AgentTag } from './AgentTag';
 import { FEATURE_ARTIFACT_DIFF_V2 } from '../featureFlags';
 import { useArtifactContent } from '../useArtifactContent';
+import { useCopyFeedback } from '../useCopyFeedback';
 import type { MultiAgentRun } from '../store';
 import type {
   ArtifactContentError,
@@ -95,6 +96,17 @@ export function ArtifactsView(props: {
 }) {
   const groups = useMemo(() => groupArtifacts(props.run.mutations), [props.run.mutations]);
   const [selected, setSelected] = useState<string | null>(null);
+  /* U42: "Copy path" used to be a bare `navigator.clipboard.writeText` in a
+   * try with an empty catch — so a successful copy and a failed one produced
+   * exactly the same thing on screen: nothing. The shared hook routes through
+   * `copyToClipboard` (which has the execCommand fallback for non-secure
+   * contexts) and flips the button's label, so the two outcomes are finally
+   * distinguishable. The label stays text rather than becoming `CopyButton`'s
+   * icon — this is a named action in a preview header, not a hover affordance
+   * beside a code block.
+   *
+   * Declared here, above the empty-state early return, because it is a hook. */
+  const { copied, copy } = useCopyFeedback();
 
   if (groups.length === 0) {
     return (
@@ -108,14 +120,6 @@ export function ArtifactsView(props: {
   }
 
   const selectedGroup = groups.find((g) => g.filePath === selected) ?? groups[0];
-
-  async function copyPath(path: string) {
-    try {
-      await navigator.clipboard.writeText(path);
-    } catch {
-      // Clipboard API can fail silently — operator can still select + copy.
-    }
-  }
 
   /**
    * Arrow / Home / End move the selection, and focus follows it (U30).
@@ -211,10 +215,10 @@ export function ArtifactsView(props: {
               <button
                 type="button"
                 className="ghost-btn"
-                onClick={() => copyPath(selectedGroup.filePath)}
+                onClick={() => void copy(selectedGroup.filePath)}
                 title="Copy the file path to the clipboard"
               >
-                Copy path
+                {copied ? 'Copied' : 'Copy path'}
               </button>
               <a
                 className="ghost-btn"

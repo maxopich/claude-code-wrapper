@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import { stripComments } from './sourceScan';
 
 /**
  * A composite ARIA role is a promise about the keyboard (registers U17, U18,
@@ -73,41 +74,6 @@ const KEYBOARD_MODELS = ['nextIndex(', 'aria-activedescendant'];
  * empty rather than starting life with a known-broken component inside it.
  */
 const EXEMPT: Array<{ file: string; why: string }> = [];
-
-/**
- * Source with its prose removed: block comments (including the braced JSX
- * form) and whole-line `//` comments.
- *
- * Both directions matter. A comment EXPLAINING a role that was removed would
- * otherwise be reported as a live declaration — which is exactly what happened
- * while writing this file, when a note saying why `LogToolbar` dropped its role
- * kept the gate red. And a comment MENTIONING `nextIndex(` would otherwise
- * launder a component that never calls it.
- *
- * Only whole-line `//` comments are stripped, never a trailing one: `//` also
- * appears inside string literals (`https://…`), and truncating a code line at
- * the first slash pair could silently delete a real declaration further along
- * it. Prose lives on its own lines here anyway.
- */
-function stripComments(src: string): string {
-  let out = '';
-  let i = 0;
-  while (i < src.length) {
-    const open = src.indexOf('/*', i);
-    if (open === -1) {
-      out += src.slice(i);
-      break;
-    }
-    out += src.slice(i, open);
-    const close = src.indexOf('*/', open + 2);
-    if (close === -1) break; // unterminated block: drop the rest
-    i = close + 2;
-  }
-  return out
-    .split('\n')
-    .filter((line) => !line.trim().startsWith('//'))
-    .join('\n');
-}
 
 /** Every composite role literally declared in this source. */
 function declaredRoles(src: string): string[] {
