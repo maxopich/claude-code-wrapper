@@ -72,7 +72,11 @@ describe('migration 031_per_mutation_pause schema shape', () => {
     expect(names).toContain('mutations_acknowledged');
   });
 
-  test('migration runner is idempotent — re-applying 031 does not throw', () => {
+  // Not an idempotence test, though it used to say so (register C10): the
+  // runner SKIPS a filename already in `schema_migrations`, so the body
+  // never re-executes. No migration here survives a second apply, and none
+  // needs to — the exactly-once contract is asserted in `db.migrations.test.ts`.
+  test('the runner applies 031 exactly once — reopening skips it', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()

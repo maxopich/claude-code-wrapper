@@ -110,7 +110,11 @@ describe('migration 023_mock_flag schema shape', () => {
     expect(marker?.hash_prev).toBeNull();
   });
 
-  test('migration runner is idempotent — re-applying 023 does not double-insert the marker', () => {
+  // Not an idempotence test, though it used to say so (register C10): the
+  // runner SKIPS a filename already in `schema_migrations`, so the body
+  // never re-executes. No migration here survives a second apply, and none
+  // needs to — the exactly-once contract is asserted in `db.migrations.test.ts`.
+  test('the runner applies 023 exactly once — reopening skips it', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const count = getDb()

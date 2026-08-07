@@ -52,7 +52,11 @@ describe('migration 027_pause_on_dangerous schema shape', () => {
     expect(cols().find((x) => x.name === 'pause_on_mutation')).toBeUndefined();
   });
 
-  test('migration runner is idempotent — re-applying 027 does not throw', () => {
+  // Not an idempotence test, though it used to say so (register C10): the
+  // runner SKIPS a filename already in `schema_migrations`, so the body
+  // never re-executes. No migration here survives a second apply, and none
+  // needs to — the exactly-once contract is asserted in `db.migrations.test.ts`.
+  test('the runner applies 027 exactly once — reopening skips it', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
