@@ -22,7 +22,8 @@
  * is v2 (Cebab captures no pre-image today, spec §2 / OQ-I5); the "Diff against
  * previous edit" affordance is scaffolded but disabled behind `ARTIFACT_DIFF_V2`.
  */
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { nextIndex } from '../listNavigation';
 import { logsHashFor } from './sessionLog/logsHash';
 import { AgentTag } from './AgentTag';
 import { FEATURE_ARTIFACT_DIFF_V2 } from '../featureFlags';
@@ -116,10 +117,41 @@ export function ArtifactsView(props: {
     }
   }
 
+  /**
+   * Arrow / Home / End move the selection, and focus follows it (U30).
+   *
+   * Bound on the row because that is where the keydown starts. The sibling
+   * rows are the other <tr>s in the same <tbody>, so the target can be focused
+   * directly off `parentElement.children` — the nodes are keyed by file path
+   * and stable across the re-render this triggers.
+   */
+  function onRowKeyDown(e: ReactKeyboardEvent<HTMLTableRowElement>, index: number) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      setSelected(groups[index]!.filePath);
+      return;
+    }
+    // A grid clamps at the ends (unlike a menu, which wraps).
+    const target = nextIndex({ key: e.key, current: index, count: groups.length });
+    if (target === null) return;
+    e.preventDefault();
+    setSelected(groups[target]!.filePath);
+    const row = e.currentTarget.parentElement?.children[target];
+    if (row instanceof HTMLElement) row.focus();
+  }
+
   return (
     <div className="artifacts">
       <div className="artifacts-table-wrap" role="region" aria-label="artifact list">
-        <table className="artifacts-table">
+        {/* U30: `role="grid"`. The rows already carried `aria-selected` and a
+         *  tabIndex, but a plain <table> maps to `role="table"` — a static
+         *  structure with no selection model, so nothing consumed that state,
+         *  and `tabIndex={0}` on every row made a fifty-file list fifty tab
+         *  stops. A grid is where both of those mean something: one tab stop
+         *  (roving index below) and a real selected state. <td>/<th> need no
+         *  attributes — HTML-AAM maps them to gridcell/columnheader once the
+         *  ancestor table is a grid, and <tbody> is already a rowgroup. */}
+        <table className="artifacts-table" role="grid" aria-label="Artifacts">
           <thead>
             <tr>
               <th className="artifacts-col-name">Name</th>
@@ -130,21 +162,18 @@ export function ArtifactsView(props: {
             </tr>
           </thead>
           <tbody>
-            {groups.map((g) => {
+            {groups.map((g, i) => {
               const isSelected = g.filePath === selectedGroup?.filePath;
               return (
                 <tr
                   key={g.filePath}
                   className={`artifacts-row${isSelected ? ' is-selected' : ''}`}
                   aria-selected={isSelected}
-                  tabIndex={0}
+                  // Roving tab index: the grid is ONE tab stop, and Tab out of
+                  // it lands in the preview pane rather than in row 2 of 50.
+                  tabIndex={isSelected ? 0 : -1}
                   onClick={() => setSelected(g.filePath)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      setSelected(g.filePath);
-                    }
-                  }}
+                  onKeyDown={(e) => onRowKeyDown(e, i)}
                 >
                   <td className="artifacts-col-name">
                     <span className="artifacts-file-icon" aria-hidden="true">

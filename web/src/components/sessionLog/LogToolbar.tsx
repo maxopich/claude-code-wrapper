@@ -56,7 +56,20 @@ export function LogToolbar(props: {
     : [...LOG_ROW_KINDS];
   const hasFilter = filters.search.length > 0 || filters.agents.size > 0 || filters.kinds.size > 0;
   return (
-    <div className="logs-toolbar" role="toolbar" aria-label="Log filters and actions">
+    // Surfaced by `widgetRoles.test.ts`, not by the register: this declared
+    // `role="toolbar"`, which obliges a roving tab index and arrow-key
+    // movement between the controls. It had neither — a search field, two
+    // <details> and four buttons, each its own tab stop.
+    //
+    // The fix is to drop the role rather than implement it, because here the
+    // promise is one that SHOULD NOT be kept: a toolbar's Left/Right arrows are
+    // exactly the keys the search input needs for the caret, so wiring the
+    // model would break a control that works today to satisfy a role nothing
+    // needs. This is a filter bar; individually tabbable controls are the right
+    // behaviour for it. `role="group"` keeps the label and the grouping and
+    // promises no keyboard model — the same role the two filter panels below
+    // already use.
+    <div className="logs-toolbar" role="group" aria-label="Log filters and actions">
       <input
         type="search"
         className="logs-search"

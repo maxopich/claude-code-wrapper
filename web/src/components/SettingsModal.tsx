@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { SettingsView } from '../store';
 import { useModalSurface } from '../useModalSurface';
 import { useStorageStats } from '../useStorageStats';
+import { nextIndex } from '../listNavigation';
 import { THEME_META, type Theme } from '../theme';
 import type { ClientMsg, ServerMsg } from '@cebab/shared';
 
@@ -108,6 +109,27 @@ export function SettingsModal(props: {
     onConfirm: save,
     canConfirm: canSave,
   });
+
+  /**
+   * Arrow keys across the theme radio group. `orientation: 'both'` because the
+   * cards wrap into a visual grid, so Left/Right and Up/Down are both natural;
+   * `wrap: true` because a radio group cycles.
+   */
+  function onThemeKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    const current = THEME_META.findIndex((t) => t.id === props.theme);
+    const target = nextIndex({
+      key: e.key,
+      current,
+      count: THEME_META.length,
+      wrap: true,
+      orientation: 'both',
+    });
+    if (target === null) return;
+    e.preventDefault();
+    props.onThemeChange(THEME_META[target]!.id);
+    const card = e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[target];
+    card?.focus();
+  }
 
   return (
     <div
@@ -226,13 +248,28 @@ export function SettingsModal(props: {
            *  effect without a round-trip and without a pending "unsaved"
            *  state. */}
           <div className="label">Appearance</div>
-          <div className="theme-grid" role="radiogroup" aria-label="Color theme">
+          {/* Found while verifying U17/U18/U26/U30, not filed in the register:
+           *  this declared `role="radiogroup"` with correct `aria-checked` and
+           *  none of the keyboard model that role obliges — four native
+           *  buttons meant four tab stops instead of one, and the arrow keys
+           *  did nothing. Roving tabIndex + arrows below. Arrows SELECT as
+           *  they move, which is correct radiogroup behaviour and safe here:
+           *  the theme applies instantly, costs nothing, and arrowing back
+           *  undoes it. (Contrast ModeToggle, where select-on-move would flip
+           *  a live session's permission posture — hence toggle buttons.) */}
+          <div
+            className="theme-grid"
+            role="radiogroup"
+            aria-label="Color theme"
+            onKeyDown={onThemeKeyDown}
+          >
             {THEME_META.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 role="radio"
                 aria-checked={props.theme === t.id}
+                tabIndex={props.theme === t.id ? 0 : -1}
                 className={`theme-card${props.theme === t.id ? ' active' : ''}`}
                 onClick={() => props.onThemeChange(t.id)}
                 title={t.description}

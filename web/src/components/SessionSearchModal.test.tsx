@@ -200,6 +200,85 @@ describe('SessionSearchModal — results + navigation (C4-4)', () => {
     expect(onNavigate.mock.calls[0]![0].sessionId).toBe('s2');
   });
 
+  // ---- U18: the combobox announces the option it would activate -----------
+  //
+  // The arrow keys above always moved a selection index; nothing told assistive
+  // tech about it, so a screen-reader operator arrowing through hits heard
+  // silence and could not know what Enter would open. `SlashCommandPalette`
+  // already did this correctly and is the shape these follow.
+
+  test('[a11y] aria-activedescendant resolves to the highlighted option', () => {
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2')] });
+
+    const activeId = () => input().getAttribute('aria-activedescendant');
+    expect(activeId()).toBeTruthy();
+    // It must point at a real node, and at the one marked selected — a
+    // dangling or stale id is the same silence with extra steps.
+    const active = () => document.getElementById(activeId()!);
+    expect(active()).toBe(rows()[0]);
+    expect(active()?.getAttribute('aria-selected')).toBe('true');
+
+    keyDown(input(), 'ArrowDown');
+    expect(active()).toBe(rows()[1]);
+    expect(active()?.getAttribute('aria-selected')).toBe('true');
+    expect(rows()[0]?.getAttribute('aria-selected')).toBe('false');
+  });
+
+  test('[a11y] no active descendant is named while there are no results', () => {
+    render({ activeProjectId: 1 });
+    expect(input().getAttribute('aria-activedescendant')).toBeNull();
+  });
+
+  test('[a11y] options are not tab stops, so focus stays on the input', () => {
+    // They used to be <button>s: a 40-hit list was 40 tab stops, and clicking
+    // one moved focus off the combobox that owns the arrow keys.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2')] });
+
+    for (const row of rows()) {
+      expect(row.tagName).toBe('LI');
+      expect(row.getAttribute('tabindex')).toBeNull();
+    }
+  });
+
+  test('[a11y] the listbox contains only options', () => {
+    // Both hint paragraphs used to live inside role="listbox", which may hold
+    // only options and groups.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1')], truncated: true });
+
+    const listbox = container.querySelector('[role="listbox"]')!;
+    expect(listbox).not.toBeNull();
+    // The truncated hint is rendered (asserted elsewhere) — just not in here.
+    expect(container.querySelector('.session-search-truncated')).not.toBeNull();
+    const childRoles = Array.from(listbox.children).map((c) => c.getAttribute('role'));
+    expect(childRoles).toEqual(['option']);
+    // And the id the input controls is the listbox itself.
+    expect(input().getAttribute('aria-controls')).toBe(listbox.id);
+  });
+
+  test('[a11y] Home and End jump to the ends of the result list', () => {
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2'), hit('s3')] });
+
+    keyDown(input(), 'End');
+    expect(rows()[2]?.getAttribute('aria-selected')).toBe('true');
+    // A listbox clamps rather than wrapping.
+    keyDown(input(), 'ArrowDown');
+    expect(rows()[2]?.getAttribute('aria-selected')).toBe('true');
+    keyDown(input(), 'Home');
+    expect(rows()[0]?.getAttribute('aria-selected')).toBe('true');
+  });
+
   test('redacted badge shows when a hit carries redactedFields; truncated hint when capped', () => {
     render({ activeProjectId: 1 });
     setValue(input(), 'mig');
