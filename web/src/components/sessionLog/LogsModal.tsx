@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
+import { useConfirmGate, type ConfirmRequest } from '../../useConfirmGate';
 import { triggerBlobDownload } from '../../exports';
 import { useLogStream } from './useLogStream';
 import { applyLogFilters, useLogFilters } from './useLogFilters';
@@ -43,6 +44,7 @@ export function LogsModal(props: {
   subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
 }) {
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: props.onClose });
+  const { gate, requestConfirm } = useConfirmGate();
 
   const stream = useLogStream({
     sessionId: props.sessionId,
@@ -147,7 +149,7 @@ export function LogsModal(props: {
           scope={props.scope}
           revealedSensitive={stream.revealedSensitive}
           loading={stream.loading}
-          onRevealSensitive={() => requestReveal(stream, filtered)}
+          onRevealSensitive={() => requestReveal(stream, filtered, requestConfirm)}
           onRefresh={stream.refresh}
           onDownload={() => downloadNdjson(props.sessionId, filtered)}
         />
@@ -195,6 +197,11 @@ export function LogsModal(props: {
           {dangerousAnnouncement}
         </div>
       </div>
+      {/* The reveal-sensitive gate. Rendered as a SIBLING of `.logs-modal`
+       *  inside this overlay, so its own `useModalSurface` inerts the logs
+       *  modal behind it — a dialog over a dialog, with only the top one
+       *  reachable. */}
+      {gate}
     </div>
   );
 }
@@ -285,9 +292,10 @@ function cssId(rowId: string): string {
 function requestReveal(
   stream: ReturnType<typeof useLogStream>,
   filteredRows: readonly LogRow[],
+  requestConfirm: (req: ConfirmRequest) => void,
 ): void {
   if (stream.revealedSensitive) {
-    // Already revealed — operator is asking to RE-MASK.
+    // Already revealed — operator is asking to RE-MASK. Tightening never asks.
     stream.setRevealSensitive(false);
     return;
   }
@@ -300,12 +308,27 @@ function requestReveal(
     if (sample.size >= 8) break;
   }
   const sampleStr = sample.size > 0 ? [...sample].sort().join(', ') : 'no redacted fields detected';
-  const ok = window.confirm(
-    `Reveal sensitive fields?\n\nThe server has masked fields matching credential/path patterns. ` +
-      `Examples in the current view: ${sampleStr}.\n\n` +
-      `Click OK to re-fetch the log with redaction disabled. Refresh the page to re-mask.`,
-  );
-  if (ok) stream.setRevealSensitive(true);
+  // U16: was a `window.confirm`. Same question, same friction level — an
+  // in-app dialog that the theme reaches and a test can drive without
+  // stubbing a global. Deliberately NOT promoted to a typed gate: this PR
+  // converges the mechanism, not the severity tiers.
+  requestConfirm({
+    title: 'Reveal sensitive fields?',
+    body: (
+      <>
+        <p>
+          The server has masked fields matching credential and path patterns. In the current view:{' '}
+          <code>{sampleStr}</code>.
+        </p>
+        <p>
+          Confirming re-fetches the log with redaction disabled. Refresh the page to re-mask.
+        </p>
+      </>
+    ),
+    confirmLabel: 'Reveal',
+    danger: true,
+    onConfirm: () => stream.setRevealSensitive(true),
+  });
 }
 
 /**

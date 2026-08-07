@@ -338,4 +338,26 @@ describe('SessionSearchModal — raw opt-in typed-ack gate (C4-3)', () => {
     expect(lastSearch()?.raw).toBe(true);
     expect(container.querySelector('.session-search-raw-pill')?.textContent).toBe('RAW');
   });
+
+  // U29's defect, second site — unfiled; the register named only the
+  // bulk-delete gate. This input printed RAW_ACK_PHRASE as its placeholder:
+  // the phrase that arms an audited, unredacted search across session content,
+  // greyed out inside the field asking you to type it. The warning above the
+  // field still names the phrase, which is right — the friction of a typed
+  // gate is deliberate typing, not secrecy. Under the caret it is neither.
+  test('the ack input does not echo the phrase it is asking for (U29)', () => {
+    render({ activeProjectId: 1 });
+    click(rawLink());
+    const ack = container.querySelector('.session-search-raw-ack') as HTMLInputElement;
+    expect(ack).not.toBeNull();
+    expect(ack.getAttribute('placeholder')).toBeNull();
+    // The phrase is still stated where the operator reads instructions...
+    expect(container.querySelector('.session-search-raw-warn')?.textContent).toContain(
+      RAW_ACK_PHRASE,
+    );
+    // ...and the gate is still shut.
+    expect(
+      (container.querySelector('.session-search-raw-confirm') as HTMLButtonElement).disabled,
+    ).toBe(true);
+  });
 });

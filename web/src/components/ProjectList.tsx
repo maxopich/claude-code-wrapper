@@ -180,6 +180,7 @@ export function ProjectList(props: {
                   {inSelectMode ? (
                     <BulkActionBar
                       count={selectedIds.size}
+                      projectName={p.name}
                       onArchive={() => {
                         props.onBulkSessionOp('archive', [...selectedIds]);
                         exitSelectMode();
@@ -267,15 +268,38 @@ export function ProjectList(props: {
  * expanded project is in select mode. Renders the live selection count
  * (announced via `aria-live="polite"` per C5-4) and the three ops.
  *
- * Delete is gated behind a typed-confirmation substate (C5-2): the
- * operator must type the selection count to arm the destructive button,
- * and Cancel is the default/safe action. Archive + Export are single-step
- * (C5-3). Escape exits — backing out of the confirm substate first, then
- * out of select mode entirely — so a reflexive Esc never nukes a
- * selection mid-confirm.
+ * Delete is gated behind a typed-confirmation substate (C5-2), and Cancel is
+ * the default/safe action. Archive + Export are single-step (C5-3). Escape
+ * exits — backing out of the confirm substate first, then out of select mode
+ * entirely — so a reflexive Esc never nukes a selection mid-confirm.
+ *
+ * U29: the required token used to be the SELECTION COUNT, and the gate printed
+ * it three times — in the prompt (`Type **3** to delete 3`), in the input's
+ * `aria-label`, and as the input's `placeholder`. So the friction the gate
+ * exists to create was gone twice over: the answer was a single character, and
+ * it was already sitting in the field, greyed out, under the cursor. The
+ * register asks for the placeholder to be dropped; that alone would change
+ * nothing, because "to delete 3" still spells out the answer in the same
+ * sentence. The token had to change.
+ *
+ * It is now the fixed verb `delete` — the rule this codebase already uses
+ * twice (`inject` in EnvInjectionGateModal, `reopen` in ReopenSessionModal),
+ * and one that cannot be read off the surrounding prose. The target moved into
+ * the sentence instead: "Delete 7 sessions from Cebab?" confirms *what* as
+ * well as *that*.
+ *
+ * Naming the token in a label is not the defect the placeholder was. The
+ * friction a typed gate creates is deliberate typing, not secrecy — GitHub
+ * prints the repository name directly above the field. Greyed text INSIDE the
+ * input is different: the eye and the caret are already there.
  */
+export const BULK_DELETE_TOKEN = 'delete';
+
 function BulkActionBar(props: {
   count: number;
+  /** The project the selected sessions belong to. Named in the confirm prompt
+   *  so the operator confirms a target, not just a number. */
+  projectName: string;
   onArchive: () => void;
   onDelete: () => void;
   onExport: () => void;
@@ -285,10 +309,7 @@ function BulkActionBar(props: {
   const [confirmText, setConfirmText] = useState('');
   const confirmInputRef = useRef<HTMLInputElement>(null);
   const hasSelection = props.count > 0;
-  // The operator types the selection count to arm Delete (C5-2). Using the
-  // count (vs a project name) keeps the gate self-contained in this bar.
-  const confirmTarget = String(props.count);
-  const deleteArmed = confirmingDelete && confirmText.trim() === confirmTarget;
+  const deleteArmed = confirmingDelete && confirmText.trim() === BULK_DELETE_TOKEN;
 
   useEffect(() => {
     if (confirmingDelete) confirmInputRef.current?.focus();
@@ -314,15 +335,18 @@ function BulkActionBar(props: {
     return (
       <li className="bulk-action-bar confirming" aria-label="Confirm bulk delete">
         <span className="bulk-action-confirm-prompt">
-          Type <strong>{confirmTarget}</strong> to delete {props.count}
+          Delete {props.count} session{props.count === 1 ? '' : 's'} from{' '}
+          <strong>{props.projectName}</strong>? Type <code>{BULK_DELETE_TOKEN}</code> to confirm.
         </span>
         <input
           ref={confirmInputRef}
           className="bulk-action-confirm-input"
           value={confirmText}
-          inputMode="numeric"
-          aria-label={`Type ${confirmTarget} to confirm deleting ${props.count} sessions`}
-          placeholder={confirmTarget}
+          autoComplete="off"
+          spellCheck={false}
+          aria-label={`Type ${BULK_DELETE_TOKEN} to confirm deleting ${props.count} sessions from ${props.projectName}`}
+          /* No `placeholder` — that was the U29 defect, and
+           * `confirmationStyle.test.ts` fails if one comes back. */
           onChange={(e) => setConfirmText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && deleteArmed) {
