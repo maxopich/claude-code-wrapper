@@ -3,19 +3,21 @@
  * diagram.
  *
  * `<text>` elements inside an SVG need numeric `fontSize`, not a CSS
- * variable. The corresponding `:root` `--tpl-fs-*` tokens in
- * `styles.css` are kept in sync with the values here so HTML
- * counterparts (panel rows, modal subtitle, etc.) read from the same
- * scale.
+ * variable, so this table is the single source for that geometry.
+ *
+ * There was a `--tpl-fs-*` mirror of these values in `styles.css` for the
+ * HTML around the SVG. No rule ever referenced it, so the "kept in sync"
+ * this comment used to promise was a sync between one live table and five
+ * dead declarations; the CSS half is gone. Anything that needs these sizes
+ * in CSS should declare the token beside its own rule.
  *
  * Values intentionally match the pre-PR-4 magic numbers scattered
  * through `layout.ts` — this is a refactor seam, not a typography
  * change. Compact + full density both pull from this table; the
  * choice of which token to read is the responsibility of the caller.
  *
- * Px on purpose — mirrored 1:1 by the `--tpl-fs-*` CSS variables in
- * `styles.css`. SVG `<text>` needs numeric `fontSize`, so neither
- * side is rem-ified even though the rest of the CSS type ramp is.
+ * Px on purpose — SVG `<text>` needs numeric `fontSize`, so this table is
+ * not rem-ified even though the rest of the CSS type ramp is.
  *
  *  - `name`         standard name size at orch row / chain wrap (12)
  *  - `nameCompact`  slightly larger name at chain row tier (13)

@@ -14,6 +14,7 @@ import type {
   SessionPermissionMode,
   StopReasonCode,
 } from '@cebab/shared/protocol';
+import { SHELL } from './breakpoints';
 import { connectWs, type WsHandle } from './ws';
 import { activeSession, initialState, isSessionPending, reduce } from './store';
 import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
@@ -539,14 +540,15 @@ function AppShell({
   }, [theme]);
 
   // Redesign Phase 2: responsive tier from a ResizeObserver on `.app`
-  // (replaces the matchMedia sidebar logic). wide ≥1120 · medium ≥830 · narrow
-  // below — below narrow both rails become off-canvas drawers. Threshold on the
-  // app's own box so the ultra-wide 1600px cap is respected.
+  // (replaces the matchMedia sidebar logic). Below `medium` both rails become
+  // off-canvas drawers. Threshold on the app's own box, not the viewport, so
+  // the ultra-wide page cap is respected — the tiers therefore live in
+  // `breakpoints.ts` alongside the CSS widths rather than in a media query.
   useEffect(() => {
     const el = appRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const classify = (w: number): 'wide' | 'medium' | 'narrow' =>
-      w >= 1120 ? 'wide' : w >= 830 ? 'medium' : 'narrow';
+      w >= SHELL.wide ? 'wide' : w >= SHELL.medium ? 'medium' : 'narrow';
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? el.clientWidth;
       setTier((prev) => {
@@ -1896,8 +1898,8 @@ function AppShell({
   // expanded by reusing the pinned state (widens the grid track + reveals labels
   // via existing CSS). Display-derived only — never writes the persisted
   // navPinned/inspPinned prefs, so a narrow window or the MacBook restores the
-  // user's collapsible behavior. The `tier === 'wide'` floor (≥1120px) keeps a
-  // narrow window on a 16:9 monitor collapsible/drawer-based as before.
+  // user's collapsible behavior. The `tier === 'wide'` floor (SHELL.wide) keeps
+  // a narrow window on a 16:9 monitor collapsible/drawer-based as before.
   const permanentPanels = wideDisplay && tier === 'wide';
 
   return (
