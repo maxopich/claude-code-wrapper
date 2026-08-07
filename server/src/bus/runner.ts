@@ -20,7 +20,7 @@
  */
 import { createSdkMcpServer, tool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { classifyToolCall } from '@cebab/shared';
+import { BUS_SEND_TOOL, classifyToolCall } from '@cebab/shared';
 import type { AskUserQuestionOption, AskUserQuestionView } from '@cebab/shared/protocol';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
@@ -70,8 +70,15 @@ export const DELEGATE_ONLY_DISALLOWED: readonly string[] = [
   'TodoWrite',
 ];
 
-/** The single MCP tool Cebab injects, under the namespaced `cebab_bus` key. */
-export const BUS_SEND_TOOL = 'mcp__cebab_bus__bus_send';
+/**
+ * The single MCP tool Cebab injects, under the namespaced `cebab_bus` key.
+ *
+ * Defined in `@cebab/shared` and re-exported here, where every caller already
+ * looks for it: `classifyToolCall` has to recognise the same string this file
+ * registers, and when the two were written out separately they disagreed —
+ * the classifier matched a bare `bus_send` the SDK never sends (register D06).
+ */
+export { BUS_SEND_TOOL };
 
 /**
  * The only tools a `'delegate-only'` agent (the orchestrator) may call:
