@@ -9,9 +9,20 @@
  * (different surface layers); the legacy block owns them with legacy
  * semantics (--bg-2 = panel, --bg-3 = card). New CSS uses these tokens. */
 
-/* Breakpoints (literals — CSS vars don't resolve in @media):
- *   sm 600 · md 900 · lg 1200 · xl 1440
- * JS counterpart: web/src/breakpoints.ts */
+/* Breakpoints. Literals here because CSS vars don't resolve inside @media —
+ * which is exactly why the table has to live somewhere a test can read it:
+ * `web/src/breakpoints.ts`, and `breakpoints.test.ts` fails if this file
+ * branches on a width that is not in it. Don't add a bare @media width here;
+ * name it there first.
+ *
+ * Buffered (via mqBelow, so the boundary pixel can't satisfy both sides):
+ *   599.98 narrow · 699.98 / 799.98 / 899.98 the .logs-row-summary collapse
+ * Exact (one-offs, no min-width partner):
+ *   640 allow-deny · 720 template panel · 768 template modal
+ * Only min-width in the sheet: 3840, the ultra-wide page cap on .app.
+ *
+ * The shell's own tiers (1120 / 830) are NOT here: they are measured on
+ * `.app`'s box by a ResizeObserver, not on the viewport. Same table, JS side. */
 
 :root {
   /* Surface ramp — neutral slate (–0 page · –1 panel · –4 hover · –5 pressed) */
@@ -73,16 +84,6 @@
   --t-lg: 0.875rem; /* 14 */
   --t-xl: clamp(0.9375rem, 0.85rem + 0.25vw, 1.0625rem); /* 15→17 */
   --t-2xl: clamp(1.125rem, 0.95rem + 0.6vw, 1.375rem); /* 18→22 */
-  /* PR-4: template-preview typography mirror. Used by HTML elements
-   * around the SVG (panel rows, modal subtitle). SVG <text> reads
-   * numeric values from `templatePreview/tokens.ts` — kept in sync.
-   * Px on purpose — do not rem-ify; SVG/canvas geometry depends on
-   * the numeric value, and the tokens.ts mirror is also px. */
-  --tpl-fs-name: var(--t-sm);
-  --tpl-fs-name-compact: var(--t-md);
-  --tpl-fs-role: var(--t-xs);
-  --tpl-fs-hub: var(--t-md);
-  --tpl-fs-slug: var(--t-xs);
   /* Spacing — rem-based (1rem = 16px assumed) */
   --s-1: 0.25rem; /* 4 */
   --s-2: 0.5rem; /* 8 */
@@ -178,7 +179,6 @@
   --panel-2: #f1f3f8;
   --raised: #ffffff;
   --canvas: radial-gradient(1100px 500px at 12% -8%, rgba(47, 111, 237, 0.07), transparent 60%), #eef1f6;
-  --header-bg: rgba(255, 255, 255, 0.82);
   --fg-0: #191b24;
   --fg-1: #33384a;
   --fg-2: #565a6b;
@@ -203,7 +203,6 @@
   --info: #2f6fed;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
   --coral: #cc785c;
-  --teal: #22a7c4;
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 18px;
@@ -214,9 +213,7 @@
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: var(--font-sans);
-  --grad-brand: linear-gradient(135deg, var(--accent), var(--teal));
   --grad-user: linear-gradient(135deg, var(--accent), #3b82f6);
-  --grad-cta: linear-gradient(135deg, var(--accent), var(--teal));
   --msg-user-bg: var(--grad-user);
   --msg-user-fg: #ffffff;
   --msg-user-border: transparent;
@@ -224,11 +221,7 @@
   --msg-asst-bg: var(--raised);
   --msg-asst-border: var(--line-1);
   --msg-asst-shadow: var(--shadow-md);
-  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
   --warn-border: rgba(211, 146, 15, 0.3);
-  --warn-bg: linear-gradient(180deg, rgba(211, 146, 15, 0.08), rgba(211, 146, 15, 0.03));
-  --scrollbar-thumb: rgba(20, 24, 50, 0.16);
-  --hover-tint: rgba(20, 24, 50, 0.06);
 }
 
 /* DAYLIGHT — warm light · coral accent (default) */
@@ -244,7 +237,6 @@
   --panel-2: #ece8dd;
   --raised: #ffffff;
   --canvas: #f3f1ea;
-  --header-bg: rgba(251, 250, 245, 0.82);
   --fg-0: #2a2620;
   --fg-1: #443f36;
   --fg-2: #5b554b;
@@ -269,7 +261,6 @@
   --info: #3a6db0;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
   --coral: #cc785c;
-  --teal: #22a7c4;
   --r-sm: 5px;
   --r-md: 8px;
   --r-lg: 14px;
@@ -280,9 +271,7 @@
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: 'Newsreader', Georgia, serif;
-  --grad-brand: linear-gradient(135deg, var(--coral), #d99412);
   --grad-user: linear-gradient(135deg, var(--info), #5a87c9);
-  --grad-cta: var(--accent);
   --msg-user-bg: #ece8dd;
   --msg-user-fg: var(--fg);
   --msg-user-border: rgba(40, 32, 20, 0.1);
@@ -290,11 +279,7 @@
   --msg-asst-bg: #ffffff;
   --msg-asst-border: rgba(40, 32, 20, 0.1);
   --msg-asst-shadow: 0 1px 2px rgba(60, 50, 30, 0.06);
-  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), 0 14px 36px rgba(80, 60, 30, 0.16);
   --warn-border: rgba(185, 133, 28, 0.4);
-  --warn-bg: rgba(185, 133, 28, 0.07);
-  --scrollbar-thumb: rgba(40, 32, 20, 0.16);
-  --hover-tint: var(--panel-2);
 }
 
 /* SLATE — refined dark · teal accent (today's Cebab, polished) */
@@ -310,7 +295,6 @@
   --panel-2: #1a1d24;
   --raised: #20232b;
   --canvas: #0c0d10;
-  --header-bg: rgba(18, 20, 25, 0.85);
   --fg-0: #f4f5f7;
   --fg-1: #c4c7cf;
   --fg-2: #9ca0aa;
@@ -335,7 +319,6 @@
   --info: #60a5fa;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
   --coral: #cc785c;
-  --teal: #2fb6c4;
   --r-sm: 4px;
   --r-md: 6px;
   --r-lg: 10px;
@@ -346,9 +329,7 @@
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: var(--font-sans);
-  --grad-brand: linear-gradient(135deg, #2fb6c4, #cc785c);
   --grad-user: linear-gradient(135deg, #3b5db0, #2a4a94);
-  --grad-cta: var(--accent);
   --msg-user-bg: rgba(47, 182, 196, 0.1);
   --msg-user-fg: var(--fg);
   --msg-user-border: rgba(47, 182, 196, 0.28);
@@ -356,11 +337,7 @@
   --msg-asst-bg: var(--panel);
   --msg-asst-border: var(--line-1);
   --msg-asst-shadow: none;
-  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
   --warn-border: rgba(251, 191, 36, 0.35);
-  --warn-bg: rgba(251, 191, 36, 0.07);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
-  --hover-tint: rgba(255, 255, 255, 0.05);
 }
 
 /* PHOSPHOR — terminal · monospace green */
@@ -376,7 +353,6 @@
   --panel-2: #0c151a;
   --raised: #0f1c20;
   --canvas: #04070a;
-  --header-bg: rgba(4, 7, 10, 0.9);
   --fg-0: #c9f5dd;
   --fg-1: #9ad3b5;
   --fg-2: #6cae8c;
@@ -401,7 +377,6 @@
   --info: #5cc8ff;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
   --coral: #ff9e7a;
-  --teal: #3ddc84;
   --r-sm: 2px;
   --r-md: 2px;
   --r-lg: 3px;
@@ -412,9 +387,7 @@
   --font-sans: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: var(--font-sans);
-  --grad-brand: linear-gradient(135deg, #3ddc84, #2cb56a);
   --grad-user: linear-gradient(135deg, #16442c, #0d2f1e);
-  --grad-cta: var(--accent);
   --msg-user-bg: rgba(61, 220, 132, 0.05);
   --msg-user-fg: var(--fg);
   --msg-user-border: rgba(72, 220, 150, 0.18);
@@ -422,35 +395,21 @@
   --msg-asst-bg: var(--panel);
   --msg-asst-border: rgba(72, 220, 150, 0.18);
   --msg-asst-shadow: none;
-  --composer-focus-shadow: 0 0 0 3px var(--accent-glow), 0 0 0 1px rgba(72, 220, 150, 0.3);
   --warn-border: rgba(245, 179, 65, 0.4);
-  --warn-bg: rgba(245, 179, 65, 0.06);
-  --scrollbar-thumb: rgba(72, 220, 150, 0.2);
-  --hover-tint: rgba(61, 220, 132, 0.06);
 }
 
-/* Mockup-named aliases + shared layout metrics. These resolve THROUGH the
+/* Mockup-named aliases that rules still reference. These resolve THROUGH the
  * per-theme primitives above (var() is late-bound), so a single declaration
  * re-themes with the active gamma. Kept out of the [data-theme] blocks so the
- * parity test only guards the color contract. */
+ * parity test only guards the color contract.
+ *
+ * This block held fifteen more (--radius, --shadow, --agent-orch…, --msg-max-w,
+ * --avatar-size…) that no rule ever read. A declared-but-unread alias is not an
+ * abstraction, it is a claim — `styleTokens.test.ts` now fails on one. If a new
+ * rule wants a mockup name, add it here next to that rule, not ahead of it. */
 :root {
   --font-ui: var(--font-sans);
-  --radius: var(--r-md);
   --radius-lg: var(--r-lg);
-  --avatar-radius: var(--r-md);
-  --shadow: var(--shadow-md);
-  --agent-orch: var(--agent-0);
-  --agent-ux: var(--agent-1);
-  --agent-qa: var(--agent-2);
-  --agent-4: var(--agent-3);
-  --agent-orch-soft: var(--agent-0-soft);
-  --agent-ux-soft: var(--agent-1-soft);
-  --agent-qa-soft: var(--agent-2-soft);
-  --agent-4-soft: var(--agent-3-soft);
-  --msg-max-w: 640px;
-  --chat-gap: 20px;
-  --avatar-size: 30px;
-  --content-indent: 42px;
 }
 
 * {
@@ -1290,7 +1249,7 @@ pre {
 .trust.on {
   color: var(--warn);
   background: var(--warn-soft);
-  border-color: rgba(251, 191, 36, 0.35);
+  border-color: var(--warn-border);
 }
 
 .session-list {
@@ -1764,7 +1723,7 @@ pre {
 }
 .msg.permission {
   border-left: 0;
-  border: 1px solid rgba(251, 191, 36, 0.35);
+  border: 1px solid var(--warn-border);
   background: var(--warn-soft);
   border-radius: var(--r-md);
   padding: 12px 14px;
@@ -2230,7 +2189,7 @@ pre {
   border: none;
   border-bottom: 1px solid var(--line-2, var(--border));
   background: transparent;
-  color: var(--ink, inherit);
+  color: var(--fg);
   font: inherit;
   font-size: var(--t-sm);
   padding: var(--s-2) var(--s-3);
@@ -2291,7 +2250,7 @@ pre {
 .slash-palette-row-command {
   font-family: var(--font-mono, monospace);
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
   background: transparent;
 }
@@ -2635,7 +2594,7 @@ pre {
 }
 .keyboard-shortcuts-modal-description {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
 /* U40 removed `.keyboard-shortcuts-modal-footer` — its only content was a
  * contributor note telling the operator to edit a source file. Rules deleted
@@ -2648,7 +2607,7 @@ pre {
   display: inline-block;
   font-family: var(--font-mono, monospace);
   font-size: var(--t-xs, 11px);
-  color: var(--fg-1, var(--ink, inherit));
+  color: var(--fg-1);
   background: var(--bg-5, var(--bg-3));
   border: 1px solid var(--line-3, var(--border));
   border-bottom-width: 2px;
@@ -3023,7 +2982,7 @@ pre {
   font-size: var(--t-sm);
   padding: 4px 8px;
   background: var(--bg-3);
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -3486,12 +3445,12 @@ pre {
 }
 .participant-bus-tag.installed {
   color: var(--ok);
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
 }
 .participant-bus-tag.missing {
   color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.35);
+  border-color: var(--warn-border);
   background: var(--warn-soft);
 }
 
@@ -3513,7 +3472,7 @@ pre {
   font-weight: 500;
   padding: 3px 8px;
   border-radius: var(--r-pill);
-  border: 1px solid rgba(52, 211, 153, 0.35);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
   color: var(--ok);
   flex-shrink: 0;
@@ -3934,9 +3893,9 @@ pre {
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
 .tpl-preview-rail-chip--failed {
-  color: var(--danger, #c0392b);
-  background: color-mix(in srgb, var(--danger, #c0392b) 12%, var(--bg-2));
-  border-color: color-mix(in srgb, var(--danger, #c0392b) 35%, var(--border));
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 12%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
 }
 .tpl-preview-rail-chip--interrupted {
   color: var(--fg-3);
@@ -5324,7 +5283,7 @@ pre {
 }
 .lifecycle-pill-temp {
   color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.35);
+  border-color: var(--warn-border);
   background: var(--warn-soft);
 }
 
@@ -5517,7 +5476,7 @@ pre {
 }
 .run-status-completed {
   color: var(--ok);
-  border-color: rgba(52, 211, 153, 0.35);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
 }
 .run-status-stopped {
@@ -5526,7 +5485,7 @@ pre {
 }
 .run-status-crashed {
   color: var(--err);
-  border-color: rgba(248, 113, 113, 0.35);
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
   background: var(--err-soft);
 }
 
@@ -7371,7 +7330,7 @@ pre {
   margin: 0;
   font-size: var(--t-md);
   font-weight: 600;
-  color: var(--text-1, inherit);
+  color: var(--fg);
 }
 .notif-inbox-close {
   width: 24px;
@@ -9279,10 +9238,10 @@ pre {
 .reopen-modal-dirty {
   /* Bold count is on `strong` inline; ambient color stays neutral so the
    * count itself reads as the data point. */
-  color: var(--ink);
+  color: var(--fg);
 }
 .reopen-modal-detail {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-size: var(--t-xs);
 }
 .reopen-modal-samples {
@@ -9297,7 +9256,7 @@ pre {
 }
 .reopen-modal-samples > li > code {
   font-size: var(--t-xs);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .reopen-modal-error {
   /* Inline validation error above the form (typed-gate / ack mismatch).
@@ -9316,7 +9275,7 @@ pre {
   gap: 8px;
   margin-top: 12px;
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
   cursor: pointer;
 }
 .reopen-modal-ack > input {
@@ -9331,7 +9290,7 @@ pre {
 }
 .reopen-modal-typed-prompt {
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .reopen-modal-typed > input {
   font-family: var(--font-mono);
@@ -9340,7 +9299,7 @@ pre {
   border: 1px solid var(--line-3);
   border-radius: var(--r-sm);
   background: var(--bg-2);
-  color: var(--ink);
+  color: var(--fg);
 }
 .reopen-modal-typed > input:focus-visible {
   outline: 2px solid var(--accent);
@@ -9382,7 +9341,7 @@ pre {
   font-family: var(--font-mono);
   font-size: var(--t-sm);
   line-height: 1.45;
-  color: var(--ink);
+  color: var(--fg);
   background: var(--bg-1);
   border: 1px solid var(--line-3);
   border-radius: var(--r-sm);
@@ -9395,7 +9354,7 @@ pre {
   word-break: break-word;
 }
 .auth-refresh-modal-output-placeholder {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-style: italic;
 }
 .auth-refresh-modal-pid {
@@ -9423,7 +9382,7 @@ pre {
 }
 .auth-refresh-modal-existing-run-id,
 .auth-refresh-modal-error-detail {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-size: var(--t-sm);
 }
 
@@ -9523,12 +9482,12 @@ pre {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .recovery-log-inspector-empty {
   margin: 0;
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 
 .recovery-log-table {
@@ -9543,7 +9502,7 @@ pre {
   border-bottom: 1px solid var(--line-3);
 }
 .recovery-log-table thead th {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-weight: 500;
   font-size: var(--t-xs, 11px);
   text-transform: uppercase;
@@ -9563,9 +9522,9 @@ pre {
   border-radius: 999px;
   font-size: var(--t-xs, 11px);
   font-weight: 500;
-  background: color-mix(in oklab, var(--ink-dim) 18%, transparent);
-  color: var(--ink);
-  border: 1px solid color-mix(in oklab, var(--ink-dim) 35%, transparent);
+  background: color-mix(in oklab, var(--fg-3) 18%, transparent);
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--fg-3) 35%, transparent);
 }
 .recovery-log-class-rate_limit {
   background: color-mix(in oklab, var(--info) 18%, transparent);
@@ -9603,7 +9562,7 @@ pre {
 }
 .recovery-log-gauge-label {
   font-size: var(--t-xs, 11px);
-  color: var(--ink-dim);
+  color: var(--fg-3);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -9615,12 +9574,12 @@ pre {
 .recovery-log-gauge-value.recovery-log-gauge-empty {
   font-weight: 400;
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .recovery-log-gauge-detail {
   font-size: var(--t-sm);
   font-weight: 400;
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 
 .recovery-log-recent-list {
@@ -9648,14 +9607,14 @@ pre {
 }
 .recovery-log-recent-row-ts {
   margin-left: auto;
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-size: var(--t-xs, 11px);
   font-variant-numeric: tabular-nums;
 }
 .recovery-log-recent-row-meta {
   margin-top: 4px;
   font-size: var(--t-xs, 11px);
-  color: var(--ink-dim);
+  color: var(--fg-3);
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -9704,12 +9663,12 @@ pre {
   display: flex;
   flex-direction: column;
   gap: var(--s-2, 8px);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 400;
 }
 .stopped-marker-prompt-label {
   font-size: var(--t-xs, 11px);
-  color: var(--ink-dim, var(--fg-3, inherit));
+  color: var(--fg-3);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -9747,7 +9706,7 @@ pre {
   padding: 4px 8px;
   font-size: var(--t-sm);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -9852,7 +9811,7 @@ pre {
 .ma-control-menu-trigger[aria-expanded='true'] {
   background: var(--bg-3);
   border-color: var(--line-3, var(--border));
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
 .ma-control-menu-trigger:focus-visible {
   outline: 2px solid var(--accent);
@@ -9889,7 +9848,7 @@ pre {
   text-align: left;
   padding: 6px 10px;
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   cursor: pointer;
   font-family: inherit;
   display: flex;
@@ -10003,7 +9962,7 @@ pre {
 }
 .kick-modal-reason-label-text {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
 }
 .kick-modal-reason-help {
@@ -10032,7 +9991,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   resize: vertical;
@@ -10107,7 +10066,7 @@ pre {
 }
 .mute-reason-modal-reason-label-text {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
 }
 .mute-reason-modal-reason-help {
@@ -10134,7 +10093,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   resize: vertical;
@@ -10209,7 +10168,7 @@ pre {
 .pause-reason-modal-reason-label-text,
 .pause-reason-modal-expiry-label-text {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
 }
 .pause-reason-modal-reason-help,
@@ -10243,7 +10202,7 @@ pre {
   background: var(--bg-3);
 }
 .pause-reason-modal-duration-text {
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
 
 /* Custom-minutes input — appears only when "Custom…" is selected. */
@@ -10266,7 +10225,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -10302,7 +10261,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   resize: vertical;
@@ -10358,7 +10317,7 @@ pre {
 .kick-forensics-meta dd {
   margin: 0;
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   word-break: break-word;
   align-self: center;
 }
@@ -10395,7 +10354,7 @@ pre {
   font-family: var(--font-mono);
   font-size: var(--t-xs, 11px);
   background: var(--bg-3);
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   padding: var(--s-2);
@@ -10452,7 +10411,7 @@ pre {
   margin: 4px 0 0;
   font-family: var(--font-mono);
   font-size: var(--t-xs, 11px);
-  color: var(--ink, inherit);
+  color: var(--fg);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -10500,7 +10459,7 @@ pre {
 .kick-forensics-mutation-summary {
   margin: 4px 0 0;
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
 .kick-forensics-mutation-path {
   margin: 2px 0 0;
@@ -10540,7 +10499,7 @@ pre {
   font-size: var(--t-sm);
   padding: 2px 6px;
   background: var(--bg-3);
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -10606,7 +10565,7 @@ pre {
  * paragraph, an actions row, and an optional soft-cap warning. */
 .max-turns-card .max-turns-card-body {
   margin: 4px 0 8px;
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-size: var(--t-sm);
 }
 .max-turns-card .max-turns-card-errors {
@@ -11360,7 +11319,7 @@ pre {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--accent-ink);
-  background: rgba(47, 182, 196, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   border: 1px solid var(--line-3);
   border-radius: var(--r-pill);
   padding: 1px 8px;
@@ -11417,7 +11376,7 @@ pre {
 }
 .ask-user-option.selected {
   border-color: var(--accent);
-  background: rgba(47, 182, 196, 0.1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .ask-user-option-label {
   font-size: var(--t-sm);

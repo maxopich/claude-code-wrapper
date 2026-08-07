@@ -52,21 +52,29 @@ export function splitTopLevel(input: string, separator = ','): string[] {
   return parts;
 }
 
+/** A token-declaring block, as an inner-text range: `css.slice(start, end)`. */
+export type BlockRange = { name: string; start: number; end: number };
+
 /**
- * Extract every `[data-theme='NAME'] { … }` block as an ordered map of
- * custom property → raw declared value.
+ * Every block that *declares* tokens — `:root { … }` and each
+ * `[data-theme='NAME'] { … }` — as inner-text ranges, in source order.
  *
- * The theme blocks are flat by requirement (see the banner comment in
- * `styles.css`, and `templatePreview/cssGate.test.ts`'s flat-rule regex), so
- * a balanced-brace scan from each opener is sufficient. A later declaration
- * of the same token wins, matching the cascade.
+ * One walk, exported, because three gates need to agree about where a block
+ * begins: parity reads the names, contrast reads the values, and the literal
+ * scan in `styleTokens.test.ts` needs the complement — everything *outside*
+ * these ranges is an ordinary rule, where a gamma's raw `rgba()` is a defect
+ * rather than a definition. A second copy of this walk would be a second
+ * opinion about which text is a declaration.
+ *
+ * The blocks are flat by requirement (see the banner comment in `styles.css`,
+ * and `templatePreview/cssGate.test.ts`'s flat-rule regex), so a
+ * balanced-brace scan from each opener is sufficient.
  */
-export function parseThemeBlocks(css: string): Record<string, Map<string, string>> {
-  const out: Record<string, Map<string, string>> = {};
-  const openRe = /\[data-theme=['"]([a-z]+)['"]\]\s*\{/g;
+export function tokenBlockRanges(css: string): BlockRange[] {
+  const out: BlockRange[] = [];
+  const openRe = /(?::root|\[data-theme=['"]([a-z]+)['"]\])\s*\{/g;
   let m: RegExpExecArray | null;
   while ((m = openRe.exec(css)) !== null) {
-    const name = m[1]!;
     let depth = 1;
     let i = m.index + m[0].length;
     const start = i;
@@ -76,9 +84,24 @@ export function parseThemeBlocks(css: string): Record<string, Map<string, string
       else if (ch === '}') depth--;
       i++;
     }
-    const inner = css.slice(start, i - 1);
+    out.push({ name: m[1] ?? ':root', start, end: i - 1 });
+  }
+  return out;
+}
+
+/**
+ * Extract every `[data-theme='NAME'] { … }` block as an ordered map of
+ * custom property → raw declared value. `:root` is excluded: it is the
+ * gamma-less default, and the parity contract is between gammas.
+ *
+ * A later declaration of the same token wins, matching the cascade.
+ */
+export function parseThemeBlocks(css: string): Record<string, Map<string, string>> {
+  const out: Record<string, Map<string, string>> = {};
+  for (const { name, start, end } of tokenBlockRanges(css)) {
+    if (name === ':root') continue;
     const tokens = new Map<string, string>();
-    for (const d of inner.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)) {
+    for (const d of css.slice(start, end).matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)) {
       tokens.set(d[1]!, d[2]!.trim());
     }
     out[name] = tokens;
