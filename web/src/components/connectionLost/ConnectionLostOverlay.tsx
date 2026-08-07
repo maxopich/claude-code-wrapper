@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ConnectionLostView } from '../../store';
+import { copyToClipboard } from '../../clipboard';
 import { INERT_EXEMPT_ATTR } from '../../useModalSurface';
 import { formatDiagnostic, type ConnectionLostReason } from './connectionLostReason';
 
@@ -126,12 +127,15 @@ export function ConnectionLostOverlay({ view, onDismiss, onRetry }: ConnectionLo
   const onClickCopy = useCallback(() => {
     if (!view) return;
     const text = formatDiagnostic(view.reason as ConnectionLostReason, view.diagnostic);
-    // navigator.clipboard is async + may throw in non-secure contexts;
-    // a fallback textarea-select would be more robust but adds noise
-    // for our 127.0.0.1 deployment (always secure context). We catch
-    // and log so a copy failure doesn't break the overlay.
-    void navigator.clipboard?.writeText?.(text)?.catch((err: unknown) => {
-      console.warn('[connection-lost] clipboard copy failed', err);
+    // U42: was a raw `navigator.clipboard` call, justified by "a fallback
+    // textarea-select would be more robust but adds noise for our 127.0.0.1
+    // deployment (always secure context)". The shared helper already carries
+    // that fallback, so the noise argument no longer buys anything — and this
+    // is the copy button that matters most, since the operator reaches for it
+    // precisely when Cebab is unreachable and they need the diagnostic to go
+    // somewhere else.
+    void copyToClipboard(text).then((ok) => {
+      if (!ok) console.warn('[connection-lost] clipboard copy failed');
     });
   }, [view]);
 

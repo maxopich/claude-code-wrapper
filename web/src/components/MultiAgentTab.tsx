@@ -23,6 +23,7 @@ import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalSurface } from '../useModalSurface';
+import { useCopyFeedback } from '../useCopyFeedback';
 import { AgentTag } from './AgentTag';
 import { AskUserQuestionCard } from './AskUserQuestionCard';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
@@ -1411,19 +1412,13 @@ function IterationRow(props: {
   onResume: (sessionId: string) => void;
 }) {
   const { item } = props;
-  const [copied, setCopied] = useState(false);
+  // U42: was a raw `navigator.clipboard.writeText` with its own copied-state
+  // pair. The shared hook adds the execCommand fallback for non-secure
+  // contexts, which the hand-rolled version lacked — there, a copy that could
+  // have worked simply didn't.
+  const { copied, copy } = useCopyFeedback();
   async function copyPath() {
-    try {
-      await navigator.clipboard.writeText(item.artifactsDir);
-      setCopied(true);
-      // Reset the "copied" affordance after a short window so a second
-      // copy feels distinct from the first.
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Clipboard API can fail under non-secure-context or denied
-      // permissions. Leave the affordance idle; operator can read the
-      // path text and copy manually.
-    }
+    await copy(item.artifactsDir);
   }
   return (
     <li className={`iteration-row iteration-status-${item.status}`}>
@@ -2845,17 +2840,10 @@ function EventRow(props: {
   // operator already toggled keeps its state as later events arrive.
   const [collapsed, setCollapsed] = useState(props.defaultCollapsed);
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
+  // U42: same convergence as `IterationRow` above — one clipboard path.
+  const { copied, copy } = useCopyFeedback();
   async function copyText() {
-    try {
-      await navigator.clipboard.writeText(event.text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Clipboard API can fail under non-secure-context or denied
-      // permissions. Leave the affordance idle; the operator can still
-      // expand the message and select the text manually.
-    }
+    await copy(event.text);
   }
   const srcId = agentIdentity(event.source);
   return (

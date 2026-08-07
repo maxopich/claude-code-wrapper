@@ -1,5 +1,5 @@
-import { useState } from 'react';
 import type { McpServerView } from '@cebab/shared/protocol';
+import { useCopyFeedback } from '../../useCopyFeedback';
 
 // Cluster B Phase 6c (UI-B13 / B15 / spec §4.2 F1): MCP servers section of
 // the AuthorityPanel.
@@ -73,36 +73,13 @@ function statusDotClass(status: string): string {
   return STATUS_DOT_CLASS[status] ?? 'mcp-status-muted';
 }
 
-/**
- * Copy `text` to the clipboard. Uses the modern API when available; falls
- * back to a `document.execCommand('copy')` shim for older browsers. The
- * return value lets the caller flash a "copied" state. We intentionally
- * swallow errors — the affordance is non-critical and a hard failure would
- * just confuse the operator.
- */
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall through */
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
-}
+/* U42: a private `copyToClipboard` lived here — the ORIGINAL. `web/src/
+ * clipboard.ts` says in its own header that it was "lifted from the local
+ * helper in authority/McpServersList.tsx so … any future caller share one
+ * implementation". The lift happened; the delete never did, so the file the
+ * shared helper was extracted from went on using its own copy, and the
+ * consolidation the comment described was never true. Deleted here, along
+ * with the hand-rolled copied-state pair, in favour of `useCopyFeedback`. */
 
 export function McpServersList(props: { servers: McpServerView[] }) {
   const { servers } = props;
@@ -132,14 +109,10 @@ export function McpServersList(props: { servers: McpServerView[] }) {
 
 function McpServerCard(props: { server: McpServerView }) {
   const { server } = props;
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyFeedback();
   async function onCopy() {
     if (!server.originPath) return;
-    const ok = await copyToClipboard(server.originPath);
-    if (ok) {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    }
+    await copy(server.originPath);
   }
   return (
     <li className={`mcp-server-card mcp-server-card-${server.scope}`}>

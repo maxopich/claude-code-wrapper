@@ -185,11 +185,26 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
     return <div className="authority-panel-loading">Loading authority…</div>;
   }
   if (slot.status === 'cache-miss') {
+    /* U32: the old copy read "…(Phase 3b will spawn a `maxTurns:0` probe;
+     * Phase 6b returns the empty cache for now)". Two problems, and the second
+     * is the worse one.
+     *
+     * It named internal milestones and an SDK parameter to an operator, who
+     * cannot act on either. And it said the button returns nothing — which is
+     * false. `resolveProjectAuthority` logs the not-yet-landed probe and falls
+     * through to the full resolver, which reads this project's settings layers,
+     * its `.mcp.json`, allow/deny attribution, env injections and hooks. The
+     * only thing missing is what a live session resolves at runtime. So the
+     * copy talked the operator out of the one action that would help them.
+     *
+     * The replacement states both halves — what Refresh does return, and what
+     * it genuinely cannot — because naming the real limitation is what keeps
+     * this from being the opposite kind of lie. */
     return (
       <div className="authority-panel-empty">
-        No authority snapshot cached for this project. Click <strong>Refresh</strong> above to
-        request one (Phase 3b will spawn a <code>maxTurns:0</code> probe; Phase 6b returns the empty
-        cache for now).
+        No authority snapshot for this project yet. <strong>Refresh</strong> above reads its settings
+        files and shows what they declare — tools, MCP servers, hooks and where each came from. The
+        parts only a live session can resolve stay empty until this project runs one.
       </div>
     );
   }
