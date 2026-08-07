@@ -104,3 +104,26 @@ describe('nextIndex — out-of-range current, which happens for real', () => {
     expect(nextIndex({ key: 'ArrowDown', current: 9, count: 3, wrap: true })).toBe(0);
   });
 });
+
+describe('nextIndex — Home/End belong to the caret in a text field', () => {
+  test('by default they jump to the ends', () => {
+    expect(nextIndex({ key: 'Home', current: 3, count: 5 })).toBe(0);
+    expect(nextIndex({ key: 'End', current: 0, count: 5 })).toBe(4);
+  });
+
+  test('homeEnd:false declines them, without touching the arrows', () => {
+    // A combobox binds its handler to the search INPUT, so a non-null return
+    // here makes the caller `preventDefault()` and the text cursor stops
+    // moving. `SessionSearchModal` adopted this helper and silently lost
+    // "jump to start of query" that way; the arrows must keep working.
+    expect(nextIndex({ key: 'Home', current: 3, count: 5, homeEnd: false })).toBeNull();
+    expect(nextIndex({ key: 'End', current: 3, count: 5, homeEnd: false })).toBeNull();
+    expect(nextIndex({ key: 'ArrowDown', current: 3, count: 5, homeEnd: false })).toBe(4);
+    expect(nextIndex({ key: 'ArrowUp', current: 3, count: 5, homeEnd: false })).toBe(2);
+  });
+
+  test('an empty list declines them either way', () => {
+    expect(nextIndex({ key: 'Home', current: -1, count: 0 })).toBeNull();
+    expect(nextIndex({ key: 'End', current: -1, count: 0, homeEnd: false })).toBeNull();
+  });
+});

@@ -85,8 +85,19 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
     }
     // A listbox clamps at the ends (unlike a menu, which wraps) — the previous
     // hand-rolled Math.min/Math.max did the same thing; it just said so in two
-    // places instead of one. Home/End come along for free.
-    const target = nextIndex({ key: e.key, current: selected, count: results.length });
+    // places instead of one.
+    //
+    // `homeEnd: false` because this handler is on the search INPUT. The
+    // helper's Home/End support was adopted here as a freebie, which quietly
+    // took Home and End away from the caret: the list jumped and
+    // `preventDefault()` below stopped the text cursor from moving at all. In
+    // a combobox those two keys belong to the textbox.
+    const target = nextIndex({
+      key: e.key,
+      current: selected,
+      count: results.length,
+      homeEnd: false,
+    });
     if (target === null) return;
     e.preventDefault();
     setSelected(target);

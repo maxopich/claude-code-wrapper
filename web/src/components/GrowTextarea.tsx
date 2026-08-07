@@ -35,6 +35,10 @@ export function GrowTextarea(props: {
   // Operator-dragged height. null = pure auto-grow. When set, the box stays
   // at least this tall but still grows past it once the text needs more.
   const [manualHeight, setManualHeight] = useState<number | null>(null);
+  // The height actually painted, mirrored into state so the separator can
+  // report a truthful `aria-valuenow` and so a keyboard resize has a current
+  // value to step from before any drag has ever happened.
+  const [renderedHeight, setRenderedHeight] = useState(0);
 
   // Resize after every value/manual change and on mount. Reset to 'auto'
   // first so scrollHeight reflects the true content height (lets it shrink).
@@ -47,6 +51,7 @@ export function GrowTextarea(props: {
     const capped = Math.min(target, maxHeightPx);
     ta.style.height = `${capped}px`;
     ta.style.overflowY = target > maxHeightPx ? 'auto' : 'hidden';
+    setRenderedHeight(capped);
   }, [props.value, manualHeight, maxHeightPx]);
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -89,15 +94,68 @@ export function GrowTextarea(props: {
     [maxHeightPx],
   );
 
+  /** The content's own height — the box may never be shorter than its text.
+   *  Measured the same way the pointer drag measures it in `onMove`. */
+  const contentFloor = useCallback(() => {
+    const ta = ref.current;
+    if (!ta) return 0;
+    const inline = ta.style.height;
+    ta.style.height = 'auto';
+    const floor = Math.min(ta.scrollHeight, maxHeightPx);
+    ta.style.height = inline;
+    return floor;
+  }, [maxHeightPx]);
+
+  /**
+   * Register U38: the handle declared `role="separator"` with a label — so a
+   * screen reader announced a control — while being pointer-only, with no
+   * tabIndex and no key handler. A focusable separator is a window splitter,
+   * and the operator gets the keys one promises.
+   *
+   * ArrowUp grows and ArrowDown shrinks, matching the drag (dragging up makes
+   * it taller). Home/End are defined by SIZE rather than by "separator
+   * position", because the axis here is inverted and the control's label
+   * promises resizing: Home is the shortest the text allows, End the tallest.
+   */
+  const RESIZE_STEP_PX = 24;
+  const onHandleKey = useCallback(
+    (e: KeyboardEvent<HTMLDivElement>) => {
+      const floor = contentFloor();
+      // Step from the height actually PAINTED, not from `manualHeight`. That
+      // is the whole bound check: `renderedHeight` is already capped by the
+      // layout effect, so a step from it lands at most one step outside the
+      // range and the effect pulls it back. Stepping from `manualHeight`
+      // instead would bank height past the ceiling — arrow up ten times too
+      // many and the operator then needs ten ArrowDowns before the box moves.
+      // A clamp here would be dead code; the effect owns both bounds.
+      const current = Math.max(renderedHeight, floor);
+      let next: number | null = null;
+      if (e.key === 'ArrowUp') next = current + RESIZE_STEP_PX;
+      else if (e.key === 'ArrowDown') next = current - RESIZE_STEP_PX;
+      else if (e.key === 'Home') next = floor;
+      else if (e.key === 'End') next = maxHeightPx;
+      if (next === null) return;
+      // Arrow keys would otherwise scroll the page out from under the composer.
+      e.preventDefault();
+      setManualHeight(next);
+    },
+    [contentFloor, renderedHeight, maxHeightPx],
+  );
+
   return (
     <div className="grow-textarea-wrap">
       <div
         className="grow-textarea-handle"
         onPointerDown={startDrag}
+        onKeyDown={onHandleKey}
+        tabIndex={0}
         role="separator"
         aria-orientation="horizontal"
         aria-label="Resize input"
-        title="Drag to resize"
+        aria-valuenow={renderedHeight}
+        aria-valuemin={0}
+        aria-valuemax={maxHeightPx}
+        title="Drag to resize, or focus and use the arrow keys"
       />
       <textarea
         ref={ref}

@@ -701,22 +701,34 @@ export function DraftView(props: {
 
         <section className="multi-agent-section">
           <div className="iterations-header iterations-collapsible">
-            <button
-              className="iterations-toggle"
-              onClick={() => setIterOpen((o) => !o)}
-              aria-expanded={iterOpen}
-              title="Past runs on this tab. Resume re-attaches to a still-live session; Copy path opens transcripts."
-            >
-              <span className="iterations-chevron">{iterOpen ? '▾' : '▸'}</span>
-              <h3>Iterations</h3>
-              <span className="iterations-count">
-                {tabIterations === null
-                  ? ''
-                  : tabIterations.length === 0
-                    ? 'none'
-                    : tabIterations.length}
-              </span>
-            </button>
+            {/* Register U37: the <h3> used to be INSIDE this button. Heading
+             *  navigation then landed on a control, and the button's accessible
+             *  name absorbed the caret glyph. The APG accordion shape is the
+             *  inverse — the heading wraps the button — so the heading names the
+             *  section and the button stays a plain disclosure. The caret is
+             *  aria-hidden: it is redundant with `aria-expanded` and was the
+             *  thing polluting the name. The count stays in the name, where
+             *  "Iterations 3" is worth hearing. */}
+            <h3>
+              <button
+                className="iterations-toggle"
+                onClick={() => setIterOpen((o) => !o)}
+                aria-expanded={iterOpen}
+                title="Past runs on this tab. Resume re-attaches to a still-live session; Copy path opens transcripts."
+              >
+                <span className="iterations-chevron" aria-hidden="true">
+                  {iterOpen ? '▾' : '▸'}
+                </span>
+                Iterations
+                <span className="iterations-count">
+                  {tabIterations === null
+                    ? ''
+                    : tabIterations.length === 0
+                      ? 'none'
+                      : tabIterations.length}
+                </span>
+              </button>
+            </h3>
             {iterOpen && (
               <div className="iterations-actions">
                 <button
