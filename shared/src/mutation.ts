@@ -37,6 +37,19 @@
 export type MutationCategory = 'read' | 'mutate' | 'dangerous';
 
 /**
+ * The single MCP tool Cebab injects into every bus agent, as the SDK delivers
+ * it: the server registers the in-process MCP server under the namespaced key
+ * `cebab_bus`, so the agent — and every `tool_use` block Cebab classifies —
+ * sees this prefixed name and never the bare `bus_send`.
+ *
+ * It lives HERE, in the shared package, rather than beside the tool
+ * registration in `server/src/bus/runner.ts` (which now re-exports it), because
+ * the classifier and the registration have to agree on the exact string and
+ * previously did not (register D06). One constant, no drift.
+ */
+export const BUS_SEND_TOOL = 'mcp__cebab_bus__bus_send';
+
+/**
  * Cluster F Phase F3 (UI-F3): stable IDs for every classifier rule that can
  * promote a Bash command above `read`. The rationale is operator-facing
  * (rendered as a tooltip on the mutation badge in `MutationsDisclosure`)
@@ -237,6 +250,12 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       };
     }
 
+    // `Agent` is the LIVE sub-agent tool: `AgentInput` is a member of the
+    // SDK's `ToolInputSchemas` union (`sdk-tools.d.ts`, checked against
+    // @anthropic-ai/claude-agent-sdk 0.3.220), and there is no `TaskInput` at
+    // all. `Task` is kept as tolerance for the older CLI name — register D37
+    // has these two the wrong way round and would have had us delete the live
+    // case. Keep both; the fixture-visible one is `Agent`.
     case 'Agent':
     case 'Task': {
       const desc = stringField(inp, 'description') ?? stringField(inp, 'prompt') ?? '';
@@ -244,9 +263,20 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       return { category: 'mutate', summary: `spawn agent "${trimmed}"` };
     }
 
+    case BUS_SEND_TOOL:
     case 'bus_send': {
       // Cebab's in-process inter-agent message tool — touches no filesystem.
-      const dest = stringField(inp, 'destination') ?? '';
+      // Keyed on the shared constant because the SDK only ever delivers the
+      // NAMESPACED name; the bare one never arrives, so this case matched
+      // nothing and every bus hop fell to `default` → `mutate`, writing a
+      // mutation row per message (register D06). The bare name is kept only
+      // so a hand-written call site or an older fixture still classifies.
+      //
+      // The field is `recipient`: that is what the tool's own input schema
+      // declares (see `makeBusToolServer`). `destination` is the name the same
+      // value takes on the WIRE, one layer later — reading it here silently
+      // produced an empty summary (register N20 tracks the split itself).
+      const dest = stringField(inp, 'recipient') ?? stringField(inp, 'destination') ?? '';
       return { category: 'read', summary: `bus_send → ${dest}` };
     }
 
@@ -286,7 +316,14 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
  */
 const DANGEROUS_FIRST_TOKENS: ReadonlySet<string> = new Set([
   'rm',
+  // Privilege escalation, all four spellings. `sudo` alone was listed, so
+  // `doas rm -rf /` and `su -c 'rm -rf /'` reached the operator as an ordinary
+  // `mutate` — escalation under a different binary name, which is not a
+  // variation the pause gate should care about.
   'sudo',
+  'su',
+  'doas',
+  'runuser',
   'dd',
   'mkfs',
   'pkill',
@@ -424,9 +461,12 @@ const READONLY_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
   npm: new Set(['ls', 'view', 'list', 'outdated', 'audit', 'doctor', 'config', 'help']),
   cargo: new Set(['tree', 'metadata', 'help']),
   docker: new Set(['ps', 'images', 'inspect', 'logs', 'top', 'stats', 'version', 'info', 'help']),
-  python: new Set([]),
-  python3: new Set([]),
-  node: new Set([]),
+  // `python` / `python3` / `node` used to map to EMPTY sets, which can never
+  // match — their only effect was to relabel the verdict
+  // `unknown_subcommand_of_known_tool` while leaving the category at `mutate`
+  // (register D38). `unknown_first_token` is the truer label when there is no
+  // allowlist to be outside of, and `<bin> --version` is handled by the
+  // version hatch either way.
 };
 
 /** Dangerous subcommand patterns: when the first two tokens together imply
@@ -646,7 +686,23 @@ function classifyBashPiece(piece: string): Verdict {
   // sensitive system paths → `dangerous`. EVERY target is scanned, not just
   // the first: `echo x > /dev/null > /etc/passwd` must not be judged by the
   // harmless one (register D04).
-  const targets = [...stripped.matchAll(/(?:^|\s)>>?\s*(\S+)/g)]
+  //
+  // The optional `(?:\d|&)` covers the two shapes that used to evade the scan
+  // entirely, because the `>` was preceded by neither start-of-string nor
+  // whitespace (register D04b): the fd-prefixed `cmd 2> /etc/passwd` and the
+  // bash combined `cmd &> /etc/passwd`. Both wrote wherever they liked and
+  // were then judged by their first token alone — `echo x 2> /etc/passwd` came
+  // out `read`.
+  //
+  // The `(?!&)` keeps fd-DUPLICATION out of the target list. `2>&1` was
+  // excluded before only as a side effect of the leading digit, and `>&2` was
+  // not excluded at all — it captured `&2` as a target and misfired as
+  // `redirect_path`. Now both are skipped by the same explicit rule.
+  //
+  // Still not caught, deliberately: `cmd>file` with no space. Dropping the
+  // leading `(?:^|\s)` anchor would make `grep "a>b" f` report a redirect, so
+  // the anchor stays and the gap is named rather than papered over.
+  const targets = [...stripped.matchAll(/(?:^|\s)(?:\d|&)?>>?\s*(?!&)(\S+)/g)]
     .map((m) => m[1] ?? '')
     .filter(Boolean);
   // The null / std devices consume their input and write nothing, so they are
@@ -745,18 +801,7 @@ function classifyByTokens(command: string): Verdict {
   const firstBase = firstName.toLowerCase();
   const winPair = second ? `${firstBase} ${second.toLowerCase()}` : firstBase;
 
-  // 1) Universal version/help check: `<anything> --version` / `-V` /
-  //    `--help` is always a query, no matter the binary. Cheap escape
-  //    hatch so `node --version` doesn't fall through to the `mutate`
-  //    default just because `node` isn't in any positive list. We deliberately
-  //    omit `-h` and the bare `help` subtoken — those are overloaded
-  //    (`shutdown -h`, `git help` is genuinely help but `npm help <cmd>` opens
-  //    docs which is fine to default to mutate via a positive-list miss).
-  if (second === '--version' || second === '-V' || second === '--help') {
-    return { category: 'read', reason: null };
-  }
-
-  // 2) Exact dangerous-subcommand match.
+  // 1) Exact dangerous-subcommand match.
   const dangerSub = DANGEROUS_SUBCOMMANDS.has(triple)
     ? triple
     : DANGEROUS_SUBCOMMANDS.has(pair)
@@ -773,7 +818,7 @@ function classifyByTokens(command: string): Verdict {
     };
   }
 
-  // 3) Plain `rm` (any args) is dangerous.
+  // 2) Plain `rm` (any args) is dangerous.
   if (DANGEROUS_FIRST_TOKENS.has(firstName)) {
     return {
       category: 'dangerous',
@@ -785,7 +830,7 @@ function classifyByTokens(command: string): Verdict {
     };
   }
 
-  // 4) `mkfs*` (mkfs.ext4, mkfs.xfs, etc.) — any filesystem-create variant.
+  // 3) `mkfs*` (mkfs.ext4, mkfs.xfs, etc.) — any filesystem-create variant.
   if (firstName.startsWith('mkfs.') || firstName === 'mkfs') {
     return {
       category: 'dangerous',
@@ -797,7 +842,7 @@ function classifyByTokens(command: string): Verdict {
     };
   }
 
-  // 5) Shell invocation (`sh`, `bash`, `zsh`):
+  // 4) Shell invocation (`sh`, `bash`, `zsh`):
   //    - bare `sh` with no args: typically the receiving end of a pipe
   //      (`curl | sh`). Dangerous.
   //    - `bash -c '<arbitrary>'`: arbitrary code. Dangerous.
@@ -834,7 +879,7 @@ function classifyByTokens(command: string): Verdict {
     };
   }
 
-  // 6) `kill` with `-9` / `-KILL` is dangerous; plain `kill` is mutate.
+  // 5) `kill` with `-9` / `-KILL` is dangerous; plain `kill` is mutate.
   if (firstName === 'kill') {
     if (tokens.includes('-9') || tokens.includes('-KILL')) {
       const signal = tokens.includes('-9') ? '-9' : '-KILL';
@@ -857,7 +902,7 @@ function classifyByTokens(command: string): Verdict {
     };
   }
 
-  // 6b) Windows-native dangerous commands (cmd / PowerShell). Cebab runs on
+  // 5b) Windows-native dangerous commands (cmd / PowerShell). Cebab runs on
   //     Windows without WSL, so a Bash-tool string may be a Windows command.
   //     Checked case-insensitively against the lowercased token / basename.
   if (DANGEROUS_WINDOWS_SUBCOMMANDS.has(winPair)) {
@@ -910,6 +955,29 @@ function classifyByTokens(command: string): Verdict {
         matched: first,
       },
     };
+  }
+
+  // 6) Universal version/help check: `<anything> --version` / `--help` is
+  //    normally a query, no matter the binary. Cheap escape hatch so
+  //    `node --version` doesn't fall through to the `mutate` default just
+  //    because `node` isn't in any positive list.
+  //
+  //    ORDER MATTERS, and it used to be wrong (register D21). This ran as
+  //    rule 1, ahead of every ESCALATING rule, so it demoted the entire
+  //    dangerous list behind a two-token prefix: `sudo --version`,
+  //    `rm --help`, `dd --version`, `del --version` all returned `read` — and
+  //    `read` is skipped wholesale by the bus mutation tap, so no row, no
+  //    badge, no audit, no pause. A demotion rule must never outrank an
+  //    escalation; it belongs here, with the other positive rules, where it
+  //    still catches everything it was written for.
+  //
+  //    `-V` was dropped for the reason already given below for `-h` and bare
+  //    `help`: overloaded. GNU `tar -V` is `--label`, not a version query, so
+  //    `tar -V mine -xf a.tar -C /` is a real extraction the hatch was
+  //    demoting. `-h` and `help` stay omitted (`shutdown -h`; `npm help <cmd>`
+  //    opens docs, fine to reach `mutate` via a positive-list miss).
+  if (second === '--version' || second === '--help') {
+    return { category: 'read', reason: null };
   }
 
   // 7) Subcommand-aware read-only check (git/npm/docker/cargo/...).
@@ -1029,25 +1097,116 @@ function basename(token: string): string {
  * the read-only allowlist, which made `env rm -rf /tmp/x` classify as `read`,
  * and `read` is skipped wholesale by the bus mutation tap (register D02).
  *
- * Only `env` is registered. `nohup` / `timeout` / `nice` / `command` /
- * `stdbuf` / `setsid` / `xargs` launder the same way but land on `mutate`
- * (they're in no allowlist), so they're a lower-severity variant of the same
- * hole — tracked separately rather than widened into this fix.
+ * `env` was the only one registered, so `nohup rm -rf /x` and `timeout 5 rm
+ * -rf /x` still came out `mutate` — a row is written, but the pause is never
+ * offered, which is the whole point of the gate (register D02b).
+ *
+ * NOT registered, and named so the omission reads as a decision: `flock`,
+ * `taskset`, `chrt` and `ionice` take positional or mask arguments whose shape
+ * this scan would have to guess at, and `strace` / `script` put the command
+ * behind a quoted `-c` value. Each needs its own arg-shape rule, and a wrong
+ * one is a new false positive, so they are tracked separately.
  */
-const COMMAND_WRAPPERS: ReadonlySet<string> = new Set(['env']);
+type WrapperSpec = {
+  /** Flags that take no value — skipped while looking for the command. */
+  noValue?: ReadonlySet<string>;
+  /**
+   * Flags that consume the FOLLOWING token as their value. A GLUED form of the
+   * same flag (`-o0`, `-n5`, `-I{}`) consumes nothing extra — see the scan.
+   */
+  value?: ReadonlySet<string>;
+  /**
+   * Predicate for a single positional the wrapper takes BEFORE the command
+   * (`timeout`'s DURATION). Only consumed when the token really has that
+   * shape; anything else stops the scan, which is the fail-safe direction.
+   */
+  positional?: (token: string) => boolean;
+};
 
-/** Wrapper flags that take no value — skipped while looking for the command. */
-const WRAPPER_NOVALUE_FLAGS: ReadonlySet<string> = new Set([
-  '-i',
-  '--ignore-environment',
-  '-0',
-  '--null',
-  '-v',
-  '--debug',
+/**
+ * Per-wrapper flag tables. A SHARED table would be wrong, not merely untidy:
+ * `-i` takes no value for `env` (`--ignore-environment`) and takes one for
+ * `stdbuf` (`--input`), so a shared set makes `stdbuf -i 0 rm -rf /x` read `0`
+ * as the command. Every wrapper owns its own flags.
+ *
+ * `command` deliberately has NO `-v` / `-V` entry. Those make it a lookup
+ * (`command -v rm` prints a path, it does not exec), so the scan must stop
+ * there rather than peel to a `rm` that never runs.
+ */
+const WRAPPER_SPECS: ReadonlyMap<string, WrapperSpec> = new Map<string, WrapperSpec>([
+  [
+    'env',
+    {
+      noValue: new Set(['-i', '--ignore-environment', '-0', '--null', '-v', '--debug']),
+      value: new Set(['-u', '--unset', '-C', '--chdir']),
+    },
+  ],
+  ['nohup', {}],
+  ['setsid', { noValue: new Set(['-f', '--fork', '-w', '--wait', '-c', '--ctty']) }],
+  ['time', { noValue: new Set(['-p', '--portability', '-v', '--verbose']) }],
+  ['unbuffer', { noValue: new Set(['-p']) }],
+  ['busybox', {}],
+  ['command', { noValue: new Set(['-p']) }],
+  [
+    'timeout',
+    {
+      noValue: new Set(['--preserve-status', '--foreground', '-v', '--verbose']),
+      value: new Set(['-s', '--signal', '-k', '--kill-after']),
+      // DURATION: `5`, `5s`, `1.5h`. Anything else and the scan stops.
+      positional: isDurationToken,
+    },
+  ],
+  ['nice', { value: new Set(['-n', '--adjustment']) }],
+  ['stdbuf', { value: new Set(['-i', '--input', '-o', '--output', '-e', '--error']) }],
+  [
+    'watch',
+    {
+      noValue: new Set([
+        '-d',
+        '--differences',
+        '-b',
+        '--beep',
+        '-e',
+        '--errexit',
+        '-g',
+        '--chgexit',
+        '-t',
+        '--no-title',
+        '-x',
+        '--exec',
+      ]),
+      value: new Set(['-n', '--interval']),
+    },
+  ],
+  [
+    'xargs',
+    {
+      noValue: new Set([
+        '-0',
+        '--null',
+        '-r',
+        '--no-run-if-empty',
+        '-t',
+        '--verbose',
+        '-p',
+        '--interactive',
+        '-x',
+        '--exit',
+        '--open-tty',
+        // `-i[replace-str]`: the value, if any, is GLUED. Bare `-i` is legal.
+        '-i',
+      ]),
+      value: new Set(['-n', '--max-args', '-I', '--replace', '-P', '--max-procs', '-L', '-l', '-s', '--max-chars', '-d', '--delimiter', '-E', '-e', '--eof', '-a', '--arg-file']),
+    },
+  ],
 ]);
 
-/** Wrapper flags that consume the FOLLOWING token as their value. */
-const WRAPPER_VALUE_FLAGS: ReadonlySet<string> = new Set(['-u', '--unset', '-C', '--chdir']);
+/**
+ * Wrapper names. Exported so the suite can assert it exercised EVERY one —
+ * a table this fix grew from 1 to 12 entries is exactly the kind of list where
+ * adding a thirteenth without a case would leave a hole that still passes.
+ */
+export const COMMAND_WRAPPERS: ReadonlySet<string> = new Set(WRAPPER_SPECS.keys());
 
 /**
  * Peel leading exec-wrappers so `env -i FOO=1 rm -rf x` classifies as `rm`.
@@ -1068,30 +1227,79 @@ function stripCommandWrappers(command: string): string {
   let rest = command;
   for (let depth = 0; depth < 4; depth += 1) {
     const tokens = rest.split(/\s+/);
-    if (!COMMAND_WRAPPERS.has(basename(tokens[0] ?? ''))) return rest;
+    const spec = WRAPPER_SPECS.get(basename(tokens[0] ?? ''));
+    if (!spec) return rest;
+    const value = spec.value ?? EMPTY_FLAGS;
+    const noValue = spec.noValue ?? EMPTY_FLAGS;
     let i = 1;
     while (i < tokens.length) {
       const t = tokens[i] ?? '';
-      if (WRAPPER_VALUE_FLAGS.has(t)) {
+      if (value.has(t)) {
         i += 2;
         continue;
       }
       if (
-        WRAPPER_NOVALUE_FLAGS.has(t) ||
-        t.startsWith('--unset=') ||
-        t.startsWith('--chdir=') ||
-        /^[A-Za-z_][A-Za-z0-9_]*=/.test(t)
+        noValue.has(t) ||
+        // `--flag=value` and `KEY=val` carry their value inline.
+        (t.startsWith('-') && t.includes('=')) ||
+        /^[A-Za-z_][A-Za-z0-9_]*=/.test(t) ||
+        // A glued short-flag value (`stdbuf -o0`, `xargs -I{}`, `xargs -n1`).
+        isGluedValueFlag(t, value) ||
+        // A bare numeric flag (`nice -5`, `xargs -3`).
+        /^-\d+$/.test(t)
       ) {
         i += 1;
         continue;
       }
       break;
     }
+    // At most one positional before the command (`timeout 5 rm -rf x`), and
+    // only when it has the shape the wrapper expects.
+    if (spec.positional && i < tokens.length && spec.positional(tokens[i] ?? '')) i += 1;
     const tail = tokens.slice(i).join(' ').trim();
     if (!tail) return rest;
     rest = tail;
   }
   return rest;
+}
+
+const EMPTY_FLAGS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * `timeout`'s DURATION positional: `5`, `5s`, `1.5h`. Hand-rolled rather than
+ * `/^\d+(?:\.\d+)?[smhd]?$/`, which eslint's `security/detect-unsafe-regex`
+ * rejects for the optional group after `\d+`.
+ */
+function isDurationToken(token: string): boolean {
+  const body =
+    token.length > 1 && 'smhd'.includes(token[token.length - 1] ?? '')
+      ? token.slice(0, -1)
+      : token;
+  const parts = body.split('.');
+  if (parts.length > 2) return false;
+  if (!isDigits(parts[0] ?? '')) return false;
+  if (parts.length === 2 && !isDigits(parts[1] ?? '')) return false;
+  return true;
+}
+
+function isDigits(s: string): boolean {
+  if (!s) return false;
+  for (const ch of s) {
+    if (ch < '0' || ch > '9') return false;
+  }
+  return true;
+}
+
+/**
+ * `-o0` for a wrapper whose `-o` takes a value: the value is glued to the
+ * flag, so nothing FOLLOWING it should be consumed. Only short flags glue.
+ */
+function isGluedValueFlag(token: string, valueFlags: ReadonlySet<string>): boolean {
+  if (token.length <= 2 || !token.startsWith('-') || token.startsWith('--')) return false;
+  for (const f of valueFlags) {
+    if (f.length === 2 && token.startsWith(f)) return true;
+  }
+  return false;
 }
 
 /**
