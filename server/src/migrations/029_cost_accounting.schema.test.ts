@@ -58,7 +58,11 @@ describe('migration 029_cost_accounting schema shape', () => {
     expect(c).toMatchObject({ type: 'REAL', notnull: 1, dflt_value: '0' });
   });
 
-  test('migration runner is idempotent — re-applying 029 does not throw', () => {
+  // Not an idempotence test, though it used to say so (register C10): the
+  // runner SKIPS a filename already in `schema_migrations`, so the body
+  // never re-executes. No migration here survives a second apply, and none
+  // needs to — the exactly-once contract is asserted in `db.migrations.test.ts`.
+  test('the runner applies 029 exactly once — reopening skips it', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
