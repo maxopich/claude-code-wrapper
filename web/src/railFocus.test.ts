@@ -183,3 +183,93 @@ describe('[a11y] the drawer toggle is above the scrim it toggles (U25)', () => {
     expect(toggle).toBeGreaterThan(rail);
   });
 });
+
+/**
+ * Every top-level rule that sets a `z-index`, as (selector, value). Values
+ * given as `var(--token)` are resolved against the token's own declaration —
+ * without that, a rule stacking itself via a token would be invisible to the
+ * scan below, which is exactly how the connection-lost overlay ended up
+ * underneath every modal.
+ */
+function zIndexRules(): Array<{ selector: string; value: number }> {
+  const css = stylesCss.replace(/\r\n/g, '\n');
+  const tokens = new Map<string, number>();
+  for (const line of css.split('\n')) {
+    const m = /^\s*(--[a-z0-9-]+):\s*(-?\d+);\s*$/.exec(line);
+    if (m) tokens.set(m[1]!, Number(m[2]));
+  }
+  const out: Array<{ selector: string; value: number }> = [];
+  let depth = 0;
+  let start = 0;
+  let pending: { selector: string; bodyStart: number } | null = null;
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i];
+    if (ch === '{') {
+      if (depth === 0) pending = { selector: css.slice(start, i), bodyStart: i + 1 };
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0 && pending) {
+        const body = css.slice(pending.bodyStart, i);
+        const m = /z-index:\s*(?:(-?\d+)|var\((--[a-z0-9-]+)\))\s*;/.exec(body);
+        if (m) {
+          const value = m[1] !== undefined ? Number(m[1]) : tokens.get(m[2]!);
+          if (value !== undefined) {
+            out.push({
+              selector: pending.selector.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, ' ').trim(),
+              value,
+            });
+          }
+        }
+        pending = null;
+        start = i + 1;
+      }
+    }
+  }
+  return out;
+}
+
+describe('[a11y] nothing renders on top of "the server is unreachable" (U28)', () => {
+  /**
+   * The overlay sat at `--notif-stack-z` (90) while every modal overlay is 100
+   * and gate modals are 110 — so the one surface telling the operator that
+   * Cebab cannot reach the server rendered UNDER any open dialog, behind that
+   * dialog's opaque backdrop and unclickable.
+   *
+   * Written as a scan rather than a pair of hardcoded numbers so a modal added
+   * at 130 later fails HERE instead of in front of an operator. The other half
+   * of U28 — `useModalSurface` marking the overlay `inert` — is a DOM
+   * question and lives in `useModalSurface.test.tsx`.
+   */
+  const RULES = zIndexRules();
+  const overlay = RULES.find((r) => r.selector === '.connection-lost-overlay');
+  const competitors = RULES.filter(
+    (r) =>
+      r.selector !== '.connection-lost-overlay' &&
+      (r.selector.includes('overlay') || r.selector.includes('backdrop')),
+  );
+
+  test('the scan found real stacking rules', () => {
+    // Anti-vacuity: a broken scanner returns [] and "nothing outranks it" is
+    // trivially true. Both counts only grow.
+    expect(RULES.length).toBeGreaterThanOrEqual(15);
+    expect(competitors.length).toBeGreaterThanOrEqual(4);
+    expect(overlay?.value).toBeGreaterThan(0);
+  });
+
+  test('the scanner resolves a var() z-index, not only literals', () => {
+    // The bug was written as `z-index: var(--notif-stack-z)`. A scanner that
+    // only read literal numbers would have skipped the very rule at issue.
+    const token = /--notif-stack-z:\s*(-?\d+);/.exec(stylesCss.replace(/\r\n/g, '\n'));
+    expect(token, '--notif-stack-z is still defined').not.toBeNull();
+    const viaToken = RULES.filter((r) => r.value === Number(token![1]));
+    expect(viaToken.length).toBeGreaterThan(0);
+  });
+
+  test.each(competitors.map((c) => [`${c.selector} (${c.value})`, c] as const))(
+    '%s does not outrank the connection-lost overlay',
+    (_label, competitor) => {
+      expect(overlay!.value).toBeGreaterThan(competitor.value);
+    },
+  );
+});

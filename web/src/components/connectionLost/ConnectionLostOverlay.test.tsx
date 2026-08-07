@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ConnectionLostView } from '../../store';
+import { INERT_EXEMPT_ATTR } from '../../useModalSurface';
 import { ConnectionLostOverlay } from './ConnectionLostOverlay';
 
 // Cluster G E3 UI: ConnectionLostOverlay tests pin:
@@ -248,10 +249,40 @@ describe('ConnectionLostOverlay / a11y', () => {
     expect(document.activeElement).toBe(copyBtn);
   });
 
-  test('card has role=alert and aria-live=assertive', () => {
+  // U27 moved the alert region DOWN a level: it used to be the whole card,
+  // which meant the ticking countdown in the Retry label re-announced the
+  // title, body and every button once a second (`role="alert"` implies
+  // `aria-atomic="true"`, so the region is re-read in full on any change).
+  // It is now the title + body, which are static for the overlay's life.
+  test('the message — not the card — is the assertive alert region', () => {
     render({ view: view(), onDismiss: vi.fn() });
     const card = container.querySelector('.connection-lost-card');
-    expect(card?.getAttribute('role')).toBe('alert');
-    expect(card?.getAttribute('aria-live')).toBe('assertive');
+    expect(card?.getAttribute('role')).toBeNull();
+    expect(card?.getAttribute('aria-live')).toBeNull();
+
+    const message = container.querySelector('.connection-lost-message');
+    expect(message).not.toBeNull();
+    expect(message?.getAttribute('role')).toBe('alert');
+    expect(message?.getAttribute('aria-live')).toBe('assertive');
+    // The announcement still carries the failure — scoping it must not have
+    // emptied it.
+    expect(message?.textContent).toContain('Connection to Cebab failed');
+  });
+
+  test('the actions sit outside the alert region', () => {
+    render({ view: view({ reason: 'server_unreachable' }), onRetry: vi.fn(), onDismiss: vi.fn() });
+    const message = container.querySelector('.connection-lost-message')!;
+    expect(message.querySelectorAll('button')).toHaveLength(0);
+    // ...and are still on screen, i.e. they moved out rather than vanished.
+    expect(container.querySelectorAll('.connection-lost-actions button').length).toBeGreaterThan(2);
+  });
+
+  test('the overlay is exempt from a modal focus trap (U28)', () => {
+    // `useModalSurface` inerts every sibling of an open modal, and this
+    // overlay is one. Without the exemption, opening any dialog while the
+    // connection is down kills Retry / Copy diagnostic / Dismiss outright.
+    render({ view: view(), onDismiss: vi.fn() });
+    const overlay = container.querySelector('.connection-lost-overlay');
+    expect(overlay?.hasAttribute(INERT_EXEMPT_ATTR)).toBe(true);
   });
 });

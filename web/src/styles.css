@@ -1000,18 +1000,61 @@ pre {
   gap: 8px;
   margin-left: auto;
 }
+/* U11: connection state used to be this dot and nothing else — 6px, green or
+ * red, no text. Three channels now carry it: shape (filled vs hollow), colour
+ * (as before), and a text label. 8px so the ring below has room to read as a
+ * ring rather than as a slightly-darker dot. */
 .dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: var(--r-pill);
+  flex: none;
 }
 .dot.on {
   background: var(--ok);
   box-shadow: 0 0 8px var(--ok);
 }
+/* Hollow, not filled — the shape difference is what survives a monochrome
+ * display or a red/green colour-blind operator. */
 .dot.off {
-  background: var(--err);
-  box-shadow: 0 0 8px var(--err);
+  background: transparent;
+  border: 2px solid var(--err);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--err) 60%, transparent);
+}
+.conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+/* Connected is the state the operator is in almost always, so its label is
+ * sr-only — the header stays uncluttered and a screen reader still finds the
+ * state by name. Disconnected shows the word, because that is the one worth a
+ * glance. (Same declarations as `.sr-only`; spelled out rather than composed
+ * because the visible branch has to override every one of them.) */
+.conn-status[data-connected='true'] .conn-status-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* Normal ink, NOT `--err`. Two reasons, and the second is the point of the
+ * finding. Measured, `--err` on `--panel` is 3.71:1 in daylight (the default
+ * gamma) — under AA for text this size, which would have added a 61st site to
+ * the ~60 the semantic-ink finding already tracks. And more importantly: U11
+ * is a complaint about a signal carried by colour alone, so answering it with
+ * red text would keep leaning on the channel that failed. The ring carries the
+ * colour; the word is always legible without it. */
+.conn-status[data-connected='false'] .conn-status-label {
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fg-1);
+  text-transform: uppercase;
 }
 
 .icon-btn {
@@ -10943,7 +10986,17 @@ pre {
   position: fixed;
   inset: 0;
   background: color-mix(in srgb, var(--bg-0) 70%, transparent);
-  z-index: var(--notif-stack-z);
+  /* U28: this sat at `--notif-stack-z` (90) while every modal overlay is 100
+   * and gate modals are 110 — so the one surface saying "Cebab cannot reach
+   * the server" rendered UNDER any open dialog, behind that dialog's opaque
+   * backdrop and unclickable. 120 puts it above the highest of them.
+   *
+   * The token is deliberately NOT raised: `--notif-stack-z` also drives the
+   * ordinary toast stack, and lifting every toast above every modal is a
+   * different design decision nobody asked for. This is the one surface whose
+   * message outranks whatever dialog is open, because while it is up, that
+   * dialog cannot be answered. */
+  z-index: 120;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -10966,6 +11019,14 @@ pre {
 }
 .connection-lost-stripe {
   display: none;
+}
+/* U27: the alert region is now this wrapper (title + body + docs link) rather
+ * than the whole card, so the ticking countdown in the Retry label no longer
+ * re-announces everything. Carries the card's gap so the split is invisible. */
+.connection-lost-message {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
 }
 .connection-lost-title {
   margin: 0;

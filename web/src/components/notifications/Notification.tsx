@@ -195,6 +195,18 @@ export function Notification({ notification, onDismiss, onAction, onMute }: Noti
    * which only appear when the run is halted and the composer is unmounted).
    * Announcement is unaffected: `NotificationStack` renders sr-only
    * polite/assertive mirrors, which is the AT replay path.
+   *
+   * ...except that it WASN'T, until `aria-live="off"` below. `alert` and
+   * `status` are not just labels — each carries an implicit `aria-live`, so
+   * giving the visible strip one of those roles made it a second live region
+   * announcing the same string the sr-only mirror already announces. The
+   * paragraph above stated the intent correctly and the code did not match it.
+   *
+   * The role stays, because it still tells someone browsing the page what the
+   * strip IS. The explicit `aria-live` overrides the role's implicit value, so
+   * the mirror remains the single announcer — and it is the better one: it is
+   * `aria-atomic="true"`, and it clears itself one rAF later so a repeated
+   * identical string re-announces instead of being swallowed as "no change".
    */
   const role = severity === 'danger' || severity === 'error' ? 'alert' : 'status';
 
@@ -204,6 +216,7 @@ export function Notification({ notification, onDismiss, onAction, onMute }: Noti
       data-severity={severity}
       data-sticky={sticky ? 'true' : 'false'}
       role={role}
+      aria-live="off"
       tabIndex={tabIndex}
       onKeyDown={handleKeyDown}
       onMouseEnter={() => setPaused(true)}
