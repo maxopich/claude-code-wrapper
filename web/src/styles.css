@@ -47,12 +47,16 @@
   /* Semantic */
   --ok: #34d399;
   --ok-soft: rgba(52, 211, 153, 0.12);
+  --ok-ink: var(--ok);
   --warn: #fbbf24;
   --warn-soft: rgba(251, 191, 36, 0.12);
+  --warn-ink: var(--warn);
   --err: #f87171;
   --err-soft: rgba(248, 113, 113, 0.12);
+  --err-ink: var(--err);
   --info: #60a5fa;
   --info-soft: rgba(96, 165, 250, 0.1);
+  --info-ink: var(--info);
   /* Claude coral — BRAND MARK / LOGO ONLY (never interactive) */
   --coral: #cc785c;
   /* Per-agent identity ring — STRICT4 (locked). Exactly 4 hues, hash %4.
@@ -194,14 +198,30 @@
   --accent-ink: #2456c8;
   --accent-2: #2456c8;
   --on-accent: #ffffff;
+  /* `--X` is the FILL (tint, border, glow) and `--X-ink` is the TEXT. One
+   * token cannot be both: a fill wants to sit near the surface, ink wants to
+   * sit far from it. Tuned for the fill, these read at 2.4–3.9:1 as text here
+   * — under AA — which is what `--X-ink` fixes, hue preserved and lightness
+   * lowered until the worst pairing clears 4.6:1. Same shape as `--accent` /
+   * `--accent-ink` above, which has always worked this way.
+   *
+   * Only the two LIGHT gammas need a different value. Slate and phosphor
+   * clear AA as ink already (5.7–9.1:1), so there `--X-ink: var(--X)` — the
+   * token exists so every call site reads the same in every gamma, not
+   * because the colour needed changing. `styleContrast.test.ts` measures all
+   * four either way. */
   --ok: #16a36a;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: #117a50;
   --warn: #d3920f;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: #8f630a;
   --err: #e0584a;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: #c63122;
   --info: #2f6fed;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: #175feb;
   --coral: #cc785c;
   --r-sm: 6px;
   --r-md: 10px;
@@ -254,12 +274,16 @@
   --on-accent: #ffffff;
   --ok: #2f9e5f;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: #237546;
   --warn: #b9851c;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: #856014;
   --err: #c0402a;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: #b43c27;
   --info: #3a6db0;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: #3768a7;
   --coral: #cc785c;
   --r-sm: 5px;
   --r-md: 8px;
@@ -312,12 +336,16 @@
   --on-accent: #05181b;
   --ok: #34d399;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: var(--ok);
   --warn: #fbbf24;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: var(--warn);
   --err: #f87171;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: var(--err);
   --info: #60a5fa;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: var(--info);
   --coral: #cc785c;
   --r-sm: 4px;
   --r-md: 6px;
@@ -370,12 +398,16 @@
   --on-accent: #04140b;
   --ok: #3ddc84;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: var(--ok);
   --warn: #f5b341;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: var(--warn);
   --err: #ff6b5e;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: var(--err);
   --info: #5cc8ff;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: var(--info);
   --coral: #ff9e7a;
   --r-sm: 2px;
   --r-md: 2px;
@@ -631,7 +663,7 @@ pre {
   border-color: var(--line-3);
 }
 .pin-btn[aria-pressed='true'] {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: var(--accent);
 }
 /* Hide the pin until the rail is expanded. */
@@ -1105,7 +1137,7 @@ pre {
 }
 .workspace-btn.warn {
   border-color: var(--warn);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .workspace-btn-icon {
   font-size: 15px;
@@ -1247,7 +1279,7 @@ pre {
   flex-shrink: 0;
 }
 .trust.on {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: var(--warn-border);
 }
@@ -1438,7 +1470,7 @@ pre {
   border-color: var(--line-3);
 }
 .session-select-toggle.on {
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
   border-color: var(--accent-soft);
   background: var(--accent-glow);
 }
@@ -1514,7 +1546,7 @@ pre {
   cursor: not-allowed;
 }
 .bulk-action-btn.danger {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: var(--err-soft);
 }
 .bulk-action-btn.danger:hover:not(:disabled) {
@@ -1666,9 +1698,15 @@ pre {
   background: var(--bg-4);
   color: var(--fg-2);
 }
+/* The avatars sit on `--bg-4`, a hover rung rather than one of the declared
+ * text surfaces the ink tokens are derived against, so they measure 4.39–4.50
+ * in the light gammas. Left alone deliberately: every `.avatar` is
+ * `aria-hidden="true"` and holds a decorative glyph, not text, so the 4.5:1
+ * text minimum does not apply to it. Named here so the exception reads as a
+ * decision — `semanticInk.test.ts` carries the same note as an exemption. */
 .avatar.tool {
   background: var(--bg-4);
-  color: var(--info);
+  color: var(--info-ink);
 }
 /* Redesign P6: message treatment — serif reading bodies (Daylight) + a
  * per-theme bubble for user turns and a card for assistant turns, driven by
@@ -1719,7 +1757,7 @@ pre {
 }
 .msg.error {
   border-color: var(--err);
-  color: var(--err);
+  color: var(--err-ink);
 }
 .msg.permission {
   border-left: 0;
@@ -1735,10 +1773,10 @@ pre {
 .msg.user-command pre {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--t-sm);
-  color: var(--info);
+  color: var(--info-ink);
 }
 .msg.user-command .role {
-  color: var(--info);
+  color: var(--info-ink);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--t-xs);
   text-transform: uppercase;
@@ -1746,7 +1784,7 @@ pre {
 }
 .msg.user-command .avatar.user {
   background: var(--bg-4);
-  color: var(--info);
+  color: var(--info-ink);
 }
 
 /* Slash-command output card (e.g. /context, /compact). Visually separated
@@ -1760,7 +1798,7 @@ pre {
   padding: 12px 14px;
 }
 .msg.command-output .role {
-  color: var(--info);
+  color: var(--info-ink);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--t-xs);
   text-transform: uppercase;
@@ -1833,7 +1871,7 @@ pre {
   margin-top: var(--s-2);
 }
 .block-tool-use .tool-name {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
@@ -1904,7 +1942,7 @@ pre {
   margin: 0.2em 0;
 }
 .markdown a {
-  color: var(--accent);
+  color: var(--accent-ink);
   text-decoration: none;
 }
 .markdown a:hover {
@@ -2130,7 +2168,7 @@ pre {
   /* Override the gray "disabled" baseline so the stopping state still
    * reads as the Stop button — operator knows the press registered. */
   background: var(--err-soft);
-  color: var(--err);
+  color: var(--err-ink);
   box-shadow: none;
   cursor: progress;
 }
@@ -2440,7 +2478,7 @@ pre {
   line-height: 1.5;
 }
 .modal .hint.warn {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .modal .hint code {
   font-size: 11.5px;
@@ -2745,12 +2783,12 @@ pre {
   background: var(--warn-soft);
 }
 .ma-stall-glyph {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: 13px;
   line-height: 1;
 }
 .ma-stall-word {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 /* Hop-budget chip: small uppercase pill at the right of the activity bar,
  * mirroring `.lifecycle-pill` typography. The `.is-warn` variant kicks in
@@ -2774,7 +2812,7 @@ pre {
   margin-left: 4px;
 }
 .ma-hop-budget-chip.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: var(--warn-soft);
 }
@@ -2807,7 +2845,7 @@ pre {
   white-space: nowrap;
 }
 .model-chip.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: var(--warn-soft);
 }
@@ -2820,13 +2858,13 @@ pre {
 }
 .model-chip-warn-icon {
   font-size: 11px;
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 /* Inline warn qualifier inside the Session-info "Hop budget" row. Sized to
  * sit next to the count without dominating it. */
 .settings-grid-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: var(--t-sm);
   margin-left: 2px;
 }
@@ -2847,7 +2885,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   margin-left: 12px;
   font-family: var(--font-sans);
@@ -2858,7 +2896,7 @@ pre {
   white-space: nowrap;
 }
 .ma-mutations-chip.has-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, var(--border));
 }
@@ -2870,7 +2908,7 @@ pre {
   padding: 2px 4px;
 }
 .mutations-danger-marker {
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 600;
   margin-left: 6px;
 }
@@ -2920,12 +2958,12 @@ pre {
   font-weight: 600;
 }
 .mutation-badge-mutate {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, transparent);
   background: var(--warn-soft);
 }
 .mutation-badge-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: color-mix(in srgb, var(--err) 45%, transparent);
   background: var(--err-soft);
   font-weight: 700;
@@ -2942,7 +2980,7 @@ pre {
   word-break: break-all;
 }
 .mutation-row .mutation-summary.mutation-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .mutation-ts {
   color: var(--fg-3);
@@ -3035,17 +3073,17 @@ pre {
   border: 1px solid;
 }
 .permission-badge-read {
-  color: var(--ok);
+  color: var(--ok-ink);
   background: var(--ok-soft);
   border-color: color-mix(in srgb, var(--ok) 35%, transparent);
 }
 .permission-badge-mutate {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, transparent);
 }
 .permission-badge-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, transparent);
   font-weight: 700;
@@ -3205,12 +3243,12 @@ pre {
   text-overflow: ellipsis;
 }
 .trust-chip-ok {
-  color: var(--ok);
+  color: var(--ok-ink);
   background: var(--ok-soft);
   border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
 }
 .trust-chip-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -3232,7 +3270,7 @@ pre {
   flex-shrink: 0;
 }
 .trust-tag.trusted {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -3462,12 +3500,12 @@ pre {
   flex-shrink: 0;
 }
 .participant-bus-tag.installed {
-  color: var(--ok);
+  color: var(--ok-ink);
   border-color: color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
 }
 .participant-bus-tag.missing {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: var(--warn-border);
   background: var(--warn-soft);
 }
@@ -3492,7 +3530,7 @@ pre {
   border-radius: var(--r-pill);
   border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
-  color: var(--ok);
+  color: var(--ok-ink);
   flex-shrink: 0;
   animation: bus-installed-badge-enter 240ms ease-out;
 }
@@ -3571,7 +3609,7 @@ pre {
   top: 8px;
   font-size: 13px;
   line-height: 1.25;
-  color: var(--warn);
+  color: var(--warn-ink);
   /* Text presentation, not a platform emoji: the shape is the signal and
    * forced-colors mode has to be able to read it. Mirrors .tpl-banner-glyph. */
   font-variant-emoji: text;
@@ -3604,7 +3642,7 @@ pre {
   padding: 2px 6px;
 }
 .recovery-warn-marker {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-weight: 500;
 }
 .recovery-body {
@@ -3635,7 +3673,7 @@ pre {
   margin-bottom: 2px;
 }
 .recovery-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 /* Iterations browser */
@@ -3901,17 +3939,20 @@ pre {
   font-variant-numeric: tabular-nums;
 }
 .tpl-preview-rail-chip--ok {
-  color: var(--ok, #1f7a3a);
-  background: color-mix(in srgb, var(--ok, #1f7a3a) 12%, var(--bg-2));
-  border-color: color-mix(in srgb, var(--ok, #1f7a3a) 35%, var(--border));
+  /* The `, #1f7a3a` fallbacks these carried could never fire — `--ok` is
+   * declared in :root and all four gammas — so they were a fifth green that
+   * no gamma contains, sitting in the source looking load-bearing. */
+  color: var(--ok-ink);
+  background: color-mix(in srgb, var(--ok) 12%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
 }
 .tpl-preview-rail-chip--at-cap {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
 .tpl-preview-rail-chip--failed {
-  color: var(--err);
+  color: var(--err-ink);
   background: color-mix(in srgb, var(--err) 12%, var(--bg-2));
   border-color: color-mix(in srgb, var(--err) 35%, var(--border));
 }
@@ -3976,7 +4017,7 @@ pre {
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
 .tpl-banner.is-warn .tpl-banner-glyph {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .tpl-banner.is-info {
   color: var(--fg-1);
@@ -3984,7 +4025,7 @@ pre {
   border-color: color-mix(in srgb, var(--info) 35%, var(--border));
 }
 .tpl-banner.is-info .tpl-banner-glyph {
-  color: var(--info);
+  color: var(--info-ink);
 }
 
 /* PR-1: container for the bypass banner repeated inside the expanded modal.
@@ -4084,12 +4125,12 @@ pre {
  * always emits `is-${tier}` (never the BEM `--tier` form), so a single
  * selector per tier is enough. */
 .session-banner.is-info {
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   border-color: color-mix(in srgb, var(--info) 35%, var(--border));
 }
 .session-banner.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -4099,14 +4140,14 @@ pre {
   border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
 }
 .session-banner.is-error {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 30%, var(--border));
 }
 /* Danger = error's louder cousin: heavier border + accent shadow. The
  * focus-steal is the primary cue; the visual is the redundant one. */
 .session-banner.is-danger {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: var(--err);
   border-width: 1px;
@@ -4116,7 +4157,7 @@ pre {
  * the existing banner is `.tpl-banner.is-warn`; spec §8.2 only requires
  * it sit at the bottom of the stack. */
 .session-banner.is-invariant {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -4192,7 +4233,7 @@ pre {
   padding: 0 6px;
   border-radius: var(--r-sm);
   background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--warn-ink);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -4269,11 +4310,11 @@ pre {
   cursor: pointer;
 }
 .rate-limit-banner-held-drop:hover {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
 }
 .rate-limit-banner-held-drop:focus-visible {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -5300,7 +5341,7 @@ pre {
   background: var(--bg-3);
 }
 .lifecycle-pill-temp {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: var(--warn-border);
   background: var(--warn-soft);
 }
@@ -5373,7 +5414,7 @@ pre {
 .lifecycle-btn.active:nth-child(2) {
   /* Highlight 'temp' with a warn-tone so the destructive-on-End
    * semantics stay legible at a glance. */
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
 }
 .lifecycle-btn:disabled:not(.active) {
@@ -5493,7 +5534,7 @@ pre {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .run-status-completed {
-  color: var(--ok);
+  color: var(--ok-ink);
   border-color: color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
 }
@@ -5502,7 +5543,7 @@ pre {
   background: var(--bg-3);
 }
 .run-status-crashed {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: color-mix(in srgb, var(--err) 35%, transparent);
   background: var(--err-soft);
 }
@@ -5572,7 +5613,7 @@ pre {
 .ma-scrollback-filter-chip.is-visible.ma-scrollback-filter-chip--error {
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 35%, var(--border));
-  color: var(--err);
+  color: var(--err-ink);
 }
 .ma-scrollback-filter-chip.is-visible.ma-scrollback-filter-chip--intro {
   background: var(--bg-1);
@@ -5806,7 +5847,7 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--ok);
+  color: var(--ok-ink);
   font-size: 10px;
   letter-spacing: 0.04em;
 }
@@ -6339,7 +6380,7 @@ pre {
   padding: 0 var(--s-1);
   border: 1px solid var(--warn);
   border-radius: var(--r-sm);
-  color: var(--warn);
+  color: var(--warn-ink);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -6370,7 +6411,7 @@ pre {
   align-items: center;
   gap: var(--s-2);
   font-size: var(--t-sm);
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 .artifact-content-error p {
@@ -6475,7 +6516,7 @@ pre {
   align-items: center;
   gap: 4px;
   margin-left: 6px;
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 600;
 }
 
@@ -6551,14 +6592,14 @@ pre {
 }
 
 .logs-modal-more {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* Cluster H D12 client: live-edge counter in the subtitle. Same tint as
  * `.logs-modal-more` (operator-positive "the feed is growing") but with
  * tabular-nums so the count column doesn't jitter as it climbs. */
 .logs-modal-live {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-variant-numeric: tabular-nums;
 }
 
@@ -6784,12 +6825,12 @@ pre {
 
 .logs-row-kind-error {
   background: var(--err-soft);
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 .logs-row-kind-artifact {
   background: var(--ok-soft);
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 
 .logs-row-agent {
@@ -6811,7 +6852,7 @@ pre {
 
 .logs-row-redacted-badge {
   background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: 10px;
   padding: 1px 5px;
   border-radius: var(--r-sm);
@@ -6931,7 +6972,7 @@ pre {
 }
 
 .logs-row-detail-meta dd a {
-  color: var(--accent);
+  color: var(--accent-ink);
   text-decoration: none;
 }
 
@@ -6951,7 +6992,7 @@ pre {
 
 .logs-row-detail-redacted code {
   font-family: var(--font-mono);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 .logs-row-detail-raw {
@@ -7131,19 +7172,19 @@ pre {
   color: var(--line-3); /* default; overridden per tier */
 }
 .notif[data-severity='info'] .notif-glyph svg {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif[data-severity='success'] .notif-glyph svg {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif[data-severity='warn'] .notif-glyph svg {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif[data-severity='error'] .notif-glyph svg {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif[data-severity='danger'] .notif-glyph svg {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .notif-body {
@@ -7162,19 +7203,19 @@ pre {
   margin-bottom: var(--s-1);
 }
 .notif[data-severity='info'] .notif-tier-label {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif[data-severity='success'] .notif-tier-label {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif[data-severity='warn'] .notif-tier-label {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif[data-severity='error'] .notif-tier-label {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif[data-severity='danger'] .notif-tier-label {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-count {
   padding: 1px var(--s-2);
@@ -7275,7 +7316,7 @@ pre {
 }
 .notif-bell[data-has-unread='true'] {
   opacity: 1;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-bell svg {
   width: 16px;
@@ -7390,29 +7431,35 @@ pre {
   background: var(--bg-5);
 }
 .notif-inbox-chip[data-active='true'] {
-  background: var(--bg-5);
+  /* Was `--bg-5`, which is also what :hover uses — so the active chip was
+   * distinguishable from a hovered one only by its border, and every tier's
+   * ink measured 3.94–4.22:1 on it in the light gammas. `--panel-2` is a
+   * declared text surface (the one the ink tokens are derived against), it
+   * clears AA for all five tiers, and it gives active a fill that hover does
+   * not have. */
+  background: var(--panel-2);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-inbox-chip[data-tier='info'][data-active='true'] {
   border-color: var(--info);
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif-inbox-chip[data-tier='success'][data-active='true'] {
   border-color: var(--ok);
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif-inbox-chip[data-tier='warn'][data-active='true'] {
   border-color: var(--warn);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif-inbox-chip[data-tier='error'][data-active='true'] {
   border-color: var(--err);
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif-inbox-chip[data-tier='danger'][data-active='true'] {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-inbox-toggle {
   font-size: var(--t-sm);
@@ -7514,19 +7561,19 @@ pre {
   font-size: 10px;
 }
 .notif-inbox-row-tier[data-tier='info'] {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif-inbox-row-tier[data-tier='success'] {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif-inbox-row-tier[data-tier='warn'] {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif-inbox-row-tier[data-tier='error'] {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif-inbox-row-tier[data-tier='danger'] {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-inbox-row-ts {
   opacity: 0.6;
@@ -7673,15 +7720,15 @@ pre {
   white-space: nowrap;
 }
 .gate-modal-reason-hash_changed {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: var(--warn);
 }
 .gate-modal-reason-first_seen {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: var(--accent);
 }
 .gate-modal-reason-env {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: var(--err);
 }
 
@@ -7770,7 +7817,7 @@ pre {
   outline-offset: 2px;
 }
 .gate-modal-btn-danger {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: var(--err);
 }
 .gate-modal-btn:disabled,
@@ -7824,7 +7871,7 @@ pre {
 }
 .gate-modal-injection-scope-local {
   /* project-local is the least-trusted tier (spec §5.3) — surface it. */
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: var(--warn);
 }
 .gate-modal-injection-set {
@@ -7833,8 +7880,11 @@ pre {
   border-radius: var(--r-sm);
 }
 .gate-modal-injection-set-yes {
-  background: rgba(255, 90, 90, 0.12);
-  color: var(--err);
+  /* Was a literal rgba(255, 90, 90, .12) — a fifth red matching no gamma's
+   * --err, so it did not re-theme. The #291 literal scan misses it precisely
+   * because it only knows the hexes the gammas declare. */
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--err-ink);
 }
 .gate-modal-injection-set-no {
   background: var(--bg-2);
@@ -8082,17 +8132,17 @@ pre {
 .model-identity-cwd {
   font-family: var(--font-mono);
   font-size: var(--t-xs);
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
   word-break: break-all;
 }
 .model-identity-perm-default {
   color: var(--fg-1);
 }
 .model-identity-perm-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .model-identity-perm-danger {
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 600;
 }
 .model-identity-perm-hint {
@@ -8100,10 +8150,10 @@ pre {
   font-style: italic;
 }
 .model-identity-key-ok {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .model-identity-key-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-weight: 600;
 }
 .model-identity-muted {
@@ -8210,10 +8260,10 @@ pre {
   color: var(--fg-1);
 }
 .tool-row-source-mcp {
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
 }
 .tool-row-source-cebab-injected {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .tool-row-mcp-server {
   margin-left: 4px;
@@ -8229,7 +8279,7 @@ pre {
   padding: 1px 6px;
   border-radius: var(--r-sm);
   background: var(--err-soft);
-  color: var(--err);
+  color: var(--err-ink);
   border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
   font-weight: 600;
 }
@@ -8261,7 +8311,7 @@ pre {
   font-style: italic;
 }
 .tool-row-reason {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 /* New "read" variant — matches existing -mutate / -dangerous shape so we
@@ -8318,12 +8368,12 @@ pre {
    * on it without having to read the label. Active state below promotes
    * to the err-soft fill. */
   border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
-  color: var(--err);
+  color: var(--err-ink);
 }
 .tools-list-usage-toggle-btn-attempted.tools-list-usage-toggle-btn-active {
   background: var(--err-soft);
   border-color: var(--err);
-  color: var(--err);
+  color: var(--err-ink);
 }
 .tools-list-usage-toggle-count {
   font-size: 10px;
@@ -8350,13 +8400,13 @@ pre {
   white-space: nowrap;
 }
 .tool-row-usage-chip-used {
-  color: var(--ok);
+  color: var(--ok-ink);
   background: color-mix(in srgb, var(--ok) 12%, var(--bg-3));
   border-color: color-mix(in srgb, var(--ok) 35%, var(--line-3));
 }
 .tool-row-usage-chip-attempted {
   /* The red signal-of-interest chip per UI-B31. */
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
   font-weight: 600;
@@ -8443,15 +8493,15 @@ pre {
   color: var(--fg-1);
 }
 .mcp-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
   border-color: color-mix(in srgb, var(--info) 35%, var(--line-3));
 }
 .mcp-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line-3));
 }
 .mcp-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .mcp-scope-cebab {
@@ -8466,15 +8516,15 @@ pre {
   border-style: dashed;
 }
 .mcp-trust-ok {
-  color: var(--ok);
+  color: var(--ok-ink);
   border-color: color-mix(in srgb, var(--ok) 35%, var(--line-3));
 }
 .mcp-trust-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .mcp-trust-err {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: color-mix(in srgb, var(--err) 45%, var(--line-3));
 }
 .mcp-trust-muted {
@@ -8632,13 +8682,13 @@ pre {
   background: var(--bg-3);
 }
 .allow-deny-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .allow-deny-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .allow-deny-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .allow-deny-scope-default {
   color: var(--fg-2);
@@ -8685,7 +8735,7 @@ pre {
   font-size: var(--t-sm);
 }
 .env-scrub-banner strong {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .env-scrub-scope {
   border: 1px solid var(--line-3);
@@ -8710,15 +8760,15 @@ pre {
   color: var(--fg-1);
 }
 .env-injection-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .env-injection-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line-3));
 }
 .env-injection-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
   border-color: color-mix(in srgb, var(--info) 35%, var(--line-3));
 }
 .env-scrub-scope-path {
@@ -8769,7 +8819,7 @@ pre {
   border: 1px solid var(--line-3);
 }
 .env-injection-set-yes {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
   font-weight: 600;
@@ -8842,7 +8892,7 @@ pre {
   flex-wrap: wrap;
 }
 .hook-card-warn-icon {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: var(--t-sm);
   font-weight: 700;
 }
@@ -8857,13 +8907,13 @@ pre {
   color: var(--fg-1);
 }
 .hook-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .hook-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .hook-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .hook-card-path {
@@ -8954,7 +9004,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   margin-left: 12px;
   display: inline-flex;
@@ -8981,7 +9031,7 @@ pre {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 25%, transparent);
 }
 .ma-router-drops-chip-burst {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, var(--border));
   font-weight: 700;
@@ -9072,12 +9122,12 @@ pre {
   white-space: nowrap;
 }
 .router-drops-reason-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .router-drops-reason-danger {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, var(--line-3));
   font-weight: 600;
@@ -9134,11 +9184,11 @@ pre {
 }
 .session-row:hover .session-row-authority-btn {
   opacity: 1;
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
 }
 .session-row-authority-btn:focus-visible {
   opacity: 1;
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -9166,7 +9216,7 @@ pre {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   text-decoration: none;
-  color: var(--accent);
+  color: var(--accent-ink);
   background: var(--accent-glow);
   border: 1px solid var(--accent);
   border-radius: 999px;
@@ -9248,10 +9298,10 @@ pre {
   overflow-y: auto;
 }
 .reopen-modal-clean {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .reopen-modal-no-git {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .reopen-modal-dirty {
   /* Bold count is on `strong` inline; ambient color stays neutral so the
@@ -9284,7 +9334,7 @@ pre {
   background: color-mix(in oklab, var(--err) 12%, transparent);
   border: 1px solid color-mix(in oklab, var(--err) 35%, transparent);
   border-radius: var(--r-sm);
-  color: var(--err);
+  color: var(--err-ink);
   font-size: var(--t-sm);
 }
 .reopen-modal-ack {
@@ -9328,7 +9378,7 @@ pre {
    * shape but with a warn-tier background since the reason is "what went
    * wrong" rather than the McpTofu-style policy chip. */
   background: color-mix(in oklab, var(--warn) 18%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
 }
 
@@ -9378,24 +9428,24 @@ pre {
 .auth-refresh-modal-pid {
   /* Subprocess PID chip — info tier (this is metadata, not a warning). */
   background: color-mix(in oklab, var(--info) 18%, transparent);
-  color: var(--info);
+  color: var(--info-ink);
   border: 1px solid color-mix(in oklab, var(--info) 35%, transparent);
 }
 .auth-refresh-modal-exit-success {
   background: color-mix(in oklab, var(--ok) 18%, transparent);
-  color: var(--ok);
+  color: var(--ok-ink);
   border: 1px solid color-mix(in oklab, var(--ok) 35%, transparent);
 }
 .auth-refresh-modal-exit-failed {
   background: color-mix(in oklab, var(--err) 18%, transparent);
-  color: var(--err);
+  color: var(--err-ink);
   border: 1px solid color-mix(in oklab, var(--err) 35%, transparent);
 }
 .auth-refresh-modal-failed-reason {
   /* Start-time failure (already_running / spawn_failed). Same warn tier
    * as the reopen modal's failed-reason chip. */
   background: color-mix(in oklab, var(--warn) 18%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
 }
 .auth-refresh-modal-existing-run-id,
@@ -9546,22 +9596,22 @@ pre {
 }
 .recovery-log-class-rate_limit {
   background: color-mix(in oklab, var(--info) 18%, transparent);
-  color: var(--info);
+  color: var(--info-ink);
   border-color: color-mix(in oklab, var(--info) 35%, transparent);
 }
 .recovery-log-class-auth_expired {
   background: color-mix(in oklab, var(--warn) 18%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in oklab, var(--warn) 35%, transparent);
 }
 .recovery-log-class-sweep {
   background: color-mix(in oklab, var(--accent) 18%, transparent);
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: color-mix(in oklab, var(--accent) 35%, transparent);
 }
 .recovery-log-class-chain_crash {
   background: color-mix(in oklab, var(--err) 18%, transparent);
-  color: var(--err);
+  color: var(--err-ink);
   border-color: color-mix(in oklab, var(--err) 35%, transparent);
 }
 
@@ -9667,7 +9717,7 @@ pre {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 500;
 }
 .stopped-marker-glyph {
@@ -9703,7 +9753,7 @@ pre {
 .stopped-marker-btn.is-active {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .stopped-marker-skip {
   margin-left: auto;
@@ -9748,7 +9798,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   margin-left: 12px;
   display: inline-flex;
@@ -9758,7 +9808,7 @@ pre {
 }
 .ma-participant-controls-chip.has-kicked {
   border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   font-weight: 600;
 }
@@ -9786,17 +9836,17 @@ pre {
   white-space: nowrap;
 }
 .ma-control-pill.is-muted {
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   border-color: color-mix(in srgb, var(--info) 30%, var(--border));
 }
 .ma-control-pill.is-paused {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 30%, var(--border));
 }
 .ma-control-pill.is-kicked {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 40%, var(--border));
   font-weight: 600;
@@ -9886,7 +9936,7 @@ pre {
 }
 .ma-control-menu-item.is-primary {
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* U26: the chain-mode explanation used to be a `<p class="ma-control-menu-hint">`
@@ -9913,7 +9963,7 @@ pre {
 }
 
 .ma-control-menu-item.is-danger {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .ma-control-menu-item.is-danger:hover,
 .ma-control-menu-item.is-danger:focus-visible {
@@ -10256,7 +10306,7 @@ pre {
 }
 .pause-reason-modal-custom-error {
   font-size: var(--t-xs, 11px);
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 .pause-reason-modal-text-label {
@@ -10306,7 +10356,7 @@ pre {
   color: var(--fg-2, var(--fg));
 }
 .kick-forensics-status.is-error {
-  color: var(--err);
+  color: var(--err-ink);
   font-style: normal;
 }
 
@@ -10471,7 +10521,7 @@ pre {
   color: var(--fg-2, var(--fg));
 }
 .kick-forensics-mutation-unconfirmed {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-weight: 600;
 }
 .kick-forensics-mutation-summary {
@@ -10557,7 +10607,7 @@ pre {
   white-space: nowrap;
 }
 .turn-counter-chip.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: var(--warn-soft);
 }
@@ -10612,7 +10662,7 @@ pre {
   margin: 8px 0 0;
   padding: 6px 10px;
   font-size: var(--t-xs, 11px);
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
   border-radius: var(--r-sm, 4px);
@@ -10636,7 +10686,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   margin-left: 12px;
   display: inline-flex;
@@ -10677,7 +10727,7 @@ pre {
   font-weight: 600;
   border-radius: var(--r-sm);
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   /* Tooltip is the affordance — the badge isn't a button. */
   cursor: help;
@@ -11029,7 +11079,7 @@ pre {
   color: var(--fg-2);
 }
 .connection-lost-docs a {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .connection-lost-actions {
   display: flex;
@@ -11224,7 +11274,7 @@ pre {
   background: var(--err-soft);
   border: 1px solid var(--err);
   border-radius: var(--r-sm);
-  color: var(--err);
+  color: var(--err-ink);
   font-size: var(--t-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -11311,7 +11361,7 @@ pre {
   padding: 0 4px;
 }
 .session-search-raw-downgrade {
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 /* Interactive AskUserQuestion card (AskUserQuestionCard.tsx) — rendered in the

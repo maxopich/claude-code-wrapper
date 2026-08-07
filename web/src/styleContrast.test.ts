@@ -7,6 +7,7 @@ import {
   contrastRatio,
   parseColor,
   parseThemeBlocks,
+  relativeLuminance,
   resolveColor,
   resolveVar,
   splitTopLevel,
@@ -31,13 +32,13 @@ import {
  * deleted. So the guarantee is exactly: *these listed pairings clear AA in
  * all four gammas*. It is not "the app is AA conformant".
  *
- * KNOWN RESIDUAL, deliberately not claimed here: the semantic inks
- * (`--warn`, `--err`, `--ok`, `--info`) are still used as text directly on a
- * panel at roughly sixty sites, where they measure 2.4–3.4:1. The two banner
- * families that register U06 named were moved onto `--fg-1` and are gated
- * below; the rest is a separate, larger change and has its own bead. Naming
- * it here rather than quietly excluding it is the point — an instrument that
- * overstates its own coverage is the defect this file exists to catch.
+ * The KNOWN RESIDUAL this header used to declare — the semantic inks used as
+ * text at "roughly sixty sites", measuring 2.4–3.4:1 — is closed. It was 159
+ * sites across five token families, and the fix was to stop asking one token
+ * to be both the fill and the ink: `--ok-ink` / `--warn-ink` / `--err-ink` /
+ * `--info-ink` now sit beside their fills, the way `--accent-ink` always has.
+ * Those pairings are gated below, and `semanticInk.test.ts` keeps the fills
+ * from creeping back into `color:`.
  */
 
 /** Surfaces that body text actually sits on, worst-case across all of them.
@@ -308,13 +309,21 @@ describe('[a11y] warning banners do not signal by colour alone (WCAG 1.4.1)', ()
   test('the hue survives where it is decoration rather than text', () => {
     // Losing the colour channel entirely would trade a contrast failure for a
     // "which banner is this?" failure.
+    //
+    // These now name the ink variant rather than the fill. The hue is
+    // identical — `--warn-ink` is `--warn` with lightness lowered — so the
+    // property this test exists for is untouched, while a glyph that measured
+    // 2.35:1 against its surface in aurora measures 4.6:1. Keeping the fill
+    // here would also have made "every `color:` is an ink token" a rule with
+    // three exceptions to remember, which is how the fills got into `color:`
+    // in the first place.
     expect(declaration(ruleBody('.tpl-banner.is-warn .tpl-banner-glyph'), 'color')).toBe(
-      'var(--warn)',
+      'var(--warn-ink)',
     );
     expect(declaration(ruleBody('.tpl-banner.is-info .tpl-banner-glyph'), 'color')).toBe(
-      'var(--info)',
+      'var(--info-ink)',
     );
-    expect(declaration(ruleBody('.multi-agent-warning::before'), 'color')).toBe('var(--warn)');
+    expect(declaration(ruleBody('.multi-agent-warning::before'), 'color')).toBe('var(--warn-ink)');
   });
 });
 
@@ -347,5 +356,108 @@ describe('[a11y] the Appearance picker previews the real palette', () => {
         panel: true,
       });
     }
+  });
+});
+
+/**
+ * ── Semantic ink (bead .5.37) ─────────────────────────────────────────
+ *
+ * `--warn`, `--err`, `--ok` and `--info` were each doing two opposite jobs.
+ * As a FILL — a 12% tint, a border, a glow — a token wants to sit close to
+ * the surface. As INK it wants to sit far from it. They were tuned for the
+ * fill and used as text at 159 sites, where they measured 2.35–4.30:1 in the
+ * two light gammas.
+ *
+ * The split is not new: `--accent-ink` has sat beside `--accent` since the
+ * redesign. These tests hold the other four to the same standard, on the two
+ * surfaces the sites actually use — the declared text surfaces, and each
+ * token's own 12% tint, which 63 of the sites sit on and which is the harder
+ * of the two (the tint pulls the background toward the ink).
+ */
+const SEMANTIC_FAMILIES = ['--ok', '--warn', '--err', '--info', '--accent'] as const;
+
+/** Gammas whose base tokens already clear AA as ink, where `--X-ink` is
+ *  deliberately an alias rather than a different colour. */
+const INK_ALIASING_GAMMAS = ['slate', 'phosphor'] as const;
+
+describe('[a11y] semantic ink is readable as text', () => {
+  test.each(THEMES)('%s: every ink clears AA on every text surface', (theme) => {
+    const measured = SEMANTIC_FAMILIES.map((base) => {
+      const ink = resolveColor(blocks[theme]!, `${base}-ink`);
+      const w = worstSurface(theme, ink);
+      return { token: `${base}-ink`, ratio: Number(w.ratio.toFixed(2)), surface: w.surface };
+    });
+    // Printed, not just asserted: a passing run should show its work, because
+    // the whole point of this file is that nobody was measuring.
+    expect(measured.length).toBe(SEMANTIC_FAMILIES.length);
+    expect(measured.filter((m) => m.ratio < AA_NORMAL_TEXT)).toEqual([]);
+  });
+
+  /**
+   * The four families whose `-soft` is a translucent 12% tint of the base.
+   *
+   * `--accent` is excluded and it is not an oversight: `--accent-soft` is a
+   * SOLID darker accent, not a tint — "soft" means something different in that
+   * family. Compositing it over the panel and measuring `--accent-ink` against
+   * it produced a 1.0 ratio in aurora, where the two happen to be the same
+   * hex. The accent's real tint is `--accent-glow`, checked on its own below.
+   */
+  const TINTED_FAMILIES = ['--ok', '--warn', '--err', '--info'] as const;
+
+  test.each(THEMES)('%s: every ink clears AA on its own soft tint', (theme) => {
+    // 63 of the 159 sites are `color: var(--X-ink)` over `background:
+    // var(--X-soft)`. The tint composites the fill over the panel, so the
+    // background moves toward the ink and this binds harder than a bare panel.
+    const failing = TINTED_FAMILIES.filter(
+      (base) =>
+        contrastRatio(
+          resolveColor(blocks[theme]!, `${base}-ink`),
+          tintOverPanel(theme, `${base}-soft`),
+        ) < AA_NORMAL_TEXT,
+    );
+    expect({ theme, failing }).toEqual({ theme, failing: [] });
+    // The tint must actually be translucent, or this measures a bare colour
+    // and silently stops testing the harder case.
+    for (const base of TINTED_FAMILIES) {
+      expect(blocks[theme]!.get(`${base}-soft`), `${theme} ${base}-soft`).toMatch(
+        /transparent|rgba/,
+      );
+    }
+  });
+
+  test.each(THEMES)('%s: --accent-ink is readable on --accent-glow', (theme) => {
+    // The one accent site that sits on a tint rather than a panel.
+    const ratio = contrastRatio(
+      resolveColor(blocks[theme]!, '--accent-ink'),
+      tintOverPanel(theme, '--accent-glow'),
+    );
+    expect({ theme, ratio: Number(ratio.toFixed(2)) }).toMatchObject({ theme });
+    expect(ratio).toBeGreaterThanOrEqual(AA_NORMAL_TEXT);
+  });
+
+  test.each(INK_ALIASING_GAMMAS)('%s: the ink alias is deliberate, not an oversight', (theme) => {
+    // These two gammas declare `--X-ink: var(--X)`. That is only defensible
+    // while the base itself clears AA as ink — which is the measurement that
+    // made aliasing the right call instead of inventing four colours for a
+    // palette nobody can eyeball from here. If a base is ever retuned into
+    // failing, this says so rather than letting the alias carry it through.
+    const failing = SEMANTIC_FAMILIES.filter(
+      (base) => worstSurface(theme, resolveColor(blocks[theme]!, base)).ratio < AA_NORMAL_TEXT,
+    );
+    expect({ theme, failing }).toEqual({ theme, failing: [] });
+  });
+
+  test.each(['aurora', 'daylight'] as const)('%s: the ink is darker than its fill', (theme) => {
+    // A positive lock. Both light gammas need a genuinely different value; a
+    // future "simplification" to `--warn-ink: var(--warn)` here would revert
+    // the fix while leaving every call site looking correct, and the AA tests
+    // above would catch it only because the numbers happen to fail. This
+    // catches the shape directly.
+    const notDarker = SEMANTIC_FAMILIES.filter((base) => {
+      const ink = resolveColor(blocks[theme]!, `${base}-ink`);
+      const fill = resolveColor(blocks[theme]!, base);
+      return relativeLuminance(ink) >= relativeLuminance(fill);
+    });
+    expect({ theme, notDarker }).toEqual({ theme, notDarker: [] });
   });
 });

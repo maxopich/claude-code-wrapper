@@ -101,12 +101,28 @@ export function parseThemeBlocks(css: string): Record<string, Map<string, string
   for (const { name, start, end } of tokenBlockRanges(css)) {
     if (name === ':root') continue;
     const tokens = new Map<string, string>();
-    for (const d of css.slice(start, end).matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)) {
+    for (const d of blankComments(css.slice(start, end)).matchAll(
+      /(--[a-z0-9-]+)\s*:\s*([^;]+);/gi,
+    )) {
       tokens.set(d[1]!, d[2]!.trim());
     }
     out[name] = tokens;
   }
   return out;
+}
+
+/**
+ * Comment bodies replaced by spaces, so offsets and line numbers survive.
+ *
+ * Load-bearing, not hygiene. The declaration matcher above is case-insensitive
+ * and unanchored, so a comment writing `--X-ink: var(--X)` as prose matched as
+ * a declaration and then ran `[^;]+` forward to the *next real semicolon* —
+ * swallowing the genuine `--ok: …` that followed it and making the gamma look
+ * as though it never declared the token. That is a documentation comment
+ * silently deleting a colour from a contrast gate's view of the palette.
+ */
+function blankComments(css: string): string {
+  return css.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
 }
 
 /**
