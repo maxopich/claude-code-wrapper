@@ -264,19 +264,67 @@ describe('SessionSearchModal — results + navigation (C4-4)', () => {
     expect(input().getAttribute('aria-controls')).toBe(listbox.id);
   });
 
-  test('[a11y] Home and End jump to the ends of the result list', () => {
+  test('[a11y] the arrow keys clamp at the ends of the result list', () => {
     render({ activeProjectId: 1 });
     setValue(input(), 'mig');
     advance(200);
     reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2'), hit('s3')] });
 
-    keyDown(input(), 'End');
+    keyDown(input(), 'ArrowDown');
+    keyDown(input(), 'ArrowDown');
     expect(rows()[2]?.getAttribute('aria-selected')).toBe('true');
     // A listbox clamps rather than wrapping.
     keyDown(input(), 'ArrowDown');
     expect(rows()[2]?.getAttribute('aria-selected')).toBe('true');
-    keyDown(input(), 'Home');
+    keyDown(input(), 'ArrowUp');
+    keyDown(input(), 'ArrowUp');
     expect(rows()[0]?.getAttribute('aria-selected')).toBe('true');
+    keyDown(input(), 'ArrowUp');
+    expect(rows()[0]?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  test('[a11y] Home and End are left to the caret, not the result list', () => {
+    // This previously asserted the opposite, and the opposite was a defect:
+    // the handler is on the search INPUT, so claiming Home/End for the list
+    // also `preventDefault()`s them, and "jump to start of query" stopped
+    // working. In a combobox those two keys belong to the textbox — the
+    // listbox owns the arrows.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2'), hit('s3')] });
+
+    keyDown(input(), 'ArrowDown'); // selection is on row 1
+    expect(rows()[1]?.getAttribute('aria-selected')).toBe('true');
+
+    keyDown(input(), 'End');
+    expect(rows()[1]?.getAttribute('aria-selected')).toBe('true');
+    keyDown(input(), 'Home');
+    expect(rows()[1]?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  test('[a11y] Home and End are not swallowed, so the caret can still move', () => {
+    // The selection staying put above would also be true if the component
+    // consumed the key and did nothing. What makes the caret work is that the
+    // event is left un-defaulted for the browser to act on.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2')] });
+
+    for (const key of ['Home', 'End']) {
+      const ev = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      input().dispatchEvent(ev);
+      expect({ key, defaultPrevented: ev.defaultPrevented }).toEqual({
+        key,
+        defaultPrevented: false,
+      });
+    }
+    // Positive control: the arrows ARE claimed, so a passing test above can't
+    // just mean the handler never runs.
+    const arrow = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+    input().dispatchEvent(arrow);
+    expect(arrow.defaultPrevented).toBe(true);
   });
 
   test('redacted badge shows when a hit carries redactedFields; truncated hint when capped', () => {

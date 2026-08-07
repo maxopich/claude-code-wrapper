@@ -2093,11 +2093,30 @@ function AppShell({
         ) : (
           <>
             <div className="main-top-bar">
+              {/* Register U36: these marked the active view with `aria-pressed`,
+               *  which announces "pressed" — a toggle that is currently down —
+               *  for a control that is really a destination. They sit inside a
+               *  <nav>, and `aria-current` is what a nav's current item uses;
+               *  `ProjectList` already makes exactly this distinction on one
+               *  button (`aria-pressed` for select mode, `aria-current` for the
+               *  active session).
+               *
+               *  The finding proposed a tablist instead. Rejected: a tablist
+               *  obliges tabpanels the tabs point at, and the chat branch below
+               *  expands to SEVERAL children of `.main` (header, the flex:1
+               *  scroller, the composer). One wrapper would collapse them into a
+               *  single flex child; `display: contents` avoids that but has a
+               *  history of dropping the element out of the accessibility tree,
+               *  which would leave the role doing nothing. A tablist whose
+               *  panels don't work announces "tab 1 of 3" and then goes nowhere
+               *  — worse than the wrong attribute. Same reasoning `ModeToggle`
+               *  gives for declining a radiogroup: don't adopt a role you are
+               *  not going to fulfil. */}
               <nav className="main-tabs" aria-label="Main view">
                 <button
                   className={`main-tab ${view === 'chat' ? 'active' : ''}`}
                   onClick={() => dispatch({ type: 'ma_set_view', view: 'chat' })}
-                  aria-pressed={view === 'chat'}
+                  aria-current={view === 'chat' ? 'page' : undefined}
                 >
                   <Icon name="chat" />
                   Chat
@@ -2105,7 +2124,7 @@ function AppShell({
                 <button
                   className={`main-tab ${view === 'multi-agent' ? 'active' : ''}`}
                   onClick={() => dispatch({ type: 'ma_set_view', view: 'multi-agent' })}
-                  aria-pressed={view === 'multi-agent'}
+                  aria-current={view === 'multi-agent' ? 'page' : undefined}
                 >
                   <Icon name="agents" />
                   Multi-Agent
@@ -2113,7 +2132,7 @@ function AppShell({
                 <button
                   className={`main-tab ${view === 'chained-chat' ? 'active' : ''}`}
                   onClick={() => dispatch({ type: 'ma_set_view', view: 'chained-chat' })}
-                  aria-pressed={view === 'chained-chat'}
+                  aria-current={view === 'chained-chat' ? 'page' : undefined}
                 >
                   <Icon name="chain" />
                   Chained Chat

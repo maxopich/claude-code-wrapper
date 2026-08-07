@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { nextIndex } from '../listNavigation.js';
 import {
   buildSdkSlashCommands,
   filterSlashCommands,
@@ -30,7 +31,9 @@ import {
  *     this on every init), de-duped against the Cebab list.
  *
  * Keyboard contract (inside the filter input):
- *   - ArrowUp / ArrowDown move highlight; wraps at boundaries.
+ *   - ArrowUp / ArrowDown move highlight; wraps at boundaries. Movement comes
+ *     from the shared `nextIndex`; Home/End are deliberately NOT claimed —
+ *     they belong to the caret in the field this handler is bound to.
  *   - Enter activates the highlighted row → `onSelect(command)`.
  *   - Esc → `onClose()`.
  *
@@ -88,16 +91,23 @@ export function SlashCommandPalette({
   }, [flat.length]);
 
   function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === 'ArrowDown') {
+    // Movement through the shared helper (bead .40) instead of a fourth
+    // hand-rolled ladder. Behaviour is unchanged: `wrap: true` keeps the menu
+    // cycling at the ends, which is what the modulo arithmetic here did.
+    //
+    // `homeEnd: false` because this handler is on the input — see the same
+    // note in `SessionSearchModal`. The palette never claimed Home/End, and
+    // adopting the helper must not hand them over silently.
+    const target = nextIndex({
+      key: e.key,
+      current: highlight,
+      count: flat.length,
+      wrap: true,
+      homeEnd: false,
+    });
+    if (target !== null) {
       e.preventDefault();
-      setHighlight((cur) => (flat.length === 0 ? 0 : (cur + 1) % flat.length));
-      return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setHighlight((cur) =>
-        flat.length === 0 ? 0 : (cur - 1 + flat.length) % flat.length,
-      );
+      setHighlight(target);
       return;
     }
     if (e.key === 'Enter') {

@@ -2051,6 +2051,21 @@ pre {
   cursor: ns-resize;
   touch-action: none;
 }
+/* U38 made the handle focusable, so it needs a ring. The outline stays ON the
+ * element — inset, because the strip is offset -4px over the composer's top
+ * border and an outward ring would collide with it. Deliberately not moved to
+ * the ::after grabber via `outline: none`: that would need an exemption in
+ * `focusVisible.test.ts`, and ringing the real hit area is more honest than
+ * ringing the 30 px nub that only marks its middle. The nub takes the accent
+ * too, as a second cue at the point the eye is already on. */
+.grow-textarea-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
+}
+.grow-textarea-handle:focus-visible::after {
+  background: var(--accent);
+}
 .grow-textarea-handle::after {
   content: '';
   position: absolute;
@@ -3313,9 +3328,12 @@ pre {
   padding: 0;
   cursor: pointer;
   color: inherit;
-}
-.iterations-toggle h3 {
-  margin: 0;
+  /* U37 moved the <h3> from inside this button to around it, so the heading
+   * font no longer arrives with the element. `font: inherit` takes it from
+   * the wrapping h3 — without it a button falls back to the UA's small
+   * system font and the section title shrinks. */
+  font: inherit;
+  text-align: left;
 }
 .iterations-chevron {
   width: 10px;

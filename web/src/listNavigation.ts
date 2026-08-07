@@ -33,6 +33,17 @@ export type ListNavOptions = {
   wrap?: boolean;
   /** Default `'vertical'` — only ArrowUp/ArrowDown move. */
   orientation?: Orientation;
+  /**
+   * Whether Home/End jump to the ends. Default `true`.
+   *
+   * Pass `false` when the handler is bound to a **text input** — a combobox's
+   * search field owns Home/End for caret movement, and APG puts them with the
+   * textbox rather than the popup. Claiming them for the list means the
+   * caller's `preventDefault()` also stops the caret from moving, which is
+   * how `SessionSearchModal` silently lost "jump to start of query" when it
+   * adopted this helper.
+   */
+  homeEnd?: boolean;
 };
 
 /**
@@ -51,8 +62,10 @@ export function nextIndex(o: ListNavOptions): number | null {
   const orientation = o.orientation ?? 'vertical';
   const last = count - 1;
 
-  if (key === 'Home') return 0;
-  if (key === 'End') return last;
+  if (o.homeEnd ?? true) {
+    if (key === 'Home') return 0;
+    if (key === 'End') return last;
+  }
 
   const forward =
     (key === 'ArrowDown' && orientation !== 'horizontal') ||
