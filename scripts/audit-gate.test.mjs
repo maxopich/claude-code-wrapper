@@ -144,6 +144,64 @@ describe('evaluate', () => {
     expect(r.blocked).toEqual([]);
   });
 
+  // Register C17. `GHSA-dddd-eeee-ffff` is the allowlist's moderate entry, and
+  // these four cases are the whole of the fix: the DATE follows the entry, the
+  // BLOCK follows the severity. Before this, the severity filter ran first and
+  // an expired moderate entry was silently excused — while the script's header
+  // promised a lapsed date exits 1. Four of the seven live entries in
+  // osv-scanner.toml are moderate or low, so most of the allowlist's dates
+  // were decoration.
+  // Deliberately the SAME entry and clock as 'blocks the same advisory once
+  // ignoreUntil has passed' above, which covers it at `high`. Severity is then
+  // the only variable between that passing test and these — which is exactly
+  // the confusion C17 was.
+  it('blocks a moderate advisory once its ignoreUntil has passed [security]', () => {
+    const r = evaluate(
+      collectAdvisories(advisory('GHSA-aaaa-bbbb-cccc', 'moderate')),
+      ignores,
+      after,
+    );
+    expect(r.ok).toBe(false);
+    expect(r.expired.map((a) => a.id)).toEqual(['GHSA-aaaa-bbbb-cccc']);
+    // Not `blocked` — the severity policy is untouched. It fails because the
+    // deadline lapsed, which is a different and clearly-reported reason.
+    expect(r.blocked).toEqual([]);
+  });
+
+  it('blocks a low advisory once its ignoreUntil has passed [security]', () => {
+    // Low is the weakest severity an entry can cover and the easiest to argue
+    // does not matter. It matters for the same reason: OSV-Scanner exits
+    // non-zero on ANY unfiltered finding, so this entry is load-bearing for
+    // the other required check, and a load-bearing entry has a real deadline.
+    const r = evaluate(collectAdvisories(advisory('GHSA-aaaa-bbbb-cccc', 'low')), ignores, after);
+    expect(r.ok).toBe(false);
+    expect(r.expired.map((a) => a.id)).toEqual(['GHSA-aaaa-bbbb-cccc']);
+  });
+
+  it('still passes a moderate whose ignoreUntil has not passed', () => {
+    // The inverse, so the fix cannot be "fail on every moderate with an
+    // entry". Same advisory, same allowlist, earlier clock.
+    const r = evaluate(
+      collectAdvisories(advisory('GHSA-dddd-eeee-ffff', 'moderate')),
+      ignores,
+      before,
+    );
+    expect(r.ok).toBe(true);
+    expect(r.expired).toEqual([]);
+    // And it is now REPORTED as excused rather than silently dropped, so the
+    // gate's output stops omitting half the allowlist it is enforcing.
+    expect(r.excused.map((a) => a.id)).toEqual(['GHSA-dddd-eeee-ffff']);
+  });
+
+  it('does not block an unexcused moderate even after the allowlist dates pass', () => {
+    // The severity policy, pinned against the fix over-reaching. An advisory
+    // with NO entry has no deadline to miss, whatever the clock says.
+    const r = evaluate(collectAdvisories(advisory('GHSA-no-entry', 'moderate')), ignores, after);
+    expect(r.ok).toBe(true);
+    expect(r.blocked).toEqual([]);
+    expect(r.expired).toEqual([]);
+  });
+
   it('reports an unused ignore without failing the run', () => {
     const r = evaluate([], ignores, before);
     expect(r.ok).toBe(true);
