@@ -35,12 +35,27 @@
  *   - any high/critical advisory not on the list         → exit 1
  *
  * Deliberately NOT fail-closed on one thing: an ignore entry that matched
- * nothing this run is reported as a warning, not an error. OSV-Scanner
- * already hard-fails on unused ignores (that behaviour is what silently
- * broke CI on 2026-07-28 — seven entries went stale at once and the scan
- * failed with no vulnerability present). One gate enforcing that is a
- * useful prod; two gates enforcing it just doubles the blast radius of a
- * routine Dependabot bump.
+ * nothing this run is reported as a warning, not an error.
+ *
+ * The reason used to be "OSV-Scanner already hard-fails on unused ignores, so
+ * two gates enforcing it just doubles the blast radius of a routine Dependabot
+ * bump". Measured 2026-08-08: it does not. osv-scanner 2.4.0 prints
+ * `osv-scanner.toml has unused ignores:` and then exits 0, upstream documents
+ * no such failure mode, and the CI runs cited as proof were failing on real
+ * unfiltered vulnerabilities in the same log. See osv-scanner.toml's header
+ * for the full measurement.
+ *
+ * The warning stays a warning anyway, for a reason that survives scrutiny: the
+ * two gates read DIFFERENT advisory databases. `npm audit` sees the npm
+ * registry; OSV-Scanner sees OSV, the GitHub Advisory Database, Snyk and more
+ * (GHSA-frvp-7c67-39w9 was an OSV-only finding here). So an entry can be
+ * unused as far as THIS gate can tell while still filtering a real OSV finding
+ * — and hard-failing would demand deleting exactly the entries doing the work.
+ * A gate may only block on what it can see.
+ *
+ * What compensates: the pass-path summary counts stale entries and names the
+ * nearest expiry, so an allowlist drifting out of date is visible on a green
+ * run instead of only on the day it goes red.
  *
  * Severity policy is unchanged from the step it replaces: high + critical
  * block, moderate/low are reported and don't. Dependabot handles the rest
@@ -75,10 +90,20 @@ const IGNORE_FILE = join(REPO_ROOT, 'osv-scanner.toml');
  * reviewed by us, holds exactly one table array, and pulling in a TOML dep
  * for it would itself have to clear `.npmrc`'s min-release-age cooldown.
  * The trade is that anything outside the shape below is invisible — so the
- * reader THROWS on a block missing either field rather than skipping it,
- * which turns a typo into a red CI run instead of a silently-dropped
- * excuse. `reason` is required by convention but not parsed; osv-scanner
- * is the authority on this file's schema.
+ * reader THROWS on a block missing any of the three fields rather than
+ * skipping it, which turns a typo into a red CI run instead of a
+ * silently-dropped excuse. osv-scanner is the authority on this file's schema.
+ *
+ * `reason` used to be "required by convention but not parsed". The whole
+ * review model for this file rests on every excuse carrying a written
+ * justification — an entry without one is an unexplained hole in two required
+ * security checks — so it is now read and required like the other two, and
+ * `scripts/osvAllowlist.test.mjs` checks what a reason must contain.
+ *
+ * Known limit of `[^"]*`: a reason containing an escaped `\"` truncates at
+ * the backslash rather than throwing. No entry has ever needed one (they use
+ * typographic quotes), and the failure is a short reason rather than a
+ * dropped entry, so the narrow reader stays narrow.
  */
 export function parseIgnoreFile(toml) {
   const blocks = toml.split(/^\s*\[\[IgnoredVulns\]\]\s*$/m).slice(1);
@@ -88,6 +113,7 @@ export function parseIgnoreFile(toml) {
     const body = block.split(/^\s*\[/m)[0];
     const id = /^\s*id\s*=\s*"([^"]+)"/m.exec(body)?.[1];
     const until = /^\s*ignoreUntil\s*=\s*"([^"]+)"/m.exec(body)?.[1];
+    const reason = /^\s*reason\s*=\s*"([^"]+)"/m.exec(body)?.[1];
     if (!id) throw new Error(`osv-scanner.toml: [[IgnoredVulns]] #${i + 1} has no \`id\``);
     if (!until) throw new Error(`osv-scanner.toml: ignore for ${id} has no \`ignoreUntil\``);
     const expiry = new Date(until);
@@ -96,7 +122,10 @@ export function parseIgnoreFile(toml) {
         `osv-scanner.toml: ignore for ${id} has an unparseable ignoreUntil "${until}"`,
       );
     }
-    return { id, until, expiry };
+    // Checked last so the existing error precedence is unchanged: a block
+    // missing several fields still names the most structural one first.
+    if (!reason) throw new Error(`osv-scanner.toml: ignore for ${id} has no \`reason\``);
+    return { id, until, expiry, reason };
   });
 }
 
@@ -176,6 +205,26 @@ export function evaluate(advisories, ignores, now) {
   return { blocked, excused, expired, unused, ok: blocked.length === 0 && expired.length === 0 };
 }
 
+/**
+ * The soonest `ignoreUntil` still ahead of `now`, or null when none is.
+ *
+ * Register C17 made these dates binding at every severity. This makes them
+ * VISIBLE before they bite: without it, the first anyone hears of a lapsed
+ * allowlist is a red required check on an unrelated PR, because the entry sat
+ * in a passing log for weeks saying nothing about how long it had left.
+ *
+ * Entries already past their date are excluded — they are the `expired` list's
+ * business, and "next deadline" that points backwards is not a deadline. Pure,
+ * with `now` injected, for the same reason `evaluate` is.
+ */
+export function nearestExpiry(ignores, now) {
+  const ahead = ignores.filter((ig) => ig.expiry > now);
+  if (ahead.length === 0) return null;
+  const soonest = ahead.reduce((a, b) => (a.expiry <= b.expiry ? a : b));
+  const days = Math.ceil((soonest.expiry.getTime() - now.getTime()) / 86_400_000);
+  return { id: soonest.id, until: soonest.until, days };
+}
+
 function runNpmAudit() {
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   let stdout;
@@ -216,16 +265,20 @@ function runNpmAudit() {
 }
 
 function main() {
+  const now = new Date();
   const ignores = parseIgnoreFile(readFileSync(IGNORE_FILE, 'utf8'));
   const advisories = collectAdvisories(runNpmAudit());
-  const result = evaluate(advisories, ignores, new Date());
+  const result = evaluate(advisories, ignores, now);
 
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify(result, null, 2));
   }
 
   for (const ig of result.unused) {
-    console.log(`note: ignore ${ig.id} matched no advisory — retire it from osv-scanner.toml`);
+    console.log(
+      `note: ignore ${ig.id} matched no npm advisory — retire it from osv-scanner.toml ` +
+        `unless it still filters an OSV-only finding`,
+    );
   }
   for (const adv of result.excused) {
     console.log(`excused: ${adv.id} (${adv.pkg}, ${adv.severity}) until ${adv.until}`);
@@ -250,8 +303,16 @@ function main() {
   }
   console.log(
     `Audit gate passed: no unexcused high/critical advisories ` +
-      `(${result.excused.length} excused, ${advisories.length} total reported).`,
+      `(${result.excused.length} excused, ${advisories.length} total reported, ` +
+      `${result.unused.length} stale).`,
   );
+  const next = nearestExpiry(ignores, now);
+  if (next) {
+    console.log(
+      `Next hold expires ${next.until} — ` +
+        `${next.days === 1 ? '1 day' : `${next.days} days`} away (${next.id}).`,
+    );
+  }
 }
 
 /**
