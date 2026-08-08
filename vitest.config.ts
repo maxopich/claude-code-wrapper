@@ -33,6 +33,14 @@ export default defineConfig({
     // stale compiled tests out (see CLAUDE.md's tsc-emit warning). eslint
     // already ignores `.claude/**` for the same worktree-shadowing reason.
     exclude: [...configDefaults.exclude, '**/dist/**', '**/build/**', '**/.claude/**'],
+    // Register Cebab-cjm: point every worker at a throwaway data directory
+    // before any test module loads, so a test that reaches getDb() without
+    // arranging anything cannot open the operator's real ~/.cebab. See the
+    // file's header for why it writes an env var instead of importing config,
+    // and for the getDb() guard that makes this an invariant rather than a
+    // default. Removing this line does not fail silently — DB-touching tests
+    // that arrange nothing will throw with a message naming this line.
+    setupFiles: ['./vitest.setup.mjs'],
     // Vitest mocks CSS imports to an empty string by default. Enabling
     // CSS processing lets the `?raw` query suffix resolve to the file's
     // literal text — needed by cssGate.test.ts to scan the stylesheet

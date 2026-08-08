@@ -63,7 +63,11 @@ export default tseslint.config(
     // Repo-level Node launchers (scripts/*.mjs) are plain ESM with no
     // tsconfig, so `no-undef` has no TS lib to pull Node globals from.
     // Declare the handful they use — avoids adding a `globals` dep.
-    files: ['scripts/**/*.mjs'],
+    // `vitest.setup.mjs` is the same shape — a root-level plain-ESM launcher
+    // with no tsconfig — so it needs the same globals. It is NOT matched by
+    // the `**/*.config.mjs` ignore above, and should not be: it is real code
+    // that runs before every test.
+    files: ['scripts/**/*.mjs', 'vitest.setup.mjs'],
     languageOptions: {
       sourceType: 'module',
       globals: {

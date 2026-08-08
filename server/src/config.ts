@@ -55,7 +55,23 @@ export const config = {
    * session multiplies it by every hop, and tests set it to 0.
    */
   mockIntervalMs: Number(process.env.MOCK_INTERVAL_MS ?? 50),
-  dataDir: path.join(os.homedir(), '.cebab'),
+  /**
+   * Where Cebab keeps its database, logs and auth token.
+   *
+   * `CEBAB_DATA_DIR` was the one path here with no env override — `port`,
+   * `workspaceRootDefault`, `allowedOrigins` and the rest all read one, and
+   * `CEBAB_AUTH_TOKEN_FILE` already overrides a sibling path for the smoke
+   * scripts. Its absence is why every DB-touching test reassigns this
+   * property by hand and why `smoke.ts` had no way not to: with no env seam,
+   * redirecting the data dir required running code.
+   *
+   * Read ONCE at module init, so anything that wants to redirect it must set
+   * the variable before this module is first imported. That is exactly what
+   * `test/setup-data-dir.mjs` does, and why it can be a plain env write with
+   * no imports. Assigning `config.dataDir` at runtime still works and is what
+   * per-test isolation uses.
+   */
+  dataDir: resolvePath(process.env.CEBAB_DATA_DIR ?? '~/.cebab'),
   /** Hard cap on agent turns per user message. Prevents runaway loops. */
   maxTurns: Number(process.env.MAX_TURNS ?? 50),
   /**
