@@ -27,7 +27,10 @@
  *   - `npm audit` output that isn't JSON                 → exit 1
  *   - an ignore entry whose `ignoreUntil` has lapsed     → exit 1 (the date
  *     is a real deadline, not decoration — this is the whole point of
- *     writing one down)
+ *     writing one down). At ANY severity: the entry's existence is what
+ *     makes the date binding, not the severity of what it covers. Until
+ *     register C17 this line was false for moderate and low, which was
+ *     most of the allowlist.
  *   - an ignore entry missing `id` or `ignoreUntil`      → exit 1
  *   - any high/critical advisory not on the list         → exit 1
  *
@@ -42,6 +45,11 @@
  * Severity policy is unchanged from the step it replaces: high + critical
  * block, moderate/low are reported and don't. Dependabot handles the rest
  * on its weekly cadence.
+ *
+ * Note the two are separate questions, and conflating them is what C17 was:
+ * SEVERITY decides whether an unexcused advisory blocks; the ENTRY decides
+ * whether a date is binding. A moderate advisory with no entry still sails
+ * through. A moderate advisory whose entry expired does not.
  *
  * Cross-platform: no deps, runs on ubuntu-latest and windows-2022. Windows
  * needs `shell: true` to spawn `npm.cmd` at all (see `runNpmAudit`) — this
@@ -130,12 +138,29 @@ export function evaluate(advisories, ignores, now) {
   const expired = [];
 
   for (const adv of advisories) {
-    if (!BLOCKING.has(adv.severity)) continue;
     const ig = byId.get(adv.id);
+
+    // No entry: the severity policy decides, unchanged. Moderate and low are
+    // reported by `npm audit` but do not block here.
     if (!ig) {
-      blocked.push(adv);
+      if (BLOCKING.has(adv.severity)) blocked.push(adv);
       continue;
     }
+
+    // An entry EXISTS, so its date is consulted regardless of severity.
+    //
+    // Register C17: the severity filter used to sit above this whole block, so
+    // a lapsed `ignoreUntil` on a moderate or low advisory was never even
+    // looked at — while this file's own header promises "the date is a real
+    // deadline, not decoration". Four of the seven entries in
+    // `osv-scanner.toml` are moderate or low today, so most of the allowlist's
+    // expiry dates meant nothing.
+    //
+    // The reasoning was already here, eleven lines down, for `unused`: an
+    // entry covering a moderate advisory is doing real work because OSV blocks
+    // on it even though this gate doesn't. An entry doing real work has a real
+    // deadline. Expiry now follows the entry, and blocking still follows the
+    // severity — they are separate questions and were conflated.
     if (now >= ig.expiry) expired.push({ ...adv, until: ig.until });
     else excused.push({ ...adv, until: ig.until });
   }

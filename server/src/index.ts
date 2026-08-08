@@ -8,6 +8,7 @@ import { closeAllQueries } from './runner/lifecycle.js';
 import { verifyChain } from './notifications/safety_audit.js';
 import { emit as emitNotification } from './notifications/dispatcher.js';
 import { describeChainFailure, startWsServer } from './ws/server.js';
+import { createShutdown, registerSignalHandlers } from './shutdown.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
 import { authTokenPath, initAuthToken } from './auth.js';
 import { mountAuthTokenRoute } from './auth_token_route.js';
@@ -135,29 +136,24 @@ function main(): void {
     console.log(`[cebab] listening at http://${config.host}:${config.port}`);
   });
 
-  const shutdown = (signal: string) => {
-    console.log(`[cebab] received ${signal}, shutting down`);
-    stopSessionPurgeCron();
-    closeAllQueries();
-    wss.clients.forEach((c) => c.terminate());
-    wss.close();
-    server.close(() => {
-      closeLogger();
-      closeDb();
-      console.log('[cebab] bye');
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(1), 3000).unref();
-  };
+  // Register C15: the sequence lives in `shutdown.ts` so it can be tested.
+  // It used to be a closure over these four locals inside `main()`, and
+  // `main()` runs on import — so the drain that keeps `claude` subprocesses
+  // from outliving the server (and spending quota) was unreachable from any
+  // test. The signal list, the ordering, and the re-entrancy guard are pinned
+  // in `shutdown.test.ts`.
+  const shutdown = createShutdown({
+    stopSessionPurgeCron,
+    closeAllQueries,
+    terminateClients: () => wss.clients.forEach((c) => c.terminate()),
+    closeWss: () => wss.close(),
+    closeServer: (cb) => server.close(cb),
+    closeLogger,
+    closeDb,
+    exit: (code) => process.exit(code),
+  });
 
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  // Windows: Ctrl+Break (and `taskkill` without /F) raises SIGBREAK, and
-  // SIGTERM is never delivered there. Registering SIGBREAK gives the same
-  // graceful drain (closeAllQueries → reap claude subprocesses) on Windows
-  // that SIGINT/SIGTERM give on POSIX. Harmless no-op on non-Windows
-  // (the signal is simply never emitted).
-  process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+  registerSignalHandlers(shutdown);
 
   // Last-resort containment: a stray unhandled rejection or uncaught exception
   // must NOT take down the whole server. The motivating case is the multi-agent

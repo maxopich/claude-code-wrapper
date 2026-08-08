@@ -3,9 +3,12 @@ import { configDefaults, defineConfig } from 'vitest/config';
 /**
  * Root vitest config. Kept minimal: just enables `?raw` CSS imports so
  * tests can assert on stylesheet structure without depending on Node
- * fs from non-Node workspaces (web's tsconfig deliberately excludes
- * `@types/node`). Tests still default to the node environment;
- * individual tests can opt into jsdom via `// @vitest-environment`.
+ * fs from non-Node workspaces (`web/tsconfig.json` sets `"types": []`, so
+ * `@types/node` is not in the web program — register C12; that was
+ * described here as deliberate for months while nothing configured it, and
+ * `web/src/nodeTypeIsolation.test.ts` now fails typecheck if it stops being
+ * true). Tests still default to the node environment; individual tests can
+ * opt into jsdom via `// @vitest-environment`.
  */
 export default defineConfig({
   test: {

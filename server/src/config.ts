@@ -67,8 +67,8 @@ export const config = {
    *
    * Read ONCE at module init, so anything that wants to redirect it must set
    * the variable before this module is first imported. That is exactly what
-   * `test/setup-data-dir.mjs` does, and why it can be a plain env write with
-   * no imports. Assigning `config.dataDir` at runtime still works and is what
+   * `vitest.setup.mjs` does, and why it can be a plain env write with no
+   * imports. Assigning `config.dataDir` at runtime still works and is what
    * per-test isolation uses.
    */
   dataDir: resolvePath(process.env.CEBAB_DATA_DIR ?? '~/.cebab'),
