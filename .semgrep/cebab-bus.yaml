@@ -1,62 +1,43 @@
+# Cebab-specific Semgrep rules. Two of them. Both are proven to fire.
+#
+# EVERY RULE HERE MUST HAVE A FIXTURE in the sibling `cebab-bus.ts`, annotated
+# `// ruleid: <id>` on the line before a violation and `// ok: <id>` before a
+# compliant shape. `semgrep --test .semgrep/` runs those annotations and exits
+# non-zero when a rule stops matching its own fixture — that is what makes a
+# rule here mean something. `scripts/semgrepRules.test.mjs` enforces the
+# pairing in the main test suite, so a rule added without a fixture is red
+# before it ever reaches the semgrep workflow.
+#
+# WHY THAT MACHINERY EXISTS (register X09 / C07). This file used to carry a
+# third rule, `cebab-writeInboxMessage-unhandled`, described in its own comment
+# as the "highest-leverage" one. The pure-SDK bus rewrite deleted
+# `writeInboxMessage`, `forwardCebabEvent` and the `bus.log` transport the rule
+# was written for. Nothing failed: the rule simply matched nothing, forever,
+# and the workflow stayed green while SECURITY.md went on crediting it as live
+# coverage. It was removed rather than repointed — the invariant it guarded no
+# longer exists, and there is no honest way to aim it at something else.
+#
+# A rule that cannot fire is worse than no rule, because it is counted.
+
 rules:
   # =====================================================================
-  # F1 — `writeInboxMessage` silent-bug pattern (highest-leverage rule).
+  # F4/F5 — `new WebSocketServer(...)` without `verifyClient`.
   #
-  # writeInboxMessage returns a BusLogEvent that the caller must either:
-  #   * capture (`const ev = writeInboxMessage(...)`) and pass into
-  #     `forwardCebabEvent(ev)` so the in-process Cebab write reaches
-  #     the orchestrator's WS forward + DB persist; OR
-  #   * return up the call chain; OR
-  #   * pass inline into forwardCebabEvent.
+  # `startWsServer`'s `verifyClient` callback (server/src/ws/server.ts) is the
+  # front door to Cebab's entire control plane: it decides, for every upgrade,
+  # whether a caller may open a socket that can start sessions, read
+  # transcripts and flip trust. It gates on Origin (F5), Host (F5) and the
+  # per-launch token (F4). Dropping it reopens Cross-Site WebSocket Hijacking.
   #
-  # A discarded return is a silent bug: the on-disk bus.log gets the
-  # line (tailer picks it up), but Cebab's in-process filter drops
-  # `source=cebab` (F3) as forgery. The briefing/roster vanishes from
-  # the UI, no test fails.
+  # This rule is load-bearing on real code, not hypothetical:
+  # `server/src/ws/upgrade_gate.security.test.ts` says in its header that the
+  # gate is deliberately left INLINE in the constructor because this rule
+  # asserts that shape. Extracting `verifyClient` to a named function would
+  # trip it — that is intended; the two must be changed together.
   #
-  # Plan: cebab-ci-cd-async-conway.md T2.1 Rule 2.
-  # =====================================================================
-  - id: cebab-writeInboxMessage-unhandled
-    patterns:
-      - pattern: writeInboxMessage(...)
-      - pattern-not-inside: |
-          $X = writeInboxMessage(...)
-      - pattern-not-inside: |
-          const $X = writeInboxMessage(...)
-      - pattern-not-inside: |
-          let $X = writeInboxMessage(...)
-      - pattern-not-inside: |
-          var $X = writeInboxMessage(...)
-      - pattern-not-inside: |
-          return writeInboxMessage(...)
-      - pattern-not-inside: |
-          forwardCebabEvent(writeInboxMessage(...))
-      - pattern-not-inside: |
-          $FN(writeInboxMessage(...))
-    message: |
-      writeInboxMessage returns a BusLogEvent that must be either
-      captured (`const ev = writeInboxMessage(...)`), returned, or
-      passed directly into forwardCebabEvent. Discarding the return
-      means the in-process Cebab write never reaches the UI scrollback
-      (F3 drops disk-side source=cebab events as forgeries).
-    languages: [typescript]
-    severity: ERROR
-    paths:
-      include:
-        - /server/src/**
-      exclude:
-        # Tests legitimately discard the return — they're asserting the
-        # side effect (file written, throw on bad input). The F3 forward
-        # check is exercised by orchestrator.security.test.ts.
-        - '**/*.test.ts'
-
-  # =====================================================================
-  # F4 — `new WebSocketServer(...)` without verifyClient.
-  #
-  # The verifyClient callback at ws/server.ts:96-128 gates every WS
-  # upgrade on Origin (F5), Host (F5), and per-launch token (F4).
-  # Dropping it reopens Cross-Site WebSocket Hijacking or worker→WS
-  # pivot via the token.
+  # No line numbers on purpose (register X20): the previous comment pointed at
+  # `ws/server.ts:96-128` for a construction that had drifted to line 1625.
+  # Symbols survive refactors, line ranges do not.
   # =====================================================================
   - id: cebab-ws-server-no-verifyClient
     patterns:
@@ -64,19 +45,30 @@ rules:
       - pattern-not: |
           new WebSocketServer({..., verifyClient: ...})
     message: |
-      WebSocketServer must be constructed with a `verifyClient`
-      callback that gates on Origin/Host (F5) + verifyToken (F4).
-      Dropping it reopens Cross-Site WebSocket Hijacking and the
-      worker→WS pivot via the per-launch auth token. See
-      server/src/ws/server.ts:96-128.
+      WebSocketServer must be constructed with an inline `verifyClient`
+      callback gating on Origin/Host (F5) + verifyToken (F4). Dropping it
+      reopens Cross-Site WebSocket Hijacking. See `startWsServer` in
+      server/src/ws/server.ts, and the end-to-end coverage in
+      server/src/ws/upgrade_gate.security.test.ts.
     languages: [typescript]
     severity: ERROR
 
   # =====================================================================
   # F2 — `child_process.spawn`/`exec` with a non-literal command under
-  # server/src/bus/. The runtime spawn path is the only legitimate
-  # caller; new spawn sites are a shell-injection vector through
-  # operator- or agent-controlled inputs that flow through the bus.
+  # server/src/bus/.
+  #
+  # This one is PREVENTIVE and currently matches nothing, by design. The bus
+  # is pure in-process SDK: chain and orchestrator turns are `query()` calls,
+  # and there is no tmux, no shell script, no tailer. So `server/src/bus/`
+  # legitimately contains zero spawn sites, and any that appears is new
+  # architecture arriving without review — reached by operator- and
+  # agent-controlled strings (recipients, agent slugs, relayed task text)
+  # that flow through the router.
+  #
+  # Do not delete this for "matching nothing" — that is the point of it, and
+  # the fixture in cebab-bus.ts proves it still fires when given something to
+  # find. (Register C07 read the empty result as a dead rule; it is the
+  # opposite.)
   # =====================================================================
   - id: cebab-bus-spawn-non-literal
     patterns:
@@ -94,10 +86,10 @@ rules:
           regex: '^[^"`'']'
     message: |
       child_process.spawn/exec under server/src/bus/ must use a literal
-      command string. Non-literal commands risk shell-injection via
-      attacker-controlled BUS_AGENT_NAME or recipient strings reaching
-      the bus runtime. F2: only the runtime spawn path is the
-      legitimate caller.
+      command string. The bus runs as in-process SDK `query()` calls and has
+      no legitimate spawn site, so a non-literal command here is a
+      shell-injection vector fed by agent- or operator-controlled strings
+      (recipients, agent slugs, relayed task text) reaching the router.
     languages: [typescript]
     severity: ERROR
     paths:
@@ -105,22 +97,19 @@ rules:
         - /server/src/bus/**
 
 # =====================================================================
-# Rules dropped after first-run triage:
+# Rules dropped after first-run triage (kept as a record so they are not
+# re-proposed):
 #
 # * `cebab-bus-fs-write-param-path` — flag bare-identifier paths into
 #   fs.mkdirSync/writeFileSync under server/src/bus/. Produced 30
-#   first-run findings, all validated upstream (writeInboxMessage's
-#   isValidBusRecipient guard, busRoot()/busBinDir() static helpers).
-#   A precise "param flows to fs without validator" detector needs
-#   dataflow / taint analysis, which semgrep expresses only with
-#   explicit source/sink annotations we don't have. The F1 invariant
-#   is covered structurally by the T2.4 regression tests
-#   (runtime.test.ts F1 test.each block).
+#   first-run findings, all validated upstream. A precise "param flows to
+#   fs without validator" detector needs dataflow / taint analysis, which
+#   semgrep expresses only with explicit source/sink annotations we don't
+#   have.
 #
 # * `cebab-briefing-roster-unsanitized` — flag template-literal
 #   interpolation inside renderChainBriefing/renderRosterPrompt not
 #   wrapped in sanitizeForPrompt. Semgrep's TypeScript template-literal
-#   support couldn't parse the `${$VAR}` pattern reliably. The
-#   sanitization check stays as a code-review item; sanitize.test.ts
+#   support couldn't parse the `${$VAR}` pattern reliably. sanitize.test.ts
 #   already pins the helper's behavior.
 # =====================================================================
