@@ -1,6 +1,6 @@
 name: semgrep
 
-# Static analysis via Semgrep with two Cebab-specific custom rules
+# Static analysis via Semgrep with three Cebab-specific custom rules
 # (.semgrep/cebab-bus.yaml) plus community packs for TypeScript /
 # Node.js / OWASP baseline coverage. The custom rules encode the F2 / F4 /
 # F5 invariants structurally — a refactor that loses one fails CI at lint
