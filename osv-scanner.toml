@@ -15,9 +15,28 @@
 # When Dependabot opens a PR to bump one of these packages past its
 # `FIXED VERSION`, REMOVE the entry rather than extending the date.
 #
-# OSV-Scanner fails the job on UNUSED ignores, so a stale entry breaks CI
-# just as loudly as an unignored vuln — prune this file in the same PR
-# that lands the fixing bump.
+# PRUNE THIS FILE IN THE SAME PR THAT LANDS THE FIXING BUMP. A dead entry is
+# an excuse nobody re-reviews, and it is the one state neither gate reports
+# loudly: OSV-Scanner prints `osv-scanner.toml has unused ignores:` and then
+# exits 0, and `scripts/audit-gate.mjs` prints a `note:` line on an otherwise
+# passing run.
+#
+# That last paragraph is a correction. This file asserted the opposite in
+# four places — "OSV-Scanner fails the job on UNUSED ignores" — and the
+# bump-and-delete-together rule was justified by it. Measured 2026-08-08
+# against osv-scanner 2.4.0, with two genuinely unused entries and no
+# unfiltered findings: "No issues found", exit 0. The two CI runs cited as
+# proof (30242087493 and 30255443117, both 2026-07-27) each ALSO carried real
+# unfiltered vulnerabilities — six and seven of them — so the exit 1 was
+# those, and the unused-ignore notice merely shared the log. Upstream
+# documents exit 0 = no findings, 1 = findings, and offers no flag for unused
+# entries.
+#
+# Caveat, because the measurement is not quite the deployed thing: CI pins
+# the action at v2.3.8 and the run above was the 2.4.0 CLI. The supportable
+# claim is "undocumented, false at 2.4.0, and the runs cited as proof do not
+# show it" — not "proven false at the pinned version". The rule itself is
+# unchanged; only its justification moved, from a CI constraint to hygiene.
 #
 # Inventory refreshed 2026-08-02 (register C32). The original PR #39 batch
 # (T2.2, 2026-05-14: @anthropic-ai/sdk, hono, ip-address, brace-expansion
@@ -27,16 +46,18 @@
 # The brace-expansion hold (GHSA-mh99-v99m-4gvg, high) is retired here: it
 # was a supply-chain cooldown wait, not an unfixed CVE, and 5.0.8 cleared
 # `.npmrc`'s min-release-age on 2026-07-30. The lockfile bump 5.0.7 → 5.0.8
-# lands in this same commit, exactly as the entry's own reason instructed —
-# it had to, because OSV-Scanner hard-fails on unused ignores, so bump and
-# delete cannot be split across two PRs. (5.0.9 exists but is still inside
-# the 7-day cooldown until 2026-08-06; 5.0.8 is the fixed version.)
+# lands in this same commit, exactly as the entry's own reason instructed.
+# (The commit message gave "OSV-Scanner hard-fails on unused ignores" as the
+# reason it HAD to be one commit; see the correction above — it is the right
+# practice for a reason that turned out not to be that one.) 5.0.9 existed
+# but was still inside the 7-day cooldown until 2026-08-06; 5.0.8 was the
+# fixed version at the time.
 #
 # Inventory refreshed 2026-08-06. The GHSA-frvp-7c67-39w9 hold
 # (@hono/node-server serve-static path traversal) is RETIRED here: the
 # lockfile bump in this same commit moves @hono/node-server past it, so the
-# entry went unused — and OSV-Scanner hard-fails on unused ignores, which is
-# why the bump and the deletion cannot be split across two PRs.
+# entry went unused and had to go with it. (Same correction as above: the
+# stated reason was OSV hard-failing, which it does not.)
 #
 # Three entries are added, all for the SAME reason and none an unfixed CVE:
 # a patched version exists upstream but is still inside `.npmrc`'s
@@ -76,17 +97,21 @@
 # bottom, and they are why this file is filtering seven IDs for what is
 # really four packages: OSV-Scanner filters by advisory ID, not by package.
 #
-# Seven entries remain.
-
-[[IgnoredVulns]]
-id = "GHSA-rgw5-rvv9-x895"
-ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "brace-expansion 5.0.8 (transitive). High — DoS via unbounded intermediate arrays. FIXED VERSION 5.0.9, published 2026-07-30T10:00Z, which clears .npmrc's min-release-age=7 cooldown at 2026-08-06T10:00Z. This is a cooldown wait, not an unfixed defect: bump to 5.0.9 and DELETE this entry in the same commit (OSV-Scanner fails on unused ignores). Exploitation needs attacker-controlled brace patterns; Cebab passes only its own literal globs."
-
-[[IgnoredVulns]]
-id = "GHSA-7p8r-x3mc-p8w7"
-ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "fast-uri 3.1.4 (transitive of ajv ← eslint tooling, dev-only). High — host confusion via backslash authority introducer. FIXED VERSION 3.1.5, published 2026-07-31T09:16Z, eligible under min-release-age=7 from 2026-08-07T09:16Z. Same cooldown wait as above: bump and delete this entry together. Reached only by JSON-schema validation in the lint/build toolchain, never by a runtime request path."
+# Inventory refreshed 2026-08-08 (second pass). The two entries the previous
+# note deferred are RETIRED here, with their lockfile bumps in this same
+# commit: brace-expansion 5.0.8 → 5.0.9 (GHSA-rgw5-rvv9-x895) and fast-uri
+# 3.1.4 → 3.1.5 (GHSA-7p8r-x3mc-p8w7). Both cooldowns had elapsed, so this is
+# that deferred dependency work landing on its own, exactly as planned.
+#
+# hono 4.12.33 is deliberately NOT taken. It cleared the cooldown on
+# 2026-08-07 and a blanket `npm install` reaches for it, but all four hono
+# advisories below are fixed in 4.12.34 — so 4.12.33 retires nothing and only
+# adds churn ahead of the real bump. `npm update <pkg> --package-lock-only`
+# keeps a retirement PR to the packages it is actually retiring.
+#
+# Five entries remain, covering two packages, all expiring 2026-08-20. hono
+# 4.12.34 becomes installable 2026-08-10T02:36Z and nanoid 3.3.17 at
+# 2026-08-10T10:39Z, leaving ten days to land them.
 
 [[IgnoredVulns]]
 id = "GHSA-8j4g-w8fx-2239"
@@ -96,7 +121,7 @@ reason = "hono 4.12.32 (transitive of @modelcontextprotocol/sdk ← @anthropic-a
 [[IgnoredVulns]]
 id = "GHSA-2v37-7h3g-55p8"
 ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "nanoid 3.3.16 (transitive of postcss ← vite, build toolchain only). High — a custom generator can loop indefinitely when size is zero. FIXED VERSION 3.3.17, published 2026-08-03T10:39Z, eligible under min-release-age=7 from 2026-08-10T10:39Z. Cooldown wait, not an unfixed defect: bump and DELETE this entry together (OSV-Scanner fails on unused ignores). Cebab never calls nanoid; postcss uses it internally with default parameters during the web build, so the custom-generator path is unreachable and nothing here runs in a request path."
+reason = "nanoid 3.3.16 (transitive of postcss ← vite, build toolchain only). High — a custom generator can loop indefinitely when size is zero. FIXED VERSION 3.3.17, published 2026-08-03T10:39Z, eligible under min-release-age=7 from 2026-08-10T10:39Z. Cooldown wait, not an unfixed defect: bump and DELETE this entry together. Cebab never calls nanoid; postcss uses it internally with default parameters during the web build, so the custom-generator path is unreachable and nothing here runs in a request path."
 
 # The three below arrived with the same 4.12.34 fix as GHSA-8j4g-w8fx-2239 and
 # wait on the same cooldown. They are listed separately because OSV-Scanner

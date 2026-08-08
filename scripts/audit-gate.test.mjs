@@ -10,7 +10,13 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { collectAdvisories, evaluate, isDirectInvocation, parseIgnoreFile } from './audit-gate.mjs';
+import {
+  collectAdvisories,
+  evaluate,
+  isDirectInvocation,
+  nearestExpiry,
+  parseIgnoreFile,
+} from './audit-gate.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -64,6 +70,22 @@ describe('parseIgnoreFile', () => {
     expect(() =>
       parseIgnoreFile('[[IgnoredVulns]]\nid = "GHSA-x"\nignoreUntil = "whenever"\n'),
     ).toThrow(/unparseable ignoreUntil/);
+  });
+
+  it('throws on an entry with no reason', () => {
+    // An excuse with no written justification is an unexplained hole in two
+    // required security checks. Checked after the date so the existing error
+    // precedence — most structural field first — is unchanged.
+    expect(() =>
+      parseIgnoreFile('[[IgnoredVulns]]\nid = "GHSA-x"\nignoreUntil = "2026-08-20T00:00:00Z"\n'),
+    ).toThrow(/has no `reason`/);
+  });
+
+  it('returns the reason it parsed', () => {
+    expect(parseIgnoreFile(TOML).map((e) => e.reason)).toEqual([
+      'held behind min-release-age',
+      'upstream bump pending',
+    ]);
   });
 
   it('does not let a following table leak keys into the last entry', () => {
@@ -222,6 +244,55 @@ describe('evaluate', () => {
 
   it('passes cleanly on an empty report', () => {
     expect(evaluate([], [], before).ok).toBe(true);
+  });
+});
+
+// Register C17 armed these dates; nothing showed how close one was. The gate
+// passed silently at 12 days out and at 1 day out with identical output, so
+// the first sign of a lapsed hold was a red required check on an unrelated PR.
+describe('nearestExpiry', () => {
+  const ignores = parseIgnoreFile(TOML);
+  const before = new Date('2026-07-28T00:00:00Z');
+  const after = new Date('2026-09-01T00:00:00Z');
+
+  it('picks the soonest entry, not the first one listed', () => {
+    // Order matters and the fixture is already in soonest-first order, which
+    // would let a `[0]` implementation pass. Assert the id AND the day count
+    // so "returns something" is not enough.
+    const next = nearestExpiry(ignores, before);
+    expect(next.id).toBe('GHSA-aaaa-bbbb-cccc');
+    expect(next.days).toBe(10);
+  });
+
+  it('picks the soonest entry when the fixture order is reversed', () => {
+    // The positive control for the case above: same data, opposite order. A
+    // `[0]` implementation passes one of these two and fails the other.
+    const next = nearestExpiry([...ignores].reverse(), before);
+    expect(next.id).toBe('GHSA-aaaa-bbbb-cccc');
+  });
+
+  it('skips entries already past their date', () => {
+    // A "next deadline" pointing backwards is not a deadline. At this instant
+    // GHSA-aaaa has lapsed, so the answer must be the one still ahead.
+    const next = nearestExpiry(ignores, after);
+    expect(next.id).toBe('GHSA-dddd-eeee-ffff');
+  });
+
+  it('returns null when every entry has lapsed', () => {
+    expect(nearestExpiry(ignores, new Date('2026-11-01T00:00:00Z'))).toBeNull();
+  });
+
+  it('returns null for an empty allowlist', () => {
+    expect(nearestExpiry([], before)).toBeNull();
+  });
+
+  it('the fixture really does straddle the two instants — anti-vacuity', () => {
+    // Every case above depends on GHSA-aaaa being ahead at `before` and behind
+    // at `after`. If the fixture dates drifted, several would pass by
+    // accident — "returns null" is satisfied by an allowlist that parsed as
+    // empty just as happily as by one whose entries all lapsed.
+    expect(ignores).toHaveLength(2);
+    expect(nearestExpiry(ignores, before).id).not.toBe(nearestExpiry(ignores, after).id);
   });
 });
 
