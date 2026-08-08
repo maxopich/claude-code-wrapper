@@ -63,10 +63,9 @@ export function findProjectByPath(path: string): ProjectRow | undefined {
 /** Lists only projects whose directories are still present on disk. */
 export function listProjects(): ProjectRow[] {
   return getDb()
-    .prepare<
-      [],
-      ProjectRow
-    >('SELECT * FROM projects WHERE missing = 0 ORDER BY last_used_at DESC NULLS LAST, name ASC')
+    .prepare<[], ProjectRow>(
+      'SELECT * FROM projects WHERE missing = 0 ORDER BY last_used_at DESC NULLS LAST, name ASC',
+    )
     .all();
 }
 
@@ -121,7 +120,5 @@ export function getProjectBusTrust(id: number): BusTrustDecision | null {
  * No-op for missing projects — the UPDATE silently matches 0 rows.
  */
 export function setProjectBusTrust(id: number, decision: BusTrustDecision | null): void {
-  getDb()
-    .prepare('UPDATE projects SET bus_trust_decision = ? WHERE id = ?')
-    .run(decision, id);
+  getDb().prepare('UPDATE projects SET bus_trust_decision = ? WHERE id = ?').run(decision, id);
 }

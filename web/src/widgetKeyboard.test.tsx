@@ -219,13 +219,7 @@ function renderGrid(paths: string[]) {
     mutations: paths.map((p, i) => mut({ id: i + 1, ts: 1000 - i, filePath: p })),
   } as unknown as MultiAgentRun;
   act(() => {
-    root.render(
-      <ArtifactsView
-        run={run}
-        send={() => {}}
-        subscribeServerMsg={() => () => {}}
-      />,
-    );
+    root.render(<ArtifactsView run={run} send={() => {}} subscribeServerMsg={() => () => {}} />);
   });
 }
 const rows = () => Array.from(container.querySelectorAll<HTMLElement>('.artifacts-row'));

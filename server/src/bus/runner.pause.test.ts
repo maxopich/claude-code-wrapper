@@ -127,7 +127,7 @@ describe('AgentRunner — pause + resume (spec §5.2, AE-4)', () => {
     expect(runner.getPendingDeliveries('alpha')).toBe(0);
   });
 
-  test('different agents are unaffected by another agent\'s pause', async () => {
+  test("different agents are unaffected by another agent's pause", async () => {
     const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
     const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
     runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
@@ -141,14 +141,20 @@ describe('AgentRunner — pause + resume (spec §5.2, AE-4)', () => {
   });
 
   test('re-pause returns false (idempotent no-op)', () => {
-    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory: () => fakeRunner([]) });
+    const runner = new AgentRunner({
+      onEvent: () => undefined,
+      runnerFactory: () => fakeRunner([]),
+    });
     runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
     expect(runner.pause('alpha')).toBe(true);
     expect(runner.pause('alpha')).toBe(false);
   });
 
   test('re-resume returns false (idempotent no-op)', () => {
-    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory: () => fakeRunner([]) });
+    const runner = new AgentRunner({
+      onEvent: () => undefined,
+      runnerFactory: () => fakeRunner([]),
+    });
     runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
     expect(runner.resume('alpha')).toBe(false); // never paused
     runner.pause('alpha');
@@ -157,7 +163,10 @@ describe('AgentRunner — pause + resume (spec §5.2, AE-4)', () => {
   });
 
   test('pause/resume on unknown agent: pause false (no-op), resume false', () => {
-    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory: () => fakeRunner([]) });
+    const runner = new AgentRunner({
+      onEvent: () => undefined,
+      runnerFactory: () => fakeRunner([]),
+    });
     // unknown agent — pause should refuse (no spec entry to gate)
     expect(runner.pause('ghost')).toBe(false);
     expect(runner.resume('ghost')).toBe(false);

@@ -507,7 +507,10 @@ describe('SettingsModal — theme is restored on cancel (U14)', () => {
     // Make the form savable, or the Save button stays disabled and this test
     // would pass by never clicking anything.
     const workspace = document.querySelector('.modal input[type="text"]') as HTMLInputElement;
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!;
     setter.call(workspace, '/tmp/elsewhere');
     act(() => workspace.dispatchEvent(new Event('input', { bubbles: true })));
 

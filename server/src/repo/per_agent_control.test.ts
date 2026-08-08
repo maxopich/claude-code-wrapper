@@ -84,10 +84,9 @@ describe('migration 020 + repo defaults', () => {
 
   test('control-state index exists', () => {
     const idxs = getDb()
-      .prepare<
-        [],
-        { name: string }
-      >("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multi_agent_participants'")
+      .prepare<[], { name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'multi_agent_participants'",
+      )
       .all();
     expect(idxs.some((r) => r.name === 'multi_agent_participants_control_state')).toBe(true);
   });

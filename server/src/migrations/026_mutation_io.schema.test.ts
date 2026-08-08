@@ -32,10 +32,9 @@ afterEach(() => {
 describe('migration 026_mutation_io schema shape', () => {
   function cols() {
     return getDb()
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('multi_agent_mutations')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('multi_agent_mutations')`,
+      )
       .all();
   }
 
@@ -59,10 +58,9 @@ describe('migration 026_mutation_io schema shape', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '026_mutation_io.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '026_mutation_io.sql'`,
+      )
       .get();
     expect(sm?.n).toBe(1);
   });

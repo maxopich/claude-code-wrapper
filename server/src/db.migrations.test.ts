@@ -50,7 +50,9 @@ type MigrationRow = { filename: string; applied_at: number };
 
 function ledger(): MigrationRow[] {
   return getDb()
-    .prepare<[], MigrationRow>('SELECT filename, applied_at FROM schema_migrations ORDER BY filename')
+    .prepare<[], MigrationRow>(
+      'SELECT filename, applied_at FROM schema_migrations ORDER BY filename',
+    )
     .all();
 }
 

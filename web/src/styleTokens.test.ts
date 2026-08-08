@@ -240,7 +240,8 @@ describe('style tokens — every theme token is read', () => {
         // either — what is being proved is that the file is a real reader.
         const declaredHexes = [...Object.values(blocks)].map((t) => t.get(token));
         const reads =
-          sources[file]!.includes(token) || declaredHexes.some((h) => h && sources[file]!.includes(h));
+          sources[file]!.includes(token) ||
+          declaredHexes.some((h) => h && sources[file]!.includes(h));
         expect({ token, file, reads }).toEqual({ token, file, reads: true });
       }
     }

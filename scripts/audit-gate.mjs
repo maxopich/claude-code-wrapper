@@ -84,7 +84,9 @@ export function parseIgnoreFile(toml) {
     if (!until) throw new Error(`osv-scanner.toml: ignore for ${id} has no \`ignoreUntil\``);
     const expiry = new Date(until);
     if (Number.isNaN(expiry.getTime())) {
-      throw new Error(`osv-scanner.toml: ignore for ${id} has an unparseable ignoreUntil "${until}"`);
+      throw new Error(
+        `osv-scanner.toml: ignore for ${id} has an unparseable ignoreUntil "${until}"`,
+      );
     }
     return { id, until, expiry };
   });
@@ -103,7 +105,8 @@ export function collectAdvisories(auditJson) {
   for (const [pkg, entry] of Object.entries(auditJson.vulnerabilities ?? {})) {
     for (const via of entry.via ?? []) {
       if (typeof via !== 'object' || via === null) continue;
-      const id = /\/advisories\/(GHSA-[\w-]+)/.exec(via.url ?? '')?.[1] ?? via.url ?? String(via.source);
+      const id =
+        /\/advisories\/(GHSA-[\w-]+)/.exec(via.url ?? '')?.[1] ?? via.url ?? String(via.source);
       out.push({
         id,
         pkg,

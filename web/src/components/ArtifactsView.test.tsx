@@ -90,8 +90,7 @@ const toggle = () =>
   container.querySelector('.artifact-content-toggle') as HTMLButtonElement | null;
 const lastSearch = () =>
   sent.filter((m) => m.type === 'get_artifact_content').at(-1) as
-    | Extract<ClientMsg, { type: 'get_artifact_content' }>
-    | undefined;
+    Extract<ClientMsg, { type: 'get_artifact_content' }> | undefined;
 
 describe('ArtifactsView content disclosure (H3 UI)', () => {
   test('renders an artifact row + a collapsed content toggle, with NO fetch yet (lazy)', () => {
@@ -164,8 +163,9 @@ describe('ArtifactsView content disclosure (H3 UI)', () => {
 // shared helper's clipboard path, AND the operator is told it happened.
 describe('ArtifactsView — Copy path reports what it did', () => {
   const copyBtn = () =>
-    Array.from(container.querySelectorAll<HTMLButtonElement>('.artifacts-preview-actions button'))
-      .find((b) => b.textContent?.trim().startsWith('Cop')) ?? null;
+    Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.artifacts-preview-actions button'),
+    ).find((b) => b.textContent?.trim().startsWith('Cop')) ?? null;
 
   test('clicking Copy path writes the file path and confirms it on the button', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);

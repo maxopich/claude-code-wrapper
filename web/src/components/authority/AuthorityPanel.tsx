@@ -202,9 +202,9 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
      * this from being the opposite kind of lie. */
     return (
       <div className="authority-panel-empty">
-        No authority snapshot for this project yet. <strong>Refresh</strong> above reads its settings
-        files and shows what they declare — tools, MCP servers, hooks and where each came from. The
-        parts only a live session can resolve stay empty until this project runs one.
+        No authority snapshot for this project yet. <strong>Refresh</strong> above reads its
+        settings files and shows what they declare — tools, MCP servers, hooks and where each came
+        from. The parts only a live session can resolve stay empty until this project runs one.
       </div>
     );
   }

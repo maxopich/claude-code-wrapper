@@ -109,13 +109,13 @@ export function BusTofuModal(props: {
           )}
         </dl>
         <p className="gate-modal-help">
-          Installing the bus integration lets this project participate in multi-agent sessions as
-          a routable identity. The agent slug above will be pinned as the worker&apos;s{' '}
-          <code>source</code> on every message it sends, and the orchestrator&apos;s
-          router-drop filters will treat that identity as authoritative. The bus runs in-process
-          (no binary executes; nothing is written into your project) — but the trust decision is
-          still consequential because the slug becomes part of the authority surface for every
-          later bus message.
+          Installing the bus integration lets this project participate in multi-agent sessions as a
+          routable identity. The agent slug above will be pinned as the worker&apos;s{' '}
+          <code>source</code> on every message it sends, and the orchestrator&apos;s router-drop
+          filters will treat that identity as authoritative. The bus runs in-process (no binary
+          executes; nothing is written into your project) — but the trust decision is still
+          consequential because the slug becomes part of the authority surface for every later bus
+          message.
         </p>
         <div className="gate-modal-buttons">
           <button

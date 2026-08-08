@@ -196,18 +196,16 @@ describe('clearDismissedInbox', () => {
     expect(cleared).toBe(1);
 
     const opRow = getDb()
-      .prepare<
-        [string],
-        { acked_at: number | null; class: string }
-      >(`SELECT acked_at, class FROM notifications WHERE id = ?`)
+      .prepare<[string], { acked_at: number | null; class: string }>(
+        `SELECT acked_at, class FROM notifications WHERE id = ?`,
+      )
       .get(opId);
     expect(opRow?.acked_at).not.toBeNull();
 
     const safetyRow = getDb()
-      .prepare<
-        [string],
-        { acked_at: number | null; class: string }
-      >(`SELECT acked_at, class FROM notifications WHERE id = ?`)
+      .prepare<[string], { acked_at: number | null; class: string }>(
+        `SELECT acked_at, class FROM notifications WHERE id = ?`,
+      )
       .get(safetyId);
     expect(safetyRow?.acked_at).toBeNull();
   });
@@ -223,10 +221,9 @@ describe('clearDismissedInbox', () => {
     const id = emitOp('s1', 'op:1');
     clearDismissedInbox();
     const row = getDb()
-      .prepare<
-        [string],
-        { acked_by: string | null }
-      >(`SELECT acked_by FROM notifications WHERE id = ?`)
+      .prepare<[string], { acked_by: string | null }>(
+        `SELECT acked_by FROM notifications WHERE id = ?`,
+      )
       .get(id);
     expect(row?.acked_by).toBeTruthy();
     expect(typeof row?.acked_by).toBe('string');

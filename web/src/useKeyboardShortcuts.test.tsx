@@ -36,7 +36,11 @@ function descriptor(over: Partial<ShortcutDescriptor> = {}): ShortcutDescriptor 
   };
 }
 
-function Harness({ bindings }: { bindings: ReadonlyArray<readonly [ShortcutDescriptor, () => void]> }) {
+function Harness({
+  bindings,
+}: {
+  bindings: ReadonlyArray<readonly [ShortcutDescriptor, () => void]>;
+}) {
   useKeyboardShortcuts(bindings);
   return null;
 }

@@ -35,10 +35,9 @@ describe('migration 023_mock_flag schema shape', () => {
   test('sessions.mock column exists with INTEGER NOT NULL DEFAULT 0', () => {
     const db = getDb();
     const cols = db
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('sessions')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('sessions')`,
+      )
       .all();
     const mock = cols.find((c) => c.name === 'mock');
     expect(mock).toBeDefined();
@@ -48,10 +47,9 @@ describe('migration 023_mock_flag schema shape', () => {
   test('multi_agent_sessions.mock column exists with INTEGER NOT NULL DEFAULT 0', () => {
     const db = getDb();
     const cols = db
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('multi_agent_sessions')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('multi_agent_sessions')`,
+      )
       .all();
     const mock = cols.find((c) => c.name === 'mock');
     expect(mock).toBeDefined();
@@ -61,10 +59,9 @@ describe('migration 023_mock_flag schema shape', () => {
   test("safety_audit.mode column exists with TEXT NOT NULL DEFAULT 'live'", () => {
     const db = getDb();
     const cols = db
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('safety_audit')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('safety_audit')`,
+      )
       .all();
     const mode = cols.find((c) => c.name === 'mode');
     expect(mode).toBeDefined();
@@ -91,7 +88,15 @@ describe('migration 023_mock_flag schema shape', () => {
     const marker = db
       .prepare<
         [],
-        { id: string; ts: number; kind: string; reason_code: string; mode: string; hash_self: Buffer; hash_prev: Buffer | null }
+        {
+          id: string;
+          ts: number;
+          kind: string;
+          reason_code: string;
+          mode: string;
+          hash_self: Buffer;
+          hash_prev: Buffer | null;
+        }
       >(
         `SELECT id, ts, kind, reason_code, mode, hash_self, hash_prev
          FROM safety_audit WHERE id = 'chain-reset-023'`,
@@ -118,18 +123,16 @@ describe('migration 023_mock_flag schema shape', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const count = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM safety_audit WHERE id = 'chain-reset-023'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM safety_audit WHERE id = 'chain-reset-023'`,
+      )
       .get();
     expect(count?.n).toBe(1);
     // schema_migrations row for 023 lands exactly once.
     const sm = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '023_mock_flag.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '023_mock_flag.sql'`,
+      )
       .get();
     expect(sm?.n).toBe(1);
   });

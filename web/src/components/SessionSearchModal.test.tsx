@@ -322,7 +322,11 @@ describe('SessionSearchModal — results + navigation (C4-4)', () => {
     }
     // Positive control: the arrows ARE claimed, so a passing test above can't
     // just mean the handler never runs.
-    const arrow = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+    const arrow = new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      bubbles: true,
+      cancelable: true,
+    });
     input().dispatchEvent(arrow);
     expect(arrow.defaultPrevented).toBe(true);
   });

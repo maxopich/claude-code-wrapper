@@ -241,7 +241,15 @@ describe('buildSingleAgentForensicsInput — orchestration seam', () => {
       fetchSession: () => ({ project_id: 7 }),
       fetchProject: () => ({ path: tmpRoot, trusted: 1 }),
       fetchEventsTail: () => [
-        { id: 1, session_id: 'sess-1', seq: 1, ts: 1, type: 'user_message', subtype: null, raw: '{"text":"x"}' },
+        {
+          id: 1,
+          session_id: 'sess-1',
+          seq: 1,
+          ts: 1,
+          type: 'user_message',
+          subtype: null,
+          raw: '{"text":"x"}',
+        },
       ],
       fetchPermissionMode: () => 'acceptEdits',
       now: () => 1_700_000_000_001,

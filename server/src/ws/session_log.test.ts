@@ -678,7 +678,7 @@ describe('multiAgentEventToLogRow — tail converter parity', () => {
       source: 'a',
       destination: 'b',
       kind: 'reply',
-      text: 'sk-ant-api03-DEADBEEF-payload',
+      text: 'sk-ant-api03-DEADBEEF-payload', // synthetic; allowlisted by literal in .gitleaks.toml
     };
     const masked = multiAgentEventToLogRow(row, false);
     const revealed = multiAgentEventToLogRow(row, true);

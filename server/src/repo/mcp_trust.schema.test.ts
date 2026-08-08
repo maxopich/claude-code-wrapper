@@ -37,10 +37,9 @@ describe('migration 016_mcp_trust schema shape', () => {
   test('mcp_trust table exists with the expected columns', () => {
     const db = getDb();
     const cols = db
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; pk: number }
-      >(`PRAGMA table_info('mcp_trust')`)
+      .prepare<[], { name: string; type: string; notnull: number; pk: number }>(
+        `PRAGMA table_info('mcp_trust')`,
+      )
       .all();
     const byName = Object.fromEntries(cols.map((c) => [c.name, c]));
     // All declared columns present in exactly the right shape.
@@ -84,10 +83,9 @@ describe('migration 016_mcp_trust schema shape', () => {
         VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(2000, 'srv', '/etc/mcp.json', 'sha-v2', 'denied_remember', 'local-user');
     const rows = db
-      .prepare<
-        [],
-        { binary_sha: string; decision: string }
-      >(`SELECT binary_sha, decision FROM mcp_trust WHERE server_name = 'srv' ORDER BY ts`)
+      .prepare<[], { binary_sha: string; decision: string }>(
+        `SELECT binary_sha, decision FROM mcp_trust WHERE server_name = 'srv' ORDER BY ts`,
+      )
       .all();
     expect(rows).toEqual([
       { binary_sha: 'sha-v1', decision: 'trusted_pinned_hash' },
@@ -120,10 +118,9 @@ describe('migration 016_mcp_trust schema shape', () => {
   test('index mcp_trust_server_origin exists', () => {
     const db = getDb();
     const idx = db
-      .prepare<
-        [],
-        { name: string }
-      >(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'mcp_trust' AND name = 'mcp_trust_server_origin'`)
+      .prepare<[], { name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'mcp_trust' AND name = 'mcp_trust_server_origin'`,
+      )
       .get();
     expect(idx?.name).toBe('mcp_trust_server_origin');
   });
@@ -138,18 +135,16 @@ describe('migration 016_mcp_trust schema shape', () => {
     expect(() => getDb()).not.toThrow();
     // Schema still intact, no duplicate table creation attempt.
     const tables = getDb()
-      .prepare<
-        [],
-        { name: string }
-      >(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_trust'`)
+      .prepare<[], { name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_trust'`,
+      )
       .all();
     expect(tables).toHaveLength(1);
     // schema_migrations row for 016 lands exactly once.
     const rows = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '016_mcp_trust.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '016_mcp_trust.sql'`,
+      )
       .get();
     expect(rows?.n).toBe(1);
   });

@@ -35,10 +35,9 @@ describe('migration 025_sessions_archive_delete schema shape', () => {
   test('sessions.archived column exists with INTEGER NOT NULL DEFAULT 0', () => {
     const db = getDb();
     const cols = db
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('sessions')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('sessions')`,
+      )
       .all();
     const archived = cols.find((c) => c.name === 'archived');
     expect(archived).toBeDefined();
@@ -48,10 +47,9 @@ describe('migration 025_sessions_archive_delete schema shape', () => {
   test('sessions.deleted_at column exists as nullable INTEGER', () => {
     const db = getDb();
     const cols = db
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('sessions')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('sessions')`,
+      )
       .all();
     const deletedAt = cols.find((c) => c.name === 'deleted_at');
     expect(deletedAt).toBeDefined();
@@ -61,10 +59,9 @@ describe('migration 025_sessions_archive_delete schema shape', () => {
   test('sessions_archived_deleted_idx covers the two filter columns', () => {
     const db = getDb();
     const indexExists = db
-      .prepare<
-        [],
-        { name: string }
-      >(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'sessions_archived_deleted_idx'`)
+      .prepare<[], { name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'sessions_archived_deleted_idx'`,
+      )
       .get();
     expect(indexExists?.name).toBe('sessions_archived_deleted_idx');
     const columns = db
@@ -82,10 +79,9 @@ describe('migration 025_sessions_archive_delete schema shape', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '025_sessions_archive_delete.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '025_sessions_archive_delete.sql'`,
+      )
       .get();
     expect(sm?.n).toBe(1);
   });
@@ -99,10 +95,9 @@ describe('migration 025_sessions_archive_delete schema shape', () => {
     createSession('s1', proj.id);
     const db = getDb();
     const row = db
-      .prepare<
-        [],
-        { archived: number; deleted_at: number | null }
-      >(`SELECT archived, deleted_at FROM sessions WHERE id = 's1'`)
+      .prepare<[], { archived: number; deleted_at: number | null }>(
+        `SELECT archived, deleted_at FROM sessions WHERE id = 's1'`,
+      )
       .get();
     expect(row).toEqual({ archived: 0, deleted_at: null });
   });

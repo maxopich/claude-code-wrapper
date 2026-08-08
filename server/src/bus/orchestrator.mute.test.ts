@@ -242,9 +242,9 @@ describe('[security] bus_send oracle suppression (AE-3)', () => {
 // assignment that fails to compile if the union ever loses muted_source).
 describe('RouterDropReasonCode includes muted_source', () => {
   test('muted_source is in the union', () => {
-    type CodeUnion = 'forged_source' | 'worker_to_user' | 'worker_to_worker' | 'unknown_source' | 'muted_source';
+    type CodeUnion =
+      'forged_source' | 'worker_to_user' | 'worker_to_worker' | 'unknown_source' | 'muted_source';
     const v: CodeUnion = 'muted_source';
     expect(v).toBe('muted_source');
   });
 });
-

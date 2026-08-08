@@ -1196,7 +1196,25 @@ const WRAPPER_SPECS: ReadonlyMap<string, WrapperSpec> = new Map<string, WrapperS
         // `-i[replace-str]`: the value, if any, is GLUED. Bare `-i` is legal.
         '-i',
       ]),
-      value: new Set(['-n', '--max-args', '-I', '--replace', '-P', '--max-procs', '-L', '-l', '-s', '--max-chars', '-d', '--delimiter', '-E', '-e', '--eof', '-a', '--arg-file']),
+      value: new Set([
+        '-n',
+        '--max-args',
+        '-I',
+        '--replace',
+        '-P',
+        '--max-procs',
+        '-L',
+        '-l',
+        '-s',
+        '--max-chars',
+        '-d',
+        '--delimiter',
+        '-E',
+        '-e',
+        '--eof',
+        '-a',
+        '--arg-file',
+      ]),
     },
   ],
 ]);
@@ -1272,9 +1290,7 @@ const EMPTY_FLAGS: ReadonlySet<string> = new Set<string>();
  */
 function isDurationToken(token: string): boolean {
   const body =
-    token.length > 1 && 'smhd'.includes(token[token.length - 1] ?? '')
-      ? token.slice(0, -1)
-      : token;
+    token.length > 1 && 'smhd'.includes(token[token.length - 1] ?? '') ? token.slice(0, -1) : token;
   const parts = body.split('.');
   if (parts.length > 2) return false;
   if (!isDigits(parts[0] ?? '')) return false;

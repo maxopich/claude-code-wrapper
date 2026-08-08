@@ -161,10 +161,9 @@ export function listInbox(filters?: InboxFilters): NotificationEnvelope[] {
 
   // Step 2: pad with older rows up to the cap.
   const allRows = db
-    .prepare<
-      unknown[],
-      InboxRow
-    >(`SELECT * FROM notifications ${whereSql} ORDER BY ts DESC LIMIT ?`)
+    .prepare<unknown[], InboxRow>(
+      `SELECT * FROM notifications ${whereSql} ORDER BY ts DESC LIMIT ?`,
+    )
     .all(...params, INBOX_HARD_CAP);
   return allRows.map(rowToEnvelope);
 }

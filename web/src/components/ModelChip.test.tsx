@@ -125,9 +125,7 @@ describe('ModelChip — anomaly variant (B4-5)', () => {
 
   test('selectedModel differs from model: warn variant + icon + anomaly tooltip', () => {
     act(() => {
-      root.render(
-        <ModelChip model="claude-sonnet-4-5-20250929" selectedModel="claude-opus-4-1" />,
-      );
+      root.render(<ModelChip model="claude-sonnet-4-5-20250929" selectedModel="claude-opus-4-1" />);
     });
     const chip = container.querySelector('.model-chip');
     expect(chip?.classList.contains('is-warn')).toBe(true);

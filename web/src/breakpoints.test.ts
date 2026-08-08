@@ -91,9 +91,7 @@ describe('breakpoints — the shell tiers are read, not respelled', () => {
   test('the shell tiers stay out of the stylesheet', () => {
     // They are measured on `.app`'s own box by a ResizeObserver, so a media
     // query on the viewport would be a different — and wrong — measurement.
-    const shellInCss = WIDTHS.filter(
-      (w) => w.px === SHELL.wide || w.px === SHELL.medium,
-    );
+    const shellInCss = WIDTHS.filter((w) => w.px === SHELL.wide || w.px === SHELL.medium);
     expect(shellInCss).toEqual([]);
   });
 });

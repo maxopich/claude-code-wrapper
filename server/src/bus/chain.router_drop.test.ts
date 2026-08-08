@@ -9,10 +9,7 @@ import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
 import { createMultiAgentSession } from '../repo/multi_agent.js';
 import type { BusEvent } from './runner.js';
-import type {
-  NotificationEnvelope,
-  RouterDropReasonCode,
-} from '@cebab/shared/protocol';
+import type { NotificationEnvelope, RouterDropReasonCode } from '@cebab/shared/protocol';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
 
 // Cluster A Phase 3 (D4 / BE-9): chain-mode mirror of the orchestrator

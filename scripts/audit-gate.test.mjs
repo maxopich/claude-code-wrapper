@@ -10,12 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import {
-  collectAdvisories,
-  evaluate,
-  isDirectInvocation,
-  parseIgnoreFile,
-} from './audit-gate.mjs';
+import { collectAdvisories, evaluate, isDirectInvocation, parseIgnoreFile } from './audit-gate.mjs';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -54,13 +49,15 @@ describe('parseIgnoreFile', () => {
   });
 
   it('throws rather than silently skipping an entry with no id', () => {
-    expect(() => parseIgnoreFile('[[IgnoredVulns]]\nignoreUntil = "2026-01-01T00:00:00Z"\n')).toThrow(
-      /has no `id`/,
-    );
+    expect(() =>
+      parseIgnoreFile('[[IgnoredVulns]]\nignoreUntil = "2026-01-01T00:00:00Z"\n'),
+    ).toThrow(/has no `id`/);
   });
 
   it('throws rather than silently skipping an entry with no ignoreUntil', () => {
-    expect(() => parseIgnoreFile('[[IgnoredVulns]]\nid = "GHSA-x"\n')).toThrow(/has no `ignoreUntil`/);
+    expect(() => parseIgnoreFile('[[IgnoredVulns]]\nid = "GHSA-x"\n')).toThrow(
+      /has no `ignoreUntil`/,
+    );
   });
 
   it('throws on an unparseable date', () => {
@@ -88,7 +85,11 @@ describe('collectAdvisories', () => {
   it('emits one row per advisory object', () => {
     const out = collectAdvisories(advisory('GHSA-aaaa-bbbb-cccc', 'high', 'brace-expansion'));
     expect(out).toEqual([
-      expect.objectContaining({ id: 'GHSA-aaaa-bbbb-cccc', pkg: 'brace-expansion', severity: 'high' }),
+      expect.objectContaining({
+        id: 'GHSA-aaaa-bbbb-cccc',
+        pkg: 'brace-expansion',
+        severity: 'high',
+      }),
     ]);
   });
 
@@ -183,7 +184,9 @@ describe('[security] isDirectInvocation — the entry guard', () => {
   // the test reports a bug that isn't there. (It did exactly that on
   // windows-2022 before this was fixed.)
   const ENTRY_PATH =
-    process.platform === 'win32' ? 'C:\\repo\\scripts\\audit-gate.mjs' : '/repo/scripts/audit-gate.mjs';
+    process.platform === 'win32'
+      ? 'C:\\repo\\scripts\\audit-gate.mjs'
+      : '/repo/scripts/audit-gate.mjs';
   const MODULE_URL = pathToFileURL(ENTRY_PATH).href;
 
   it('runs main() when the script IS the process entry point', () => {

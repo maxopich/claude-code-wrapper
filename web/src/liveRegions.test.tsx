@@ -102,9 +102,7 @@ const view = (over: Partial<ConnectionLostView> = {}): ConnectionLostView => ({
 describe('[a11y] the disconnect card announces once, not once a second (U27)', () => {
   function renderOverlay() {
     act(() => {
-      root.render(
-        <ConnectionLostOverlay view={view()} onDismiss={() => {}} onRetry={() => {}} />,
-      );
+      root.render(<ConnectionLostOverlay view={view()} onDismiss={() => {}} onRetry={() => {}} />);
     });
   }
 

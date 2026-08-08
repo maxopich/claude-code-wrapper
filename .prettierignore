@@ -4,3 +4,7 @@ build
 *.lock
 package-lock.json
 .husky
+# Worktrees under .claude/ are full repo copies — a bare `prettier --check .`
+# descends into every one of them and takes minutes. vitest.config.ts excludes
+# `**/.claude/**` for the same reason and says so there.
+.claude

@@ -18,6 +18,8 @@
     "setup": "npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false && husky",
     "prepare": "husky",
     "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit -p shared && tsc --noEmit -p server && tsc --noEmit -p web",
     "test": "vitest run",
     "test:security": "node scripts/security-test-gate.mjs"
@@ -35,7 +37,7 @@
     "vitest": "^4.1.10"
   },
   "lint-staged": {
-    "*.{ts,tsx,js,jsx}": [
+    "*.{ts,tsx,js,jsx,mjs,cjs}": [
       "eslint --fix",
       "prettier --write"
     ],

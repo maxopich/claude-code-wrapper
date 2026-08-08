@@ -83,9 +83,9 @@ describe('[a11y] a fill token is never used as ink', () => {
   });
 
   test('no ordinary rule sets color to a fill token', () => {
-    const offenders = SITES.filter((s) =>
-      (FILL_TOKENS as readonly string[]).includes(s.token),
-    ).map((s) => `${s.line}: ${s.text}`);
+    const offenders = SITES.filter((s) => (FILL_TOKENS as readonly string[]).includes(s.token)).map(
+      (s) => `${s.line}: ${s.text}`,
+    );
     expect(offenders).toEqual([]);
   });
 
