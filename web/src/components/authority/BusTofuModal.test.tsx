@@ -126,8 +126,8 @@ describe('BusTofuModal — render + buttons', () => {
       (n) => n.textContent,
     );
     expect(dts).toContain('Triggered from session');
-    const dds = Array.from(container.querySelectorAll('.gate-modal-fact dd')).map(
-      (n) => n.textContent?.trim(),
+    const dds = Array.from(container.querySelectorAll('.gate-modal-fact dd')).map((n) =>
+      n.textContent?.trim(),
     );
     expect(dds).toContain('ma-session-9');
   });
@@ -241,9 +241,7 @@ describe('BusTofuModal — focus + a11y', () => {
     expect(dialog?.getAttribute('aria-modal')).toBe('true');
     const labelledBy = dialog?.getAttribute('aria-labelledby');
     expect(labelledBy).toBe('bus-tofu-title-bp-x');
-    expect(container.querySelector(`#${labelledBy}`)?.textContent).toBe(
-      'Trust this bus install?',
-    );
+    expect(container.querySelector(`#${labelledBy}`)?.textContent).toBe('Trust this bus install?');
   });
 });
 

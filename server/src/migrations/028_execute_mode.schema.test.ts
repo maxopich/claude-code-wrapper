@@ -39,10 +39,9 @@ afterEach(() => {
 describe('migration 028_execute_mode schema shape', () => {
   function cols() {
     return getDb()
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('multi_agent_sessions')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('multi_agent_sessions')`,
+      )
       .all();
   }
 
@@ -69,10 +68,9 @@ describe('migration 028_execute_mode schema shape', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '028_execute_mode.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '028_execute_mode.sql'`,
+      )
       .get();
     expect(sm?.n).toBe(1);
   });

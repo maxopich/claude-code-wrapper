@@ -320,9 +320,7 @@ function requestReveal(
           The server has masked fields matching credential and path patterns. In the current view:{' '}
           <code>{sampleStr}</code>.
         </p>
-        <p>
-          Confirming re-fetches the log with redaction disabled. Refresh the page to re-mask.
-        </p>
+        <p>Confirming re-fetches the log with redaction disabled. Refresh the page to re-mask.</p>
       </>
     ),
     confirmLabel: 'Reveal',

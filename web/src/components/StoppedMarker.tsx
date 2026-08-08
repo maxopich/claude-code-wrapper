@@ -86,8 +86,8 @@ export function StoppedMarker({
           ■
         </span>
         <span className="stopped-marker-text">
-          Stopped by you · <time dateTime={new Date(ts).toISOString()}>{formatTime(ts)}</time> ·
-          ack {formatMs(ackLatencyMs)}
+          Stopped by you · <time dateTime={new Date(ts).toISOString()}>{formatTime(ts)}</time> · ack{' '}
+          {formatMs(ackLatencyMs)}
         </span>
       </div>
       {!reasonSubmitted && (

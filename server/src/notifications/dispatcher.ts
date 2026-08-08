@@ -253,10 +253,9 @@ export type NotificationRow = {
 
 export function getNotification(id: string): NotificationRow | undefined {
   return getDb()
-    .prepare<
-      [string],
-      NotificationRow
-    >(`SELECT id, class, reason_code, audit_row_id, acked_at FROM notifications WHERE id = ?`)
+    .prepare<[string], NotificationRow>(
+      `SELECT id, class, reason_code, audit_row_id, acked_at FROM notifications WHERE id = ?`,
+    )
     .get(id);
 }
 

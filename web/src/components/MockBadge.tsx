@@ -61,11 +61,7 @@ export function MockBadge({ variant = 'sidebar' }: MockBadgeProps = {}) {
   // class strings stay statically discoverable by tooling and the union
   // type is the single source of truth for what variants exist.
   const variantClass =
-    variant === 'inline'
-      ? 'mock-badge-inline'
-      : variant === 'history'
-        ? 'mock-badge-history'
-        : '';
+    variant === 'inline' ? 'mock-badge-inline' : variant === 'history' ? 'mock-badge-history' : '';
   const className = variantClass ? `mock-badge ${variantClass}` : 'mock-badge';
   return (
     <span

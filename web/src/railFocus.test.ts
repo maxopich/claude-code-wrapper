@@ -216,7 +216,10 @@ function zIndexRules(): Array<{ selector: string; value: number }> {
           const value = m[1] !== undefined ? Number(m[1]) : tokens.get(m[2]!);
           if (value !== undefined) {
             out.push({
-              selector: pending.selector.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s+/g, ' ').trim(),
+              selector: pending.selector
+                .replace(/\/\*[\s\S]*?\*\//g, '')
+                .replace(/\s+/g, ' ')
+                .trim(),
               value,
             });
           }

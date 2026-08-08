@@ -300,9 +300,7 @@ export function ParticipantControlMenu({
         className="ma-control-menu-trigger"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-label={
-          isKicked ? `View forensics for ${agentLabel}` : `Controls for ${agentLabel}`
-        }
+        aria-label={isKicked ? `View forensics for ${agentLabel}` : `Controls for ${agentLabel}`}
         title={
           isKicked
             ? `View kick forensics for ${agentLabel}.`

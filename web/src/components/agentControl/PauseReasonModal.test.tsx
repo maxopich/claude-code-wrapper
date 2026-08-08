@@ -71,9 +71,7 @@ function findExpiryInput(value: string): HTMLInputElement {
   ) as HTMLInputElement;
 }
 function findSubmitBtn(): HTMLButtonElement {
-  return document.querySelector(
-    '.pause-reason-modal .gate-modal-btn-primary',
-  ) as HTMLButtonElement;
+  return document.querySelector('.pause-reason-modal .gate-modal-btn-primary') as HTMLButtonElement;
 }
 function findCancelBtn(): HTMLButtonElement {
   return Array.from(
@@ -81,9 +79,7 @@ function findCancelBtn(): HTMLButtonElement {
   ).find((b) => b.textContent?.trim() === 'Cancel')!;
 }
 function findCustomInput(): HTMLInputElement {
-  return document.querySelector(
-    '.pause-reason-modal-custom-input',
-  ) as HTMLInputElement;
+  return document.querySelector('.pause-reason-modal-custom-input') as HTMLInputElement;
 }
 function typeIntoInput(el: HTMLInputElement, value: string) {
   const proto = HTMLInputElement.prototype;
@@ -184,7 +180,13 @@ describe('PauseReasonModal — custom-duration validation', () => {
       findSubmitBtn().click();
     });
     // 45 minutes * 60_000 ms/minute = 2_700_000
-    expect(onSubmit).toHaveBeenCalledWith(7, 'topology_repair', undefined, 2_700_000, 'auto_resume');
+    expect(onSubmit).toHaveBeenCalledWith(
+      7,
+      'topology_repair',
+      undefined,
+      2_700_000,
+      'auto_resume',
+    );
   });
 
   test('custom > 1440 minutes (24h cap) disables submit', () => {
@@ -265,13 +267,7 @@ describe('PauseReasonModal — dispatch', () => {
     act(() => {
       findSubmitBtn().click();
     });
-    expect(onSubmit).toHaveBeenCalledWith(
-      7,
-      'tool_misuse',
-      undefined,
-      15 * 60 * 1000,
-      'auto_kick',
-    );
+    expect(onSubmit).toHaveBeenCalledWith(7, 'tool_misuse', undefined, 15 * 60 * 1000, 'auto_kick');
   });
 
   test('trims notes and forwards text', () => {

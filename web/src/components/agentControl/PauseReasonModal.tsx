@@ -179,9 +179,9 @@ export function PauseReasonModal({
           </h3>
         </header>
         <p className="gate-modal-help">
-          Hold incoming deliverTurn calls for this participant behind a pause gate. The agent is
-          NOT told — its bus_send still echoes success, but the orchestrator stops scheduling new
-          turns. Queued deliveries fire on Resume (manually or auto-).
+          Hold incoming deliverTurn calls for this participant behind a pause gate. The agent is NOT
+          told — its bus_send still echoes success, but the orchestrator stops scheduling new turns.
+          Queued deliveries fire on Resume (manually or auto-).
         </p>
         <fieldset className="pause-reason-modal-fieldset">
           <legend className="pause-reason-modal-legend">Reason</legend>

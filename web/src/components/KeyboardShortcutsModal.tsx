@@ -100,8 +100,7 @@ export function KeyboardShortcutsModal({ onClose }: KeyboardShortcutsModalProps)
         <section className="keyboard-shortcuts-modal-body">
           {isEmpty ? (
             <p className="keyboard-shortcuts-modal-empty">
-              No shortcuts match{' '}
-              {query.length > 0 ? <code>{query}</code> : 'your filter'}.
+              No shortcuts match {query.length > 0 ? <code>{query}</code> : 'your filter'}.
             </p>
           ) : (
             sectioned.map((s) =>
@@ -115,10 +114,7 @@ export function KeyboardShortcutsModal({ onClose }: KeyboardShortcutsModalProps)
                           {row.keyDisplay.map((k, i) => (
                             <span key={i}>
                               {i > 0 && (
-                                <span
-                                  className="keyboard-shortcuts-modal-plus"
-                                  aria-hidden="true"
-                                >
+                                <span className="keyboard-shortcuts-modal-plus" aria-hidden="true">
                                   +
                                 </span>
                               )}

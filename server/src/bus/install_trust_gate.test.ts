@@ -81,10 +81,9 @@ function makeSink(): { sent: ServerMsg[]; send: (m: ServerMsg) => void } {
 
 function readAuditRows(kind: string): Array<{ reason_code: string; payload_json: string }> {
   return getDb()
-    .prepare<
-      [string],
-      { reason_code: string; payload_json: string }
-    >('SELECT reason_code, payload_json FROM safety_audit WHERE kind = ? ORDER BY rowid')
+    .prepare<[string], { reason_code: string; payload_json: string }>(
+      'SELECT reason_code, payload_json FROM safety_audit WHERE kind = ? ORDER BY rowid',
+    )
     .all(kind);
 }
 
@@ -363,7 +362,9 @@ describe('migration 024 — backfill', () => {
     // still NULL — but new projects' subsequent install would expect
     // backfill semantics. We retroactively run the backfill UPDATE to
     // mimic the migration's effect on an already-installed row.
-    getDb().prepare("UPDATE projects SET bus_trust_decision = 'trusted' WHERE bus_installed = 1").run();
+    getDb()
+      .prepare("UPDATE projects SET bus_trust_decision = 'trusted' WHERE bus_installed = 1")
+      .run();
     expect(getProjectBusTrust(pid)).toBe('trusted');
 
     // And the gate short-circuits silently.

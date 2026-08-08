@@ -12,10 +12,9 @@ export type EventRow = {
 
 export function nextSeq(sessionId: string): number {
   const row = getDb()
-    .prepare<
-      [string],
-      { max_seq: number | null }
-    >('SELECT MAX(seq) AS max_seq FROM events WHERE session_id = ?')
+    .prepare<[string], { max_seq: number | null }>(
+      'SELECT MAX(seq) AS max_seq FROM events WHERE session_id = ?',
+    )
     .get(sessionId);
   return (row?.max_seq ?? 0) + 1;
 }
@@ -57,10 +56,9 @@ export function countEvents(sessionId: string): number {
 export function listEventsTail(sessionId: string, limit: number): EventRow[] {
   if (limit <= 0) return [];
   const recent = getDb()
-    .prepare<
-      [string, number],
-      EventRow
-    >('SELECT * FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT ?')
+    .prepare<[string, number], EventRow>(
+      'SELECT * FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT ?',
+    )
     .all(sessionId, limit);
   // Flip back to ascending — the DESC query was just to LIMIT the tail.
   return recent.reverse();

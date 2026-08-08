@@ -56,11 +56,7 @@ export type SlashCommandPaletteProps = {
   onClose: () => void;
 };
 
-export function SlashCommandPalette({
-  sdkCommands,
-  onSelect,
-  onClose,
-}: SlashCommandPaletteProps) {
+export function SlashCommandPalette({ sdkCommands, onSelect, onClose }: SlashCommandPaletteProps) {
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   // Focus the filter input on mount — both trigger paths (`/` + Cmd+K)
@@ -133,11 +129,7 @@ export function SlashCommandPalette({
   const activeRowId = !isEmpty ? `slash-palette-row-${highlight}` : undefined;
 
   return (
-    <div
-      className="slash-palette"
-      role="dialog"
-      aria-label="Slash command palette"
-    >
+    <div className="slash-palette" role="dialog" aria-label="Slash command palette">
       <input
         ref={inputRef}
         type="text"

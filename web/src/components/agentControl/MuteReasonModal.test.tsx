@@ -65,15 +65,13 @@ function findReasonInput(code: string): HTMLInputElement {
 }
 
 function findCancelBtn(): HTMLButtonElement {
-  return Array.from(
-    document.querySelectorAll<HTMLButtonElement>('.mute-reason-modal button'),
-  ).find((b) => b.textContent?.trim() === 'Cancel')!;
+  return Array.from(document.querySelectorAll<HTMLButtonElement>('.mute-reason-modal button')).find(
+    (b) => b.textContent?.trim() === 'Cancel',
+  )!;
 }
 
 function findSubmitBtn(): HTMLButtonElement {
-  return document.querySelector(
-    '.mute-reason-modal .gate-modal-btn-primary',
-  ) as HTMLButtonElement;
+  return document.querySelector('.mute-reason-modal .gate-modal-btn-primary') as HTMLButtonElement;
 }
 
 // Mirrors KickModal.test.tsx — React tracks the previous value internally;
@@ -165,9 +163,7 @@ describe('MuteReasonModal — other requires text', () => {
       findReasonInput('other').click();
     });
     expect(findSubmitBtn().disabled).toBe(true);
-    const textarea = document.querySelector(
-      '.mute-reason-modal-text-input',
-    ) as HTMLTextAreaElement;
+    const textarea = document.querySelector('.mute-reason-modal-text-input') as HTMLTextAreaElement;
     act(() => {
       typeIntoTextarea(textarea, 'lost context');
     });
@@ -202,9 +198,7 @@ describe('MuteReasonModal — dispatch', () => {
     act(() => {
       findReasonInput('cost_ceiling').click();
     });
-    const textarea = document.querySelector(
-      '.mute-reason-modal-text-input',
-    ) as HTMLTextAreaElement;
+    const textarea = document.querySelector('.mute-reason-modal-text-input') as HTMLTextAreaElement;
     act(() => {
       typeIntoTextarea(textarea, '  burn rate cleared  ');
     });
@@ -220,9 +214,7 @@ describe('MuteReasonModal — dispatch', () => {
     act(() => {
       findReasonInput('other').click();
     });
-    const textarea = document.querySelector(
-      '.mute-reason-modal-text-input',
-    ) as HTMLTextAreaElement;
+    const textarea = document.querySelector('.mute-reason-modal-text-input') as HTMLTextAreaElement;
     act(() => {
       typeIntoTextarea(textarea, 'operator manually verified');
     });

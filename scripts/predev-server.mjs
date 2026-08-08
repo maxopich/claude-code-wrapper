@@ -49,11 +49,10 @@ function listMatchingProcessIds() {
     // wmic CSV: Node,CommandLine,ProcessId  (the leading Node column is
     // the WMI host name, not a number). PID is the trailing field.
     try {
-      const out = execFileSync(
-        'wmic',
-        ['process', 'get', 'processid,commandline', '/format:csv'],
-        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
-      );
+      const out = execFileSync('wmic', ['process', 'get', 'processid,commandline', '/format:csv'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
       return out
         .split(/\r?\n/)
         .filter((line) => NEEDLE.test(line))

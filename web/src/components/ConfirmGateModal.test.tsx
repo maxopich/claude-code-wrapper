@@ -74,7 +74,13 @@ describe('ConfirmGateModal — dialog semantics', () => {
   });
 
   test('renders the body as markup, so the target can be named', () => {
-    render({ body: <p>Deleting from <strong>Cebab</strong>.</p> });
+    render({
+      body: (
+        <p>
+          Deleting from <strong>Cebab</strong>.
+        </p>
+      ),
+    });
     expect(container.querySelector('.gate-modal-help strong')?.textContent).toBe('Cebab');
   });
 });

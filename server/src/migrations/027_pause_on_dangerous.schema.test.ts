@@ -35,10 +35,9 @@ afterEach(() => {
 describe('migration 027_pause_on_dangerous schema shape', () => {
   function cols() {
     return getDb()
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('multi_agent_sessions')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('multi_agent_sessions')`,
+      )
       .all();
   }
 
@@ -60,10 +59,9 @@ describe('migration 027_pause_on_dangerous schema shape', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '027_pause_on_dangerous.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '027_pause_on_dangerous.sql'`,
+      )
       .get();
     expect(sm?.n).toBe(1);
   });
