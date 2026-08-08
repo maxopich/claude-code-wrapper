@@ -112,7 +112,7 @@ describe('redactSensitive — sensitive-path siblings', () => {
 describe('redactSensitive — inline value patterns', () => {
   it('masks Bearer tokens inside arbitrary strings', () => {
     const { redacted, fields } = redactSensitive({
-      tool_result: 'curl -H "Authorization: Bearer abcd1234efgh5678ijkl"',
+      tool_result: 'curl -H "Authorization: Bearer abcd1234efgh5678ijkl"', // synthetic; allowlisted by literal in .gitleaks.toml
     });
     expect(redacted).toEqual({ tool_result: '<redacted>' });
     expect(fields).toEqual(['tool_result']);
@@ -127,14 +127,14 @@ describe('redactSensitive — inline value patterns', () => {
 
   it('masks Anthropic sk- keys', () => {
     const { redacted } = redactSensitive({
-      out: 'OPENAI_KEY=sk-1234567890abcdef1234567890abcdef1234',
+      out: 'OPENAI_KEY=sk-1234567890abcdef1234567890abcdef1234', // synthetic; allowlisted by literal in .gitleaks.toml
     });
     expect((redacted as Record<string, unknown>).out).toBe('<redacted>');
   });
 
   it('masks JWT-shaped tokens', () => {
     const { redacted } = redactSensitive({
-      headers: 'token: eyJhbGciOiJI.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF0kIs',
+      headers: 'token: eyJhbGciOiJI.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF0kIs', // synthetic; allowlisted by literal in .gitleaks.toml
     });
     expect((redacted as Record<string, unknown>).headers).toBe('<redacted>');
   });

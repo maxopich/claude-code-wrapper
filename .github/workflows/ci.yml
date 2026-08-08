@@ -68,6 +68,15 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Register C14: before this, formatting was enforced ONLY by the
+      # lint-staged pre-commit hook — and `.npmrc` sets ignore-scripts=true,
+      # which suppresses the `prepare` script that installs it. A contributor
+      # who runs a plain `npm install` gets no hook, so unformatted code
+      # reached main with every check green. It had: 66 tracked files were
+      # unformatted when this step was added.
+      - name: Format check
+        run: npm run format:check
+
       - name: Typecheck
         run: npm run typecheck
 
