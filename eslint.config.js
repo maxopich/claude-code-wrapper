@@ -16,6 +16,12 @@ export default tseslint.config(
       // .ts in the repo and cause tseslint to bail with "multiple
       // candidate tsconfigRootDirs". Never user-authored code.
       '.claude/**',
+      // Semgrep rule fixtures. `.semgrep/cebab-bus.ts` exists to contain
+      // deliberate violations (undefined identifiers, a non-literal spawn)
+      // so `semgrep --test` can prove each rule still fires. Nothing imports
+      // or compiles it, and linting it would report exactly the problems it
+      // is built out of.
+      '.semgrep/**',
     ],
   },
   js.configs.recommended,
@@ -36,10 +42,12 @@ export default tseslint.config(
       'security/detect-object-injection': 'off',
       // `detect-non-literal-fs-filename` flags any `fs.X(variable)` call.
       // Cebab's bus and workspace modules thread paths through validators
-      // (isValidBusRecipient, computeSessionPaths) before fs touches; the
-      // structural invariant is covered by the F1 regression tests and
-      // the Semgrep rule `cebab-writeInboxMessage-unhandled`. Out-of-the-
-      // box this rule is a constant low-value alert source.
+      // (isValidBusRecipient, computeSessionPaths) before fs touches, and
+      // that is covered by the paths.test.ts / runtime.test.ts regression
+      // suites. Out-of-the-box this rule is a constant low-value alert
+      // source. (This comment used to also cite a Semgrep rule as backup;
+      // that rule had been dead since the bus rewrite and was removed in the
+      // same change as this edit — an exemption resting on retired coverage.)
       'security/detect-non-literal-fs-filename': 'off',
     },
   },

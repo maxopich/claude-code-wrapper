@@ -1,13 +1,20 @@
 name: semgrep
 
-# Static analysis via Semgrep with four Cebab-specific custom rules
+# Static analysis via Semgrep with two Cebab-specific custom rules
 # (.semgrep/cebab-bus.yaml) plus community packs for TypeScript /
-# Node.js / OWASP baseline coverage. The custom rules encode the F1-F6
-# / R3 / F12 invariants structurally — a refactor that loses one fails
-# CI at lint time, complementing the T2.4 vitest+bats regression suite
-# that pins behavior at test time.
+# Node.js / OWASP baseline coverage. The custom rules encode the F2 / F4 /
+# F5 invariants structurally — a refactor that loses one fails CI at lint
+# time, complementing the vitest regression suite that pins behavior at
+# test time.
 #
-# Plan reference: cebab-ci-cd-async-conway.md T2.1.
+# The count above is enforced: `scripts/semgrepRules.test.mjs` fails if it
+# stops matching the number of rules actually defined. It said "four" for
+# months while the file defined three, one of which had been dead since the
+# bus rewrite (register X09 / X13).
+#
+# Two steps run here, and the second is the one that gives the first any
+# meaning: the scan finds violations, and `--test` proves each rule is still
+# capable of finding anything at all.
 
 on:
   pull_request:
@@ -40,11 +47,39 @@ jobs:
         # `--error` makes findings exit non-zero (default exits 0 with
         # findings; we want CI to fail). Community packs cover baseline
         # smells; .semgrep/cebab-bus.yaml encodes the F-invariants.
+        #
+        # `--exclude=.semgrep` skips the rule fixtures. `.semgrep/cebab-bus.ts`
+        # contains deliberate violations so the next step can prove the rules
+        # fire; scanning it here would fail the build on its own test data.
         run: |
           semgrep scan --error --metrics off \
+            --exclude=.semgrep \
             --config p/typescript \
             --config p/nodejs \
             --config p/javascript \
             --config p/owasp-top-ten \
             --config .semgrep/cebab-bus.yaml \
             .
+
+      - name: Custom rules must still be able to fire
+        # Runs the ruleid/ok annotations in .semgrep/cebab-bus.ts. A rule whose
+        # target was deleted stops matching its fixture and fails here — the
+        # check that did not exist when `cebab-writeInboxMessage-unhandled` sat
+        # dead in this repo for months, counted as coverage by SECURITY.md.
+        #
+        # MUST run with .semgrep as the cwd: semgrep pairs a rule file with a
+        # test file by sibling basename, and passing the directory from the
+        # repo root finds no pairs at all.
+        #
+        # The grep IS the gate, not decoration. When semgrep finds no pairs it
+        # prints "No unit tests found" and exits 0 — so a broken pairing would
+        # otherwise read as a pass, which is the exact failure this whole step
+        # exists to prevent.
+        working-directory: .semgrep
+        run: |
+          out=$(semgrep --test --metrics off .)
+          echo "$out"
+          if ! echo "$out" | grep -q "All tests passed"; then
+            echo "::error::semgrep --test did not report a passing suite (see output above)"
+            exit 1
+          fi

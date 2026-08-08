@@ -57,13 +57,25 @@ export type ProjectRules = { framed: string; sizeLabel: string };
 /**
  * Read a bus worker project's ROOT CLAUDE.md for first-turn injection.
  *
- * The SDK does NOT auto-load it for bus agents: they run with
- * `settingSources: ['user']` and the SDK only loads CLAUDE.md when
- * `'project'` is in scope — a deliberate trust boundary (a hostile sibling
- * repo's `.claude/settings*.json` must not auto-exec hooks/MCP). We must not
- * widen `settingSources`; instead Cebab surfaces the rules as prompt TEXT
- * (executes nothing, no project mutation — preserves the "bus install writes
- * nothing to the project" invariant).
+ * WHY THIS STILL EXISTS, given the SDK now loads CLAUDE.md itself. It was
+ * written when bus agents ran `settingSources: ['user']`, where the SDK loads
+ * no project file at all, so this was the only way a worker saw its own
+ * rules. That scope has since been widened: workers and chain participants
+ * run `['user', 'project', 'local']` (see `chain.ts` and `orchestrator.ts`),
+ * and the SDK auto-loads CLAUDE.md for them. Only the orchestrator is still
+ * `['user']`, and its cwd is an empty Cebab-owned folder with nothing to load.
+ *
+ * The injection was kept anyway, and the duplicate read is deliberate: the
+ * SDK's auto-load happens inside the model's context where Cebab never sees
+ * it, so the operator's chat and the on-disk transcript would show a worker
+ * acting on rules that appear nowhere in the record. Surfacing the bytes as
+ * framed prompt TEXT puts them in both. It costs a few thousand tokens on the
+ * first turn of each participant; that is the price of the transcript being
+ * complete.
+ *
+ * It executes nothing and writes nothing, so the "bus install writes nothing
+ * into the project" invariant is unaffected — that guarantee is about
+ * Cebab-side mutations, and reading a file is not one.
  *
  * Root file only: replicating the SDK's hierarchical/nested CLAUDE.md
  * discovery would pull content from OUTSIDE the opted-in project root (the
