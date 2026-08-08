@@ -1,0 +1,28 @@
+# Line endings are LF in the index AND in every working tree, on every OS.
+#
+# Without this file, git on Windows checks out with core.autocrlf=true — which
+# is the GitHub Actions windows runner's default — and every tracked file
+# arrives with CRLF. Two things have broken on that, in the same repo, weeks
+# apart:
+#
+#   - `prettier --check` uses endOfLine: "lf" by default, so the format gate
+#     added in this PR reported ALL 524 tracked files as unformatted on
+#     windows-2022 while passing on ubuntu. That is what prompted this file.
+#   - any test that reads a source file and does a line-oriented scan or an
+#     exact string match sees a stray `\r` at every line end. The CSS token
+#     and z-index scans under web/src hit this, and the workflow scan added in
+#     PR #295 hit it again; each one now normalises defensively at the read.
+#
+# Those defensive normalisations stay — a test should not assume its input —
+# but this is the root cause, and fixing it here means the next scan written
+# without that thought does not fail on one runner only.
+#
+# `text=auto` still lets git detect binaries and leave them alone. Every
+# tracked file is already LF in the index, so this changes no stored content;
+# it only stops the checkout-time conversion.
+* text=auto eol=lf
+
+# The one deliberate exception: the PowerShell installer keeps CRLF on
+# checkout, which is what Windows users get today. Nothing formats or scans
+# it, so it costs nothing to leave it alone.
+*.ps1 text eol=crlf
