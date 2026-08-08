@@ -48,3 +48,39 @@ child_process.execFile(binary, ['--help']);
 
 // ok: cebab-bus-spawn-non-literal
 spawn('claude', ['--version']);
+
+// --- cebab-spawn-missing-win32-shell -------------------------------------
+
+// The violating shape. Note the callee is a LOCAL, not `spawn` — that is the
+// case the rule exists to catch, and the one a callee-name pattern misses.
+// ruleid: cebab-spawn-missing-win32-shell
+child = spawnFn(binary, args, {
+  env: cleanEnv,
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+
+// Guarded: the platform-conditional shell is the fix.
+// ok: cebab-spawn-missing-win32-shell
+child = spawnFn(binary, args, {
+  env: cleanEnv,
+  stdio: ['ignore', 'pipe', 'pipe'],
+  shell: process.platform === 'win32',
+});
+
+// Also guarded, on the other exclusion: spawning the Node binary itself needs
+// no shell, because it is a real executable rather than a shim.
+//
+// The callee here is deliberately NOT the bare `spawn` that the real shape in
+// `server/src/ci_smoke.ts` uses. `process.execPath` is a non-literal command,
+// so bare `spawn` would also match the F2 rule above; in real code it does not,
+// because F2 is scoped to `/server/src/bus/**` by `paths.include` — but
+// `semgrep --test` ignores `paths.include`, so inside this file every rule sees
+// every line and the two fixtures would collide. Semgrep binds an annotation to
+// the single line that follows it, so stacking a `ruleid` and an `ok` is not a
+// way out. Keeping the callee distinct is, and it costs this rule nothing:
+// matching by shape rather than by callee name is the point of it.
+// ok: cebab-spawn-missing-win32-shell
+spawnFn(process.execPath, [tsxCli, script], {
+  cwd: serverDir,
+  stdio: 'inherit',
+});

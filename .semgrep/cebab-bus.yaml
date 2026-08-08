@@ -1,4 +1,4 @@
-# Cebab-specific Semgrep rules. Two of them. Both are proven to fire.
+# Cebab-specific Semgrep rules. Three of them. All are proven to fire.
 #
 # EVERY RULE HERE MUST HAVE A FIXTURE in the sibling `cebab-bus.ts`, annotated
 # `// ruleid: <id>` on the line before a violation and `// ok: <id>` before a
@@ -95,6 +95,74 @@ rules:
     paths:
       include:
         - /server/src/bus/**
+
+  # =====================================================================
+  # Cebab-x1n.6.20 — a child process spawned without a win32 shell guard.
+  #
+  # On Windows an npm-installed CLI is a `.cmd` shim, and since the
+  # CVE-2024-27980 fix (Node >=18.20.2 / 20.12.2 / 21.7.3, and all 22/24)
+  # Node REFUSES to spawn a .cmd/.bat without `shell: true` — it throws a
+  # synchronous `spawn EINVAL`. Every such call site therefore needs
+  # `shell: process.platform === 'win32'` or it cannot work on a platform
+  # the README supports.
+  #
+  # This is the THIRD instance of the same defect in this repo:
+  # `scripts/bootstrap.mjs` and `scripts/security-test-gate.mjs` carry the
+  # workaround; `scripts/audit-gate.mjs` did not, and windows-2022 went red
+  # with `spawnSync npm.cmd EINVAL` the moment that gate was armed (#272);
+  # `server/src/auth_refresh.ts` did not either, and there the throw was
+  # CAUGHT and returned as `{ ok: false, reason: 'spawn_failed' }`, so the
+  # operator's Re-authenticate action silently never ran on Windows. A
+  # defect whose third instance degrades quietly is one to catch at review.
+  #
+  # MATCHED BY SHAPE, NOT BY CALLEE NAME, and that is the whole design.
+  # `auth_refresh.ts` spawns through a `spawnFn` local (an injection seam
+  # for tests), so a rule patterned on `spawn(...)` / `execFile(...)` would
+  # have missed the one live bug it was written for. Anchoring on `stdio:`
+  # in the options object catches the call regardless of what the function
+  # is bound to; in this repo nothing but a child_process call passes that
+  # key.
+  #
+  # Both exclusions were measured against the real tree before landing:
+  # `process.execPath` matches `server/src/ci_smoke.ts` alone (spawning the
+  # Node binary needs no shell — it is not a shim), and the `shell:` form
+  # matches exactly the three already-guarded scripts.
+  #
+  # DELIBERATELY SENSITIVE. Semgrep cannot tell an npm shim from a real OS
+  # executable by name, so this also fires on `wmic` and `ps` in
+  # `scripts/predev-server.mjs`. Those carry a `nosemgrep` line naming the
+  # reason, which is the outcome worth having: the rule cannot decide, so it
+  # makes a human decide once and write down which it was. Prefer that over
+  # an allowlist of "safe" command names, which would be silently incomplete
+  # exactly when a new npm-installed CLI shows up — the case this exists for.
+  # =====================================================================
+  - id: cebab-spawn-missing-win32-shell
+    patterns:
+      # Quoted because the patterns contain `key: value` inside braces, which
+      # bare YAML scalars read as a nested mapping (it is a parse error, not a
+      # silent misread — but only if you run semgrep, so: quoted).
+      - pattern: '$F($CMD, $ARGS, {..., stdio: $STDIO, ...})'
+      # Already guarded — any `shell` key means the author considered it.
+      - pattern-not: '$F($CMD, $ARGS, {..., shell: $SHELL, ...})'
+      # Spawning the Node binary itself: a real executable, never a shim.
+      - pattern-not: '$F(process.execPath, $ARGS, {...})'
+    message: |
+      This child process is spawned without a `shell` option. On Windows an
+      npm-installed CLI is a `.cmd` shim and Node refuses to spawn one
+      without `shell: true` (CVE-2024-27980 fix) — it throws `spawn EINVAL`,
+      which callers routinely catch and degrade on, so the failure is
+      silent. Add `shell: process.platform === 'win32'`, keeping the POSIX
+      path shell-free. Keep the command a bare name rather than appending
+      `.cmd`, so cmd.exe's PATHEXT lookup resolves shims and native binaries
+      alike. If the command is `process.execPath` or another real
+      executable, this rule already excludes it.
+    languages: [typescript, javascript]
+    severity: ERROR
+    paths:
+      exclude:
+        - '*.test.ts'
+        - '*.test.mjs'
+        - '*.test.js'
 
 # =====================================================================
 # Rules dropped after first-run triage (kept as a record so they are not

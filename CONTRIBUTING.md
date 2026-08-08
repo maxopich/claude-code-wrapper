@@ -1,8 +1,15 @@
 # Contributing to Cebab
 
-Thanks for poking at the code. Cebab is a small macOS-only personal tool, so this
-guide is short — it documents the bits that aren't obvious from the README:
-what to run before opening a PR, and where the security-critical paths live.
+Thanks for poking at the code. Cebab is a small personal tool that runs natively
+on macOS, Linux and Windows (no WSL), so this guide is short — it documents the
+bits that aren't obvious from the README: what to run before opening a PR, and
+where the security-critical paths live.
+
+**All three platforms are in scope for your change.** CI runs a `ubuntu-latest` +
+`windows-2022` matrix and both are required, so a POSIX-only assumption fails the
+build rather than shipping. Windows is the one that bites: `.cmd` shims need
+`shell: true` to spawn, POSIX file modes are a no-op, `SIGTERM` is never
+delivered (`SIGBREAK` is), and paths are separator- and case-insensitive.
 
 ## Dev setup
 
@@ -16,8 +23,10 @@ cp .env.example .env     # then point WORKSPACE_ROOT at your agent projects
 
 The `setup` script is the dev-side counterpart to CI's two-stage install. Cebab
 ships an `.npmrc` with `ignore-scripts=true` to block transitive npm postinstall
-scripts (the bus / orchestrator launch under `--permission-mode bypassPermissions`,
-so an attacker-controlled postinstall is direct RCE on your machine). `setup`
+scripts (no bus tool call is ever gated on a human — production turns run
+`permissionMode: 'default'` with a callback that auto-approves everything except
+`AskUserQuestion`, which is bypass in effect — so an attacker-controlled
+postinstall is direct RCE on your machine). `setup`
 explicitly re-enables scripts for the one place we need them — rebuilding the
 native `better-sqlite3` binding — and installs the husky pre-commit hook.
 
@@ -45,6 +54,7 @@ Run these locally:
 ```sh
 npm run lint            # eslint with security + no-unsanitized plugins, --max-warnings 0
 npm run typecheck       # tsc --noEmit across shared / server / web
+npm run format:check    # prettier; a required CI step, and easy to miss locally
 npm test                # vitest
 npm run test:security   # F-invariant regression suite ([security]-tagged vitest cases)
 ```

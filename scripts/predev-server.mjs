@@ -49,6 +49,11 @@ function listMatchingProcessIds() {
     // wmic CSV: Node,CommandLine,ProcessId  (the leading Node column is
     // the WMI host name, not a number). PID is the trailing field.
     try {
+      // wmic.exe is a real Windows executable under System32\wbem, not an
+      // npm .cmd shim, so Node spawns it directly and needs no shell. The
+      // waiver must sit on the line directly above the call — semgrep binds
+      // it to the next line only, so prose in between silently defeats it.
+      // nosemgrep: cebab-spawn-missing-win32-shell
       const out = execFileSync('wmic', ['process', 'get', 'processid,commandline', '/format:csv'], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -67,6 +72,9 @@ function listMatchingProcessIds() {
   }
   // POSIX (macOS, Linux).
   try {
+    // POSIX-only branch, and /bin/ps is a real binary — the shim problem is
+    // Windows-only.
+    // nosemgrep: cebab-spawn-missing-win32-shell
     const out = execFileSync('ps', ['-A', '-o', 'pid=,command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
