@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'vitest';
 import stylesCss from './styles.css?raw';
+// Moved to cssColor.ts when styleContrast.test.ts needed the same split — the
+// `@media` recursion is not something to hold two opinions about.
+import { topLevelRules, type Rule } from './cssColor.js';
 
 /**
  * Focus is a state of its own, not a synonym for hover (registers U19, U20).
@@ -25,52 +28,6 @@ import stylesCss from './styles.css?raw';
  * `:focus` without `-visible` (deliberately unused here: it would ring mouse
  * clicks, which is the thing `:focus-visible` exists to prevent).
  */
-
-type Rule = { selector: string; body: string; line: number };
-
-/**
- * Every top-level rule as (selector, body). A brace scan, not a regex:
- * selectors here span lines and carry `:is(…)` / `:not(…)` groups, and at-rule
- * preludes must not be mistaken for selectors.
- */
-function topLevelRules(css: string): Rule[] {
-  const out: Rule[] = [];
-  let depth = 0;
-  let start = 0;
-  let pending: { selector: string; bodyStart: number } | null = null;
-  for (let i = 0; i < css.length; i++) {
-    const ch = css[i];
-    if (ch === '{') {
-      if (depth === 0) pending = { selector: css.slice(start, i), bodyStart: i + 1 };
-      depth++;
-    } else if (ch === '}') {
-      depth--;
-      if (depth === 0 && pending) {
-        out.push({
-          selector: pending.selector.replace(/\/\*[\s\S]*?\*\//g, '').trim(),
-          body: css.slice(pending.bodyStart, i),
-          line: css.slice(0, pending.bodyStart).split('\n').length,
-        });
-        pending = null;
-        start = i + 1;
-      }
-    }
-  }
-  // At-rule bodies (media queries) hold rules of their own; scan them too so a
-  // `@media (hover: none)` block can't smuggle in a fused selector.
-  for (const m of css.matchAll(/@media[^{]*\{/g)) {
-    const bodyStart = m.index! + m[0].length;
-    let d = 1;
-    let i = bodyStart;
-    while (i < css.length && d > 0) {
-      if (css[i] === '{') d++;
-      else if (css[i] === '}') d--;
-      i++;
-    }
-    for (const r of topLevelRules(css.slice(bodyStart, i - 1))) out.push(r);
-  }
-  return out;
-}
 
 const RULES = topLevelRules(stylesCss);
 

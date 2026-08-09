@@ -203,15 +203,19 @@ describe('style tokens — every var() resolves', () => {
 
 /**
  * Gamma tokens no `var()` reads, that are nonetheless read — by a sibling gate
- * or by TypeScript holding the same value. One entry, and it is checked below
- * rather than trusted, for the same reason `RUNTIME_SET` is.
+ * or by TypeScript holding the same value. Checked below rather than trusted,
+ * for the same reason `RUNTIME_SET` is.
+ *
+ * EMPTY, and it took a bug to get here. The one entry was `--panel-2`, added
+ * when no CSS rule read it. PR #293 gave `.notif-inbox-chip[data-active]`
+ * `background: var(--panel-2)`, so the exemption stopped being needed — and
+ * nothing said so. The guard below verified that the cited READERS existed,
+ * which they did, but never that the exemption was still NECESSARY. An
+ * allowlist checked for validity and not for necessity accumulates entries
+ * that quietly excuse nothing, and the next real defect hides among them. The
+ * second test below closes that direction.
  */
-const READ_WITHOUT_VAR = {
-  '--panel-2': {
-    why: 'a text surface `styleContrast.test.ts` measures the ink ramp against, and the swatch colour `theme.ts` previews for the two dark gammas',
-    provenBy: ['./styleContrast.test.ts', './theme.ts'],
-  },
-} as const;
+const READ_WITHOUT_VAR: Record<string, { why: string; provenBy: readonly string[] }> = {};
 
 describe('style tokens — every theme token is read', () => {
   const body = stripComments(stylesCss);
@@ -225,6 +229,22 @@ describe('style tokens — every theme token is read', () => {
       .filter((t) => !referenced.has(t) && !(t in READ_WITHOUT_VAR))
       .sort();
     expect(unread).toEqual([]);
+  });
+
+  test('no exemption outlives its reason', () => {
+    // The direction that was missing. `--panel-2` sat here for months after a
+    // rule started reading it: still a real token, still read by the files it
+    // named, and no longer needing an exemption at all. The list is the one
+    // place this gate can be lied to, so an entry that excuses nothing has to
+    // fail rather than accumulate.
+    const unnecessary = Object.keys(READ_WITHOUT_VAR).filter((t) => referenced.has(t));
+    expect(
+      unnecessary,
+      'a rule now reads these with var(); delete the exemption rather than leaving it to rot',
+    ).toEqual([]);
+    // Anti-vacuity: `referenced` is the input to both this and the test above,
+    // so an empty parse would make both pass over nothing.
+    expect(referenced.size).toBeGreaterThan(40);
   });
 
   test('each var()-less exemption really is read by what it claims', () => {

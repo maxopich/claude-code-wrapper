@@ -9,6 +9,7 @@ import {
   resolveColor,
   resolveVar,
   splitTopLevel,
+  topLevelRules,
 } from './cssColor.js';
 
 /**
@@ -215,5 +216,43 @@ describe('parseThemeBlocks against the real stylesheet', () => {
         expect(() => resolveColor(tokens, token), `${theme} ${token}`).not.toThrow();
       }
     }
+  });
+});
+
+/**
+ * `topLevelRules` moved here from `focusVisible.test.ts` when
+ * `styleContrast.test.ts` needed the same split. These cases exist because the
+ * revert-check found the subtle half UNPROVEN: deleting the `@media` recursion
+ * entirely left every gate that uses it green, since both scan a stylesheet
+ * with far more top-level rules than media-nested ones and both only assert a
+ * floor on the count. A rule inside `@media (hover: none)` would simply have
+ * stopped being examined, quietly, by two a11y gates at once.
+ */
+describe('topLevelRules', () => {
+  test('reads selector and body, and skips at-rule preludes', () => {
+    const rules = topLevelRules('.a { color: red; }\n.b,\n.c { color: blue; }');
+    expect(rules.map((r) => r.selector)).toEqual(['.a', '.b,\n.c']);
+    expect(rules[0]!.body.trim()).toBe('color: red;');
+  });
+
+  test('descends into @media bodies', () => {
+    const rules = topLevelRules(
+      '.a { color: red; }\n@media (hover: none) {\n  .b { color: blue; }\n}',
+    );
+    expect(rules.map((r) => r.selector).sort()).toEqual(['.a', '.b']);
+  });
+
+  test('a nested block does not end the outer rule early', () => {
+    // `:is(…)` and `&`-nesting both produce inner braces; a naive scan closes
+    // the rule at the first `}` and reports a truncated body.
+    const rules = topLevelRules('.a { color: red;\n  &:hover { color: blue; }\n}');
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.body).toContain('color: red');
+    expect(rules[0]!.body).toContain('&:hover');
+  });
+
+  test('strips a comment out of the selector', () => {
+    const rules = topLevelRules('/* note */ .a { color: red; }');
+    expect(rules[0]!.selector).toBe('.a');
   });
 });

@@ -187,7 +187,12 @@
   --fg-0: #191b24;
   --fg-1: #33384a;
   --fg-2: #565a6b;
-  --fg-3: #6a6c78;
+  /* Was #6a6c78, which measured 4.32:1 on `--bg-4` — below AA, at three sites
+   * that pair them (`.ask-user-q-chip`, `.session-search-redacted-badge`,
+   * `.input-box button:disabled`). The old contrast gate never saw it: `--bg-4`
+   * is darker than every surface `TEXT_SURFACES` listed. Three steps of grey
+   * buys 4.52:1 and is imperceptible; the ramp's own tiers are 20+ apart. */
+  --fg-3: #676975;
   --fg: #191b24;
   --line-1: rgba(20, 24, 50, 0.08);
   --line-2: rgba(20, 24, 50, 0.14);
@@ -213,10 +218,10 @@
    * four either way. */
   --ok: #16a36a;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
-  --ok-ink: #117a50;
+  --ok-ink: #10794f;
   --warn: #d3920f;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
-  --warn-ink: #8f630a;
+  --warn-ink: #8d6108;
   --err: #e0584a;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
   --err-ink: #c63122;
@@ -261,7 +266,9 @@
   --fg-0: #2a2620;
   --fg-1: #443f36;
   --fg-2: #5b554b;
-  --fg-3: #6d665c;
+  /* Was #6d665c — 4.38:1 on `--bg-4`, same sub-AA pairing as aurora above.
+   * Two steps to 4.52:1. */
+  --fg-3: #6b645a;
   --fg: #2a2620;
   --line-1: rgba(40, 32, 20, 0.1);
   --line-2: rgba(40, 32, 20, 0.16);
@@ -270,21 +277,21 @@
   --accent: #b85a38;
   --accent-soft: #a44d2c;
   --accent-glow: rgba(184, 90, 56, 0.12);
-  --accent-ink: #a44d2c;
+  --accent-ink: #a24b2a;
   --accent-2: #a44d2c;
   --on-accent: #ffffff;
   --ok: #2f9e5f;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
-  --ok-ink: #237546;
+  --ok-ink: #217344;
   --warn: #b9851c;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
-  --warn-ink: #856014;
+  --warn-ink: #835e12;
   --err: #c0402a;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
-  --err-ink: #b43c27;
+  --err-ink: #b33b26;
   --info: #3a6db0;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
-  --info-ink: #3768a7;
+  --info-ink: #3566a5;
   --coral: #cc785c;
   --r-sm: 5px;
   --r-md: 8px;
@@ -11227,7 +11234,12 @@ pre {
 .session-search-chip.on {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--fg-1);
+  /* `--accent-soft` reads like a pale tint and is not one — it is a saturated
+   * mid-tone in every gamma (#2456c8 / #a44d2c / #1f8e9b / #2cb56a). Neutral
+   * ink on it measured 1.56–2.30:1. `--on-accent` is the ink that belongs on
+   * an accent fill (4.68–7.14 here). Same defect as register .5.37: one token
+   * cannot be both the fill and the ink. */
+  color: var(--on-accent);
 }
 .session-search-chip:disabled {
   opacity: 0.5;
@@ -11361,7 +11373,9 @@ pre {
 }
 .session-search-result-snippet mark {
   background: var(--accent-soft);
-  color: var(--fg-1);
+  /* The search-result highlight — the one span on screen whose whole job is to
+   * be read. It was neutral ink on the accent fill at 1.56:1 in phosphor. */
+  color: var(--on-accent);
   border-radius: 2px;
 }
 .session-search-result-meta {
