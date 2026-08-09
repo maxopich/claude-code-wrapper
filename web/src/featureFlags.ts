@@ -20,6 +20,14 @@
  * the renderer falls back to orchestrator. When the custom-mode work
  * matures, the picker can opt in by reading this flag; until then no
  * caller exists, and that is deliberate.
+ *
+ * Register N11 proposed deleting it for gating nothing. Kept: the staged opt-in
+ * is real, and the `import.meta.env` idiom is load-bearing for the reason
+ * documented on `FEATURE_ARTIFACT_DIFF_V2` below. The genuine problem N11 found
+ * is that nothing distinguished this from an oversight —
+ * `scripts/exportConsumers.test.mjs` records the verdict, so it is decided once
+ * rather than re-litigated by every unused-export sweep. If custom mode is
+ * abandoned rather than deferred, this goes WITH that decision.
  */
 export const ENABLE_CUSTOM_MODE_PICKER: boolean = import.meta.env.DEV;
 

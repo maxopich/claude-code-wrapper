@@ -265,21 +265,17 @@ export function buildParticipantMuteChangedMsg(args: {
   };
 }
 
-/**
- * Probe whether a participant is currently muted — used by the bus_send
- * oracle-suppression test (PR's invariant assertion) to verify the
- * post-mute state. The current architecture has oracle suppression
- * BY-CONSTRUCTION: `handleBusSend` returns `delivered to <recipient>`
- * unconditionally regardless of router decisions (the muted agent's
- * outbound is dropped at the router AFTER bus_send already returned its
- * success text). So this probe isn't read by production code; it's
- * there so a future refactor that introduces oracle visibility (e.g.
- * surfacing a "dropped" status back into the tool result) fails the
- * AE-3 [security] test.
- */
-export function probeIsMuted(args: { sessionId: string; projectId: number }): boolean {
-  return getControlState(args.sessionId, args.projectId)?.muted === true;
-}
+// REMOVED (register N10): `probeIsMuted(args)` — a one-line alias for
+// `getControlState(sessionId, projectId)?.muted === true`. Its docstring said it
+// existed so "a future refactor that introduces oracle visibility fails the AE-3
+// [security] test", and it was imported by NOTHING: not production, not
+// `control_verbs.test.ts` (which asserts that same expression directly, four
+// times), not `bus/orchestrator.mute.test.ts` where AE-3 actually lives. A
+// tripwire wired to nothing is worse than no tripwire, because it is counted.
+//
+// It could not have done the job in any case: the oracle it claimed to guard is
+// `handleBusSend`'s RETURN TEXT, which this function never reads. AE-3 pins that
+// invariant where it lives — by construction, in `orchestrator.mute.test.ts`.
 
 // ---------- Cluster C Phase 4c: pause + resume ----------
 //

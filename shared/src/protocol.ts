@@ -3881,7 +3881,12 @@ export type RecoveryContextView = {
  *  - No disconnected components
  *  - No "broadcast" edge type (broadcast is policy, not topology)
  *
- * See `validateCustomTopology` in `shared/src/topology.ts` for the runtime check.
+ * `validateCustomTopology` in `shared/src/topology.ts` encodes these rules, but
+ * NOTHING CALLS IT AT RUNTIME — this comment claimed it was "the runtime check"
+ * and there is no such check (register N07). The validator is written and
+ * tested against the custom-mode editor that has not shipped; until that editor
+ * calls it, the rules above are enforced by nothing, and a `CustomLayout`
+ * arriving over the wire is accepted as-is.
  */
 export type CustomLayout = {
   kind: 'custom';
