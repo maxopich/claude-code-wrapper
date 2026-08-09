@@ -52,6 +52,71 @@ export function splitTopLevel(input: string, separator = ','): string[] {
   return parts;
 }
 
+/** One ordinary CSS rule, as selector + body text. */
+export type Rule = { selector: string; body: string; line: number };
+
+/**
+ * Every top-level rule as (selector, body). A brace scan, not a regex:
+ * selectors here span lines and carry `:is(…)` / `:not(…)` groups, and at-rule
+ * preludes must not be mistaken for selectors.
+ *
+ * Lives here rather than in one gate because two now need the same split and
+ * it is not a split you want two opinions about: `focusVisible.test.ts` reads
+ * it to find `:focus-visible` rules, and `styleContrast.test.ts` to find the
+ * ink/background pairings the stylesheet actually declares. The `@media`
+ * recursion in particular is easy to omit and silently halves the scan — a
+ * fused selector inside `@media (hover: none)` would simply not be seen.
+ */
+export function topLevelRules(css: string): Rule[] {
+  const out: Rule[] = [];
+  let depth = 0;
+  let start = 0;
+  let pending: { selector: string; bodyStart: number } | null = null;
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i];
+    if (ch === '{') {
+      if (depth === 0) pending = { selector: css.slice(start, i), bodyStart: i + 1 };
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0 && pending) {
+        const selector = pending.selector.replace(/\/\*[\s\S]*?\*\//g, '').trim();
+        // At-rule WRAPPERS are not rules. `@media` bodies are visited by the
+        // recursion below, so emitting the prelude too double-counts, and its
+        // "body" is the whole block — a caller looking for a rule that sets
+        // both `color` and `background` would pair declarations from two
+        // different nested rules and invent a site that does not exist. Same
+        // for `@keyframes`, whose body holds several frames. The header of
+        // this function always claimed preludes were not mistaken for
+        // selectors; a unit test written when it moved here showed they were.
+        if (!selector.startsWith('@')) {
+          out.push({
+            selector,
+            body: css.slice(pending.bodyStart, i),
+            line: css.slice(0, pending.bodyStart).split('\n').length,
+          });
+        }
+        pending = null;
+        start = i + 1;
+      }
+    }
+  }
+  // At-rule bodies (media queries) hold rules of their own; scan them too so a
+  // `@media (hover: none)` block can't smuggle in a fused selector.
+  for (const m of css.matchAll(/@media[^{]*\{/g)) {
+    const bodyStart = m.index! + m[0].length;
+    let d = 1;
+    let i = bodyStart;
+    while (i < css.length && d > 0) {
+      if (css[i] === '{') d++;
+      else if (css[i] === '}') d--;
+      i++;
+    }
+    for (const r of topLevelRules(css.slice(bodyStart, i - 1))) out.push(r);
+  }
+  return out;
+}
+
 /** A token-declaring block, as an inner-text range: `css.slice(start, end)`. */
 export type BlockRange = { name: string; start: number; end: number };
 

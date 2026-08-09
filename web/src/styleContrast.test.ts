@@ -11,6 +11,7 @@ import {
   resolveColor,
   resolveVar,
   splitTopLevel,
+  topLevelRules,
   type Rgba,
 } from './cssColor.js';
 
@@ -45,8 +46,28 @@ import {
  *  In the light gammas the darkest of these binds; in the dark gammas the
  *  lightest does (slate's `--raised` is the real constraint, not `--panel` —
  *  which is why measuring against `--panel` alone under-reported every
- *  finding in the register by 0.3–0.6). */
-const TEXT_SURFACES = ['--bg', '--panel', '--panel-2', '--raised'] as const;
+ *  finding in the register by 0.3–0.6).
+ *
+ *  `--bg-4` was missing and is the darkest surface the light gammas paint text
+ *  on. Its absence was not a rounding error: `--fg-3` measured 4.32/4.38 on it
+ *  at three sites while this list bottomed out at 4.60, so the gate reported a
+ *  pass over a sub-AA pairing that ships.
+ *
+ *  `--bg-5` is deliberately NOT here. It is painted eight times and *no rule
+ *  pairs text with it* — every one inherits its ink. Listing it would repeat
+ *  the mistake this file was audited for (`--panel-2` sat here for months
+ *  while nothing painted it), and it would hold the gate red over a pairing
+ *  that does not exist. The declared-pairings block below is what catches it
+ *  the moment text does land there — which is the better mechanism, because it
+ *  needs no one to remember to update a list.
+ *
+ *  WHAT THIS LIST IS AND IS NOT. It is a palette-level PROMISE: every ink
+ *  clears AA on all of these, whether or not a rule pairs them. It is not the
+ *  enforcement — shortening it reddens nothing, because the pairings that
+ *  actually ship are checked against the stylesheet below and never read this
+ *  list. Deliberate: a hand-kept list cannot notice itself being shortened,
+ *  which is why the promise and the enforcement are separate. */
+const TEXT_SURFACES = ['--bg', '--panel', '--panel-2', '--raised', '--bg-4'] as const;
 
 /** The ink ramp, strongest first. */
 const INK_RAMP = ['--fg-0', '--fg-1', '--fg-2', '--fg-3'] as const;
@@ -91,6 +112,16 @@ function ruleBody(selector: string): string {
  *  those as if they were text backdrops is how the first draft of this gate
  *  "found" a failure in a 1px border. */
 function declaration(body: string, prop: string): string {
+  const found = findDeclaration(body, prop);
+  if (found === null) throw new Error(`declaration not found: ${prop}`);
+  return found;
+}
+
+/** `declaration`, but `null` instead of a throw when the property is absent.
+ *  The pairing scan below asks every rule in the stylesheet whether it sets
+ *  `color` and `background`; almost none set both, so "absent" is the ordinary
+ *  case there rather than an error. */
+function findDeclaration(body: string, prop: string): string | null {
   // Scanned rather than built into a RegExp: a constructed pattern here trips
   // eslint's security/detect-non-literal-regexp, and the boundary rules are
   // clearer written out anyway — `color` must not match inside
@@ -105,7 +136,7 @@ function declaration(body: string, prop: string): string {
     at = j + 1;
     break;
   }
-  if (at === -1) throw new Error(`declaration not found: ${prop}`);
+  if (at === -1) return null;
   let i = at;
   const start = i;
   let depth = 0;
@@ -459,5 +490,146 @@ describe('[a11y] semantic ink is readable as text', () => {
       return relativeLuminance(ink) >= relativeLuminance(fill);
     });
     expect({ theme, notDarker }).toEqual({ theme, notDarker: [] });
+  });
+});
+
+// ===========================================================================
+// The pairings the stylesheet actually declares.
+// ===========================================================================
+
+/**
+ * The block above measures a CROSS-PRODUCT: every ink tier against every
+ * surface someone remembered to list. That has two failure modes and this
+ * repo has now hit both.
+ *
+ *   - It measures pairings that do not exist. `--panel-2` sat in
+ *     `TEXT_SURFACES` for months while no rule painted it (a rule does now,
+ *     since #293). Harmless, but it made the list feel maintained.
+ *   - It MISSES pairings that do. `--bg-4` was absent, and `--fg-3` on it
+ *     measured 4.32:1 in aurora and 4.38 in daylight at three real sites,
+ *     while the listed surfaces bottomed out at 4.60. The gate said PASS over
+ *     sub-AA text in the default theme.
+ *
+ * The second is the one that matters, and no amount of care with the list
+ * fixes it — a hand-kept list of surfaces is exactly the artifact that goes
+ * stale silently. So this block does not use a list. It reads every rule that
+ * sets BOTH `color: var(--fg-N)` and a `background` naming a token, and
+ * measures that pair in all four gammas. A new component pairing a ramp tier
+ * with a darker fill is caught the day it lands.
+ *
+ * Covers the neutral ramp AND the `-ink` partners, because both are inks that
+ * land on arbitrary fills. `semanticInk.test.ts` is not a duplicate of this —
+ * it asserts a *fill* token never appears in `color:`, and says nothing about
+ * the contrast of the pairing that results.
+ *
+ * A first draft scanned `--fg-N` only. That left `--info-ink` on `--bg-4`
+ * (`.avatar.tool`, `.msg.user-command .avatar.user`) covered solely by the
+ * hand-kept `TEXT_SURFACES` list — and the revert-check proved it: dropping
+ * `--bg-4` from that list reddened nothing, because no *declared* pairing
+ * depended on it. A gate whose coverage evaporates when someone shortens a
+ * list is the thing this block exists to replace.
+ */
+type Pairing = { ink: string; surface: string; selectors: string[] };
+
+/** `color: var(--fg-N)` + `background[-color]: var(--X)` in one rule. */
+function declaredPairings(): Pairing[] {
+  const byPair = new Map<string, Pairing>();
+  for (const rule of topLevelRules(stylesCss)) {
+    const color = findDeclaration(rule.body, 'color');
+    if (color === null) continue;
+    const ink = /^var\(\s*(--fg-[0-3]|--(?:ok|warn|err|info|accent)-ink|--on-accent)\s*\)$/.exec(
+      color.trim(),
+    )?.[1];
+    if (!ink) continue;
+    const bg =
+      findDeclaration(rule.body, 'background') ?? findDeclaration(rule.body, 'background-color');
+    if (bg === null) continue;
+    const surface = /^var\(\s*(--[a-z0-9-]+)\s*\)$/.exec(bg.trim())?.[1];
+    if (!surface) continue;
+    const key = `${ink} on ${surface}`;
+    const entry = byPair.get(key) ?? { ink, surface, selectors: [] };
+    entry.selectors.push(rule.selector.replace(/\s+/g, ' '));
+    byPair.set(key, entry);
+  }
+  return [...byPair.values()].sort((a, b) => (a.ink + a.surface).localeCompare(b.ink + b.surface));
+}
+
+const PAIRINGS = declaredPairings();
+
+/**
+ * Worst contrast a pairing reaches in one gamma.
+ *
+ * A translucent surface (`--*-soft` is `rgba()` in the dark gammas and
+ * `color-mix(…, transparent)` in the light ones) has no contrast of its own —
+ * what the eye sees is the tint composited over whatever is behind it, and
+ * that is NOT knowable from the rule alone.
+ *
+ * Modelled as "over `--panel`", reusing `tintOverPanel` and therefore the same
+ * assumption the shipped `--accent-ink on --accent-glow` case already makes.
+ * A draft composited over every surface and took the worst, which is stricter
+ * and sounds better — and it reported `--err-ink`/`--info-ink`/`--ok-ink` on
+ * their own tints at 3.90–3.95, on the premise that a badge might sit over
+ * `--bg-4`. Nothing shows that any of them does. This file's header is right
+ * that a gate which cries wolf gets deleted, so the limitation is written
+ * down instead of guessed at: **a tint over a surface darker than `--panel`
+ * is not modelled here.** If a component ever puts one there, this gate will
+ * not see it.
+ */
+function pairingRatio(theme: string, p: Pairing): number {
+  const ink = resolveColor(blocks[theme]!, p.ink);
+  const fill = resolveColor(blocks[theme]!, p.surface);
+  if (fill.a >= 1) return contrastRatio(ink, fill);
+  return contrastRatio(ink, tintOverPanel(theme, p.surface));
+}
+
+describe('[a11y] theme contrast — pairings the stylesheet declares', () => {
+  test('the scan found the pairings', () => {
+    // Without this the two assertions below iterate an empty list and pass —
+    // the shape this whole file exists to prevent, one level up. A floor
+    // rather than an exact count, so adding a component is a one-file edit.
+    expect(PAIRINGS.length).toBeGreaterThanOrEqual(18);
+    // Two anchors found through the scanner rather than by string search, so a
+    // parser that mangles multi-line selectors or skips `@media` bodies is
+    // caught here rather than by silently shrinking the list.
+    const surfaces = new Set(PAIRINGS.map((p) => p.surface));
+    expect([...surfaces]).toContain('--bg-4');
+    expect([...surfaces]).toContain('--bg-3');
+  });
+
+  test.each(THEMES)('%s: every declared ink/surface pairing clears AA', (theme) => {
+    const failing = PAIRINGS.map((p) => ({
+      pair: `${p.ink} on ${p.surface}`,
+      ratio: Number(pairingRatio(theme, p).toFixed(2)),
+      at: p.selectors.slice(0, 3),
+    })).filter((m) => m.ratio < AA_NORMAL_TEXT);
+    expect(failing, `${theme}: text below ${AA_NORMAL_TEXT}:1`).toEqual([]);
+  });
+
+  test('a ramp tier never sits on an OPAQUE semantic fill', () => {
+    // How `--fg-1` on `--accent-soft` survived to ship at 1.56:1 in phosphor,
+    // on the search-result highlight: `semanticInk.test.ts` guards the five
+    // FILL_TOKENS but not their `-soft` variants, so nobody owned this pair.
+    //
+    // The distinction that matters is OPACITY, not the name. `--ok-soft` and
+    // friends are 10-12% tints (`rgba()` in the dark gammas,
+    // `color-mix(..., transparent)` in the light ones); composited they are
+    // near enough the panel that a ramp tier on them is fine, and six such
+    // pairings ship correctly today. `--accent-soft` is the odd one out in its
+    // own family -- a solid hex in all four gammas. A ramp tier on a saturated
+    // fill is the `.5.37` defect, and the fill's own ink (`--on-accent`) is
+    // what it takes.
+    //
+    // A first draft keyed on the `-soft` SUFFIX and flagged all six legitimate
+    // tints. Naming is not the invariant; opacity is.
+    const onOpaqueFill = PAIRINGS.filter(
+      (p) =>
+        p.ink.startsWith('--fg-') &&
+        /^--(ok|warn|err|info|accent)(-soft)?$/.test(p.surface) &&
+        THEMES.every((theme) => resolveColor(blocks[theme]!, p.surface).a >= 1),
+    );
+    expect(
+      onOpaqueFill.map((p) => `${p.ink} on ${p.surface} at ${p.selectors[0]}`),
+      'an opaque semantic fill takes its own ink (--on-accent / --X-ink), not a --fg-N tier',
+    ).toEqual([]);
   });
 });
