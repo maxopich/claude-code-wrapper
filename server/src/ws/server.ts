@@ -52,6 +52,7 @@ import type {
 import { computeWorkspaceDiff } from '../workspace_diff.js';
 import { cancelAuthRefresh, startAuthRefresh, type AuthRefreshCallbacks } from '../auth_refresh.js';
 import { translate } from './translate.js';
+import { validateClientMsg } from './validate_client_msg.js';
 import {
   BUS_SETTING_SCOPES,
   resolveProjectAuthority,
@@ -1620,10 +1621,28 @@ type Conn = {
   lastInterruptIds: Map<string, string>;
 };
 
+/**
+ * Register H10: cap on a single inbound WS frame.
+ *
+ * `ws` defaults to 100 MiB, and each frame is then duplicated twice more on
+ * the way in — `raw.toString()` and `JSON.parse` — so the default lets any
+ * token holder drive several hundred megabytes of transient allocation per
+ * message on a single-threaded server.
+ *
+ * 4 MiB is a bound on the absurd, not a tuned limit. The largest legitimate
+ * frame is an operator-edited tool input in a permission card (a `Write`
+ * payload) or a pasted prompt; the runner-up is `bulk_session_op` with every
+ * session selected, at ~39 bytes per id — over 100k sessions before it binds.
+ * Exceeding it makes `ws` close the connection with 1009, which the client's
+ * existing reconnect path already handles.
+ */
+export const MAX_WS_FRAME_BYTES = 4 * 1024 * 1024;
+
 export function startWsServer(server: HttpServer): WebSocketServer {
   const allowedOrigins = buildAllowedOrigins();
   const wss = new WebSocketServer({
     server,
+    maxPayload: MAX_WS_FRAME_BYTES,
     verifyClient: (info, cb) => {
       const req = info.req as IncomingMessage;
       const origin = String(req.headers.origin ?? '');
@@ -2142,14 +2161,33 @@ function onConnection(ws: WebSocket): void {
   const heartbeatTimer = setInterval(emitActiveRuns, 10_000);
 
   ws.on('message', (raw) => {
-    let parsed: ClientMsg;
+    let parsed: unknown;
     try {
       parsed = JSON.parse(raw.toString());
     } catch {
       console.warn('[ws] bad client json');
       return;
     }
-    handleClientMsg(conn, parsed).catch((err) => {
+    // Register S17: `parsed` was asserted as `ClientMsg` here and handed
+    // straight to the switch below, so every handler indexed fields nothing
+    // had checked. `handleClientMsg` has exactly one call site — this one —
+    // so validating here covers the whole verb surface.
+    //
+    // A rejected frame is DROPPED with a log line and no wire reply, matching
+    // the JSON-parse failure three lines above. Deliberately not a
+    // `wrapper_error`: one without a `sessionId` is folded onto the active
+    // session by the client reducer and flips it to `status: 'error'`, so
+    // answering a malformed frame would mark the operator's live session
+    // failed because some client sent garbage. The browser app compiles
+    // against the same union and sends through one typed helper, so a
+    // rejected frame means a client bug or a non-browser client — a thing to
+    // find in this log, not a session event.
+    const validated = validateClientMsg(parsed);
+    if (!validated.ok) {
+      console.warn(`[ws] rejected frame: ${validated.reason}`);
+      return;
+    }
+    handleClientMsg(conn, validated.msg).catch((err) => {
       console.error('[ws] handler error', err);
       send(ws, {
         type: 'wrapper_error',

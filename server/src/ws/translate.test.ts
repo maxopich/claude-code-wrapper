@@ -223,3 +223,56 @@ describe('translate', () => {
     });
   });
 });
+
+/**
+ * Register S07. `SDKUserMessage.message` is a `MessageParam`, whose `content`
+ * is `string | ContentBlockParam[]`. This case used to cast the array arm
+ * unconditionally and forward it, and `store.ts` does `msg.blocks.map(...)` on
+ * what arrives — so the string arm is a reducer TypeError that takes the whole
+ * session's render with it.
+ */
+describe('user messages always arrive as blocks', () => {
+  const userMsg = (content: unknown) => fake({ type: 'user', uuid: 'u', message: { content } });
+
+  test('a block array passes through untouched', () => {
+    const blocks = [{ type: 'tool_result', tool_use_id: 't', content: 'ok' }];
+    expect(translate(userMsg(blocks), PID)).toMatchObject({ type: 'user_message', blocks });
+  });
+
+  test('a bare string becomes a single text block', () => {
+    expect(translate(userMsg('just text'), PID)).toMatchObject({
+      type: 'user_message',
+      blocks: [{ type: 'text', text: 'just text' }],
+    });
+  });
+
+  test('an empty string is still a block array, not a dropped message', () => {
+    expect(translate(userMsg(''), PID)).toMatchObject({
+      type: 'user_message',
+      blocks: [{ type: 'text', text: '' }],
+    });
+  });
+
+  test('anything else degrades to an empty array rather than crashing the reducer', () => {
+    for (const content of [null, undefined, 7, { text: 'no' }]) {
+      expect(translate(userMsg(content), PID), String(content)).toMatchObject({
+        type: 'user_message',
+        blocks: [],
+      });
+    }
+    // …including a `message` that is missing entirely.
+    expect(translate(fake({ type: 'user', uuid: 'u' }), PID)).toMatchObject({
+      type: 'user_message',
+      blocks: [],
+    });
+  });
+
+  test('every shape yields something the client reducer can map over', () => {
+    // The property that actually matters — `store.ts` calls `.map` on this.
+    for (const content of ['s', [], [{ type: 'text', text: 'x' }], null, 7]) {
+      const out = translate(userMsg(content), PID) as { blocks: unknown[] };
+      expect(Array.isArray(out.blocks), String(content)).toBe(true);
+      expect(() => out.blocks.map((b) => b)).not.toThrow();
+    }
+  });
+});
