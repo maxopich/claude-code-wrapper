@@ -24,6 +24,27 @@ function coerceResultSubtype(raw: string): ResultSubtype {
 type AnyMsg = Record<string, unknown> & { type: string; subtype?: string };
 
 /**
+ * Register S07: normalise a user message's content to the block array the wire
+ * (and the client reducer) require.
+ *
+ * A plain-text prompt arrives as a bare string; a tool result arrives as
+ * blocks. Both are legal — `MessageParam['content']` is
+ * `string | ContentBlockParam[]` — and only the second was handled. Anything
+ * else (null from a malformed replay, an object) becomes an empty array rather
+ * than being forwarded: an empty tool-result line is a strictly better outcome
+ * than a reducer crash that takes the whole session's render with it.
+ *
+ * The `assistant` case deliberately does NOT get this treatment. Its content
+ * comes from `APIAssistantMessage`, a response type whose `content` is always
+ * blocks — normalising there would imply a shape that cannot occur.
+ */
+function normaliseUserContent(content: unknown): ContentBlock[] {
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  if (Array.isArray(content)) return content as ContentBlock[];
+  return [];
+}
+
+/**
  * Translate one SDK message to a ServerMsg destined for the browser.
  * Returns null for messages the UI does not need to see (e.g. message_start /
  * content_block_start / message_stop), but the caller should still persist them.
@@ -195,12 +216,19 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
     }
 
     case 'user': {
-      const u = m as AnyMsg & { uuid?: string; message: { content: ContentBlock[] } };
+      const u = m as AnyMsg & { uuid?: string; message: { content: string | ContentBlock[] } };
       return {
         type: 'user_message',
         sessionId,
         uuid: u.uuid ?? '',
-        blocks: u.message.content,
+        // Register S07: the SDK declares `SDKUserMessage.message` as
+        // `MessageParam`, whose `content` is `string | ContentBlockParam[]`.
+        // This cast used to claim the array arm unconditionally and forward
+        // it, and the client's reducer does `msg.blocks.map(...)` — so a
+        // string-content user message is a TypeError that kills the render
+        // for that session. Latent rather than observed (nothing in
+        // `fixtures/` carries one), but nothing prevented it either.
+        blocks: normaliseUserContent(u.message?.content),
       };
     }
 
