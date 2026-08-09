@@ -13,6 +13,15 @@
  * width that is not listed here, or if a width listed here is branched on by
  * nothing. That test is what makes this file a source of truth rather than a
  * second opinion.
+ *
+ * SO THE TEST IS THE CONSUMER, AND THAT IS THE DESIGN. Only `SHELL` has a
+ * runtime caller (App.tsx). `BUFFERED`, `EXACT`, `ULTRAWIDE_CAP` and `mqBelow`
+ * are read by `breakpoints.test.ts` alone, because `@media` cannot resolve a
+ * custom property — there is no way to *derive* the queries from this table,
+ * only to compare the two and fail on a mismatch. A sweep for unused exports
+ * reads those four as dead code and proposes deleting them (register N12 did);
+ * deleting them deletes the gate. `scripts/exportConsumers.test.mjs` records
+ * that verdict so it is decided once rather than re-litigated.
  */
 
 /**
