@@ -213,7 +213,7 @@ describe('executeMuteParticipant — failure codes', () => {
     );
   });
 
-  test("reasonCode='other' without reasonText → already_in_state misuse", () => {
+  test("reasonCode='other' without reasonText → invalid_request", () => {
     const { workerId } = seedSession();
     const result = executeMuteParticipant({
       msg: muteMsg({ projectId: workerId, reasonCode: 'other' }),
@@ -222,6 +222,10 @@ describe('executeMuteParticipant — failure codes', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      // Register B21/N04: this used to assert only the message, which is how
+      // `already_in_state` — a state-machine code, for a schema error —
+      // survived here with a test covering it.
+      expect(result.failureCode).toBe('invalid_request');
       expect(result.message).toMatch(/'other' requires non-empty reasonText/);
     }
   });
@@ -769,7 +773,7 @@ describe('executeKickParticipant — happy path (drain mode)', () => {
 });
 
 describe('executeKickParticipant — wire validation', () => {
-  test("reasonCode='other' without reasonText → already_in_state misuse", () => {
+  test("reasonCode='other' without reasonText → invalid_request", () => {
     const { workerId } = seedSession();
     const result = executeKickParticipant({
       msg: kickMsg({ projectId: workerId, reasonCode: 'other' }),
@@ -778,6 +782,7 @@ describe('executeKickParticipant — wire validation', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      expect(result.failureCode).toBe('invalid_request');
       expect(result.message).toMatch(/'other' requires non-empty reasonText/);
     }
     // No DB flip
@@ -798,7 +803,7 @@ describe('executeKickParticipant — wire validation', () => {
     );
   });
 
-  test('unknown mode → already_in_state misuse', () => {
+  test('unknown mode → invalid_request', () => {
     const { workerId } = seedSession();
     const result = executeKickParticipant({
       msg: kickMsg({ projectId: workerId, mode: 'shutdown' as unknown as 'drain' }),
@@ -807,10 +812,33 @@ describe('executeKickParticipant — wire validation', () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
+      expect(result.failureCode).toBe('invalid_request');
       expect(result.message).toMatch(/invalid kick mode/);
     }
     // DB not mutated
     expect(getControlState('sess-1', workerId)?.kickedAt).toBeNull();
+  });
+
+  test("mode='hard' is NOT invalid_request — it is a real mode we don't ship yet", () => {
+    // The two live one line apart in the executor and mean opposite things
+    // to the operator: "your client is broken" vs "wait for v1.1".
+    const { workerId } = seedSession();
+    const bad = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId, mode: 'nonsense' as unknown as 'drain' }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    const hard = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId, mode: 'hard' }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(bad.ok).toBe(false);
+    expect(hard.ok).toBe(false);
+    if (!bad.ok && !hard.ok) {
+      expect(bad.failureCode).toBe('invalid_request');
+      expect(hard.failureCode).toBe('hard_kill_unsupported_v1');
+    }
   });
 });
 
@@ -1347,5 +1375,258 @@ describe('executeExpireParticipant auto_kick — forensic capture (Phase 4f)', (
       .prepare<[], { c: number }>('SELECT COUNT(*) as c FROM controllability_forensics')
       .get()!.c;
     expect(count).toBe(0);
+  });
+});
+
+// ===== Register B21/N04 + B12 + B19 =====
+//
+// Three semantic groups used to share one failure code, `already_in_state`:
+// a malformed frame, a broken audit trail, and a genuine no-op flip. The
+// operator's correct response differs for each — fix your client, the state
+// changed but the log has a gap, and your click did nothing — so one code
+// told them the wrong thing three ways. These suites pin the split, and pin
+// the two `already_in_state` returns that were right all along.
+
+const NONSENSE_REASON = 'not_a_reason' as unknown as 'off_task';
+
+describe('[security] a malformed control frame is invalid_request, never already_in_state', () => {
+  test('mute: unknown reasonCode', () => {
+    const { workerId } = seedSession();
+    const result = executeMuteParticipant({
+      msg: muteMsg({ projectId: workerId, reasonCode: NONSENSE_REASON }),
+      orchestratorHandle: makeFakeOrchestratorHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toMatchObject({ ok: false, failureCode: 'invalid_request' });
+    // Rejected at the wire — nothing was read or written.
+    expect(getControlState('sess-1', workerId)?.muted).toBe(false);
+  });
+
+  test('unmute: unknown reasonCode', () => {
+    const { workerId } = seedSession();
+    const result = executeUnmuteParticipant({
+      msg: { ...muteMsg({ projectId: workerId }), type: 'unmute_participant' },
+      orchestratorHandle: makeFakeOrchestratorHandle(),
+      sessionMode: 'orchestrator',
+    });
+    // Sanity: a WELL-formed unmute of an unmuted agent is the real
+    // already_in_state. Without this the test below cannot show a contrast.
+    expect(result).toMatchObject({ ok: false, failureCode: 'already_in_state' });
+
+    const malformed = executeUnmuteParticipant({
+      msg: {
+        ...muteMsg({ projectId: workerId, reasonCode: NONSENSE_REASON }),
+        type: 'unmute_participant',
+      },
+      orchestratorHandle: makeFakeOrchestratorHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(malformed).toMatchObject({ ok: false, failureCode: 'invalid_request' });
+  });
+
+  test('pause: unknown reasonCode, and empty reasonText for other', () => {
+    const { workerId } = seedSession();
+    expect(
+      executePauseParticipant({
+        msg: pauseMsg({ projectId: workerId, reasonCode: NONSENSE_REASON }),
+        orchestratorHandle: makeFakePauseHandle(),
+        sessionMode: 'orchestrator',
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'invalid_request' });
+    expect(
+      executePauseParticipant({
+        msg: pauseMsg({ projectId: workerId, reasonCode: 'other', reasonText: '   ' }),
+        orchestratorHandle: makeFakePauseHandle(),
+        sessionMode: 'orchestrator',
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'invalid_request' });
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+  });
+
+  test('resume: unknown reasonCode', () => {
+    const { workerId } = seedSession();
+    expect(
+      executeResumeParticipant({
+        msg: resumeMsgFor({ projectId: workerId, reasonCode: NONSENSE_REASON }),
+        orchestratorHandle: makeFakePauseHandle(),
+        sessionMode: 'orchestrator',
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'invalid_request' });
+  });
+
+  test('kick: unknown reasonCode', () => {
+    const { workerId } = seedSession();
+    expect(
+      executeKickParticipant({
+        msg: kickMsg({ projectId: workerId, reasonCode: NONSENSE_REASON }),
+        orchestratorHandle: makeFakeKickHandle(),
+        sessionMode: 'orchestrator',
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'invalid_request' });
+    expect(getControlState('sess-1', workerId)?.kickedAt).toBeNull();
+  });
+
+  test('a real no-op flip still reports already_in_state, not invalid_request', () => {
+    // The contrast case. Three of the sixteen `already_in_state` returns
+    // were correct and had to survive the split.
+    const { workerId } = seedSession();
+    setParticipantMuted('sess-1', workerId, true);
+    expect(
+      executeMuteParticipant({
+        msg: muteMsg({ projectId: workerId }),
+        orchestratorHandle: makeFakeOrchestratorHandle(),
+        sessionMode: 'orchestrator',
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'already_in_state' });
+  });
+});
+
+describe('[security] an audit-append failure is audit_write_failed, and the state DID change', () => {
+  const boom = () => {
+    throw new Error('chain is broken');
+  };
+
+  test('mute: the DB column is flipped and the code says so', () => {
+    const { workerId } = seedSession();
+    const result = executeMuteParticipant({
+      msg: muteMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeOrchestratorHandle(),
+      sessionMode: 'orchestrator',
+      appendAudit: boom as never,
+    });
+    expect(result).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
+    // The whole point of the separate code: this is NOT a no-op.
+    expect(getControlState('sess-1', workerId)?.muted).toBe(true);
+  });
+
+  test('kick: same, and kick cannot be undone', () => {
+    const { workerId } = seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+      appendAudit: boom as never,
+    });
+    expect(result).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
+    expect(getControlState('sess-1', workerId)?.kickedAt).not.toBeNull();
+  });
+
+  test('pause + resume both report it', () => {
+    const { workerId } = seedSession();
+    expect(
+      executePauseParticipant({
+        msg: pauseMsg({ projectId: workerId }),
+        orchestratorHandle: makeFakePauseHandle(),
+        sessionMode: 'orchestrator',
+        appendAudit: boom as never,
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
+
+    // The row is now paused (unaudited); resume it and break the audit again.
+    expect(
+      executeResumeParticipant({
+        msg: resumeMsgFor({ projectId: workerId }),
+        orchestratorHandle: makeFakePauseHandle(),
+        sessionMode: 'orchestrator',
+        appendAudit: boom as never,
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
+  });
+
+  test('retrying does NOT re-attempt the audit — the row stays unaudited', () => {
+    // Register B12. The code used to carry a comment promising the opposite
+    // ("the retry path's short-circuit will short-circuit the DB step, so
+    // only the audit re-attempt runs"). It cannot: `setParticipantMuted` is
+    // `UPDATE … WHERE muted != ?`, so the second call matches zero rows and
+    // the handler returns at the `!dbChanged` guard, above the audit block.
+    const { workerId } = seedSession();
+    const appendAudit = vi.fn(() => {
+      throw new Error('chain is broken');
+    });
+    executeMuteParticipant({
+      msg: muteMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeOrchestratorHandle(),
+      sessionMode: 'orchestrator',
+      appendAudit: appendAudit as never,
+    });
+    expect(appendAudit).toHaveBeenCalledTimes(1);
+
+    const retry = executeMuteParticipant({
+      msg: muteMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeOrchestratorHandle(),
+      sessionMode: 'orchestrator',
+      appendAudit: appendAudit as never,
+    });
+    // Still 1: the retry never reached the audit block.
+    expect(appendAudit).toHaveBeenCalledTimes(1);
+    expect(retry).toMatchObject({ ok: false, failureCode: 'already_in_state' });
+    // And there is no audit row for the flip that did happen.
+    const rows = getDb()
+      .prepare(`SELECT COUNT(*) as c FROM safety_audit WHERE kind = 'agent_control.muted'`)
+      .get() as { c: number };
+    expect(rows.c).toBe(0);
+  });
+});
+
+describe('[security] pause reports failure when no gate was actually installed', () => {
+  test('a runner that refuses the slug rolls the DB back and fails', () => {
+    // Register B19. `AgentRunner.pause()` returns false when
+    // `!this.specs.has(agentName)` — it has never heard of this agent, so
+    // nothing is gated. Reporting ok with a `pausedUntil` there is exactly
+    // the B03 defect (an operator watching "paused until 14:32" while the
+    // worker keeps taking turns), reached through a different door.
+    const { workerId } = seedSession();
+    const handle = {
+      pauseAgent: vi.fn(() => false),
+      getPendingDeliveries: vi.fn(() => 0),
+    };
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+    });
+
+    expect(result).toMatchObject({ ok: false, failureCode: 'participant_not_found' });
+    expect(handle.pauseAgent).toHaveBeenCalledWith('worker-slug');
+    // No residue claiming a pause that is not in force.
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+    // And no audit row for a pause that never happened.
+    const rows = getDb()
+      .prepare(`SELECT COUNT(*) as c FROM safety_audit WHERE kind = 'agent_control.paused'`)
+      .get() as { c: number };
+    expect(rows.c).toBe(0);
+  });
+
+  test('a runner that accepts the slug still succeeds (positive control)', () => {
+    const { workerId } = seedSession();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakePauseHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result.ok).toBe(true);
+    expect(getControlState('sess-1', workerId)?.pausedUntil).not.toBeNull();
+  });
+
+  test('resume is deliberately NOT symmetric — a gateless runner still succeeds', () => {
+    // The operator asked for the gate to be gone. The DB now says
+    // not-paused and the runner holds nothing: that is the desired end
+    // state, reached by a different route. Rolling back would re-assert a
+    // pause that is not in force, which is strictly worse.
+    const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 60_000, 'auto_resume');
+    const handle = {
+      resumeAgent: vi.fn(() => false),
+      getPendingDeliveries: vi.fn(() => 0),
+    };
+    const result = executeResumeParticipant({
+      msg: resumeMsgFor({ projectId: workerId }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('held no pause gate'));
   });
 });

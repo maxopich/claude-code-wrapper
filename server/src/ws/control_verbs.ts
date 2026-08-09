@@ -40,8 +40,8 @@ import {
  *   1. Validate the wire shape (reasonCode enum, 'other' + reasonText
  *      pairing, mode-specific topology guards).
  *   2. Validate the participant exists + isn't already in the target state
- *      (idempotent: re-mute returns wrapper_error `already_in_state` so a
- *      stale UI doesn't surface success-then-no-effect).
+ *      (idempotent: re-mute fails with `already_in_state` so a stale UI
+ *      doesn't surface success-then-no-effect).
  *   3. Flip the persistence layer (`per_agent_control.setParticipantMuted`).
  *      The DB write is the source-of-truth and MUST land before the
  *      router's in-memory set is updated; otherwise an R-B restart between
@@ -53,21 +53,35 @@ import {
  *      'agent_control.unmuted', reasonCode from the operator's choice,
  *      payload carries the agent slug + projectId).
  *   6. Send the `participant_mute_changed` ServerMsg echo so the client
- *      reducer can reconcile its optimistic flip.
+ *      reducer can reconcile its optimistic flip. Every `ok: false` above
+ *      ships as `participant_control_failed` instead — see that variant's
+ *      note in `shared/src/protocol.ts` for why it is not a `wrapper_error`.
  *
  * Why the OrchestratorSessionHandle.setMute call (step 4) sits between
  * the DB flip (3) and the audit write (5):
  *   - If audit append fails AFTER the router is updated, the operator's
- *     intent is honored but the trail breaks. Phase 4b logs + returns the
- *     `wrapper_error` so the operator can retry; the DB + router are
- *     already aligned, so a retry just re-attempts the audit.
+ *     intent is honored but the trail breaks. The handler logs and returns
+ *     `audit_write_failed`. Register B12: an earlier version of this note
+ *     said "a retry just re-attempts the audit" — it does not, because the
+ *     DB idempotency guard returns first. See the catch block itself.
  *   - If we ordered audit before router update + audit failed, we'd have
  *     to roll back the DB flip — adding atomicity complexity for a corner
  *     case that's already covered by the retry path.
  *
- * Failure code semantics (return-without-action):
+ * Failure code semantics:
+ *   - invalid_request          — the frame is malformed (unknown reasonCode,
+ *                                'other' with no reasonText, unknown kick
+ *                                mode). Nothing was read or written; the
+ *                                same frame will always fail. Register
+ *                                B21/N04: these nine sites used to return
+ *                                `already_in_state`, so a client bug reached
+ *                                the operator as "the agent is already muted"
+ *   - audit_write_failed       — the action APPLIED and the audit append
+ *                                threw. The only code here that does NOT
+ *                                mean "return-without-action" (register B12)
  *   - participant_not_found    — (sessionId, projectId) doesn't identify a
- *                                participant row
+ *                                participant row, or the live router has no
+ *                                agent by that slug (register B19)
  *   - chain_mute_unsupported   — Mute targeted in chain mode (§5.3)
  *   - orchestrator_cannot_kick — Mute targeted at the orchestrator's own
  *                                row (we reuse the kick failure code for
@@ -125,14 +139,14 @@ function runMuteUnmute(input: ExecuteMuteInput, targetMuted: boolean): ExecuteMu
   if (!isControlReasonCode(msg.reasonCode)) {
     return {
       ok: false,
-      failureCode: 'already_in_state', // misuse — fall back to a generic enum (no enum for "bad reasonCode" itself)
+      failureCode: 'invalid_request',
       message: `invalid reasonCode: ${JSON.stringify(msg.reasonCode)}`,
     };
   }
   if (msg.reasonCode === 'other' && !msg.reasonText?.trim()) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'invalid_request',
       message: "reasonCode='other' requires non-empty reasonText",
     };
   }
@@ -199,7 +213,17 @@ function runMuteUnmute(input: ExecuteMuteInput, targetMuted: boolean): ExecuteMu
   // torn down between getMultiAgentSession and here; we still write the
   // audit + return ok, but log the divergence so it's visible.
   if (input.orchestratorHandle) {
-    input.orchestratorHandle.setMute(participant.bus_agent_name, targetMuted);
+    // Register B19 (adjacent): `setMute` is a plain Set flip with no roster
+    // lookup, so unlike `pauseAgent` a false here cannot mean "unknown
+    // agent" — it can only mean the router mirror was ALREADY at the target
+    // while the DB was not, i.e. the two had drifted. Not an operator-facing
+    // failure (the flip we wanted is now true on both sides), but it is the
+    // signal that would explain a later "why was this agent muted?".
+    if (!input.orchestratorHandle.setMute(participant.bus_agent_name, targetMuted)) {
+      console.warn(
+        `[ws] executeMute(${msg.sessionId}/${msg.projectId}): router mute mirror for ${participant.bus_agent_name} was already ${targetMuted} while the DB was not — drift, now converged`,
+      );
+    }
   } else {
     console.warn(
       `[ws] executeMute(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to update router mute set`,
@@ -228,12 +252,21 @@ function runMuteUnmute(input: ExecuteMuteInput, targetMuted: boolean): ExecuteMu
   } catch (err) {
     console.error(`[ws] executeMute safety_audit append failed for ${msg.sessionId}`, err);
     // DB + router are already aligned with the new state — surface the
-    // audit failure but don't roll back. Operator can retry; the retry
-    // path's `already_in_state` short-circuit will short-circuit the DB
-    // step, so only the audit re-attempt runs.
+    // failure but don't roll back.
+    //
+    // Register B12: this used to say "the operator can retry; the retry
+    // path short-circuits the DB step so only the audit re-attempt runs."
+    // That is not what happens. `setParticipantMuted` is
+    // `UPDATE … WHERE muted != ?` returning `changes > 0`, so on the second
+    // attempt it matches zero rows and the handler returns at the
+    // `!dbChanged` guard ABOVE — the audit block is never reached again.
+    // The row stays applied and unaudited, and the operator has no verb
+    // that repairs it. `audit_write_failed` at least says so out loud
+    // instead of reporting the flip as a no-op; a repair path is a separate
+    // decision (it means writing history into an append-only log).
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'audit_write_failed',
       message: `safety_audit append failed: ${(err as Error).message}`,
     };
   }
@@ -376,14 +409,14 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
   if (!isControlReasonCode(msg.reasonCode)) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'invalid_request',
       message: `invalid reasonCode: ${JSON.stringify(msg.reasonCode)}`,
     };
   }
   if (msg.reasonCode === 'other' && !msg.reasonText?.trim()) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'invalid_request',
       message: "reasonCode='other' requires non-empty reasonText",
     };
   }
@@ -481,7 +514,30 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
   // (register B03) — so `undefined` means the session was torn down between
   // the lookup and here, and the DB row is the surviving record of intent.
   if (input.orchestratorHandle) {
-    input.orchestratorHandle.pauseAgent(participant.bus_agent_name);
+    // Register B19: this return value used to be discarded. `AgentRunner.
+    // pause()` returns false in two cases, and the first is the dangerous
+    // one — `!this.specs.has(agentName)`, i.e. the runner has never heard
+    // of this slug, so NO GATE WAS INSTALLED. Reporting `ok` with a
+    // `pausedUntil` there is register B03 all over again: the operator sees
+    // "paused until 14:32" while the worker keeps taking turns.
+    //
+    // So we undo the DB flip and fail. B03's own stated principle is that
+    // the rejection must leave "none of that residue behind claiming a
+    // pause that was never in force"; it just never covered this door.
+    // `participant_not_found` is the right code — the participant row
+    // exists, but the *live router* has no agent by that name, which is the
+    // same "no live target" family the two guards above use.
+    if (!input.orchestratorHandle.pauseAgent(participant.bus_agent_name)) {
+      clearParticipantPause(msg.sessionId, msg.projectId);
+      console.error(
+        `[ws] executePause(${msg.sessionId}/${msg.projectId}): runner refused to gate ${participant.bus_agent_name} — DB flip rolled back`,
+      );
+      return {
+        ok: false,
+        failureCode: 'participant_not_found',
+        message: `the live router has no agent named ${participant.bus_agent_name} — nothing was paused`,
+      };
+    }
   } else {
     console.warn(
       `[ws] executePause(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to install pause gate`,
@@ -515,7 +571,7 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
     console.error(`[ws] executePause safety_audit append failed for ${msg.sessionId}`, err);
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'audit_write_failed',
       message: `safety_audit append failed: ${(err as Error).message}`,
     };
   }
@@ -539,14 +595,14 @@ export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResu
   if (!isControlReasonCode(msg.reasonCode)) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'invalid_request',
       message: `invalid reasonCode: ${JSON.stringify(msg.reasonCode)}`,
     };
   }
   if (msg.reasonCode === 'other' && !msg.reasonText?.trim()) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'invalid_request',
       message: "reasonCode='other' requires non-empty reasonText",
     };
   }
@@ -597,7 +653,22 @@ export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResu
     };
   }
   if (input.orchestratorHandle) {
-    input.orchestratorHandle.resumeAgent(participant.bus_agent_name);
+    // Register B19, and deliberately NOT symmetric with pause. `resume()`
+    // returning false means the runner held no gate for this agent — but
+    // the operator asked for the gate to be gone, the DB column now says
+    // not-paused, and the runner is not holding anything. That is the
+    // desired end state, reached by a different route. Rolling back would
+    // re-assert a pause that is not in force, which is strictly worse than
+    // the divergence we just converged. Log it as the anomaly it is and
+    // return ok.
+    //
+    // Do not "fix" this into a failure branch to match pause above; the
+    // asymmetry is the point.
+    if (!input.orchestratorHandle.resumeAgent(participant.bus_agent_name)) {
+      console.warn(
+        `[ws] executeResume(${msg.sessionId}/${msg.projectId}): runner held no pause gate for ${participant.bus_agent_name} — DB and router had diverged, now converged`,
+      );
+    }
   } else {
     console.warn(
       `[ws] executeResume(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to release pause gate`,
@@ -622,7 +693,7 @@ export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResu
     console.error(`[ws] executeResume safety_audit append failed for ${msg.sessionId}`, err);
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'audit_write_failed',
       message: `safety_audit append failed: ${(err as Error).message}`,
     };
   }
@@ -733,14 +804,14 @@ export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResu
   if (!isControlReasonCode(msg.reasonCode)) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'invalid_request',
       message: `invalid reasonCode: ${JSON.stringify(msg.reasonCode)}`,
     };
   }
   if (msg.reasonCode === 'other' && !msg.reasonText?.trim()) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'invalid_request',
       message: "reasonCode='other' requires non-empty reasonText",
     };
   }
@@ -754,7 +825,10 @@ export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResu
   if (!isKickMode(msg.mode)) {
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      // `hard` is a *valid* mode we don't support yet and keeps its own
+      // `hard_kill_unsupported_v1` code, checked immediately below. This
+      // branch is only for values that are not kick modes at all.
+      failureCode: 'invalid_request',
       message: `invalid kick mode: ${JSON.stringify(msg.mode)}`,
     };
   }
@@ -843,7 +917,15 @@ export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResu
   // would re-seed via `initialKickedAgents` — log the divergence so
   // the operator can audit it.
   if (input.orchestratorHandle) {
-    input.orchestratorHandle.kickAgent(participant.bus_agent_name);
+    // Register B19 (adjacent): same reading as `setMute` above — an add-only
+    // Set, so false means the mirror already held this agent as kicked while
+    // the DB row did not. Converged either way; logged because a kick is
+    // irreversible and its provenance is worth being able to reconstruct.
+    if (!input.orchestratorHandle.kickAgent(participant.bus_agent_name)) {
+      console.warn(
+        `[ws] executeKick(${msg.sessionId}/${msg.projectId}): router kickedSet already held ${participant.bus_agent_name} while the DB did not — drift, now converged`,
+      );
+    }
   } else {
     console.warn(
       `[ws] executeKick(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to update router kickedSet`,
@@ -873,12 +955,14 @@ export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResu
   } catch (err) {
     console.error(`[ws] executeKick safety_audit append failed for ${msg.sessionId}`, err);
     // DB + router are already aligned with the kicked state (irreversibly).
-    // We surface the audit failure but don't roll back — same posture as
-    // mute. A retry's `participant_already_kicked` short-circuit would skip
-    // the DB step and only re-attempt the audit.
+    // We surface the failure but don't roll back — same posture as mute,
+    // including register B12's correction: a retry returns at the
+    // `participant_already_kicked` guard above and never re-reaches this
+    // block, so the audit row is not recoverable by retrying. Kick is the
+    // worst place for that gap, since the action cannot be undone either.
     return {
       ok: false,
-      failureCode: 'already_in_state',
+      failureCode: 'audit_write_failed',
       message: `safety_audit append failed: ${(err as Error).message}`,
     };
   }

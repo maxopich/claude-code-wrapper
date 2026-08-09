@@ -886,7 +886,25 @@ export function createOrchestratorRouter(params: {
       deliver?.(ev.destination, ev.text);
       return;
     }
+    // Register B16 (filed against chain.ts; this router had it too). The
+    // event is already persisted and counted against the hop budget, and
+    // `handleBusSend` has already told the sending agent "delivered" — so a
+    // bare warn here lost the message with no audit row and no operator
+    // signal. Every other drop in this router goes through
+    // `dispatchRouterDrop`; so does this one now.
+    //
+    // The `_sink` case above stays a plain warn: it is a worker addressing a
+    // recipient that exists in the protocol but has no meaning in
+    // orchestrator mode, which is a different (and unmapped) category.
     console.warn(`[orchestrator] event for unknown destination: ${ev.destination}`);
+    dispatchRouterDrop({
+      reasonCode: 'unknown_destination',
+      source: ev.source,
+      destination: ev.destination,
+      kind: ev.kind,
+      title: 'Message addressed to an unknown agent',
+      message: `${ev.source} addressed ${ev.destination}, who is not in this session's roster — the message was dropped`,
+    });
   };
 
   // Cebab-originated events (briefings, roster prompts, user prompts):

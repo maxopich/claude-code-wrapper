@@ -28,6 +28,9 @@ import type { RouterDropView } from '../../store';
 //   - kicked_destination  — info (Cluster C Phase 4d: stale routing
 //                                 attempt addressed at a kicked agent;
 //                                 operator-driven, not alarming)
+//   - unknown_destination — warn (register B16: a legitimate participant
+//                                 addressed a name nobody has; the message
+//                                 is lost and the sender was told otherwise)
 //
 // Forged-source is the only danger tier — it's a spoof attempt. F2 routing
 // violations tint warn. Operator-driven mute/kick drops tint info because
@@ -44,6 +47,10 @@ const REASON_TINT: Record<RouterDropView['reasonCode'], string> = {
   muted_source: 'router-drops-reason-info',
   kicked_source: 'router-drops-reason-info',
   kicked_destination: 'router-drops-reason-info',
+  // Register B16: warn, not info. Nobody asked for this one — a real
+  // participant addressed a name that does not exist, so a message the
+  // sender was told had been delivered is gone.
+  unknown_destination: 'router-drops-reason-warn',
 };
 
 const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
@@ -54,6 +61,7 @@ const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
   muted_source: 'muted source',
   kicked_source: 'kicked source (drain)',
   kicked_destination: 'kicked destination',
+  unknown_destination: 'unknown destination',
 };
 
 function formatTime(ts: number): string {

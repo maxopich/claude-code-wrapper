@@ -490,7 +490,22 @@ export function createChainRouter(params: {
       return;
     }
     if (!participantSet.has(ev.destination)) {
+      // Register B16: this was a bare `console.warn` while its three sibling
+      // drops above all went through `dispatchRouterDrop`. By the time we
+      // get here the event has been persisted, counted against the hop
+      // budget and folded into `lastPromptForAgent` — and `handleBusSend`
+      // already answered the sending agent "delivered". So the message was
+      // gone with no audit row and no operator notification, in a session
+      // whose hop count silently moved.
       console.warn(`[chain] event for non-participant: ${ev.destination}`);
+      dispatchRouterDrop({
+        reasonCode: 'unknown_destination',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Message addressed to an unknown agent',
+        message: `${ev.source} addressed ${ev.destination}, who is not in this chain — the message was dropped`,
+      });
       return;
     }
     // Hop-budget enforcement: the hop we just persisted is in the trail; if

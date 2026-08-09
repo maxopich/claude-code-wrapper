@@ -103,6 +103,13 @@ describe('ControllabilityFailureCode', () => {
       'orchestrator_cannot_kick',
       'pause_timeout_required',
       'pause_expiry_action_invalid',
+      // Register B21/N04 + B12: nine schema-validation sites and four
+      // audit-failure sites all used to answer `already_in_state`, which
+      // told the operator their click was a no-op in both cases. It never
+      // was: the first means the frame is broken, the second means the
+      // state changed and the hash-chained trail did not.
+      'invalid_request',
+      'audit_write_failed',
     ];
     for (const c of codes) {
       expect(CONTROLLABILITY_FAILURE_CODES.has(c)).toBe(true);

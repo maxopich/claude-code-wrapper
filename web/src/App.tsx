@@ -2313,7 +2313,7 @@ function AppShell({
                   onStart={view === 'chained-chat' ? startChain : startOrchestrator}
                   onStopMultiAgent={stopMultiAgent}
                   onResumeSession={resumeSession}
-                  wrapperErrorSeq={state.wrapperErrorSeq}
+                  failureSeq={state.failureSeq}
                   onSendUserPrompt={sendMultiAgentUserPrompt}
                   onContinueMultiAgent={continueMultiAgent}
                   onRetryWorker={retryWorker}
