@@ -3,8 +3,10 @@
 --
 -- The per-session "pause before a worker's first DANGEROUS command" opt-in
 -- (migration 011, "Item #5") has fired dangerous-only since PR #200 narrowed
--- the gate — `shouldPauseForMutation()` returns false for ordinary `mutate`
--- calls (server/src/bus/pause_gate.ts). But the backing flag was still named
+-- the gate — the pause gate returns `run` for ordinary `mutate` calls
+-- (`decidePauseForMutation` in server/src/bus/pause_gate.ts; this comment
+-- named it `shouldPauseForMutation()` until that symbol stopped existing).
+-- But the backing flag was still named
 -- `pause_on_mutation`, which reads as "pause on ANY mutation" and actively
 -- misleads (pause_gate.ts's docstring spends a paragraph un-teaching it).
 -- This renames the column to match what it does; the camelCase wire/web field

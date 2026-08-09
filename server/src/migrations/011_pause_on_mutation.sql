@@ -1,16 +1,32 @@
 -- Item #5 — opt-in pause-on-first-mutation + persisted mutation log for bus
--- sessions. Bus participants run with `bypassPermissions`, so without this
--- there is no human-in-the-loop check between the consultant guardrail prompt
--- and silent disk mutations. Three columns + one new table:
+-- sessions. No bus tool call is gated on a human, so without this there is no
+-- human-in-the-loop check between the consultant guardrail prompt and silent
+-- disk mutations. Three columns + one new table:
+--
+-- SUPERSEDED — READ THIS BEFORE THE LIST. What follows describes the gate AS
+-- SHIPPED IN THIS MIGRATION. Two later migrations changed it, and an operator
+-- reading here for the current safety model would over-trust the toggle:
+--
+--   * 027 narrowed the trigger to the `dangerous` category alone. Ordinary
+--     edits and MCP tool calls are logged and run free. The column is now
+--     named `pause_on_dangerous`.
+--   * 031 moved the pause state onto the mutation ROW. Every dangerous command
+--     from every agent needs its own approval, so `mutations_acknowledged`
+--     below is dead weight and the per-session slot no longer holds.
+--
+-- `server/src/bus/pause_gate.ts` is the live description.
 --
 --  1. multi_agent_sessions.pause_on_mutation — operator opt-in at session
---     start (UI: checkbox next to Lifecycle). When 1, the FIRST non-`read`
---     tool call from any worker triggers an awaiting_continue-style overlay;
---     operator clicks Continue (subsequent mutations auto-allow).
+--     start (UI: checkbox next to Lifecycle). When 1, a qualifying tool call
+--     from a worker halts the turn and asks the operator to approve it. As
+--     shipped here the trigger was any non-`read` call and the overlay was
+--     awaiting_continue-style; 027 and 031 changed both, as above.
 --
 --  2. multi_agent_sessions.mutations_acknowledged — flipped 0→1 when the
 --     operator clicks Continue on the pause banner. Persists across server
---     restart so an already-approved session doesn't re-pause on R-B.
+--     restart so an already-approved session doesn't re-pause on R-B. Dead
+--     since 031 moved the state onto the mutation row; left in place rather
+--     than dropped, because dropping a column rewrites the table.
 --
 --  3. multi_agent_sessions.pending_mutation_id — soft FK to the
 --     multi_agent_mutations row that caused the current pause. NULL when no

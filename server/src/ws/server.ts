@@ -1665,10 +1665,11 @@ export function startWsServer(server: HttpServer): WebSocketServer {
         });
         return;
       }
-      // F4: per-launch auth token. Workers under bypassPermissions can
-      //     spoof Origin/Host from a Node WS client trivially, so the
-      //     only real defense against a worker→WS hijack is requiring a
-      //     secret they can't read (mode 0600 on ~/.cebab/auth-token).
+      // F4: per-launch auth token. A bus worker's tool calls are all
+      //     auto-approved (no human gate on Bash), so it can spoof
+      //     Origin/Host from a Node WS client trivially, and the only real
+      //     defense against a worker→WS hijack is requiring a secret it
+      //     can't read (mode 0600 on ~/.cebab/auth-token).
       const u = new URL(req.url ?? '/', 'http://x');
       if (!verifyToken(u.searchParams.get('token'))) {
         console.warn('[ws] reject: bad token');

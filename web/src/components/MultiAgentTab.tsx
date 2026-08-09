@@ -382,7 +382,7 @@ export function DraftView(props: {
   return (
     <div className="multi-agent multi-agent-draft">
       <div className="multi-agent-draft-body">
-        {/* PR-1: load-bearing safety banner. Surfaces the bypassPermissions
+        {/* PR-1: load-bearing safety banner. Surfaces the auto-approve
             posture that's baked into server/src/bus/runner.ts but is
             otherwise invisible in the UI. Non-dismissible. */}
         <BypassPermissionsBanner />
@@ -518,9 +518,10 @@ export function DraftView(props: {
                              * slot away in the same row, opened a six-line
                              * dialog. The register calls uninstall "the more
                              * consequential half"; it is the opposite — install
-                             * GRANTS the capability (headless bypassPermissions,
-                             * the project's own hooks auto-executing on every
-                             * bus hop), uninstall revokes it. Confirming the
+                             * GRANTS the capability (headless runs with every
+                             * tool call auto-approved, the project's own hooks
+                             * auto-executing on every bus hop), uninstall
+                             * revokes it. Confirming the
                              * grant and not the revoke is the right direction.
                              *
                              * The real case for a gate here is narrower: two
@@ -557,7 +558,7 @@ export function DraftView(props: {
                       ) : (
                         <button
                           className="primary-btn"
-                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless with bypassPermissions (tool calls auto-approved — no human-in-the-loop)."
+                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless: every tool call is auto-approved with no human in the loop — bypass in effect. Only AskUserQuestion is ever surfaced to you."
                           onClick={() =>
                             // U16: was a `window.confirm`. Same words, same
                             // friction — an in-app dialog the theme reaches.
@@ -572,8 +573,9 @@ export function DraftView(props: {
                                   </p>
                                   <p>
                                     During multi-agent sessions this project&apos;s agent runs
-                                    headless with <code>bypassPermissions</code> — tool calls are
-                                    auto-approved, with no human in the loop.
+                                    headless — every tool call is auto-approved, with no human in
+                                    the loop (<code>bypass</code> in effect). The one exception is{' '}
+                                    <code>AskUserQuestion</code>, which is surfaced to you.
                                   </p>
                                 </>
                               ),
@@ -653,7 +655,7 @@ export function DraftView(props: {
               operator opts in explicitly per session. Survives R-B once set. */}
           <label
             className="ma-pause-mutation-checkbox"
-            title="When enabled, the session pauses before the first dangerous command (rm, sudo, force-push, curl|sh, writes to system or secret paths, destructive infra/cluster/DB ops) from any worker and asks for your approval. Ordinary edits and MCP tool calls run without a prompt. Subsequent dangerous commands auto-allow once you click Continue. Survives a Cebab server restart."
+            title="When enabled, the session pauses before EVERY dangerous command (rm, sudo, force-push, curl|sh, writes to system or secret paths, destructive infra/cluster/DB ops) from any worker and asks for your approval. Each command needs its own Continue — approving one does not disarm the toggle — and workers are gated independently, so pausing one does not let another through. Ordinary edits and MCP tool calls run without a prompt. Survives a Cebab server restart."
           >
             <input
               type="checkbox"
@@ -2098,9 +2100,11 @@ export function ActiveRunView(props: {
 
 /**
  * Item #6: trust signal per bus participant, joined render-time from the
- * project's `trusted` flag. Bus workers always run with bypassPermissions, so
- * trust is not a runtime gate here — the chip exposes which projects the
- * operator has vouched for, which is otherwise invisible from this surface.
+ * project's `trusted` flag. Trust is not a runtime gate here — the bus's
+ * `canUseTool` (server/src/bus/runner.ts) never reads the project's trust
+ * flag; it allows every tool but `AskUserQuestion` for any agent that is not
+ * the orchestrator. So the chip exposes which projects the operator has
+ * vouched for, which is otherwise invisible from this surface.
  *
  * Returns null when no project matches the slug (degenerate case: the project
  * was uninstalled/deleted mid-run). Caller renders nothing in that case.
@@ -2109,9 +2113,13 @@ function ParticipantTrustChip(props: { slug: string; projects: Project[] }) {
   const project = props.projects.find((p) => p.busAgentName === props.slug);
   if (!project) return null;
   const trusted = project.trusted;
+  // One sentence, both arms — it drifted into two copies once already, and the
+  // claim it drifted into was wrong in both (register X01/X11).
+  const busNote =
+    "Bus workers auto-approve every tool call regardless of trust, so this signal is informational here — the bus gate never reads the project's trusted flag.";
   const title = trusted
-    ? `${project.name}: trusted. In a single-agent chat this project auto-allows every tool. Bus workers always run with bypassPermissions, so this trust signal is informational here — the worker's tool calls bypass the gate regardless.`
-    : `${project.name}: untrusted. In a single-agent chat this project would prompt for non-edit tools. Bus workers always run with bypassPermissions, so this trust signal is informational here — the worker's tool calls bypass the gate regardless.`;
+    ? `${project.name}: trusted. In a single-agent chat this project auto-allows every tool. ${busNote}`
+    : `${project.name}: untrusted. In a single-agent chat this project would prompt for non-edit tools. ${busNote}`;
   return (
     <span
       className={`trust-tag ${trusted ? 'trusted' : 'untrusted'}`}

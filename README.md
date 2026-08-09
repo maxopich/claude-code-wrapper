@@ -51,9 +51,10 @@ npm run bootstrap
 ```
 
 `npm run bootstrap` exists because the repo's `.npmrc` sets
-`ignore-scripts=true` (a supply-chain guard — bus agents run under
-`bypassPermissions`, so a malicious transitive `postinstall` would be direct
-RCE), which means a plain `npm install` deliberately does **not** build
+`ignore-scripts=true` (a supply-chain guard — no bus tool call is ever gated on
+a human, so auto-approve is bypass in effect and a malicious transitive
+`postinstall` would be direct RCE), which means a plain `npm install`
+deliberately does **not** build
 `better-sqlite3`. The bootstrap script — pure Node, no shell, runnable on a
 fresh clone — does the three required steps in order: `npm install`, then the
 one re-enabled native build via `prebuild-install` (a prebuilt binary on
