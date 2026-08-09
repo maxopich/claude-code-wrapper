@@ -101,7 +101,7 @@ function render(draftParticipants: number[]): { onAddParticipant: ReturnType<typ
           defaultHopBudget={30}
           onStart={vi.fn()}
           onResumeSession={vi.fn()}
-          wrapperErrorSeq={0}
+          failureSeq={0}
           onRefreshIterations={vi.fn()}
           onClearIterations={vi.fn()}
           onSaveTemplate={vi.fn()}

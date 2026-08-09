@@ -158,7 +158,21 @@ export type RouterDropReasonCode =
    * answers "did the orchestrator try to talk to the kicked worker after
    * the kick?") without re-engaging the participant.
    */
-  | 'kicked_destination';
+  | 'kicked_destination'
+  /**
+   * Register B16: `ev.destination` names nobody in the roster. Both routers
+   * reached this case through a bare `console.warn` — the event was
+   * persisted, counted against the hop budget, and then vanished, while
+   * `bus_send` had already answered the sending agent "delivered". Every
+   * sibling drop went through `dispatchRouterDrop`; this one did not, so the
+   * operator got no notification and the audit log no row.
+   *
+   * Distinct from `unknown_source`, which is an allowlist filter (F2 —
+   * somebody claiming an identity they do not have). This is a routing miss:
+   * a legitimate participant addressed a name that does not exist, which in
+   * practice means a typo or a hallucinated roster entry.
+   */
+  | 'unknown_destination';
 
 /**
  * Cluster A Phase 6 — extended §7 vocabulary (subset that has source sites
@@ -343,6 +357,15 @@ export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
  *   - orchestrator_cannot_kick  — Kick targeted at the orchestrator row
  *   - pause_timeout_required    — `timeoutMs` missing or non-positive
  *   - pause_expiry_action_invalid — `expiryAction` not one of PAUSE_EXPIRY_ACTIONS
+ *   - invalid_request           — the control frame itself is malformed
+ *   - audit_write_failed        — the action APPLIED and the audit append threw
+ *
+ * Register B21/N04: the last two exist because nine schema-validation sites
+ * and four audit-failure sites all used to return `already_in_state`, and one
+ * of them said so in an inline comment ("misuse — fall back to a generic
+ * enum"). The three semantic groups have opposite operator responses — fix
+ * your client, retry, and *the state changed but the trail did not* — so
+ * collapsing them onto one code told the operator the wrong thing three ways.
  */
 export type ControllabilityFailureCode =
   | 'chain_mute_unsupported'
@@ -354,7 +377,28 @@ export type ControllabilityFailureCode =
   | 'participant_already_kicked'
   | 'orchestrator_cannot_kick'
   | 'pause_timeout_required'
-  | 'pause_expiry_action_invalid';
+  | 'pause_expiry_action_invalid'
+  /**
+   * The frame did not typecheck at runtime: unknown `reasonCode`,
+   * `reasonCode: 'other'` with no `reasonText`, or an unknown kick `mode`.
+   * Nothing was read, nothing was written — the operator's own client is
+   * what needs fixing, and a retry of the same frame will fail identically.
+   */
+  | 'invalid_request'
+  /**
+   * The action **took effect** — the `multi_agent_participants` column is
+   * flipped and the router mirror is updated — and then the hash-chained
+   * `safety_audit` append threw. Reported separately from `already_in_state`
+   * because the operator's correct response is the opposite one: not "your
+   * click was a no-op" but "the state changed and the trail has a gap".
+   *
+   * Retrying the verb does NOT repair it. The DB idempotency guard
+   * (`UPDATE … WHERE muted != ?`) matches zero rows on the second attempt
+   * and returns before the audit block is reached, so the row stays applied
+   * and unaudited. `control_verbs.ts` used to carry a comment claiming the
+   * opposite; see the note there.
+   */
+  | 'audit_write_failed';
 
 export const CONTROLLABILITY_FAILURE_CODES: ReadonlySet<ControllabilityFailureCode> = new Set([
   'chain_mute_unsupported',
@@ -367,6 +411,8 @@ export const CONTROLLABILITY_FAILURE_CODES: ReadonlySet<ControllabilityFailureCo
   'orchestrator_cannot_kick',
   'pause_timeout_required',
   'pause_expiry_action_invalid',
+  'invalid_request',
+  'audit_write_failed',
 ]);
 
 export function isControllabilityFailureCode(v: unknown): v is ControllabilityFailureCode {
@@ -3072,6 +3118,46 @@ export type ServerMsg =
       reasonCode: ControlReasonCode;
       reasonText?: string;
       actor: 'operator';
+      ts: number;
+    }
+  /**
+   * Register B21/B12/B19: the negative counterpart of the three echoes
+   * above. A rejected control verb used to ship as
+   * `wrapper_error { kind: 'process_crashed', message: '<code>: <text>' }`,
+   * which reached nobody:
+   *
+   *   - `notifyFromServerMsg` returns early for any `wrapper_error` carrying
+   *     a `sessionId`, on the grounds that the store renders those as a
+   *     session banner; and
+   *   - the store cannot, because a **bus** session id is deliberately
+   *     absent from `sessionToProject` / `sessionsByProject` (see the
+   *     `auto_retry` case, which guards for exactly this). Its fallback
+   *     invented a `SessionView` under whatever single-agent project
+   *     happened to be selected, flagged `status: 'error'`, and told the
+   *     operator the claude process had crashed.
+   *
+   * So refusing to mute the orchestrator — a guard-rail rejection the server
+   * gets right — fabricated a phantom errored chat session in an unrelated
+   * project and showed nothing at all in the multi-agent UI.
+   *
+   * A rejected control action is not a session error: the session is healthy
+   * and still running. It gets its own envelope, and the operator-facing
+   * toast is fanned out by the dispatcher server-side rather than by a new
+   * client case (`notifyFromServerMsg`'s header: route via the dispatcher or
+   * you are probably double-toasting).
+   */
+  | {
+      type: 'participant_control_failed';
+      sessionId: string;
+      projectId: number;
+      /** Which verb was refused — drives the toast title and the row that
+       *  should stop showing a spinner. `unmute`/`resume` are distinct from
+       *  `mute`/`pause` because the operator's next move differs. */
+      verb: 'mute' | 'unmute' | 'pause' | 'resume' | 'kick';
+      failureCode: ControllabilityFailureCode;
+      /** Human-readable detail. Never the only signal — `failureCode` is
+       *  what a client should branch on. */
+      message: string;
       ts: number;
     }
   | {

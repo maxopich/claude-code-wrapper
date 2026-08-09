@@ -13,6 +13,7 @@ import type {
   PendingRetryDescriptor,
   Project,
   RecoveryContextView,
+  RouterDropReasonCode,
   ServerMsg,
   SessionPermissionMode,
   SessionSummary,
@@ -448,18 +449,12 @@ export type MultiAgentAutoRetry = {
  */
 export type RouterDropView = {
   auditRowId: string;
-  // Cluster C Phase 4b adds `muted_source`; Phase 4d adds `kicked_source`
-  // and `kicked_destination`. Keep this in sync with the server's
-  // RouterDropReasonCode in shared/src/protocol.ts. Inline-list rather
-  // than `import type` to keep the type fully local for the reducer.
-  reasonCode:
-    | 'forged_source'
-    | 'worker_to_user'
-    | 'worker_to_worker'
-    | 'unknown_source'
-    | 'muted_source'
-    | 'kicked_source'
-    | 'kicked_destination';
+  // Was an inline copy of the server's union, with a comment asking the next
+  // author to keep it in sync by hand. Adding `unknown_destination` (register
+  // B16) is what made it diverge, and this module already imports
+  // `WrapperErrorKind` from the same file — so "keep the type local for the
+  // reducer" was buying nothing. One declaration, in shared.
+  reasonCode: RouterDropReasonCode;
   source: string;
   destination: string;
   kind: string;
@@ -744,11 +739,16 @@ export type AppState = {
   permissionModeBySession: Record<string, SessionPermissionMode>;
   // Workspace settings reported by the server. `null` means we haven't asked yet.
   settings: SettingsView | null;
-  // Monotonic counter bumped on every `wrapper_error`. Pending-state effects
-  // key off it to clear stuck spinners when an async action fails — it's the
-  // only generic "an error happened" signal (wrapper_error otherwise routes
-  // into a chat session's message list, invisible to the multi-agent tab).
-  wrapperErrorSeq: number;
+  // Monotonic counter bumped on every failure envelope — `wrapper_error` and
+  // `participant_control_failed`. Pending-state effects key off it to clear
+  // stuck spinners when an async action fails; it is the only generic "an
+  // error happened" signal (a `wrapper_error` otherwise routes into a chat
+  // session's message list, invisible to the multi-agent tab).
+  //
+  // Was `wrapperErrorSeq` until `participant_control_failed` became the
+  // second source. A name that says wrapperError while counting two things
+  // is the drift this repo keeps paying for, so it was renamed with them.
+  failureSeq: number;
   // Multi-agent draft + view state.
   multiAgent: MultiAgentState;
   /** Cluster D Phase 6: app-wide auth-expired slice. See AuthExpiredState
@@ -855,7 +855,7 @@ export const initialState: AppState = {
   liveSessions: {},
   permissionModeBySession: {},
   settings: null,
-  wrapperErrorSeq: 0,
+  failureSeq: 0,
   // Cluster D Phase 6: starts undefined; populated when wrapper_error
   // with kind='auth_expired' lands. Cleared on next session_started.
   authExpired: undefined,
@@ -928,6 +928,37 @@ function appendMessage(
 function projectFor(state: AppState, sessionId: string): number | null {
   const pid = state.sessionToProject[sessionId];
   return pid === undefined ? null : pid;
+}
+
+/**
+ * Cluster D Phase 6: promote `auth_expired` into the top-level slice so the
+ * app-wide AuthExpiredBanner can mount. Per-session inline rendering (the
+ * chat message-list 'error' entry) and the toast (routed by the dispatcher)
+ * stay independent; this slice is the durable in-page signal.
+ *
+ * Extracted from the `wrapper_error` case when that case grew a second exit
+ * — a bus-scoped error returns early, and the banner must not be something
+ * that early return can swallow.
+ *
+ * Returns `state.authExpired` unchanged for every other kind.
+ */
+function authExpiredAfter(
+  state: AppState,
+  kind: WrapperErrorKind,
+  message: string,
+): AuthExpiredState | undefined {
+  if (kind !== 'auth_expired') return state.authExpired;
+  const now = Date.now();
+  return {
+    firstSeenMs: state.authExpired?.firstSeenMs ?? now,
+    lastSeenMs: now,
+    count: (state.authExpired?.count ?? 0) + 1,
+    lastMessage: message,
+    // Re-surface the banner on every fresh observation — the operator may
+    // have dismissed it, then attempted another message, so the dismiss
+    // should not silence the second failure.
+    dismissed: false,
+  };
 }
 
 export type Action =
@@ -2807,6 +2838,31 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     }
 
     case 'wrapper_error': {
+      // A **bus** session id is deliberately absent from `sessionToProject` /
+      // `sessionsByProject` (see the `auto_retry` case, which guards for the
+      // same thing). Without this check the fallback below would resolve to
+      // `activeProjectId`, find no existing session, and invent one flagged
+      // `status: 'error'` — a phantom crashed chat in whatever single-agent
+      // project happened to be selected. That is what a refused control verb
+      // used to do; those now ship as `participant_control_failed`, and this
+      // guard is what stops the next bus-scoped sender re-creating it.
+      //
+      // Still bump `failureSeq` — a genuine bus-side error should clear
+      // pending spinners even though it has no chat session to land in —
+      // and still promote `auth_expired`, so the app-wide banner is not
+      // something this guard can swallow. (`classifyError`'s auth path is
+      // the single-agent turn loop today, so that combination should not
+      // arise; carrying it costs one expression and removes the question.)
+      const busScoped = Boolean(
+        msg.sessionId && state.multiAgent.active?.sessionId === msg.sessionId,
+      );
+      if (busScoped) {
+        return {
+          ...state,
+          failureSeq: state.failureSeq + 1,
+          authExpired: authExpiredAfter(state, msg.kind, msg.message),
+        };
+      }
       const projectId = msg.sessionId
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
         : state.activeProjectId;
@@ -2822,26 +2878,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         runStartedAt: null,
         heldMessages: [],
       };
-      // Cluster D Phase 6: ALSO promote `auth_expired` into the top-level
-      // slice so the app-wide AuthExpiredBanner can mount. Per-session
-      // inline rendering (the chat message-list 'error' entry below) and
-      // the toast notification (already routed by the dispatcher) stay
-      // independent; this slice is the durable in-page signal.
-      const now = Date.now();
-      const nextAuthExpired =
-        msg.kind === 'auth_expired'
-          ? {
-              firstSeenMs: state.authExpired?.firstSeenMs ?? now,
-              lastSeenMs: now,
-              count: (state.authExpired?.count ?? 0) + 1,
-              lastMessage: msg.message,
-              // Re-surface the banner on every fresh observation — the
-              // operator may have dismissed it, then attempted another
-              // message, so the dismiss should not silence the second
-              // failure.
-              dismissed: false,
-            }
-          : state.authExpired;
+      const nextAuthExpired = authExpiredAfter(state, msg.kind, msg.message);
       return {
         ...putSession(state, projectId, sessionId, {
           ...session,
@@ -2863,9 +2900,31 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             },
           ],
         }),
-        wrapperErrorSeq: state.wrapperErrorSeq + 1,
+        failureSeq: state.failureSeq + 1,
         authExpired: nextAuthExpired,
       };
+    }
+
+    case 'participant_control_failed': {
+      // Register B21/B12/B19: a refused mute/unmute/pause/resume/kick. The
+      // server used to send these as `wrapper_error` — see the variant's
+      // note in shared/src/protocol.ts for the two-step disappearing act
+      // that produced (no toast, and a phantom errored SessionView invented
+      // under an unrelated single-agent project).
+      //
+      // Bumping `failureSeq` is the WHOLE job here, and deliberately so: it
+      // is what stops the row's pending spinner. The operator-facing text
+      // arrives as a dispatcher `notification`, which is the house channel
+      // (see notifyFromServerMsg's header). Do not add a `lastControlFailure`
+      // field unless something renders it — an unread slice is the exact
+      // shape the register keeps filing.
+      //
+      // Not attempted: reconciling the participant's control state on an
+      // `already_in_state` failure. The envelope says the flip did not
+      // happen, not what the true state is, so there is nothing to write.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      return { ...state, failureSeq: state.failureSeq + 1 };
     }
 
     case 'participant_mute_changed': {

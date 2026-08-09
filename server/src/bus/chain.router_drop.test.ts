@@ -121,4 +121,27 @@ describe('[security][BE-9] chain router-drop → safety_audit + envelope', () =>
     expect(selectAuditRows()[0]?.reason_code).toBe('unknown_source');
     expect(captured.notifications[0]?.reasonCode).toBe('unknown_source');
   });
+
+  // Register B16. Unlike the three above, this drop is reached AFTER the
+  // event has been persisted and the hop counted — and after `handleBusSend`
+  // told the sending agent "delivered". It used to be a bare `console.warn`,
+  // so the message vanished with no audit row and no operator notification
+  // while the session's hop count had silently moved.
+  test('a chain participant addressing a name nobody has drops as unknown_destination', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: 'coder', destination: 'ghost' }));
+
+    expect(selectAuditRows()[0]?.reason_code).toBe('unknown_destination');
+    expect(captured.notifications[0]?.reasonCode).toBe('unknown_destination');
+    expect(captured.drops[0]?.reasonCode).toBe('unknown_destination');
+  });
+
+  test('a legitimate hop between two chain participants still does NOT drop', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' }));
+
+    expect(selectAuditRows()).toEqual([]);
+    expect(captured.notifications).toHaveLength(0);
+    expect(captured.drops).toHaveLength(0);
+  });
 });

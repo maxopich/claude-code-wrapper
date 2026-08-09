@@ -107,7 +107,7 @@ export function MultiAgentTab(props: {
   onStopMultiAgent: (sessionId: string) => void;
   onResumeSession: (sessionId: string) => void;
   /** Monotonic; bumps on every wrapper_error so pending spinners clear on failure. */
-  wrapperErrorSeq: number;
+  failureSeq: number;
   onSendUserPrompt: (sessionId: string, text: string) => void;
   onContinueMultiAgent: (sessionId: string) => void;
   onRetryWorker: (sessionId: string) => void;
@@ -291,7 +291,7 @@ export function DraftView(props: {
   defaultHopBudget: number | null;
   onStart: () => void;
   onResumeSession: (sessionId: string) => void;
-  wrapperErrorSeq: number;
+  failureSeq: number;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
   onSaveTemplate: (name: string, mode: 'chain' | 'orchestrator') => void;
@@ -318,7 +318,7 @@ export function DraftView(props: {
   const { gate, requestConfirm } = useConfirmGate();
   const [namingOpen, setNamingOpen] = useState(false);
   // In-flight signals for async WS round-trips. Cleared on success (this
-  // view unmounts when a session becomes active) or on wrapperErrorSeq
+  // view unmounts when a session becomes active) or on failureSeq
   // bumping (the attempt failed and we stayed on the draft view).
   const [pendingResumeId, setPendingResumeId] = useState<string | null>(null);
   const [startPending, setStartPending] = useState<'chain' | 'orchestrator' | null>(null);
@@ -326,7 +326,7 @@ export function DraftView(props: {
   useEffect(() => {
     setPendingResumeId(null);
     setStartPending(null);
-  }, [props.wrapperErrorSeq]);
+  }, [props.failureSeq]);
   useEffect(() => {
     // Iterations list replaced (refresh / clear reply) — drop stale spinners.
     setPendingResumeId(null);

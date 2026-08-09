@@ -165,6 +165,31 @@ describe('[security][BE-9] orchestrator router-drop → safety_audit + envelope'
     expect(captured.drops[0]?.reasonCode).toBe('unknown_source');
   });
 
+  // Register B16. Note what makes this one different from the four above:
+  // they all reject before the event is persisted. This one is reached
+  // AFTER `sink.onEvent` has run and the hop has been counted, and after
+  // `handleBusSend` already answered the sending agent "delivered" — so
+  // before this it was a bare `console.warn` and the message was simply
+  // gone, with no audit row and nothing for the operator to see.
+  test('a real worker addressing a name nobody has drops as unknown_destination', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: 'ghost' }));
+
+    expect(selectAuditRows()[0]).toMatchObject({ reason_code: 'unknown_destination' });
+    expect(captured.notifications[0]).toMatchObject({ reasonCode: 'unknown_destination' });
+    expect(captured.drops[0]?.reasonCode).toBe('unknown_destination');
+  });
+
+  test('the drop envelope names who addressed whom, so the operator can find the typo', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: 'revewer' }));
+
+    expect(captured.drops[0]).toMatchObject({
+      source: ORCHESTRATOR_AGENT_NAME,
+      destination: 'revewer',
+    });
+  });
+
   test('orchestrator → orchestrator (self-message) and orchestrator → worker do NOT drop', () => {
     const { router, captured } = makeRouter();
     // orchestrator → worker is a legit deliver path; the F2/F3 filters let

@@ -107,6 +107,7 @@ import { getSafetyAuditRow } from '../notifications/safety_audit.js';
 import {
   isControlReasonCode,
   isKickMode,
+  type ControllabilityFailureCode,
   type ForensicBusEvent,
   type ForensicMutation,
   type KickForensicsSnapshot,
@@ -2865,6 +2866,83 @@ export async function buildIterationsList(): Promise<IterationSummary[]> {
   return out;
 }
 
+/** Operator-facing name for each control verb, used in the toast title. */
+const CONTROL_VERB_LABEL: Record<ControlVerb, string> = {
+  mute: 'Mute',
+  unmute: 'Unmute',
+  pause: 'Pause',
+  resume: 'Resume',
+  kick: 'Kick',
+};
+
+type ControlVerb = 'mute' | 'unmute' | 'pause' | 'resume' | 'kick';
+
+/**
+ * Register B21/B12/B19: report a refused control verb to the operator.
+ *
+ * The four `mute_participant` / `pause_participant` / `resume_participant` /
+ * `kick_participant` handlers each used to answer a rejection with
+ * `wrapper_error { kind: 'process_crashed', message: '<code>: <text>' }`,
+ * which arrived nowhere. `notifyFromServerMsg` skips any `wrapper_error`
+ * carrying a `sessionId` (it assumes the store renders a session banner);
+ * the store can't, because a bus session id is deliberately absent from
+ * `sessionToProject`, so its fallback invented a `SessionView` in whatever
+ * single-agent project was selected and flagged it `status: 'error'`.
+ * Refusing to mute the orchestrator therefore produced a phantom crashed
+ * chat session in an unrelated project and nothing in the multi-agent UI.
+ *
+ * Two channels now, both of which actually land:
+ *
+ *   - the typed `participant_control_failed` envelope, which the store
+ *     routes onto the active `MultiAgentRun` (matching the `auto_retry`
+ *     guard) and which bumps `failureSeq` so pending row spinners stop; and
+ *   - a dispatcher notification, per `notifyFromServerMsg`'s own header
+ *     ("route via the dispatcher instead" of adding client cases).
+ *
+ * The notification is **operational**, including for `audit_write_failed`,
+ * which reads like a miscategorisation and is not: a safety-class emit
+ * appends to `safety_audit` first, through the very path that just threw —
+ * the emit would fail and the operator would learn nothing. The audit gap
+ * itself is already logged by the executor. Every failure gets a toast (not
+ * just the surprising ones): the UI disables the impossible actions, so a
+ * rejection reaching here means a client-side guard missed.
+ */
+function sendControlFailure(
+  conn: Conn,
+  verb: ControlVerb,
+  args: {
+    sessionId: string;
+    projectId: number;
+    failureCode: ControllabilityFailureCode;
+    message: string;
+  },
+): void {
+  send(conn.ws, {
+    type: 'participant_control_failed',
+    sessionId: args.sessionId,
+    projectId: args.projectId,
+    verb,
+    failureCode: args.failureCode,
+    message: args.message,
+    ts: Date.now(),
+  });
+  emitNotification(
+    {
+      class: 'operational',
+      severity: args.failureCode === 'audit_write_failed' ? 'error' : 'warn',
+      // Same participant + verb + code collapses; a different code does not,
+      // because "already muted" and "the audit trail broke" are not the same
+      // event even when the operator clicked the same button twice.
+      dedupeKey: `control_failed:${args.sessionId}:${args.projectId}:${verb}:${args.failureCode}`,
+      title: `${CONTROL_VERB_LABEL[verb]} refused`,
+      message: args.message,
+      sessionId: args.sessionId,
+      reasonCode: args.failureCode,
+    },
+    (out) => send(conn.ws, out),
+  );
+}
+
 async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
   switch (msg.type) {
     case 'list_projects': {
@@ -3493,9 +3571,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // in-memory mutedSet (handle.setMute), writes safety_audit, then
       // emits the participant_mute_changed state-change echo. Topology
       // failures (chain-mode, orchestrator target, unknown participant,
-      // already-in-state) return as wrapper_error with a typed
-      // ControllabilityFailureCode in the `message` field so the client
-      // reducer can roll back the optimistic flip cleanly.
+      // already-in-state) ship as `participant_control_failed` — see
+      // `sendControlFailure` for why they stopped being `wrapper_error`.
       const live = getLiveSession(msg.sessionId);
       const orchestratorHandle =
         live?.mode === 'orchestrator'
@@ -3509,11 +3586,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, msg.type === 'mute_participant' ? 'mute' : 'unmute', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
@@ -3556,11 +3633,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, 'pause', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
@@ -3681,11 +3758,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, 'resume', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
@@ -3732,11 +3809,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, 'kick', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
@@ -5352,7 +5429,7 @@ async function runOneTurn(
         // operator-facing toast is fanned out by the dispatcher as a
         // sticky safety notification.
         if (out.type === 'result' && out.subtype === 'error_max_turns') {
-          emitNotification(
+          const capNotified = emitNotification(
             {
               class: 'safety',
               severity: 'warn',
@@ -5374,6 +5451,20 @@ async function runOneTurn(
             },
             (m) => send(conn.ws, m),
           );
+          // Register S10: this result used to be discarded, alone among the
+          // safety-class emits in this file — so a failed hash-chained
+          // append for a cap hit was completely silent, in the one
+          // subsystem whose value is that it has no gaps. There is nothing
+          // to roll back (the cap already fired and the `result` message is
+          // already on the wire), so the log line IS the remedy: it gives
+          // the operator something to correlate against `verifyChain()`'s
+          // next boot report. `safety_emit_result.test.ts` is the gate that
+          // keeps every future safety emit from re-acquiring this shape.
+          if (!capNotified.ok) {
+            console.error(
+              `[ws] max_turns.hit safety notification failed for ${sessionId}: ${capNotified.error}`,
+            );
+          }
         }
         // Cluster A Phase 3 (B2): typed `rate_limit_event` also fans out as
         // an operational warn toast via the dispatcher. We do this only on
