@@ -13,8 +13,11 @@
  *     subcomponent + badge color without re-classifying client-side.
  *   - Bus runner stream tap ([`server/src/bus/runner.ts`]) — classifies every
  *     `tool_use` block on assistant messages and (a) persists non-`read`
- *     calls into `multi_agent_mutations`, (b) optionally pauses the worker
- *     before the first mutation when `pause_on_dangerous=1`.
+ *     calls into `multi_agent_mutations`, (b) when `pause_on_dangerous=1`,
+ *     halts the worker before each `dangerous` call. `mutate` is logged, not
+ *     gated — the flag name is the trigger. (Register X19: this line said
+ *     "before the first mutation", quoting the renamed flag while describing
+ *     the trigger it was renamed away from.)
  *
  * Design rules:
  *   - Pure: no I/O, no side effects, no clock reads. Same input → same output.

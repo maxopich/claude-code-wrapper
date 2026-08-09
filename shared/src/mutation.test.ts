@@ -768,7 +768,7 @@ describe('classifyBashCommand — Windows-native dangerous detection [security]'
 /**
  * Laundering holes from the 1 Aug 2026 issue register (D01–D04). Each of the
  * first three let a genuinely destructive command classify BELOW `dangerous`,
- * and `shouldPauseForMutation` fires only on `dangerous` — while `read` is
+ * and the pause gate (`decidePauseForMutation`) fires only on `dangerous` — while `read` is
  * skipped wholesale by the bus mutation tap (no row, no badge, no audit, no
  * pause). So these are not missed warnings; they are calls the operator was
  * never offered the chance to stop. D04 is the mirror image: a false positive

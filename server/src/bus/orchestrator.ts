@@ -178,8 +178,14 @@ export type StartOrchestratorOpts = {
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
   /**
    * Item #5: opt-in pause-on-dangerous. When `true`, the bus runner's
-   * mutation tap fires `awaiting_continue` + a banner before the first
-   * non-`read` tool call from any worker. Persisted into
+   * mutation tap halts a worker's turn before each `dangerous` tool call and
+   * puts it in front of the operator — NOT before the first non-`read` call;
+   * ordinary edits and MCP calls classify as `mutate` and run free. Every
+   * dangerous command needs its own approval (migration 031 moved the state
+   * onto the mutation row), and the halt throws `PausedForMutationError`
+   * rather than setting `awaiting_continue`, which is the R-B recovery state
+   * and produced two Continue buttons while the two were coupled (B05).
+   * Persisted into
    * `multi_agent_sessions.pause_on_dangerous` at session start; survives R-B.
    * Default `false` (resolved at `start_multi_agent` handler from
    * `msg.pauseOnDangerous`).

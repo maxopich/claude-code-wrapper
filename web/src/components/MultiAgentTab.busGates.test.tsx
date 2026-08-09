@@ -15,7 +15,7 @@ import { ReopenProvider } from './reopen/ReopenContext';
  *
  * The register calls uninstall "the more consequential half". It is the
  * opposite: install GRANTS the capability (that project's agent then runs
- * headless under `bypassPermissions`, with its own hooks auto-executing on
+ * headless with every tool call auto-approved, its own hooks auto-executing on
  * every bus hop and no human in the loop), and uninstall revokes it. Gating
  * the grant and not the revoke points the right way.
  *
@@ -186,12 +186,21 @@ describe('bus install keeps its gate, now in-app (U16)', () => {
     expect(h.onInstallBus).not.toHaveBeenCalled();
   });
 
-  test('confirming installs; the dialog still names the bypassPermissions posture', () => {
+  test('confirming installs; the dialog still names the auto-approve posture', () => {
     const h = render(NOT_INSTALLED);
     click(rowButton('Install bus'));
     // The one fact the old native dialog existed to deliver must survive the
     // move — this is a grant of headless, auto-approved tool execution.
-    expect(document.querySelector('.gate-modal')?.textContent).toContain('bypassPermissions');
+    //
+    // This used to assert the literal `bypassPermissions`, which pinned a
+    // false mechanism in place: both routers wire the ask-gate hook, so bus
+    // turns run `permissionMode: 'default'` with a live `canUseTool` and the
+    // bypass branch is reached only by tests (`bus/guardrail.ts`). The grant
+    // being made is unchanged; the words for it are now true.
+    const text = document.querySelector('.gate-modal')?.textContent ?? '';
+    expect(text).toContain('auto-approved');
+    expect(text).toContain('no human in the loop');
+    expect(text).not.toContain('bypassPermissions');
     click(gateButton('Install bus'));
     expect(h.onInstallBus).toHaveBeenCalledWith(1);
   });

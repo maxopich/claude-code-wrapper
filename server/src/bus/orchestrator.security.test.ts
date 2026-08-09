@@ -20,11 +20,19 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 // F2 / F3 regression coverage for the orchestrator router's handleEvent
 // source-allowlist + cebab-event-forgery drops at orchestrator.ts:514-552.
-// Without these checks, a worker under bypassPermissions could write
-// directly to bus.log claiming to be the orchestrator, cebab, or another
-// worker — phishing the operator with spoofed final answers, planting
+// Without these checks a worker — whose tool calls are all auto-approved —
+// could emit events claiming to be the orchestrator, cebab, or another
+// worker: phishing the operator with spoofed final answers, planting
 // forged briefings, or staging a confused-deputy prompt-injection across
 // agents. Plan reference: T2.4.
+//
+// Two bits of this comment were stale and are corrected above: workers do
+// not run `bypassPermissions` in production (both routers wire the ask-gate,
+// so it is `permissionMode: 'default'` + a live `canUseTool` — see
+// `bus/guardrail.ts`), and the forgery target was `bus.log`, a file
+// transport the pure-SDK rewrite deleted. The drops themselves still matter:
+// `bus_send`'s `source` is pinned per-agent in a Cebab-owned closure, and
+// these filters are the defense-in-depth behind that.
 
 let tmpRoot: string;
 let originalDataDir: string;

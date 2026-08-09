@@ -9,8 +9,9 @@
  * WHY THIS EXISTS. `npm audit` has no per-advisory ignore: the only knobs
  * are `--audit-level` (blunt — drops a whole severity band) and `--omit=dev`
  * (blunter — stops looking at dev deps entirely, which in this repo is the
- * wrong direction: bus agents run under bypassPermissions, so a poisoned
- * dev dependency is squarely in the threat model — see .npmrc). So the only
+ * wrong direction: no bus tool call is gated on a human, so auto-approve is
+ * bypass in effect and a poisoned dev dependency is squarely in the threat
+ * model — see .npmrc, which carries the full wording). So the only
  * previously available response to one unfixable advisory was to disable the
  * gate for ALL of them, which is what ci.yml's old "temporarily set
  * continue-on-error" comment resorted to.
