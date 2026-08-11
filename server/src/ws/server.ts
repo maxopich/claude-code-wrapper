@@ -60,12 +60,14 @@ import {
 } from '../repo/project_authority.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import {
+  abandonPendingMcpGates,
   awaitMcpTrustDecisions,
   makeTrustGateState,
   type TrustGateOutcome,
   type TrustGateState,
 } from '../repo/mcp_trust_gate.js';
 import {
+  abandonPendingStartGates,
   ACKNOWLEDGMENT_TRIGGER,
   awaitEnvInjectionAck,
   makeStartGateState,
@@ -82,6 +84,7 @@ import {
 } from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
 import {
+  abandonPendingBusGates,
   awaitBusTrustDecision,
   type BusTrustGateState,
   makeBusTrustGateState,
@@ -1569,20 +1572,30 @@ type Conn = {
   /**
    * Cluster B Phase 4b: TOFU spawn-gate state. Holds parked `pendingId`
    * promises (one per emitted `mcp_auto_install_pending`) and the per-session
-   * deny_once set. Cleared implicitly on disconnect via Conn drop.
+   * deny_once set. Drained by `abandonPendingMcpGates` in `ws.on('close')`.
+   *
+   * Register B20: said "Cleared implicitly on disconnect via Conn drop." A
+   * PROMISE map is not cleared by dropping its owner — the unsettled promise
+   * keeps the awaiting spawn's async frame alive, and that frame keeps this
+   * `Conn`. Contrast `capturedPrompts` below, which is plain data and really
+   * is collected with the Conn; the distinction is what makes one of these
+   * comments true and three of them false.
    */
   trustGate: TrustGateState;
   /**
    * Cluster G Phase 4 (D6/D11): bus-install TOFU gate state. Holds parked
    * `pendingId` promises (one per emitted `bus_auto_install_pending`) and
-   * the per-Conn `deny_once` set keyed by projectId. Cleared implicitly on
-   * disconnect via Conn drop.
+   * the per-Conn `deny_once` set keyed by projectId. Drained by
+   * `abandonPendingBusGates` in `ws.on('close')` — register B20, same
+   * correction as `trustGate` above.
    */
   busTrustGate: BusTrustGateState;
   /**
    * Cluster B Phase 5: env-injection start-gate state. Holds parked
    * `pendingStartId` promises (one per emitted `session_start_gated`).
-   * Cleared implicitly on disconnect.
+   * Drained by `abandonPendingStartGates` in `ws.on('close')` — register
+   * B20, and the one of the three where draining by RESOLVING would have
+   * spawned a session nobody acknowledged. It rejects.
    */
   startGate: StartGateState;
   /**
@@ -1605,7 +1618,11 @@ type Conn = {
    * Lives on the Conn (not in module-level state) so a second operator
    * pane attaching to the same session doesn't inherit the first
    * pane's held-prompt — each pane manages its own retry intent.
-   * Cleared implicitly on WS close.
+   *
+   * Cleared implicitly on WS close — and unlike the three gate maps above,
+   * that is literally true here: this holds plain data, not promises, so
+   * dropping the `Conn` really does collect it. Register B20 corrected the
+   * other three rather than this one; don't "fix" this to match them.
    *
    * The map's existence-as-signal is also the "this session is held"
    * indicator that gates `runOneTurn`'s finally-block status flip.
@@ -2206,6 +2223,20 @@ function onConnection(ws: WebSocket): void {
     conn.pendingPermissions.clear();
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
+    // Register B20: the three spawn gates park a promise per pending decision
+    // and each one's doc claimed a disconnect took care of it. None did —
+    // dropping the `Conn` does not settle a promise, so the awaiting spawn
+    // stayed suspended forever and its async frame held the `Conn` alive.
+    // These three lines are what makes those docs true. They REJECT rather
+    // than resolve: a resolve carries an operator decision, and for the start
+    // gate it means "acknowledged, spawn". See `gate_abandon.ts`.
+    const abandoned =
+      abandonPendingMcpGates(conn.trustGate, 'client disconnected') +
+      abandonPendingBusGates(conn.busTrustGate, 'client disconnected') +
+      abandonPendingStartGates(conn.startGate, 'client disconnected');
+    if (abandoned > 0) {
+      console.log(`[ws] released ${abandoned} parked spawn gate(s) on disconnect`);
+    }
     // Cluster G Phase 3 (G1): tear down the active-runs dispatcher so its
     // listener + heartbeat don't outlive the WS. The closed-ws guard inside
     // `emitActiveRuns` would no-op the send, but the timer still fires; the
@@ -3979,6 +4010,16 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         reason: 'completed' | 'stopped' | 'crashed',
         iterationId: string | null,
       ) => {
+        // Register B11: cancel every pause-expiry timer for the ending
+        // session. This is the SECOND of two `onEnded` closures — the shared
+        // sink used by resume/re-attach has done this since Phase 4c2, and
+        // this fresh-start one did not, so a session started in this
+        // connection left its timers armed past teardown. They then fired
+        // `executeExpireParticipant`, which re-checks durable state and
+        // returns `noop_diverged` — but only AFTER writing its trigger audit
+        // row, so the hash-chained log accrued expiry events for a session
+        // that had ended.
+        getPauseExpiryRegistry().clearSession(sessionId);
         send(conn.ws, {
           type: 'multi_agent_ended',
           sessionId,

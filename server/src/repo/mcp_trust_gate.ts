@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ServerMsg, McpServerView } from '@cebab/shared/protocol';
+import { abandonPendingGates, MAX_PENDING_GATES } from '../gate_abandon.js';
 import { listForServer, recordTrustDecision } from './mcp_trust.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 
@@ -49,9 +50,16 @@ import { appendSafetyAudit } from '../notifications/safety_audit.js';
 //     start_session calls (re-prompts on the next connection).
 
 /**
- * Per-connection gate state. Lives on the `Conn` (in ws/server.ts) so the
- * pending Map clears on disconnect (the operator's parked decisions die with
- * their session; a reconnect re-prompts).
+ * Per-connection gate state. Lives on the `Conn` (in ws/server.ts), and the
+ * `ws.on('close')` handler calls `abandonPendingMcpGates` on it so a parked
+ * decision does not outlive the operator who was asked for it.
+ *
+ * Register B20: that used to read "the pending Map clears on disconnect (the
+ * operator's parked decisions die with their session)". It did not. Dropping
+ * the `Conn` reference does not settle a promise — the awaiting spawn stayed
+ * suspended forever and kept the whole `Conn` alive through its own async
+ * frame. The drain is now explicit; see `gate_abandon.ts` for why it rejects
+ * instead of resolving.
  */
 export type TrustGateState = {
   /**
@@ -76,6 +84,13 @@ export type PendingTrustEntry = {
   originPath: string;
   /** Resolved by the mcp_trust_decision handler. Removes itself from the Map. */
   resolve: (outcome: TrustGateOutcome) => void;
+  /**
+   * Register B20: the parked promise's `reject`. Used only by
+   * `abandonPendingMcpGates` when the operator's connection goes away.
+   * Deliberately separate from `resolve`, which carries a DECISION and runs
+   * `applyDecision` — persisting a choice nobody made.
+   */
+  abandon: (err: Error) => void;
 };
 
 /** What the operator decided for one pending. Drives both persistence and
@@ -218,11 +233,29 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
       ...(previousSha ? { previousSha } : {}),
     };
 
-    const spawnPromise = new Promise<void>((resolveSpawn) => {
+    // H15: fail closed rather than park an unbounded number of decisions.
+    if (input.gate.pending.size >= MAX_PENDING_GATES) {
+      console.warn(
+        `[mcp-gate] refusing ${server.name}: ${MAX_PENDING_GATES} decisions already parked on this connection`,
+      );
+      applyDecision({
+        projectId: input.projectId,
+        gate: input.gate,
+        server,
+        originPath,
+        decision: { kind: 'deny_once' },
+        outcome,
+        sessionKey,
+      });
+      continue;
+    }
+
+    const spawnPromise = new Promise<void>((resolveSpawn, rejectSpawn) => {
       input.gate.pending.set(pendingId, {
         pendingId,
         serverName: server.name,
         originPath,
+        abandon: rejectSpawn,
         resolve: (decision) => {
           // Always clean up the Map before doing persistence so a thrown
           // recordTrustDecision can't leak a dangling entry (the spawn
@@ -252,6 +285,18 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
 
   await Promise.all(promises);
   return outcome;
+}
+
+/**
+ * Register B20: reject every MCP decision still parked on this connection.
+ * Called from `ws.on('close')`. Returns how many were released.
+ *
+ * The awaiting `awaitMcpTrustDecisions` throws, which propagates out of
+ * `gateProjectsForSpawn` and abandons the spawn — the correct outcome, since
+ * the operator who was being asked has gone.
+ */
+export function abandonPendingMcpGates(gate: TrustGateState, reason: string): number {
+  return abandonPendingGates(gate.pending, 'mcp-trust', reason);
 }
 
 // ---- internals ----

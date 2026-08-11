@@ -253,7 +253,12 @@ export function createChainRouter(params: {
   /** Always-run finalizer (every terminal path: stop, crash, completion),
    *  independent of `onTeardown`'s temp/crashed gating and of the sink's
    *  detach/rebind state. Used to dispose the liveness observer. */
-  onFinalize?: () => void;
+  /**
+   * Register B09: receives the teardown `reason` so a finalizer can tell an
+   * ending the operator asked for from one a turn produced. The bus handles
+   * use it to decide whether to abort the runner — see their closures.
+   */
+  onFinalize?: (reason: MultiAgentEndedReason) => void;
   /** Wake the destination agent with `text` as its next turn. */
   deliver?: (agentName: string, text: string) => void;
   /** Hard cap on persisted hops. Required so the router enforces the
@@ -316,7 +321,7 @@ export function createChainRouter(params: {
     // First: kill any pending liveness timer so it can't fire a spurious
     // `stalled` mid-teardown. Always runs, exactly once (ended-guarded).
     try {
-      onFinalize?.();
+      onFinalize?.(reason);
     } catch (err) {
       console.error('[chain] onFinalize failed', err);
     }
@@ -1133,11 +1138,15 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onTeardown,
-    onFinalize: () => {
+    onFinalize: (reason) => {
       // Interactive AskUserQuestion: drain any parked questions so a
       // stopped/ended session doesn't leave a canUseTool Promise dangling.
       rejectQuestionsForSession(sessionId, 'session ended');
       activity.dispose();
+      // Register B09, same as the orchestrator and with the same
+      // completion exemption — which chain mode is exactly where it bites.
+      // See the orchestrator's copy of this note.
+      if (reason !== 'completed') runner.stop();
     },
     deliver,
     hopBudget,

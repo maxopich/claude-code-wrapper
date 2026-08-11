@@ -434,7 +434,12 @@ export function createOrchestratorRouter(params: {
   /** Always-run finalizer (stop/crash/completion), independent of
    *  `onTeardown`'s temp/crashed gating and of sink detach/rebind. Disposes
    *  the liveness observer. */
-  onFinalize?: () => void;
+  /**
+   * Register B09: receives the teardown `reason` so a finalizer can tell an
+   * ending the operator asked for from one a turn produced. The bus handles
+   * use it to decide whether to abort the runner — see their closures.
+   */
+  onFinalize?: (reason: MultiAgentEndedReason) => void;
   deliver?: (agentName: string, text: string) => void;
   /** Hard cap on persisted hops. Required so the router enforces the
    *  ceiling; the caller resolves precedence. */
@@ -571,7 +576,7 @@ export function createOrchestratorRouter(params: {
     // First: kill any pending liveness timer so it can't fire a spurious
     // `stalled` mid-teardown. Always runs, exactly once (ended-guarded).
     try {
-      onFinalize?.();
+      onFinalize?.(reason);
     } catch (err) {
       console.error('[orchestrator] onFinalize failed', err);
     }
@@ -1701,11 +1706,38 @@ export function wireOrchestratorSession(p: {
     onEvent: p.onEvent,
     onEnded: p.onEnded,
     onTeardown,
-    onFinalize: () => {
+    onFinalize: (reason) => {
       // Interactive AskUserQuestion: drain any parked questions so a
       // stopped/ended session doesn't leave a canUseTool Promise dangling.
       rejectQuestionsForSession(sessionId, 'session ended');
       activity.dispose();
+      // Register B09: stop the runner too. `router.teardown()` ended the DB
+      // row, unregistered the live session and fired `sink.onEnded` — but
+      // only `handle.stop()` ever called `runner.stop()`, so the operator's
+      // Stop button was clean and every OTHER route out was not. A
+      // budget-exhaust, a completion or a crash reported `ended` while an
+      // in-flight SDK turn kept running: the exact leak `runner/lifecycle.ts`
+      // exists to prevent, burning subscription quota with nobody watching.
+      //
+      // It goes here rather than in the router because the router has no
+      // `runner` in scope — which is why it never stopped it. `onFinalize`
+      // already exists for this same class of dangling-promise cleanup and
+      // is called first inside `teardown`, so the seam was sitting right
+      // there. `runner.stop()` is `abortController?.abort()`, idempotent, so
+      // `handle.stop()` calling it too is harmless.
+      //
+      // NOT on 'completed', and this is the half the finding conflated. A
+      // completion happens BECAUSE a turn produced the terminal event — from
+      // inside that turn's `bus_send`, before its own `result` message — and
+      // the `--resume` checkpoint (`onSessionId` → `upsertAgentSession`) is
+      // written on `result`. Aborting there destroys Cebab's own lineage row
+      // for the agent that just finished, which `computeRecoveryContext`
+      // reads. `mock_replay.test.ts` documents the ordering and was the test
+      // that caught it. A completing turn also ends on its own moments later
+      // and closes its query in the `finally`, so there is nothing to leak:
+      // the leak this fixes is 'stopped' and 'crashed', where nothing else
+      // will ever end the turn.
+      if (reason !== 'completed') runner.stop();
     },
     deliver,
     hopBudget,
