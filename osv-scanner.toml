@@ -109,35 +109,48 @@
 # adds churn ahead of the real bump. `npm update <pkg> --package-lock-only`
 # keeps a retirement PR to the packages it is actually retiring.
 #
-# Five entries remain, covering two packages, all expiring 2026-08-20. hono
-# 4.12.34 becomes installable 2026-08-10T02:36Z and nanoid 3.3.17 at
-# 2026-08-10T10:39Z, leaving ten days to land them.
-
-[[IgnoredVulns]]
-id = "GHSA-8j4g-w8fx-2239"
-ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "hono 4.12.32 (transitive of @modelcontextprotocol/sdk ← @anthropic-ai/claude-agent-sdk). MEDIUM (CVSS 5.3, ReDoS in CORS middleware via Access-Control-Request-Headers). Affects every version below the fix, so the pre-existing 4.12.27 was equally exposed — the advisory is simply newer than main's last scan. FIXED VERSION 4.12.34, published 2026-08-03T02:36Z, eligible under min-release-age=7 from 2026-08-10T02:36Z. Cooldown wait: bump and DELETE this entry together. Cebab never mounts hono at all, let alone its CORS middleware; the package arrives only as a transitive dependency of the agent SDK's MCP client."
-
-[[IgnoredVulns]]
-id = "GHSA-2v37-7h3g-55p8"
-ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "nanoid 3.3.16 (transitive of postcss ← vite, build toolchain only). High — a custom generator can loop indefinitely when size is zero. FIXED VERSION 3.3.17, published 2026-08-03T10:39Z, eligible under min-release-age=7 from 2026-08-10T10:39Z. Cooldown wait, not an unfixed defect: bump and DELETE this entry together. Cebab never calls nanoid; postcss uses it internally with default parameters during the web build, so the custom-generator path is unreachable and nothing here runs in a request path."
-
-# The three below arrived with the same 4.12.34 fix as GHSA-8j4g-w8fx-2239 and
-# wait on the same cooldown. They are listed separately because OSV-Scanner
-# filters by advisory ID, not by package.
-
-[[IgnoredVulns]]
-id = "GHSA-54fx-42gc-7vw4"
-ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "hono 4.12.32 — MEDIUM (CVSS 5.3), algorithmic-complexity DoS in the Language middleware. FIXED VERSION 4.12.34, eligible under min-release-age=7 from 2026-08-10T02:36Z. Cebab never mounts hono, let alone its Language middleware; it arrives only as a transitive of @modelcontextprotocol/sdk ← @anthropic-ai/claude-agent-sdk. Retire with the 4.12.34 bump alongside its three siblings."
-
-[[IgnoredVulns]]
-id = "GHSA-79qm-7rj5-m7r9"
-ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "hono 4.12.32 — LOW (CVSS 3.7), the Proxy helper does not strip response headers named in the Connection header. FIXED VERSION 4.12.34, same cooldown as above. Cebab runs no hono proxy. Listed because OSV-Scanner exits non-zero on ANY unfiltered finding regardless of severity, unlike the audit gate."
-
-[[IgnoredVulns]]
-id = "GHSA-f23p-vx2j-j53r"
-ignoreUntil = "2026-08-20T00:00:00Z"
-reason = "hono 4.12.32 — MEDIUM (CVSS 4.8), memo() retains SSR output across requests, disclosing one user's render to another. The most serious of this batch in the abstract, and unreachable here: Cebab does no hono SSR and never mounts the framework. FIXED VERSION 4.12.34, same cooldown."
+# Zero entries remain. The allowlist is empty, and that is the intended
+# resting state — every excuse here is meant to be temporary.
+#
+# Inventory refreshed 2026-08-11. All five remaining holds are RETIRED here
+# with their lockfile bumps in this same commit, exactly as each entry's own
+# reason text instructed:
+#
+#   GHSA-2v37-7h3g-55p8                   nanoid 3.3.16 → 3.3.17
+#   GHSA-8j4g-w8fx-2239, GHSA-54fx-42gc-7vw4,
+#   GHSA-79qm-7rj5-m7r9, GHSA-f23p-vx2j-j53r   hono   4.12.32 → 4.13.0
+#
+# Every one was a supply-chain cooldown wait, not an unfixed CVE. Both
+# cooldowns elapsed on 2026-08-10 (hono's fix at 02:36Z, nanoid's at 10:39Z);
+# this landed on 2026-08-11.
+#
+# hono went to 4.13.0, NOT the 4.12.34 the entries named, and that is a
+# deliberate departure from their instruction. Reasoning, so the next reader
+# does not "correct" it back:
+#
+#   - The four advisories are fixed in 4.12.34; 4.13.0 is above it, so all
+#     four are retired either way.
+#   - The entries were written 2026-08-08, when 4.13.0 (published
+#     2026-08-03T21:54Z) was still inside the 7-day cooldown and could not be
+#     resolved at all. Their "do not take 4.13.x" sat alongside "do not take
+#     4.12.33", whose stated reason — it retires nothing — does not apply to
+#     4.13.0.
+#   - `npm update hono nanoid --package-lock-only` resolves to 4.13.0 on its
+#     own: hono is a transitive peer under `^4.11.4` / `^4`. Forcing exactly
+#     4.12.34 would need an `overrides` pin (a permanent artifact to express a
+#     one-day preference) or a hand-written integrity hash. Both are worse
+#     than the version they would buy.
+#   - The resulting diff is six lines: version/resolved/integrity for the two
+#     packages. No package added, removed, or re-resolved — which is the check
+#     the "keeps a retirement PR to the packages it is actually retiring" rule
+#     above is really asking for.
+#
+# nanoid stopped at 3.3.17, the version its entry named. 3.3.18 exists
+# (published 2026-08-07T16:41Z) but is inside the cooldown until
+# 2026-08-14T16:41Z, so npm will not resolve it yet — and it fixes nothing
+# outstanding.
+#
+# If you are adding the first new entry after this line, keep the shape the
+# retired ones used: name the FIXED VERSION, the publish timestamp, the date
+# the cooldown elapses, and set `ignoreUntil` just past it so a forgotten
+# excuse fails the build instead of lingering.

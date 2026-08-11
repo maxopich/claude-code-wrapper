@@ -109,10 +109,34 @@ describe('[security] osv-scanner.toml bookkeeping', () => {
     expect([...new Set(ENTRIES.map((e) => e.id))]).toHaveLength(ENTRIES.length);
   });
 
-  it('parsed a non-empty allowlist — anti-vacuity', () => {
-    // Every case in this file iterates ENTRIES. An empty parse satisfies the
-    // FIXED VERSION and duplicate-id cases by having nothing to check.
-    expect(ENTRIES.length).toBeGreaterThan(0);
+  it('the parser really parses — anti-vacuity, measured on a fixture', () => {
+    // Every case above iterates ENTRIES, so a broken `parseIgnoreFile` would
+    // satisfy them by having nothing to check.
+    //
+    // This used to assert `ENTRIES.length > 0` against the live file, which
+    // conflated two different facts: "the parser works" and "the allowlist is
+    // non-empty". Only the first is an invariant. An EMPTY allowlist is the
+    // intended resting state — every entry is a temporary excuse — and it
+    // arrived on 2026-08-11 when the last five holds were retired, at which
+    // point the old floor failed on the success case and the only ways out
+    // were deleting the guard or keeping a dead entry to feed it.
+    //
+    // So prove the machinery on input this test owns. The live file is then
+    // free to be empty without disarming anything.
+    const fixture = [
+      '[[IgnoredVulns]]',
+      'id = "GHSA-aaaa-bbbb-cccc"',
+      'ignoreUntil = "2099-01-01T00:00:00Z"',
+      'reason = "fixture — FIXED VERSION 9.9.9"',
+      '',
+      '[[IgnoredVulns]]',
+      'id = "GHSA-dddd-eeee-ffff"',
+      'ignoreUntil = "2099-01-01T00:00:00Z"',
+      'reason = "fixture — FIXED VERSION 8.8.8"',
+    ].join('\n');
+    const parsed = parseIgnoreFile(fixture);
+    expect(parsed.map((e) => e.id)).toEqual(['GHSA-aaaa-bbbb-cccc', 'GHSA-dddd-eeee-ffff']);
+    expect(parsed[0].reason).toMatch(/FIXED VERSION 9\.9\.9/);
   });
 });
 
