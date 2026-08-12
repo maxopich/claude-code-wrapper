@@ -409,7 +409,22 @@ describe('computeRecoveryContext (Item #7)', () => {
     // promise.
     createMultiAgentSession('s1', 'orchestrator', '001');
     insertEventAt('s1', 'quiet', 1);
-    for (let i = 0; i < 5000; i++) insertEventAt('s1', 'chatty', 1000 + i);
+    // Bulk-insert the noise WITHOUT the per-row helper. Two costs scale with
+    // the row count and both are removable: `insertEventAt` re-`prepare`s its
+    // statement every call, and a bare INSERT is its own implicit transaction
+    // and therefore its own commit. Measured locally, 5,000 rows: 59ms
+    // prepare-per-call+bare, 3ms cached+batched. Locally that never mattered;
+    // on the windows-2022 runner the first form exceeded vitest's 5s timeout,
+    // which is how this test first failed in CI. The row count IS the point of
+    // the case, so bound the cost rather than the count.
+    const db = getDb();
+    const insert = db.prepare(
+      `INSERT INTO multi_agent_events (session_id, ts, source, destination, kind, text)
+       VALUES (?, ?, 'chatty', 'cebab', 'reply', '')`,
+    );
+    db.transaction(() => {
+      for (let i = 0; i < 5000; i++) insert.run('s1', 1000 + i);
+    })();
     upsertAgentAt('s1', 'chatty', 999_999); // clean
     // `quiet` never checkpointed.
 
