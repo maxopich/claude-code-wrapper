@@ -399,6 +399,43 @@ describe('computeRecoveryContext (Item #7)', () => {
     expect(ctx!.interruptedAgents.map((a) => a.agentName)).toEqual(['beta', 'gamma', 'alpha']);
   });
 
+  test('[security] D29: an agent buried under thousands of newer events is still reported', () => {
+    // The register's suggested fix for D29 was "accept and apply a row cap".
+    // This is the case that makes it wrong. `quiet` is interrupted, and its
+    // one event is the OLDEST of 5,001 — any newest-N cap smaller than that
+    // drops it, and the disclosure then tells the operator nothing needs
+    // re-checking. The docstring's "false negatives are not possible by
+    // construction" is the invariant at stake, so it gets a test rather than a
+    // promise.
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    insertEventAt('s1', 'quiet', 1);
+    for (let i = 0; i < 5000; i++) insertEventAt('s1', 'chatty', 1000 + i);
+    upsertAgentAt('s1', 'chatty', 999_999); // clean
+    // `quiet` never checkpointed.
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.interruptedAgents).toEqual([
+      { agentName: 'quiet', lastEventTs: 1, lastCheckpointTs: null },
+    ]);
+    expect(ctx!.staleSinceTs).toBe(5999);
+  });
+
+  test('D29: a session whose only events are back-dated still resolves its max', () => {
+    // The aggregate reads MAX(ts), not "the last row by id". Insertion order
+    // and ts order diverge in tests (and after a clock step), and the old
+    // loop-over-every-row computed the max explicitly for exactly that reason
+    // — moving to SQL must not quietly become "take the last row".
+    createMultiAgentSession('s1', 'orchestrator', '001');
+    insertEventAt('s1', 'workerX', 900);
+    insertEventAt('s1', 'workerX', 100); // inserted later, older ts
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx!.staleSinceTs).toBe(900);
+    expect(ctx!.interruptedAgents).toEqual([
+      { agentName: 'workerX', lastEventTs: 900, lastCheckpointTs: null },
+    ]);
+  });
+
   test('staleSinceTs reflects the highest event ts overall, even when synthetic', () => {
     createMultiAgentSession('s1', 'orchestrator', '001');
     insertEventAt('s1', 'workerE', 100);
@@ -617,5 +654,40 @@ describe('migration 026 — tool input/output capture', () => {
     expect(capToolIoJson(undefined)).toBeNull();
     expect(capToolIoJson(null)).toBeNull();
     expect(capToolIoJson({ a: 1 })).toBe('{"a":1}');
+  });
+
+  // ---- Register D32: the cap is named for BYTES; it used to count UTF-16 ----
+
+  test('capToolIoJson caps on BYTES, not UTF-16 units', () => {
+    // 30k three-byte codepoints is ~90 KB of UTF-8 but only ~30k `.length`,
+    // so the old comparison let it straight through — well past the 64 KB
+    // budget the cap exists to hold the WS frame inside.
+    const wide = '中'.repeat(30 * 1024);
+    const capped = capToolIoJson({ content: wide });
+    expect(capped).not.toBeNull();
+    const parsed = JSON.parse(capped!) as { truncated?: boolean; bytes?: number; preview?: string };
+    expect(parsed.truncated).toBe(true);
+    // And the reported size is the real one, not the code-unit count.
+    expect(parsed.bytes).toBe(Buffer.byteLength(JSON.stringify({ content: wide }), 'utf8'));
+    expect(parsed.bytes).toBeGreaterThan(80 * 1024);
+  });
+
+  test('capToolIoJson preview is bounded in bytes and never split mid-codepoint', () => {
+    const wide = '中'.repeat(30 * 1024);
+    const parsed = JSON.parse(capToolIoJson({ content: wide })!) as { preview: string };
+    expect(Buffer.byteLength(parsed.preview, 'utf8')).toBeLessThanOrEqual(8 * 1024);
+    // A byte-wise cut through a 3-byte character would decode to U+FFFD, and a
+    // preview that ends in a replacement char reads as corruption rather than
+    // as truncation.
+    expect(parsed.preview).not.toContain('\uFFFD'); // U+FFFD REPLACEMENT CHARACTER
+  });
+
+  test('capToolIoJson still passes an ASCII payload just under the cap', () => {
+    // Anti-vacuity: switching to byte counting must not start rejecting the
+    // plain-ASCII values that make up almost every real row.
+    const body = 'x'.repeat(60 * 1024);
+    const out = capToolIoJson({ content: body });
+    expect(out).not.toBeNull();
+    expect(JSON.parse(out!)).toEqual({ content: body });
   });
 });

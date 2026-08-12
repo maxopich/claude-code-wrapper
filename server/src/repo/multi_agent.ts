@@ -601,6 +601,7 @@ function parseClassifierReason(json: string | null): BashClassifierReason | null
  * value (a cyclic structure throws → drop it rather than fail the write).
  */
 const TOOL_IO_CAP_BYTES = 64 * 1024;
+const TOOL_IO_PREVIEW_BYTES = 8 * 1024;
 export function capToolIoJson(value: unknown): string | null {
   if (value === undefined || value === null) return null;
   let json: string | undefined;
@@ -610,12 +611,37 @@ export function capToolIoJson(value: unknown): string | null {
     return null;
   }
   if (json === undefined) return null;
-  if (json.length <= TOOL_IO_CAP_BYTES) return json;
+  // Register D32: both of these used `json.length`, which counts UTF-16 code
+  // units, against a cap named for BYTES. A CJK- or emoji-heavy tool result
+  // could be roughly three times the intended budget and still pass, and the
+  // `bytes` field then understated it by the same factor — while the whole
+  // point of the cap, per the comment above, is bounding the WS frame the log
+  // projector pages against. Frames are measured in bytes, so measure bytes.
+  const bytes = Buffer.byteLength(json, 'utf8');
+  if (bytes <= TOOL_IO_CAP_BYTES) return json;
   return JSON.stringify({
     truncated: true,
-    bytes: json.length,
-    preview: json.slice(0, 8 * 1024),
+    bytes,
+    preview: truncateJsonToBytes(json, TOOL_IO_PREVIEW_BYTES),
   });
+}
+
+/**
+ * Cut `s` to at most `maxBytes` of UTF-8 without splitting a codepoint.
+ *
+ * A bare `Buffer.from(s).subarray(0, n).toString()` would leave a partial
+ * multi-byte sequence at the boundary, which decodes to U+FFFD — a preview
+ * that ends in a replacement character reads as data corruption rather than
+ * as truncation. Fast path first: pure ASCII needs no scan.
+ */
+function truncateJsonToBytes(s: string, maxBytes: number): string {
+  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s;
+  const buf = Buffer.from(s, 'utf8');
+  let end = maxBytes;
+  // Walk back off any continuation byte (0b10xxxxxx) so `end` lands on a
+  // codepoint boundary. At most 3 steps for valid UTF-8.
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
+  return buf.subarray(0, end).toString('utf8');
 }
 
 /**
@@ -1241,24 +1267,48 @@ export function listAgentSessions(sessionId: string): MultiAgentAgentSessionRow[
 const RECOVERY_SYNTHETIC_SOURCES: ReadonlySet<string> = new Set(['cebab', '_sink']);
 
 export function computeRecoveryContext(sessionId: string): RecoveryContextView | null {
-  const events = listMultiAgentEvents(sessionId);
-  if (events.length === 0) return null;
+  // Register D29: this used to load every event for the session into a JS
+  // array and reduce it to two aggregates. Both are now computed by SQLite, so
+  // memory is O(agents) instead of O(events) — a long orchestrator run no
+  // longer replays its whole transcript on every reconstruct and every attach.
+  //
+  // The register's suggested fix was "accept and apply a row cap". That would
+  // have been WRONG here, and the docstring above says why: "False negatives
+  // are not possible by construction". A cap keeps only the newest N rows, so
+  // an agent whose last event falls outside the window silently stops being
+  // reported as possibly interrupted — a false negative in the disclosure the
+  // operator uses to decide what to re-check. An aggregate has no such edge:
+  // it sees every row and returns one number per source.
+  //
+  // `staleSinceTs` deliberately spans ALL sources including synthetic ones —
+  // it anchors "last persisted activity" regardless of who emitted it —
+  // whereas the per-source map excludes them (they have no checkpoint row).
+  // Two different questions, so two queries rather than one clever join.
+  const db = getDb();
+  const overall = db
+    .prepare<[string], { max_ts: number | null }>(
+      'SELECT MAX(ts) AS max_ts FROM multi_agent_events WHERE session_id = ?',
+    )
+    .get(sessionId);
+  // MAX() over zero rows returns a single row holding NULL, not no rows — so
+  // the emptiness check is on the value, not on the result set.
+  if (!overall || overall.max_ts === null) return null;
+  const staleSinceTs = overall.max_ts;
+
+  const perSource = db
+    .prepare<[string], { source: string; last_ts: number }>(
+      'SELECT source, MAX(ts) AS last_ts FROM multi_agent_events WHERE session_id = ? GROUP BY source',
+    )
+    .all(sessionId);
+
   const checkpoints = listAgentSessions(sessionId);
   const checkpointBy = new Map<string, number>(
     checkpoints.map((c) => [c.agent_name, c.updated_at]),
   );
   const lastEventBy = new Map<string, number>();
-  // `staleSinceTs` is max(ts) across ALL events (including synthetic) — it
-  // anchors "last persisted activity" in the disclosure regardless of who
-  // emitted it. `listMultiAgentEvents` returns rows in id-ascending order
-  // (insertion order), which equals ts order in production but not in tests
-  // where rows can be back-dated, so we compute the max explicitly.
-  let staleSinceTs = 0;
-  for (const ev of events) {
-    if (ev.ts > staleSinceTs) staleSinceTs = ev.ts;
-    if (RECOVERY_SYNTHETIC_SOURCES.has(ev.source)) continue;
-    const prev = lastEventBy.get(ev.source);
-    if (prev === undefined || ev.ts > prev) lastEventBy.set(ev.source, ev.ts);
+  for (const row of perSource) {
+    if (RECOVERY_SYNTHETIC_SOURCES.has(row.source)) continue;
+    lastEventBy.set(row.source, row.last_ts);
   }
   const reconstructedAtTs = Date.now();
   const interruptedAgents: RecoveryAgentEntry[] = [];

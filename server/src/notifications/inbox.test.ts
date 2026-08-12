@@ -114,6 +114,45 @@ describe('listInbox', () => {
     expect(rows[2].dedupeKey).toBe('op:a');
   });
 
+  // ---- Register D13: the window query used to have no LIMIT ----
+
+  test('returns at most the hard cap, and the newest ones', () => {
+    // 250 in-window rows against a 200 cap. Before D13 the SQL asked for all
+    // 250 and `.slice(0, 200)` threw 50 away in JavaScript; the LIMIT that
+    // replaced the slice has to produce exactly the same 200.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_700_000_000_000));
+    for (let i = 0; i < 250; i++) {
+      emitOp('s1', `op:${String(i).padStart(3, '0')}`);
+      vi.advanceTimersByTime(1);
+    }
+
+    const rows = listInbox();
+    expect(rows.length).toBe(200);
+    // Newest first, and the newest is the LAST one emitted — a LIMIT applied
+    // before the ORDER BY would have kept the oldest 200 instead.
+    expect(rows[0].dedupeKey).toBe('op:249');
+    expect(rows[199].dedupeKey).toBe('op:050');
+  });
+
+  test('a window holding fewer than the cap still tops up from older rows', () => {
+    // The other branch, unchanged by D13 but easy to break with it: when the
+    // 7-day window is short, step 2 re-queries without the window. If the
+    // LIMIT had been placed so that step 1 always looked full, this would
+    // silently return only the in-window rows.
+    vi.useFakeTimers();
+    const now = 1_700_000_000_000;
+    vi.setSystemTime(new Date(now));
+    const old = now - 30 * 24 * 60 * 60 * 1000; // well outside the 7-day window
+    vi.setSystemTime(new Date(old));
+    emitOp('s1', 'op:ancient');
+    vi.setSystemTime(new Date(now));
+    emitOp('s1', 'op:fresh');
+
+    const rows = listInbox();
+    expect(rows.map((r) => r.dedupeKey)).toEqual(['op:fresh', 'op:ancient']);
+  });
+
   test('sessionId filter — string narrows to that session', () => {
     emitOp('s1', 'op:1');
     emitOp('s2', 'op:2');

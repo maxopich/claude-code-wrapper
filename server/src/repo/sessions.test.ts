@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { upsertProject } from './projects.js';
-import { bumpSession, createSession, getSession } from './sessions.js';
+import { appendForensics } from './controllability_forensics.js';
+import { appendRecoveryLog } from './recovery_log.js';
+import { _resetCoalesceState, emit } from '../notifications/dispatcher.js';
+import { appendSafetyAudit } from '../notifications/safety_audit.js';
+import { bumpSession, createSession, getSession, hardDeleteSession } from './sessions.js';
 
 /**
  * Register C06: `sessions.ts` had twelve exported functions and no test file,
@@ -106,5 +110,151 @@ describe('bumpSession — the cost invariant migration 029 repairs', () => {
   test('bumping an unknown session id is a no-op, not a throw', () => {
     expect(() => bumpSession('nope', 1.5)).not.toThrow();
     expect(getSession('nope')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Register D31: the purge left three tables pointing at a session that no
+// longer exists. `notifications`, `controllability_forensics` and
+// `recovery_log` all carry `session_id TEXT` with no REFERENCES and no
+// cascade, so nothing removed them — while `hardDeleteSession`'s own comment
+// claimed the audit lineage was "the only surviving record after the purge".
+//
+// Both halves are load-bearing and both are asserted below: the dependents
+// must GO, and `safety_audit` must STAY. A fix that deleted everything would
+// break the hash chain for every row after the deleted one, which is a worse
+// bug than the one being fixed.
+// ---------------------------------------------------------------------------
+
+describe('[security] hardDeleteSession — what a purge removes, and what it must not', () => {
+  // `emit`'s coalesce map is MODULE-scoped and survives across tests, so a
+  // repeated dedupeKey silently returns `sent: false` and persists nothing.
+  // Reset it, and use a fresh key per call, so this file tests the purge
+  // rather than the dispatcher's dedupe window.
+  beforeEach(() => {
+    _resetCoalesceState();
+  });
+  let seedSeq = 0;
+
+  /** Seed one row in each dependent table plus one audit row, through the
+   *  real repo helpers — a hand-rolled INSERT here would drift from the schema
+   *  and, worse, could pass while omitting a column the production writer
+   *  always sets. */
+  function seedDependents(sessionId: string): void {
+    seedSeq += 1;
+    emit(
+      {
+        class: 'operational',
+        severity: 'info',
+        dedupeKey: `k-${sessionId}-${seedSeq}`,
+        title: 'hello',
+        sessionId,
+        // `emit` persists an operational envelope ONLY when it is sticky
+        // (`if (env.sticky) persistNotification(env)`). Without this the seed
+        // writes no row, and every "the purge removed it" assertion below
+        // passes against a table that was empty to begin with.
+        sticky: true,
+      },
+      () => {},
+    );
+    appendRecoveryLog({
+      sessionId,
+      failureClass: 'chain_crash',
+      operatorAction: 'in_session_resume',
+      tsOverride: 1,
+    });
+    const audit = appendSafetyAudit({
+      ts: 1,
+      sessionId,
+      kind: 'session.stopped',
+      reasonCode: 'operator_stop',
+      payload: null,
+    });
+    appendForensics({
+      safetyAuditId: audit.id,
+      ts: 1,
+      sessionId,
+      effectivePrompt: null,
+      eventsLastN: [],
+    });
+
+    // Prove the seed seeded. Every assertion in this describe is of the form
+    // "after the purge this count is 0", which is satisfied for free by a
+    // table that was never written to — and one of these four writes silently
+    // did nothing until this check was added.
+    for (const table of TABLES) {
+      expect(countFor(table, sessionId), `seed wrote nothing to ${table}`).toBe(1);
+    }
+  }
+
+  const TABLES = [
+    'notifications',
+    'recovery_log',
+    'controllability_forensics',
+    'safety_audit',
+  ] as const;
+
+  function countFor(table: string, sessionId: string): number {
+    return (
+      getDb()
+        .prepare<[string], { n: number }>(`SELECT COUNT(*) AS n FROM ${table} WHERE session_id = ?`)
+        .get(sessionId)?.n ?? -1
+    );
+  }
+
+  test('removes the three soft-FK dependents along with the session', () => {
+    createSession('purge-me', projectId);
+    seedDependents('purge-me');
+
+    expect(hardDeleteSession('purge-me')).toBe(1);
+
+    expect(getSession('purge-me')).toBeUndefined();
+    expect(countFor('notifications', 'purge-me')).toBe(0);
+    expect(countFor('recovery_log', 'purge-me')).toBe(0);
+    expect(countFor('controllability_forensics', 'purge-me')).toBe(0);
+  });
+
+  test('LEAVES safety_audit intact — deleting a row would break the chain', () => {
+    createSession('purge-me', projectId);
+    seedDependents('purge-me');
+
+    hardDeleteSession('purge-me');
+
+    expect(countFor('safety_audit', 'purge-me')).toBe(1);
+  });
+
+  test('touches nothing belonging to another session', () => {
+    createSession('keep-me', projectId);
+    createSession('purge-me', projectId);
+    seedDependents('keep-me');
+    seedDependents('purge-me');
+
+    hardDeleteSession('purge-me');
+
+    expect(getSession('keep-me')).toBeDefined();
+    expect(countFor('notifications', 'keep-me')).toBe(1);
+    expect(countFor('recovery_log', 'keep-me')).toBe(1);
+    expect(countFor('controllability_forensics', 'keep-me')).toBe(1);
+  });
+
+  test('is atomic — a failure inside the transaction leaves everything', () => {
+    // The dependents are deleted before the session row, so a throw partway
+    // through must roll the whole thing back rather than leave a session with
+    // its notifications already gone.
+    createSession('purge-me', projectId);
+    seedDependents('purge-me');
+    const db = getDb();
+    let threw = false;
+    try {
+      db.transaction(() => {
+        hardDeleteSession('purge-me');
+        throw new Error('boom');
+      })();
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+    expect(getSession('purge-me')).toBeDefined();
+    expect(countFor('notifications', 'purge-me')).toBe(1);
   });
 });
