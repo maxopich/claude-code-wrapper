@@ -150,13 +150,28 @@ export function listInbox(filters?: InboxFilters): NotificationEnvelope[] {
   const windowStart = Date.now() - windowMs;
 
   // Step 1: rows within the 7-day window (filter-aware).
+  //
+  // Register D13: this used to run without a LIMIT and slice afterwards, so a
+  // burst-heavy week materialised every in-window row on every attach (safety
+  // rows never coalesce, so a burst really can be tens of thousands). The
+  // LIMIT is exactly INBOX_HARD_CAP, which makes it semantically identical to
+  // the slice it replaces: the branch below only asks whether the window held
+  // AT LEAST the cap, and a LIMIT of the cap answers that the same way.
+  //
+  // The LIMIT alone would not have helped. Until migration 032 the only usable
+  // index was `notifications(acked_at) WHERE acked_at IS NULL`, whose key is
+  // constant inside its own partial index — so `ORDER BY ts DESC` needed a
+  // temp B-tree over the whole unacked set before it could return the first
+  // row. D13 and D30 are one fix; see the migration header.
   const windowWhere = whereSql ? `${whereSql} AND ts >= ?` : 'WHERE ts >= ?';
   const recentRows = db
-    .prepare<unknown[], InboxRow>(`SELECT * FROM notifications ${windowWhere} ORDER BY ts DESC`)
-    .all(...params, windowStart);
+    .prepare<unknown[], InboxRow>(
+      `SELECT * FROM notifications ${windowWhere} ORDER BY ts DESC LIMIT ?`,
+    )
+    .all(...params, windowStart, INBOX_HARD_CAP);
 
   if (recentRows.length >= INBOX_HARD_CAP) {
-    return recentRows.slice(0, INBOX_HARD_CAP).map(rowToEnvelope);
+    return recentRows.map(rowToEnvelope);
   }
 
   // Step 2: pad with older rows up to the cap.

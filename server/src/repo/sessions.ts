@@ -181,15 +181,33 @@ export function listIdleSessionIds(cutoffMs: number): string[] {
  *
  * Returns the number of session rows actually removed (0 or 1).
  *
- * IMPORTANT: this does NOT touch the `safety_audit` table. Audit rows
- * are append-only (BE-1 invariant) and explicitly survive session
- * deletion per spec §7 — the audit lineage is the only surviving record
- * after the purge fires.
+ * WHAT SURVIVES, and why it is now a decision rather than an omission
+ * (register D31). This comment used to say the audit lineage was "the only
+ * surviving record after the purge fires". It was not: `notifications`,
+ * `controllability_forensics` and `recovery_log` all carry `session_id TEXT`
+ * with no REFERENCES and no cascade, so all three outlived the purge silently
+ * — leaving inbox rows and per-session badge counts pointing at a session that
+ * no longer exists. Spec §7 as quoted decides which side was wrong: the code.
+ *
+ *   DELETED — `events`, `sessions`, and the three soft-FK dependents. They are
+ *             operator-facing state about a session, and a purge is the
+ *             operator saying they are done with it.
+ *   KEPT    — `safety_audit`. Append-only (BE-1 invariant), hash-chained, and
+ *             explicitly exempt per spec §7: deleting a row would break
+ *             `verifyChain` for every row after it. The audit lineage really
+ *             is the only surviving record, once the above is true.
+ *
+ * All three dependent deletes are index-served (`notifications_session`,
+ * `controllability_forensics_session_ts`, `recovery_log_session_idx`), so this
+ * stays a lookup per table rather than three scans.
  */
 export function hardDeleteSession(id: string): number {
   const db = getDb();
   const tx = db.transaction((sessionId: string) => {
     db.prepare('DELETE FROM events WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM notifications WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM controllability_forensics WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM recovery_log WHERE session_id = ?').run(sessionId);
     const info = db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
     return info.changes as number;
   });
