@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import {
   MAX_PROJECT_CLAUDE_MD,
+  MAX_PROJECT_CLAUDE_MD_BYTES,
   nextIterationId,
   PROJECT_CLAUDE_MD_HEAD_MAX_BYTES,
   PROJECT_CLAUDE_MD_HEAD_MAX_LINES,
@@ -376,6 +377,57 @@ describe('readProjectClaudeMd', () => {
     expect(r!.framed.length).toBeLessThan(MAX_PROJECT_CLAUDE_MD + 2000);
   });
 
+  // ---- Register H11: the read itself is bounded, not just the string ----
+  //
+  // Both cases below are chosen to DISTINGUISH a bounded read from the
+  // read-whole-then-slice it replaced. Asserting "an oversized file comes back
+  // capped" would not: that was already true when the whole file was pulled
+  // into memory first. What changes is what happens past the byte cap.
+
+  test('[security] content past the byte cap is never pulled in, marker says bytes', () => {
+    const dir = projDir();
+    // Short real content, then padding well past the byte cap. Reading whole
+    // would trim the padding away and report an untruncated file; reading a
+    // bounded prefix cannot know the tail is only spaces, so it reports the
+    // truncation honestly — and names the cap that actually applied.
+    fs.writeFileSync(
+      path.join(dir, 'CLAUDE.md'),
+      '# Rules\n' + 'a'.repeat(100) + ' '.repeat(MAX_PROJECT_CLAUDE_MD_BYTES),
+    );
+    const r = readProjectClaudeMd(dir);
+    expect(r).not.toBeNull();
+    expect(r!.framed).toContain('# Rules');
+    expect(r!.framed).toContain(`truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD_BYTES} bytes`);
+    // The char cap did NOT apply here, so its marker must not appear — the
+    // two branches have to stay distinguishable.
+    expect(r!.framed).not.toContain(`${MAX_PROJECT_CLAUDE_MD} chars`);
+    expect(r!.sizeLabel).toContain('(truncated)');
+  });
+
+  test('[security] a file whose first bytes are all whitespace reads as absent', () => {
+    const dir = projDir();
+    // The documented cost of bounding the read: the content past the cap is
+    // unreachable, so a file padded to hide it reads as "no CLAUDE.md" rather
+    // than being unpacked in full to find it.
+    fs.writeFileSync(
+      path.join(dir, 'CLAUDE.md'),
+      ' '.repeat(MAX_PROJECT_CLAUDE_MD_BYTES + 4096) + '# Hidden rules',
+    );
+    expect(readProjectClaudeMd(dir)).toBeNull();
+  });
+
+  test('a file comfortably under the byte cap is untouched by it', () => {
+    // Anti-vacuity for the two above: if the cap were applied too eagerly,
+    // every ordinary CLAUDE.md would grow a truncation marker.
+    const dir = projDir();
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '# Rules\n\n' + 'x'.repeat(4000));
+    const r = readProjectClaudeMd(dir);
+    expect(r).not.toBeNull();
+    expect(r!.framed).not.toContain('truncated by Cebab');
+    expect(r!.sizeLabel).not.toContain('(truncated)');
+    expect(r!.framed).toContain('x'.repeat(4000));
+  });
+
   test('a literal close delimiter inside the file cannot break out', () => {
     const dir = projDir();
     fs.writeFileSync(
@@ -422,6 +474,18 @@ describe('readProjectClaudeMdHead', () => {
   test('returns null when CLAUDE.md is empty / whitespace', () => {
     const dir = projDir();
     fs.writeFileSync(path.join(dir, 'CLAUDE.md'), '  \n\t\n');
+    expect(readProjectClaudeMdHead(dir)).toBeNull();
+  });
+
+  test('[security] the head reader is byte-bounded too, not just line-capped', () => {
+    // Register H11: this reader captured `st.size` and then read the file
+    // whole anyway. Padding past the byte cap is the case that separates the
+    // two — a whole read would find the content behind it.
+    const dir = projDir();
+    fs.writeFileSync(
+      path.join(dir, 'CLAUDE.md'),
+      ' '.repeat(MAX_PROJECT_CLAUDE_MD_BYTES + 4096) + '# Hidden',
+    );
     expect(readProjectClaudeMdHead(dir)).toBeNull();
   });
 

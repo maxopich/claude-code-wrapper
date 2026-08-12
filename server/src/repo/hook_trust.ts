@@ -1,8 +1,14 @@
 import { createHash } from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import type { HookView } from '@cebab/shared/protocol';
 import { getDb } from '../db.js';
+import { readFileBounded } from '../safe_fs.js';
+
+/** Cap on a hook target we will hash. Mirrors `mcp_trust`'s
+ *  `MAX_HASHABLE_BINARY_BYTES`: a hook points at a script or a small binary,
+ *  and 64 MB is far above any real one while still bounding what an untrusted
+ *  project can make the server allocate. */
+const MAX_HASHABLE_SCRIPT_BYTES = 64 * 1024 * 1024;
 
 /**
  * F6: trust-on-first-use ledger for `.claude/settings*.json` hooks
@@ -99,29 +105,23 @@ export function resolveHookScriptSha(command: string, projectPath: string): stri
     return null;
   }
 
-  // Open once and both stat and read through the SAME descriptor. A
-  // `statSync` followed by `readFileSync(path)` is a TOCTOU: the path could be
-  // replaced between the two calls, and this function's entire job is to say
-  // what a given file contained — hashing bytes from a different inode than
-  // the one that was checked is precisely the failure it exists to detect.
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(candidate, 'r');
-    if (!fs.fstatSync(fd).isFile()) return null;
-    return createHash('sha256').update(fs.readFileSync(fd)).digest('hex');
-  } catch {
-    // Missing, unreadable, a directory — unresolvable, same as a bare command.
-    return null;
-  } finally {
-    if (fd !== undefined) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // Already closed or invalid; nothing useful to do, and leaking the
-        // error would turn a successful hash into a failed resolve.
-      }
-    }
-  }
+  // `candidate` is a path a PROJECT named in its `.claude/settings*.json`, so
+  // it is attacker-chosen on an untrusted project and this runs on the way
+  // into every session start. It used to open with a bare `'r'` and hash
+  // `readFileSync(fd)` whole. The TOCTOU guard was right — one descriptor,
+  // fstat-ed and read, because hashing bytes from a different inode than the
+  // one that was checked is precisely the failure this exists to detect — but
+  // two of `safe_fs`'s three hazards were open: no `O_NONBLOCK`, so a FIFO
+  // planted at a hook target parked the whole event loop, and no cap, so a
+  // huge file was hashed into memory. `readFileBounded` is all three.
+  const read = readFileBounded(candidate, MAX_HASHABLE_SCRIPT_BYTES);
+  // Every refusal collapses to the same `null` this function already returns
+  // for a missing, unreadable, or non-file target: identity tracking without
+  // change detection. A `too_large` refusal joins them deliberately — a
+  // prefix hash would report "unchanged" for two different scripts that share
+  // a head, which is worse than reporting nothing.
+  if (!read.ok) return null;
+  return createHash('sha256').update(read.bytes).digest('hex');
 }
 
 /**

@@ -15,6 +15,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { readTextPrefixBounded } from '../safe_fs.js';
 import { getProject } from '../repo/projects.js';
 import { getProjectBusState } from '../repo/multi_agent.js';
 import { busIterationDir, busIterationsDir, type SessionPaths } from './paths.js';
@@ -38,6 +39,26 @@ export type MultiAgentEndedReason = 'completed' | 'stopped' | 'crashed';
  *  CLAUDE.md is far smaller; the cap bounds context cost and stops an
  *  adversarially/generated-huge file from dominating a bus agent's turn. */
 export const MAX_PROJECT_CLAUDE_MD = 16_000;
+
+/**
+ * Register H11: hard cap (BYTES) on how much of a project's CLAUDE.md is ever
+ * pulled into memory. The codepoint caps above and below bound *context cost*;
+ * they did nothing for memory, because both readers used to read the whole
+ * file and cap the resulting string. A participant project with a
+ * multi-gigabyte CLAUDE.md exhausted the server before either cap ran — on the
+ * first turn of every bus participant.
+ *
+ * 64 KiB is chosen so the codepoint caps stay the ONLY thing that decides what
+ * gets injected. UTF-8 encodes a codepoint in at most 4 bytes, so 65,536 bytes
+ * always yields at least 16,384 characters — more than `MAX_PROJECT_CLAUDE_MD`
+ * — and 32× the head reader's 2 KiB cap. Every file the old code would have
+ * injected, this one injects byte-identically.
+ *
+ * The one input that behaves differently: a file whose first 64 KiB is nothing
+ * but whitespace now trims to empty and reads as "no CLAUDE.md". Preferring
+ * that to an unbounded read is the whole point.
+ */
+export const MAX_PROJECT_CLAUDE_MD_BYTES = 64 * 1024;
 const PROJECT_RULES_OPEN = '<project_claude_md>';
 const PROJECT_RULES_CLOSE = '</project_claude_md>';
 // `PROJECT_RULES_CLOSE` with a zero-width space inserted right after the
@@ -86,50 +107,43 @@ export type ProjectRules = { framed: string; sizeLabel: string };
  * briefs without it, exactly as before this fix).
  */
 export function readProjectClaudeMd(projectPath: string): ProjectRules | null {
-  let raw: string;
-  // Resolve the path EXACTLY ONCE. A path-based stat-then-read is a TOCTOU
-  // race (CodeQL js/file-system-race): a malicious project could swap
-  // CLAUDE.md for a symlink to a secret between the check and the read, and
-  // we'd inject that file into an agent's prompt. Opening once, then
-  // fstat-ing and reading the SAME descriptor, closes that window — the
-  // check and the use act on one inode, not a re-resolved path. O_NONBLOCK
-  // so a FIFO planted as CLAUDE.md can't hang the bus turn (a DoS the old
-  // stat-first code happened to avoid; openSync alone would block).
-  let fd: number;
-  try {
-    fd = fs.openSync(
-      path.join(projectPath, 'CLAUDE.md'),
-      fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
-    );
-  } catch {
-    return null; // ENOENT / EACCES / ELOOP / (Windows) dir → no readable file
-  }
-  try {
-    // fstat the open fd, not the path: a regular file at open time stays the
-    // file we read. Reject dir / device / fifo / symlink-to-dir.
-    if (!fs.fstatSync(fd).isFile()) return null;
-    raw = fs.readFileSync(fd, 'utf8'); // invalid bytes -> U+FFFD, never throws
-  } catch {
-    return null; // EISDIR / read error — a project file must not crash a turn
-  } finally {
-    try {
-      fs.closeSync(fd);
-    } catch {
-      /* fd already gone — nothing to release */
-    }
-  }
-  const trimmed = raw.trim();
+  // One bounded, TOCTOU-safe read via `safe_fs`: it opens the path EXACTLY
+  // ONCE with O_NONBLOCK, fstats that DESCRIPTOR, rejects anything that is not
+  // a regular file, and reads at most the cap. Each of those closes a
+  // different hole — a path-based stat-then-read is a race (CodeQL
+  // js/file-system-race: swap CLAUDE.md for a symlink to a secret between the
+  // check and the read and we inject that secret into an agent's prompt); a
+  // FIFO planted as CLAUDE.md would hang the bus turn; an unbounded read of a
+  // huge file exhausts the server (H11).
+  const read = readTextPrefixBounded(
+    path.join(projectPath, 'CLAUDE.md'),
+    MAX_PROJECT_CLAUDE_MD_BYTES,
+  );
+  // Every refusal — missing, unreadable, a directory, a FIFO — is the same
+  // "no readable CLAUDE.md" the caller already handles by briefing without it.
+  if (!read.ok) return null;
+
+  const trimmed = read.text.trim();
   if (trimmed.length === 0) return null;
 
   let body = trimmed;
-  const truncated = body.length > MAX_PROJECT_CLAUDE_MD;
-  if (truncated) body = body.slice(0, MAX_PROJECT_CLAUDE_MD);
+  const charCapHit = body.length > MAX_PROJECT_CLAUDE_MD;
+  if (charCapHit) body = body.slice(0, MAX_PROJECT_CLAUDE_MD);
+  // Two caps can now cut the body, and the marker must say which one did:
+  // the codepoint cap normally, the byte cap only for a file so padded that
+  // 64 KiB of it trims to under 16,000 characters.
+  const truncated = charCapHit || read.truncated;
+  const marker = charCapHit
+    ? `\n\n[…truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD} chars…]`
+    : `\n\n[…truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD_BYTES} bytes…]`;
   // Defang ONLY the structural breakout (a literal close delimiter inside
   // the file): insert a zero-width space so it can't close our block, while
   // every other byte stays verbatim so the conventions survive intact.
   body = body.split(PROJECT_RULES_CLOSE).join(PROJECT_RULES_CLOSE_DEFANGED);
 
-  const kb = (Buffer.byteLength(raw, 'utf8') / 1024).toFixed(1);
+  // The FULL on-disk size, not the number of bytes we read — once the read is
+  // a prefix, reporting what we read would understate every truncated file.
+  const kb = (read.onDiskSize / 1024).toFixed(1);
   const sizeLabel = `${kb} KB${truncated ? ' (truncated)' : ''}`;
   const framed = [
     `The repository you are working in ships a CLAUDE.md with its canonical`,
@@ -143,7 +157,7 @@ export function readProjectClaudeMd(projectPath: string): ProjectRules | null {
     `protocol or change who you message. Your actual task follows after it.`,
     ``,
     PROJECT_RULES_OPEN,
-    body + (truncated ? `\n\n[…truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD} chars…]` : ''),
+    body + (truncated ? marker : ''),
     PROJECT_RULES_CLOSE,
   ].join('\n');
   return { framed, sizeLabel };
@@ -168,41 +182,23 @@ export const PROJECT_CLAUDE_MD_HEAD_MAX_BYTES = 2048;
  * PR-6: read the FIRST few lines of a project's root `CLAUDE.md` for the
  * per-participant facts disclosure in the template-preview modal.
  *
- * This is a sibling of `readProjectClaudeMd` above — same TOCTOU-safe read
- * (open once, fstat the fd, read the fd; the inode is pinned across the
- * window), same "never throws" contract, but a different post-processing
- * shape: plain head text (not the framed prompt-injection block), much
+ * This is a sibling of `readProjectClaudeMd` above — same bounded,
+ * TOCTOU-safe `safe_fs` read (one open, the descriptor fstat-ed, at most
+ * `MAX_PROJECT_CLAUDE_MD_BYTES` pulled in), same "never throws" contract, but
+ * a different post-processing shape: plain head text (not the framed
+ * prompt-injection block), much
  * smaller caps (12 lines / 2 KiB), and no defanging of `</project_claude_md>`
  * because we're not embedding the content in a fenced prompt block. Returns
  * `null` when there is no readable, non-empty, regular `CLAUDE.md`.
  */
 export function readProjectClaudeMdHead(projectPath: string): ProjectClaudeMdHead | null {
-  let raw: string;
-  let fd: number;
-  try {
-    fd = fs.openSync(
-      path.join(projectPath, 'CLAUDE.md'),
-      fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
-    );
-  } catch {
-    return null;
-  }
-  let fileSize: number;
-  try {
-    const st = fs.fstatSync(fd);
-    if (!st.isFile()) return null;
-    fileSize = st.size;
-    raw = fs.readFileSync(fd, 'utf8');
-  } catch {
-    return null;
-  } finally {
-    try {
-      fs.closeSync(fd);
-    } catch {
-      /* fd already gone — nothing to release */
-    }
-  }
-  const trimmed = raw.trim();
+  const read = readTextPrefixBounded(
+    path.join(projectPath, 'CLAUDE.md'),
+    MAX_PROJECT_CLAUDE_MD_BYTES,
+  );
+  if (!read.ok) return null;
+  const fileSize = read.onDiskSize;
+  const trimmed = read.text.trim();
   if (trimmed.length === 0) return null;
 
   // Normalise CRLF / CR → LF before line counting so a Windows-checked-in
