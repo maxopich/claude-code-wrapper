@@ -27,9 +27,11 @@
  *     whose value matches a sensitive-path regex (see SENSITIVE_PATH_PATTERNS).
  *     Mask the SIBLING value field (e.g. `content`, `output`, `text`) on
  *     the same object — not the path itself, which is operator-meaningful.
- *   - String values that look like an obvious credential header
- *     (`Bearer <jwt>`, `Authorization: ...`, `sk-...`, AWS access-key
- *     prefixes `AKIA[A-Z0-9]{16}`). Masked in place.
+ *   - String values that look like an obvious credential: header shapes
+ *     (`Bearer <jwt>`, `Authorization: ...`), API keys (`sk-...`, AWS
+ *     `AKIA[A-Z0-9]{16}`), a PEM `BEGIN … PRIVATE KEY` header, and the
+ *     vendor token prefixes in SENSITIVE_VALUE_PATTERNS (GitHub, GitLab,
+ *     Slack, Google, npm, Stripe live). Masked in place.
  *
  * Pure: no I/O, no globals. Same input → same output (modulo `JSON.stringify`
  * key order, which we don't depend on). Browser-safe.
@@ -44,6 +46,18 @@ export type RedactResult = {
 
 const REDACTED_TOKEN = '<redacted>';
 const MAX_DEPTH = 12;
+
+/**
+ * Reported path for a mask applied to the payload ROOT — a top-level string
+ * that is itself a credential, or a whole payload that sat past `MAX_DEPTH`.
+ *
+ * Registers D24/D25: both of those masked the value and reported nothing,
+ * because the dot-path for the root is the empty string and every caller
+ * gates on `fields.length > 0`. A sentinel is what lets "the entire payload
+ * was a secret" and "nothing here was sensitive" stop being the same answer.
+ * Deliberately not a valid dot-path, so it can never collide with a real key.
+ */
+export const ROOT_FIELD = '(root)';
 
 /** Field names whose VALUE is always redacted (case-insensitive substring). */
 const SENSITIVE_KEY_PATTERNS: readonly RegExp[] = [
@@ -83,6 +97,25 @@ const SENSITIVE_BASENAME_STEMS: readonly string[] = [
   'secrets',
 ];
 
+/**
+ * Register H16: extensions that mark the whole file as key material, matched
+ * on the basename's suffix rather than its stem.
+ *
+ * NOT here, deliberately: `.crt`, `.cer`, `.pub`. Those are the PUBLIC halves
+ * — they are meant to be handed out, and masking them costs the operator real
+ * signal (which cert is this run using?) while protecting nothing. The
+ * header's "false positives are cheap" is a rule about credentials, not a
+ * licence to mask anything that sounds cryptographic.
+ */
+const SENSITIVE_BASENAME_EXTENSIONS: readonly string[] = [
+  '.pem',
+  '.key',
+  '.p12',
+  '.pfx',
+  '.jks',
+  '.keystore',
+];
+
 /** Special compound paths — exact match against the tail of the path. */
 const SENSITIVE_TAILS: readonly string[] = ['/.git/config'];
 
@@ -108,8 +141,19 @@ const SIBLING_VALUE_FIELDS: ReadonlySet<string> = new Set([
   'data',
 ]);
 
-/** Inline value patterns — masked wherever they appear (heuristic, not
- *  comprehensive; here to catch the obvious leaks). */
+/**
+ * Inline value patterns — masked wherever they appear (heuristic, not
+ * comprehensive; here to catch the obvious leaks).
+ *
+ * Register H16: the first five were the whole list, which covered no private
+ * key and none of the vendor token shapes that dominate real leaks. Each
+ * addition is a literal prefix plus a length floor — no alternation inside a
+ * quantifier, so `security/detect-unsafe-regex` has nothing to backtrack on.
+ *
+ * The floors are deliberately below the real token lengths (vendors change
+ * them) but high enough that prose cannot trip them: "ghp_" alone is not a
+ * match, "ghp_" followed by 20+ token characters is.
+ */
 const SENSITIVE_VALUE_PATTERNS: readonly RegExp[] = [
   // Authorization headers (case-insensitive, anywhere in the string).
   /\bauthorization:\s*\S+/i,
@@ -120,6 +164,29 @@ const SENSITIVE_VALUE_PATTERNS: readonly RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{32,}/,
   // Generic JWT-shape (three b64 segments)
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+
+  // ---- H16 additions ----
+  // PEM private keys. The header alone is enough: whatever follows it in the
+  // payload is key material, and it is the single highest-value shape here.
+  // `PRIVATE KEY` covers RSA/EC/DSA/OPENSSH/ENCRYPTED variants via the
+  // wildcard, which is bounded by the line-ish `[A-Z ]` class rather than `.`.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  // GitHub: personal/OAuth/user/server/refresh tokens share the ghX_ shape.
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/,
+  // GitHub fine-grained PATs.
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/,
+  // GitLab personal access tokens.
+  /\bglpat-[A-Za-z0-9_-]{16,}/,
+  // Slack bot/user/app/refresh/legacy tokens.
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/,
+  // Google API keys.
+  /\bAIza[A-Za-z0-9_-]{30,}/,
+  // npm automation/publish tokens.
+  /\bnpm_[A-Za-z0-9]{30,}/,
+  // Stripe live secret + restricted keys. (Test keys `sk_test_` are
+  // deliberately NOT here — they are publishable by design and masking them
+  // costs an operator real debugging signal.)
+  /\b[sr]k_live_[A-Za-z0-9]{20,}/,
 ];
 
 /**
@@ -165,6 +232,11 @@ function pathLooksSensitive(value: string): boolean {
     if (basename === stem) return true;
     if (basename.startsWith(`${stem}.`)) return true;
   }
+  // H16: `norm` is already lowercased, so this is case-insensitive — which
+  // matters on Windows, where `SERVER.PEM` is the same file.
+  for (const ext of SENSITIVE_BASENAME_EXTENSIONS) {
+    if (basename.endsWith(ext)) return true;
+  }
   return false;
 }
 
@@ -192,11 +264,40 @@ export function redactSensitive(payload: unknown): RedactResult {
 }
 
 function walk(value: unknown, path: string, depth: number, fields: string[]): unknown {
-  if (depth > MAX_DEPTH) return value;
+  if (depth > MAX_DEPTH) {
+    // Register D24: this used to `return value` — the CALLER'S OWN object,
+    // by reference, unmasked, and unreported. Three promises broken at once:
+    // the JSDoc above says "deep-cloned copy" (it aliased), nothing past
+    // depth 12 was masked, and `fields` said so by omission.
+    //
+    // The file already knew. The D05 note below observes that "`walk` returns
+    // values verbatim past MAX_DEPTH, so recursion under a sensitive key
+    // would still leak anything nested deeper than that" — and fixed that ONE
+    // branch by masking wholesale rather than recursing. This applies the
+    // same trade everywhere, which makes the two consistent instead of the
+    // general case being the exception.
+    //
+    // Cost: a payload nested deeper than MAX_DEPTH loses its tail. That is
+    // the right direction for a redactor — the alternative is emitting bytes
+    // nobody inspected while reporting that nothing was found.
+    fields.push(path || ROOT_FIELD);
+    return REDACTED_TOKEN;
+  }
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') {
     if (valueContainsSensitivePattern(value)) {
-      if (path) fields.push(path);
+      // Register D25: this was `if (path) fields.push(path)`. A top-level
+      // string has an empty path, so the value was masked and `fields` stayed
+      // empty — and every caller gates on exactly that
+      // (`if (fields.length > 0) row.redactedFields = fields`), so a payload
+      // that was ENTIRELY a credential reported as "nothing redacted".
+      //
+      // Reachable, not theoretical: `repo/artifact_content.ts` passes a bare
+      // string once per line of every artifact preview. It happens to survive
+      // because it compares `redacted !== line` instead of trusting `fields`
+      // — i.e. the one caller that reaches this path had to route around the
+      // report to be correct.
+      fields.push(path || ROOT_FIELD);
       return REDACTED_TOKEN;
     }
     return value;
