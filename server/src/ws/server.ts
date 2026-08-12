@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
   classifyToolCall,
   isSessionPermissionMode,
+  redactSensitive,
   type ClientMsg,
   type ServerMsg,
   type SessionPermissionMode,
@@ -1042,6 +1043,15 @@ export function executeKickForensicsSnapshot(args: {
     }
   }
 
+  // Register D18, read side. `appendForensics` masks every payload column on
+  // the way IN, so anything written from now on is already clean — but rows
+  // persisted BEFORE that landed are raw, and this is the only thing standing
+  // between them and the browser. Masking twice is a no-op, so this stays
+  // correct once the backlog ages out; it is not worth a migration to remove.
+  //
+  // Scoped to the payload fields, matching `redactColumn`'s column list. The
+  // ids, `operatorId`, `workdirTreeHash` and the kick provenance are
+  // Cebab-generated metadata and would only be damaged by masking.
   const snapshot: KickForensicsSnapshot = {
     auditId: row.safety_audit_id,
     ts: row.ts,
@@ -1052,14 +1062,17 @@ export function executeKickForensicsSnapshot(args: {
     kickReasonCode,
     kickReasonText,
     kickMode,
-    effectivePrompt: parseJsonOrUndefined(row.effective_prompt_json),
-    busEvents: parseBusEvents(row.bus_inbox_outbox_json),
-    mutations: parseMutations(row.mutation_rationale_json),
+    effectivePrompt: redactSensitive(parseJsonOrUndefined(row.effective_prompt_json)).redacted,
+    // The two typed parsers validate field-by-field AFTER this, and a masked
+    // string is still a string — so redacting first cannot make a well-formed
+    // row fail validation and vanish.
+    busEvents: parseBusEvents(redactJsonString(row.bus_inbox_outbox_json)),
+    mutations: parseMutations(redactJsonString(row.mutation_rationale_json)),
     pendingToolCalls: row.pending_tool_calls_json
-      ? parseJsonOrUndefined(row.pending_tool_calls_json)
+      ? redactSensitive(parseJsonOrUndefined(row.pending_tool_calls_json)).redacted
       : null,
     activePermissions: row.active_permissions_json
-      ? parseJsonOrUndefined(row.active_permissions_json)
+      ? redactSensitive(parseJsonOrUndefined(row.active_permissions_json)).redacted
       : null,
     workdirTreeHash: row.workdir_tree_hash,
     snapshotFailedReason: row.snapshot_failed_reason,
@@ -1072,6 +1085,77 @@ export function executeKickForensicsSnapshot(args: {
     found: true,
     snapshot,
   });
+}
+
+/**
+ * Register H06: decide whether this `load_session_log` turn may project
+ * UNREDACTED rows, recording the operator's intent first.
+ *
+ * Three surfaces serve raw transcript bytes and the rule — record intent
+ * before any unredacted byte ships — was enforced on two of them. The HTTP
+ * export writes `session.exported` / `exported_raw` before the body and 500s
+ * if the append throws; raw search writes `session.searched` / `searched_raw`
+ * and downgrades on failure. This path wrote nothing, justified by a comment
+ * saying the WS message "is enough server-side because the connection is
+ * already bound to 127.0.0.1" — which is an argument against the whole rule,
+ * not for exempting the cheapest route to the same data.
+ *
+ * On an audit-write failure this takes RAW SEARCH's posture, not the
+ * export's: return false, so the caller serves a redacted chunk. The operator
+ * still gets their logs, the untraced bytes never leave, and
+ * `revealedSensitive: false` on the reply tells the UI which it got.
+ * `search_sessions.ts` argued exactly this trade; a third posture here would
+ * be invention.
+ *
+ * The payload carries no transcript content — session id, scope and window
+ * only. Same discipline as the raw-search row, which omits the query string
+ * because a raw search is often FOR a secret and audit rows outlive the
+ * session they describe.
+ *
+ * Exported with an `appendAudit` seam for the same reason
+ * `executeSearchSessions` has one: the downgrade branch is the interesting
+ * behaviour and a real socket cannot make the append throw.
+ */
+export function resolveRevealAudit(args: {
+  requested: boolean;
+  sessionId: string;
+  scope: 'single' | 'multi_agent';
+  offset: number;
+  limit: number;
+  appendAudit?: typeof appendSafetyAudit;
+}): boolean {
+  if (!args.requested) return false;
+  const append = args.appendAudit ?? appendSafetyAudit;
+  try {
+    append({
+      ts: Date.now(),
+      sessionId: args.sessionId,
+      kind: 'session.revealed',
+      reasonCode: 'revealed_raw',
+      payload: { scope: args.scope, offset: args.offset, limit: args.limit },
+    });
+    return true;
+  } catch (err) {
+    console.error('[ws] load_session_log reveal audit append failed; downgrading to redacted', err);
+    return false;
+  }
+}
+
+/**
+ * Register D18: mask a persisted JSON column, keeping it a JSON string so the
+ * strict parsers below can still validate it. Null in, null out.
+ *
+ * Unparseable input is returned unchanged rather than nulled — the parsers
+ * already degrade a bad column to `[]`, and swallowing it here would turn a
+ * corrupt-row signal into a silent empty section.
+ */
+function redactJsonString(s: string | null): string | null {
+  if (s === null) return null;
+  try {
+    return JSON.stringify(redactSensitive(JSON.parse(s)).redacted);
+  } catch {
+    return s;
+  }
 }
 
 // Defensive JSON parse — returns undefined on any throw so the caller
@@ -4938,11 +5022,18 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'load_session_log': {
-      // Phase H: paginated session log. Pure read — no DB mutation, no side
-      // effects, no permission check beyond session existence.
-      // `revealSensitive=true` requires the operator's explicit confirm
-      // client-side (the WS message is enough server-side because the
-      // connection is already bound to 127.0.0.1).
+      // Phase H: paginated session log. Pure read — no DB mutation beyond the
+      // reveal audit below, no permission check beyond session existence.
+      //
+      // Register H06: `revealSensitive=true` used to be honoured with no
+      // acknowledgment, no confirmation and NO AUDIT ROW, justified by "the
+      // WS message is enough server-side because the connection is already
+      // bound to 127.0.0.1". That is an argument against the whole
+      // record-intent-before-unredacted-bytes rule, not for exempting one
+      // path — the HTTP raw export (`session_log_export.ts`) and raw search
+      // (`search_sessions.ts`) serve from the same 127.0.0.1 server and both
+      // audit first. This was the cheapest route to raw transcripts and the
+      // only one that left no trail.
       //
       // Cluster H C3 backend: branch on `msg.scope`. Default is the original
       // multi-agent projector ('multi_agent'); `'single'` reads the
@@ -4975,12 +5066,21 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       const offset = Number.isFinite(msg.offset) ? Math.max(0, Math.floor(msg.offset)) : 0;
       const limit = Number.isFinite(msg.limit) ? Math.max(1, Math.floor(msg.limit)) : 200;
+
+      const reveal = resolveRevealAudit({
+        requested: msg.revealSensitive === true,
+        sessionId: msg.sessionId,
+        scope,
+        offset,
+        limit,
+      });
+
       const project = scope === 'single' ? buildSingleAgentSessionLogChunk : buildSessionLogChunk;
       const chunk = project({
         sessionId: msg.sessionId,
         offset,
         limit,
-        revealSensitive: msg.revealSensitive === true,
+        revealSensitive: reveal,
       });
       send(conn.ws, {
         type: 'session_log_chunk',

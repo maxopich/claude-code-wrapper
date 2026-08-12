@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { redactSensitive } from '@cebab/shared';
 import type { ForensicsInput } from '../repo/controllability_forensics.js';
 
 /**
@@ -38,6 +39,36 @@ const WORKDIR_HASH_SKIP_DIRS: ReadonlySet<string> = new Set([
   '.next',
   '.cache',
 ]);
+
+/**
+ * Register D18: mask a persisted SDK envelope that is stored as a JSON
+ * STRING.
+ *
+ * `appendForensics` redacts every payload column on the way in, which is the
+ * structural guarantee — but a JSON string is opaque to that pass. The
+ * redactor's primary weapon is its KEY-NAME list (`api_key`, `password`,
+ * `authorization`, …), and a key name inside a serialised blob is just
+ * characters: only the inline value patterns can reach it. That leaves the
+ * single largest payload in the bundle covered by the weaker half of the
+ * policy.
+ *
+ * So parse first, mask the object, re-serialise. The shape on disk is
+ * unchanged (still a string), which matters because the forensic viewer and
+ * `KickForensicsSnapshot` both read it as one.
+ *
+ * Unparseable input falls back to masking the raw string — the same
+ * "degrade to the weaker check rather than to nothing" posture
+ * `ws/session_log.ts` takes with its `parsed ?? ev.raw`.
+ */
+function redactRawEventJson(raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return redactSensitive(raw).redacted as string;
+  }
+  return JSON.stringify(redactSensitive(parsed).redacted);
+}
 
 export type CapturedPromptEntry = { text: string; projectId: number };
 
@@ -99,7 +130,7 @@ export function captureSingleAgentForensics(
     ts: e.ts,
     type: e.type,
     subtype: e.subtype,
-    raw: e.raw,
+    raw: redactRawEventJson(e.raw),
   }));
 
   // Pending tool calls: filter resolve+toolInput passthrough. resolve() is a
