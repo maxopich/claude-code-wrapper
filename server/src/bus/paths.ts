@@ -185,17 +185,48 @@ export function isValidBusRecipient(s: string): boolean {
 }
 
 /**
- * Slugs reserved for system roles in the bus protocol. A project whose name
- * happens to slugify to one of these gets bumped to a `<slug>-<id>` fallback
- * by `chooseAgentName` — otherwise the project would shadow the system
- * sentinel and the orchestrator's routing logic would get confused.
+ * Windows reserved device names (register H17). A slug becomes a DIRECTORY —
+ * `SessionPaths.iterationDir` joins it straight into the artifact path — and
+ * on Windows these names address a device, not a file, so `mkdir con` fails.
+ * A project named "Con" or "Aux" would therefore have every hop archive fail
+ * on a first-class supported platform (CI runs windows-2022) and nowhere else.
+ *
+ * `slugifyAgentName` lowercases and strips non-alphanumerics, so only the
+ * bare lowercase forms can ever be produced: no `CON`, and no `con.txt`
+ * (a slug cannot contain a dot).
+ */
+const WINDOWS_DEVICE_NAMES: readonly string[] = [
+  'con',
+  'prn',
+  'aux',
+  'nul',
+  ...Array.from({ length: 9 }, (_, i) => `com${i + 1}`),
+  ...Array.from({ length: 9 }, (_, i) => `lpt${i + 1}`),
+];
+
+/**
+ * Slugs a project may not take, for two unrelated reasons.
+ *
+ *   1. **Bus protocol sentinels** — a project whose name slugifies to one of
+ *      these would shadow the sentinel and confuse the orchestrator's routing.
+ *   2. **Windows device names** — see `WINDOWS_DEVICE_NAMES` above; the slug
+ *      is used as a directory name.
+ *
+ * Either way `chooseAgentName` bumps the project to a `<slug>-<id>` fallback,
+ * so this list is data, not a new code path.
  *
  * The `_sink` sentinel is intentionally absent: its leading underscore is
  * disallowed by `isValidAgentName`, so it can never be reached from a
  * project name regardless.
+ *
+ * Applied at ASSIGNMENT time only. A project already installed under a device
+ * name keeps it: renaming a live agent would orphan its `--resume` checkpoint
+ * and its existing iteration directories, which is a worse trade than leaving
+ * one pre-existing install broken on one platform.
  */
 export const RESERVED_AGENT_NAMES: ReadonlySet<string> = new Set([
   'orchestrator', // Cebab's own routing agent
   'user', // operator-facing terminal recipient
   'cebab', // Cebab itself as a bus source
+  ...WINDOWS_DEVICE_NAMES,
 ]);

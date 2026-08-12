@@ -558,3 +558,162 @@ describe('[security] /session-log :: CORS preflight + exposed headers', () => {
     expect(res.body).toContain('sk-raw-visible');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Register S05: an export that is cancelled mid-stream must release its file
+// descriptor. Both flavors leaked — the raw path because `pipe` un-pipes but
+// does not destroy the source, the redacted path because it waited for a
+// `drain` that a destroyed socket never emits.
+//
+// The assertion is on the READ STREAM's own `destroyed` flag, captured by
+// spying on `fs.createReadStream`. That is the fd's lifetime directly, not a
+// proxy for it.
+// ---------------------------------------------------------------------------
+
+describe('[security] /session-log :: cancelled downloads release the descriptor', () => {
+  /** A log big enough that the socket buffer fills and the server is still
+   *  mid-stream when the client hangs up. */
+  function writeBigJsonl(sid: string, lines = 4000): void {
+    const filler = 'y'.repeat(2048);
+    writeJsonl(
+      sid,
+      Array.from({ length: lines }, (_, i) => ({ type: 'assistant', i, text: filler })),
+    );
+  }
+
+  /** Capture every read stream the endpoint opens. */
+  function captureStreams(): fs.ReadStream[] {
+    const opened: fs.ReadStream[] = [];
+    const real = fs.createReadStream.bind(fs);
+    vi.spyOn(fs, 'createReadStream').mockImplementation(((...args: Parameters<typeof real>) => {
+      const s = real(...args);
+      opened.push(s);
+      return s;
+    }) as typeof fs.createReadStream);
+    return opened;
+  }
+
+  /** Issue a GET, abort as soon as the first byte lands, resolve after the
+   *  server has had a tick to react. */
+  function requestThenAbort(reqPath: string, extraHeaders: Record<string, string> = {}) {
+    return new Promise<void>((resolve, reject) => {
+      const req = http.request(
+        {
+          host: TEST_HOST,
+          port: serverPort,
+          path: reqPath,
+          method: 'GET',
+          headers: { Host: defaultHostHeader(), ...extraHeaders },
+        },
+        (res) => {
+          res.once('data', () => {
+            req.destroy();
+            setTimeout(resolve, 250);
+          });
+          res.on('error', () => {
+            /* expected on abort */
+          });
+        },
+      );
+      req.on('error', (err: NodeJS.ErrnoException) => {
+        // ECONNRESET is our own destroy coming back; anything else is real.
+        if (err.code === 'ECONNRESET') return;
+        reject(err);
+      });
+      req.end();
+    });
+  }
+
+  test('a cancelled RAW export destroys its read stream', async () => {
+    writeBigJsonl('sess-raw');
+    const opened = captureStreams();
+    await requestThenAbort(`/session-log/sess-raw?token=${token}&format=raw`, {
+      [RAW_ACK_HEADER]: RAW_ACK_VALUE,
+    });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.destroyed).toBe(true);
+  });
+
+  test('a cancelled REDACTED export destroys its read stream', async () => {
+    writeBigJsonl('sess-red');
+    const opened = captureStreams();
+    await requestThenAbort(`/session-log/sess-red?token=${token}`);
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.destroyed).toBe(true);
+  });
+
+  test('a COMPLETED redacted export still delivers every line', async () => {
+    // Anti-vacuity for both cases above: a teardown that fires too eagerly
+    // would truncate an ordinary download, and "the stream is destroyed"
+    // would still pass.
+    writeJsonl('sess-ok', [
+      { type: 'assistant', text: 'first' },
+      { type: 'assistant', text: 'middle' },
+      { type: 'assistant', text: 'last' },
+    ]);
+    const res = await request({
+      path: `/session-log/sess-ok?token=${token}`,
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('first');
+    expect(res.body).toContain('middle');
+    expect(res.body).toContain('last');
+    expect(res.body.trimEnd().split('\n')).toHaveLength(3);
+  });
+
+  test('a COMPLETED raw export still delivers the whole body', async () => {
+    writeJsonl('sess-ok-raw', [{ marker: 'alpha' }, { marker: 'omega' }]);
+    const res = await request({
+      path: `/session-log/sess-ok-raw?token=${token}&format=raw`,
+      hostHeader: defaultHostHeader(),
+      extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('alpha');
+    expect(res.body).toContain('omega');
+  });
+
+  test('a backpressured redacted export parks at most one drain listener', async () => {
+    // `rl.pause()` does not discard the lines readline has already buffered,
+    // so without a guard every one of them parked its own `once('drain')`.
+    // Node reports that itself once the count passes ten — which is both the
+    // symptom and the cleanest way to observe it from outside the handler.
+    writeBigJsonl('sess-drain');
+    const warnings: string[] = [];
+    const onWarning = (w: Error): void => {
+      warnings.push(w.name);
+    };
+    process.on('warning', onWarning);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            host: TEST_HOST,
+            port: serverPort,
+            path: `/session-log/sess-drain?token=${token}`,
+            method: 'GET',
+            headers: { Host: defaultHostHeader() },
+          },
+          (res) => {
+            // Deliberately do not read: the socket buffer fills, every write
+            // returns false, and the server sits in the backpressure branch.
+            res.pause();
+            setTimeout(() => {
+              req.destroy();
+              setTimeout(resolve, 150);
+            }, 400);
+          },
+        );
+        req.on('error', (err: NodeJS.ErrnoException) => {
+          if (err.code === 'ECONNRESET') return;
+          reject(err);
+        });
+        req.end();
+      });
+    } finally {
+      process.off('warning', onWarning);
+    }
+    expect(warnings).not.toContain('MaxListenersExceededWarning');
+  });
+});

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { HookView } from '@cebab/shared/protocol';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
@@ -42,6 +42,10 @@ afterEach(() => {
 });
 
 const ORIGIN = '/somewhere/.claude/settings.json';
+
+/** FIFO / device cases need mkfifo and /dev/zero; skip on Windows rather than
+ *  fake them. Mirrors `safe_fs.test.ts`. */
+const posixOnly = process.platform === 'win32' ? test.skip : test;
 
 function hook(over: Partial<HookView> = {}): HookView {
   return {
@@ -102,6 +106,66 @@ describe('resolveHookScriptSha', () => {
     expect(resolveHookScriptSha('', projectDir)).toBeNull();
     // A directory is not a script.
     expect(resolveHookScriptSha('./.claude/hooks', projectDir)).toBeNull();
+  });
+
+  // ---- Cebab-x1n.6.21: this used to open with a bare 'r' and read whole ----
+  //
+  // `command` is a path a PROJECT chose in its own `.claude/settings*.json`,
+  // and this runs on the way into every session start. The TOCTOU guard was
+  // here from the start; the other two hazards `safe_fs` names were not.
+
+  test('[security] the hook target is opened NON-BLOCKING, so a FIFO cannot park the server', () => {
+    // The obvious test — point this at a real FIFO and assert it returns —
+    // is the one test that must NOT be written here. A blocking `openSync`
+    // freezes the event loop, and vitest's per-test timeout is itself
+    // JavaScript: it can never fire, so a regression would HANG the suite
+    // (and CI) instead of reddening it. Verified by doing exactly that.
+    //
+    // So assert the guard rather than its consequence. `O_NONBLOCK` on the
+    // open is what makes a FIFO at a project-named hook path return ENXIO
+    // immediately instead of waiting forever for a writer. Reading a normal
+    // file here means the assertion costs nothing and can never block.
+    const abs = writeScript('.claude/hooks/flagged.sh', 'x');
+    const flags: number[] = [];
+    const realOpen = fs.openSync.bind(fs);
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation(((
+      p: fs.PathLike,
+      f: number,
+      m?: fs.Mode,
+    ) => {
+      flags.push(typeof f === 'number' ? f : 0);
+      return realOpen(p, f, m);
+    }) as typeof fs.openSync);
+    try {
+      expect(resolveHookScriptSha(abs, projectDir)).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(flags).toHaveLength(1);
+    // 0 on Windows, where the constant does not exist and `safe_fs` says
+    // `?? 0`. Skip rather than assert `x & 0 === 0`, which would pass while
+    // measuring nothing.
+    const NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
+    if (NONBLOCK === 0) return;
+    expect(flags[0]! & NONBLOCK).toBe(NONBLOCK);
+  });
+
+  posixOnly(
+    '[security] a character device is refused rather than hashed forever',
+    () => {
+      // /dev/zero never ends: an unbounded read allocates until it dies.
+      expect(resolveHookScriptSha('/dev/zero', projectDir)).toBeNull();
+    },
+    10_000,
+  );
+
+  test('an ordinary script still hashes — the cap is not a blanket refusal', () => {
+    // Anti-vacuity for the two above: a null is only meaningful if the normal
+    // path still returns a hash.
+    const abs = writeScript('.claude/hooks/normal.sh', '#!/bin/sh\necho ok\n');
+    expect(resolveHookScriptSha(abs, projectDir)).toBe(
+      createHash('sha256').update('#!/bin/sh\necho ok\n').digest('hex'),
+    );
   });
 });
 

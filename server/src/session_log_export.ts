@@ -50,6 +50,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { pipeline } from 'node:stream';
 import type { Express, Request, Response } from 'express';
 import { redactSensitive } from '@cebab/shared';
 import { config } from './config.js';
@@ -322,26 +323,50 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
     // ── Stream the body. ─────────────────────────────────────────────
+    // Register S05, both paths: the operator can cancel a large download at
+    // any moment, and nothing here used to notice. `res` emits 'close' when
+    // that happens; without a teardown the read stream stays open and its
+    // descriptor is held for the life of the PROCESS, not the request.
     if (format === 'raw') {
+      // `pipeline` rather than `pipe`: `pipe` un-pipes when the destination
+      // goes away but does NOT destroy the source, so a cancelled raw export
+      // leaked its fd. `pipeline` destroys both ends on any outcome —
+      // success, source error, or the client hanging up.
       const stream = fs.createReadStream(filePath);
-      stream.on('error', (err: unknown) => {
+      pipeline(stream, res, (err) => {
+        if (!err) return;
+        // ERR_STREAM_PREMATURE_CLOSE is the ordinary "operator cancelled"
+        // signal, not a fault: the fd is already released by then, and
+        // logging it at error level would cry wolf on every cancelled
+        // download.
+        if ((err as NodeJS.ErrnoException).code === 'ERR_STREAM_PREMATURE_CLOSE') return;
         console.error('[http] /session-log raw stream error', err);
         if (!res.headersSent) res.status(500).end();
         else res.end();
       });
-      stream.pipe(res);
       return;
     }
 
     // Redacted path: line-by-line. `readline` handles CRLF + final-line
     // edge cases. Backpressure: pause the readline when `res.write`
-    // returns false; resume on drain. The HTTP socket may close mid-
-    // stream (operator cancelled the download) — in that case the
-    // readline gets a stream error and we just stop emitting; the next
-    // `res.write` would be a no-op (or throw `ERR_STREAM_DESTROYED`),
-    // which we swallow because the operator already has what they got.
+    // returns false; resume on drain.
     const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    // Teardown. `rl.close()` alone does not close the underlying stream, so
+    // destroy both. Idempotent — 'close' can arrive after we already ended.
+    const teardown = (): void => {
+      rl.close();
+      stream.destroy();
+    };
+    res.on('close', teardown);
+
+    // `rl.pause()` does not discard lines readline has already buffered, so
+    // several more 'line' events arrive after the first failed write. Without
+    // this flag each of them parked ANOTHER `once('drain')` listener — enough
+    // to trip Node's MaxListenersExceededWarning at 11 on any large export,
+    // and to fire `rl.resume()` once per listener when drain finally landed.
+    let waitingForDrain = false;
     rl.on('line', (line: string) => {
       const out = redactJsonlLine(line);
       let ok: boolean;
@@ -350,12 +375,16 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       } catch (err) {
         // Socket closed mid-stream — log once and bail.
         console.warn('[http] /session-log redacted write after close', err);
-        rl.close();
+        teardown();
         return;
       }
-      if (!ok) {
+      if (!ok && !waitingForDrain) {
+        waitingForDrain = true;
         rl.pause();
-        res.once('drain', () => rl.resume());
+        res.once('drain', () => {
+          waitingForDrain = false;
+          rl.resume();
+        });
       }
     });
     rl.on('close', () => {
@@ -363,6 +392,7 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
     });
     rl.on('error', (err: unknown) => {
       console.error('[http] /session-log redacted stream error', err);
+      stream.destroy();
       if (!res.headersSent) res.status(500).end();
       else res.end();
     });
