@@ -279,6 +279,86 @@ describe('[security] bounded rejection log — value cap', () => {
     expect(capHeader('http://127.0.0.1:5173')).toBe('http://127.0.0.1:5173');
     expect(capHeader(null)).toBeNull();
   });
+
+  // The cap must bound what is STORED, not what arrived — escaping expands,
+  // so capping first would leave entries several times past the stated
+  // constant and make the name a lie (register N03's shape).
+  test('the cap bounds the stored value, escapes included', () => {
+    const cut = capHeader('\u0000'.repeat(MAX_RECORDED_HEADER_CHARS))!;
+    expect(cut.length).toBeLessThanOrEqual(MAX_RECORDED_HEADER_CHARS + TRUNCATION_MARKER.length);
+    // …and the slice must not leave half an escape behind.
+    expect(cut).not.toMatch(/\\u[0-9a-f]{0,3}$/);
+    expect(cut.replace(TRUNCATION_MARKER, '')).toMatch(/^(\\u0000)+$/);
+  });
+});
+
+// A rejection record is read by a human (`tail -f` on the log) and shipped to
+// a browser (`recent_rejections`), and both fields in it are raw attacker-
+// supplied request headers. `JSON.stringify` happens to escape the C0 half on
+// the way to disk — which is why no line has ever been forged — but that is
+// the serializer's property, not the record's, and it does nothing for the WS
+// payload. These cases make the guarantee belong to `capHeader`.
+describe('[security] bounded rejection log — hostile header characters', () => {
+  test('CR and LF cannot forge a second log line', () => {
+    recordRejection({
+      origin: 'http://evil.test\r\n{"origin":"http://trusted.test","reason":"forged"}',
+      host: 'localhost:4319',
+      reason: 'origin_not_allowed',
+      channel: 'http',
+    });
+    const raw = fs.readFileSync(rejectionLogPath(), 'utf8');
+    expect(raw.trim().split('\n')).toHaveLength(1);
+    expect(recentRejections()[0].origin).toContain('\\u000d\\u000a');
+    // The forged fragment survives as inert TEXT inside the real record —
+    // dropping it would lose the evidence of what was attempted.
+    expect(recentRejections()[0].origin).toContain('forged');
+  });
+
+  test('terminal escapes cannot fire when the operator tails the log', () => {
+    recordRejection({
+      origin: 'http://a.test\u001b[2J\u001b[1;31mSAFE',
+      host: null,
+      reason: 'origin_not_allowed',
+      channel: 'ws',
+    });
+    const stored = recentRejections()[0].origin;
+    const ESC = String.fromCharCode(27);
+    // No raw ESC anywhere — in the WS payload OR on disk. The first half is
+    // what JSON.stringify was never protecting.
+    expect(stored).not.toContain(ESC);
+    expect(stored).toContain('\\u001b');
+    expect(fs.readFileSync(rejectionLogPath(), 'utf8')).not.toContain(ESC);
+  });
+
+  test('bidi overrides cannot make a hostile origin render as an allowed one', () => {
+    recordRejection({
+      origin: `http://${String.fromCharCode(0x202e)}tsoh-live${String.fromCharCode(0x202c)}.test`,
+      host: null,
+      reason: 'origin_not_allowed',
+      channel: 'ws',
+    });
+    const stored = recentRejections()[0].origin;
+    expect(stored).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+    expect(stored).toContain('\\u202e');
+  });
+
+  test('the escaping is reversible — a literal backslash is escaped first', () => {
+    expect(capHeader('a\\u0041b')).toBe('a\\\\u0041b');
+  });
+
+  // Anti-over-fix: ordinary header characters must survive untouched, or
+  // every record becomes unreadable while all four cases above still pass.
+  test('ordinary origins and hosts pass through byte-for-byte', () => {
+    for (const v of [
+      'http://127.0.0.1:5173',
+      'http://xn--80ak6aa92e.com',
+      'https://sub.domain.example:8443',
+      'localhost:4319',
+      'http://example.test/~user?q=1&r=2#frag',
+    ]) {
+      expect(capHeader(v)).toBe(v);
+    }
+  });
 });
 
 describe('[security] bounded rejection log — disk dedupe', () => {

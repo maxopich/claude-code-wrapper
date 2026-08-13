@@ -45,9 +45,10 @@
  * Three independent bounds, because each one leaves a hole the next
  * closes:
  *
- *   1. `MAX_RECORDED_HEADER_CHARS` truncates `origin`/`host` at record
- *      time, so one entry is small. This bounds the ring's memory and
- *      the `recent_rejections` WS frame as well as a log line.
+ *   1. `capHeader` escapes the characters a hostile header must not
+ *      carry raw and truncates at `MAX_RECORDED_HEADER_CHARS`, so one
+ *      entry is small AND inert. This bounds the ring's memory and the
+ *      `recent_rejections` WS frame as well as a log line.
  *   2. `DISK_DEDUPE_WINDOW_MS` writes at most one line per distinct
  *      (origin, host, reason, channel) per window. A retry loop or a
  *      flood on one origin costs one line, not one per attempt — and
@@ -167,22 +168,58 @@ const rejectionRing: RejectionRecord[] = [];
 const diskDedupe = new Map<string, { lastWrittenTs: number; suppressed: number }>();
 
 /** Key a rejection by everything that makes two of them the same event. `ts`
- *  is excluded on purpose — the whole point is to collapse repeats over
- *  time — and the separator cannot appear in a header value that survived
- *  `capHeader` (which stops at 256 chars but does not strip newlines), so
- *  keep it distinctive rather than assuming the parts are clean. */
+ *  is excluded on purpose — the whole point is to collapse repeats over time.
+ *  `JSON.stringify` of the parts rather than a joined string, so no separator
+ *  has to be argued safe against a hostile header: two records collide only if
+ *  every field matches, whatever the fields contain. */
 function dedupeKey(entry: RejectionRecord): string {
   return JSON.stringify([entry.origin, entry.host, entry.reason, entry.channel]);
 }
 
 /**
- * Truncate a recorded header value to `MAX_RECORDED_HEADER_CHARS`, marking
- * the cut. `null` passes through — an absent header is a fact worth keeping
- * distinct from an empty one.
+ * Characters an attacker-supplied header must not carry into a record that a
+ * human reads and a browser receives: C0 controls and DEL/C1 (CR and LF forge
+ * log lines; ESC fires terminal sequences the moment an operator `cat`s or
+ * tails the file), plus the invisible and bidi-override set that makes a
+ * hostile origin *render* as an allowed one.
+ *
+ * `JSON.stringify` already escapes the C0 half on its way to disk, which is
+ * why no line has ever been forged. But that is the SERIALIZER's property,
+ * not this module's — swap the disk format and it silently goes away — and it
+ * does nothing for the `recent_rejections` WS payload, which carries these
+ * values to the browser unescaped. Doing it here makes the guarantee belong
+ * to the record.
+ */
+const UNSAFE_HEADER_CHARS =
+  // eslint-disable-next-line no-control-regex -- the control set IS the target
+  /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+
+/** Trailing fragment of a `\uXXXX` escape left by slicing mid-sequence. */
+const PARTIAL_ESCAPE = /\\u[0-9a-f]{0,3}$/;
+
+/**
+ * Normalise a recorded header value: escape what must not be stored raw, then
+ * truncate to `MAX_RECORDED_HEADER_CHARS`, marking the cut. `null` passes
+ * through — an absent header is a fact worth keeping distinct from an empty
+ * one.
+ *
+ * Escaping runs FIRST so the constant bounds what is actually stored rather
+ * than what arrived (escaping expands, so capping first would leave entries up
+ * to 6x the stated cap and make the name a lie — register N03's shape). The
+ * cost is that a slice can land inside a `\uXXXX`, so the partial is trimmed.
+ *
+ * Escapes are `\uXXXX` rather than dropped characters on purpose: deleting
+ * them would make two different hostile origins record identically, which is
+ * the opposite of what a forensic log is for. Backslash is escaped first so
+ * the encoding is reversible.
  */
 export function capHeader(value: string | null): string | null {
-  if (value === null || value.length <= MAX_RECORDED_HEADER_CHARS) return value;
-  return value.slice(0, MAX_RECORDED_HEADER_CHARS) + TRUNCATION_MARKER;
+  if (value === null) return value;
+  const safe = value
+    .replace(/\\/g, '\\\\')
+    .replace(UNSAFE_HEADER_CHARS, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  if (safe.length <= MAX_RECORDED_HEADER_CHARS) return safe;
+  return safe.slice(0, MAX_RECORDED_HEADER_CHARS).replace(PARTIAL_ESCAPE, '') + TRUNCATION_MARKER;
 }
 
 /**
