@@ -22,6 +22,7 @@ import {
   getMultiAgentSession,
   listAgentSessions,
   listMultiAgentEvents,
+  listParticipants,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
@@ -242,6 +243,7 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
     captured: Array<{ cwd: string; prompt: string }>,
     briefedAgents?: string[],
     executeMode?: boolean,
+    budget?: { hopBudget: number; initialHopsCount?: number; onEnded?: () => void },
   ) {
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
@@ -253,10 +255,14 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
       paths,
       workers,
       onEvent: vi.fn(),
-      onEnded: vi.fn(),
+      onEnded: budget?.onEnded ?? vi.fn(),
       briefedAgents,
       executeMode,
       runnerFactory: fakeFactory(captured),
+      ...(budget ? { hopBudget: budget.hopBudget } : {}),
+      ...(budget?.initialHopsCount !== undefined
+        ? { initialHopsCount: budget.initialHopsCount }
+        : {}),
     });
   }
 
@@ -397,6 +403,82 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
     expect(newbieTurn.prompt).toContain('<project_claude_md>');
     expect(newbieTurn.prompt).toContain('- Follow the house style');
     expect(markers('newbie')).toHaveLength(1);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  // Register B14: `addWorker` was a hand-rolled copy of `sendUserPrompt` —
+  // the same cebab→orchestrator prompt event followed by the same deliver —
+  // minus its `ended` and hop-budget guards. Since `forwardCebabEvent` bumps
+  // the counter, the roster update could be the very hop that reached the cap
+  // and still wake the orchestrator, defeating the runaway brake.
+  function addNewWorker(name: string) {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    setProjectBusInstalled(proj.id, true, name);
+    return proj.id;
+  }
+
+  test('addWorker at the hop cap refuses to wake the orchestrator', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const onEnded = vi.fn();
+    // Seeded one hop below the cap: the roster event addWorker persists is
+    // the hop that reaches it.
+    const { handle } = wire([worker('coder', null)], captured, undefined, undefined, {
+      hopBudget: 3,
+      initialHopsCount: 2,
+      onEnded,
+    });
+
+    await handle.addWorker(addNewWorker('newbie'));
+    await flush();
+
+    // Nothing was woken: no orchestrator turn ran.
+    expect(captured.some((c) => c.prompt.includes('newbie'))).toBe(false);
+    // …and the operator is told why, in the trail and on the wire.
+    const persisted = listMultiAgentEvents(SESSION_ID);
+    expect(persisted.at(-1)).toMatchObject({ source: CEBAB_SOURCE, kind: 'error' });
+    expect(persisted.at(-1)!.text).toContain('Hop budget exhausted (3/3)');
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', 'iter-1');
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('CONTROL: below the cap, addWorker still wakes the orchestrator with the roster', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const onEnded = vi.fn();
+    const { handle } = wire([worker('coder', null)], captured, undefined, undefined, {
+      hopBudget: 50,
+      onEnded,
+    });
+
+    await handle.addWorker(addNewWorker('newbie2'));
+    await flush();
+
+    const orchTurn = captured.find((c) => c.prompt.includes('newbie2'));
+    expect(orchTurn).toBeDefined();
+    expect(onEnded).not.toHaveBeenCalled();
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('the worker is registered either way — the refusal is about waking, not joining', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle } = wire([worker('coder', null)], captured, undefined, undefined, {
+      hopBudget: 3,
+      initialHopsCount: 2,
+    });
+
+    const projectId = addNewWorker('newbie3');
+    const result = await handle.addWorker(projectId);
+
+    // The participant row and the roster event are durable before the check,
+    // so returning early leaves consistent state rather than a half-join.
+    // (`handle.participantAgentNames` is a start-time snapshot that does not
+    // grow on addWorker — the DB is the roster of record.)
+    expect(result.agentName).toBe('newbie3');
+    expect(listParticipants(SESSION_ID).map((p) => p.project_id)).toContain(projectId);
 
     unregisterLiveSession(SESSION_ID);
   });

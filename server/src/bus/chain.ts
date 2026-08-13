@@ -246,6 +246,12 @@ type ChainRouter = {
 export function createChainRouter(params: {
   sessionId: string;
   iterationId: string;
+  /**
+   * Participants in **chain order**. Register B08: the last entry is the only
+   * agent permitted to address `_sink`, so reordering this list reassigns who
+   * may end the run. Keep it the same order `startChainSession` builds
+   * `nextHops` and the briefings from.
+   */
   agentNames: string[];
   paths: SessionPaths;
   onEvent: StartChainOpts['onEvent'];
@@ -291,6 +297,13 @@ export function createChainRouter(params: {
   const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
     params;
   const participantSet = new Set(agentNames);
+  // Register B08: the only participant entitled to address `_sink` and end
+  // the run. `agentNames` is the chain order (`participants.map(p =>
+  // p.agentName)`), the same list `startChainSession` walks to build
+  // `nextHops` — so this is the agent whose next hop IS `_sink`, and the one
+  // whose briefing says so. `undefined` for an empty chain, which no source
+  // can equal.
+  const terminalAgent = agentNames.at(-1);
   const lastPromptForAgent = new Map<string, string>();
 
   // Mutable WS sink: swapped on reconnect (`rebind`), silenced on `detach`.
@@ -452,6 +465,27 @@ export function createChainRouter(params: {
       });
       return;
     }
+    // Register B24: an agent addressing itself. Nothing rejected this, so
+    // `deliver` woke the sender again with its own text — a loop bounded only
+    // by the hop budget, which a confused model can burn entirely without
+    // another participant ever running.
+    //
+    // Dropped HERE, before the persist below, unlike `unknown_destination`.
+    // The harm B24 names is the budget, so a message that goes nowhere must
+    // not advance the counter; the safety-audit row is the record that it was
+    // attempted.
+    if (ev.source === ev.destination) {
+      console.warn(`[chain] drop self-addressed event from ${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'self_addressed',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Agent addressed itself',
+        message: `${ev.source} sent to itself — the message was dropped rather than waking the sender again`,
+      });
+      return;
+    }
 
     let dbId = 0;
     try {
@@ -463,10 +497,19 @@ export function createChainRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[chain] persist event failed', err);
     }
+    // Register B25: OUTSIDE the try. The counter is the runaway brake, and a
+    // brake that stops counting when writes start failing is exactly backwards
+    // — the event below is forwarded and delivered whether or not the row
+    // landed, so a session with a sick database used to run unbounded.
+    //
+    // This does mean the displayed ratio can exceed `events.length` while
+    // persistence is failing. That divergence is true information (events ARE
+    // missing); under healthy persistence the two stay in lockstep exactly as
+    // before, which is what the UI test asserts.
+    hopsCount += 1;
     // PR-7: capture kind='error' events as the run's first_error for the rail.
     if (ev.kind === 'error') {
       captureError(ev.text);
@@ -494,6 +537,30 @@ export function createChainRouter(params: {
     lastPromptForAgent.set(ev.destination, ev.text);
 
     if (ev.destination === SINK_RECIPIENT) {
+      // Register B08: `_sink` was the ONE destination with no source check.
+      // Reaching it publishes the sender's text as the run's `final.md` and
+      // tears the session down as `completed`, so a middle participant that
+      // addressed it answered on the chain's behalf and skipped every
+      // downstream hop.
+      //
+      // The entitlement is not a new rule. `startChainSession` builds
+      // `nextHops` from the same ordered participant list `agentNames` comes
+      // from — last participant → `_sink`, everyone else → their successor —
+      // and `renderChainBriefing` reads that map to tell each agent its one
+      // destination. `terminalAgent` is that same fact, available where the
+      // rule has to be enforced.
+      if (ev.source !== terminalAgent) {
+        console.warn(`[chain] drop dest=_sink from non-terminal source=${ev.source}`);
+        dispatchRouterDrop({
+          reasonCode: 'unauthorized_sink',
+          source: ev.source,
+          destination: ev.destination,
+          kind: ev.kind,
+          title: 'Agent tried to end the chain early',
+          message: `${ev.source} addressed _sink, which only the last participant may do — the chain was not completed`,
+        });
+        return;
+      }
       try {
         const idir = paths.iterationDir(iterationId);
         fs.mkdirSync(idir, { recursive: true });
@@ -573,8 +640,10 @@ export function createChainRouter(params: {
   // Cebab-originated events (briefings, initial prompt): persist + forward so
   // the operator's scrollback + DB transcript include them. No routing — the
   // briefing/prompt is delivered as the agent's actual turn separately.
-  // Bumps `hopsCount` on a successful persist so the counter stays in
-  // lockstep with `run.events.length` as the UI sees it.
+  // Bumps `hopsCount` so the counter stays in lockstep with
+  // `run.events.length` as the UI sees it — register B25 moved the bump out
+  // of the persist `try` so a failed write can no longer stall the brake;
+  // see `handleEvent` for the reasoning.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -587,10 +656,10 @@ export function createChainRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[chain] persist cebab event failed', err);
     }
+    hopsCount += 1;
     try {
       sink.onEvent(sessionId, ev, dbId);
     } catch (err) {

@@ -6,8 +6,12 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createChainRouter } from './chain.js';
 import { computeSessionPaths } from './paths.js';
-import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
-import { createMultiAgentSession } from '../repo/multi_agent.js';
+import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT } from './runtime.js';
+import {
+  createMultiAgentSession,
+  getMultiAgentSession,
+  listMultiAgentEvents,
+} from '../repo/multi_agent.js';
 import type { BusEvent } from './runner.js';
 import type { NotificationEnvelope, RouterDropReasonCode } from '@cebab/shared/protocol';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
@@ -46,21 +50,25 @@ type Captured = {
   drops: Array<{ reasonCode: RouterDropReasonCode }>;
 };
 
-function makeRouter(): {
+function makeRouter(agentNames: string[] = AGENTS): {
   router: ReturnType<typeof createChainRouter>;
   captured: Captured;
+  onEnded: ReturnType<typeof vi.fn>;
+  paths: ReturnType<typeof computeSessionPaths>;
 } {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
   const paths = computeSessionPaths(SESSION_ID, workspace);
+  fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
   const captured: Captured = { notifications: [], drops: [] };
+  const onEnded = vi.fn();
   const router = createChainRouter({
     sessionId: SESSION_ID,
     iterationId: 'iter-1',
-    agentNames: AGENTS,
+    agentNames,
     paths,
     onEvent: vi.fn(),
-    onEnded: vi.fn(),
+    onEnded,
     hopBudget: 1000,
     sendNotification: (env) => {
       captured.notifications.push(env);
@@ -69,7 +77,7 @@ function makeRouter(): {
       captured.drops.push({ reasonCode: drop.reasonCode });
     },
   });
-  return { router, captured };
+  return { router, captured, onEnded, paths };
 }
 
 function ev(partial: Partial<BusEvent>): BusEvent {
@@ -143,5 +151,87 @@ describe('[security][BE-9] chain router-drop → safety_audit + envelope', () =>
     expect(selectAuditRows()).toEqual([]);
     expect(captured.notifications).toHaveLength(0);
     expect(captured.drops).toHaveLength(0);
+  });
+});
+
+// Register B08. `_sink` was the one destination class `handleEvent` routed
+// without asking who sent it — and reaching it publishes the sender's text as
+// the iteration's `final.md` and tears the session down as `completed`. A
+// middle participant could therefore answer on the chain's behalf and skip
+// every hop after it.
+describe('[security][B08] only the last participant may end the chain', () => {
+  const THREE = ['first', 'middle', 'last'];
+
+  test('a middle participant addressing _sink is dropped as unauthorized_sink', () => {
+    const { router, captured, onEnded, paths } = makeRouter(THREE);
+    router.handleEvent(ev({ source: 'middle', destination: SINK_RECIPIENT, text: 'my answer' }));
+
+    expect(selectAuditRows()[0]).toEqual({
+      kind: 'router.drop',
+      reason_code: 'unauthorized_sink',
+    });
+    expect(captured.notifications[0]).toMatchObject({
+      class: 'safety',
+      severity: 'danger',
+      reasonCode: 'unauthorized_sink',
+    });
+    expect(captured.drops[0]?.reasonCode).toBe('unauthorized_sink');
+
+    // The three consequences the drop has to prevent, asserted separately:
+    // the run was not answered, was not ended, and the DB agrees.
+    expect(fs.existsSync(path.join(paths.iterationDir('iter-1'), 'final.md'))).toBe(false);
+    expect(onEnded).not.toHaveBeenCalled();
+    expect(getMultiAgentSession(SESSION_ID)!.status).toBe('running');
+  });
+
+  test('CONTROL: the last participant still ends the chain', () => {
+    const { router, captured, onEnded, paths } = makeRouter(THREE);
+    router.handleEvent(ev({ source: 'last', destination: SINK_RECIPIENT, text: 'the answer' }));
+
+    expect(selectAuditRows()).toEqual([]);
+    expect(captured.drops).toHaveLength(0);
+    expect(fs.readFileSync(path.join(paths.iterationDir('iter-1'), 'final.md'), 'utf8')).toBe(
+      'the answer',
+    );
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'completed', 'iter-1');
+  });
+
+  test('CONTROL: the FIRST participant may not either — the rule is position, not seniority', () => {
+    const { router, captured, onEnded } = makeRouter(THREE);
+    router.handleEvent(ev({ source: 'first', destination: SINK_RECIPIENT }));
+
+    expect(captured.drops[0]?.reasonCode).toBe('unauthorized_sink');
+    expect(onEnded).not.toHaveBeenCalled();
+  });
+});
+
+// Register B24. Nothing rejected `source === destination`, so `deliver` woke
+// the sender again with its own text — a loop bounded only by the hop budget.
+describe('[security][B24] an agent may not address itself', () => {
+  test('a self-addressed event is dropped as self_addressed', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: 'coder', destination: 'coder' }));
+
+    expect(selectAuditRows()[0]?.reason_code).toBe('self_addressed');
+    expect(captured.notifications[0]?.reasonCode).toBe('self_addressed');
+    expect(captured.drops[0]?.reasonCode).toBe('self_addressed');
+  });
+
+  test('the drop lands BEFORE the persist, so it costs no hop', () => {
+    // The harm B24 names is budget burn. A drop that still counted the hop
+    // would leave the loop just as expensive, only quieter — so this, not
+    // the reason code, is what makes the fix address the finding.
+    const { router } = makeRouter();
+    router.handleEvent(ev({ source: 'coder', destination: 'coder' }));
+
+    expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(0);
+  });
+
+  test('CONTROL: the same agent addressing its real next hop is not dropped', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' }));
+
+    expect(captured.drops).toHaveLength(0);
+    expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(1);
   });
 });

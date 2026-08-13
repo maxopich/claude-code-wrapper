@@ -185,7 +185,44 @@ export type RouterDropReasonCode =
    * a legitimate participant addressed a name that does not exist, which in
    * practice means a typo or a hallucinated roster entry.
    */
-  | 'unknown_destination';
+  | 'unknown_destination'
+  /**
+   * Register B08: an agent addressed `_sink` when it was not allowed to end
+   * the run.
+   *
+   * `_sink` is the chain's terminator: the event's text is written as the
+   * iteration's `final.md` and the session tears down as **completed**. Every
+   * other destination class in `handleEvent` is source-checked; this one was
+   * not, so a MIDDLE participant addressing `_sink` published its own text as
+   * the run's answer and skipped every downstream hop. The chain router now
+   * consults the same `nextHops` map the briefings are generated from — only
+   * the participant whose next hop IS `_sink` may use it.
+   *
+   * The orchestrator emits this code too, for a different rule: `_sink` has
+   * no meaning in hub-and-spoke mode, so nobody may address it. That branch
+   * was a bare `console.warn` — the same shape B16 fixed for
+   * `unknown_destination`, and left unmapped at the time for want of a code.
+   *
+   * Not `unknown_destination`: `_sink` is a real recipient in the protocol.
+   * The sender named something that exists and was not entitled to it, which
+   * is an authorization failure rather than a typo.
+   */
+  | 'unauthorized_sink'
+  /**
+   * Register B24: `ev.source === ev.destination`.
+   *
+   * Nothing rejected a self-addressed event, so `deliver` woke the sender
+   * again with its own text — a loop bounded only by the hop budget, which a
+   * confused model can burn entirely without another agent ever running. In
+   * orchestrator mode the worker case is already covered by
+   * `worker_to_worker`; the gap this closes there is orchestrator →
+   * orchestrator.
+   *
+   * Dropped BEFORE the event is persisted, unlike `unknown_destination`. The
+   * harm here is the budget, and a message that goes nowhere should not
+   * advance the counter; the audit row is the record that it was attempted.
+   */
+  | 'self_addressed';
 
 /**
  * Cluster A Phase 6 — extended §7 vocabulary (subset that has source sites
