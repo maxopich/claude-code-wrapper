@@ -149,6 +149,23 @@ export type LiveBusSession = {
    * silence a newer window's stream (register B01).
    */
   rebind: (sink: BusSink) => number;
+  /**
+   * Register B17: send a ServerMsg to whoever owns this session's sink **right
+   * now**, resolved at call time rather than captured by the caller.
+   *
+   * The pause-expiry registry is a process singleton whose timers are cleared
+   * on session end, not on connection close — so a timer armed by one browser
+   * window routinely fires after that window is gone. Its callback used to
+   * `send(conn.ws, …)` into the closed socket while the DB and audit writes
+   * landed anyway, which is how an auto-kick could be durably recorded and
+   * never shown to the operator still watching from another window.
+   *
+   * Delegates to the router the same way `rebind` does, so it reads the
+   * router's live `sink` variable. That matters: a copy held here would keep
+   * sending after `detach()` swapped the router's sink for `NOOP_SINK`,
+   * un-silencing a session the operator deliberately detached.
+   */
+  sendServerMsg: (msg: ServerMsg) => void;
 };
 
 const live = new Map<string, LiveBusSession>();
@@ -183,4 +200,53 @@ export function hasLiveSession(sessionId: string): boolean {
  */
 export function listLiveSessionIds(): string[] {
   return [...live.keys()];
+}
+
+/**
+ * Register B18: the gap between "no session is live" and "a session is live".
+ *
+ * `registerLiveSession` is called from inside `startOrchestratorSession` /
+ * `startChainSession`, and the WS handler awaits `gateProjectsForSpawn` before
+ * either of those — a gate that parks until the OPERATOR answers a trust
+ * prompt. So `listLiveSessionIds()` stays empty for as long as a human takes
+ * to click, and two browser windows can both pass the process-wide check and
+ * both start. The register's consequence is the bad half: the next connect's
+ * resume sweep reports one of them `crashed` while its AgentRunner keeps
+ * delivering turns, leaving agents running with no session the UI can stop.
+ *
+ * The claim closes that window. It lives here rather than in the WS layer
+ * because "is a session being started right now" is the same question this
+ * module already answers for "is one running", and because the answer must be
+ * process-wide, not per connection.
+ *
+ * Deliberately NOT folded into `listLiveSessionIds()`: a claim token is not a
+ * session id, and that list feeds an operator-facing message that names ids.
+ *
+ * The owner token is the claiming connection's, and `ws.on('close')` releases
+ * it. That is the property that matters — the WS message dispatch wraps only
+ * `JSON.parse` in a try, so a rejection between the claim and registration
+ * would skip an explicit release and wedge every future start until restart.
+ * A claim that cannot outlive its connection cannot fail that way.
+ */
+const startClaims = new Set<string>();
+
+/** Returns false when a session is already live or another start is in
+ *  flight; the caller must refuse. Idempotent for a token that already
+ *  holds the claim. */
+export function claimSessionStart(owner: string): boolean {
+  if (startClaims.has(owner)) return true;
+  if (live.size > 0 || startClaims.size > 0) return false;
+  startClaims.add(owner);
+  return true;
+}
+
+/** Owner-scoped: releasing with a token that does not hold the claim is a
+ *  no-op, so a late release from a stale connection cannot free a newer
+ *  connection's claim. */
+export function releaseSessionStart(owner: string): void {
+  startClaims.delete(owner);
+}
+
+export function isSessionStartInFlight(): boolean {
+  return startClaims.size > 0;
 }

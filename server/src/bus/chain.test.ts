@@ -471,6 +471,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
         bound = s;
         return 1; // register B01: rebind mints a sink-ownership epoch
       },
+      sendServerMsg: () => {},
     });
 
     const onEvent = vi.fn();
@@ -501,6 +502,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
         continueThroughMutation: vi.fn(),
       },
       rebind: vi.fn(),
+      sendServerMsg: () => {},
     });
     expect(
       await resumeChainSession({ sessionId: SESSION_ID, onEvent: vi.fn(), onEnded: vi.fn() }),

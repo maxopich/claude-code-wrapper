@@ -152,6 +152,7 @@ describe('[B02] the supersede sweep does not crash-mark a still-live session [se
         continueThroughMutation: async () => {},
       },
       rebind: () => 1,
+      sendServerMsg: () => {},
     });
   }
 

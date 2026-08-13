@@ -59,6 +59,7 @@ import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
   RouterDropReasonCode,
+  ServerMsg,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
@@ -371,6 +372,11 @@ type OrchestratorRouter = {
   detach: (epoch?: number) => void;
   /** Returns the new sink epoch (register B01). */
   rebind: (sink: BusSink) => number;
+  /** Register B17: send a ServerMsg through the sink that owns this session
+   *  RIGHT NOW. For callers that outlive a connection — the pause-expiry
+   *  timers are process-scoped and routinely fire after the window that armed
+   *  them has gone. */
+  sendServerMsg: (msg: ServerMsg) => void;
   registerWorker: (agentName: string) => void;
   getWorkerNames: () => readonly string[];
   setLifecycle: (lifecycle: MultiAgentLifecycle) => void;
@@ -1035,6 +1041,18 @@ export function createOrchestratorRouter(params: {
     sink = next;
     return ++sinkEpoch;
   };
+  /**
+   * Register B17: send to whoever owns the sink right now.
+   *
+   * Reads the mutable `sink` at call time — which is the whole point. A caller
+   * that captured a sink when it armed a timer would keep sending to a window
+   * that has since closed, and would keep sending after `detach()` swapped in
+   * `NOOP_SINK`. Going through here, both cases behave: a rebound session
+   * reaches the new window, a detached one drops.
+   */
+  const sendServerMsg = (msg: ServerMsg): void => {
+    sink.sendServerMsg?.(msg);
+  };
   const registerWorker = (agentName: string) => {
     if (workerSet.has(agentName)) return;
     workerSet.add(agentName);
@@ -1184,6 +1202,7 @@ export function createOrchestratorRouter(params: {
     sendUserPrompt,
     detach,
     rebind,
+    sendServerMsg,
     registerWorker,
     getWorkerNames,
     setLifecycle,
@@ -1997,6 +2016,7 @@ export function wireOrchestratorSession(p: {
     mode: 'orchestrator',
     handle,
     rebind: (s) => router.rebind(s),
+    sendServerMsg: (m) => router.sendServerMsg(m),
   });
 
   return { handle, router, deliver };
