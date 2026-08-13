@@ -84,8 +84,14 @@ function undecidedCards(stream: ServerMsg[]): string[] {
     .filter((id) => !decided.has(id));
 }
 
-/** `recordDrainedPermission` is fire-and-forget; let its write land. */
-const settle = () => new Promise((r) => setImmediate(r));
+/**
+ * The drains return their in-flight bookkeeping writes; awaiting them is what
+ * makes these tests deterministic AND what keeps `withTempDataDir` from
+ * deleting the data directory while `persistMessage` still holds the session's
+ * JSONL open. On Windows that race is an `ENOTEMPTY` at teardown, which is
+ * exactly how the first version of this file failed CI.
+ */
+const settle = (writes: Promise<void>[]) => Promise.all(writes);
 
 describe('[security] a drained permission replays as decided, not as a live card', () => {
   test('socket close: every open card is answered in the transcript', async () => {
@@ -101,8 +107,7 @@ describe('[security] a drained permission replays as decided, not as a live card
       ['req-1', pendingEntry(SESSION)],
       ['req-2', pendingEntry(SESSION)],
     ]);
-    drainAllPendingPermissions(pending);
-    await settle();
+    await settle(drainAllPendingPermissions(pending));
 
     expect(undecidedCards(replay())).toEqual([]);
     const decisions = replay().filter((m) => m.type === 'permission_decided');
@@ -122,8 +127,7 @@ describe('[security] a drained permission replays as decided, not as a live card
       ['req-mine', pendingEntry(SESSION)],
       ['req-theirs', pendingEntry('sess-other')],
     ]);
-    cleanupPendingPermissionsForSession(pending, SESSION);
-    await settle();
+    await settle(cleanupPendingPermissionsForSession(pending, SESSION));
 
     expect(undecidedCards(replay())).toEqual([]);
     expect(replay().filter((m) => m.type === 'permission_decided')[0]).toMatchObject({
@@ -143,8 +147,7 @@ describe('[security] a drained permission replays as decided, not as a live card
     // asserting the operator refused a tool call they never saw.
     seedSession();
     await seedRequest('req-1');
-    recordDrainedPermission(SESSION, 'req-1', 'client_disconnected');
-    await settle();
+    await recordDrainedPermission(SESSION, 'req-1', 'client_disconnected');
 
     const decided = replay().find((m) => m.type === 'permission_decided');
     expect(decided).toMatchObject({ reason: 'client_disconnected' });
@@ -179,13 +182,13 @@ describe('[security] a drained permission replays as decided, not as a live card
     await seedRequest('req-1');
     const before = listEvents(SESSION).length;
 
-    drainAllPendingPermissions(new Map(), () => {
+    const a = drainAllPendingPermissions(new Map(), () => {
       throw new Error('recorder called for an empty drain');
     });
-    cleanupPendingPermissionsForSession(new Map(), SESSION, () => {
+    const b = cleanupPendingPermissionsForSession(new Map(), SESSION, () => {
       throw new Error('recorder called for an empty drain');
     });
-    await settle();
+    expect([...a, ...b]).toEqual([]);
 
     expect(listEvents(SESSION)).toHaveLength(before);
   });

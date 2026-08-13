@@ -247,33 +247,39 @@ export type PendingPermission = {
  * is right): nothing replays a parked spawn gate, so there is no card to
  * strand and no claim to correct. The asymmetry is the point.
  *
- * Fire-and-forget with an explicit catch: the callers are a socket-close
- * handler and a synchronous interrupt path, neither of which can await, and a
- * failed bookkeeping write must not take down the drain it is describing.
+ * Fire-and-forget FOR THE CALLERS — a socket-close handler and a synchronous
+ * interrupt path, neither of which can await, and a failed bookkeeping write
+ * must not take down the drain it is describing. The rejection is swallowed
+ * here, so ignoring the returned promise is safe.
+ *
+ * It is still RETURNED, and that is not decoration. `persistMessage` awaits a
+ * JSONL append before it resolves, so the promise is the only handle on "the
+ * log file is closed". A test that drains and then deletes its temp directory
+ * without it races the write — on Windows that race is an `ENOTEMPTY` on
+ * teardown, which is how this was found.
  */
 export type RecordDrainedPermission = (
   sessionId: string,
   requestId: string,
   reason: PermissionDecisionReason,
-) => void;
+) => Promise<void>;
 
-export const recordDrainedPermission: RecordDrainedPermission = function recordDrainedPermission(
-  sessionId,
-  requestId,
-  reason,
-): void {
-  void persistMessage(sessionId, {
-    type: 'wrapper',
-    subtype: 'permission_decided',
-    session_id: sessionId,
-    uuid: randomUUID(),
-    requestId,
-    decision: 'deny',
-    reason,
-  } as never).catch((err) => {
-    console.error(`[ws] failed to persist drained permission ${requestId}`, err);
-  });
-};
+export const recordDrainedPermission: RecordDrainedPermission =
+  async function recordDrainedPermission(sessionId, requestId, reason): Promise<void> {
+    try {
+      await persistMessage(sessionId, {
+        type: 'wrapper',
+        subtype: 'permission_decided',
+        session_id: sessionId,
+        uuid: randomUUID(),
+        requestId,
+        decision: 'deny',
+        reason,
+      } as never);
+    } catch (err) {
+      console.error(`[ws] failed to persist drained permission ${requestId}`, err);
+    }
+  };
 
 /**
  * F12: drain pending permission Promises for a given session before
@@ -290,18 +296,25 @@ export const recordDrainedPermission: RecordDrainedPermission = function recordD
  * not leave a second thing to omit. `record` is injectable only so tests that
  * are about map hygiene can opt out of the DB; production never passes it,
  * and there is no argument order in which the recording gets lost.
+ *
+ * Returns the in-flight bookkeeping writes. Production ignores them (the
+ * interrupt handler is synchronous); a test awaits them before deleting its
+ * temp data directory, because `persistMessage` holds a JSONL handle until it
+ * resolves and Windows will not remove a directory out from under one.
  */
 export function cleanupPendingPermissionsForSession(
   pending: Map<string, PendingPermission>,
   sessionId: string,
   record: RecordDrainedPermission = recordDrainedPermission,
-): void {
+): Promise<void>[] {
+  const writes: Promise<void>[] = [];
   for (const [requestId, p] of pending) {
     if (p.sessionId !== sessionId) continue;
     p.resolve({ behavior: 'deny', message: 'interrupted' });
     pending.delete(requestId);
-    record(p.sessionId, requestId, 'interrupted');
+    writes.push(record(p.sessionId, requestId, 'interrupted'));
   }
+  return writes;
 }
 
 /**
@@ -321,12 +334,14 @@ export function cleanupPendingPermissionsForSession(
 export function drainAllPendingPermissions(
   pending: Map<string, PendingPermission>,
   record: RecordDrainedPermission = recordDrainedPermission,
-): void {
+): Promise<void>[] {
+  const writes: Promise<void>[] = [];
   for (const [requestId, p] of pending) {
     p.resolve({ behavior: 'deny', message: 'client disconnected' });
-    record(p.sessionId, requestId, 'client_disconnected');
+    writes.push(record(p.sessionId, requestId, 'client_disconnected'));
   }
   pending.clear();
+  return writes;
 }
 
 /**

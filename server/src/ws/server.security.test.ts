@@ -5,7 +5,7 @@ import { cleanupPendingPermissionsForSession, type PendingPermission } from './s
 // they run without a data directory, so the real recorder would try to open a
 // database. Opting out explicitly keeps that separation visible — the
 // recording itself is covered end-to-end in `permission_drain.test.ts`.
-const noRecord = () => {};
+const noRecord = async () => {};
 
 // F12: pending permission Promises for a given session must be drained
 // when that session is interrupted. Without this, the map grows unbounded
