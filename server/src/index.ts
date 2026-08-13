@@ -1,7 +1,7 @@
 import http from 'node:http';
 import express from 'express';
 import { config } from './config.js';
-import { closeDb, getDb } from './db.js';
+import { closeDb, declareRealDataDirIntent, getDb } from './db.js';
 import { runDataPermsBootCheck } from './data_perms_boot.js';
 import { closeLogger } from './runner/logger.js';
 import { closeAllQueries } from './runner/lifecycle.js';
@@ -24,6 +24,12 @@ function main(): void {
   console.log(`[cebab] workspace default=${config.workspaceRootDefault}`);
   console.log(`[cebab] data=${config.dataDir}`);
 
+  // The server is the ONE process entitled to open the operator's real
+  // ~/.cebab. Everything else — smoke scripts, benchmarks, one-off tsx files —
+  // must point CEBAB_DATA_DIR at a scratch directory, and `getDb()` refuses
+  // otherwise. See `declareRealDataDirIntent` for the incident that made this
+  // a guard rather than a convention.
+  declareRealDataDirIntent();
   getDb();
 
   // Register H01: bring `~/.cebab` to owner-only. `getDb()` above already

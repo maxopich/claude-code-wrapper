@@ -108,6 +108,14 @@ export type ResumedSession = {
   sinkEpoch: number;
 };
 
+/**
+ * DELIBERATELY UNBOUNDED (`Cebab-3nt`), unlike the session-log projector which
+ * now pages. This is the replay a re-attaching window receives so its transcript
+ * matches what was on screen before; a cap would silently start it mid-history
+ * with no marker saying so, which is worse than the load. If this becomes a
+ * problem the fix is the `sinceId` seam plus a client that asks for more — not
+ * a number chosen here.
+ */
 function replayFor(sessionId: string): PersistedEvent[] {
   return listMultiAgentEvents(sessionId).map((r) => ({
     ts: r.ts,

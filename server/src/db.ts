@@ -52,17 +52,88 @@ function samePath(a: string, b: string): boolean {
  * it catches a deleted setup line, a test that assigns `dataDir` back to the
  * home path, and any indirect reach that arrives before the swap.
  */
+let realDataDirDeclared = false;
+
+/**
+ * Declare that this process is entitled to open the operator's real `~/.cebab`.
+ *
+ * Exactly one caller: `index.ts`, the server. Everything else — a smoke
+ * script, a benchmark, a one-off `tsx` file — must point `CEBAB_DATA_DIR` at a
+ * scratch directory instead, and `assertNotRealDataDir` below refuses if it
+ * did not.
+ *
+ * WHY AN EXPLICIT OPT-IN rather than sniffing the entry point: "am I the
+ * server" is not a question a module can answer honestly. `require.main`,
+ * `argv[1]` and `process.title` are all wrong under `tsx watch`, under a
+ * bundler, and in a worker. A declaration is one line in the one place that
+ * knows the answer.
+ */
+export function declareRealDataDirIntent(): void {
+  realDataDirDeclared = true;
+}
+
+/**
+ * Test-only: withdraw the declaration.
+ *
+ * Module state outlives a case, and a leaked declaration would silently switch
+ * this guard off for every later test in the same worker — the guard being off
+ * is precisely the condition it exists to catch, so it must not be reachable
+ * by forgetting a cleanup. The `VITEST` branch above fires first under vitest,
+ * so a leak is not exploitable today; this keeps that from being the only
+ * thing standing between a stray call and a disabled guard.
+ */
+export function __resetRealDataDirIntentForTests(): void {
+  realDataDirDeclared = false;
+}
+
+/**
+ * Fail closed when something that is not the server would open the operator's
+ * real `~/.cebab`.
+ *
+ * WHY THIS IS A RUNTIME GUARD AND NOT A LINT RULE. `config.dataDir` is
+ * mutable module state and the swap is a per-file convention, so a caller can
+ * reach `getDb()` INDIRECTLY — through `translate`, a repo helper, a
+ * notification dispatch — without ever naming `getDb` or `config.dataDir`.
+ * That is how it happened before (PR #280): one test file quietly opened,
+ * migrated and read the real database on every full-suite run, and the only
+ * trace was a changed ctime.
+ *
+ * WHY IT COVERS MORE THAN TESTS NOW. This used to return early unless
+ * `process.env.VITEST` was set, so it only ever watched vitest. On 2026-08-13
+ * a one-off `tsx` benchmark wrote 20,000 synthetic rows into the operator's
+ * real database: it assigned `process.env.CEBAB_DATA_DIR` at the top of the
+ * file, but **ESM hoists `import` above executable statements**, so
+ * `config.ts` had already read the variable and resolved `~/.cebab`. The
+ * script was not a test, so nothing stopped it.
+ *
+ * `smoke.ts` shows the shape that works and says why: set the variable, then
+ * `await import('./db.js')` dynamically. This guard is what makes that a rule
+ * rather than a thing one file happens to remember.
+ */
 function assertNotRealDataDir(): void {
-  if (!process.env.VITEST) return;
   if (!samePath(config.dataDir, realDataDir())) return;
+  if (process.env.VITEST) {
+    throw new Error(
+      `[db] refusing to open the real data directory (${realDataDir()}) from a test.\n` +
+        `This test reached getDb() with config.dataDir still pointing at your actual ~/.cebab, ` +
+        `which would migrate and mutate your real database.\n` +
+        `Fix: use withTempDataDir() from server/src/test_support/temp_data_dir.ts, or set ` +
+        `config.dataDir to a temp directory in beforeEach.\n` +
+        `If you are seeing this on EVERY test, test/setup-data-dir.mjs is no longer wired ` +
+        `into vitest.config.ts's setupFiles.`,
+    );
+  }
+  if (realDataDirDeclared) return;
   throw new Error(
-    `[db] refusing to open the real data directory (${realDataDir()}) from a test.\n` +
-      `This test reached getDb() with config.dataDir still pointing at your actual ~/.cebab, ` +
-      `which would migrate and mutate your real database.\n` +
-      `Fix: use withTempDataDir() from server/src/test_support/temp_data_dir.ts, or set ` +
-      `config.dataDir to a temp directory in beforeEach.\n` +
-      `If you are seeing this on EVERY test, test/setup-data-dir.mjs is no longer wired ` +
-      `into vitest.config.ts's setupFiles.`,
+    `[db] refusing to open the real data directory (${realDataDir()}) from a process that ` +
+      `did not declare it.\n` +
+      `Only the server opens the operator's real database. A script, benchmark or probe must ` +
+      `point CEBAB_DATA_DIR at a scratch directory FIRST.\n` +
+      `Fix: set process.env.CEBAB_DATA_DIR and then load db.js with a DYNAMIC import — ` +
+      `\`const { getDb } = await import('./db.js')\` — because a top-level \`import\` is ` +
+      `hoisted above your assignment and config.ts will already have read the old value. ` +
+      `server/src/smoke.ts is the worked example.\n` +
+      `If you really are the server, call declareRealDataDirIntent() at boot.`,
   );
 }
 
