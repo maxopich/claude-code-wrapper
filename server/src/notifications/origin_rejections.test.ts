@@ -5,11 +5,18 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import {
   __resetForTests,
+  capHeader,
+  DEDUPE_KEYS_CAP,
+  DISK_DEDUPE_WINDOW_MS,
+  MAX_LOG_BYTES,
+  MAX_RECORDED_HEADER_CHARS,
   recentRejections,
   recordRejection,
   rejectionLogPath,
+  rotatedRejectionLogPath,
   REJECTION_RING_CAP,
   REJECTION_VISIBLE_WINDOW_MS,
+  TRUNCATION_MARKER,
 } from './origin_rejections.js';
 
 // Cluster G E3 (server-side): origin_rejections.ts is the dual-write
@@ -154,7 +161,7 @@ describe('recentRejections / visible window', () => {
 });
 
 describe('disk log', () => {
-  test('every rejection appends one JSON line to origin_rejections.log', () => {
+  test('each distinct rejection appends one JSON line to origin_rejections.log', () => {
     recordRejection({
       origin: 'http://a.test',
       host: 'localhost:4319',
@@ -214,6 +221,197 @@ describe('disk log', () => {
       }),
     ).not.toThrow();
     expect(recentRejections()).toHaveLength(1);
+  });
+});
+
+// [security] `Cebab-l4e` — the rejection log had no bound of any kind.
+//
+// `origin` and `host` are raw request headers, and `GET /auth-token` (one of
+// the two callers) needs no token, so an unauthenticated local page can drive
+// this path as fast as it can issue requests. Three independent bounds, one
+// describe each, because each closes a hole the others leave open:
+//
+//   1. value cap    — one entry is small (ring, WS frame AND disk line)
+//   2. disk dedupe  — a flood on one origin costs one line, not one per hit
+//   3. rotation     — the backstop for a flood that VARIES the origin
+//
+// Every case asserts the ring is unaffected: repetition is the signal the
+// operator's toast counts, and a "bound" that quietly stopped counting
+// attempts would hide the abuse rather than the bytes.
+describe('[security] bounded rejection log — value cap', () => {
+  const overLong = `http://${'a'.repeat(MAX_RECORDED_HEADER_CHARS * 3)}.test`;
+
+  test('an over-long origin is truncated with a marker, on disk and in the ring', () => {
+    recordRejection({
+      origin: overLong,
+      host: 'localhost:4319',
+      reason: 'origin_not_allowed',
+      channel: 'http',
+    });
+
+    const expected = overLong.slice(0, MAX_RECORDED_HEADER_CHARS) + TRUNCATION_MARKER;
+    expect(recentRejections()[0].origin).toBe(expected);
+
+    const parsed = JSON.parse(fs.readFileSync(rejectionLogPath(), 'utf8').trim());
+    expect(parsed.origin).toBe(expected);
+    // The point of the cap: Node's 16 KiB header budget is the only other
+    // limit, so without this a single line could be ~64x this size.
+    expect(parsed.origin.length).toBeLessThan(overLong.length);
+  });
+
+  test('an over-long host is truncated too', () => {
+    recordRejection({
+      origin: null,
+      host: 'h'.repeat(MAX_RECORDED_HEADER_CHARS * 2),
+      reason: 'host_not_allowed',
+      channel: 'ws',
+    });
+    expect(recentRejections()[0].host).toBe(
+      'h'.repeat(MAX_RECORDED_HEADER_CHARS) + TRUNCATION_MARKER,
+    );
+  });
+
+  // Anti-over-fix. A cap that also mangled ordinary values would make every
+  // log line useless while still passing the truncation case above.
+  test('a value at the cap is passed through untouched, and null stays null', () => {
+    const exact = 'e'.repeat(MAX_RECORDED_HEADER_CHARS);
+    expect(capHeader(exact)).toBe(exact);
+    expect(capHeader('http://127.0.0.1:5173')).toBe('http://127.0.0.1:5173');
+    expect(capHeader(null)).toBeNull();
+  });
+});
+
+describe('[security] bounded rejection log — disk dedupe', () => {
+  const rep = {
+    origin: 'http://flood.test',
+    host: 'localhost:4319',
+    reason: 'origin_not_allowed',
+    channel: 'http',
+  } as const;
+
+  test('a flood on one key writes one line while the ring records every hit', () => {
+    for (let i = 0; i < 50; i++) recordRejection({ ...rep, ts: 1_000 + i });
+
+    const lines = fs.readFileSync(rejectionLogPath(), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    // The ring is deliberately NOT deduped — 50 attempts is what the operator
+    // is told about.
+    expect(recentRejections(1_050)).toHaveLength(50);
+  });
+
+  test('the suppressed count is carried onto the next written line, not dropped', () => {
+    for (let i = 0; i < 5; i++) recordRejection({ ...rep, ts: 1_000 + i });
+    // Past the window: this one writes, and reports the four it swallowed.
+    recordRejection({ ...rep, ts: 1_000 + DISK_DEDUPE_WINDOW_MS + 1 });
+
+    const parsed = fs
+      .readFileSync(rejectionLogPath(), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(parsed).toHaveLength(2);
+    // The first line keeps the shape it always had — no field appears until
+    // it means something.
+    expect(parsed[0].suppressed).toBeUndefined();
+    expect(parsed[1].suppressed).toBe(4);
+  });
+
+  test('distinct keys are not collapsed into each other', () => {
+    recordRejection({ ...rep, ts: 1_000 });
+    recordRejection({ ...rep, ts: 1_001, origin: 'http://other.test' });
+    recordRejection({ ...rep, ts: 1_002, channel: 'ws' });
+    recordRejection({ ...rep, ts: 1_003, reason: 'host_not_allowed' });
+
+    const lines = fs.readFileSync(rejectionLogPath(), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(4);
+  });
+
+  // Anti-over-fix, and the case that matters most: the FIRST occurrence of
+  // anything must always reach disk. A dedupe that swallowed cold keys would
+  // pass every other case here and lose the only record of a one-off probe.
+  test('a cold key always writes immediately', () => {
+    recordRejection({ ...rep, ts: 5_000 });
+    expect(fs.readFileSync(rejectionLogPath(), 'utf8').trim().split('\n')).toHaveLength(1);
+  });
+
+  test('the dedupe table is bounded — the coldest key is evicted, not remembered', () => {
+    recordRejection({ ...rep, ts: 1_000 });
+    // Push the first key out with exactly enough distinct ones.
+    for (let i = 0; i < DEDUPE_KEYS_CAP; i++) {
+      recordRejection({ ...rep, ts: 1_001 + i, origin: `http://k${i}.test` });
+    }
+    // Same key, still inside the dedupe window. It writes again — which is
+    // only possible if the table forgot it, i.e. the Map did not grow.
+    recordRejection({ ...rep, ts: 1_100 });
+
+    const lines = fs.readFileSync(rejectionLogPath(), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(DEDUPE_KEYS_CAP + 2);
+    expect(1_100 - 1_000).toBeLessThan(DISK_DEDUPE_WINDOW_MS); // the window did not lapse
+  });
+});
+
+describe('[security] bounded rejection log — rotation', () => {
+  /** Pre-fill the log to the cap. Cheaper and more honest than making
+   *  MAX_LOG_BYTES injectable: the test then exercises the real constant. */
+  function fillLogToCap(): void {
+    fs.mkdirSync(path.dirname(rejectionLogPath()), { recursive: true });
+    fs.writeFileSync(rejectionLogPath(), 'x'.repeat(MAX_LOG_BYTES), { mode: 0o600 });
+  }
+
+  test('a write past MAX_LOG_BYTES rotates to .1 and starts a fresh log', () => {
+    fillLogToCap();
+    recordRejection({
+      origin: 'http://rotate.test',
+      host: 'localhost:4319',
+      reason: 'origin_not_allowed',
+      channel: 'http',
+    });
+
+    expect(fs.existsSync(rotatedRejectionLogPath())).toBe(true);
+    expect(fs.statSync(rotatedRejectionLogPath()).size).toBe(MAX_LOG_BYTES);
+    // The new log holds only the line that triggered the roll.
+    const lines = fs.readFileSync(rejectionLogPath(), 'utf8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]).origin).toBe('http://rotate.test');
+  });
+
+  test('only one generation is kept — a second roll replaces .1', () => {
+    fs.mkdirSync(path.dirname(rejectionLogPath()), { recursive: true });
+    fs.writeFileSync(rotatedRejectionLogPath(), 'stale generation');
+    fillLogToCap();
+    recordRejection({
+      origin: 'http://rotate2.test',
+      host: 'localhost:4319',
+      reason: 'origin_not_allowed',
+      channel: 'http',
+    });
+    expect(fs.readFileSync(rotatedRejectionLogPath(), 'utf8')).not.toContain('stale generation');
+  });
+
+  // Anti-over-fix: rotation must not fire on an ordinary log.
+  test('an under-cap log is not rotated', () => {
+    recordRejection({
+      origin: 'http://small.test',
+      host: 'localhost:4319',
+      reason: 'origin_not_allowed',
+      channel: 'http',
+    });
+    expect(fs.existsSync(rotatedRejectionLogPath())).toBe(false);
+  });
+
+  test('the rotated generation keeps owner-only mode', () => {
+    if (process.platform === 'win32') return;
+    fillLogToCap();
+    recordRejection({
+      origin: 'http://rotate3.test',
+      host: 'localhost:4319',
+      reason: 'origin_not_allowed',
+      channel: 'http',
+    });
+    // rename() carries the mode across with the inode; a copy+truncate
+    // implementation would silently re-create it under the ambient umask.
+    expect(fs.statSync(rotatedRejectionLogPath()).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(rejectionLogPath()).mode & 0o777).toBe(0o600);
   });
 });
 

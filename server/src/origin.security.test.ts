@@ -24,12 +24,28 @@ afterEach(() => {
 });
 
 describe('[security][F5] buildAllowedOrigins', () => {
-  test('includes dev (5173) and configured port for both 127.0.0.1 and localhost', () => {
+  test('includes the bound port for both 127.0.0.1 and localhost', () => {
     const origins = buildAllowedOrigins();
-    expect(origins.has('http://127.0.0.1:5173')).toBe(true);
-    expect(origins.has('http://localhost:5173')).toBe(true);
     expect(origins.has(`http://127.0.0.1:${config.port}`)).toBe(true);
     expect(origins.has(`http://localhost:${config.port}`)).toBe(true);
+  });
+
+  // Register H09. The two 5173 entries used to be unconditional, and that is
+  // a port Cebab does not own: 5173 is Vite's default for EVERY Vite project,
+  // so any other project the operator has running serves pages at exactly
+  // that origin — and an allow-listed origin gets the per-launch WS token
+  // from `/auth-token`, with a CORS echo so browser JS can read it.
+  //
+  // Asserted as an absence rather than folded into the case above, because
+  // "the default set is exactly these two" is the property, and a test that
+  // only checks presence would still pass with the literals back.
+  test('trusts no port other than the bound one by default', () => {
+    const origins = buildAllowedOrigins();
+    expect(origins.has('http://127.0.0.1:5173')).toBe(false);
+    expect(origins.has('http://localhost:5173')).toBe(false);
+    expect([...origins].sort()).toEqual(
+      [`http://127.0.0.1:${config.port}`, `http://localhost:${config.port}`].sort(),
+    );
   });
 
   test('includes extras from config.allowedOrigins (CEBAB_ALLOWED_ORIGINS)', () => {
@@ -38,10 +54,21 @@ describe('[security][F5] buildAllowedOrigins', () => {
     expect(origins.has('http://other-host:8080')).toBe(true);
   });
 
+  // The other half of H09: removing the literals must not remove the ability
+  // to run the app. `npm run dev` declares the dev origin through exactly this
+  // path (scripts/dev-origins.mjs → CEBAB_ALLOWED_ORIGINS → config), so this
+  // case is the unit-level stand-in for a real launch.
+  test('a declared dev origin is allow-listed', () => {
+    config.allowedOrigins.push('http://127.0.0.1:5173', 'http://localhost:5173');
+    const origins = buildAllowedOrigins();
+    expect(origins.has('http://127.0.0.1:5173')).toBe(true);
+    expect(origins.has('http://localhost:5173')).toBe(true);
+  });
+
   test('excludes evil cross-origin hosts', () => {
     const origins = buildAllowedOrigins();
     expect(origins.has('http://evil.com')).toBe(false);
-    expect(origins.has('https://127.0.0.1:5173')).toBe(false); // https mismatch
+    expect(origins.has(`https://127.0.0.1:${config.port}`)).toBe(false); // https mismatch
     expect(origins.has('http://127.0.0.1')).toBe(false); // missing port
   });
 });
