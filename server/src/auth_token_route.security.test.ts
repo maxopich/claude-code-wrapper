@@ -28,12 +28,17 @@ import { mountAuthTokenRoute } from './auth_token_route.js';
 
 const TEST_HOST = '127.0.0.1';
 
+/** The dev web origin, which `beforeEach` declares. Not allow-listed by
+ *  default — see the comment there and `origin.security.test.ts`. */
+const DECLARED_WEB_ORIGIN = `http://${TEST_HOST}:5173`;
+
 let server: http.Server;
 let serverPort: number;
 let token: string;
 let tmpRoot: string;
 let originalDataDir: string;
 let originalPort: number;
+let originalAllowedOrigins: string[];
 
 beforeEach(async () => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-auth-route-'));
@@ -42,6 +47,13 @@ beforeEach(async () => {
   config.dataDir = path.join(tmpRoot, '.cebab');
   fs.mkdirSync(config.dataDir, { recursive: true });
   token = initAuthToken();
+  // Register H09: :5173 is not allow-listed by default any more. It is
+  // DECLARED by whatever starts that web server — `npm run dev` for a real
+  // launch, this line for the probe standing in for the browser app. The
+  // CORS echo below is the reason the declaration matters: an allow-listed
+  // origin can READ the token, not merely request it.
+  originalAllowedOrigins = [...config.allowedOrigins];
+  config.allowedOrigins.push(DECLARED_WEB_ORIGIN);
 
   const app = express();
   // Mount AFTER config.port is still the original: buildAllowedOrigins() reads
@@ -59,6 +71,8 @@ afterEach(async () => {
   if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   config.dataDir = originalDataDir;
   config.port = originalPort;
+  config.allowedOrigins.length = 0;
+  config.allowedOrigins.push(...originalAllowedOrigins);
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -93,13 +107,13 @@ function allowedHost(): string {
 describe('[security] GET /auth-token origin posture', () => {
   test('serves the token to the allow-listed browser origin', async () => {
     const res = await request({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: allowedHost(),
     });
     expect(res.status).toBe(200);
     expect(res.body).toBe(token);
     // CORS echo so the dev-mode cross-port fetch can read the response.
-    expect(res.headers['access-control-allow-origin']).toBe(`http://${TEST_HOST}:5173`);
+    expect(res.headers['access-control-allow-origin']).toBe(DECLARED_WEB_ORIGIN);
     expect(res.headers['vary']).toBe('Origin');
   });
 
@@ -122,7 +136,7 @@ describe('[security] GET /auth-token origin posture', () => {
 
   test('rejects a disallowed Host even with a good Origin (DNS rebinding)', async () => {
     const res = await request({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: 'evil.example',
     });
     expect(res.status).toBe(403);

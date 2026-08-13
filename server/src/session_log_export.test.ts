@@ -106,9 +106,15 @@ describe('redactJsonlLine', () => {
 
 const TEST_HOST = '127.0.0.1';
 
+/** Register H09: the Vite dev origin is not allow-listed by default — the
+ *  launcher that STARTS that web server declares it. `startServer()`
+ *  declares it here, standing in for `npm run dev`. */
+const DECLARED_WEB_ORIGIN = 'http://localhost:5173';
+
 let tmpRoot: string;
 let originalDataDir: string;
 let originalPort: number;
+let originalAllowedOrigins: string[];
 let server: http.Server;
 let serverPort: number;
 let token: string;
@@ -151,6 +157,8 @@ beforeEach(async () => {
   _resetOperatorIdCache();
   getDb(); // applies migrations including 015_safety_audit
   token = initAuthToken();
+  originalAllowedOrigins = [...config.allowedOrigins];
+  config.allowedOrigins.push(DECLARED_WEB_ORIGIN);
   await startServer();
 });
 
@@ -161,6 +169,8 @@ afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   config.port = originalPort;
+  config.allowedOrigins.length = 0;
+  config.allowedOrigins.push(...originalAllowedOrigins);
   _resetOperatorIdCache();
   vi.restoreAllMocks();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -237,7 +247,7 @@ describe('[security] /session-log :: origin + host + token gates', () => {
     writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: 'wrong.host:9999',
     });
     expect(res.status).toBe(403);
@@ -248,7 +258,7 @@ describe('[security] /session-log :: origin + host + token gates', () => {
     writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
     const res = await request({
       path: `/session-log/sess-1`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -259,7 +269,7 @@ describe('[security] /session-log :: origin + host + token gates', () => {
     writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
     const res = await request({
       path: `/session-log/sess-1?token=garbage`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -285,7 +295,7 @@ describe('/session-log :: redacted format (default)', () => {
     ]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(200);
@@ -305,7 +315,7 @@ describe('/session-log :: redacted format (default)', () => {
     writeJsonl('sess-r', [{ apiKey: 'sk-leak' }]);
     const res = await request({
       path: `/session-log/sess-r?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(200);
@@ -317,7 +327,7 @@ describe('/session-log :: redacted format (default)', () => {
     writeJsonl('sess-known', [{ type: 'assistant' }]);
     const res = await request({
       path: `/session-log/sess-known?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(String(res.headers['content-disposition'])).toContain(
@@ -331,7 +341,7 @@ describe('[security] /session-log :: raw format', () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-leak' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -342,7 +352,7 @@ describe('[security] /session-log :: raw format', () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-leak' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
       extraHeaders: { [RAW_ACK_HEADER]: 'not-the-magic-value' },
     });
@@ -354,7 +364,7 @@ describe('[security] /session-log :: raw format', () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-leak-me' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
       extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
     });
@@ -371,7 +381,7 @@ describe('/session-log :: input validation', () => {
     // 'passwd' as :sid. The regex matches alphanumerics-only; this fails.
     const res = await request({
       path: `/session-log/abc%2Fdef?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(400);
@@ -382,7 +392,7 @@ describe('/session-log :: input validation', () => {
     writeJsonl('sess-1', [{}]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=html`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(400);
@@ -391,7 +401,7 @@ describe('/session-log :: input validation', () => {
   test('returns 404 when the on-disk log does not exist', async () => {
     const res = await request({
       path: `/session-log/sess-missing?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(404);
@@ -406,7 +416,7 @@ describe('[security] /session-log :: forensic safety_audit', () => {
       .get()!.c;
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(200);
@@ -434,7 +444,7 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     writeJsonl('sess-raw', [{ apiKey: 'x' }]);
     const res = await request({
       path: `/session-log/sess-raw?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
       extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
     });
@@ -456,7 +466,7 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     // Bad token → 403 before any audit attempt.
     const res = await request({
       path: `/session-log/sess-1?token=garbage`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -473,7 +483,7 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     });
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(500);
@@ -495,7 +505,7 @@ describe('[security] /session-log :: CORS preflight + exposed headers', () => {
     const res = await request({
       method: 'OPTIONS',
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(204);
@@ -525,7 +535,7 @@ describe('[security] /session-log :: CORS preflight + exposed headers', () => {
     const res = await request({
       method: 'OPTIONS',
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: 'wrong.host:9999',
     });
     expect(res.status).toBe(403);
@@ -536,7 +546,7 @@ describe('[security] /session-log :: CORS preflight + exposed headers', () => {
     writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(200);
@@ -550,7 +560,7 @@ describe('[security] /session-log :: CORS preflight + exposed headers', () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-raw-visible' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
       extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
     });

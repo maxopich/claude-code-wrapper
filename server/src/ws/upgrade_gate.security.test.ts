@@ -39,12 +39,20 @@ import { startWsServer } from './server.js';
 
 const TEST_HOST = '127.0.0.1';
 
+/** Register H09: the Vite dev origin is no longer trusted by default —
+ *  Cebab trusts the port it BINDS, and whoever STARTS the web server
+ *  declares that one (`npm run dev` does, via CEBAB_ALLOWED_ORIGINS).
+ *  These probes stand in for the browser app, so they declare it the same
+ *  way. The default posture is pinned in `origin.security.test.ts`. */
+const DECLARED_WEB_ORIGIN = `http://${TEST_HOST}:5173`;
+
 let server: http.Server;
 let wss: WebSocketServer;
 let serverPort: number;
 let token: string;
 let tmpRoot: string;
 let originalDataDir: string;
+let originalAllowedOrigins: string[];
 
 beforeEach(async () => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-ws-upgrade-'));
@@ -52,6 +60,8 @@ beforeEach(async () => {
   config.dataDir = path.join(tmpRoot, '.cebab');
   fs.mkdirSync(config.dataDir, { recursive: true });
   token = initAuthToken();
+  originalAllowedOrigins = [...config.allowedOrigins];
+  config.allowedOrigins.push(DECLARED_WEB_ORIGIN);
 
   server = http.createServer();
   // config.port is left at its real value: buildAllowedOrigins() reads it
@@ -79,6 +89,8 @@ afterEach(async () => {
   // it passed locally and only broke on CI.
   closeDb();
   config.dataDir = originalDataDir;
+  config.allowedOrigins.length = 0;
+  config.allowedOrigins.push(...originalAllowedOrigins);
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -148,9 +160,9 @@ describe('[security] WS upgrade gate — origin', () => {
     expect(res.headers['x-cebab-reject-reason']).toBe('origin_not_allowed');
   });
 
-  test('accepts the Vite dev origin', async () => {
+  test('accepts a declared web origin', async () => {
     const res = await probeUpgrade({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: allowedHost(),
       token,
     });
@@ -172,7 +184,7 @@ describe('[security] WS upgrade gate — host', () => {
   test('rejects a foreign Host with 403 and a reason header', async () => {
     // DNS-rebinding shape: the Origin is fine, the Host is not.
     const res = await probeUpgrade({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: 'evil.example',
       token,
     });
@@ -184,7 +196,7 @@ describe('[security] WS upgrade gate — host', () => {
     // isAllowedHost pins host AND port; a different local service proxying
     // through must not inherit the allowance.
     const res = await probeUpgrade({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: `${TEST_HOST}:1`,
       token,
     });
@@ -199,7 +211,7 @@ describe('[security] WS upgrade gate — token', () => {
     // the operator's uid) from opening its own control-plane socket: Origin
     // and Host are headers any Node client sets freely.
     const res = await probeUpgrade({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: allowedHost(),
       token: null,
     });
@@ -212,7 +224,7 @@ describe('[security] WS upgrade gate — token', () => {
     const wrong = 'f'.repeat(token.length);
     expect(wrong).not.toBe(token);
     const res = await probeUpgrade({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: allowedHost(),
       token: wrong,
     });
@@ -221,7 +233,7 @@ describe('[security] WS upgrade gate — token', () => {
 
   test('rejects a token that is a prefix of the real one', async () => {
     const res = await probeUpgrade({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: allowedHost(),
       token: token.slice(0, -1),
     });
@@ -289,7 +301,7 @@ describe('[security] H07 — attach re-verifies the audit chain', () => {
     ).n;
 
     const res = await probeUpgrade({
-      origin: `http://${TEST_HOST}:5173`,
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: allowedHost(),
       token,
     });
