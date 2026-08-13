@@ -44,6 +44,7 @@ import type {
   NotificationAction,
   NotificationEnvelope,
   NotificationSeverity,
+  PermissionDecisionReason,
   ReopenSessionFailureReason,
   RouterDropReasonCode,
   SessionCrashedReasonCode,
@@ -225,6 +226,62 @@ export type PendingPermission = {
 };
 
 /**
+ * Register S06: record a permission request that Cebab denied on the
+ * operator's behalf.
+ *
+ * WHY THIS HAS TO EXIST AT ALL. The `permission_request` is persisted the
+ * moment it is raised, and `translate` maps that row straight back to a live
+ * `permission_request` ServerMsg on replay. So the request survives a
+ * disconnect; the *resolution* did not. Reopening the session re-rendered
+ * working-looking Allow/Deny buttons for a promise that had already been
+ * settled and discarded — and clicking one hit `if (!pending) return` and did
+ * nothing at all, with no error and no explanation.
+ *
+ * WHY NOT JUST WRITE `decision: 'deny'`. Because the operator did not deny it.
+ * The row is read months later by someone reconstructing what happened; a bare
+ * deny says a human looked at a tool call and refused it. `reason` is what
+ * keeps the transcript honest about who decided.
+ *
+ * Contrast with the three SPAWN gates, whose disconnect drain deliberately
+ * persists nothing (`gate_drain.security.test.ts` asserts exactly that, and it
+ * is right): nothing replays a parked spawn gate, so there is no card to
+ * strand and no claim to correct. The asymmetry is the point.
+ *
+ * Fire-and-forget FOR THE CALLERS — a socket-close handler and a synchronous
+ * interrupt path, neither of which can await, and a failed bookkeeping write
+ * must not take down the drain it is describing. The rejection is swallowed
+ * here, so ignoring the returned promise is safe.
+ *
+ * It is still RETURNED, and that is not decoration. `persistMessage` awaits a
+ * JSONL append before it resolves, so the promise is the only handle on "the
+ * log file is closed". A test that drains and then deletes its temp directory
+ * without it races the write — on Windows that race is an `ENOTEMPTY` on
+ * teardown, which is how this was found.
+ */
+export type RecordDrainedPermission = (
+  sessionId: string,
+  requestId: string,
+  reason: PermissionDecisionReason,
+) => Promise<void>;
+
+export const recordDrainedPermission: RecordDrainedPermission =
+  async function recordDrainedPermission(sessionId, requestId, reason): Promise<void> {
+    try {
+      await persistMessage(sessionId, {
+        type: 'wrapper',
+        subtype: 'permission_decided',
+        session_id: sessionId,
+        uuid: randomUUID(),
+        requestId,
+        decision: 'deny',
+        reason,
+      } as never);
+    } catch (err) {
+      console.error(`[ws] failed to persist drained permission ${requestId}`, err);
+    }
+  };
+
+/**
  * F12: drain pending permission Promises for a given session before
  *      abort/interrupt. Otherwise their entries leak in the map until WS
  *      close — functionally benign (the SDK's canUseTool callback is
@@ -232,16 +289,59 @@ export type PendingPermission = {
  *      Filter by sessionId so other concurrent sessions on the same WS
  *      connection aren't affected. Same pattern is used on WS close,
  *      with no sessionId filter (close drains everything).
+ *
+ * Register S06: this records the denial itself rather than taking a callback
+ * the caller has to remember to pass. The bug being fixed was an omission —
+ * a drain that settled the promise and wrote nothing — so the repair should
+ * not leave a second thing to omit. `record` is injectable only so tests that
+ * are about map hygiene can opt out of the DB; production never passes it,
+ * and there is no argument order in which the recording gets lost.
+ *
+ * Returns the in-flight bookkeeping writes. Production ignores them (the
+ * interrupt handler is synchronous); a test awaits them before deleting its
+ * temp data directory, because `persistMessage` holds a JSONL handle until it
+ * resolves and Windows will not remove a directory out from under one.
  */
 export function cleanupPendingPermissionsForSession(
   pending: Map<string, PendingPermission>,
   sessionId: string,
-): void {
+  record: RecordDrainedPermission = recordDrainedPermission,
+): Promise<void>[] {
+  const writes: Promise<void>[] = [];
   for (const [requestId, p] of pending) {
     if (p.sessionId !== sessionId) continue;
     p.resolve({ behavior: 'deny', message: 'interrupted' });
     pending.delete(requestId);
+    writes.push(record(p.sessionId, requestId, 'interrupted'));
   }
+  return writes;
+}
+
+/**
+ * The socket-close sibling of the above: drain EVERY pending permission on
+ * this connection, whatever session it belongs to.
+ *
+ * Pulled out of the `ws.on('close')` body for the same reason its sibling was
+ * pulled out of the interrupt handler — the close handler cannot be reached
+ * from a test without standing up a WS server, and register S06's whole point
+ * is that what this loop does (and does not) persist is worth asserting.
+ *
+ * Deliberately not merged with `cleanupPendingPermissionsForSession`: they
+ * differ in the deny message the SDK sees, in the filter, and in the reason
+ * they record, and a single function with three switches reads worse than two
+ * that each say one thing.
+ */
+export function drainAllPendingPermissions(
+  pending: Map<string, PendingPermission>,
+  record: RecordDrainedPermission = recordDrainedPermission,
+): Promise<void>[] {
+  const writes: Promise<void>[] = [];
+  for (const [requestId, p] of pending) {
+    p.resolve({ behavior: 'deny', message: 'client disconnected' });
+    writes.push(record(p.sessionId, requestId, 'client_disconnected'));
+  }
+  pending.clear();
+  return writes;
 }
 
 /**
@@ -2302,10 +2402,11 @@ function onConnection(ws: WebSocket): void {
 
   ws.on('close', () => {
     console.log('[ws] client disconnected');
-    for (const pending of conn.pendingPermissions.values()) {
-      pending.resolve({ behavior: 'deny', message: 'client disconnected' });
-    }
-    conn.pendingPermissions.clear();
+    // Register S06: persist each denial as well as resolving it. The request
+    // row replays as a live card; without a matching decision row the operator
+    // reopens the session to buttons that do nothing. `reason` says Cebab
+    // decided this, not them.
+    drainAllPendingPermissions(conn.pendingPermissions);
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
     // Register B20: the three spawn gates park a promise per pending decision
@@ -5729,6 +5830,46 @@ async function runOneTurn(
   }
 }
 
+/**
+ * Register S16: turn persisted event rows back into ServerMsgs, and let one
+ * bad row cost one row.
+ *
+ * WHAT WAS WRONG. `replaySession` did `JSON.parse(row.raw) as SDKMessage` and
+ * guarded only the parse, with `continue` — the right instinct, applied to
+ * half the hazard. The cast checks nothing, so a row written by an older
+ * build, a hand-edited fixture, or a truncated write reaches `translate`
+ * shaped however it happens to be shaped. A throw there escaped the loop:
+ * `session_history_end` never shipped and the operator's session hung
+ * half-rendered, with no way to reach the rest of its own history.
+ *
+ * WHY A COUNT AND NOT A SILENT SKIP. A replay that quietly drops history is
+ * the same bug wearing a quieter coat. The caller logs the number, which is
+ * what a future reader needs to tell "this session was short" from "this
+ * session is damaged".
+ *
+ * Extracted from the loop so that property is testable: it streams (the caller
+ * still emits row by row, no history is materialised) while returning
+ * something a test can assert on.
+ */
+export function streamPersistedHistory(
+  rows: Iterable<{ raw: string }>,
+  projectId: number,
+  emit: (msg: ServerMsg) => void,
+): number {
+  let skipped = 0;
+  for (const row of rows) {
+    let out: ServerMsg | null;
+    try {
+      out = translate(JSON.parse(row.raw) as SDKMessage, projectId);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (out) emit(out);
+  }
+  return skipped;
+}
+
 async function replaySession(conn: Conn, projectId: number, sessionId: string): Promise<void> {
   const session = getSession(sessionId);
   if (!session || session.project_id !== projectId) {
@@ -5741,18 +5882,15 @@ async function replaySession(conn: Conn, projectId: number, sessionId: string): 
     return;
   }
   send(conn.ws, { type: 'session_history_start', projectId, sessionId });
-  for (const row of listEvents(sessionId)) {
-    let parsed: SDKMessage;
-    try {
-      parsed = JSON.parse(row.raw) as SDKMessage;
-    } catch {
-      continue;
-    }
-    const out = translate(parsed, projectId);
-    if (out) {
-      cacheSessionStartedIfNeeded(conn, out);
-      send(conn.ws, out);
-    }
+  const skippedRows = streamPersistedHistory(listEvents(sessionId), projectId, (out) => {
+    cacheSessionStartedIfNeeded(conn, out);
+    send(conn.ws, out);
+  });
+  if (skippedRows > 0) {
+    console.warn(
+      `[ws] replay of ${sessionId}: skipped ${skippedRows} unrenderable event row(s); ` +
+        `the rest of the history was sent`,
+    );
   }
   send(conn.ws, { type: 'session_history_end', projectId, sessionId });
 

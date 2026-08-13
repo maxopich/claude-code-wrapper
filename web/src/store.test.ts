@@ -169,6 +169,67 @@ describe('store / permission_decided', () => {
     });
     expect(activeSession(s)!.messages).toEqual(activeSession(before)!.messages);
   });
+
+  // Register S06: a decision Cebab made on the operator's behalf carries a
+  // reason, and the card has to keep it — that is what lets the UI say "this
+  // was denied for you" instead of implying the operator refused something
+  // they never saw.
+  function withCard(sessionId: string) {
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_started', sessionId, projectId: PID, model: 'opus-4', tools: [] },
+    });
+    return reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'permission_request',
+        requestId: 'req-1',
+        sessionId,
+        toolName: 'Bash',
+        input: { cmd: 'ls' },
+      },
+    });
+  }
+
+  const card = (s: ReturnType<typeof open>) =>
+    activeSession(s)!.messages.find(
+      (m) => m.kind === 'permission_request' && m.requestId === 'req-1',
+    );
+
+  for (const reason of ['client_disconnected', 'interrupted'] as const) {
+    test(`a ${reason} decision keeps its reason on the card`, () => {
+      const s = reduce(withCard('sid-r'), {
+        type: 'server',
+        msg: {
+          type: 'permission_decided',
+          sessionId: 'sid-r',
+          requestId: 'req-1',
+          decision: 'deny',
+          reason,
+        },
+      });
+      expect(card(s)).toMatchObject({ decided: 'deny', decidedReason: reason });
+    });
+  }
+
+  test("an operator's own decision leaves the card without a reason", () => {
+    // POSITIVE CONTROL. Both cases above assert a reason lands; without this
+    // one, a reducer that stamped a constant reason on every decision would
+    // pass them and tell the operator they were disconnected when they were
+    // sitting there clicking Deny.
+    const s = reduce(withCard('sid-o'), {
+      type: 'server',
+      msg: {
+        type: 'permission_decided',
+        sessionId: 'sid-o',
+        requestId: 'req-1',
+        decision: 'deny',
+      },
+    });
+    expect(card(s)).toMatchObject({ decided: 'deny' });
+    expect(card(s)).not.toHaveProperty('decidedReason');
+  });
 });
 
 describe('store / session_renamed', () => {

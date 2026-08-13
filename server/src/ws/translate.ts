@@ -211,7 +211,17 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         type: 'assistant_message',
         sessionId,
         uuid: a.uuid,
-        blocks: a.message.content,
+        // Register S16: optional-chained, matching the `user` case below —
+        // which got the same treatment under S07 and was not generalised.
+        //
+        // The SDK types make `message` required, so this cannot be undefined
+        // on the LIVE path. It can on REPLAY: `replaySession` casts each
+        // persisted row with `JSON.parse(row.raw) as SDKMessage`, and that
+        // cast checks nothing. A row written by an older build, a hand-edited
+        // fixture, or a truncated write reaches here shaped however it is
+        // shaped, and a throw inside the replay loop used to cost the operator
+        // the entire rest of the session's history.
+        blocks: a.message?.content ?? [],
       };
     }
 
@@ -265,6 +275,7 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         toolName?: string;
         input?: unknown;
         decision?: 'allow' | 'deny';
+        reason?: string;
         kind?: string;
         message?: string;
       };
@@ -283,6 +294,12 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
           sessionId,
           requestId: w.requestId,
           decision: w.decision,
+          // Register S06: only the drain paths write a reason, and only rows
+          // written after S06 have one — hence the spread. An operator-made
+          // decision has none, which is exactly what its absence means.
+          ...(w.reason === 'client_disconnected' || w.reason === 'interrupted'
+            ? { reason: w.reason }
+            : {}),
         };
       }
       // Wrapper-level errors land here too; the wrapper_error replay path
@@ -303,7 +320,17 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
       // result. The command_output card already shows the operator the
       // command completed; an extra "success · $0.0000" chip below it is
       // noise. Drop result rows for synthetic (zero-turn) commands.
-      if (r.num_turns === 0) return null;
+      //
+      // Register S15: the subtype gate is load-bearing, not decoration. This
+      // used to be `if (r.num_turns === 0)`, checked before the subtype was
+      // read — and the SDK declares `num_turns` as REQUIRED on `SDKResultError`
+      // too, so a turn that failed before completing its first turn (an
+      // `error_during_execution` at zero turns) was dropped exactly like a
+      // slash command. The operator then got no envelope at all: neither a
+      // completion nor a failure, just a turn that stopped producing output.
+      // Only the success case is noise; an error at zero turns is the single
+      // most important thing to say.
+      if (r.subtype === 'success' && r.num_turns === 0) return null;
       return {
         type: 'result',
         sessionId,

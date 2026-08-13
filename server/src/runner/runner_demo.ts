@@ -37,7 +37,11 @@ async function main() {
   });
 
   for await (const msg of q) {
-    const seq = persistMessage(sessionId, msg);
+    // Register S12: awaited. `persistMessage` is async, so the un-awaited call
+    // put a Promise in `seq` — every line below printed `[#[object Promise]
+    // …]` — and a rejected write became an unhandled rejection outside this
+    // loop's own error handling.
+    const seq = await persistMessage(sessionId, msg);
     if (msg.type === 'system' && msg.subtype === 'init') {
       console.error(
         `[#${seq} init] model=${msg.model} apiKeySource=${msg.apiKeySource} tools=${msg.tools.length}`,

@@ -85,6 +85,19 @@ export const RESULT_SUBTYPES: ReadonlySet<ResultSubtype> = new Set([
 ]);
 
 /**
+ * Register S06: why a permission request was resolved without the operator.
+ *
+ * `client_disconnected` — the socket closed with the card still open.
+ * `interrupted` — the operator stopped the turn, which drains the session's
+ * pending requests along with it.
+ *
+ * Both deny. The distinction exists because the transcript is read later, and
+ * "you denied this" and "this was denied for you" are different facts about
+ * the same tool call.
+ */
+export type PermissionDecisionReason = 'client_disconnected' | 'interrupted';
+
+/**
  * Why a turn ended badly.
  *
  * `aborted` is the odd one out and register S02b is why it exists: it means
@@ -1775,6 +1788,20 @@ export type ServerMsg =
       sessionId: string;
       requestId: string;
       decision: 'allow' | 'deny';
+      /**
+       * Register S06: why this was decided, when nobody decided it.
+       *
+       * Absent means the operator answered the card — the only case that
+       * existed before. Present means Cebab resolved the request on their
+       * behalf because the request could no longer be answered: the socket
+       * closed, or the turn was interrupted. Both drain paths deny, and
+       * without this the transcript would claim the operator denied a tool
+       * call they never saw.
+       *
+       * Optional so replays of rows written before this field still render,
+       * the same reason `permission_request` carries `category?` / `summary?`.
+       */
+      reason?: PermissionDecisionReason;
     }
   | {
       type: 'permission_mode_changed';
