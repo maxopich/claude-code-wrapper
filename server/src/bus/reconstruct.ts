@@ -193,6 +193,12 @@ export function reconstructOrchestratorSession(
   // to have spoken it must have completed its briefed first turn, so its
   // resumed transcript already contains the briefing. The orchestrator is
   // never briefed (it learns the protocol from its workspace CLAUDE.md).
+  //
+  // DELIBERATELY UNBOUNDED (`Cebab-3nt`), unlike the session-log projector
+  // which now pages. A cap here would silently narrow the set of agents this
+  // reconstruction believes have been briefed: an agent whose only event fell
+  // outside the cap would be re-briefed after a restart, mid-task. The
+  // question this asks is "has this agent EVER spoken", so it needs every row.
   const allEvents = listMultiAgentEvents(row.id);
   const workerNameSet = new Set(workers.map((w) => w.agentName));
   const briefedAgents = [

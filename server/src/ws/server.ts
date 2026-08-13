@@ -166,6 +166,7 @@ import {
   getMultiAgentSession,
   listPendingMutations,
   getPendingRetry,
+  lastEventIdFromSource,
   listMultiAgentEvents,
   listMultiAgentMutations,
   listMultiAgentSessionsWithIteration,
@@ -2873,18 +2874,17 @@ function resumeFailureMessage(sessionId: string): string {
  * landed after its last action — not the whole log. Excludes the
  * cebab→user recovery banner (operator-facing, not orchestrator input).
  */
-function buildContinueNudge(sessionId: string): string {
-  const events = listMultiAgentEvents(sessionId);
-  let lastOrchIdx = -1;
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i]!.source === ORCHESTRATOR_AGENT_NAME) {
-      lastOrchIdx = i;
-      break;
-    }
-  }
-  const since = events
-    .slice(lastOrchIdx + 1)
-    .filter((e) => !(e.source === 'cebab' && e.destination === 'user'));
+export function buildContinueNudge(sessionId: string): string {
+  // `Cebab-3nt`: this used to load the whole transcript and scan backwards in
+  // JS for the last orchestrator row. `listMultiAgentEvents` has taken a
+  // `sinceId` since it was written and every caller passed 0, so the seam for
+  // "only what landed after X" was already here and unused. Asking SQL for the
+  // boundary and then for the tail reads the same rows the old code kept, and
+  // none of the ones it threw away.
+  const lastOrchId = lastEventIdFromSource(sessionId, ORCHESTRATOR_AGENT_NAME);
+  const since = listMultiAgentEvents(sessionId, lastOrchId).filter(
+    (e) => !(e.source === 'cebab' && e.destination === 'user'),
+  );
   const log =
     since.length > 0
       ? since.map((e) => `- ${e.source} → ${e.destination} [${e.kind}]: ${e.text}`).join('\n')

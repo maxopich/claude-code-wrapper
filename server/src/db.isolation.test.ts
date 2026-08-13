@@ -26,7 +26,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from './config.js';
-import { closeDb, getDb } from './db.js';
+import {
+  __resetRealDataDirIntentForTests,
+  closeDb,
+  declareRealDataDirIntent,
+  getDb,
+} from './db.js';
 
 const REAL_DATA_DIR = path.join(os.homedir(), '.cebab');
 
@@ -98,6 +103,78 @@ describe('[security] the test suite cannot open the real data directory', () => 
     closeDb();
     config.dataDir = path.join(os.tmpdir(), `cebab-guard-control-${process.pid}`, '.cebab');
     expect(() => getDb()).not.toThrow();
+  });
+
+  // The guard used to return early unless `process.env.VITEST` was set, so it
+  // watched vitest and nothing else. On 2026-08-13 a one-off `tsx` benchmark
+  // wrote 20,000 synthetic rows into the operator's real database: it assigned
+  // `process.env.CEBAB_DATA_DIR` at the top of the file, but ESM hoists
+  // `import` above executable statements, so `config.ts` had already read the
+  // variable and resolved `~/.cebab`. Not a test, so nothing stopped it.
+  //
+  // These cases run with VITEST unset so they exercise the branch a script
+  // takes. The homedir stub above still applies, so a regression here writes
+  // to a temp directory rather than to the operator's real one.
+  test('a script that did not declare intent is refused too', () => {
+    const hadVitest = process.env.VITEST;
+    delete process.env.VITEST;
+    try {
+      closeDb();
+      config.dataDir = path.join(fakeHome, '.cebab');
+      expect(() => getDb()).toThrow(/did not declare it/);
+      // The message has to teach the fix, because the person reading it is
+      // mid-incident and the cause (import hoisting) is not visible in their
+      // code.
+      expect(() => getDb()).toThrow(/DYNAMIC import/);
+    } finally {
+      if (hadVitest !== undefined) process.env.VITEST = hadVitest;
+    }
+  });
+
+  test('the script branch still allows a scratch directory', () => {
+    // Positive control for the case above: a guard that refused every path
+    // outside vitest would break `smoke.ts` and every future script.
+    const hadVitest = process.env.VITEST;
+    delete process.env.VITEST;
+    try {
+      closeDb();
+      config.dataDir = path.join(os.tmpdir(), `cebab-script-control-${process.pid}`, '.cebab');
+      expect(() => getDb()).not.toThrow();
+    } finally {
+      if (hadVitest !== undefined) process.env.VITEST = hadVitest;
+    }
+  });
+
+  test('declaring intent is what lets the server through', () => {
+    const hadVitest = process.env.VITEST;
+    delete process.env.VITEST;
+    try {
+      closeDb();
+      config.dataDir = path.join(fakeHome, '.cebab');
+      declareRealDataDirIntent();
+      expect(() => getDb()).not.toThrow();
+    } finally {
+      if (hadVitest !== undefined) process.env.VITEST = hadVitest;
+      __resetRealDataDirIntentForTests();
+    }
+  });
+
+  test('the declaration does not leak into the next case', () => {
+    // Ordering-dependent ON PURPOSE, and it must stay after the case above.
+    // `realDataDirDeclared` is module state, so a declaration that is never
+    // withdrawn leaves the guard switched off for every later test in the
+    // worker — the guard being off is exactly the condition it exists to
+    // catch, so it must not be reachable by forgetting a cleanup. Without
+    // this case the reset seam is unobserved and its removal is invisible.
+    const hadVitest = process.env.VITEST;
+    delete process.env.VITEST;
+    try {
+      closeDb();
+      config.dataDir = path.join(fakeHome, '.cebab');
+      expect(() => getDb()).toThrow(/did not declare it/);
+    } finally {
+      if (hadVitest !== undefined) process.env.VITEST = hadVitest;
+    }
   });
 });
 

@@ -1172,6 +1172,99 @@ export function listMultiAgentEvents(sessionId: string, sinceId = 0): MultiAgent
     .all(sessionId, sinceId);
 }
 
+/**
+ * Sort key for one bus event — what the session-log projector needs to ORDER
+ * and PAGE, and nothing that costs anything to read. `source` is here because
+ * it is the projector's `agent` tiebreak, not because the caller displays it.
+ *
+ * See `listEventKeys` in `repo/events.ts` for why the projector reads keys
+ * first (register S04): converting a row runs `redactSensitive` over its
+ * payload, and doing that for the whole session to return one page is the
+ * defect.
+ */
+export type MultiAgentEventKey = {
+  id: number;
+  ts: number;
+  source: string;
+};
+
+/** Sort key for one mutation. `agent_name` is the projector's `agent`. */
+export type MultiAgentMutationKey = {
+  id: number;
+  ts: number;
+  agentName: string;
+};
+
+/**
+ * Keys for every bus event in a session. Unordered on purpose — the projector
+ * owns the comparator (see `listEventKeys`).
+ */
+export function listMultiAgentEventKeys(sessionId: string): MultiAgentEventKey[] {
+  return getDb()
+    .prepare<[string], MultiAgentEventKey>(
+      'SELECT id, ts, source FROM multi_agent_events WHERE session_id = ?',
+    )
+    .all(sessionId);
+}
+
+/**
+ * Keys for the mutations a session-log page can contain.
+ *
+ * The `confirmed_at IS NOT NULL` filter is the projector's own rule, moved
+ * into SQL where it belongs: a provisional mutation whose result never landed
+ * shows in the agent's lane as "working files", and a log line for it is
+ * noise. Filtering here rather than after the read means an unconfirmed row
+ * never reaches JS at all — and, more importantly, never counts toward
+ * `total`, which is what it did before this moved.
+ */
+export function listMultiAgentMutationKeys(sessionId: string): MultiAgentMutationKey[] {
+  return getDb()
+    .prepare<[string], { id: number; ts: number; agent_name: string }>(
+      'SELECT id, ts, agent_name FROM multi_agent_mutations WHERE session_id = ? AND confirmed_at IS NOT NULL',
+    )
+    .all(sessionId)
+    .map((r) => ({ id: r.id, ts: r.ts, agentName: r.agent_name }));
+}
+
+/** Resolve full bus-event rows for an explicit id list. See `getEventsByIds`. */
+export function getMultiAgentEventsByIds(ids: number[]): MultiAgentEventRow[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return getDb()
+    .prepare<number[], MultiAgentEventRow>(
+      `SELECT * FROM multi_agent_events WHERE id IN (${placeholders})`,
+    )
+    .all(...ids);
+}
+
+/** Resolve full mutation rows for an explicit id list. See `getEventsByIds`. */
+export function getMultiAgentMutationsByIds(ids: number[]): MutationRecord[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return getDb()
+    .prepare<number[], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations WHERE id IN (${placeholders})`,
+    )
+    .all(...ids)
+    .map(rowToMutation);
+}
+
+/**
+ * Largest event id in a session with the given `source`, or 0 if the agent has
+ * never spoken. Lets a caller that wants "everything after X last acted" use
+ * `listMultiAgentEvents`'s existing `sinceId` seam instead of loading the whole
+ * transcript and scanning backwards in JS (`Cebab-3nt`).
+ */
+export function lastEventIdFromSource(sessionId: string, source: string): number {
+  return (
+    getDb()
+      .prepare<[string, string], { max_id: number | null }>(
+        'SELECT MAX(id) AS max_id FROM multi_agent_events WHERE session_id = ? AND source = ?',
+      )
+      .get(sessionId, source)?.max_id ?? 0
+  );
+}
+
 // ---- per-agent CLI sessions (R-B reconstruction) ----
 
 /**
