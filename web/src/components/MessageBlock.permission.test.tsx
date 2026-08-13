@@ -152,3 +152,43 @@ describe('permission card actions', () => {
     expect(container.querySelector('.decided')?.textContent).toContain('allow');
   });
 });
+
+/**
+ * Register S06. A permission request that Cebab denied on the operator's
+ * behalf — because the socket closed, or the turn was interrupted — used to
+ * replay as a live card with working-looking buttons that did nothing. It now
+ * replays as decided, and the card has to say WHO decided: "you denied this"
+ * and "this was denied for you while you were gone" are different facts about
+ * the same tool call, and only one of them is true.
+ */
+describe('a card decided by a drain says so', () => {
+  const decidedCard = (over: Partial<MessageView>) =>
+    permissionMessage({ decided: 'deny', ...over } as Partial<MessageView>);
+
+  test('a disconnect-drained card names the disconnect', () => {
+    render(decidedCard({ decidedReason: 'client_disconnected' } as Partial<MessageView>), vi.fn());
+    const text = container.querySelector('.decided')?.textContent ?? '';
+    expect(text).toContain('deny');
+    expect(text).toContain('disconnected');
+    // And it is still decided: no buttons come back.
+    expect(container.querySelector('button.permission-deny')).toBeNull();
+  });
+
+  test('an interrupt-drained card names the interrupt', () => {
+    render(decidedCard({ decidedReason: 'interrupted' } as Partial<MessageView>), vi.fn());
+    expect(container.querySelector('.decided')?.textContent).toContain('interrupted');
+  });
+
+  test("an operator's own denial claims nothing extra", () => {
+    // POSITIVE CONTROL. Both cases above assert extra copy appears; without
+    // this one, a change that appended the automatic-denial wording to every
+    // decided card would pass them and put the words in the operator's mouth
+    // backwards — telling them they were away when they were not.
+    render(decidedCard({}), vi.fn());
+    const text = container.querySelector('.decided')?.textContent ?? '';
+    expect(text).toContain('deny');
+    expect(text).not.toContain('automatic');
+    expect(text).not.toContain('disconnected');
+    expect(text).not.toContain('interrupted');
+  });
+});

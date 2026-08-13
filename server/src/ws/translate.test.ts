@@ -74,6 +74,40 @@ describe('translate', () => {
     expect(out.numTurns).toBeUndefined();
   });
 
+  // Register S15. The zero-turn drop exists for slash commands, which close
+  // out `success` with no turns. It used to be checked before the subtype, and
+  // the SDK declares `num_turns` REQUIRED on `SDKResultError` too — so a turn
+  // that failed before completing its first turn was dropped identically, and
+  // the operator got no envelope at all: no completion, no failure, just a
+  // session that stopped saying anything.
+  //
+  // Both directions are asserted, and they have to be: a fix that simply
+  // deleted the short-circuit would satisfy the error case while re-adding the
+  // "$0.0000 success" noise the drop exists to remove.
+  const ERROR_SUBTYPES = [
+    'error_during_execution',
+    'error_max_turns',
+    'error_max_budget_usd',
+    'error_max_structured_output_retries',
+  ] as const;
+
+  for (const subtype of ERROR_SUBTYPES) {
+    test(`result: a zero-turn ${subtype} still reaches the operator`, () => {
+      const out = translate(
+        fake({
+          type: 'result',
+          subtype,
+          duration_ms: 12,
+          total_cost_usd: 0,
+          num_turns: 0,
+          errors: ['boom'],
+        }),
+        PID,
+      );
+      expect(out).toMatchObject({ type: 'result', subtype, numTurns: 0 });
+    });
+  }
+
   test('result.numTurns === 0 short-circuits the envelope (synthetic /command)', () => {
     // Pre-existing contract: slash commands close out with num_turns=0,
     // total_cost_usd=0; the translator drops these to avoid a noisy
@@ -274,5 +308,86 @@ describe('user messages always arrive as blocks', () => {
       expect(Array.isArray(out.blocks), String(content)).toBe(true);
       expect(() => out.blocks.map((b) => b)).not.toThrow();
     }
+  });
+});
+
+/**
+ * Register S16. The sibling of the S07 block above, for the case that was left
+ * behind when it was written: `assistant` dereferenced `message.content`
+ * without the optional chain `user` had been given.
+ *
+ * The SDK types make `message` required, so the live stream never produces
+ * this. Replay does: `replaySession` casts every persisted row with
+ * `JSON.parse(row.raw) as SDKMessage`, which checks nothing, and a throw in
+ * that loop used to cost the operator the rest of the session's history.
+ */
+describe('assistant messages survive a row the SDK types say cannot exist', () => {
+  test('a missing `message` yields empty blocks instead of throwing', () => {
+    expect(() => translate(fake({ type: 'assistant', uuid: 'a' }), PID)).not.toThrow();
+    expect(translate(fake({ type: 'assistant', uuid: 'a' }), PID)).toMatchObject({
+      type: 'assistant_message',
+      uuid: 'a',
+      blocks: [],
+    });
+  });
+
+  test('a `message` with no content yields empty blocks', () => {
+    expect(translate(fake({ type: 'assistant', uuid: 'a', message: {} }), PID)).toMatchObject({
+      type: 'assistant_message',
+      blocks: [],
+    });
+  });
+
+  test('a well-formed assistant message is untouched', () => {
+    // POSITIVE CONTROL. Every case above asserts a fallback fires; without
+    // this one, a "fix" that always returned `[]` would pass them all.
+    const blocks = [{ type: 'text', text: 'hello' }];
+    expect(
+      translate(fake({ type: 'assistant', uuid: 'a', message: { content: blocks } }), PID),
+    ).toMatchObject({ type: 'assistant_message', uuid: 'a', blocks });
+  });
+});
+
+/**
+ * Register S06: a permission decided by a DRAIN — the socket closed, or the
+ * turn was interrupted — carries why, so replay can say Cebab decided it
+ * rather than implying the operator did.
+ */
+describe('permission_decided carries the drain reason on replay', () => {
+  const decided = (extra: Record<string, unknown>) =>
+    translate(
+      fake({
+        type: 'wrapper',
+        subtype: 'permission_decided',
+        uuid: 'u',
+        requestId: 'req-1',
+        decision: 'deny',
+        ...extra,
+      }),
+      PID,
+    );
+
+  test('a drained row forwards its reason', () => {
+    expect(decided({ reason: 'client_disconnected' })).toMatchObject({
+      type: 'permission_decided',
+      requestId: 'req-1',
+      decision: 'deny',
+      reason: 'client_disconnected',
+    });
+    expect(decided({ reason: 'interrupted' })).toMatchObject({ reason: 'interrupted' });
+  });
+
+  test("an operator's own decision has no reason, and that absence is the signal", () => {
+    const out = decided({}) as Record<string, unknown>;
+    expect(out).toMatchObject({ type: 'permission_decided', decision: 'deny' });
+    expect('reason' in out).toBe(false);
+  });
+
+  test('an unrecognised reason is dropped rather than forwarded', () => {
+    // The wire type is a closed union; a row written by a future build with a
+    // reason this build does not know must not leak an unmodelled value into
+    // the client's reducer.
+    const out = decided({ reason: 'something_new' }) as Record<string, unknown>;
+    expect('reason' in out).toBe(false);
   });
 });

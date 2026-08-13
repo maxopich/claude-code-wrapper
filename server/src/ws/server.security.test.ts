@@ -1,6 +1,12 @@
 import { describe, expect, test, vi } from 'vitest';
 import { cleanupPendingPermissionsForSession, type PendingPermission } from './server.js';
 
+// These cases are about MAP HYGIENE, not about the register-S06 decision row:
+// they run without a data directory, so the real recorder would try to open a
+// database. Opting out explicitly keeps that separation visible — the
+// recording itself is covered end-to-end in `permission_drain.test.ts`.
+const noRecord = () => {};
+
 // F12: pending permission Promises for a given session must be drained
 // when that session is interrupted. Without this, the map grows unbounded
 // under burst interrupts. The cleanup also resolves each pending Promise
@@ -25,7 +31,7 @@ describe('[security][F12] cleanupPendingPermissionsForSession', () => {
     map.set('req-a2', a2);
     map.set('req-b1', b1);
 
-    cleanupPendingPermissionsForSession(map, 'sess-A');
+    cleanupPendingPermissionsForSession(map, 'sess-A', noRecord);
 
     // Both sess-A entries removed; sess-B preserved.
     expect(map.has('req-a1')).toBe(false);
@@ -38,7 +44,7 @@ describe('[security][F12] cleanupPendingPermissionsForSession', () => {
     const p = makePending('sess-X');
     map.set('req-x', p);
 
-    cleanupPendingPermissionsForSession(map, 'sess-X');
+    cleanupPendingPermissionsForSession(map, 'sess-X', noRecord);
 
     expect(p.resolve).toHaveBeenCalledTimes(1);
     expect(p.resolve).toHaveBeenCalledWith({
@@ -54,7 +60,7 @@ describe('[security][F12] cleanupPendingPermissionsForSession', () => {
     map.set('req-target', target);
     map.set('req-other', other);
 
-    cleanupPendingPermissionsForSession(map, 'sess-A');
+    cleanupPendingPermissionsForSession(map, 'sess-A', noRecord);
 
     expect(target.resolve).toHaveBeenCalledTimes(1);
     expect(other.resolve).not.toHaveBeenCalled();
@@ -65,7 +71,7 @@ describe('[security][F12] cleanupPendingPermissionsForSession', () => {
     const p = makePending('sess-A');
     map.set('req-a', p);
 
-    cleanupPendingPermissionsForSession(map, 'sess-NONE');
+    cleanupPendingPermissionsForSession(map, 'sess-NONE', noRecord);
 
     expect(map.size).toBe(1);
     expect(p.resolve).not.toHaveBeenCalled();
@@ -73,7 +79,7 @@ describe('[security][F12] cleanupPendingPermissionsForSession', () => {
 
   test('handles empty map without throwing', () => {
     const map = new Map<string, PendingPermission>();
-    expect(() => cleanupPendingPermissionsForSession(map, 'any')).not.toThrow();
+    expect(() => cleanupPendingPermissionsForSession(map, 'any', noRecord)).not.toThrow();
     expect(map.size).toBe(0);
   });
 });

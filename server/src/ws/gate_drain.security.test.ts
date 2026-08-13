@@ -99,6 +99,16 @@ describe('[security] a disconnect releases every parked MCP trust decision', () 
   });
 
   test('no trust decision is persisted — nobody decided anything', async () => {
+    // Register S06 made the OPPOSITE call for permission requests: their drain
+    // now writes a `permission_decided` row, because the request row replays
+    // as a live Allow/Deny card and a missing decision strands it. This one
+    // must not follow. Nothing replays a parked spawn gate, so there is no
+    // card to strand — and a persisted trust row is a durable grant that
+    // shapes future spawns, so writing one for an operator who never answered
+    // would hand out authority nobody granted.
+    //
+    // The two drains look alike and mean opposite things; this comment is here
+    // so the next sweep that notices the asymmetry knows it is deliberate.
     const gate = makeTrustGateState();
     const p = awaitMcpTrustDecisions({
       projectId: 1,

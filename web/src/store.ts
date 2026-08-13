@@ -19,7 +19,7 @@ import type {
   SessionSummary,
   WrapperErrorKind,
 } from '@cebab/shared/protocol';
-import type { MutationCategory } from '@cebab/shared';
+import type { MutationCategory, PermissionDecisionReason } from '@cebab/shared';
 
 export type MessageView =
   | { kind: 'user'; id: string; text: string }
@@ -71,6 +71,11 @@ export type MessageView =
       toolName: string;
       input: unknown;
       decided?: 'allow' | 'deny';
+      /** Register S06: set when Cebab decided this instead of the operator —
+       *  the socket closed, or the turn was interrupted, with the card still
+       *  open. Absent on an operator's own answer, which is what tells the two
+       *  apart when the session is read back later. */
+      decidedReason?: PermissionDecisionReason;
       /** Item #5: server-classified category from `classifyToolCall`. Optional
        *  so a replay of a pre-Item-5 permission_request still renders via the
        *  JSON-fallback subcomponent. */
@@ -2341,7 +2346,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // produce the same final state.
       const messages = session.messages.map((mm) =>
         mm.kind === 'permission_request' && mm.requestId === msg.requestId
-          ? { ...mm, decided: msg.decision }
+          ? {
+              ...mm,
+              decided: msg.decision,
+              // Register S06: spread so an operator decision (no reason) does
+              // not clobber a drain reason already on the card, and so the
+              // field simply stays absent for the common case.
+              ...(msg.reason ? { decidedReason: msg.reason } : {}),
+            }
           : mm,
       );
       return putSession(state, projectId, msg.sessionId, { ...session, messages });
