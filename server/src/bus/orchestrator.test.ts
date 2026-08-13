@@ -324,8 +324,11 @@ describe('createOrchestratorRouter — hop-budget enforcement', () => {
     // Only the first 2 hops fired deliver; hop 3 was the boundary trip and
     // its deliver call was refused by `checkBudgetExhausted()`.
     expect(deliver).toHaveBeenCalledTimes(2);
-    expect(deliver).toHaveBeenNthCalledWith(1, ORCHESTRATOR_AGENT_NAME, 'r1');
-    expect(deliver).toHaveBeenNthCalledWith(2, ORCHESTRATOR_AGENT_NAME, 'e1');
+    // The 3rd argument is the pinned `ev.source` — the router's statement of
+    // who wrote these bytes, which is what the H08/F16 fence keys off, and
+    // which is also how the orchestrator now learns WHICH worker replied.
+    expect(deliver).toHaveBeenNthCalledWith(1, ORCHESTRATOR_AGENT_NAME, 'r1', 'reviewer');
+    expect(deliver).toHaveBeenNthCalledWith(2, ORCHESTRATOR_AGENT_NAME, 'e1', 'editor');
 
     expect(onEnded).toHaveBeenCalledTimes(1);
     expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');

@@ -93,6 +93,7 @@ import {
   type ProjectRules,
   type ResolvedAgent,
 } from './runtime.js';
+import { fenceRelayedMessage } from './message_fence.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
 import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
@@ -260,7 +261,16 @@ export function createChainRouter(params: {
    */
   onFinalize?: (reason: MultiAgentEndedReason) => void;
   /** Wake the destination agent with `text` as its next turn. */
-  deliver?: (agentName: string, text: string) => void;
+  /**
+   * Wake `agentName` with `text`.
+   *
+   * `from` is the slug of the AGENT that wrote `text`, present on exactly the
+   * calls that relay agent-authored bytes. Its absence means Cebab or the
+   * operator wrote them (the initial prompt, a replay of already-composed wire
+   * bytes), and the session-level composer keys the H08/F16 message fence off
+   * it. Mirrors `createOrchestratorRouter`.
+   */
+  deliver?: (agentName: string, text: string, from?: string) => void;
   /** Hard cap on persisted hops. Required so the router enforces the
    *  ceiling; the caller resolves precedence. */
   hopBudget: number;
@@ -553,7 +563,11 @@ export function createChainRouter(params: {
     // Fire-and-forget: must NOT block the sending agent's in-flight turn
     // (this runs inside its bus_send tool call). Mirrors the old
     // `sendKeys(...).catch(...)`.
-    deliver?.(ev.destination, ev.text);
+    //
+    // `ev.source` is pinned per-agent in `makeBusToolServer`'s closure and has
+    // already passed the participant allowlist above, so it is a trustworthy
+    // label for who wrote `ev.text` — which is what the fence needs.
+    deliver?.(ev.destination, ev.text, ev.source);
   };
 
   // Cebab-originated events (briefings, initial prompt): persist + forward so
@@ -1082,16 +1096,23 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     });
   }
 
-  const deliver = (agentName: string, text: string) => {
+  const deliver = (agentName: string, text: string, from?: string) => {
     const briefing = briefings.get(agentName);
-    let prompt = text;
+    // H08/F16: a `from` means another AGENT wrote these bytes, so they get the
+    // nonce fence — the recipient can then tell Cebab's framing from a peer's
+    // prose no matter what the prose contains. No `from` means Cebab or the
+    // operator wrote them (the initial prompt, or a replay of bytes this
+    // function already composed), and those must stay bare: fencing the
+    // operator's own task would label it untrusted, and re-fencing a replay
+    // would nest one wrapper inside another.
+    let prompt = from ? fenceRelayedMessage(from, text).text : text;
     if (briefing && !briefed.has(agentName)) {
       briefed.add(agentName);
       // Order: bus protocol → project rules → task. Rules sit after the
       // protocol so the "bus protocol wins" framing holds; the task still
       // visibly follows the fenced block.
       const pr = projectRules.get(agentName);
-      prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${text}` : `${briefing}\n\n${text}`;
+      prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${prompt}` : `${briefing}\n\n${prompt}`;
     }
     // Capture the post-briefing-and-rules bytes so the .catch can hand them
     // to onWorkerFailed for the pending-retry slot, AND so

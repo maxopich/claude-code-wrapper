@@ -96,7 +96,7 @@ describe('orchestrator routing (AgentRunner era)', () => {
     router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: 'coder', text: 'go' }));
     expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith('coder', 'go');
+    expect(deliver).toHaveBeenCalledWith('coder', 'go', ORCHESTRATOR_AGENT_NAME);
   });
 
   test('worker→orchestrator delivers a turn to the orchestrator', () => {
@@ -104,7 +104,7 @@ describe('orchestrator routing (AgentRunner era)', () => {
     router.handleEvent(
       ev({ source: 'coder', destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'done' }),
     );
-    expect(deliver).toHaveBeenCalledWith(ORCHESTRATOR_AGENT_NAME, 'done');
+    expect(deliver).toHaveBeenCalledWith(ORCHESTRATOR_AGENT_NAME, 'done', 'coder');
   });
 
   test('orchestrator→user persists + forwards but does not route', () => {
