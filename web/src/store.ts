@@ -736,6 +736,36 @@ export type AppState = {
   // can route incoming messages to the right project bucket.
   sessionToProject: Record<string, number>;
 
+  /**
+   * Registers W08/W09: the replay currently in flight, or `null` when every
+   * message on the wire is live.
+   *
+   * A persisted `system/init` row translates back into a `session_started`, so
+   * the reducer sees the same envelope for "a turn just started" and "here is
+   * what happened last Tuesday". Two of its side effects are only ever true of
+   * the live one — migrating the pending optimistic session, and treating the
+   * SDK's successful handshake as proof the credentials are good. This slice
+   * is how the reducer tells the two apart.
+   *
+   * **Matched on `projectId`, not `sessionId`.** `translate` takes its
+   * `sessionId` from the persisted row's own `session_id` field, while
+   * `projectId` is injected by the server for every row it replays. Matching
+   * the project therefore holds for the whole replay even if a row disagrees
+   * with the id that was asked for; matching the session id would stop
+   * guarding at exactly that point, silently.
+   *
+   * **One entry, not a set.** `replaySession` sends `session_history_start`,
+   * every translated row, and `session_history_end` in a single synchronous
+   * block — no `await` separates them — so a replay cannot interleave with
+   * live traffic. A set would imply a concurrency that cannot occur.
+   *
+   * Cleared by `session_history_end` and by `ws_close`; the latter bounds a
+   * leak (a replay the server never finished) to one connection, because a
+   * stuck flag fails *unsafe* — it would make a later live `session_started`
+   * look like a replay and strand the operator's optimistic message.
+   */
+  historyReplay: { projectId: number; sessionId: string } | null;
+
   // The known list of past sessions per project (from project_opened).
   knownSessions: Record<number, SessionSummary[]>;
   // Sessions currently running on this WebSocket connection.
@@ -856,6 +886,9 @@ export const initialState: AppState = {
   activeSessionByProject: {},
   pendingByProject: {},
   sessionToProject: {},
+  // Registers W08/W09: null until a `session_history_start` lands. See the
+  // AppState field's JSDoc for why this is one entry keyed by project.
+  historyReplay: null,
   knownSessions: {},
   liveSessions: {},
   permissionModeBySession: {},
@@ -1080,6 +1113,11 @@ export function reduce(state: AppState, action: Action): AppState {
         connected: false,
         liveSessions: {},
         activeRuns: [],
+        // Registers W08/W09: a replay in flight when the socket dropped will
+        // never get its `session_history_end`. Clearing here bounds the stuck
+        // flag to the connection that stranded it — see the field's JSDoc for
+        // why leaving it set is the dangerous direction.
+        historyReplay: null,
         // Cluster G Phase 4 (D6/D11): clear the in-session install
         // timestamps too. A stale 25-second-old entry would otherwise
         // briefly relight the badge on reconnect for an install that
@@ -2100,15 +2138,25 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           ...state.sessionToProject,
           [msg.sessionId]: msg.projectId,
         },
+        // Registers W08/W09: everything until `session_history_end` is
+        // history, not news.
+        historyReplay: { projectId: msg.projectId, sessionId: msg.sessionId },
       };
     }
 
     case 'session_history_end': {
-      const session = state.sessionsByProject[msg.projectId]?.[msg.sessionId];
-      if (!session) return state;
+      // Registers W08/W09: clear the replay flag BEFORE the early return
+      // below. A history that ended with no session bucket to close out is
+      // precisely the case where leaving the flag set would be worst — the
+      // next live `session_started` for this project would be read as more
+      // history and the operator's pending message would never migrate.
+      const cleared: AppState =
+        state.historyReplay === null ? state : { ...state, historyReplay: null };
+      const session = cleared.sessionsByProject[msg.projectId]?.[msg.sessionId];
+      if (!session) return cleared;
       // After replay, session is idle unless server signals it's still running.
-      const stillRunning = state.liveSessions[msg.sessionId] === true;
-      return putSession(state, msg.projectId, msg.sessionId, {
+      const stillRunning = cleared.liveSessions[msg.sessionId] === true;
+      return putSession(cleared, msg.projectId, msg.sessionId, {
         ...session,
         status: stillRunning ? 'running' : session.status === 'running' ? 'done' : session.status,
       });
@@ -2119,11 +2167,23 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       const projectMap = state.sessionsByProject[projectId] ?? {};
       const pendingId = state.pendingByProject[projectId];
 
+      // Register W08: a persisted `system/init` row replays as a
+      // `session_started`, identical on the wire to a live one. Everything
+      // below that talks about *now* has to ask first.
+      const isReplay = state.historyReplay?.projectId === projectId;
+
       // Migrate the optimistic "pending:*" session into the real id, so the
       // user message we appended optimistically isn't lost.
+      //
+      // Register W08: never during a replay. The operator can send a first
+      // message and then click an older session of the same project while the
+      // turn spins up; that replay's `session_started` would otherwise adopt
+      // the pending session — grafting the message they just typed onto the
+      // front of an unrelated conversation and leaving the real session, when
+      // it finally starts, empty.
       let session: SessionView;
       const nextProjectMap = { ...projectMap };
-      if (pendingId && nextProjectMap[pendingId]) {
+      if (!isReplay && pendingId && nextProjectMap[pendingId]) {
         session = {
           ...nextProjectMap[pendingId],
           id: msg.sessionId,
@@ -2200,8 +2260,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             ...knownList,
           ];
 
+      // Register W08: the pending POINTER is dropped by the same condition
+      // that migrates the pending SESSION. Clearing it on a replay would
+      // strand the optimistic bucket just as thoroughly as adopting it — the
+      // session would survive in `sessionsByProject` with nothing left to
+      // rename it, so the operator's message would sit in a bucket the UI
+      // never shows.
       const pendingNext = { ...state.pendingByProject };
-      if (pendingNext[projectId] === pendingId) delete pendingNext[projectId];
+      if (!isReplay && pendingNext[projectId] === pendingId) delete pendingNext[projectId];
 
       // Cluster E Phase 2.x: if this session_started belongs to a bus
       // participant of the currently-active MultiAgentRun, also push
@@ -2251,7 +2317,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // be valid for the spawn to reach init), so any prior auth_expired
         // slice is now stale — drop it. Identity-preserving when there's
         // nothing to clear (undefined === undefined for shallow equality).
-        authExpired: undefined,
+        //
+        // Register W09: that argument is about a handshake happening *now*.
+        // A replayed init proves the credentials worked whenever this session
+        // ran, which says nothing about the ones that just expired — so
+        // opening an old session must not take the banner down.
+        authExpired: isReplay ? state.authExpired : undefined,
         multiAgent: multiAgentNext,
       };
     }
@@ -2879,7 +2950,27 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
         : state.activeProjectId;
       if (projectId === null) return state;
-      const sessionId = msg.sessionId ?? getActiveSessionId(state, projectId) ?? newPendingId();
+      // Register W16: an error with no session of its own used to fall through
+      // to `?? newPendingId()`, minting a `pending:*` id and writing a
+      // SessionView under it. Nothing pointed at that session —
+      // `activeSessionByProject`, `pendingByProject` and `knownSessions` were
+      // all left alone — so the message was unreachable and every occurrence
+      // leaked another bucket. The operator's surface for a sessionless error
+      // is the sticky "Server error" toast that `notifyFromServerMsg` already
+      // pushes for exactly this case, so there is nothing to replace.
+      //
+      // Same shape as the bus-scoped guard above, for the same reason: still
+      // bump `failureSeq` so pending spinners clear, still promote
+      // `authExpired` so the app-wide banner isn't something this guard can
+      // swallow. An error that DOES have somewhere to land still lands there.
+      const sessionId = msg.sessionId ?? getActiveSessionId(state, projectId);
+      if (sessionId === undefined) {
+        return {
+          ...state,
+          failureSeq: state.failureSeq + 1,
+          authExpired: authExpiredAfter(state, msg.kind, msg.message),
+        };
+      }
       const existing = state.sessionsByProject[projectId]?.[sessionId];
       const session: SessionView = existing ?? {
         id: sessionId,
