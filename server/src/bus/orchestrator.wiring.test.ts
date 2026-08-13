@@ -180,6 +180,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
         bound = true;
         return 1; // register B01: rebind mints a sink-ownership epoch
       },
+      sendServerMsg: () => {},
     });
     const resumed = await resumeOrchestratorSession({
       sessionId: SESSION_ID,
@@ -206,6 +207,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
         continueThroughMutation: vi.fn(),
       },
       rebind: vi.fn(),
+      sendServerMsg: () => {},
     });
     expect(
       await resumeOrchestratorSession({

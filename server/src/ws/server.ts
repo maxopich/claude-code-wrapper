@@ -179,7 +179,14 @@ import {
 } from '../repo/multi_agent.js';
 import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
-import { getLiveSession, hasLiveSession, listLiveSessionIds } from '../bus/session_registry.js';
+import {
+  claimSessionStart,
+  getLiveSession,
+  hasLiveSession,
+  isSessionStartInFlight,
+  listLiveSessionIds,
+  releaseSessionStart,
+} from '../bus/session_registry.js';
 import {
   resolveQuestion,
   listParkedQuestions,
@@ -196,7 +203,7 @@ import {
   executeResumeParticipant,
   executeUnmuteParticipant,
 } from './control_verbs.js';
-import { getPauseExpiryRegistry } from './pause_expiry.js';
+import { getPauseExpiryRegistry, type PauseExpiryEntry } from './pause_expiry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type {
   IterationSummary,
@@ -925,8 +932,112 @@ export function describeHeldWorkers(sessionId: string): string | null {
  */
 export function describeLiveSessionConflict(): string | null {
   const ids = listLiveSessionIds();
-  if (ids.length === 0) return null;
-  return `another multi-agent session is already running in this Cebab (${ids.join(', ')}); stop it first — possibly from another browser window.`;
+  if (ids.length > 0) {
+    return `another multi-agent session is already running in this Cebab (${ids.join(', ')}); stop it first — possibly from another browser window.`;
+  }
+  // Register B18: a session being STARTED is not in the registry yet. The
+  // start path awaits `gateProjectsForSpawn`, which parks until the operator
+  // answers a trust prompt, and only then reaches `registerLiveSession` — so
+  // the check above stays empty for as long as a human takes to click, and a
+  // second window sails through it. Two live sessions is the failure the B02
+  // guard exists to prevent; this is the same guard, covering the window
+  // where the session exists as an intention rather than a row.
+  //
+  // Its own message: there are no ids to name yet, and "wait" is different
+  // advice from "stop it first".
+  if (isSessionStartInFlight()) {
+    return 'another multi-agent session is already being started in this Cebab — possibly from another browser window. Wait for it to finish starting, or close that window.';
+  }
+  return null;
+}
+
+/**
+ * Register B17: what happens when a pause-expiry timer fires.
+ *
+ * Lifted out of the `pause_participant` case, where it was an inline closure
+ * over `conn.ws`. The extraction is the proof as much as the fix: **this
+ * function now captures nothing from any connection**, so it cannot be wrong
+ * about which connection it belongs to. It reads the live session at fire time
+ * and talks to whoever owns that session's sink right now.
+ *
+ * Why it mattered: `PauseExpiryRegistry` is a process singleton whose timers
+ * are cleared on session end, not on connection close — unlike the
+ * connection's own heartbeat and debounce timers, which `ws.on('close')`
+ * clears explicitly. So a timer armed by one browser window routinely fires
+ * after that window is gone, and the old `send(conn.ws, ...)` was a no-op
+ * while `executeExpireParticipant` still wrote the audit row and performed the
+ * kick. The durable trail recorded a kick the operator was never shown; their
+ * live window kept saying `paused`.
+ *
+ * Exported for direct testing, like its neighbours in this file.
+ */
+export function handlePauseExpiry(entry: PauseExpiryEntry): void {
+  // The fire-time orchestrator handle may differ from the
+  // schedule-time one (R-A reattach swapped the live session
+  // between bind and fire) — re-read at fire time.
+  const liveAtFire = getLiveSession(entry.sessionId);
+  const handleAtFire =
+    liveAtFire?.mode === 'orchestrator'
+      ? (liveAtFire.handle as unknown as OrchestratorSessionHandle)
+      : undefined;
+  // Register B17: and so must the SINK. `liveAtFire.sendServerMsg`
+  // resolves the router's current sink on every call, so a window
+  // that re-attached after the pause was armed receives the envelope
+  // and a session the operator detached correctly drops it. Falls
+  // back to nothing when the session is no longer live at all —
+  // there is no one to tell, and the audit row is the record.
+  const tellOperator = liveAtFire?.sendServerMsg;
+  const expireResult = executeExpireParticipant({
+    entry,
+    orchestratorHandle: handleAtFire,
+  });
+  if (!expireResult.ok) {
+    console.error(
+      `[ws] pause-expiry executor failed for ${entry.sessionId}/${entry.projectId}`,
+      expireResult.error,
+    );
+    return;
+  }
+  // Diverged state (operator resumed/kicked between schedule +
+  // fire): the trigger audit captured it; no state-change
+  // envelope ships because the state had already moved on
+  // and the operator's UI is already reconciled to the
+  // post-move state from the prior verb's echo.
+  if (expireResult.action === 'noop_diverged') return;
+  const fireTs = entry.pausedUntil; // approximate; the audit row's ts is the authoritative
+  if (expireResult.action === 'auto_resume') {
+    tellOperator?.(
+      buildParticipantPauseChangedMsg({
+        sessionId: entry.sessionId,
+        projectId: entry.projectId,
+        pausedUntil: null,
+        expiryAction: null,
+        reasonCode: entry.reasonCode,
+        ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
+        // No queued deliveries: the gate released, runner
+        // drained the count to zero. Reporting 0 keeps the
+        // wire shape consistent without re-querying the runner
+        // (which the executor doesn't hold a handle to).
+        queuedDeliveries: handleAtFire?.getPendingDeliveries(entry.agentName) ?? 0,
+        ts: fireTs,
+      }),
+    );
+    return;
+  }
+  // auto_kick: fan a `participant_kicked` envelope. The
+  // operator's UI dispatches on the same type the operator-
+  // kick path uses; the reasonCode is carried forward from
+  // the pause.
+  tellOperator?.(
+    buildParticipantKickedMsg({
+      sessionId: entry.sessionId,
+      projectId: entry.projectId,
+      mode: 'drain',
+      reasonCode: entry.reasonCode,
+      ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
+      ts: expireResult.kickedAt ?? fireTs,
+    }),
+  );
 }
 
 /**
@@ -1752,6 +1863,18 @@ type Conn = {
    * window's teardown is ignored once a newer window has re-attached.
    */
   multiAgentSinkEpoch: number;
+  /**
+   * Register B18: this connection's token for the process-wide "a multi-agent
+   * session is being started" claim, or `null` when it holds no claim.
+   *
+   * Same shape as `multiAgentSinkEpoch` above — a per-connection token for a
+   * registry-owned concept. Held only across the start path's awaits and
+   * released by `ws.on('close')`, so a rejection between the claim and
+   * `registerLiveSession` cannot wedge every future start: the message
+   * dispatch wraps only `JSON.parse` in a try, and a claim that dies with its
+   * connection does not need one.
+   */
+  multiAgentStartClaim: string | null;
   /** Cluster B Phase 3: per-project authority cache; see CachedSessionStarted. */
   authorityCache: Map<number, CachedSessionStarted>;
   /**
@@ -2236,6 +2359,7 @@ function onConnection(ws: WebSocket): void {
     inFlight: new Map(),
     multiAgent: null,
     multiAgentSinkEpoch: 0,
+    multiAgentStartClaim: null,
     authorityCache: new Map(),
     trustGate: makeTrustGateState(),
     busTrustGate: makeBusTrustGateState(),
@@ -2445,6 +2569,16 @@ function onConnection(ws: WebSocket): void {
     // Register B01: pass THIS conn's sink epoch. If another window has since
     // re-attached (bumping the epoch), the detach is ignored — closing an
     // older window must not blank the live window's event stream.
+    // Register B18: release a start claim this connection was still holding.
+    // The claim's `finally` covers the normal paths; this covers the one that
+    // matters — the message dispatch wraps only `JSON.parse` in a try, so a
+    // rejection out of the start path would skip the `finally` and leave the
+    // slot claimed forever, refusing every future start until a restart. A
+    // claim cannot outlive the connection that took it.
+    if (conn.multiAgentStartClaim !== null) {
+      releaseSessionStart(conn.multiAgentStartClaim);
+      conn.multiAgentStartClaim = null;
+    }
     if (conn.multiAgent) {
       conn.multiAgent.detach(conn.multiAgentSinkEpoch);
       conn.multiAgent = null;
@@ -2741,7 +2875,10 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // Original `participants` (project ids) only ride the start request,
     // not the DB row; the reducer doesn't use this field post-start.
     participants: [],
-    participantAgentNames: resumed.handle.participantAgentNames,
+    // Register Cebab-74q: from the DB, not `resumed.handle`. The handle's
+    // array is a start-time snapshot that `addWorker` never grows, so a
+    // worker added mid-run used to disappear on the operator's next refresh.
+    participantAgentNames: rosterAgentNames(resumed.handle.sessionId, resumed.mode),
     lifecycle: resumed.handle.lifecycle,
     sessionFolder: resumed.handle.sessionFolder,
     // R-A: re-attaches a live handle → use the original session's budget.
@@ -3034,6 +3171,35 @@ function seedPermissionMode(
 }
 
 /**
+ * Register Cebab-74q: who is in this session, according to the DB.
+ *
+ * There were two answers to that question and they disagreed. The iteration
+ * browser derived it from `multi_agent_participants` (correct); the re-attach
+ * envelope shipped `handle.participantAgentNames`, an array built once at
+ * start time from the initial worker list. `addWorker` updates the router, the
+ * participant row, and three maps — but not that array, because nothing holds
+ * a reference that would make a push visible. So a worker added mid-run
+ * vanished the moment the operator refreshed the browser, taking its
+ * per-participant controls (mute / pause / kick) with it.
+ *
+ * The fix is one builder reading the durable side, not a `push` in
+ * `addWorker`: the push fixes today's symptom and leaves the next mid-run
+ * mutation to rediscover the same split.
+ *
+ * `bus_agent_name` is null for a participant whose project row is gone, so
+ * those are dropped rather than rendered as blanks. Chain mode has no
+ * orchestrator, hence the mode branch.
+ *
+ * Exported for direct testing, like its neighbours in this file.
+ */
+export function rosterAgentNames(sessionId: string, mode: 'chain' | 'orchestrator'): string[] {
+  const workerNames = listResolvedParticipants(sessionId)
+    .map((p) => p.bus_agent_name)
+    .filter((n): n is string => n !== null);
+  return mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+}
+
+/**
  * Build the iteration browser list from the DB. Exported for direct unit
  * testing without standing up a WS connection.
  *
@@ -3049,12 +3215,7 @@ export async function buildIterationsList(): Promise<IterationSummary[]> {
   const rows = listMultiAgentSessionsWithIteration();
   const out: IterationSummary[] = [];
   for (const row of rows) {
-    const participants = listResolvedParticipants(row.id);
-    const workerNames = participants
-      .map((p) => p.bus_agent_name)
-      .filter((n): n is string => n !== null);
-    const participantAgentNames =
-      row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+    const participantAgentNames = rosterAgentNames(row.id, row.mode as 'chain' | 'orchestrator');
     const artifactsDir =
       row.session_folder !== null
         ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
@@ -3857,11 +4018,24 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         });
         return;
       }
-      // Phase 4c2: register the expiry timer. The fire callback is
-      // captured-by-closure so it can call back into the handler's
-      // `conn.ws` for the state-change envelope. If the connection has
-      // closed by fire time, `send(conn.ws, ...)` is a no-op — the DB
-      // + audit writes still land (durable trail survives).
+      // Phase 4c2: register the expiry timer.
+      //
+      // Register B17: the fire callback used to send the state-change
+      // envelope to `conn.ws` — the socket that issued the pause — and the
+      // comment here accepted the consequence: "If the connection has closed
+      // by fire time, send(conn.ws, ...) is a no-op; the DB + audit writes
+      // still land." That is precisely the failure. `PauseExpiryRegistry` is
+      // a process singleton cleared on session end, not on connection close
+      // (unlike this connection's own heartbeat/debounce timers, which
+      // `ws.on('close')` clears explicitly), so a timer armed by one window
+      // routinely fires after that window is gone. The operator's LIVE window
+      // then kept showing `paused` for an agent the audit log records as
+      // kicked.
+      //
+      // The callback already re-reads the orchestrator HANDLE at fire time
+      // for exactly this reason (see its comment below). The sink needed the
+      // same treatment; it now goes through the registry entry's
+      // `sendServerMsg`, which resolves the router's current sink.
       getPauseExpiryRegistry().schedule(
         {
           sessionId: msg.sessionId,
@@ -3872,69 +4046,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           reasonCode: msg.reasonCode,
           reasonText: msg.reasonText ?? null,
         },
-        (entry) => {
-          // The fire-time orchestrator handle may differ from the
-          // schedule-time one (R-A reattach swapped the live session
-          // between bind and fire) — re-read at fire time.
-          const liveAtFire = getLiveSession(entry.sessionId);
-          const handleAtFire =
-            liveAtFire?.mode === 'orchestrator'
-              ? (liveAtFire.handle as unknown as OrchestratorSessionHandle)
-              : undefined;
-          const expireResult = executeExpireParticipant({
-            entry,
-            orchestratorHandle: handleAtFire,
-          });
-          if (!expireResult.ok) {
-            console.error(
-              `[ws] pause-expiry executor failed for ${entry.sessionId}/${entry.projectId}`,
-              expireResult.error,
-            );
-            return;
-          }
-          // Diverged state (operator resumed/kicked between schedule +
-          // fire): the trigger audit captured it; no state-change
-          // envelope ships because the state had already moved on
-          // and the operator's UI is already reconciled to the
-          // post-move state from the prior verb's echo.
-          if (expireResult.action === 'noop_diverged') return;
-          const fireTs = entry.pausedUntil; // approximate; the audit row's ts is the authoritative
-          if (expireResult.action === 'auto_resume') {
-            send(
-              conn.ws,
-              buildParticipantPauseChangedMsg({
-                sessionId: entry.sessionId,
-                projectId: entry.projectId,
-                pausedUntil: null,
-                expiryAction: null,
-                reasonCode: entry.reasonCode,
-                ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
-                // No queued deliveries: the gate released, runner
-                // drained the count to zero. Reporting 0 keeps the
-                // wire shape consistent without re-querying the runner
-                // (which the executor doesn't hold a handle to).
-                queuedDeliveries: handleAtFire?.getPendingDeliveries(entry.agentName) ?? 0,
-                ts: fireTs,
-              }),
-            );
-            return;
-          }
-          // auto_kick: fan a `participant_kicked` envelope. The
-          // operator's UI dispatches on the same type the operator-
-          // kick path uses; the reasonCode is carried forward from
-          // the pause.
-          send(
-            conn.ws,
-            buildParticipantKickedMsg({
-              sessionId: entry.sessionId,
-              projectId: entry.projectId,
-              mode: 'drain',
-              reasonCode: entry.reasonCode,
-              ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
-              ts: expireResult.kickedAt ?? fireTs,
-            }),
-          );
-        },
+        handlePauseExpiry,
       );
       send(
         conn.ws,
@@ -4133,8 +4245,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         });
         return;
       }
+      // Register B18: one token per start attempt on this connection. Reused
+      // by the claim below and by `ws.on('close')`, which releases whatever
+      // this connection still holds.
+      const startClaimId = randomUUID();
       // Register B02: the guard above is per-CONNECTION; this one is
-      // process-wide. See `describeLiveSessionConflict`.
+      // process-wide. Register B18 widened it to cover a start that has been
+      // claimed but has not reached the registry yet. See
+      // `describeLiveSessionConflict`.
       const liveConflict = describeLiveSessionConflict();
       if (liveConflict) {
         send(conn.ws, {
@@ -4345,6 +4463,22 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
           return;
         }
+        // Register B18: claim the process-wide start slot on the last
+        // synchronous line before the first `await`. Everything from the
+        // guards at the top of this case down to here runs without yielding,
+        // and Node cannot deliver a second `start_multi_agent` except at an
+        // await point — so claiming here is equivalent to claiming at the
+        // guard, while leaving exactly ONE exit below to release rather than
+        // the seven early returns in between.
+        if (!claimSessionStart(startClaimId)) {
+          send(conn.ws, {
+            type: 'wrapper_error',
+            kind: 'process_crashed',
+            message: describeLiveSessionConflict() ?? 'another multi-agent session is starting.',
+          });
+          return;
+        }
+        conn.multiAgentStartClaim = startClaimId;
         // Cluster B Phase 4b (§4.4): TOFU spawn-gate. Per unique worker
         // project, prompt the operator for any declared MCP server that
         // isn't currently 'trusted'. Awaiting blocks the spawn until every
@@ -4397,7 +4531,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             sessionId: handle.sessionId,
             mode: 'orchestrator',
             participants: msg.participants,
-            participantAgentNames: handle.participantAgentNames,
+            // Register Cebab-74q: the same DB-derived roster the re-attach
+            // envelope uses. Identical content at fresh start (the start path
+            // writes participant rows before it returns the handle) — the
+            // point is that the WS layer has ONE answer to "who is in this
+            // session", so a mid-run change cannot leave two.
+            participantAgentNames: rosterAgentNames(handle.sessionId, 'orchestrator'),
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
             hopBudget: handle.hopBudget,
@@ -4413,6 +4552,13 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        } finally {
+          // Register B18: the claim covered the gap between the guard and
+          // `registerLiveSession` (which runs inside `startOrchestratorSession`).
+          // By here the session is either in the registry — where the B02 check
+          // takes over — or the start failed. Either way the slot is free.
+          releaseSessionStart(startClaimId);
+          conn.multiAgentStartClaim = null;
         }
         return;
       }
@@ -4431,6 +4577,18 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
         return;
       }
+      // Register B18: claim the start slot — mirror of the orchestrator
+      // branch above; see its comment for why the claim sits on the last
+      // synchronous line before the first await.
+      if (!claimSessionStart(startClaimId)) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: describeLiveSessionConflict() ?? 'another multi-agent session is starting.',
+        });
+        return;
+      }
+      conn.multiAgentStartClaim = startClaimId;
       // Cluster B Phase 4b (§4.4): TOFU spawn-gate, mirror of the
       // orchestrator path. Chain participants may repeat (e.g. [A, B, A])
       // and the helper dedupes on projectId so A is gated once.
@@ -4473,7 +4631,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           sessionId: handle.sessionId,
           mode: 'chain',
           participants: msg.participants,
-          participantAgentNames: handle.participantAgentNames,
+          // Register Cebab-74q: see the orchestrator branch.
+          participantAgentNames: rosterAgentNames(handle.sessionId, 'chain'),
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
           hopBudget: handle.hopBudget,
@@ -4488,6 +4647,10 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+      } finally {
+        // Register B18: mirror of the orchestrator branch — see its comment.
+        releaseSessionStart(startClaimId);
+        conn.multiAgentStartClaim = null;
       }
       return;
     }
