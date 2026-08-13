@@ -247,6 +247,77 @@ describe('createChainRouter — hop-budget enforcement', () => {
     const persisted = listMultiAgentEvents(SESSION_ID);
     expect(persisted.every((p) => p.kind !== 'error' || p.source !== CEBAB_SOURCE)).toBe(true);
   });
+
+  // Register B25: `hopsCount += 1` used to sit INSIDE the persist `try`, so a
+  // failing write left the counter frozen while the event was still forwarded
+  // and delivered. The brake stopped counting exactly when things were going
+  // wrong, and the session ran unbounded.
+  //
+  // The failure is injected without mocks: `multi_agent_events.session_id`
+  // has a FK to `multi_agent_sessions(id)` and `foreign_keys` is ON, so a
+  // router built on a session id nobody created makes every
+  // `appendMultiAgentEvent` throw — the same shape as a disk error, through
+  // the same catch.
+  describe('a failing persist must not stall the brake', () => {
+    function setupUnpersistable(hopBudget: number) {
+      const workspace = path.join(tmpRoot, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const paths = computeSessionPaths('session-that-was-never-created', workspace);
+      const onEnded = vi.fn();
+      const deliver = vi.fn();
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const router = createChainRouter({
+        sessionId: 'session-that-was-never-created',
+        iterationId: 'iter-1',
+        agentNames: AGENTS,
+        paths,
+        onEvent: vi.fn(),
+        onEnded,
+        deliver,
+        hopBudget,
+      });
+      return { router, onEnded, deliver, errSpy };
+    }
+
+    test('the counter still advances and the budget still trips', () => {
+      const { router, onEnded, deliver, errSpy } = setupUnpersistable(2);
+
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'h1' }));
+      router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'h2' }));
+
+      // Persistence really did fail — otherwise this test proves nothing
+      // about the failure path.
+      expect(errSpy).toHaveBeenCalled();
+      expect(listMultiAgentEvents('session-that-was-never-created')).toHaveLength(0);
+
+      // Hop 1 delivered; hop 2 hit the cap and was refused; teardown ran.
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(onEnded).toHaveBeenCalledWith('session-that-was-never-created', 'stopped', null);
+      errSpy.mockRestore();
+    });
+
+    test('forwardCebabEvent counts too, even when its row does not land', () => {
+      // Budget 3 against TWO cebab events + one agent hop, deliberately: with
+      // a smaller budget the agent hop's own increment could reach the cap on
+      // its own, and the test would pass whether or not `forwardCebabEvent`
+      // counted. Only 2 (cebab) + 1 (hop) = 3 trips it.
+      const { router, onEnded, deliver, errSpy } = setupUnpersistable(3);
+      for (const agent of AGENTS) {
+        router.forwardCebabEvent({
+          ts: 1,
+          source: CEBAB_SOURCE,
+          destination: agent,
+          kind: 'intro',
+          text: `briefing for ${agent}`,
+        });
+      }
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'work' }));
+
+      expect(deliver).not.toHaveBeenCalled();
+      expect(onEnded).toHaveBeenCalledWith('session-that-was-never-created', 'stopped', null);
+      errSpy.mockRestore();
+    });
+  });
 });
 
 // --- Item #4: worker failure surfacing + pending-retry slot --------------

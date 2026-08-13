@@ -31,6 +31,13 @@ import type { RouterDropView } from '../../store';
 //   - unknown_destination — warn (register B16: a legitimate participant
 //                                 addressed a name nobody has; the message
 //                                 is lost and the sender was told otherwise)
+//   - unauthorized_sink   — warn (register B08: an agent addressed `_sink`
+//                                 without being entitled to end the run —
+//                                 in chain mode anyone but the last
+//                                 participant, in orchestrator mode anyone)
+//   - self_addressed      — warn (register B24: source === destination; the
+//                                 sender would have been woken with its own
+//                                 text, looping until the budget ran out)
 //
 // Forged-source is the only danger tier — it's a spoof attempt. F2 routing
 // violations tint warn. Operator-driven mute/kick drops tint info because
@@ -51,6 +58,14 @@ const REASON_TINT: Record<RouterDropView['reasonCode'], string> = {
   // participant addressed a name that does not exist, so a message the
   // sender was told had been delivered is gone.
   unknown_destination: 'router-drops-reason-warn',
+  // Register B08: an agent tried to end the run without being entitled to.
+  // Warn, not danger — danger is reserved for `forged_source`, which is an
+  // identity spoof; this is a routing-authorization failure by a participant
+  // who is who it claims to be.
+  unauthorized_sink: 'router-drops-reason-warn',
+  // Register B24: an agent addressed itself. Warn — nobody asked for it, and
+  // left unchecked it burns the hop budget without another agent running.
+  self_addressed: 'router-drops-reason-warn',
 };
 
 const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
@@ -62,6 +77,10 @@ const REASON_LABEL: Record<RouterDropView['reasonCode'], string> = {
   kicked_source: 'kicked source (drain)',
   kicked_destination: 'kicked destination',
   unknown_destination: 'unknown destination',
+  // No `(F2)` suffix on these two: the siblings carry it because they came
+  // from that hardening pass, and tagging a new rule with it would be false.
+  unauthorized_sink: 'not entitled to end the run',
+  self_addressed: 'addressed itself',
 };
 
 function formatTime(ts: number): string {

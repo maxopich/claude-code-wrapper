@@ -766,6 +766,29 @@ export function createOrchestratorRouter(params: {
       });
       return;
     }
+    // Register B24: an agent addressing itself, which used to fall through to
+    // the orchestrator/worker deliver branches and wake the sender again with
+    // its own text — a loop bounded only by the hop budget.
+    //
+    // Placed AFTER the worker→worker guard on purpose: a worker addressing
+    // itself is caught there and keeps reporting `worker_to_worker`, so no
+    // drop that was already classified changes its reason code. What reaches
+    // here is orchestrator → orchestrator, which is the gap.
+    //
+    // Dropped before the persist below, like its chain-mode twin: the harm is
+    // the budget, so a message that goes nowhere must not advance the counter.
+    if (ev.source === ev.destination) {
+      console.warn(`[orchestrator] drop self-addressed event from ${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'self_addressed',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Agent addressed itself',
+        message: `${ev.source} sent to itself — the message was dropped rather than waking the sender again`,
+      });
+      return;
+    }
     // F2 round-2: source must be the orchestrator or a known worker.
     if (ev.source !== ORCHESTRATOR_AGENT_NAME && !workerSet.has(ev.source)) {
       console.warn(`[orchestrator] drop event from non-participant source=${ev.source}`);
@@ -866,10 +889,19 @@ export function createOrchestratorRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[orchestrator] persist event failed', err);
     }
+    // Register B25: OUTSIDE the try. The counter is the runaway brake, and a
+    // brake that stops counting when writes start failing is exactly backwards
+    // — everything below runs whether or not the row landed, so a session with
+    // a sick database used to run unbounded.
+    //
+    // This does mean the displayed ratio can exceed `events.length` while
+    // persistence is failing. That divergence is true information (events ARE
+    // missing); under healthy persistence the two stay in lockstep exactly as
+    // before.
+    hopsCount += 1;
     // PR-7: capture kind='error' events as the run's first_error. F2/F3
     // filters above have already dropped forged source=cebab and bad
     // routing — anything reaching this point is a legitimate participant
@@ -891,7 +923,24 @@ export function createOrchestratorRouter(params: {
       return;
     }
     if (ev.destination === SINK_RECIPIENT) {
+      // Register B08: this was the last bare `console.warn` drop in the
+      // router — no audit row, no operator notification, exactly the shape
+      // B16 fixed for `unknown_destination`. It was left that way for want of
+      // a reason code ("a recipient that exists in the protocol but has no
+      // meaning in orchestrator mode"); `unauthorized_sink` is that code.
+      //
+      // The rule differs from chain mode's by who is entitled, not by kind:
+      // there, only the terminal participant may end the run; here, `_sink`
+      // is not a routable recipient at all, so nobody may.
       console.warn(`[orchestrator] unexpected destination=_sink from ${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'unauthorized_sink',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Agent addressed the chain terminator',
+        message: `${ev.source} addressed _sink, which has no meaning in orchestrator mode — the message was dropped`,
+      });
       return;
     }
     if (checkBudgetExhausted()) return;
@@ -928,8 +977,9 @@ export function createOrchestratorRouter(params: {
   };
 
   // Cebab-originated events (briefings, roster prompts, user prompts):
-  // persist + forward. Bumps `hopsCount` on successful persist so the
-  // counter stays in lockstep with `run.events.length`.
+  // persist + forward. Bumps `hopsCount` so the counter stays in lockstep
+  // with `run.events.length` — register B25 moved the bump out of the persist
+  // `try` so a failed write can no longer stall the brake; see `handleEvent`.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -942,10 +992,11 @@ export function createOrchestratorRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[orchestrator] persist cebab event failed', err);
     }
+    // Register B25: outside the persist try — see `handleEvent`.
+    hopsCount += 1;
     try {
       sink.onEvent(sessionId, ev, dbId);
     } catch (err) {
@@ -1822,14 +1873,24 @@ export function wireOrchestratorSession(p: {
       hopBudget,
       executeMode: p.executeMode ?? false,
     });
-    router.forwardCebabEvent({
-      ts: Date.now(),
-      source: CEBAB_SOURCE,
-      destination: ORCHESTRATOR_AGENT_NAME,
-      kind: 'prompt',
-      text: rosterText,
-    });
-    deliver(ORCHESTRATOR_AGENT_NAME, rosterText);
+    // Register B14: this was a hand-rolled copy of `sendUserPrompt` — the
+    // same `forwardCebabEvent(cebab → orchestrator, kind:'prompt')` followed
+    // by the same `deliver(ORCHESTRATOR_AGENT_NAME, …)` — minus both of its
+    // guards. `forwardCebabEvent` bumps `hopsCount`, so the roster update
+    // could be the very hop that reached the cap and STILL wake the
+    // orchestrator, defeating the runaway brake the operator was promised;
+    // the `ended` check was missing too.
+    //
+    // Calling the shared path rather than adding a third copy of the guards:
+    // "wake the orchestrator with Cebab-authored prompt text" is one
+    // operation, and a roster update is an instance of it. No fence, for the
+    // reason `sendUserPrompt` gives — this text is Cebab's, not an agent's.
+    //
+    // Refusing here happens AFTER the worker is registered, deliberately: the
+    // participant row and the roster event are already durable, so the early
+    // return leaves consistent state and the budget-exhausted teardown is
+    // what explains the stop to the operator.
+    await router.sendUserPrompt(rosterText);
     return { agentName: newAgent.agentName, busWasAlreadyInstalled };
   }
 

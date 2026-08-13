@@ -376,6 +376,82 @@ describe('createOrchestratorRouter — hop-budget enforcement', () => {
     expect(deliver).toHaveBeenCalledTimes(0); // never woke orchestrator
   });
 
+  // Register B25: `hopsCount += 1` used to sit INSIDE the persist `try`, so a
+  // failing write froze the counter while everything below it — including the
+  // deliver — still ran. The brake stopped counting exactly when things were
+  // going wrong.
+  //
+  // Injected without mocks: `multi_agent_events.session_id` has a FK to
+  // `multi_agent_sessions(id)` with `foreign_keys = ON`, so a router built on
+  // a session nobody created makes every `appendMultiAgentEvent` throw —
+  // through the same catch a disk error would take.
+  function buildUnpersistableRouter(hopBudget: number) {
+    const sessionId = 'orch-session-that-was-never-created';
+    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    const onEnded = vi.fn();
+    const deliver = vi.fn();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const router = createOrchestratorRouter({
+      sessionId,
+      iterationId: '001',
+      workerNames: ['reviewer', 'editor'],
+      paths,
+      lifecycle: 'persistent',
+      onEvent: vi.fn(),
+      onEnded,
+      deliver,
+      hopBudget,
+    });
+    return { router, sessionId, onEnded, deliver, errSpy };
+  }
+
+  test('the counter advances even when the persist throws, so the budget still trips', () => {
+    const { router, sessionId, onEnded, deliver, errSpy } = buildUnpersistableRouter(2);
+
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'h1' }),
+    );
+    router.handleEvent(
+      makeEvent({ source: 'editor', destination: ORCHESTRATOR_AGENT_NAME, text: 'h2' }),
+    );
+
+    // Persistence really did fail — without this the test would pass on a
+    // healthy database and prove nothing about the failure path.
+    expect(errSpy).toHaveBeenCalled();
+    expect(listMultiAgentEvents(sessionId)).toHaveLength(0);
+
+    expect(deliver).toHaveBeenCalledTimes(1);
+    expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');
+    errSpy.mockRestore();
+  });
+
+  test('forwardCebabEvent counts too, even when its row does not land', () => {
+    // The second of the router's two counter sites. Briefings and roster
+    // prompts go through here, so a session whose writes are failing from the
+    // start would otherwise never advance the counter at all.
+    //
+    // Budget 3 against TWO cebab events + one worker hop, deliberately: with
+    // a smaller budget the hop's own increment could reach the cap by itself,
+    // and this would pass whether or not `forwardCebabEvent` counted.
+    const { router, sessionId, onEnded, deliver, errSpy } = buildUnpersistableRouter(3);
+    for (const agent of ['reviewer', 'editor']) {
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: agent,
+        kind: 'intro',
+        text: `briefing for ${agent}`,
+      });
+    }
+    router.handleEvent(
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'work' }),
+    );
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');
+    errSpy.mockRestore();
+  });
+
   test('initialHopsCount seeds the counter (R-B reconstruction parity)', () => {
     // R-B path: reconstruct.ts reads `listMultiAgentEvents(...).length` and
     // passes it as `initialHopsCount` so a session at 29/30 resumed after a
