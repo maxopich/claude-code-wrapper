@@ -82,6 +82,7 @@ import {
   type ProjectRules,
   type ResolvedAgent,
 } from './runtime.js';
+import { fenceRelayedMessage } from './message_fence.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
 import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
@@ -440,7 +441,18 @@ export function createOrchestratorRouter(params: {
    * use it to decide whether to abort the runner — see their closures.
    */
   onFinalize?: (reason: MultiAgentEndedReason) => void;
-  deliver?: (agentName: string, text: string) => void;
+  /**
+   * Wake `agentName` with `text`.
+   *
+   * `from` is the slug of the AGENT that wrote `text`, and it is present on
+   * exactly the calls that relay agent-authored bytes. Its absence is the
+   * signal that Cebab or the operator wrote them (roster prompts, the user's
+   * prompt, a replay of already-composed wire bytes), and the session-level
+   * composer keys the H08/F16 message fence off it. Passing it here rather
+   * than fencing inside the router keeps this module about routing and leaves
+   * one place that knows how a prompt is assembled.
+   */
+  deliver?: (agentName: string, text: string, from?: string) => void;
   /** Hard cap on persisted hops. Required so the router enforces the
    *  ceiling; the caller resolves precedence. */
   hopBudget: number;
@@ -883,12 +895,15 @@ export function createOrchestratorRouter(params: {
       return;
     }
     if (checkBudgetExhausted()) return;
+    // `ev.source` is pinned per-agent in `makeBusToolServer`'s closure and has
+    // already passed the F2/F3 allowlist above, so it is a trustworthy label
+    // for who wrote `ev.text` — which is what the fence needs.
     if (ev.destination === ORCHESTRATOR_AGENT_NAME) {
-      deliver?.(ORCHESTRATOR_AGENT_NAME, ev.text);
+      deliver?.(ORCHESTRATOR_AGENT_NAME, ev.text, ev.source);
       return;
     }
     if (workerSet.has(ev.destination)) {
-      deliver?.(ev.destination, ev.text);
+      deliver?.(ev.destination, ev.text, ev.source);
       return;
     }
     // Register B16 (filed against chain.ts; this router had it too). The
@@ -950,6 +965,9 @@ export function createOrchestratorRouter(params: {
     // The user's prompt just landed as a persisted hop; check the cap
     // before waking the orchestrator for it.
     if (checkBudgetExhausted()) return;
+    // No `from`: the operator is the principal here, and the whole point of
+    // the fence is to mark text an AGENT wrote. Wrapping the operator's own
+    // prompt would label the actual task as untrusted peer data.
     deliver?.(ORCHESTRATOR_AGENT_NAME, text);
   };
 
@@ -1624,8 +1642,15 @@ export function wireOrchestratorSession(p: {
   // briefing (its resumed transcript still has it), so it is pre-marked
   // here and `deliver` won't duplicate it.
   const briefed = new Set<string>(p.briefedAgents ?? []);
-  const deliver = (agentName: string, text: string) => {
-    let prompt = text;
+  const deliver = (agentName: string, text: string, from?: string) => {
+    // H08/F16: a `from` means another AGENT wrote these bytes, so they get the
+    // nonce fence — the recipient can then tell Cebab's framing from a peer's
+    // prose no matter what the prose contains. No `from` means Cebab or the
+    // operator wrote them (roster prompt, roster update, the user's prompt, or
+    // a replay of bytes this function already composed), and those must stay
+    // bare: fencing the operator's own task would label it untrusted, and
+    // re-fencing a replay would nest one wrapper inside another.
+    let prompt = from ? fenceRelayedMessage(from, text).text : text;
     if (agentName !== ORCHESTRATOR_AGENT_NAME && !briefed.has(agentName)) {
       briefed.add(agentName);
       // Order: bus protocol → project rules → task (same as chain mode).
@@ -1634,7 +1659,7 @@ export function wireOrchestratorSession(p: {
         executeMode: p.executeMode ?? false,
       });
       const pr = workerProjectRules.get(agentName) ?? null;
-      prompt = pr ? `${brief}\n\n${pr.framed}\n\n${text}` : `${brief}\n\n${text}`;
+      prompt = pr ? `${brief}\n\n${pr.framed}\n\n${prompt}` : `${brief}\n\n${prompt}`;
       if (pr) {
         // Compact scrollback marker only — the full CLAUDE.md is in the
         // delivered prompt + the on-disk iteration transcript, not echoed

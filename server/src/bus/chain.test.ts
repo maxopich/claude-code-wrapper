@@ -93,7 +93,9 @@ describe('createChainRouter routing', () => {
 
     expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith('reviewer', 'do review');
+    // The 3rd argument is the pinned `ev.source` — the router's statement of
+    // who wrote these bytes, which is what the H08/F16 fence keys off.
+    expect(deliver).toHaveBeenCalledWith('reviewer', 'do review', 'coder');
     // coder's hop archived (empty incoming prompt → reply.md = the text)
     expect(
       fs.readFileSync(path.join(paths.iterationDir('iter-1', 'coder'), 'reply.md'), 'utf8'),
@@ -194,8 +196,8 @@ describe('createChainRouter — hop-budget enforcement', () => {
     // Hops 1 and 2 fired deliver; hop 3 was the boundary trip (its deliver
     // call was refused by the budget check), hop 4 was dropped by `ended`.
     expect(deliver).toHaveBeenCalledTimes(2);
-    expect(deliver).toHaveBeenNthCalledWith(1, 'reviewer', 'h1');
-    expect(deliver).toHaveBeenNthCalledWith(2, 'coder', 'h2');
+    expect(deliver).toHaveBeenNthCalledWith(1, 'reviewer', 'h1', 'coder');
+    expect(deliver).toHaveBeenNthCalledWith(2, 'coder', 'h2', 'reviewer');
 
     // Teardown ran exactly once with reason='stopped'.
     expect(onEnded).toHaveBeenCalledTimes(1);
