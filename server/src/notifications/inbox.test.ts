@@ -331,3 +331,82 @@ describe('buildInboxSnapshot', () => {
     expect(snap.unackedGlobal).toBe(2);
   });
 });
+
+describe('rowToEnvelope — malformed JSON columns (register D10)', () => {
+  // Both JSON columns were parsed bare, so ONE bad row threw out of
+  // `listInbox` → `buildInboxSnapshot`, which the attach path calls
+  // unguarded. The blast radius of a single bad column was the operator's
+  // whole attach snapshot rather than one missing field.
+  //
+  // The shape is enforced at write time, so these rows are corrupted the way
+  // `parseClassifierReason` already documents: written by an older binary, or
+  // touched by `sqlite3` CLI edits. We reproduce that with a direct UPDATE —
+  // going through `emit()` could never produce it, which is exactly why no
+  // fixture had ever carried one.
+  function corruptColumn(id: string, column: 'details_json' | 'action_json'): void {
+    getDb()
+      .prepare(`UPDATE notifications SET ${column} = ? WHERE id = ?`)
+      .run('{oops not json', id);
+  }
+
+  test('a malformed details_json degrades that one field to undefined', () => {
+    const id = emitOp('s1', 'op:bad-details');
+    corruptColumn(id, 'details_json');
+
+    const rows = listInbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.id).toBe(id);
+    expect(rows[0]!.details).toBeUndefined();
+    // The rest of the row is untouched — this is a degraded field, not a
+    // degraded notification.
+    expect(rows[0]!.title).toBe('Test op:bad-details');
+    expect(rows[0]!.sessionId).toBe('s1');
+  });
+
+  test('a malformed action_json degrades that one field to undefined', () => {
+    const id = emitOp('s1', 'op:bad-action');
+    corruptColumn(id, 'action_json');
+
+    const rows = listInbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.action).toBeUndefined();
+    expect(rows[0]!.title).toBe('Test op:bad-action');
+  });
+
+  test('one malformed row does not take the other rows with it', () => {
+    const bad = emitOp('s1', 'op:bad');
+    const goodA = emitOp('s2', 'op:good-1');
+    const goodB = emitOp('s3', 'op:good-2');
+    corruptColumn(bad, 'details_json');
+
+    const rows = listInbox();
+    // The bad row still ships, and so do both good ones — the whole point is
+    // that the failure stays inside the field it belongs to.
+    expect(rows.map((r) => r.id).sort()).toEqual([bad, goodA, goodB].sort());
+    expect(rows.find((r) => r.id === bad)!.details).toBeUndefined();
+  });
+
+  test('the attach snapshot survives a malformed row', () => {
+    const bad = emitSafety('s1', 'safety:bad');
+    emitOp('s2', 'op:fine');
+    corruptColumn(bad, 'action_json');
+
+    // `buildInboxSnapshot()` is what the attach path calls, unguarded.
+    const snap = buildInboxSnapshot();
+    expect(snap.rows).toHaveLength(2);
+    expect(snap.unackedGlobal).toBe(2);
+  });
+
+  // CONTROL. Without this, every assertion above would also pass on a
+  // `parseJsonColumn` that returned `undefined` unconditionally — "didn't
+  // throw" is not evidence that anything is still being parsed.
+  test('a well-formed action_json still parses', () => {
+    const id = emitOp('s1', 'op:good-action');
+    getDb()
+      .prepare('UPDATE notifications SET action_json = ? WHERE id = ?')
+      .run(JSON.stringify({ kind: 'open_session', sessionId: 's1' }), id);
+
+    const rows = listInbox();
+    expect(rows[0]!.action).toEqual({ kind: 'open_session', sessionId: 's1' });
+  });
+});

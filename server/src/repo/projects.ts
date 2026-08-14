@@ -33,6 +33,13 @@ export type ProjectRow = {
  */
 export type BusTrustDecision = 'trusted' | 'denied';
 
+/**
+ * How many `name (n)` variants to try before giving up (register D16). Two
+ * same-named folders is the realistic case; twenty is well past the point
+ * where the operator has a naming problem rather than Cebab having a bug.
+ */
+const MAX_NAME_DISAMBIGUATION_TRIES = 20;
+
 export function upsertProject(name: string, path: string): ProjectRow {
   const db = getDb();
   const existing = findProjectByPath(path);
@@ -44,12 +51,66 @@ export function upsertProject(name: string, path: string): ProjectRow {
     return existing;
   }
   const now = Date.now();
-  const result = db
-    .prepare(
-      'INSERT INTO projects (name, path, trusted, missing, created_at, last_used_at) VALUES (?, ?, 0, 0, ?, NULL)',
-    )
-    .run(name, path, now);
-  return getProject(Number(result.lastInsertRowid))!;
+  const insert = db.prepare(
+    'INSERT INTO projects (name, path, trusted, missing, created_at, last_used_at) VALUES (?, ?, 0, 0, ?, NULL)',
+  );
+
+  // Register D16: lookup is by `path`, but `projects.name` is UNIQUE
+  // (001_init.sql). Two directories sharing a basename under DIFFERENT roots
+  // therefore collide on INSERT. That is not exotic — repointing the workspace
+  // root is a supported Settings action, and the old root's rows keep their
+  // names. Within one scan a collision is impossible (`readdir` returns
+  // siblings), so this is purely the cross-root case.
+  //
+  // The unguarded throw was not a one-time abort. `syncWorkspaceProjects` runs
+  // on EVERY `list_projects`, so it re-hit the same row on every sidebar
+  // refresh and the operator got a permanently empty sidebar plus a repeating
+  // `process_crashed` — recoverable only by hand-editing SQLite. It also took
+  // `markProjectsMissingByPaths` down with it, so the soft-delete bookkeeping
+  // silently stopped.
+  //
+  // WHY NOT DROP THE UNIQUE. A table-level UNIQUE mints an implicit index
+  // SQLite won't let us drop (the D09 lesson), so relaxing the constraint
+  // means recreating `projects` — and `sessions.project_id REFERENCES
+  // projects(id) ON DELETE CASCADE` makes that a real risk to an operator's
+  // sessions. Nothing looks a project up by name; the column is display-only,
+  // and a disambiguated name is arguably better than a duplicate — the
+  // operator can tell the two folders apart in the sidebar.
+  //
+  // This is the mirror of D09 rather than a contradiction with it: there the
+  // constraint was MISSING and belonged in the schema; here it exists and the
+  // WRITER is what has to honour it. `upsertProject` is the only writer, so
+  // the rule still has exactly one home.
+  //
+  // The suffix is stable across rescans: the path lookup above runs first, so
+  // the next scan finds this row by path and never re-derives its name.
+  for (let attempt = 1; attempt <= MAX_NAME_DISAMBIGUATION_TRIES; attempt++) {
+    const candidate = attempt === 1 ? name : `${name} (${attempt})`;
+    try {
+      const result = insert.run(candidate, path, now);
+      return getProject(Number(result.lastInsertRowid))!;
+    } catch (err) {
+      // Only the NAME collision is recoverable by renaming. A `path` collision
+      // can't happen (we just looked it up) and anything else — a disk error,
+      // a schema problem — is a real failure the caller must see.
+      if (!isNameUniqueViolation(err)) throw err;
+    }
+  }
+  throw new Error(
+    `upsertProject: could not find a free name for ${JSON.stringify(path)} after ` +
+      `${MAX_NAME_DISAMBIGUATION_TRIES} attempts starting from ${JSON.stringify(name)}`,
+  );
+}
+
+/**
+ * True for the specific `UNIQUE constraint failed: projects.name` error.
+ * Matched on the message rather than on `err.code` because better-sqlite3
+ * reports every uniqueness failure as `SQLITE_CONSTRAINT_UNIQUE` — including
+ * a `projects.path` collision, which renaming would NOT fix and which would
+ * spin this loop 20 times before surfacing the real problem.
+ */
+function isNameUniqueViolation(err: unknown): boolean {
+  return err instanceof Error && /UNIQUE constraint failed:\s*projects\.name/i.test(err.message);
 }
 
 export function getProject(id: number): ProjectRow | undefined {
