@@ -23,7 +23,8 @@ export type NotificationsState = {
   /** Currently rendered toasts. Length never exceeds MAX_VISIBLE. */
   visible: DisplayNotification[];
   /** FIFO overflow when all visible slots are non-evictable (sticky or
-   * severity in NON_EVICTABLE). Promoted on dismiss. */
+   * severity in NON_EVICTABLE). Promoted on dismiss. Length never exceeds
+   * MAX_QUEUED; past that the oldest falls off (W12). */
   queued: DisplayNotification[];
 };
 
@@ -38,6 +39,31 @@ export type NotificationsAction =
  * the queue.
  */
 export const MAX_VISIBLE = 4;
+
+/**
+ * W12: cap the overflow queue. It used to grow without limit — every push past
+ * a full, entirely non-evictable visible list appended forever — so a burst of
+ * distinct-`dedupeKey` errors left an array that nothing trimmed and a backlog
+ * the operator cleared one dismissal at a time, each promotion surfacing an
+ * older toast than the last.
+ *
+ * OVERFLOW DROPS THE OLDEST QUEUED ENTRY, and that loses less than it sounds.
+ * The queue is only reachable when all four visible slots hold non-evictable
+ * toasts, and they hold them BECAUSE they cannot be evicted — so in a cascade
+ * the earliest failures are already pinned on screen and the queue behind them
+ * is the consequences. Dropping the newest instead would hide the arrival the
+ * operator is reacting to right now.
+ *
+ * Nor is the dock the record: the server persists every sticky-operational and
+ * every safety notification to the inbox (`dispatcher.ts` §4), which is the
+ * surface that keeps history. Non-sticky operational toasts are transient by
+ * design and were already unreachable at this depth.
+ *
+ * The number is a judgement call, not a derived quantity: two screenfuls of
+ * backlog past what is showing. The tests assert the invariant — bounded, and
+ * the newest kept — not the value.
+ */
+export const MAX_QUEUED = 8;
 
 /**
  * Severities that can never be auto-evicted to make room for a newer
@@ -110,7 +136,9 @@ export function notificationsReducer(
         visible.push(display);
         return { ...state, visible };
       }
-      return { ...state, queued: [...state.queued, display] };
+      // W12: `slice(-MAX_QUEUED)` after the append, so the oldest falls off
+      // the head — the end the promotion in `dismiss` reads from.
+      return { ...state, queued: [...state.queued, display].slice(-MAX_QUEUED) };
     }
     case 'dismiss': {
       const visIdx = state.visible.findIndex((v) => v.id === action.id);

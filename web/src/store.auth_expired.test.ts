@@ -31,10 +31,14 @@ afterEach(() => {
 });
 
 function seedProjectAndSession(): AppState {
-  // The wrapper_error reducer needs an activeProjectId so the per-
-  // session inline error has somewhere to land. Use the standard test
-  // dispatch chain: project_opened → select_project (or rely on
-  // sessionToProject mapping from a prior session_started).
+  // Seeds a project and selects it; despite the name it starts no session,
+  // and does not need to. The comment here used to say the reducer "needs an
+  // activeProjectId so the per-session inline error has somewhere to land" —
+  // that stopped being true in two steps. W16 stopped a sessionless error
+  // inventing a session, and Cebab-da6 stopped it borrowing the active one,
+  // so a sessionless error now lands nowhere by design and the auth slice is
+  // read straight off the early return. Kept as-is because these cases are
+  // about `authExpired`, not about where an error renders.
   let s = reduce(initialState, {
     type: 'server',
     msg: {

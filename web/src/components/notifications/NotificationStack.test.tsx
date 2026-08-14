@@ -104,6 +104,31 @@ describe('NotificationStack — host scaffolding', () => {
   });
 });
 
+/**
+ * W06. Until this block existed, the whole of "live regions" was the
+ * scaffolding test below: it asserted the two `<div>`s were in the DOM and
+ * carried `sr-only`, and stopped. **Nothing had ever asserted that anything
+ * was announced**, which is how the effect shipped setting the polite region,
+ * returning, and leaving `assertiveText` unwritten for an error that arrived
+ * in the same commit — while the loop above had already marked that error
+ * announced, so no later render retried it. The urgent tier was the dropped
+ * one.
+ *
+ * Reachability, stated honestly: two un-announced notifications must reach one
+ * render, which needs two `push` calls in a single synchronous block. Every
+ * production call site (App.tsx, `notifyFromServerMsg`) pushes once, and each
+ * WS message is its own task, so no production path was found. `act()` batches
+ * them, which is what these tests use. The fix is for the trap, and the tests
+ * are for the hole that hid it.
+ */
+function regions() {
+  return {
+    polite: container.querySelector('.notif-stack > [aria-live="polite"]')?.textContent ?? null,
+    assertive:
+      container.querySelector('.notif-stack > [aria-live="assertive"]')?.textContent ?? null,
+  };
+}
+
 describe('NotificationStack — sr-only live regions (UI-10)', () => {
   test('polite region scaffolding always present', () => {
     act(() => {
@@ -115,6 +140,44 @@ describe('NotificationStack — sr-only live regions (UI-10)', () => {
     expect(assertive).not.toBeNull();
     expect(polite?.classList.contains('sr-only')).toBe(true);
     expect(assertive?.classList.contains('sr-only')).toBe(true);
+  });
+
+  test('CONTROL: an info push announces politely, and only politely', () => {
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      actions.push?.(env({ id: 'i', severity: 'info', title: 'Saved', message: 'All good' }));
+    });
+    expect(regions()).toEqual({ polite: 'Saved. All good', assertive: '' });
+  });
+
+  test('CONTROL: an error push announces assertively, and only assertively', () => {
+    // Paired with the case above so the W06 test cannot be satisfied by a
+    // component that writes every announcement into both regions.
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      actions.push?.(env({ id: 'e', severity: 'error', title: 'Server error' }));
+    });
+    expect(regions()).toEqual({ polite: '', assertive: 'Server error' });
+  });
+
+  test('W06: an error arriving with an info still reaches the assertive region', () => {
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      // One `act`, so both reducer dispatches land in one commit and the
+      // effect sees two un-announced notifications of different tiers.
+      actions.push?.(env({ id: 'i', severity: 'info', title: 'Saved' }));
+      actions.push?.(env({ id: 'e', severity: 'error', title: 'Server error' }));
+    });
+    expect(regions()).toEqual({ polite: 'Saved', assertive: 'Server error' });
   });
 });
 
