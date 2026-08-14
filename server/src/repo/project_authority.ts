@@ -29,7 +29,7 @@ const MAX_MCP_JSON_BYTES = 1024 * 1024;
 /** Project-root MCP manifest. See `readMcpJsonServers` for why this exists. */
 const MCP_JSON_FILENAME = '.mcp.json';
 import { getProject } from './projects.js';
-import { checkTrust, computeBinarySha, listForServer } from './mcp_trust.js';
+import { checkTrust, computeBinarySha, firstDecisionTs, listForServer } from './mcp_trust.js';
 import { listSessionsForProject } from './sessions.js';
 import { getDb } from '../db.js';
 
@@ -533,9 +533,14 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
  * are always `trust: 'trusted'` — Cebab pins them, no operator decision
  * is needed. They skip the lookup.
  *
- * `firstSeenAt` / `lastSeenAt` come from `listForServer` (most-recent
- * first); the oldest decision in the list is firstSeenAt. Absent when
- * the server has never had a recorded decision.
+ * `lastSeenAt` comes from `listForServer` (most-recent first). `firstSeenAt`
+ * comes from `firstDecisionTs`, i.e. the append-only `safety_audit` chain —
+ * NOT from the oldest surviving lookup row, which is a different question.
+ * `mcp_trust` replaces rows it supersedes, so its oldest survivor answers
+ * "the oldest decision not yet overwritten"; on the non-null-sha path that has
+ * never equalled the first decision, and register D09's migration 033 makes the
+ * null-sha path behave the same way. Both absent when the server has never had
+ * a recorded decision.
  */
 export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
   for (const view of views) {
@@ -562,11 +567,16 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
         view.trust = 'pending_tofu';
         break;
     }
-    // Decision history → first/last seen.
+    // Decision history → first/last seen, from the two sources that actually
+    // answer each question: the lookup for "most recent", the audit chain for
+    // "first ever".
     const history = listForServer(view.name, view.originPath);
     if (history.length > 0) {
       view.lastSeenAt = history[0].ts;
-      view.firstSeenAt = history[history.length - 1].ts;
+    }
+    const firstTs = firstDecisionTs(view.name, view.originPath);
+    if (firstTs !== null) {
+      view.firstSeenAt = firstTs;
     }
   }
   return views;
