@@ -54,6 +54,16 @@
 -- pinned-hash mismatch detected) are distinct rows — the lookup uses
 -- (server_name, origin_path, binary_sha) directly, so the most recent
 -- pinned-hash decision wins for that tuple.
+--
+-- CORRECTION (register D09, migration 033). The paragraph above is true for a
+-- non-null binary_sha and FALSE for NULL: SQLite treats NULLs as distinct in a
+-- UNIQUE index, so the conflict never fires for unresolvable targets — the very
+-- case this column is nullable for — and every decision appended a row instead
+-- of replacing one. 033_mcp_trust_null_safe_key.sql dedupes the existing rows
+-- and adds a partial unique index that closes it. This file is left as shipped
+-- rather than reworded, so that anyone reading the schema in migration order
+-- sees the claim and its correction rather than a history that was quietly
+-- always right.
 CREATE TABLE mcp_trust (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   ts           INTEGER NOT NULL,

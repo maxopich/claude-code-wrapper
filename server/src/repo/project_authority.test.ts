@@ -529,6 +529,33 @@ describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
     expect(view.firstSeenAt).toBeTypeOf('number');
   });
 
+  test('firstSeenAt is the FIRST decision, not the oldest surviving lookup row (D09)', async () => {
+    // The case above asserts both fields are numbers, which is true under any
+    // implementation — including the one where they are the SAME number. This
+    // one pins the values apart.
+    //
+    // `firstSeenAt` used to come from the oldest row `listForServer` returned.
+    // `mcp_trust` is a lookup whose rows are replaced, so that answered "the
+    // oldest decision not yet superseded". It was already wrong for a real sha
+    // (a replace deletes the older row) and only looked right for `npx` because
+    // NULL-distinct semantics let the old rows pile up — the very bug 033
+    // fixes. It now reads the append-only audit chain, which keeps them all.
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({ mcpServers: { twice: { command: 'npx' } } }),
+    );
+    const { recordTrustDecision: rec } = await import('./mcp_trust.js');
+    const originPath = path.join(projectPath, '.claude', 'settings.json');
+    rec({ serverName: 'twice', originPath, binarySha: null, decision: 'denied_remember' });
+    await new Promise((r) => setTimeout(r, 5)); // distinct ts
+    rec({ serverName: 'twice', originPath, binarySha: null, decision: 'trusted' });
+
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const view = out!.mcpServers.find((s) => s.name === 'twice')!;
+    expect(view.trust).toBe('trusted'); // the later decision governs
+    expect(view.firstSeenAt).toBeLessThan(view.lastSeenAt!);
+  });
+
   test('cebab-injected servers always trust=trusted (skip the JOIN)', () => {
     // The cebab_bus MCP is identity-pinned by Cebab — no operator
     // decision needed; the enrichment pass shortcuts these.

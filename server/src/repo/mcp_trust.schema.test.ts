@@ -93,11 +93,24 @@ describe('migration 016_mcp_trust schema shape', () => {
     ]);
   });
 
-  test('multiple NULL binary_sha rows for same (server_name, origin_path) are allowed (SQLite NULL UNIQUE semantics)', () => {
-    // SQLite treats NULL as distinct in UNIQUE constraints — multiple
-    // unresolvable-target rows (npx commands) can coexist. The Phase 4
-    // repo's lookup logic handles "any matching name+origin with NULL sha"
-    // as a separate path; this just pins SQLite's default behavior.
+  test('a second NULL binary_sha row for the same (server_name, origin_path) conflicts (D09 / 033)', () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and that is the finding.
+    //
+    // It read: "multiple NULL binary_sha rows ... are allowed (SQLite NULL
+    // UNIQUE semantics)", with a comment noting that SQLite treats NULL as
+    // distinct in a UNIQUE constraint, that unresolvable-target rows can
+    // therefore coexist, and that "this just pins SQLite's default behavior".
+    // Every word of that was true. What it missed is that the schema and the
+    // repository both promise the opposite three lines away: 016's UNIQUE is
+    // documented as making the table a decision LOOKUP, and
+    // `recordTrustDecision` writes through INSERT OR REPLACE so a changed mind
+    // replaces the prior row. At a NULL sha the conflict never fired, so every
+    // decision appended — and this test pinned that as the contract rather than
+    // asking whether it should be.
+    //
+    // Migration 033's partial unique index closes it. The SQLite fact the old
+    // comment documented is still true; it is now a fact about the table-level
+    // UNIQUE alone, which is why 033 exists.
     const db = getDb();
     db.prepare(
       `INSERT INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
@@ -110,9 +123,29 @@ describe('migration 016_mcp_trust schema shape', () => {
             VALUES (?, ?, ?, NULL, ?, ?)`,
         )
         .run(2000, 'srv', '/etc/mcp.json', 'denied_remember', 'local-user'),
-    ).not.toThrow();
+    ).toThrowError(/UNIQUE constraint/);
     const count = db.prepare<[], { n: number }>(`SELECT COUNT(*) AS n FROM mcp_trust`).get();
-    expect(count?.n).toBe(2);
+    expect(count?.n).toBe(1);
+  });
+
+  test('…and a plain INSERT OR REPLACE at NULL sha now replaces, which is the point', () => {
+    // The behavioural half, at the schema layer: the constraint is only useful
+    // because it makes the repository's INSERT OR REPLACE do what its comment
+    // says. Without it this is two rows and "most recent wins" is left to an
+    // ORDER BY.
+    const db = getDb();
+    const write = db.prepare(
+      `INSERT OR REPLACE INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
+        VALUES (?, ?, ?, NULL, ?, ?)`,
+    );
+    write.run(1000, 'srv', '/etc/mcp.json', 'trusted', 'local-user');
+    write.run(2000, 'srv', '/etc/mcp.json', 'denied_remember', 'local-user');
+    const rows = db
+      .prepare<[], { ts: number; decision: string }>(
+        `SELECT ts, decision FROM mcp_trust WHERE server_name = 'srv'`,
+      )
+      .all();
+    expect(rows).toEqual([{ ts: 2000, decision: 'denied_remember' }]);
   });
 
   test('index mcp_trust_server_origin exists', () => {

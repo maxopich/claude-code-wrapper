@@ -122,12 +122,21 @@ export function computeBinarySha(command: string): string | null {
 
 /**
  * Record an operator's trust decision. Dual-writes to `mcp_trust` and
- * `safety_audit`. Conflicts on the UNIQUE(server_name, origin_path,
- * binary_sha) triple are resolved INSERT OR REPLACE so a fresh decision
+ * `safety_audit`. Conflicts are resolved INSERT OR REPLACE so a fresh decision
  * (e.g. operator changes their mind from `denied_remember` to `trusted`)
  * overwrites the prior. The audit chain preserves every decision in
  * order, so the forensic trail is complete even when the lookup row gets
  * replaced.
+ *
+ * TWO constraints make that conflict fire, and register D09 is why it takes
+ * two. 016's `UNIQUE(server_name, origin_path, binary_sha)` covers a non-null
+ * sha; for `binary_sha IS NULL` — `npx <name>` and every other unresolvable
+ * target — SQLite treats NULLs as distinct, the conflict never fired, and this
+ * function appended a row per decision while claiming to replace one. Migration
+ * 033's partial unique index on (server_name, origin_path) WHERE binary_sha IS
+ * NULL closes that half. The read-back below noticed the same NULL semantics on
+ * the SELECT side and handled them; the INSERT side three lines above went
+ * unexamined.
  *
  * Per BE-1 invariant: the safety_audit append happens FIRST. If it
  * throws, the mcp_trust write is not attempted and the caller gets the
@@ -168,6 +177,12 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
   // autoincrement id, so we look up by the UNIQUE triple. NULL-distinct
   // SQLite semantics on binarySha=NULL mean the lookup needs IS NULL
   // (not = NULL).
+  //
+  // `id DESC` for the same reason `checkTrust`'s recency probe carries it: on a
+  // same-millisecond `ts` tie, `ORDER BY ts DESC` alone is unordered by
+  // contract — and measurably returns the OLDEST row, because the scan walks
+  // (server_name, origin_path) in rowid order. That would hand this function a
+  // row it did not just write.
   const row =
     input.binarySha === null
       ? db
@@ -175,7 +190,7 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
             `SELECT id, ts, server_name, origin_path, binary_sha, decision, operator
                FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND binary_sha IS NULL
-           ORDER BY ts DESC LIMIT 1`,
+           ORDER BY ts DESC, id DESC LIMIT 1`,
           )
           .get(input.serverName, input.originPath)
       : db
@@ -183,7 +198,7 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
             `SELECT id, ts, server_name, origin_path, binary_sha, decision, operator
                FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND binary_sha = ?
-           ORDER BY ts DESC LIMIT 1`,
+           ORDER BY ts DESC, id DESC LIMIT 1`,
           )
           .get(input.serverName, input.originPath, input.binarySha);
   if (!row) {
@@ -214,14 +229,17 @@ export function checkTrust(
   candidateSha: string | null,
 ): TrustLookupResult {
   const db = getDb();
-  // Most-recent matching row wins.
+  // Most-recent matching row wins — `id DESC` is what makes "most recent" mean
+  // write order rather than whatever the scan reached first on a `ts` tie. Same
+  // argument as the recency probe below, which is where it was first written
+  // and, until register D09, the only query in this file that had it.
   const exact =
     candidateSha === null
       ? db
           .prepare<[string, string], { decision: PersistedDecision; binary_sha: string | null }>(
             `SELECT decision, binary_sha FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND binary_sha IS NULL
-           ORDER BY ts DESC LIMIT 1`,
+           ORDER BY ts DESC, id DESC LIMIT 1`,
           )
           .get(serverName, originPath)
       : db
@@ -231,7 +249,7 @@ export function checkTrust(
           >(
             `SELECT decision, binary_sha FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND binary_sha = ?
-           ORDER BY ts DESC LIMIT 1`,
+           ORDER BY ts DESC, id DESC LIMIT 1`,
           )
           .get(serverName, originPath, candidateSha);
   if (exact) {
@@ -281,7 +299,7 @@ export function checkTrust(
         `SELECT binary_sha FROM mcp_trust
           WHERE server_name = ? AND origin_path = ?
             AND decision = 'trusted_pinned_hash' AND binary_sha IS NOT NULL
-       ORDER BY ts DESC LIMIT 1`,
+       ORDER BY ts DESC, id DESC LIMIT 1`,
       )
       .get(serverName, originPath);
     if (pinned && pinned.binary_sha !== candidateSha) {
@@ -294,9 +312,16 @@ export function checkTrust(
 }
 
 /**
- * Return every decision row for a (serverName, originPath) pair, most
+ * Return every SURVIVING decision row for a (serverName, originPath) pair, most
  * recent first. Used by the AuthorityPanel "Trust history" disclosure
  * (Phase 7 UI), and by tests.
+ *
+ * "Surviving" is the honest word: this is the lookup table, and `INSERT OR
+ * REPLACE` deletes the row it supersedes — at any sha since 016, and at a null
+ * sha since 033. So a server the operator has decided on five times has one row
+ * per distinct sha here, not five. The complete history is the `safety_audit`
+ * chain (`kind='mcp.trust_decided'`), which is where `firstDecisionTs` reads
+ * from and where anything else wanting the full trail should read from too.
  */
 export function listForServer(serverName: string, originPath: string): McpTrustRow[] {
   return getDb()
@@ -304,7 +329,31 @@ export function listForServer(serverName: string, originPath: string): McpTrustR
       `SELECT id, ts, server_name, origin_path, binary_sha, decision, operator
         FROM mcp_trust
        WHERE server_name = ? AND origin_path = ?
-    ORDER BY ts DESC`,
+    ORDER BY ts DESC, id DESC`,
     )
     .all(serverName, originPath);
+}
+
+/**
+ * Timestamp of the operator's FIRST recorded decision for a (serverName,
+ * originPath) pair, or `null` if they have never decided on it.
+ *
+ * Reads the append-only `safety_audit` chain rather than `mcp_trust`, and that
+ * is the entire point. `mcp_trust` is a lookup whose rows get replaced, so its
+ * oldest surviving row answers "when was the oldest decision I have not yet
+ * superseded" — which is not a question anyone asked. Before register D09 the
+ * null-sha path accidentally kept its history and appeared to answer correctly;
+ * the non-null path never did. Sourcing it from the chain makes both right and
+ * survives 033's dedupe.
+ */
+export function firstDecisionTs(serverName: string, originPath: string): number | null {
+  const row = getDb()
+    .prepare<[string, string], { ts: number | null }>(
+      `SELECT MIN(ts) AS ts FROM safety_audit
+        WHERE kind = 'mcp.trust_decided'
+          AND json_extract(payload_json, '$.serverName') = ?
+          AND json_extract(payload_json, '$.originPath') = ?`,
+    )
+    .get(serverName, originPath);
+  return row?.ts ?? null;
 }
