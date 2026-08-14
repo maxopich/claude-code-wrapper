@@ -1243,6 +1243,11 @@ function AppShell({
   // already made their choice; refreshing would be noise). The
   // server's silent drop on stale id is the right behavior: a late
   // reason for a stale Stop becomes a no-op on both sides.
+  //
+  // Cebab-u0s: that unmount is the problem when the send does NOT go out.
+  // Nothing re-opens the prompt, so a reason typed while the socket was down
+  // was gone for good. The send is now checked; on failure the prompt stays
+  // mounted and the operator can submit the same reason again.
   const submitStopReason = useCallback(
     (
       sessionId: string,
@@ -1250,14 +1255,30 @@ function AppShell({
       reasonCode: StopReasonCode,
       reasonText?: string,
     ) => {
-      wsRef.current?.send({
-        type: 'stop_reason',
-        sessionId,
-        interruptAckId,
-        reasonCode,
-        reasonText,
+      sendThenApply({
+        send: () =>
+          wsRef.current?.send({
+            type: 'stop_reason',
+            sessionId,
+            interruptAckId,
+            reasonCode,
+            reasonText,
+          }) === true,
+        apply: () => dispatch({ type: 'stop_reason_dismissed', sessionId }),
+        onUndeliverable: () =>
+          notifPushRef.current?.({
+            id: mintNotificationId(),
+            ts: Date.now(),
+            severity: 'error',
+            class: 'operational',
+            dedupeKey: `stop_reason_undeliverable:${interruptAckId}`,
+            title: 'Reason not sent',
+            message:
+              'Cebab is not connected, so your reason for stopping was not recorded. ' +
+              'The prompt is still here — submit it again once the connection is back.',
+            sticky: false,
+          }),
       });
-      dispatch({ type: 'stop_reason_dismissed', sessionId });
     },
     [],
   );
@@ -1523,33 +1544,77 @@ function AppShell({
   // PauseReasonModal) — the optional `reasonText?` field on each ClientMsg
   // shape. Undefined means the operator left the notes blank; we elide
   // the field entirely so the on-wire shape stays clean.
+  /**
+   * Cebab-u0s: all five control verbs share one failure story — the menu's
+   * modal closes on submit and takes the operator's typed `reasonText` with
+   * it — so they share one sender rather than five copies of the same block.
+   *
+   * Returns whether the verb actually went out. `ParticipantControlMenu` uses
+   * that to decide whether to close its modal, so on a dropped send the
+   * operator keeps both the dialog and everything they typed into it.
+   *
+   * The notification is `class: 'operational'`, not `'safety'`, even though
+   * these verbs are the safety controls. What failed is a *delivery*; the
+   * safety event would have been the mute/pause/kick itself and it never
+   * happened, so filing it under Safety would put a row in that filter with
+   * no `safety_audit` row behind it.
+   */
+  function sendControlVerb(msg: ClientMsg, title: string, dedupeKey: string): boolean {
+    return sendThenApply({
+      send: () => wsRef.current?.send(msg) === true,
+      // Nothing optimistic here — the reducer moves on the server's echo.
+      // The modal-close is the caller's, gated on the boolean below.
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey,
+          title,
+          message:
+            'Cebab is not connected, so the agent was not affected. Your reason is still ' +
+            'in the dialog — submit it again once the connection is back.',
+          sticky: false,
+        }),
+    });
+  }
   function muteParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    wsRef.current?.send({
-      type: 'mute_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'mute_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+      },
+      'Mute not sent',
+      `mute_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function unmuteParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    wsRef.current?.send({
-      type: 'unmute_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'unmute_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+      },
+      'Unmute not sent',
+      `unmute_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function pauseParticipant(
     sessionId: string,
@@ -1558,30 +1623,38 @@ function AppShell({
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) {
-    wsRef.current?.send({
-      type: 'pause_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-      timeoutMs,
-      expiryAction,
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'pause_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+        timeoutMs,
+        expiryAction,
+      },
+      'Pause not sent',
+      `pause_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function resumeParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    wsRef.current?.send({
-      type: 'resume_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'resume_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+      },
+      'Resume not sent',
+      `resume_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   // Cluster C Phase 4g3: kick sender. Mode is currently always 'drain'
   // (server rejects 'hard' with `hard_kill_unsupported_v1`); KickModal
@@ -1592,15 +1665,19 @@ function AppShell({
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) {
-    wsRef.current?.send({
-      type: 'kick_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-      mode,
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'kick_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+        mode,
+      },
+      'Kick not sent',
+      `kick_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function removeParticipant(projectId: number) {
     dispatch({ type: 'ma_remove_participant', projectId });
@@ -1678,21 +1755,65 @@ function AppShell({
     // reducer flips to the active-run view), failure as `wrapper_error`.
     wsRef.current?.send({ type: 'resume_multi_agent', sessionId });
   }
-  function sendMultiAgentUserPrompt(sessionId: string, text: string) {
+  /**
+   * Cebab-u0s: returns whether the prompt actually went out, because
+   * `UserPromptInput` clears its textarea on submit. An unchecked send meant
+   * a message typed while the socket was down was erased along with any
+   * chance of resending it.
+   */
+  function sendMultiAgentUserPrompt(sessionId: string, text: string): boolean {
     // Caller (the active-run input) already trims; nothing else to validate
     // here. The reducer doesn't track an optimistic local copy — the prompt
     // round-trips through the in-process router as a `multi_agent_event`
     // with source=cebab, so it shows up in the scrollback like any other
     // event.
-    wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text });
+    return sendThenApply({
+      send: () =>
+        wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text }) === true,
+      // The composer clears itself — see the boolean this returns.
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `ma_user_prompt_undeliverable:${sessionId}`,
+          title: 'Prompt not sent',
+          message:
+            'Cebab is not connected, so the run never received your message. ' +
+            'It is still in the box — send it again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function continueMultiAgent(sessionId: string) {
     // R-B: the operator reviewed a restart-recovered (read-only) run and
-    // chose to continue. Optimistically drop the read-only gate; the server
-    // delivers the "continue where you left off" nudge to the orchestrator
-    // and the resumed turn streams back as normal events.
-    dispatch({ type: 'ma_clear_awaiting' });
-    wsRef.current?.send({ type: 'continue_multi_agent', sessionId });
+    // chose to continue. The server delivers the "continue where you left
+    // off" nudge to the orchestrator and the resumed turn streams back as
+    // normal events.
+    //
+    // Cebab-u0s: dropping the read-only gate used to happen BEFORE the send.
+    // On a socket that was down that left a session which looked live and
+    // resumable while nothing had been asked to resume, and the banner that
+    // would have let the operator try again was already gone.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'continue_multi_agent', sessionId }) === true,
+      apply: () => dispatch({ type: 'ma_clear_awaiting' }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `continue_multi_agent_undeliverable:${sessionId}`,
+          title: 'Continue not sent',
+          message:
+            'Cebab is not connected, so the recovered run was not resumed. ' +
+            'It stays read-only — try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   // Cluster D Phase 4d: bus auto-retry banner self-clears when the
   // CountdownChip's onElapsed fires (retry just fired or is firing now).
@@ -1708,15 +1829,54 @@ function AppShell({
     // clears the DB slot and replays; if the retried turn fails again,
     // the next `multi_agent_pending_retry` ServerMsg re-asserts a new
     // descriptor and the banner re-appears.
-    dispatch({ type: 'ma_clear_pending_retry' });
-    wsRef.current?.send({ type: 'retry_worker', sessionId });
+    //
+    // Cebab-u0s: "re-appears" only covers a retry the server actually ran.
+    // When the send itself was dropped the banner went away with nothing to
+    // bring it back, so the retry could never be attempted again.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'retry_worker', sessionId }) === true,
+      apply: () => dispatch({ type: 'ma_clear_pending_retry' }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `retry_worker_undeliverable:${sessionId}`,
+          title: 'Retry not sent',
+          message:
+            'Cebab is not connected, so the worker was not retried. ' +
+            'The banner is still here — try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function abandonSession(sessionId: string) {
     // Item #4: give up on the pending-retry slot and end the session as
     // 'stopped'. No optimistic update — the banner stays visible until
     // `multi_agent_ended` arrives (which the reducer uses to flip status
     // and also clears `pendingRetry` so the banner disappears).
-    wsRef.current?.send({ type: 'abandon_session', sessionId });
+    //
+    // Cebab-u0s: nothing to withhold, then, but a dropped send is a click on
+    // "give up on this run" that does nothing and says nothing. Same shape as
+    // `interruptSession` — an empty `apply`, purely for the failure branch.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'abandon_session', sessionId }) === true,
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `abandon_session_undeliverable:${sessionId}`,
+          title: 'Not ended',
+          message:
+            'Cebab is not connected, so the run was not ended. ' +
+            'It is still going — try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function archiveSession(sessionId: string) {
     // Cluster D Phase 5e (UI-D17): in-session SweptSessionBanner's
@@ -1726,6 +1886,11 @@ function AppShell({
     // on this iteration until the operator navigates away (no auto-
     // redirect; the scrollback is still useful after archiving for
     // post-mortem). Idempotent server-side (Phase 5).
+    //
+    // Cebab-u0s: deliberately NOT routed through `sendThenApply`. Archiving
+    // applies no optimistic state, is idempotent and reversible, and its row
+    // stays on screen to click again — so a dropped send costs nothing but a
+    // second click. The console drop log from W29 is enough here.
     wsRef.current?.send({ type: 'archive_session', sessionId });
   }
   function continueThroughMutation(sessionId: string, mutationId: number) {
@@ -1735,8 +1900,30 @@ function AppShell({
     // `multi_agent_pending_mutations` and re-delivers that worker's captured
     // prompt. The replayed turn re-issues the approved command once (the
     // server's one-shot grant); anything else dangerous pauses again.
-    dispatch({ type: 'ma_clear_pending_mutation', mutationId });
-    wsRef.current?.send({ type: 'continue_through_mutation', sessionId, mutationId });
+    //
+    // Cebab-u0s: the highest-stakes send in this file. This is the operator
+    // releasing a worker halted before a `dangerous` command — the mechanical
+    // brake behind the consultant prompt. Dropping the banner before an
+    // unchecked send meant a failed approval left the worker paused for good
+    // and the operator certain they had approved it. Send first, always.
+    sendThenApply({
+      send: () =>
+        wsRef.current?.send({ type: 'continue_through_mutation', sessionId, mutationId }) === true,
+      apply: () => dispatch({ type: 'ma_clear_pending_mutation', mutationId }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `continue_through_mutation_undeliverable:${mutationId}`,
+          title: 'Approval not sent',
+          message:
+            'Cebab is not connected, so the command was not approved and the worker is ' +
+            'still paused. The banner is still here — approve again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function answerQuestion(
     sessionId: string,
@@ -1744,17 +1931,38 @@ function AppShell({
     toolUseId: string,
     answers: Record<string, string>,
   ) {
-    // Interactive AskUserQuestion: optimistically clear the card, then send the
-    // answer. The server resolves the parked turn (the agent receives the
-    // answer as the tool result and resumes) + echoes
-    // `multi_agent_ask_user_resolved`.
-    dispatch({ type: 'ma_clear_pending_question' });
-    wsRef.current?.send({
-      type: 'multi_agent_ask_user_answer',
-      sessionId,
-      agent,
-      toolUseId,
-      answers,
+    // Interactive AskUserQuestion: clear the card and send the answer. The
+    // server resolves the parked turn (the agent receives the answer as the
+    // tool result and resumes) + echoes `multi_agent_ask_user_resolved`.
+    //
+    // Cebab-u0s: the multi-agent twin of the permission card W29 fixed. The
+    // agent is parked on `AskUserQuestion` exactly as a single-agent turn
+    // parks on `canUseTool`, so clearing the card before an unchecked send
+    // left it waiting on an answer the operator had already given and could
+    // no longer re-give.
+    sendThenApply({
+      send: () =>
+        wsRef.current?.send({
+          type: 'multi_agent_ask_user_answer',
+          sessionId,
+          agent,
+          toolUseId,
+          answers,
+        }) === true,
+      apply: () => dispatch({ type: 'ma_clear_pending_question' }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `ask_user_answer_undeliverable:${toolUseId}`,
+          title: 'Answer not sent',
+          message:
+            'Cebab is not connected, so the agent never received your answer and is ' +
+            'still waiting. The question is still here — answer again once the connection is back.',
+          sticky: false,
+        }),
     });
   }
   function setDraftPauseOnDangerous(value: boolean) {

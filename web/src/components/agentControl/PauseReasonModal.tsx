@@ -102,13 +102,19 @@ export type PauseReasonModalProps = {
   projectId: number;
   agentLabel: string;
   onClose: () => void;
+  /**
+   * Cebab-u0s: returns whether the pause actually reached the server. On
+   * `false` this modal stays open with the reason, duration and expiry
+   * action the operator chose — this form collects the most state of the
+   * three, so it had the most to lose.
+   */
   onSubmit: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
 };
 
 export function PauseReasonModal({
@@ -151,13 +157,15 @@ export function PauseReasonModal({
   function handleSubmit() {
     if (!canSubmit || resolvedMinutes === null) return;
     const trimmed = reasonText.trim();
-    onSubmit(
+    // Cebab-u0s: close only once the pause has gone out — see the prop's doc.
+    const sent = onSubmit(
       projectId,
       reasonCode,
       trimmed.length > 0 ? trimmed : undefined,
       resolvedMinutes * 60_000,
       expiryAction,
     );
+    if (!sent) return;
     onClose();
   }
 

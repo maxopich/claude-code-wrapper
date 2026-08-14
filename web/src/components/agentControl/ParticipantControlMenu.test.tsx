@@ -52,6 +52,14 @@ function ctrl(over: Partial<ParticipantControlView>): ParticipantControlView {
 }
 
 function noop() {}
+/**
+ * Cebab-u0s: the control-verb props now return "did it go out". `true` is the
+ * default for every existing case because it reproduces the old behaviour —
+ * which makes those cases the CONTROL for the new ones that pass `false`.
+ */
+function sent(): boolean {
+  return true;
+}
 
 function render(
   over: Partial<React.ComponentProps<typeof ParticipantControlMenu>> = {},
@@ -63,11 +71,11 @@ function render(
     agentLabel: 'worker-a',
     sessionMode: 'orchestrator',
     control: undefined,
-    onMute: noop,
-    onUnmute: noop,
-    onPause: noop,
-    onResume: noop,
-    onKick: noop,
+    onMute: sent,
+    onUnmute: sent,
+    onPause: sent,
+    onResume: sent,
+    onKick: sent,
     ...over,
   };
   act(() => {
@@ -211,7 +219,7 @@ describe('ParticipantControlMenu — modal open + dispatch (C4g5)', () => {
   });
 
   test('submitting the Mute modal calls onMute(projectId, reasonCode, reasonText|undefined)', () => {
-    const onMute = vi.fn();
+    const onMute = vi.fn(() => true);
     render({ onMute });
     openMenu();
     clickItemContaining('Mute…');
@@ -225,6 +233,28 @@ describe('ParticipantControlMenu — modal open + dispatch (C4g5)', () => {
     expect(document.querySelector('.mute-reason-modal')).toBeNull();
   });
 
+  test('an undelivered mute leaves the modal open (Cebab-u0s)', () => {
+    // The control for the case above, with the one thing changed that matters.
+    //
+    // Worth stating why this lives HERE as well as in MuteReasonModal.test:
+    // there were TWO closers. This component called `closeModal()` and the
+    // modal called its own `onClose()` — the comment above `handleMuteSubmit`
+    // even described the second one as the real closer. Gating either alone
+    // leaves the modal closing, so both need a case.
+    const onMute = vi.fn(() => false);
+    render({ onMute });
+    openMenu();
+    clickItemContaining('Mute…');
+    const submit = document.querySelector(
+      '.mute-reason-modal .gate-modal-btn-primary',
+    ) as HTMLButtonElement;
+    act(() => {
+      submit.click();
+    });
+    expect(onMute).toHaveBeenCalledWith(7, 'topology_repair', undefined);
+    expect(document.querySelector('.mute-reason-modal')).not.toBeNull();
+  });
+
   test('Unmute… click opens MuteReasonModal (action=unmute)', () => {
     render({ control: ctrl({ muted: true }) });
     openMenu();
@@ -234,7 +264,7 @@ describe('ParticipantControlMenu — modal open + dispatch (C4g5)', () => {
   });
 
   test('submitting the Unmute modal calls onUnmute', () => {
-    const onUnmute = vi.fn();
+    const onUnmute = vi.fn(() => true);
     render({ control: ctrl({ muted: true }), onUnmute });
     openMenu();
     clickItemContaining('Unmute…');
@@ -256,7 +286,7 @@ describe('ParticipantControlMenu — modal open + dispatch (C4g5)', () => {
   });
 
   test('submitting the Pause modal calls onPause with default 15m / auto_resume', () => {
-    const onPause = vi.fn();
+    const onPause = vi.fn(() => true);
     render({ onPause });
     openMenu();
     clickItemContaining('Pause…');
@@ -284,7 +314,7 @@ describe('ParticipantControlMenu — modal open + dispatch (C4g5)', () => {
   });
 
   test('submitting the Resume modal calls onResume', () => {
-    const onResume = vi.fn();
+    const onResume = vi.fn(() => true);
     render({ control: ctrl({ pausedUntil: Date.now() + 60_000 }), onResume });
     openMenu();
     clickItemContaining('Resume…');
@@ -360,7 +390,7 @@ describe('ParticipantControlMenu — Kick item (C4g3)', () => {
   });
 
   test('submitting the Kick modal calls onKick + closes the modal', () => {
-    const onKick = vi.fn();
+    const onKick = vi.fn(() => true);
     render({ onKick });
     openMenu();
     clickItemContaining('Kick');

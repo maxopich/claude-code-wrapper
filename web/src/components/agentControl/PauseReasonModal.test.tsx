@@ -38,7 +38,11 @@ type Props = React.ComponentProps<typeof PauseReasonModal>;
 
 function render(over: Partial<Props> = {}): { onClose: () => void; onSubmit: Props['onSubmit'] } {
   const onClose = over.onClose ?? vi.fn();
-  const onSubmit = (over.onSubmit ?? vi.fn()) as Props['onSubmit'];
+  // Cebab-u0s: `onSubmit` reports whether the pause reached the server, and the
+  // modal now closes only when it did. The default returns `true` (delivered),
+  // which is the pre-existing behaviour — so every case using this default is
+  // the CONTROL for the dropped-send cases that pass `() => false`.
+  const onSubmit = (over.onSubmit ?? vi.fn(() => true)) as Props['onSubmit'];
   const { onClose: _o, onSubmit: _s, ...rest } = over;
   void _o;
   void _s;
@@ -167,7 +171,7 @@ describe('PauseReasonModal — custom-duration validation', () => {
   });
 
   test('custom in-range enables submit and emits the right ms', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ onSubmit });
     act(() => {
       findDurationInput('custom').click();
@@ -227,7 +231,7 @@ describe('PauseReasonModal — other requires text', () => {
 
 describe('PauseReasonModal — dispatch', () => {
   test('default submit: 15m / topology_repair / auto_resume', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ projectId: 42, onSubmit, onClose });
     act(() => {
@@ -244,7 +248,7 @@ describe('PauseReasonModal — dispatch', () => {
   });
 
   test('switching duration to 5m emits 300000ms', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ onSubmit });
     act(() => {
       findDurationInput('5m').click();
@@ -256,7 +260,7 @@ describe('PauseReasonModal — dispatch', () => {
   });
 
   test('switching expiry to auto_kick is reflected in dispatch', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ onSubmit });
     act(() => {
       findExpiryInput('auto_kick').click();
@@ -271,7 +275,7 @@ describe('PauseReasonModal — dispatch', () => {
   });
 
   test('trims notes and forwards text', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ onSubmit });
     act(() => {
       findReasonInput('forensics').click();
@@ -297,7 +301,7 @@ describe('PauseReasonModal — dispatch', () => {
 
 describe('PauseReasonModal — dismissal', () => {
   test('Cancel calls onClose, not onSubmit', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ onSubmit, onClose });
     act(() => {
@@ -308,7 +312,7 @@ describe('PauseReasonModal — dismissal', () => {
   });
 
   test('Escape closes the modal', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ onSubmit, onClose });
     act(() => {
@@ -316,5 +320,52 @@ describe('PauseReasonModal — dismissal', () => {
     });
     expect(onClose).toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('PauseReasonModal — an undelivered pause keeps the dialog (Cebab-u0s)', () => {
+  test('onSubmit returning false preserves reason, duration AND expiry action', () => {
+    // This form collects the most state of the three modals, so it had the
+    // most to lose. Every field below is moved OFF its default on purpose: a
+    // case that leaves the defaults in place cannot tell "the state survived"
+    // from "the component remounted fresh".
+    const onSubmit = vi.fn(() => false);
+    const onClose = vi.fn();
+    render({ projectId: 11, onSubmit, onClose });
+    act(() => {
+      findReasonInput('cost_ceiling').click();
+    });
+    act(() => {
+      findDurationInput('custom').click();
+    });
+    act(() => {
+      typeIntoInput(findCustomInput(), '45');
+    });
+    act(() => {
+      findExpiryInput('auto_kick').click();
+    });
+    const textarea = document.querySelector(
+      '.pause-reason-modal-text-input',
+    ) as HTMLTextAreaElement;
+    act(() => {
+      typeIntoTextarea(textarea, 'burning tokens on a retry loop');
+    });
+    act(() => {
+      findSubmitBtn().click();
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      11,
+      'cost_ceiling',
+      'burning tokens on a retry loop',
+      45 * 60_000,
+      'auto_kick',
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(findReasonInput('cost_ceiling').checked).toBe(true);
+    expect(findDurationInput('custom').checked).toBe(true);
+    expect(findCustomInput().value).toBe('45');
+    expect(findExpiryInput('auto_kick').checked).toBe(true);
+    const after = document.querySelector('.pause-reason-modal-text-input') as HTMLTextAreaElement;
+    expect(after.value).toBe('burning tokens on a retry loop');
   });
 });
