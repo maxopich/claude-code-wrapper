@@ -108,7 +108,8 @@ export function MultiAgentTab(props: {
   onResumeSession: (sessionId: string) => void;
   /** Monotonic; bumps on every wrapper_error so pending spinners clear on failure. */
   failureSeq: number;
-  onSendUserPrompt: (sessionId: string, text: string) => void;
+  /** Cebab-u0s: boolean = "it went out"; the composer clears only then. */
+  onSendUserPrompt: (sessionId: string, text: string) => boolean;
   onContinueMultiAgent: (sessionId: string) => void;
   onRetryWorker: (sessionId: string) => void;
   onAbandonSession: (sessionId: string) => void;
@@ -154,18 +155,22 @@ export function MultiAgentTab(props: {
    * `reasonText` field so the modal-collected free-text notes reach the
    * safety_audit payload.
    */
+  /**
+   * Cebab-u0s: each returns whether the verb reached the server, so the ⋮
+   * menu's modal can stay open — reason text and all — when it did not.
+   */
   onMuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onUnmuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onPauseParticipant: (
     sessionId: string,
     projectId: number,
@@ -173,13 +178,13 @@ export function MultiAgentTab(props: {
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
   onResumeParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   /**
    * Cluster C Phase 4g3: kick dispatch — bound to the KickModal's
    * onSubmit callback via the ⋮ menu. Mode is currently always 'drain'
@@ -191,7 +196,7 @@ export function MultiAgentTab(props: {
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
@@ -1621,7 +1626,8 @@ export function ActiveRunView(props: {
   /** The tab this view is mounted under; used only for a cross-tab notice. */
   tabMode: 'chain' | 'orchestrator';
   projects: Project[];
-  onSendUserPrompt: (sessionId: string, text: string) => void;
+  /** Cebab-u0s: boolean = "it went out"; the composer clears only then. */
+  onSendUserPrompt: (sessionId: string, text: string) => boolean;
   onContinue: (sessionId: string) => void;
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (sessionId: string, projectId: number) => void;
@@ -1632,18 +1638,19 @@ export function ActiveRunView(props: {
    * C4g5 added reasonText for every action — collected by MuteReason/
    * PauseReasonModal.
    */
+  /** Cebab-u0s: boolean = "it went out" — see the ActiveRunView props. */
   onMuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onUnmuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onPauseParticipant: (
     sessionId: string,
     projectId: number,
@@ -1651,13 +1658,13 @@ export function ActiveRunView(props: {
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
   onResumeParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   /** Cluster C Phase 4g3: kick dispatch — bound to KickModal's onSubmit. */
   onKickParticipant: (
     sessionId: string,
@@ -1665,7 +1672,7 @@ export function ActiveRunView(props: {
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
   /** Item #4: Retry the worker named in this session's pending-retry slot.
    *  The slot is server-authoritative — no agentName/prompt args. */
   onRetryWorker: (sessionId: string) => void;
@@ -2190,28 +2197,29 @@ function SessionSettingsPanel(props: {
    * the menu provides (projectId, reasonCode, reasonText, …pauseExtras)
    * at the leaf. C4g5: reasonText collected by MuteReason/PauseReasonModal.
    */
+  /** Cebab-u0s: boolean = "it went out"; forwarded straight to the menu. */
   onMuteParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onUnmuteParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onPauseParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
   onResumeParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   /**
    * Cluster C Phase 4g3: kick dispatch. The ⋮ menu opens KickModal; the
    * modal collects reasonCode + reasonText and calls back here with
@@ -2222,7 +2230,7 @@ function SessionSettingsPanel(props: {
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
   /** Drives the (collapsed-by-default) routing-trail disclosure: the
    *  spine→scrollback jump highlight lives in ActiveRunView and is passed
    *  through so the trail can stay tucked inside this panel. */
@@ -2612,12 +2620,16 @@ function AddParticipantPicker(props: {
  * clear. Enter sends, Shift+Enter inserts a newline — same convention as
  * the regular chat InputBox.
  */
-function UserPromptInput(props: { onSend: (text: string) => void }) {
+/** Exported for `MultiAgentTab.userPrompt.test.tsx` (Cebab-u0s). */
+export function UserPromptInput(props: { onSend: (text: string) => boolean }) {
   const [text, setText] = useState('');
   function submit() {
     const trimmed = text.trim();
     if (!trimmed) return;
-    props.onSend(trimmed);
+    // Cebab-u0s: clear only once the prompt has gone out. On a socket that is
+    // not open the operator keeps what they wrote — the previous unconditional
+    // `setText('')` erased it along with any chance of resending.
+    if (!props.onSend(trimmed)) return;
     setText('');
   }
   return (

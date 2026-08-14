@@ -68,29 +68,35 @@ export type ParticipantControlMenuProps = {
    * the `reasonText?` field in each ClientMsg shape). Undefined means
    * the operator left the notes blank — the safety_audit row's
    * `payload_json` simply lacks that field.
+   *
+   * Cebab-u0s: each returns whether the verb reached the server. `false`
+   * means the socket was not open and nothing was sent, so this menu keeps
+   * the modal — and the reason typed into it — rather than closing over a
+   * control the agent never received. The operator is told separately; all
+   * this boolean decides is whether the dialog goes away.
    */
   onMute: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onUnmute: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onPause: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
   onResume: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   /**
    * Cluster C Phase 4g3: kick dispatch. The menu opens the KickModal;
    * the modal collects reasonCode + reasonText and calls back here.
@@ -102,7 +108,7 @@ export type ParticipantControlMenuProps = {
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
 };
 
 type ModalKind = null | 'mute' | 'unmute' | 'pause' | 'resume' | 'kick';
@@ -229,21 +235,29 @@ export function ParticipantControlMenu({
   // callback and closes the modal. The modal's own onClose runs after
   // onSubmit returns (see KickModal pattern), which sets activeModal to
   // null on the same render — closeModal() here is just defensive.
+  //
+  // Cebab-u0s: that second closer is exactly why gating only this file would
+  // have changed nothing — the modal would still have closed itself. So the
+  // boolean is returned onward to the modal, which now gates its own
+  // `onClose()` too, and `closeModal()` here is gated for the same reason it
+  // was defensive before: whichever path runs first must agree.
   function handleMuteSubmit(
     pid: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    onMute(pid, reasonCode, reasonText);
+  ): boolean {
+    if (!onMute(pid, reasonCode, reasonText)) return false;
     closeModal();
+    return true;
   }
   function handleUnmuteSubmit(
     pid: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    onUnmute(pid, reasonCode, reasonText);
+  ): boolean {
+    if (!onUnmute(pid, reasonCode, reasonText)) return false;
     closeModal();
+    return true;
   }
   function handlePauseSubmit(
     pid: number,
@@ -251,26 +265,29 @@ export function ParticipantControlMenu({
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) {
-    onPause(pid, reasonCode, reasonText, timeoutMs, expiryAction);
+  ): boolean {
+    if (!onPause(pid, reasonCode, reasonText, timeoutMs, expiryAction)) return false;
     closeModal();
+    return true;
   }
   function handleResumeSubmit(
     pid: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    onResume(pid, reasonCode, reasonText);
+  ): boolean {
+    if (!onResume(pid, reasonCode, reasonText)) return false;
     closeModal();
+    return true;
   }
   function handleKickSubmit(
     pid: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) {
-    onKick(pid, reasonCode, reasonText, mode);
+  ): boolean {
+    if (!onKick(pid, reasonCode, reasonText, mode)) return false;
     closeModal();
+    return true;
   }
 
   // Kick available in orchestrator mode only; chain-mode kick of a

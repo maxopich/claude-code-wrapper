@@ -90,7 +90,10 @@ function illegalChildren(scope: ParentNode): string[] {
 // ---------------------------------------------------------------- U26: menu
 
 function renderMenu(over: Partial<Parameters<typeof ParticipantControlMenu>[0]> = {}) {
-  const noop = () => {};
+  // Cebab-u0s: the control verbs report whether they went out; `true` keeps
+  // these keyboard cases on the pre-existing (delivered) path. It replaced the
+  // `noop` that used to stand in for all five.
+  const sent = () => true;
   act(() => {
     root.render(
       <ForensicViewerProvider send={(() => {}) as never}>
@@ -100,11 +103,11 @@ function renderMenu(over: Partial<Parameters<typeof ParticipantControlMenu>[0]> 
           agentLabel="worker-a"
           sessionMode="orchestrator"
           control={undefined}
-          onMute={noop}
-          onUnmute={noop}
-          onPause={noop}
-          onResume={noop}
-          onKick={noop}
+          onMute={sent}
+          onUnmute={sent}
+          onPause={sent}
+          onResume={sent}
+          onKick={sent}
           {...over}
         />
       </ForensicViewerProvider>,

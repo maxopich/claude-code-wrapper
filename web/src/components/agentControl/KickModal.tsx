@@ -84,12 +84,18 @@ export type KickModalProps = {
   projectId: number;
   agentLabel: string;
   onClose: () => void;
+  /**
+   * Cebab-u0s: returns whether the kick actually reached the server. On
+   * `false` this modal stays open with the operator's reason intact — for a
+   * terminal action, quietly closing over a kick that never happened is the
+   * worst of the five verbs.
+   */
   onSubmit: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
 };
 
 export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModalProps) {
@@ -115,7 +121,10 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
   function handleSubmit() {
     if (!canSubmit) return;
     const trimmed = reasonText.trim();
-    onSubmit(projectId, reasonCode, trimmed.length > 0 ? trimmed : undefined, KICK_MODE);
+    // Cebab-u0s: close only once the kick has gone out — see the prop's doc.
+    if (!onSubmit(projectId, reasonCode, trimmed.length > 0 ? trimmed : undefined, KICK_MODE)) {
+      return;
+    }
     onClose();
   }
 

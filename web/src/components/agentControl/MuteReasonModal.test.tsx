@@ -40,7 +40,11 @@ type Props = React.ComponentProps<typeof MuteReasonModal>;
 
 function render(over: Partial<Props> = {}): { onClose: () => void; onSubmit: Props['onSubmit'] } {
   const onClose = over.onClose ?? vi.fn();
-  const onSubmit = (over.onSubmit ?? vi.fn()) as Props['onSubmit'];
+  // Cebab-u0s: `onSubmit` reports whether the verb reached the server, and the
+  // modal now closes only when it did. The default returns `true` (delivered),
+  // which is the pre-existing behaviour — so every case using this default is
+  // the CONTROL for the dropped-send cases that pass `() => false`.
+  const onSubmit = (over.onSubmit ?? vi.fn(() => true)) as Props['onSubmit'];
   const { onClose: _o, onSubmit: _s, ...rest } = over;
   void _o;
   void _s;
@@ -182,7 +186,7 @@ describe('MuteReasonModal — other requires text', () => {
 
 describe('MuteReasonModal — dispatch', () => {
   test('submit calls onSubmit(projectId, reasonCode, undefined) then closes', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ projectId: 42, onSubmit, onClose, action: 'mute' });
     act(() => {
@@ -193,7 +197,7 @@ describe('MuteReasonModal — dispatch', () => {
   });
 
   test('submit with custom reason + notes passes trimmed text', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ projectId: 9, onSubmit, action: 'unmute' });
     act(() => {
       findReasonInput('cost_ceiling').click();
@@ -209,7 +213,7 @@ describe('MuteReasonModal — dispatch', () => {
   });
 
   test('submit with "other" + text passes the text', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ projectId: 5, onSubmit, action: 'resume' });
     act(() => {
       findReasonInput('other').click();
@@ -225,9 +229,52 @@ describe('MuteReasonModal — dispatch', () => {
   });
 });
 
+describe('MuteReasonModal — an undelivered verb keeps the dialog (Cebab-u0s)', () => {
+  test('onSubmit returning false leaves the modal open with the typed reason intact', () => {
+    // The reason text is deliberately NON-EMPTY. On an empty textarea "the
+    // text survived" is true however the code behaves, so the assertion would
+    // pass on the broken version too — the fixture is where this kind of gate
+    // usually goes vacuous.
+    const onSubmit = vi.fn(() => false);
+    const onClose = vi.fn();
+    render({ projectId: 42, onSubmit, onClose, action: 'mute' });
+    const textarea = document.querySelector('.mute-reason-modal-text-input') as HTMLTextAreaElement;
+    act(() => {
+      typeIntoTextarea(textarea, 'router loop, muting while I look');
+    });
+    act(() => {
+      findSubmitBtn().click();
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      42,
+      'topology_repair',
+      'router loop, muting while I look',
+    );
+    // The whole point: the operator keeps the dialog and everything in it.
+    expect(onClose).not.toHaveBeenCalled();
+    const after = document.querySelector('.mute-reason-modal-text-input') as HTMLTextAreaElement;
+    expect(after).not.toBeNull();
+    expect(after.value).toBe('router loop, muting while I look');
+  });
+
+  test('a second attempt still submits — the dialog is not left inert', () => {
+    // Guards the lazy fix: an early `return` that also disabled the button
+    // would satisfy the case above while making the retry impossible.
+    const onSubmit = vi.fn(() => false);
+    render({ projectId: 7, action: 'mute', onSubmit });
+    act(() => {
+      findSubmitBtn().click();
+    });
+    act(() => {
+      findSubmitBtn().click();
+    });
+    expect(onSubmit).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('MuteReasonModal — dismissal without dispatch', () => {
   test('Cancel calls onClose, not onSubmit', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ onSubmit, onClose });
     act(() => {
@@ -238,7 +285,7 @@ describe('MuteReasonModal — dismissal without dispatch', () => {
   });
 
   test('Escape closes the modal', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ onSubmit, onClose });
     act(() => {
