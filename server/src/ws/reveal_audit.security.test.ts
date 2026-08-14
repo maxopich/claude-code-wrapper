@@ -7,10 +7,11 @@ import { WebSocket, type WebSocketServer } from 'ws';
 import type { ServerMsg } from '@cebab/shared';
 import { config } from '../config.js';
 import { initAuthToken } from '../auth.js';
-import { closeDb, getDb } from '../db.js';
+import { closeDb } from '../db.js';
 import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
 import { resolveRevealAudit, startWsServer } from './server.js';
+import { auditRowsInWriteOrder } from '../test_support/audit_order.js';
 
 /**
  * [security] Register H06 — the reveal path leaves a trail.
@@ -102,12 +103,13 @@ function seedSingleAgentSession(sessionId: string): void {
   createSession(sessionId, project.id);
 }
 
+// Register Cebab-34l: was `ORDER BY id`, and `safety_audit.id` is a
+// `randomUUID()` — so the order was random whenever more than one row
+// matched. LATENT rather than live: every caller below asserts
+// `toHaveLength(1)` or `toEqual([])`, so nothing is ordered today. Fixed as a
+// trap, before the first test that reveals twice walks into it.
 function revealRows(): Array<{ reason_code: string; session_id: string | null }> {
-  return getDb()
-    .prepare(
-      `SELECT reason_code, session_id FROM safety_audit WHERE kind = 'session.revealed' ORDER BY id`,
-    )
-    .all() as Array<{ reason_code: string; session_id: string | null }>;
+  return auditRowsInWriteOrder("kind = 'session.revealed'");
 }
 
 describe('[security] the reveal decision records intent, and fails closed', () => {

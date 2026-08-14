@@ -34,6 +34,7 @@ import {
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { upsertProject } from '../repo/projects.js';
 import { __resetRegistryForTesting, getPauseExpiryRegistry } from '../ws/pause_expiry.js';
+import { auditKindsInWriteOrder } from '../test_support/audit_order.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -597,12 +598,14 @@ describe('reconstructOrchestratorSession — R-B reseed (Phase 4e)', () => {
       expect(handle.isKicked('coder')).toBe(true);
 
       // Both audits written: the trigger + the kick.
-      const kinds = getDb()
-        .prepare<[], { kind: string }>(
-          "SELECT kind FROM safety_audit WHERE kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked' ORDER BY ts ASC",
-        )
-        .all()
-        .map((r) => r.kind);
+      // Register Cebab-34l: WRITE order, not `ORDER BY ts`. This test runs
+      // under fake timers, so `Date.now()` is frozen and the two rows tie BY
+      // CONSTRUCTION — it passed only because the plan happened to return
+      // rowid order, and would have flipped silently on an index change
+      // without ever flaking first to warn anyone.
+      const kinds = auditKindsInWriteOrder(
+        "kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked'",
+      );
       expect(kinds).toEqual(['pause.expired_without_resume', 'agent_control.kicked']);
     } finally {
       vi.useRealTimers();

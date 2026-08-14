@@ -25,6 +25,7 @@ import {
   setParticipantMuted,
   setParticipantPause,
 } from '../repo/per_agent_control.js';
+import { auditRowsInWriteOrder } from '../test_support/audit_order.js';
 
 // Cluster C Phase 4b: WS handler-level tests for executeMuteParticipant /
 // executeUnmuteParticipant. Exercises the full validation chain (reason
@@ -1095,11 +1096,12 @@ describe('executeExpireParticipant — auto_kick', () => {
     expect(handle.resumeAgent).not.toHaveBeenCalled();
 
     // Two safety_audit rows: the trigger + the resulting kick.
-    const audits = getDb()
-      .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
-        "SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked' ORDER BY ts ASC",
-      )
-      .all();
+    // Register Cebab-34l: WRITE order, not `ORDER BY ts`. Both rows are
+    // written back-to-back inside the expiry handler, so they routinely share
+    // a millisecond and the tie was resolved by the query plan — and
+    // `audits[1]` below is read as the KICK payload, so a flip would not just
+    // reorder the assertion, it would parse the wrong row.
+    const audits = auditRowsInWriteOrder("kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked'");
     expect(audits.map((r) => r.kind)).toEqual([
       'pause.expired_without_resume',
       'agent_control.kicked',
