@@ -36,7 +36,11 @@ const ENTRIES = parseIgnoreFile(TOML);
 // Literal regexes throughout: `security/detect-non-literal-regexp` forbids
 // building these from variables, and a spelled-out alternation is what makes
 // the count claim greppable by a human too.
-const COUNT_CLAIM = /^#\s*(zero|one|two|three|four|five|six|seven|eight|nine|ten) entries remain/im;
+// `entry remains` accepted alongside `entries remain` so a count of one can be
+// written in English. Cosmetic only — the assertion below still compares the
+// spelled-out number against the parsed entry count, unchanged.
+const COUNT_CLAIM =
+  /^#\s*(zero|one|two|three|four|five|six|seven|eight|nine|ten) entr(?:ies remain|y remains)/im;
 const NUMBER_WORDS = [
   'zero',
   'one',
