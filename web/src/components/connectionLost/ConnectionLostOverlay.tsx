@@ -80,6 +80,13 @@ export function ConnectionLostOverlay({ view, onDismiss, onRetry }: ConnectionLo
     if (!view) return;
     startedAtRef.current = Date.now();
     setAttempt(0);
+    // Cebab-1uk: `[view?.reason]` is PR #322's fix (W07), not an oversight —
+    // the reducer rebuilds `view` on unrelated updates, and depending on the
+    // object restarted the retry countdown every time. The body reads `view`
+    // only as a null guard, and `undefined` ⇄ a reason string both show up in
+    // the narrowed value, so the dependency is behaviourally complete. Undoing
+    // this to satisfy the rule would reintroduce the bug #322 fixed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.reason]);
 
   // Esc dismisses. Bound only while the overlay is mounted so it

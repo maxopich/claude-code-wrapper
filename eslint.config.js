@@ -2,6 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import security from 'eslint-plugin-security';
 import noUnsanitized from 'eslint-plugin-no-unsanitized';
+import reactHooks from 'eslint-plugin-react-hooks';
 
 export default tseslint.config(
   {
@@ -57,6 +58,39 @@ export default tseslint.config(
       parserOptions: {
         ecmaFeatures: { jsx: true },
       },
+    },
+  },
+  {
+    // Cebab-1uk: dependency-array lint for the ~175 hook call sites in web/.
+    // PR #322 fixed five of these BY HAND (an effect keyed on an object
+    // identity, a useCallback depending on arrays that churn, an effect
+    // depending on a whole props object); nothing stopped the sixth.
+    //
+    // SCOPED to web/ because that is where React lives — measured: zero hook
+    // call sites in server/src or shared/src.
+    //
+    // RULES ARE NAMED, NOT PRESET. `reactHooks.configs.recommended` enables
+    // SIXTEEN rules, fourteen of which are React Compiler rules
+    // (purity, immutability, set-state-in-effect, static-components, …) — v7
+    // bundles the compiler linter, which is why installing it pulls in
+    // @babel/core and hermes-parser. Naming the two rules we want means a
+    // future major cannot silently widen what `--max-warnings 0` enforces on
+    // an `npm update`. Same posture as `security.configs.recommended` above,
+    // which is loaded and then tuned down rule by rule.
+    //
+    // POSTURE: both at 'error', repo-wide within web/, no directory allowlist.
+    // The alternative (an allowlist that grows per PR) was rejected once the
+    // count came in: 13 exhaustive-deps findings across 6 of 13 directories,
+    // and the dirty set included web/src itself — an allowlist would have
+    // covered almost nothing while looking like coverage. Where an omission is
+    // deliberate it carries an `eslint-disable-next-line` AT THE SITE with the
+    // reason, which is greppable from the code; an allowlist in this file is
+    // not. `--max-warnings 0` is untouched and stays that way.
+    files: ['web/**/*.{ts,tsx}'],
+    plugins: { 'react-hooks': reactHooks },
+    rules: {
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'error',
     },
   },
   {
