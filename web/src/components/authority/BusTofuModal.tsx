@@ -28,21 +28,31 @@ import { useModalSurface } from '../../useModalSurface';
 // affordance entirely because it can never be applicable.
 //
 // `useModalSurface` provides focus trap, body-scroll lock, Esc-to-close,
-// and backdrop-click-to-close. Esc / backdrop close without a decision
-// leaves the server-side gate parked; that's intentional — the operator
-// can refresh the WS to clear, or the same pending re-fires on
-// reconnection in a future phase. For Phase 1 (this slice) Esc is "I'll
-// decide later", which matches the spec's defensive-default framing.
+// and backdrop-click-to-close.
+//
+// Register W28: this used to say Esc/backdrop "leaves the server-side gate
+// parked; that's intentional", resting on two escapes — refreshing the WS,
+// and "the same pending re-fires on reconnection in a future phase". Only the
+// first exists: PR #310's drain made it real, while nothing re-emits a pending
+// gate on attach. So "I'll decide later" was really "the install hangs until
+// you drop the socket". Esc / backdrop now send `cancel_gate`, which unparks
+// `installBusForProject` without recording a trust decision.
 
 type Pending = Extract<ServerMsg, { type: 'bus_auto_install_pending' }>;
 
 export function BusTofuModal(props: {
   pending: Pending;
-  send: (msg: ClientMsg) => void;
+  send: (msg: ClientMsg) => boolean;
+  /** Pop the queue. Called after a decision has gone out. */
   onClose: () => void;
+  /** Register W28: back out without deciding — sends `cancel_gate`, which
+   *  unparks the spawn without recording a trust decision. */
+  onCancel: () => void;
 }) {
-  const { pending, send, onClose } = props;
-  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
+  const { pending, send, onClose, onCancel } = props;
+  // W28: Esc / backdrop cancel rather than silently popping the queue and
+  // leaving `installBusForProject` parked on its promise.
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: onCancel });
 
   // Default focus on Deny once per the destructive-modal pattern (spec
   // D6-4): the safer option is pre-selected so the operator's first
@@ -59,7 +69,8 @@ export function BusTofuModal(props: {
       projectId: pending.projectId,
       decision,
     };
-    send(msg);
+    // W29: only close once the decision has actually gone out.
+    if (!send(msg)) return;
     onClose();
   }
 

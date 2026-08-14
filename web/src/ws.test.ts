@@ -175,3 +175,92 @@ describe('ws / send', () => {
     expect(socket().sent).toEqual([JSON.stringify({ type: 'list_projects' })]);
   });
 });
+
+/**
+ * Register W29: `send` reported nothing.
+ *
+ * A socket that is CONNECTING, CLOSING or CLOSED swallowed the message with no
+ * return value and no log, while callers had already applied their optimistic
+ * state — the permission card flipped its buttons to "decided: …" BEFORE
+ * calling this, so a decision made during a reconnect left the operator
+ * looking at "Allowed" with the agent still parked in `canUseTool`.
+ *
+ * Each refusal is paired with the control that proves the permitted path still
+ * transmits: a `send` that simply always returned false would satisfy every
+ * "returns false" case in this block on its own.
+ */
+describe('ws / send reports whether it went out (W29)', () => {
+  test('returns false and logs on a socket that is not open', () => {
+    const cb = spies();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const handle = connectWs({ url: 'ws://x', ...cb });
+
+    // readyState 0 = CONNECTING, the reconnect window this is really about.
+    expect(handle.send({ type: 'list_projects' })).toBe(false);
+    expect(socket().sent).toEqual([]);
+    expect(err).toHaveBeenCalledTimes(1);
+    err.mockRestore();
+  });
+
+  test('CONTROL: returns true and transmits on an open socket', () => {
+    const cb = spies();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const handle = connectWs({ url: 'ws://x', ...cb });
+
+    socket().readyState = FakeSocket.OPEN;
+    expect(handle.send({ type: 'list_projects' })).toBe(true);
+    expect(socket().sent).toHaveLength(1);
+    expect(err).not.toHaveBeenCalled();
+    err.mockRestore();
+  });
+
+  test('CLOSING and CLOSED report false too, not just CONNECTING', () => {
+    const cb = spies();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const handle = connectWs({ url: 'ws://x', ...cb });
+
+    for (const state of [2, 3]) {
+      socket().readyState = state;
+      expect(handle.send({ type: 'list_projects' })).toBe(false);
+    }
+    expect(socket().sent).toEqual([]);
+    err.mockRestore();
+  });
+
+  test('a released handle reports false even while the socket still reads OPEN', () => {
+    // W15's flag and W29's return value have to agree: `close()` does not
+    // change `readyState` synchronously, so a handle the caller let go of
+    // would otherwise report a successful send on a socket it no longer owns.
+    const cb = spies();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const handle = connectWs({ url: 'ws://x', ...cb });
+
+    socket().readyState = FakeSocket.OPEN;
+    handle.close();
+
+    expect(handle.send({ type: 'list_projects' })).toBe(false);
+    expect(socket().sent).toEqual([]);
+    err.mockRestore();
+  });
+
+  test('the log names the message type and never its payload', () => {
+    // Dropped messages carry session ids, typed acknowledgments and operator
+    // reason text. The console line is a diagnostic, not a place to spill them.
+    const cb = spies();
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const handle = connectWs({ url: 'ws://x', ...cb });
+
+    handle.send({
+      type: 'acknowledge_and_start',
+      pendingStartId: 'p-1',
+      typedAcknowledgment: 'inject',
+      reasonText: 'CI sync, expected this',
+    });
+
+    const line = String(err.mock.calls[0]?.[0] ?? '');
+    expect(line).toContain('acknowledge_and_start');
+    expect(line).not.toContain('CI sync');
+    expect(line).not.toContain('p-1');
+    err.mockRestore();
+  });
+});

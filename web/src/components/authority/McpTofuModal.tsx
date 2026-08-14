@@ -26,17 +26,28 @@ type Pending = Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
 
 export function McpTofuModal(props: {
   pending: Pending;
-  send: (msg: ClientMsg) => void;
+  send: (msg: ClientMsg) => boolean;
+  /** Pop the queue. Called after a decision has gone out. */
   onClose: () => void;
+  /**
+   * Register W28: back out without deciding — sends `cancel_gate`, which
+   * unparks the spawn without recording anything. Bound to Escape and the
+   * backdrop below.
+   */
+  onCancel: () => void;
 }) {
-  const { pending, send, onClose } = props;
-  // Esc / backdrop close. NOTE: closing without picking a decision leaves
-  // the server-side gate parked — that's intentional, the operator can
-  // refresh the WS to clear, or open another window where the same
-  // pending re-fires on reconnect (the server re-emits on attach in
-  // future phases; for now Phase 6a treats Esc as "I'll decide later"
-  // which is the same as the spec's "Refuse & edit" focus default).
-  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
+  const { pending, send, onClose, onCancel } = props;
+  // Esc / backdrop close. This used to say closing without deciding "leaves
+  // the server-side gate parked — that's intentional", justified by two
+  // things: that the operator can refresh the WS to clear it, and that "the
+  // server re-emits on attach in future phases".
+  //
+  // Register W28: only the first is true. PR #310's drain made the refresh
+  // escape real; nothing re-emits a pending gate on attach, then or now. So
+  // the fallback the comment leaned on never arrived, and dismissing left the
+  // spawn parked until the socket dropped. Esc now CANCELS — same
+  // reject-don't-resolve path, nothing recorded, asked again next time.
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: onCancel });
 
   // Focus the safest default button (Deny once) on mount so screen
   // readers announce the modal and the operator's first Enter doesn't
@@ -55,7 +66,10 @@ export function McpTofuModal(props: {
       decision,
       ...(pending.binarySha ? { binarySha: pending.binarySha } : {}),
     };
-    send(msg);
+    // W29: only close once the decision has actually gone out. A drop on a
+    // reconnecting socket used to dismiss the modal anyway, taking the
+    // operator's only route back to this gate with it.
+    if (!send(msg)) return;
     onClose();
   }
 

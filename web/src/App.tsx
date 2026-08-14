@@ -180,8 +180,11 @@ export function App() {
   }, []);
   // Cluster B Phase 6a: ClientMsg sink for the GateModalsProvider. Same
   // wsRef indirection as inboxSend — keeps the provider WS-agnostic.
-  const gateSend = useCallback((msg: ClientMsg) => {
-    wsRef.current?.send(msg);
+  // W29: returns whether the message went out, so a gate modal can decline to
+  // close on a decision that never reached the server. `=== true` because the
+  // optional chain yields `undefined`, not `false`, when the ref is null.
+  const gateSend = useCallback((msg: ClientMsg): boolean => {
+    return wsRef.current?.send(msg) === true;
   }, []);
   // Cluster B Phase 6e: ClientMsg sink for the AuthorityProvider — pipes
   // `get_project_authority` requests onto the active WS.
@@ -1154,7 +1157,28 @@ function AppShell({
   function interruptSession() {
     const sessionId = session?.id;
     if (!sessionId) return;
-    wsRef.current?.send({ type: 'interrupt', sessionId });
+    // W29: Stop is the other operator decision that must not fail quietly.
+    // Nothing optimistic is applied here — the server's `session_interrupted`
+    // drives the UI — so the failure mode was a click that did nothing at all,
+    // with the turn still running and no reason for the operator to click
+    // again. Same shape as the permission card so both read alike.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'interrupt', sessionId }) === true,
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `interrupt_undeliverable:${sessionId}`,
+          title: 'Stop not sent',
+          message:
+            'Cebab is not connected, so the stop did not reach the run. It is still going — ' +
+            'try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
 
   // Cluster E Phase 4 (H1): global keyboard bindings driven by the
@@ -1405,23 +1429,49 @@ function AppShell({
 
   function decidePermission(requestId: string, decision: 'allow' | 'deny') {
     if (!session) return;
-    // Optimistic local update so the buttons flip to "decided: …" immediately.
-    // The server echoes a permission_decided ServerMsg back; the reducer is
-    // idempotent so the second arrival is a no-op.
-    dispatch({
-      type: 'server',
-      msg: {
-        type: 'permission_decided',
-        sessionId: session.id,
-        requestId,
-        decision,
-      },
-    });
-    wsRef.current?.send({
-      type: 'permission_decision',
-      sessionId: session.id,
-      requestId,
-      decision,
+    // W29: send FIRST, then apply the optimistic update — the reverse of what
+    // this used to do. The optimistic dispatch flips the buttons to
+    // "decided: …", and on a socket that is reconnecting the send used to
+    // vanish silently, so the operator was left looking at "Allowed" while
+    // the agent stayed parked in `canUseTool` with no way back to the card.
+    //
+    // Ordering rather than a rollback: there is then no window in which the
+    // UI claims something that has not happened. See `sendThenApply`.
+    sendThenApply({
+      // `=== true` because `wsRef.current?.send(...)` yields `undefined` —
+      // not `false` — when the ref itself is null.
+      send: () =>
+        wsRef.current?.send({
+          type: 'permission_decision',
+          sessionId: session.id,
+          requestId,
+          decision,
+        }) === true,
+      // The server echoes a permission_decided ServerMsg back; the reducer is
+      // idempotent so the second arrival is a no-op.
+      apply: () =>
+        dispatch({
+          type: 'server',
+          msg: {
+            type: 'permission_decided',
+            sessionId: session.id,
+            requestId,
+            decision,
+          },
+        }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `permission_decision_undeliverable:${requestId}`,
+          title: 'Decision not sent',
+          message:
+            'Cebab is not connected, so your answer to the tool request did not reach the agent. ' +
+            'It is still waiting — answer again once the connection is back.',
+          sticky: false,
+        }),
     });
   }
 
@@ -2434,6 +2484,38 @@ function AppShell({
  * Exported for the gate — a pure function beats driving all of App.tsx
  * through jsdom to enumerate four states.
  */
+/**
+ * Register W29: apply the optimistic update only if the message went out.
+ *
+ * The permission card used to dispatch `permission_decided` FIRST — flipping
+ * its buttons to "decided: …" — and then call `send`, which returned nothing
+ * and silently swallowed the message on a socket that was still connecting.
+ * The operator was left looking at "Allowed" while the agent stayed parked in
+ * `canUseTool`, with no card left to answer.
+ *
+ * Ordering rather than a rollback: there is then no window in which the UI
+ * claims something that has not happened.
+ *
+ * Exported for the gate. The invariant is one line, and it is the line the
+ * whole finding is about, so it is worth being able to state it in a test
+ * instead of driving all of App.tsx through jsdom.
+ */
+export function sendThenApply(input: {
+  /** The WS write. Returns whether it actually went out. */
+  send: () => boolean;
+  /** The optimistic state change. Runs ONLY on a successful send. */
+  apply: () => void;
+  /** Tell the operator. Runs only on a failed send. */
+  onUndeliverable: () => void;
+}): boolean {
+  if (!input.send()) {
+    input.onUndeliverable();
+    return false;
+  }
+  input.apply();
+  return true;
+}
+
 export function composerDisabledReason(s: {
   hasActiveProject: boolean;
   workspaceReady: boolean;

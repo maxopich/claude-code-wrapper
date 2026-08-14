@@ -174,6 +174,7 @@ const SHAPES: Table = {
     typedAcknowledgment: 'string',
     reasonText: 'string?',
   },
+  cancel_gate: { kind: 'string', pendingId: 'string' },
   retry_rate_limited: { sessionId: 'string', auto: 'boolean?' },
   start_auth_refresh: {},
   cancel_auth_refresh: { runId: 'string' },

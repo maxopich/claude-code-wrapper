@@ -17,7 +17,7 @@ import {
   awaitBusTrustDecision,
   makeBusTrustGateState,
 } from '../bus/install_trust_gate.js';
-import { MAX_PENDING_GATES } from '../gate_abandon.js';
+import { abandonOnePendingGate, MAX_PENDING_GATES } from '../gate_abandon.js';
 import type { McpServerView, ServerMsg } from '@cebab/shared/protocol';
 
 /**
@@ -265,6 +265,119 @@ describe('[security] the parked-decision ceiling fails closed', () => {
 
     abandonPendingStartGates(gate, 'test cleanup');
     await Promise.allSettled(parked);
+  });
+});
+
+/**
+ * Register H15 remainder + W28: an operator who backs out of a gate.
+ *
+ * The drain above covers "the socket dropped". This covers "the operator
+ * pressed Escape" — which had no verb at all until now, so dismissing a gate
+ * modal popped the queue client-side and left the spawn parked exactly as if
+ * nothing had happened. The MCP modal called that intentional on the strength
+ * of a re-emit-on-attach phase that never shipped.
+ *
+ * Cancel routes to the SAME reject-don't-resolve path, which is the whole
+ * answer to the question H15 parked ("does cancelling deny?"): it does not.
+ * Nothing is persisted; the operator is asked again next time.
+ */
+describe('[security] cancelling one gate releases only that gate', () => {
+  test('the awaiting spawn rejects, and its siblings stay parked', async () => {
+    const gate = makeTrustGateState();
+    const first = awaitMcpTrustDecisions({
+      projectId: 1,
+      gate,
+      send: () => undefined,
+      servers: [mcpServer('srv-a')],
+    });
+    const second = awaitMcpTrustDecisions({
+      projectId: 2,
+      gate,
+      send: () => undefined,
+      servers: [mcpServer('srv-b')],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(gate.pending.size).toBe(2);
+
+    const [cancelledId] = [...gate.pending.keys()];
+    expect(
+      abandonOnePendingGate(gate.pending, 'mcp-trust', 'operator cancelled', cancelledId!),
+    ).toBe(true);
+
+    await expect(first).rejects.toThrow(/mcp-trust gate abandoned/);
+    // CONTROL: the other gate is untouched — a cancel that drained the map
+    // would satisfy the rejection above and silently kill an unrelated spawn.
+    expect(gate.pending.size).toBe(1);
+    expect(await settlesWithin(second, 100)).toBe(false);
+    abandonPendingMcpGates(gate, 'cleanup');
+    await expect(second).rejects.toThrow();
+  });
+
+  test('cancelling persists no decision — the operator refused to answer', async () => {
+    // Same reasoning as the disconnect case: a persisted trust row is a
+    // durable grant, and backing out of the question is not an answer to it.
+    const gate = makeTrustGateState();
+    const p = awaitMcpTrustDecisions({
+      projectId: 1,
+      gate,
+      send: () => undefined,
+      servers: [mcpServer('srv-a')],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const [id] = [...gate.pending.keys()];
+    abandonOnePendingGate(gate.pending, 'mcp-trust', 'operator cancelled', id!);
+    await expect(p).rejects.toThrow();
+
+    const rows = getDb().prepare('SELECT COUNT(*) AS c FROM mcp_trust').get() as { c: number };
+    expect(rows.c).toBe(0);
+  });
+
+  test('the env start gate rejects rather than starting the session', async () => {
+    // The gate where resolving would be the regression: `resolve()` here
+    // means "the operator typed the trigger, go". Cancelling must reject.
+    const gate = makeStartGateState();
+    const p = awaitEnvInjectionAck({
+      projectId: 1,
+      gate,
+      send: () => undefined,
+      injections: [
+        {
+          envKey: 'ANTHROPIC_API_KEY',
+          scope: 'project',
+          scopePath: '/u/p/.claude/settings.json',
+          posture: 'subscription auth bypass',
+          isSet: true,
+        },
+      ],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    const [id] = [...gate.pending.keys()];
+    expect(abandonOnePendingGate(gate.pending, 'session-start', 'operator cancelled', id!)).toBe(
+      true,
+    );
+    await expect(p).rejects.toThrow(/session-start gate abandoned/);
+  });
+
+  test('an unknown pendingId returns false and disturbs nothing', async () => {
+    // A reconnect empties the map, so a client cancelling afterwards is
+    // sending an id the server has legitimately forgotten. That is expected
+    // traffic, not an error — and it must not take the live entries with it.
+    const gate = makeTrustGateState();
+    const p = awaitMcpTrustDecisions({
+      projectId: 1,
+      gate,
+      send: () => undefined,
+      servers: [mcpServer('srv-a')],
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(gate.pending.size).toBe(1);
+
+    expect(abandonOnePendingGate(gate.pending, 'mcp-trust', 'stale', 'no-such-id')).toBe(false);
+
+    expect(gate.pending.size).toBe(1);
+    expect(await settlesWithin(p, 100)).toBe(false);
+    abandonPendingMcpGates(gate, 'cleanup');
+    await expect(p).rejects.toThrow();
   });
 });
 
