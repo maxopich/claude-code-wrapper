@@ -158,8 +158,36 @@ function windowAt(lines, i, before, after) {
  * qualifier marking it as the test-only branch or as an effect-not-mechanism
  * restatement.
  */
+/**
+ * Every alternative is a marker someone writes ON PURPOSE to say "this
+ * describes the test-only branch or the superseded claim" — the principle
+ * `PAUSE_QUALIFIER` below already states, and which this list did not follow
+ * until 2026-08-14.
+ *
+ * It used to read `\btests?\b|\bused to\b|\bnot\b|ask-gate|skip|in effect|…`,
+ * and CLAUDE.md's inverted claim proved what that cost. The sentence
+ *
+ *     "with no ask-gate hook wired (chain participants, tests — the
+ *      pure-headless path) they run `permissionMode: 'bypassPermissions'` +
+ *      `allowDangerouslySkipPermissions`"
+ *
+ * is the exact claim this gate exists to forbid, and it was exempted THREE
+ * times over: by `ask-gate` (which it uses to assert that hook's ABSENCE), by
+ * `tests` (which it names as one of the two things on the bypass path — the
+ * false pairing itself), and by `skip`, which matches inside
+ * `allowDangerouslySkipPermissions`. That last one is the worst: the qualifier
+ * matched a substring of the very API name that constitutes the claim, so no
+ * sentence naming that option could ever be flagged.
+ *
+ * `\.not\.toContain\(` is here because a test asserting the string's ABSENCE
+ * is a legitimate mention. It replaces the bare `\bnot\b` that used to exempt
+ * it by accident — measured: tightening without it flagged exactly one site,
+ * `web/src/components/MultiAgentTab.busGates.test.tsx`, and that site is
+ * right. One legitimate hit is a reason to change the predicate, not to add an
+ * allowlist entry.
+ */
 const POSTURE_QUALIFIER =
-  /\btests?\b|\bused to\b|\bnot\b|ask-gate|skip|in effect|only by callers|test-only/i;
+  /\btest-only\b|only by callers|reached only by|\bused to\b|superseded|no longer|corrected|\bregister\b|as shipped|in effect|\.not\.toContain\(/i;
 const PARTICIPANT = /\b(participants?|workers?|agents?|bus)\b/i;
 
 function findPostureClaims(text) {
@@ -239,6 +267,11 @@ describe('[security] the claim checkers actually catch the claims', () => {
     " * project's `trusted` flag. Bus workers always run with bypassPermissions, so",
     '    ? `x: trusted. Bus workers always run with bypassPermissions, so this is informational.`',
     '// Without these checks, a worker under bypassPermissions could write',
+    // Register X01, verbatim from CLAUDE.md before this PR. It is here because
+    // it is the one claim in the corpus the ORIGINAL qualifier could not flag
+    // (see POSTURE_QUALIFIER's header), so without it the tightening above
+    // could be reverted and every case would still pass.
+    "Bus agents run one of **two permission postures** (`server/src/bus/runner.ts`): with no ask-gate hook wired (chain participants, tests — the pure-headless path) they run `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions`;",
   ];
 
   test.each(REAL_POSTURE_CLAIMS)('flags: %s', (line) => {
@@ -284,8 +317,11 @@ describe('[security] the claim checkers actually catch the claims', () => {
  * SDK type union from a claim about the bus, so the decision is a human's, made
  * once, in writing.
  *
- * `CLAUDE.md` is absent deliberately: it carries claims A and B, and project
- * convention keeps it out of PRs. Register X01/X05 track that.
+ * `CLAUDE.md` was absent from the SCAN ITSELF until 2026-08-14, on the reason
+ * "it carries claims A and B, and project convention keeps it out of PRs".
+ * That convention is gone, and the exemption it justified is why the file kept
+ * an inverted posture claim through four releases: an exemption whose premise
+ * expires does not announce itself. It is now collected and listed below.
  */
 const POSTURE_ALLOWLIST = new Map([
   ['server/src/bus/runner.ts', 'the branch itself'],
@@ -303,6 +339,7 @@ const POSTURE_ALLOWLIST = new Map([
   ['web/src/components/templatePreview/TemplatePreviewBanners.test.tsx', 'asserts its absence'],
   ['web/src/components/MultiAgentTab.busGates.test.tsx', 'asserts its absence'],
   ['.npmrc', 'carries the canonical corrected wording'],
+  ['CLAUDE.md', 'names the branch to say it is test-only, not the chain path'],
   [SELF, 'this gate'],
 ]);
 
@@ -317,6 +354,17 @@ describe('[security] no artifact may claim the superseded bus safety model', () 
     expect(files.length).toBeGreaterThan(200);
     expect(files).toContain('server/src/bus/runner.ts');
     expect(files).toContain('README.md');
+  });
+
+  test('CLAUDE.md is in range, and is a file with claims in it', () => {
+    // Its own coverage case, separate from the floor above, because CLAUDE.md
+    // is the one artifact this gate was built around and never looked at. A
+    // green scan proves nothing about a file that is not collected — and the
+    // two `expect`s fail for different reasons on purpose: the first if the
+    // `collectFiles` entry is dropped, the second if the path resolves to
+    // something empty or unreadable.
+    expect(files).toContain('CLAUDE.md');
+    expect(read('CLAUDE.md')).toContain('permissionMode');
   });
 
   test('every file naming bypassPermissions is on the allowlist', () => {
@@ -358,7 +406,14 @@ function collectFiles() {
   const exts = new Set(['.ts', '.tsx', '.sql', '.mjs', '.yml', '.md']);
   const out = [];
   for (const root of roots) walk(root, out, exts);
-  for (const top of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', '.npmrc']) {
+  // `CLAUDE.md` joined this list when the convention that kept it out of PRs
+  // was reversed (2026-08-14). It is the artifact that most needed scanning
+  // and was the only one exempt: `bus/runtime.ts`'s `readProjectClaudeMd`
+  // injects a project's CLAUDE.md verbatim into every bus agent's first turn,
+  // so a superseded claim in it is not documentation drift — it is a false
+  // statement delivered to a running model. It carried four of them (register
+  // X01, X02, X04, X05) for as long as nothing was allowed to look.
+  for (const top of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'CLAUDE.md', '.npmrc']) {
     if (fs.existsSync(path.join(repoRoot, top))) out.push(top);
   }
   return out;
