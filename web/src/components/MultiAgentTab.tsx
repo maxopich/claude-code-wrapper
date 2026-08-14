@@ -906,7 +906,7 @@ function MultiAgentComposer(props: {
  * editors). Selection is derived, not asserted, so deleting the selected
  * template self-heals to the first remaining one with no dangling id.
  */
-function TemplatesPanel(props: {
+export function TemplatesPanel(props: {
   items: MultiAgentTemplate[] | null;
   mode: 'chain' | 'orchestrator';
   projects: Project[];
@@ -929,10 +929,23 @@ function TemplatesPanel(props: {
   // (b) on each `multi_agent_ended` whose session was started from any
   // visible templateId (via the subscription below).
   const [lastRuns, setLastRuns] = useState<Map<string, TemplateLastRun | null>>(() => new Map());
+  // W10: the cached ids, readable without a `setLastRuns` updater. The
+  // `multi_agent_ended` branch below only ever needed the current KEYS; it
+  // used an updater that returned `prev` unchanged purely to get at them.
+  const lastRunsRef = useRef(lastRuns);
+  lastRunsRef.current = lastRuns;
+  const { subscribeServerMsg, onReadLastRunForTemplate } = props;
   // Listen for `last_run_for_template` replies and ENDED events that
   // should invalidate the rail. Subscribe once per panel mount.
+  //
+  // W10: this used to depend on `[props]` — a fresh object on every parent
+  // render, and the parent re-renders on every WS message, so the subscriber
+  // was torn down and re-registered constantly. Depending on the two
+  // callbacks actually used is only worth anything because App.tsx wraps them
+  // in `useCallback`; a plain `function` declaration there would churn just
+  // as badly. See `subscribeServerMsg` / `readLastRunForTemplate` in App.tsx.
   useEffect(() => {
-    return props.subscribeServerMsg((msg) => {
+    return subscribeServerMsg((msg) => {
       if (msg.type === 'last_run_for_template') {
         setLastRuns((prev) => {
           const next = new Map(prev);
@@ -947,19 +960,18 @@ function TemplatesPanel(props: {
         // correct option: refresh every cached template — the rail's
         // SELECT is a single-row lookup so this is bounded. Without this,
         // a just-finished run would show stale rail until the next mount.
-        setLastRuns((prev) => {
-          if (prev.size === 0) return prev;
-          // Defer per-key requests so React doesn't churn — we trigger
-          // refetches in the side-effect; the state map itself is
-          // untouched (the replies arrive via the same subscription).
-          for (const templateId of prev.keys()) {
-            props.onReadLastRunForTemplate(templateId);
-          }
-          return prev;
-        });
+        //
+        // Sent from here, not from inside a `setLastRuns` updater: an updater
+        // must be pure. React invokes it during render and may re-invoke it
+        // when a concurrent render is discarded, so a WS send in there is a
+        // send with no defined number of times. The state map itself is
+        // untouched — the replies arrive via this same subscription.
+        for (const templateId of lastRunsRef.current.keys()) {
+          onReadLastRunForTemplate(templateId);
+        }
       }
     });
-  }, [props]);
+  }, [subscribeServerMsg, onReadLastRunForTemplate]);
 
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
@@ -1090,7 +1102,7 @@ function normalizeRoles(r: Record<string, string>): Record<string, string> {
  * that would leak stale roles across selections). Switching templates
  * discards unsaved role edits, by design.
  */
-function TemplatePreview(props: {
+export function TemplatePreview(props: {
   template: MultiAgentTemplate;
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
@@ -1123,9 +1135,28 @@ function TemplatePreview(props: {
   const [roles, setRoles] = useState<Record<string, string>>(template.roles ?? {});
   // Re-seed when the saved value changes (our own save round-trips back
   // through the templates list, or another window edits it).
+  //
+  // W11: that is what this always meant to do, and the dependency used to be
+  // the `roles` OBJECT. `case 'templates'` replaces the whole array with
+  // freshly parsed rows, and the server sends that reply for `list_templates`,
+  // `save_template` AND `delete_template` — so deleting or saving any OTHER
+  // template handed us a new-but-identical object and wiped role text the
+  // operator was still typing. Compare the serialised value instead, via the
+  // same `normalizeRoles` + `JSON.stringify` the dirty check below uses.
+  //
+  // `seededRef` holds what we last seeded FROM, not what the operator has
+  // locally: comparing against the local edits would suppress the legitimate
+  // "another window changed it" re-seed as long as the pane was dirty.
+  const savedRolesJson = JSON.stringify(normalizeRoles(template.roles ?? {}));
+  const seededRef = useRef(savedRolesJson);
   useEffect(() => {
+    if (seededRef.current === savedRolesJson) return;
+    seededRef.current = savedRolesJson;
     setRoles(template.roles ?? {});
-  }, [template.roles]);
+    // `template.roles` is read, not depended on — the serialised value is the
+    // trigger. Switching templates still discards edits via the parent's
+    // `key={template.id}` remount, which this does not touch.
+  }, [savedRolesJson, template.roles]);
   const rolesDirty =
     JSON.stringify(normalizeRoles(roles)) !== JSON.stringify(normalizeRoles(template.roles ?? {}));
 

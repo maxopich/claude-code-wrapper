@@ -1,4 +1,12 @@
-import { createContext, useCallback, useContext, useMemo, useReducer, type ReactNode } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useReducer,
+  useRef,
+  type ReactNode,
+} from 'react';
 import type { NotificationEnvelope } from '@cebab/shared/protocol';
 import {
   initialNotificationsState,
@@ -44,6 +52,27 @@ export type NotificationsProviderProps = {
 export function NotificationsProvider({ children, onAck }: NotificationsProviderProps) {
   const [state, dispatch] = useReducer(notificationsReducer, initialNotificationsState);
 
+  /**
+   * W05: the current state, mirrored so `dismiss` can read it without
+   * *depending* on it. Same idiom as App.tsx's `stateRef`.
+   *
+   * The previous version read `state` from the closure and listed
+   * `state.visible` / `state.queued` as `useCallback` deps. That read was
+   * correct, and for the reason the old comment gave — `dismiss` is invoked
+   * from event handlers, i.e. after render, so the captured arrays are
+   * current. What it never weighed was the cost of the dependency that keeps
+   * them current: every push rebuilds `visible` (even a dedupe hit does
+   * `visible.slice()`), so `dismiss` got a new identity, so did the `actions`
+   * memo below, so did the `onDismiss` prop each `<Notification>` receives —
+   * and that prop is a dependency of its auto-dismiss timer effect. The
+   * cleanup cleared the pending timeout and re-armed a FULL-LENGTH one, so
+   * under any event stream faster than the 5s window no toast ever reached
+   * its deadline. Reading through a ref keeps the read just as current and
+   * costs nothing in identity.
+   */
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
   const push = useCallback((n: NotificationEnvelope) => {
     // Cluster A Phase 5: display-side mute. The server still persists
     // every sticky-operational / safety row to the inbox regardless of
@@ -59,12 +88,11 @@ export function NotificationsProvider({ children, onAck }: NotificationsProvider
     (id: string) => {
       // Look up before dispatching so we can read sticky off the envelope.
       // The reducer removes it on dispatch; we capture the metadata first.
-      // We intentionally re-read state via a closure capture rather than via
-      // a ref — React batches dispatch/effect, and reading `state` here is
-      // fine for this single read because dismiss is invoked from event
-      // handlers (post-render).
+      // Read through `stateRef` (see above) so this callback's identity does
+      // not churn with every push.
+      const current = stateRef.current;
       const target =
-        state.visible.find((v) => v.id === id) ?? state.queued.find((q) => q.id === id);
+        current.visible.find((v) => v.id === id) ?? current.queued.find((q) => q.id === id);
       if (target && target.sticky && onAck) {
         try {
           onAck(id);
@@ -74,7 +102,7 @@ export function NotificationsProvider({ children, onAck }: NotificationsProvider
       }
       dispatch({ type: 'dismiss', id });
     },
-    [onAck, state.visible, state.queued],
+    [onAck],
   );
 
   const actions = useMemo<ActionsValue>(() => ({ push, dismiss }), [push, dismiss]);
