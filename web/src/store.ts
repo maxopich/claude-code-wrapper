@@ -2946,24 +2946,51 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           authExpired: authExpiredAfter(state, msg.kind, msg.message),
         };
       }
-      const projectId = msg.sessionId
-        ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
-        : state.activeProjectId;
-      if (projectId === null) return state;
-      // Register W16: an error with no session of its own used to fall through
-      // to `?? newPendingId()`, minting a `pending:*` id and writing a
-      // SessionView under it. Nothing pointed at that session —
+      // Register W16 + Cebab-da6: an error with no session of its own lands in
+      // no session at all.
+      //
+      // W16 removed the `?? newPendingId()` third fallback, which minted a
+      // `pending:*` id and wrote a SessionView nothing pointed at —
       // `activeSessionByProject`, `pendingByProject` and `knownSessions` were
-      // all left alone — so the message was unreachable and every occurrence
-      // leaked another bucket. The operator's surface for a sessionless error
-      // is the sticky "Server error" toast that `notifyFromServerMsg` already
-      // pushes for exactly this case, so there is nothing to replace.
+      // all left alone, so the message was unreachable and every occurrence
+      // leaked another bucket. It left the SECOND fallback in place:
+      // `?? getActiveSessionId(state, projectId)`, which folded a sessionless
+      // error onto whichever session happened to be active. That is what da6
+      // is, and it is worse than a duplicate toast — the fold flips an
+      // unrelated conversation to `status: 'error'`, appends a red inline
+      // error to its transcript, and (via the W01 line below) clears its
+      // `streamingText`, destroying the partial output of a run that did not
+      // fail.
+      //
+      // Twenty-six server call sites send a sessionless `wrapper_error`, and
+      // they are overwhelmingly refusals of an operator ACTION rather than
+      // session failures: `start_multi_agent` ("needs at least one
+      // participant"), `mcp_trust_decision` validation, `set_workspace_root`,
+      // `install_bus_integration`, `acknowledge_and_start`. Clicking Start on
+      // an empty participant list should not mark the chat you left streaming
+      // in another project as crashed.
+      //
+      // Nothing is left spinning by refusing to guess: the single-agent turn
+      // loop binds `sessionId = msg.sessionId ?? randomUUID()` and its catch
+      // sends that id, so a run that dies always says which one it was. The
+      // operator's surface for a sessionless error is the sticky "Server
+      // error" toast `notifyFromServerMsg` pushes for exactly this case —
+      // W16's own comment already said so unconditionally, while the guard it
+      // justified only covered the half where no session was active.
       //
       // Same shape as the bus-scoped guard above, for the same reason: still
       // bump `failureSeq` so pending spinners clear, still promote
       // `authExpired` so the app-wide banner isn't something this guard can
-      // swallow. An error that DOES have somewhere to land still lands there.
-      const sessionId = msg.sessionId ?? getActiveSessionId(state, projectId);
+      // swallow. An error that NAMES a session still lands in it.
+      //
+      // The guard also moved ABOVE the project resolution, which closes a
+      // second, smaller hole it used to sit under: `projectId === null`
+      // returned `state` untouched, so a sessionless error arriving before the
+      // operator had selected any project bumped nothing and promoted no
+      // `authExpired` — an expired subscription raised no app-wide banner
+      // until a project was clicked. Resolving a project is only the
+      // session-scoped path's business now.
+      const sessionId = msg.sessionId;
       if (sessionId === undefined) {
         return {
           ...state,
@@ -2971,6 +2998,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           authExpired: authExpiredAfter(state, msg.kind, msg.message),
         };
       }
+      const projectId = projectFor(state, sessionId) ?? state.activeProjectId;
+      if (projectId === null) return state;
       const existing = state.sessionsByProject[projectId]?.[sessionId];
       const session: SessionView = existing ?? {
         id: sessionId,

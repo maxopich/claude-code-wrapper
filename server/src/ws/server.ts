@@ -2656,14 +2656,19 @@ function onConnection(ws: WebSocket): void {
     // so validating here covers the whole verb surface.
     //
     // A rejected frame is DROPPED with a log line and no wire reply, matching
-    // the JSON-parse failure three lines above. Deliberately not a
-    // `wrapper_error`: one without a `sessionId` is folded onto the active
-    // session by the client reducer and flips it to `status: 'error'`, so
-    // answering a malformed frame would mark the operator's live session
-    // failed because some client sent garbage. The browser app compiles
-    // against the same union and sends through one typed helper, so a
-    // rejected frame means a client bug or a non-browser client — a thing to
-    // find in this log, not a session event.
+    // the JSON-parse failure three lines above. The browser app compiles
+    // against the same union and sends through one typed helper, so a rejected
+    // frame means a client bug or a non-browser client — a thing to find in
+    // this log, not a session event.
+    //
+    // This used to carry a second reason, and it is worth recording that it is
+    // gone rather than deleting it silently: answering with a `wrapper_error`
+    // was also unsafe, because the client reducer folded any error WITHOUT a
+    // `sessionId` onto whichever session was active and flipped it to
+    // `status: 'error'` — so a malformed frame from some other client marked
+    // the operator's live session failed. `Cebab-da6` removed that fold, so a
+    // sessionless `wrapper_error` is now a toast and nothing else. The drop
+    // stays on the argument above, which never depended on it.
     const validated = validateClientMsg(parsed);
     if (!validated.ok) {
       console.warn(`[ws] rejected frame: ${validated.reason}`);
