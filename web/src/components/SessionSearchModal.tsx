@@ -42,9 +42,21 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
   const { onClose, send, subscribeServerMsg, activeProjectId, onNavigate } = props;
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
 
-  const [scope, setScope] = useState<SearchScope>(
+  // Register D11: the operator's PREFERENCE, seeded from the open project.
+  const [scopePref, setScope] = useState<SearchScope>(
     activeProjectId != null ? 'this_project' : 'all_projects',
   );
+  // ...and the scope actually in force. The seed above only runs on mount, so
+  // a project closing under an open modal used to leave the preference at
+  // `this_project` with no id to scope by — the request went out naming a
+  // project that wasn't there. The server now fails closed on that (see
+  // `searchSessions`), which is the correct answer but an opaque one: the
+  // operator would be looking at an empty result list under a chip still
+  // reading "This project". Deriving instead of storing keeps the chip, the
+  // dispatch and the server's view in agreement on every render, with no
+  // intermediate frame that dispatches the stale scope — and restores the
+  // preference if the project comes back.
+  const scope: SearchScope = activeProjectId == null ? 'all_projects' : scopePref;
   const [includeArchived, setIncludeArchived] = useState(false);
   // Raw opt-in: `rawArmed` only flips true after the typed ack lands.
   const [rawArmed, setRawArmed] = useState(false);

@@ -143,6 +143,59 @@ describe('SessionSearchModal — scaffold + scope chips (C4-2)', () => {
   });
 });
 
+/**
+ * Register D11. The two cases above pin the scope at MOUNT. `scope` used to be
+ * plain state seeded once, so a project closing under an already-open modal
+ * left it at `this_project` with no id to scope by — and the dispatch effect
+ * refires on exactly that change, so the malformed request went out on its
+ * own. Re-rendering with a new `activeProjectId` is the same reconciliation
+ * the app performs, so component state survives it.
+ */
+describe('SessionSearchModal — scope follows the project closing (D11)', () => {
+  test('a project closing under an open modal drops the dispatched scope', () => {
+    render({ activeProjectId: 5 });
+    setValue(input(), 'mig');
+    advance(200);
+    expect(lastSearch()).toMatchObject({ scope: 'this_project', projectId: 5 });
+
+    render({ activeProjectId: null });
+    advance(200);
+
+    const last = lastSearch()!;
+    expect(last.scope).toBe('all_projects');
+    expect(last.projectId).toBeUndefined();
+  });
+
+  test('the chips stop claiming a scope that is not in force', () => {
+    render({ activeProjectId: 5 });
+    expect(chip('This project')?.getAttribute('aria-pressed')).toBe('true');
+
+    render({ activeProjectId: null });
+    expect(chip('This project')?.getAttribute('aria-pressed')).toBe('false');
+    expect(chip('All projects')?.getAttribute('aria-pressed')).toBe('true');
+    expect(chip('This project')?.disabled).toBe(true);
+  });
+
+  test('the operator preference is restored when the project comes back', () => {
+    render({ activeProjectId: 5 });
+    render({ activeProjectId: null });
+    render({ activeProjectId: 5 });
+    // Derived, not overwritten — closing a project must not silently discard
+    // the choice the operator made before it closed.
+    expect(chip('This project')?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('an explicit All projects choice survives the project closing and reopening', () => {
+    render({ activeProjectId: 5 });
+    click(chip('All projects'));
+    render({ activeProjectId: null });
+    render({ activeProjectId: 5 });
+    // Control for the case above: the restore must return the operator's
+    // preference, not hardcode `this_project`.
+    expect(chip('All projects')?.getAttribute('aria-pressed')).toBe('true');
+  });
+});
+
 describe('SessionSearchModal — dispatch + scope/archived (C4-2)', () => {
   test('typing dispatches search_sessions with the active scope + projectId', () => {
     render({ activeProjectId: 5 });
