@@ -53,6 +53,7 @@ const SHARED_READER = 'safe_fs.ts';
  */
 const ALLOWED: ReadonlyMap<string, string> = new Map([
   ['db.ts', 'migration SQL shipped inside the repo'],
+  ['migration_integrity.ts', 'the same shipped migration SQL db.ts applies, re-read to hash it'],
   ['data_perms.ts', "touches Cebab's own SQLite path to create it with a mode; reads nothing"],
   ['session_log_export.ts', "streams Cebab's own ~/.cebab/logs/<sid>.jsonl to the operator"],
   ['notifications/audit_tip.ts', "Cebab's own audit-tip mirror under ~/.cebab"],
