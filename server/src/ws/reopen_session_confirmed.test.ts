@@ -518,3 +518,131 @@ describe('executeReopenSessionConfirmed — reactivation failures', () => {
     });
   });
 });
+
+// Register S09: a reopen that fails must not have cost the operator the session
+// they already had.
+//
+// WHY THESE CASES DID NOT EXIST. Every reactivation-failure case above passes
+// `currentActiveSessionId: null`, so the handler skipped the displacement block
+// entirely and the bug had no way to show. The assertions were fine; the
+// FIXTURE omitted the one input the failure needs. Each case here is one of
+// those tests with a live incumbent supplied.
+//
+// The displacement is now the LAST thing the handler does, after the target is
+// provably back — so "not called" is the whole contract.
+describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent (S09)', () => {
+  /** Seed a live incumbent + a crashed, reopenable target. */
+  function seedSwap(targetId: string, mode: 'chain' | 'orchestrator' = 'orchestrator'): void {
+    const proj = upsertProject('P', '/projects/p');
+    createMultiAgentSession('incumbent', 'orchestrator', '100');
+    // Left running on purpose — this is the session the operator is working in.
+    createMultiAgentSession(targetId, mode, '101');
+    endMultiAgentSession(targetId, 'crashed');
+    addParticipant(targetId, proj.id, 'worker', mode === 'chain' ? 0 : null);
+  }
+
+  test('reattach-failed → incumbent is still running, never detached', async () => {
+    seedSwap('orch-tgt');
+    const detach = vi.fn();
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'orch-tgt',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: 'incumbent',
+      detachCurrentActive: detach,
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: stubResumeReattachFailed,
+    });
+
+    expect(sent.find((m) => m.type === 'reopen_session_failed')).toMatchObject({
+      reason: 'reactivate_failed',
+    });
+    // The operator keeps what they had: sink attached, row still running, and
+    // no supersede notice for a supersede that never happened.
+    expect(detach).not.toHaveBeenCalled();
+    expect(getMultiAgentSession('incumbent')?.status).toBe('running');
+    expect(sent.find((m) => m.type === 'session_superseded')).toBeUndefined();
+  });
+
+  test('chain target → incumbent survives the unsupported-reconstruction path', async () => {
+    seedSwap('chain-tgt', 'chain');
+    const detach = vi.fn();
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'chain-tgt',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: 'incumbent',
+      detachCurrentActive: detach,
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: stubResumeReattachFailed,
+    });
+
+    expect(sent.find((m) => m.type === 'reopen_session_failed')).toMatchObject({
+      reason: 'chain_reconstruction_unsupported',
+    });
+    expect(detach).not.toHaveBeenCalled();
+    expect(getMultiAgentSession('incumbent')?.status).toBe('running');
+  });
+
+  test('resumeTarget throws → incumbent survives the fourth failure route', async () => {
+    seedSwap('boom');
+    const detach = vi.fn();
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'boom',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: 'incumbent',
+      detachCurrentActive: detach,
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: vi.fn(async () => {
+        throw new Error('reconstruction blew up');
+      }),
+    });
+
+    expect(sent[0]).toMatchObject({ type: 'reopen_session_failed' });
+    expect(detach).not.toHaveBeenCalled();
+    expect(getMultiAgentSession('incumbent')?.status).toBe('running');
+  });
+
+  test('a gate rejection also leaves the incumbent alone (it never reached resume)', async () => {
+    // The control for the three above: they must pass because the SWAP was
+    // withheld, not because this handler never displaces anything. This case
+    // fails before `reactivate` is even reached, and the same assertions hold —
+    // so it is only the pair that distinguishes "withheld on failure" from
+    // "never happens".
+    seedSwap('dirty-tgt');
+    const detach = vi.fn();
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'dirty-tgt',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: 'not-the-word',
+      currentActiveSessionId: 'incumbent',
+      detachCurrentActive: detach,
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => DIRTY_DIFF,
+      resumeTarget: stubResumeOk,
+    });
+
+    expect(sent.find((m) => m.type === 'reopen_session_failed')).toMatchObject({
+      reason: 'typed_confirmation_required',
+    });
+    expect(stubResumeOk).not.toHaveBeenCalled();
+    expect(detach).not.toHaveBeenCalled();
+    expect(getMultiAgentSession('incumbent')?.status).toBe('running');
+  });
+});

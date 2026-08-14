@@ -1556,12 +1556,18 @@ export async function executeReopenSessionProbe(args: {
  * Cluster D Phase 5c (spec §6.3 / BE-D20, BE-D21, BE-D24): commit step
  * of the swept-session reopen flow. Validates the operator's typed
  * "reopen" gate (re-running the workspace diff for safety against a
- * stale modal), detaches the current active session (if any) and marks
- * it crashed with a `session_superseded` notification carrying
- * `reasonCode: 'operator_reopen'`, unarchives the target if needed,
- * then reactivates it via the existing `resumeMultiAgentTarget` (R-B)
- * path. Writes a `recovery_log` row so the spec §8.5
+ * stale modal), unarchives the target if needed, reactivates it via the
+ * existing `resumeMultiAgentTarget` (R-B) path, and only THEN detaches
+ * the current active session and marks it crashed with a
+ * `session_superseded` notification carrying `reasonCode:
+ * 'operator_reopen'`. Writes a `recovery_log` row so the spec §8.5
  * `sweepReopenRate()` roll-up sees this case.
+ *
+ * Register S09: reactivate-then-displace, in that order. The reverse
+ * (the original) crashed a working session on behalf of a reopen that
+ * could still fail four different ways, leaving the operator with
+ * neither. See the step comments for why the overlap is safe and why
+ * the unarchive is the one thing that stays ahead of it.
  *
  * The conn-bound concerns (detach + adopt) ride a small bridge object
  * (`detachCurrentActive` / `adoptResumed`) so the helper itself doesn't
@@ -1669,12 +1675,78 @@ export async function executeReopenSessionConfirmed(args: {
     return;
   }
 
-  // ---- Step 3: displace the current active (if any) ----
-  // Same posture as the existing auto-sweep in bus/resume.ts — the
-  // displaced row is marked crashed + a typed `session_superseded`
-  // notification fires. Different here: the reasonCode is
-  // `operator_reopen` (not `swept_competing`) so the inbox panel /
-  // recovery_log can distinguish the two causes.
+  // ---- Step 3: unarchive if needed (operator changed their mind) ----
+  // Stays AHEAD of the reactivate below, unlike the displacement: on the
+  // success path `resumeMultiAgentTarget` snapshots the row on entry and hands
+  // it back as `resumed.row`, so unarchiving afterwards would ship a stale
+  // `archived: 1` to the browser. This is also not a recovery affordance being
+  // destroyed — it is the target's own state, moving in the direction the
+  // operator just asked for, and one click puts it back. A failed reopen
+  // therefore leaves the target unarchived; that is the deliberate exception to
+  // the ordering rule below, not an oversight.
+  if (row.archived === 1) {
+    unarchiveMultiAgentSession(sessionId);
+  }
+
+  // ---- Step 4: reactivate via R-B / live re-attach ----
+  // Register S09: this runs BEFORE the incumbent is displaced, and the order is
+  // the fix. Reactivation has four ways to fail — a chain target, a guard
+  // failure, a row that vanished, and a throw — and the previous order crashed
+  // the operator's working session first, so any of the four left them with
+  // neither session and a toast. Nothing here needs a rollback: if this fails
+  // the incumbent was never touched.
+  //
+  // Safe to run while the incumbent is still `running`: the guards below key on
+  // the TARGET row only, nothing in `server/src` reads "the one running
+  // session", and there is no `await` between this returning and the
+  // displacement, so no other WS message can observe the overlap. The conn
+  // hand-off order is unchanged — detach (which nulls `conn.multiAgent`) still
+  // precedes adopt.
+  const reactivate = args.resumeTarget ?? resumeMultiAgentTarget;
+  let result: Awaited<ReturnType<typeof resumeMultiAgentTarget>>;
+  try {
+    result = await reactivate(sessionId, cbs);
+  } catch (err) {
+    console.error(`[reopen_session_confirmed] resumeMultiAgentTarget threw for ${sessionId}`, err);
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'reactivate_failed',
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  if (!result.ok) {
+    // Map TargetResumeFailure → ReopenSessionFailureReason. The two
+    // we expect here:
+    //   - 'reattach-failed' for chain mode (R-B is orchestrator-only)
+    //     OR a guard failure (folder missing, etc.). Mode-check
+    //     against the row distinguishes them.
+    //   - 'not-found' / 'already-running' shouldn't reach here (we
+    //     guarded above), but map defensively.
+    let reason: ReopenSessionFailureReason = 'reactivate_failed';
+    let message = 'Failed to reactivate the session.';
+    if (result.reason === 'reattach-failed' && row.mode === 'chain') {
+      reason = 'chain_reconstruction_unsupported';
+      message = 'Chain-mode reconstruction across a Cebab server restart is not supported in v1.';
+    } else if (result.reason === 'already-running') {
+      reason = 'still_running';
+      message = 'This session is already running.';
+    } else if (result.reason === 'not-found') {
+      reason = 'not_found';
+      message = 'Session vanished between confirm and reactivate.';
+    }
+    send({ type: 'reopen_session_failed', sessionId, reason, message });
+    return;
+  }
+
+  // ---- Step 5: displace the current active (if any) ----
+  // The target is back, so the swap is now safe to commit. Same posture as the
+  // existing auto-sweep in bus/resume.ts — the displaced row is marked crashed
+  // + a typed `session_superseded` notification fires. Different here: the
+  // reasonCode is `operator_reopen` (not `swept_competing`) so the inbox panel
+  // / recovery_log can distinguish the two causes.
   if (currentActiveSessionId && currentActiveSessionId !== sessionId) {
     try {
       detachCurrentActive();
@@ -1716,51 +1788,6 @@ export async function executeReopenSessionConfirmed(args: {
     }
   }
 
-  // ---- Step 4: unarchive if needed (operator changed their mind) ----
-  if (row.archived === 1) {
-    unarchiveMultiAgentSession(sessionId);
-  }
-
-  // ---- Step 5: reactivate via R-B / live re-attach ----
-  const reactivate = args.resumeTarget ?? resumeMultiAgentTarget;
-  let result: Awaited<ReturnType<typeof resumeMultiAgentTarget>>;
-  try {
-    result = await reactivate(sessionId, cbs);
-  } catch (err) {
-    console.error(`[reopen_session_confirmed] resumeMultiAgentTarget threw for ${sessionId}`, err);
-    send({
-      type: 'reopen_session_failed',
-      sessionId,
-      reason: 'reactivate_failed',
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return;
-  }
-
-  if (!result.ok) {
-    // Map TargetResumeFailure → ReopenSessionFailureReason. The two
-    // we expect here:
-    //   - 'reattach-failed' for chain mode (R-B is orchestrator-only)
-    //     OR a guard failure (folder missing, etc.). Mode-check
-    //     against the row distinguishes them.
-    //   - 'not-found' / 'already-running' shouldn't reach here (we
-    //     guarded above), but map defensively.
-    let reason: ReopenSessionFailureReason = 'reactivate_failed';
-    let message = 'Failed to reactivate the session.';
-    if (result.reason === 'reattach-failed' && row.mode === 'chain') {
-      reason = 'chain_reconstruction_unsupported';
-      message = 'Chain-mode reconstruction across a Cebab server restart is not supported in v1.';
-    } else if (result.reason === 'already-running') {
-      reason = 'still_running';
-      message = 'This session is already running.';
-    } else if (result.reason === 'not-found') {
-      reason = 'not_found';
-      message = 'Session vanished between confirm and reactivate.';
-    }
-    send({ type: 'reopen_session_failed', sessionId, reason, message });
-    return;
-  }
-
   // ---- Step 6: adopt + emit ----
   adoptResumed(result.resumed);
 
@@ -1775,6 +1802,133 @@ export async function executeReopenSessionConfirmed(args: {
     });
   } catch (err) {
     console.error(`[reopen_session_confirmed] recovery_log append failed for ${sessionId}`, err);
+  }
+}
+
+/**
+ * Body of the `continue_multi_agent` handler — the RECOVERY Continue an
+ * operator clicks on a session Cebab rebuilt read-only after a restart (R-B).
+ *
+ * Extracted for the same reason as `executeArchiveSession` /
+ * `executeReopenSessionProbe` / `executeReopenSessionConfirmed`: the conn-bound
+ * concerns ride a small bridge (`sendUserPrompt`, `gateProjects`,
+ * `applyMcpDenials`, `send`) so the helper needs no Conn type and the failure
+ * paths below can be exercised directly. `sendUserPrompt` is `null` for a chain
+ * handle, which is how the caller expresses "this handle has no such method".
+ *
+ * Register S08. `awaiting_continue` is this session's ONLY way back: the guard
+ * a few lines down refuses any Continue once it is 0, and `emitResumedSession`
+ * re-reads it from the DB, so a reload does not help either. The flag is still
+ * cleared BEFORE delivery — that is deliberate and load-bearing, since a racing
+ * second click has to find 0 and no-op — but a delivery that FAILS now puts it
+ * back. Without that, one throw between the clear and the nudge landing left
+ * the session permanently unresumable, with the banner gone and no error the
+ * operator could act on.
+ */
+export async function executeContinueMultiAgent(args: {
+  sessionId: string;
+  /** `conn.multiAgent?.sessionId` — the run this connection is attached to. */
+  activeSessionId: string | null;
+  /** The active handle's `sendUserPrompt`; `null` for a chain handle. */
+  sendUserPrompt: ((text: string) => Promise<void>) | null;
+  /** Wraps `gateProjectsForSpawn(conn, …)` for the session's worker projects. */
+  gateProjects: (projectIds: number[]) => Promise<McpDenials>;
+  applyMcpDenials: (projectId: number, serverNames: readonly string[]) => void;
+  send: (msg: ServerMsg) => void;
+}): Promise<void> {
+  const { sessionId, activeSessionId, sendUserPrompt, gateProjects, applyMcpDenials, send } = args;
+  if (activeSessionId === null || activeSessionId !== sessionId) {
+    // Not the active session — drop (raced an ended, or never
+    // re-attached). The browser only shows Continue on the active run.
+    return;
+  }
+  if (sendUserPrompt === null) {
+    // Chain handles have no sendUserPrompt — chain reconstruction is
+    // out of scope, so this should be unreachable, but fail loud.
+    send({
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: 'Only orchestrator sessions can be continued.',
+    });
+    return;
+  }
+  const row = getMultiAgentSession(sessionId);
+  if (!row || row.awaiting_continue !== 1) {
+    // Already continued (or never a recovered session). Idempotent
+    // no-op so a double-click can't double-deliver the nudge.
+    return;
+  }
+  // [security] Register B05. This is the RECOVERY Continue (R-B: the
+  // session was rebuilt read-only after a restart). The pause-on-dangerous
+  // banner has its own Continue — `continue_through_mutation` — and the two
+  // used to be confusable: a mutation pause also set `awaiting_continue`,
+  // so both banners rendered and clicking this one cleared the recovery
+  // flag while leaving the pause in place. That silently disarmed the gate
+  // for the rest of the session AND stranded the paused worker.
+  //
+  // The pause no longer sets `awaiting_continue`, so the two states are
+  // disjoint on fresh pauses. They can still coexist legitimately: a pause
+  // that was live when Cebab restarted comes back alongside R-B's own
+  // `awaiting_continue`. Refuse rather than guess — resuming the session
+  // while a worker is held at a dangerous command is exactly the decision
+  // the operator has to make explicitly.
+  const heldMessage = describeHeldWorkers(sessionId);
+  if (heldMessage) {
+    send({
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: heldMessage,
+    });
+    return;
+  }
+  // [security] R-B reconstruction rebuilds the runner with the widened
+  // bus `settingSources` but is READ-ONLY — it delivers nothing. This
+  // Continue is the moment a `query()` actually spawns, so it is where
+  // the spawn gates belong. They matter more here than at the original
+  // start: a server restart is exactly the window in which a
+  // participant's `.claude/settings*.json` can have gained an MCP server,
+  // a hook, or an `env:` key since the operator last approved anything.
+  //
+  // Runs BEFORE `setAwaitingContinue(false)` so a refused/unanswered gate
+  // leaves the session in its recovered state rather than half-continued.
+  try {
+    const continueDenials = await gateProjects(
+      listResolvedParticipants(sessionId)
+        .filter((p) => p.role === 'worker')
+        .map((p) => p.project_id),
+    );
+    // H04: this session's specs already exist (R-B rebuilt them), so the
+    // denial is merged into them rather than passed at registration. It
+    // binds on the next turn — which is the one Continue is about to run.
+    for (const [projectId, serverNames] of continueDenials) {
+      applyMcpDenials(projectId, serverNames);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    send({ type: 'wrapper_error', kind: 'process_crashed', message });
+    return;
+  }
+  try {
+    // Clear the flag BEFORE delivering so a racing second click sees
+    // awaiting_continue=0 and the guard above no-ops it.
+    setAwaitingContinue(sessionId, false);
+    await sendUserPrompt(buildContinueNudge(sessionId));
+  } catch (err) {
+    // Register S08: the delivery never happened, so re-arm the recovery state
+    // the clear above gave up. The banner returns on the next attach and the
+    // guard accepts a retry; without this the operator's error toast is the
+    // last thing that ever happens to this session. Guarded in turn — if even
+    // the re-arm fails there is nothing further to try, and the original error
+    // is the one worth reporting.
+    try {
+      setAwaitingContinue(sessionId, true);
+    } catch (restoreErr) {
+      console.error(`[ws] restoring awaiting_continue for ${sessionId} failed`, restoreErr);
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    send({ type: 'wrapper_error', kind: 'process_crashed', message });
   }
 }
 
@@ -4826,91 +4980,23 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'continue_multi_agent': {
+      // Body delegated to `executeContinueMultiAgent` for testability — same
+      // bridge-object pattern as `executeReopenSessionConfirmed` above.
       const active = conn.multiAgent;
-      if (!active || active.sessionId !== msg.sessionId) {
-        // Not the active session — drop (raced an ended, or never
-        // re-attached). The browser only shows Continue on the active run.
-        return;
-      }
-      if (!('sendUserPrompt' in active)) {
-        // Chain handles have no sendUserPrompt — chain reconstruction is
-        // out of scope, so this should be unreachable, but fail loud.
-        send(conn.ws, {
-          type: 'wrapper_error',
-          sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: 'Only orchestrator sessions can be continued.',
-        });
-        return;
-      }
-      const row = getMultiAgentSession(msg.sessionId);
-      if (!row || row.awaiting_continue !== 1) {
-        // Already continued (or never a recovered session). Idempotent
-        // no-op so a double-click can't double-deliver the nudge.
-        return;
-      }
-      // [security] Register B05. This is the RECOVERY Continue (R-B: the
-      // session was rebuilt read-only after a restart). The pause-on-dangerous
-      // banner has its own Continue — `continue_through_mutation` — and the two
-      // used to be confusable: a mutation pause also set `awaiting_continue`,
-      // so both banners rendered and clicking this one cleared the recovery
-      // flag while leaving the pause in place. That silently disarmed the gate
-      // for the rest of the session AND stranded the paused worker.
-      //
-      // The pause no longer sets `awaiting_continue`, so the two states are
-      // disjoint on fresh pauses. They can still coexist legitimately: a pause
-      // that was live when Cebab restarted comes back alongside R-B's own
-      // `awaiting_continue`. Refuse rather than guess — resuming the session
-      // while a worker is held at a dangerous command is exactly the decision
-      // the operator has to make explicitly.
-      const heldMessage = describeHeldWorkers(msg.sessionId);
-      if (heldMessage) {
-        send(conn.ws, {
-          type: 'wrapper_error',
-          sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: heldMessage,
-        });
-        return;
-      }
-      // [security] R-B reconstruction rebuilds the runner with the widened
-      // bus `settingSources` but is READ-ONLY — it delivers nothing. This
-      // Continue is the moment a `query()` actually spawns, so it is where
-      // the spawn gates belong. They matter more here than at the original
-      // start: a server restart is exactly the window in which a
-      // participant's `.claude/settings*.json` can have gained an MCP server,
-      // a hook, or an `env:` key since the operator last approved anything.
-      //
-      // Runs BEFORE `setAwaitingContinue(false)` so a refused/unanswered gate
-      // leaves the session in its recovered state rather than half-continued.
-      try {
-        const continueDenials = await gateProjectsForSpawn(
-          conn,
-          listResolvedParticipants(msg.sessionId)
-            .filter((p) => p.role === 'worker')
-            .map((p) => p.project_id),
-          BUS_SETTING_SCOPES,
-        );
-        // H04: this session's specs already exist (R-B rebuilt them), so the
-        // denial is merged into them rather than passed at registration. It
-        // binds on the next turn — which is the one Continue is about to run.
-        for (const [projectId, serverNames] of continueDenials) {
-          active.applyMcpDenials(projectId, serverNames);
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
-        return;
-      }
-      try {
-        // Clear the flag BEFORE delivering so a racing second click sees
-        // awaiting_continue=0 and the guard above no-ops it.
-        setAwaitingContinue(msg.sessionId, false);
-        await active.sendUserPrompt(buildContinueNudge(msg.sessionId));
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
-      }
+      // Narrow once: `sendUserPrompt` and `applyMcpDenials` both live on the
+      // orchestrator handle only, and the helper's `sendUserPrompt: null` is
+      // how "this is a chain handle" reaches it.
+      const orch = active && 'sendUserPrompt' in active ? active : null;
+      await executeContinueMultiAgent({
+        sessionId: msg.sessionId,
+        activeSessionId: active?.sessionId ?? null,
+        sendUserPrompt: orch ? (text) => orch.sendUserPrompt(text) : null,
+        gateProjects: (projectIds) => gateProjectsForSpawn(conn, projectIds, BUS_SETTING_SCOPES),
+        applyMcpDenials: (projectId, serverNames) => {
+          orch?.applyMcpDenials(projectId, serverNames);
+        },
+        send: (m) => send(conn.ws, m),
+      });
       return;
     }
     case 'retry_worker': {
