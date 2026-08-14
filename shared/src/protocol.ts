@@ -1313,6 +1313,35 @@ export type ClientMsg =
     }
   | {
       /**
+       * Register H15 / W28: back out of a parked spawn gate without
+       * deciding it.
+       *
+       * All three gates park a promise the spawn is awaiting, and until
+       * this verb existed the client had nothing to send when the operator
+       * dismissed the modal — Escape, a backdrop click, and the env gate's
+       * own "Refuse & edit" button all just popped the queue head, leaving
+       * the spawn parked with no trace in the UI.
+       *
+       * **Cancel is NOT deny.** The handler routes to the same `abandon`
+       * path `ws.on('close')` uses, which REJECTS the parked promise rather
+       * than resolving it — deliberately, because `resolve` runs the
+       * decision-application path (see `server/src/gate_abandon.ts`). So the
+       * spawn does not proceed, no trust decision is recorded, and the
+       * project stays un-decided: exactly what closing a dialog means. The
+       * operator is asked again next time.
+       *
+       * `kind` selects which per-connection pending map to look in; the
+       * three states are structurally identical (`Map<string, { abandon }>`).
+       * An unknown `pendingId` is a logged no-op, matching
+       * `resolveBusTrustPending`'s stale-reply handling — a reconnect blows
+       * the map away, and a client retrying afterwards must not throw.
+       */
+      type: 'cancel_gate';
+      kind: 'mcp' | 'bus' | 'start';
+      pendingId: string;
+    }
+  | {
+      /**
        * Cluster D Phase 4 (spec §4.2, BE-D4): "Retry now" trigger for a
        * held single-agent turn that hit a rate-limit. The server
        * re-delivers the captured user message on the same SDK session

@@ -1,7 +1,20 @@
 import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
 
 export type WsHandle = {
-  send(msg: ClientMsg): void;
+  /**
+   * Register W29: returns whether the message actually went out.
+   *
+   * A socket that is CONNECTING, CLOSING or CLOSED silently swallowed it
+   * before — no return value, no log — while callers had already applied
+   * their optimistic state. The permission card is the case that hurts: it
+   * dispatched `permission_decided` so the buttons flip to "decided: …", then
+   * called this, so a decision made during a reconnect left the operator
+   * looking at "Allowed" while the agent stayed parked in `canUseTool`.
+   *
+   * Callers that carry an operator DECISION must check this and act only on
+   * `true`. Everything else at least gets the console line.
+   */
+  send(msg: ClientMsg): boolean;
   close(): void;
 };
 
@@ -87,7 +100,23 @@ export function connectWs(opts: {
   });
   return {
     send(msg) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      // A released handle reports failure rather than transmitting, for the
+      // same reason its listeners are silent: the caller has let go of this
+      // socket. Checked before `readyState` because a just-closed socket can
+      // still read OPEN for a tick.
+      if (released) {
+        console.error(`[ws] dropped ${msg.type}: handle released`);
+        return false;
+      }
+      if (ws.readyState !== WebSocket.OPEN) {
+        // Only the message TYPE is logged. Payloads carry session ids, typed
+        // acknowledgments and operator reason text; a dropped message is a
+        // diagnostic, not a place to spill them into the console.
+        console.error(`[ws] dropped ${msg.type}: socket not open (readyState=${ws.readyState})`);
+        return false;
+      }
+      ws.send(JSON.stringify(msg));
+      return true;
     },
     close() {
       released = true;

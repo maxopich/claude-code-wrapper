@@ -68,6 +68,7 @@ import {
   type TrustGateOutcome,
   type TrustGateState,
 } from '../repo/mcp_trust_gate.js';
+import { abandonOnePendingGate } from '../gate_abandon.js';
 import {
   abandonPendingStartGates,
   ACKNOWLEDGMENT_TRIGGER,
@@ -3769,6 +3770,84 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           `[bus_trust] decision for unknown pendingId=${msg.pendingId} (project=${msg.projectId}) — no-op`,
         );
       }
+      return;
+    }
+    case 'cancel_gate': {
+      // Register H15 / W28: the operator dismissed a gate modal instead of
+      // deciding it. Before this verb the client had nothing to send, so the
+      // spawn stayed parked until the socket dropped — including when they
+      // pressed the env gate's own "Refuse & edit" button.
+      //
+      // Routed to `abandonOnePendingGate`, i.e. the SAME reject-don't-resolve
+      // path `ws.on('close')` drains with. That is the whole answer to "does
+      // cancelling deny?": it does not. Nothing is written to
+      // `projects.bus_trust_decision`, no MCP hash is pinned, no env override
+      // is acknowledged. The spawn fails with `GateAbandonedError` and the
+      // operator is asked again next time.
+      //
+      // Dispatched with a switch rather than a lookup table so each call
+      // infers `abandonOnePendingGate`'s generic from ONE concrete entry
+      // type. A table would union the three maps, and `Map` is invariant in
+      // its value type, so the union is assignable to none of them.
+      const CANCEL_REASON = 'operator cancelled';
+      let gateName: string;
+      let matched: boolean;
+      switch (msg.kind) {
+        case 'mcp':
+          gateName = 'mcp-trust';
+          matched = abandonOnePendingGate(
+            conn.trustGate.pending,
+            gateName,
+            CANCEL_REASON,
+            msg.pendingId,
+          );
+          break;
+        case 'bus':
+          gateName = 'bus-trust';
+          matched = abandonOnePendingGate(
+            conn.busTrustGate.pending,
+            gateName,
+            CANCEL_REASON,
+            msg.pendingId,
+          );
+          break;
+        case 'start':
+          gateName = 'session-start';
+          matched = abandonOnePendingGate(
+            conn.startGate.pending,
+            gateName,
+            CANCEL_REASON,
+            msg.pendingId,
+          );
+          break;
+        default:
+          // The validator checks `kind` is a string, not which string. An
+          // unknown one is a client bug, not an attack surface — nothing is
+          // parked under it either way.
+          console.log(`[gate] cancel for unknown kind=${JSON.stringify(msg.kind)} — no-op`);
+          return;
+      }
+      if (!matched) {
+        // Same stale-reply contract as `bus_trust_decision` above: a
+        // reconnect empties the map, so an id the server has forgotten is
+        // expected traffic, not an error.
+        console.log(`[gate] cancel for unknown ${gateName} pendingId=${msg.pendingId} — no-op`);
+        return;
+      }
+      // The disconnect drain deliberately writes NO audit row — "nothing was
+      // decided and nothing was refused; the operator was asked and then
+      // left" (install_trust_gate.ts). Half of that still holds here: nothing
+      // was decided. The other half does not — the operator ACTED. "The
+      // socket dropped" and "they explicitly backed out of a security gate"
+      // are exactly the distinction a forensic walker needs, and it is
+      // invisible from the pending envelope alone.
+      appendSafetyAudit({
+        ts: Date.now(),
+        sessionId: null,
+        kind: 'gate.cancelled',
+        reasonCode: msg.kind,
+        payload: { pendingId: msg.pendingId, gate: gateName },
+      });
       return;
     }
     case 'acknowledge_and_start': {

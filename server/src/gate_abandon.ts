@@ -97,3 +97,40 @@ export function abandonPendingGates<T extends { abandon: (err: Error) => void }>
   }
   return released;
 }
+
+/**
+ * Register H15 / W28: reject ONE parked entry by id — the `cancel_gate`
+ * handler's path, where an operator dismissed the modal instead of deciding.
+ *
+ * Same semantics as the drain above, and for the same reason: `abandon` is the
+ * promise's `reject`, so the spawn does not proceed, no decision is applied,
+ * and the project stays un-decided. The difference is only the scope (one
+ * entry, not the map) and that a human chose it.
+ *
+ * Returns `false` when no entry matched, which is NOT an error — a reconnect
+ * empties the map, so a client cancelling after one is sending an id the
+ * server has legitimately forgotten. Same stale-reply contract as
+ * `resolveBusTrustPending`; the caller logs and moves on.
+ *
+ * Deletes before abandoning, matching the drain's ordering so a handler that
+ * reaches back into the map finds the entry already gone rather than racing.
+ */
+export function abandonOnePendingGate<T extends { abandon: (err: Error) => void }>(
+  pending: Map<string, T>,
+  gateName: string,
+  reason: string,
+  pendingId: string,
+): boolean {
+  const entry = pending.get(pendingId);
+  if (entry === undefined) return false;
+  pending.delete(pendingId);
+  try {
+    entry.abandon(new GateAbandonedError(gateName, reason));
+  } catch (err) {
+    // Swallowed for the same reason the drain swallows: a bad handler must not
+    // turn a cancel into a 500 on the socket. The entry is already gone, so
+    // the spawn is unparked either way.
+    console.error(`[gate] cancelling a parked ${gateName} entry threw`, err);
+  }
+  return true;
+}

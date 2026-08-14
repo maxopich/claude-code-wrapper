@@ -72,6 +72,7 @@ const SAMPLES: ClientMsg[] = [
   { type: 'mcp_trust_decision', serverName: 'm', originPath: '/p', decision: 'trust' },
   { type: 'bus_trust_decision', pendingId: 'p', projectId: 1, decision: 'trust' },
   { type: 'acknowledge_and_start', pendingStartId: 'p', typedAcknowledgment: 'inject' },
+  { type: 'cancel_gate', kind: 'mcp', pendingId: 'p' },
   { type: 'retry_rate_limited', sessionId: 's' },
   { type: 'start_auth_refresh' },
   { type: 'cancel_auth_refresh', runId: 'r' },

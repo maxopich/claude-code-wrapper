@@ -55,7 +55,14 @@ function mkPending(
 describe('BusTofuModal — render + buttons', () => {
   test('renders exactly three decision buttons (no Trust & pin)', () => {
     act(() => {
-      root.render(<BusTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <BusTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
     });
     const buttons = container.querySelectorAll('.gate-modal-buttons button');
     const labels = Array.from(buttons).map((b) => b.textContent?.trim());
@@ -65,7 +72,14 @@ describe('BusTofuModal — render + buttons', () => {
 
   test('title reads "Trust this bus install?"', () => {
     act(() => {
-      root.render(<BusTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <BusTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
     });
     expect(container.querySelector('.gate-modal-title')?.textContent).toBe(
       'Trust this bus install?',
@@ -74,7 +88,14 @@ describe('BusTofuModal — render + buttons', () => {
 
   test('reason chip reads "first seen"', () => {
     act(() => {
-      root.render(<BusTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <BusTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
     });
     expect(container.querySelector('.gate-modal-reason')?.textContent).toBe('first seen');
   });
@@ -84,8 +105,9 @@ describe('BusTofuModal — render + buttons', () => {
       root.render(
         <BusTofuModal
           pending={mkPending({ projectName: 'Echo', agentName: 'echo-7' })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -101,8 +123,9 @@ describe('BusTofuModal — render + buttons', () => {
       root.render(
         <BusTofuModal
           pending={mkPending({ contextSessionId: null })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -117,8 +140,9 @@ describe('BusTofuModal — render + buttons', () => {
       root.render(
         <BusTofuModal
           pending={mkPending({ contextSessionId: 'ma-session-9' })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -152,8 +176,12 @@ describe('BusTofuModal — decision ClientMsg dispatch', () => {
       root.render(
         <BusTofuModal
           pending={mkPending({ pendingId: 'bp-9', projectId: 17 })}
-          send={(m) => sent.push(m)}
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
           onClose={onClose}
+          onCancel={() => {}}
         />,
       );
     });
@@ -175,8 +203,12 @@ describe('BusTofuModal — decision ClientMsg dispatch', () => {
       root.render(
         <BusTofuModal
           pending={mkPending({ pendingId: 'bp-1', projectId: 3 })}
-          send={(m) => sent.push(m)}
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
           onClose={onClose}
+          onCancel={() => {}}
         />,
       );
     });
@@ -198,8 +230,12 @@ describe('BusTofuModal — decision ClientMsg dispatch', () => {
       root.render(
         <BusTofuModal
           pending={mkPending({ pendingId: 'bp-2', projectId: 99 })}
-          send={(m) => sent.push(m)}
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
           onClose={onClose}
+          onCancel={() => {}}
         />,
       );
     });
@@ -218,7 +254,14 @@ describe('BusTofuModal — decision ClientMsg dispatch', () => {
 describe('BusTofuModal — focus + a11y', () => {
   test('default focus lands on Deny once (destructive-modal pattern)', () => {
     act(() => {
-      root.render(<BusTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <BusTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
     });
     const denyOnce = Array.from(
       container.querySelectorAll<HTMLButtonElement>('.gate-modal-buttons button'),
@@ -231,8 +274,9 @@ describe('BusTofuModal — focus + a11y', () => {
       root.render(
         <BusTofuModal
           pending={mkPending({ pendingId: 'bp-x' })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -246,18 +290,40 @@ describe('BusTofuModal — focus + a11y', () => {
 });
 
 describe('BusTofuModal — Esc / backdrop close', () => {
-  test('Esc invokes onClose without firing a decision', () => {
+  // Register W28. This case used to read "Esc invokes onClose without firing a
+  // decision" and assert `sent` was empty — it pinned the defect. Escape left
+  // `installBusForProject` parked on its promise with nothing to un-park it,
+  // and the only escape was dropping the socket.
+  //
+  // Esc still fires no DECISION — that part was always right and is asserted
+  // below. What changed is that it now routes to `onCancel`, whose job is to
+  // tell the server.
+  test('Esc invokes onCancel, not onClose, and fires no decision', () => {
     const sent: ClientMsg[] = [];
     const onClose = vi.fn();
+    const onCancel = vi.fn();
     act(() => {
       root.render(
-        <BusTofuModal pending={mkPending()} send={(m) => sent.push(m)} onClose={onClose} />,
+        <BusTofuModal
+          pending={mkPending()}
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
+          onClose={onClose}
+          onCancel={onCancel}
+        />,
       );
     });
     act(() => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    // Not `onClose`: that one pops the queue silently and is for the
+    // after-a-decision path. Routing Esc there is the bug.
+    expect(onClose).not.toHaveBeenCalled();
+    // The modal itself sends no `bus_trust_decision`; the cancel envelope is
+    // the host's job (see GateModalsContext.test.tsx).
     expect(sent).toHaveLength(0);
   });
 });
