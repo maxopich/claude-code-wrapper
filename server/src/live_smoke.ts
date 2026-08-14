@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { sawNonce } from './smoke_assertions.js';
 
 // F4: per-launch auth token. See ws_smoke.ts for the same setup.
 const tokenPath = process.env.CEBAB_AUTH_TOKEN_FILE ?? path.join(os.homedir(), '.cebab/auth-token');
@@ -22,6 +23,24 @@ let sessionId: string | undefined;
 let phase: 'first' | 'second' | 'done' = 'first';
 let approvals = 0;
 let lastResultText = '';
+
+/**
+ * Register S11: the nonce the resume check is actually about.
+ *
+ * WHAT WAS WRONG. The first turn asked the agent to `echo cebab-live-test-$$`
+ * and the summary then compared the answer against `String(process.pid)` —
+ * this script's pid, while `$$` expands inside the agent's OWN bash. The two
+ * were never going to match. The fallback `/\d+/.test(...)` then matched any
+ * digit anywhere, and the follow-up prompt literally asks for a number, so
+ * essentially every answer "passed". And both branches fell through to the
+ * same `process.exit(0)`, so the resume check could not fail AT ALL — it
+ * printed PARTIAL and exited green.
+ *
+ * A value this script generates is the only thing it can legitimately assert
+ * on. Six digits with a fixed prefix: long enough not to appear by accident in
+ * a sentence, short enough for a model to echo back without mangling.
+ */
+const NONCE = `cebab-live-${Math.floor(100000 + Math.random() * 900000)}`;
 
 function send(msg: unknown) {
   console.log('>>>', JSON.stringify(msg).slice(0, 120));
@@ -64,7 +83,10 @@ ws.on('message', (raw) => {
       send({
         type: 'send_message',
         projectId,
-        text: 'Use the Bash tool to run `echo cebab-live-test-$$`. Reply with exactly one short sentence.',
+        // The nonce is a literal in the prompt, NOT `$$` — the shell's `$$`
+        // expands in the agent's bash to a pid this script never learns, which
+        // is what made the old comparison meaningless.
+        text: `Use the Bash tool to run \`echo ${NONCE}\`. Reply with exactly one short sentence.`,
       });
     }
   } else if (msg.type === 'session_started') {
@@ -91,7 +113,7 @@ ws.on('message', (raw) => {
           type: 'send_message',
           projectId,
           sessionId,
-          text: 'What number did the bash command print? Answer with just the number, nothing else.',
+          text: 'What exact string did the bash command print? Answer with just that string, nothing else.',
         });
       }, 500);
     } else {
@@ -100,16 +122,20 @@ ws.on('message', (raw) => {
       console.log('=== summary ===');
       console.log(`approvals: ${approvals}`);
       console.log(`final result: ${JSON.stringify(lastResultText)}`);
-      const pid = process.pid;
-      const expected = String(pid);
-      if (lastResultText.includes(expected) || /\d+/.test(lastResultText)) {
-        console.log('[live] PASS — follow-up message saw context from first turn');
+      const resumed = sawNonce(lastResultText, NONCE);
+      if (resumed) {
+        console.log(`[live] PASS — follow-up echoed the nonce ${NONCE} from the first turn`);
       } else {
-        console.log('[live] PARTIAL — follow-up answered but did not include expected number');
+        console.error(`[live] FAIL — follow-up did not carry the first turn's nonce`);
+        console.error(`  expected to contain: ${JSON.stringify(NONCE)}`);
+        console.error(`  actual:              ${JSON.stringify(lastResultText)}`);
       }
+      // Register S11: this used to be an unconditional exit(0), so the branch
+      // above was console decoration. Nobody reads the console of a script
+      // whose exit code is always green.
       setTimeout(() => {
         ws.close();
-        process.exit(0);
+        process.exit(resumed ? 0 : 1);
       }, 200);
     }
   } else if (msg.type === 'wrapper_error') {
