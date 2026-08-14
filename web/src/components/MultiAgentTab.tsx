@@ -1734,6 +1734,18 @@ export function ActiveRunView(props: {
   // slot; if it's ever absent the panel falls back to rendering inline, so the
   // relocation can never break the run view.
   const [inspSlot, setInspSlot] = useState<HTMLElement | null>(null);
+  // Cebab-1uk: no dependency array, so this re-resolves the portal target
+  // after EVERY render. That is deliberate as far as it goes — the slot is
+  // rendered by a sibling that can mount and unmount, and a stale target
+  // silently breaks the relocation. It does not loop: `setInspSlot` with the
+  // same element hits React's Object.is bail-out.
+  //
+  // Left as-is rather than taking the rule's suggestion of `[]`: mounting once
+  // would drop the target whenever the inspector remounts, and proving which
+  // of the two is correct needs the sibling's lifecycle, which is not this
+  // PR's subject — tracked in Cebab-fsn. The disable records the omission; it
+  // is not an endorsement.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     setInspSlot(document.getElementById('inspector-multi-slot'));
   });

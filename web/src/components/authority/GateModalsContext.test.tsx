@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { act, useEffect, useRef } from 'react';
+import { act, useEffect } from 'react';
 import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
 import { GateModalsProvider, useGateModalsActions, useGateModalsState } from './GateModalsContext';
 
@@ -489,5 +489,3 @@ type _AssertActionsRef = React.MutableRefObject<ReturnType<typeof useGateModalsA
 type _AssertStateRef = React.MutableRefObject<ReturnType<typeof useGateModalsState> | null>;
 const _assertRefs = (a: _AssertActionsRef, s: _AssertStateRef) => [a, s];
 void _assertRefs;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _useRefUsage = () => useRef(null);

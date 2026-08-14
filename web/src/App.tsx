@@ -636,6 +636,15 @@ function AppShell({
   // directly (they don't repopulate the WS handle); the counter is
   // the cleanest "trigger this side-effect again" signal.
   const [wsRetryNonce, setWsRetryNonce] = useState(0);
+  // Cebab-1uk: hoisted out of the JSX. As an inline arrow this was a new
+  // identity on every AppShell render, and ConnectionLostOverlay's auto-retry
+  // effect lists `onRetry` in its dependencies — so the retry timeout was torn
+  // down and recreated on every render. Self-correcting (the effect recomputes
+  // the REMAINING delay, so the countdown did not restart), which is why it
+  // was churn rather than a bug — and why `exhaustive-deps` cannot see it: the
+  // dependency IS listed, it is just never equal. The linter has no opinion on
+  // stability, so this one still has to be found by reading.
+  const retryWs = useCallback(() => setWsRetryNonce((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -875,7 +884,27 @@ function AppShell({
     // the nonce in the deps array also makes the auto-retry timer's
     // `onRetry` callback trigger a real reconnect path rather than
     // closing over a stale effect closure.
-  }, [wsRef, notifPushRef, notifDismissRef, wsRetryNonce]);
+    //
+    // Cebab-1uk: the ref entries are listed for exhaustive-deps, which cannot
+    // prove they are stable — they arrive as PROPS of AppShell, so the rule
+    // sees plain values rather than the `useRef` results they are. Listing
+    // them costs nothing at runtime (a ref object's identity never changes)
+    // and the alternative was a suppression on the repo's single most
+    // important effect. `wsRetryNonce` is the only entry that actually varies.
+  }, [
+    wsRef,
+    notifPushRef,
+    notifDismissRef,
+    authTokenRef,
+    authorityHandlerRef,
+    authRefreshHandlerRef,
+    forensicViewerHandlerRef,
+    gateHandlerRef,
+    inboxHandlerRef,
+    recoveryLogHandlerRef,
+    reopenHandlerRef,
+    wsRetryNonce,
+  ]);
 
   // First-run UX: open the settings modal automatically when we learn the
   // workspace path is unset / invalid.
@@ -883,6 +912,14 @@ function AppShell({
     if (state.settings && !state.settings.workspaceRootValid) {
       setSettingsOpen(true);
     }
+    // Cebab-1uk: the narrow dependency is deliberate and behaviourally
+    // complete. The body reads `state.settings` only as a null guard, and
+    // every transition that matters also changes the optional-chained value —
+    // `undefined` ⇄ `false` ⇄ `true`. Depending on the object instead would
+    // re-run on every settings reply that changed nothing, which is the exact
+    // identity-churn class PR #322 removed. The rule cannot express "this
+    // field, plus its presence", so the omission is stated here instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.settings?.workspaceRootValid]);
 
   function selectProject(projectId: number) {
@@ -1280,7 +1317,9 @@ function AppShell({
           }),
       });
     },
-    [],
+    // Cebab-1uk: refs only — they are AppShell props, so exhaustive-deps
+    // cannot see the `useRef` behind them. Identity never changes.
+    [notifPushRef, wsRef],
   );
 
   const skipStopReason = useCallback((sessionId: string) => {
@@ -1396,10 +1435,13 @@ function AppShell({
   // one file. `triggerRetry` is shared between manual + auto fire — the
   // `auto` flag is the only difference, and it tags the recovery_log
   // row server-side (`'manual_retry'` vs `'auto_retry'`, spec §8.5).
-  const triggerRateLimitRetry = useCallback((sessionId: string, auto: boolean) => {
-    dispatch({ type: 'rl_retry_sent', sessionId });
-    wsRef.current?.send({ type: 'retry_rate_limited', sessionId, auto });
-  }, []);
+  const triggerRateLimitRetry = useCallback(
+    (sessionId: string, auto: boolean) => {
+      dispatch({ type: 'rl_retry_sent', sessionId });
+      wsRef.current?.send({ type: 'retry_rate_limited', sessionId, auto });
+    },
+    [wsRef],
+  );
   const setRateLimitPaused = useCallback((sessionId: string, paused: boolean) => {
     dispatch({ type: 'rl_set_paused', sessionId, paused });
   }, []);
@@ -1446,6 +1488,8 @@ function AppShell({
     session?.heldMessages,
     session?.status,
     state.liveSessions,
+    // Cebab-1uk: an AppShell prop, so the rule cannot see the useRef.
+    wsRef,
   ]);
 
   function decidePermission(requestId: string, decision: 'allow' | 'deny') {
@@ -2003,9 +2047,13 @@ function AppShell({
   function dismissActiveRun() {
     dispatch({ type: 'ma_dismiss_active' });
   }
-  function refreshIterations() {
+  // Cebab-1uk: memoised because two lazy-load effects below depend on them.
+  // As plain function declarations they were a fresh identity every render, so
+  // listing them (which exhaustive-deps asks for) would have re-fired those
+  // effects on every render. `wsRef` is stable, so `[wsRef]` never changes.
+  const refreshIterations = useCallback(() => {
     wsRef.current?.send({ type: 'list_iterations' });
-  }
+  }, [wsRef]);
   function clearIterations() {
     // Server-side: deletes every multi_agent_sessions row whose status is
     // not 'running', along with its events and participants, then re-sends
@@ -2014,9 +2062,10 @@ function AppShell({
     // consistent with the DB even if the WS round-trip fails.
     wsRef.current?.send({ type: 'clear_iterations' });
   }
-  function refreshTemplates() {
+  // Cebab-1uk: memoised for the same reason as `refreshIterations` above.
+  const refreshTemplates = useCallback(() => {
     wsRef.current?.send({ type: 'list_templates' });
-  }
+  }, [wsRef]);
   function saveTemplate(name: string, mode: 'chain' | 'orchestrator') {
     const { draftLifecycle, draftParticipants } = state.multiAgent;
     // Mode comes from the active tab (passed down), not draft state. Per-agent
@@ -2108,14 +2157,17 @@ function AppShell({
   // W10: `useCallback([])` for the same reason as `subscribeServerMsg` above —
   // TemplatesPanel's subscription effect depends on it, and narrowing that
   // effect off `[props]` only helps if this identity is stable.
-  const readLastRunForTemplate = useCallback((templateId: string) => {
-    // PR-7: WS round-trip for the templates UI's "Last run" rail. The reply
-    // (`last_run_for_template`) lives outside Redux; the templates panel
-    // owns a per-template cache keyed on templateId and refreshes on
-    // `multi_agent_ended` for a matching templateId (same side-channel
-    // pattern as project_facts above).
-    wsRef.current?.send({ type: 'get_last_run_for_template', templateId });
-  }, []);
+  const readLastRunForTemplate = useCallback(
+    (templateId: string) => {
+      // PR-7: WS round-trip for the templates UI's "Last run" rail. The reply
+      // (`last_run_for_template`) lives outside Redux; the templates panel
+      // owns a per-template cache keyed on templateId and refreshes on
+      // `multi_agent_ended` for a matching templateId (same side-channel
+      // pattern as project_facts above).
+      wsRef.current?.send({ type: 'get_last_run_for_template', templateId });
+    },
+    [wsRef],
+  );
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
   // refresh after each `multi_agent_ended` so a just-finished run appears
@@ -2132,14 +2184,16 @@ function AppShell({
     if (onMultiTab && !templatesLoaded) {
       refreshTemplates();
     }
-  }, [maView, iterationsLoaded, templatesLoaded]);
+    // Cebab-1uk: both senders are `useCallback`d on `[wsRef]`, so listing them
+    // adds no re-runs — the guards above still decide when work happens.
+  }, [maView, iterationsLoaded, templatesLoaded, refreshIterations, refreshTemplates]);
   useEffect(() => {
     // status flips from 'running' → terminal exactly once per session.
     // Refresh so the iteration browser picks up the just-ended row.
     if (activeStatus && activeStatus !== 'running') {
       refreshIterations();
     }
-  }, [activeStatus]);
+  }, [activeStatus, refreshIterations]);
 
   const running = session?.status === 'running';
   const workspaceReady = state.settings?.workspaceRootValid ?? false;
@@ -2662,7 +2716,7 @@ function AppShell({
       <ConnectionLostOverlay
         view={state.connectionLost}
         onDismiss={() => dispatch({ type: 'connection_lost_dismissed' })}
-        onRetry={() => setWsRetryNonce((n) => n + 1)}
+        onRetry={retryWs}
       />
     </div>
   );
