@@ -120,7 +120,11 @@ describe('checkAppliedMigrationHashes', () => {
   const ORIGINAL = 'CREATE TABLE widget (id INTEGER PRIMARY KEY);';
 
   function scratchDir(): string {
-    return fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'cebab-ledger-'));
+    // `os.tmpdir()`, not `process.env.TMPDIR`: TMPDIR is POSIX-only, so on
+    // Windows this fell back to `/tmp` — a path that does not exist there —
+    // and every case using it threw. Caught by CI on windows-2022 while
+    // ubuntu stayed green.
+    return fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-ledger-'));
   }
 
   test('an untouched ledger reports nothing', () => {
