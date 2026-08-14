@@ -64,12 +64,23 @@ export function ConnectionLostOverlay({ view, onDismiss, onRetry }: ConnectionLo
   // unmount-then-mount). Using `view?.diagnostic.ts` would be wrong
   // for `auth_token_invalid` (the same ts could re-arrive after a
   // user-initiated retry).
+  //
+  // W07: keyed on `view.reason`, NOT on the `view` object. The store's
+  // `connection_lost` case always stores a fresh literal, and the
+  // `/auth-token` non-OK branch in App.tsx dispatches unguarded (unlike the
+  // fetch-threw branch, which checks the existing slice first). So against a
+  // 502/504 — which `resolveFromAuthTokenResponse` maps to
+  // `server_unreachable` — a new object arrived on every attempt, reset the
+  // counter, and pinned the 2/4/8/15/30s ladder at 2s while the server was
+  // already struggling. Keying on the reason means a repeat of the SAME
+  // failure keeps the ladder climbing, a genuinely different failure resets
+  // it, and dismiss-then-fail resets too (the dep passes through undefined).
   const startedAtRef = useRef<number>(Date.now());
   useEffect(() => {
     if (!view) return;
     startedAtRef.current = Date.now();
     setAttempt(0);
-  }, [view]);
+  }, [view?.reason]);
 
   // Esc dismisses. Bound only while the overlay is mounted so it
   // doesn't swallow Esc in unrelated views.

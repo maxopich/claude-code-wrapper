@@ -1824,14 +1824,21 @@ function AppShell({
       ...(scope !== undefined ? { scope } : {}),
     });
   }
-  function subscribeServerMsg(cb: (msg: ServerMsg) => void): () => void {
+  // W10: `useCallback([])`, not a plain `function`. Every consumer of this
+  // seam puts it in an effect dependency array (useLogStream, TemplatesPanel,
+  // SessionSearchModal, ArtifactContentContext's memo). A new identity per
+  // App render — and App renders on every WS message — meant each of those
+  // unsubscribed and resubscribed constantly, and defeated the memo outright.
+  // Only refs are touched here, so `[]` is exactly right; same shape as
+  // `handleAck` / `inboxSend` / `gateSend` above.
+  const subscribeServerMsg = useCallback((cb: (msg: ServerMsg) => void): (() => void) => {
     // Phase H side-channel subscription. Returns the unsubscribe fn so
     // useEffect cleanups can remove their listener on unmount.
     msgSubscribersRef.current.add(cb);
     return () => {
       msgSubscribersRef.current.delete(cb);
     };
-  }
+  }, []);
   function readProjectFacts(projectId: number) {
     // PR-6: WS round-trip for the per-participant facts disclosure inside
     // the template-preview modal. The matching `project_facts` reply lives
@@ -1840,14 +1847,17 @@ function AppShell({
     // on-disk state).
     wsRef.current?.send({ type: 'read_project_facts', projectId });
   }
-  function readLastRunForTemplate(templateId: string) {
+  // W10: `useCallback([])` for the same reason as `subscribeServerMsg` above —
+  // TemplatesPanel's subscription effect depends on it, and narrowing that
+  // effect off `[props]` only helps if this identity is stable.
+  const readLastRunForTemplate = useCallback((templateId: string) => {
     // PR-7: WS round-trip for the templates UI's "Last run" rail. The reply
     // (`last_run_for_template`) lives outside Redux; the templates panel
     // owns a per-template cache keyed on templateId and refreshes on
     // `multi_agent_ended` for a matching templateId (same side-channel
     // pattern as project_facts above).
     wsRef.current?.send({ type: 'get_last_run_for_template', templateId });
-  }
+  }, []);
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
   // refresh after each `multi_agent_ended` so a just-finished run appears
