@@ -41,28 +41,46 @@ export const CEBAB_SOURCE = 'cebab';
  */
 export type MultiAgentEndedReason = 'completed' | 'stopped' | 'crashed';
 
-/** Hard cap (codepoints) on injected project-CLAUDE.md size. A real root
- *  CLAUDE.md is far smaller; the cap bounds context cost and stops an
- *  adversarially/generated-huge file from dominating a bus agent's turn. */
-export const MAX_PROJECT_CLAUDE_MD = 16_000;
-
 /**
- * Register H11: hard cap (BYTES) on how much of a project's CLAUDE.md is ever
- * pulled into memory. The codepoint caps above and below bound *context cost*;
- * they did nothing for memory, because both readers used to read the whole
- * file and cap the resulting string. A participant project with a
- * multi-gigabyte CLAUDE.md exhausted the server before either cap ran — on the
- * first turn of every bus participant.
+ * Register H11: the ONE hard cap on an injected project CLAUDE.md — bytes
+ * read into memory. A participant project with a multi-gigabyte CLAUDE.md
+ * exhausted the server before any codepoint cap ran, on the first turn of
+ * every bus participant, because the reader used to read the whole file and
+ * cap the resulting string. This is the memory guard and it does not move.
  *
- * 64 KiB is chosen so the codepoint caps stay the ONLY thing that decides what
- * gets injected. UTF-8 encodes a codepoint in at most 4 bytes, so 65,536 bytes
- * always yields at least 16,384 characters — more than `MAX_PROJECT_CLAUDE_MD`
- * — and 32× the head reader's 2 KiB cap. Every file the old code would have
- * injected, this one injects byte-identically.
+ * The one input that behaves differently from an unbounded read: a file whose
+ * first 64 KiB is nothing but whitespace trims to empty and reads as "no
+ * CLAUDE.md". Preferring that to an unbounded read is the whole point.
  *
- * The one input that behaves differently: a file whose first 64 KiB is nothing
- * but whitespace now trims to empty and reads as "no CLAUDE.md". Preferring
- * that to an unbounded read is the whole point.
+ * THERE USED TO BE A SECOND CAP — `MAX_PROJECT_CLAUDE_MD`, 16,000 codepoints,
+ * applied after this one — and removing it is a deliberate change worth its
+ * reasons, because it looked like a safety control and was not one.
+ *
+ * It could not do the job its comment claimed ("stops an adversarially or
+ * generated-huge file from dominating a bus agent's turn"). Every project this
+ * function injects for — orchestrator workers and chain participants alike —
+ * runs `settingSources: ['user', 'project', 'local']`, so **the SDK already
+ * auto-loads that same CLAUDE.md into the model's context**. Truncating our
+ * copy never kept a byte away from the model. It only cut Cebab's own record
+ * of what the model was told, which is the exact thing this injection exists
+ * to produce (see `readProjectClaudeMd`'s header). The cap was working against
+ * its own function's purpose.
+ *
+ * It was also live, not theoretical: Cebab's own CLAUDE.md passed 16,000
+ * characters and was silently cut whenever the Cebab project ran as a bus
+ * participant. Truncation takes the END of a file, which is where this repo
+ * keeps its traps — the auth-precedence note that stops a stray
+ * `ANTHROPIC_API_KEY` routing to paid billing was among the casualties. The
+ * marker went into a prompt; nothing told the operator.
+ *
+ * WHAT IS GENUINELY LOST, stated plainly rather than waved away: the injection
+ * duplicates content the SDK also loads, so its token cost is now bounded only
+ * by the 64 KiB above rather than by 16,000 characters. A large participant
+ * CLAUDE.md is therefore paid for twice, in full. That is a context-cost
+ * problem, and a cost control that truncates the transcript is the wrong shape
+ * for it — where one belongs (warn the operator? skip the duplicate when the
+ * SDK is known to have loaded it?) is `Cebab-luj`, which says to measure the
+ * real distribution of participant CLAUDE.md sizes before building anything.
  */
 export const MAX_PROJECT_CLAUDE_MD_BYTES = 64 * 1024;
 
@@ -121,23 +139,19 @@ export function readProjectClaudeMd(projectPath: string): ProjectRules | null {
   const trimmed = read.text.trim();
   if (trimmed.length === 0) return null;
 
-  let body = trimmed;
-  const charCapHit = body.length > MAX_PROJECT_CLAUDE_MD;
-  if (charCapHit) body = body.slice(0, MAX_PROJECT_CLAUDE_MD);
-  // Two caps can now cut the body, and the marker must say which one did:
-  // the codepoint cap normally, the byte cap only for a file so padded that
-  // 64 KiB of it trims to under 16,000 characters.
-  const truncated = charCapHit || read.truncated;
-  const marker = charCapHit
-    ? `\n\n[…truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD} chars…]`
-    : `\n\n[…truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD_BYTES} bytes…]`;
+  // One cap decides now: the bounded read above. Whatever came back is what
+  // gets injected, so the transcript matches what the SDK loaded rather than a
+  // shortened copy of it. See MAX_PROJECT_CLAUDE_MD_BYTES for why the second,
+  // codepoint cap went away.
+  const truncated = read.truncated;
+  const marker = `\n\n[…truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD_BYTES} bytes…]`;
   // Defang ONLY the structural breakouts (a literal delimiter inside the
   // file): insert a zero-width space so the file's own copy can't close our
   // block, while every other byte stays verbatim so the conventions survive
   // intact. Shared with the relayed-message fence — a hostile CLAUDE.md wants
   // to forge exactly the same delimiters a hostile bus message does, and one
   // implementation means the two cannot drift apart.
-  body = defangBusDelimiters(body);
+  const body = defangBusDelimiters(trimmed);
 
   // The FULL on-disk size, not the number of bytes we read — once the read is
   // a prefix, reporting what we read would understate every truncated file.
