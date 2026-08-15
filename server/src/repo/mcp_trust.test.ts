@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,7 +7,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { closeDb, getDb } from '../db.js';
 import { config } from '../config.js';
 import { _resetOperatorIdCache } from '../notifications/operator.js';
-import { checkTrust, computeBinarySha, listForServer, recordTrustDecision } from './mcp_trust.js';
+import {
+  checkTrust,
+  computeBinarySha,
+  firstDecisionTs,
+  listForServer,
+  recordTrustDecision,
+} from './mcp_trust.js';
 import * as safetyAudit from '../notifications/safety_audit.js';
 
 // Cluster B Phase 4 (§4.4): TOFU repository tests cover:
@@ -102,10 +109,9 @@ describe('recordTrustDecision — dual-write contract', () => {
       decision: 'trusted_pinned_hash',
     });
     const audit = getDb()
-      .prepare<
-        [],
-        { kind: string; reason_code: string; payload_json: string }
-      >(`SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'mcp.trust_decided'`)
+      .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
+        `SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'mcp.trust_decided'`,
+      )
       .all();
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({
@@ -178,10 +184,15 @@ describe('recordTrustDecision — dual-write contract', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].decision).toBe('denied_remember');
     const audits = getDb()
-      .prepare<
-        [],
-        { reason_code: string }
-      >(`SELECT reason_code FROM safety_audit WHERE kind = 'mcp.trust_decided' ORDER BY ts`)
+      .prepare<[], { reason_code: string }>(
+        // `ORDER BY rowid`, not `ORDER BY ts`. Two decisions land in the same
+        // millisecond often enough that this assertion was a coin flip:
+        // `safety_audit.id` is a `randomUUID()`, so ties broke at random and a
+        // reversed pair failed the deepEqual. Caught by a revert-check that
+        // reddened this case while patching something unrelated — it fails
+        // roughly half the time on unmodified code. `rowid` is insertion order.
+        `SELECT reason_code FROM safety_audit WHERE kind = 'mcp.trust_decided' ORDER BY rowid`,
+      )
       .all();
     expect(audits.map((a) => a.reason_code)).toEqual(['trusted', 'denied_remember']);
   });
@@ -202,6 +213,86 @@ describe('recordTrustDecision — dual-write contract', () => {
     const rows = listForServer('svr', '/p/settings.json');
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.binary_sha).sort()).toEqual(['sha-v1', 'sha-v2']);
+  });
+
+  // Register D09. The case above this one asserts the overwrite guarantee and
+  // passes `binarySha: 'sha-1'` — the assertion is right, and the fixture picks
+  // the one value where the bug cannot happen. SQLite treats NULLs as distinct
+  // in a UNIQUE index, so at a NULL sha the conflict never fired and every
+  // decision appended a row.
+  //
+  // NULL is not an exotic input here: it is what `computeBinarySha` returns for
+  // `npx <name>` and every other unresolvable target, which is the documented
+  // reason the column is nullable at all.
+  test('[security] the same triple at a NULL sha also overwrites — it does not append', () => {
+    recordTrustDecision({
+      serverName: 'npx-svr',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'trusted',
+    });
+    recordTrustDecision({
+      serverName: 'npx-svr',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'denied_remember',
+    });
+    const rows = listForServer('npx-svr', '/p/settings.json');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].decision).toBe('denied_remember');
+    // Same contract as the non-null case: one lookup row, every decision in
+    // the chain.
+    const audits = getDb()
+      .prepare<[], { reason_code: string }>(
+        // `ORDER BY rowid`, not `ORDER BY ts` — see the note on the non-null
+        // twin of this assertion above.
+        `SELECT reason_code FROM safety_audit WHERE kind = 'mcp.trust_decided' ORDER BY rowid`,
+      )
+      .all();
+    expect(audits.map((a) => a.reason_code)).toEqual(['trusted', 'denied_remember']);
+  });
+
+  test('a NULL-sha row and a real-sha row for the same server still coexist', () => {
+    // The control for the case above: 033's index is PARTIAL. A plain unique
+    // index on (server_name, origin_path) would pass that test and destroy the
+    // design — a server is allowed one decision per distinct binary.
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'trusted',
+    });
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-real',
+      decision: 'denied_remember',
+    });
+    const rows = listForServer('svr', '/p/settings.json');
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.binary_sha).sort()).toEqual([null, 'sha-real']);
+  });
+
+  test('[security] a NULL-sha mind-change is what checkTrust reports', () => {
+    // The operator-visible half. Before 033 both rows survived and the answer
+    // came from `ORDER BY ts DESC` alone — correct only as long as the two
+    // decisions landed in different milliseconds.
+    recordTrustDecision({
+      serverName: 'npx-svr',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'denied_remember',
+    });
+    expect(checkTrust('npx-svr', '/p/settings.json', null)).toEqual({
+      decision: 'denied_remember',
+    });
+    recordTrustDecision({
+      serverName: 'npx-svr',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'trusted',
+    });
+    expect(checkTrust('npx-svr', '/p/settings.json', null)).toEqual({ decision: 'trusted' });
   });
 });
 
@@ -257,7 +348,15 @@ describe('checkTrust — spec §4.4 decision table', () => {
     });
   });
 
-  test('denied_remember always wins regardless of sha (no future spawn)', () => {
+  // Register D08 [security]. This test's NAME was the contract — "regardless
+  // of sha" — but it only ever probed `sha-1`, the very sha it recorded, so it
+  // exercised the exact-match branch and never the rule it claimed to cover.
+  // The exact lookup filters on `binary_sha = ?`, so a denial recorded against
+  // a different binary was invisible: the server fell through to `first_seen`
+  // and the operator was re-prompted about something they had already denied —
+  // and handed a fresh chance to approve it. The module header (line 16) has
+  // always documented `denied_remember (any sha) → silent refusal`.
+  test('[security] denied_remember wins at the sha it was recorded at', () => {
     recordTrustDecision({
       serverName: 'svr',
       originPath: '/p/settings.json',
@@ -265,6 +364,85 @@ describe('checkTrust — spec §4.4 decision table', () => {
       decision: 'denied_remember',
     });
     expect(checkTrust('svr', '/p/settings.json', 'sha-1')).toEqual({ decision: 'denied_remember' });
+  });
+
+  test('[security] denied_remember wins at a DIFFERENT sha — the upgraded binary', () => {
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    // The denied server ships a new build. Re-prompting here is the bug: the
+    // operator already said no, and a rebuild is not a reason to ask again.
+    expect(checkTrust('svr', '/p/settings.json', 'sha-2')).toEqual({
+      decision: 'denied_remember',
+    });
+  });
+
+  test('[security] denied_remember wins when the new binary is unresolvable', () => {
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    expect(checkTrust('svr', '/p/settings.json', null)).toEqual({ decision: 'denied_remember' });
+  });
+
+  test('[security] a denial outranks an older pin on the same server', () => {
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'pinned-sha',
+      decision: 'trusted_pinned_hash',
+    });
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'bad-sha',
+      decision: 'denied_remember',
+    });
+    // Without the ordering this returns `hash_changed` and prompts, which
+    // offers an approve button for a server whose latest verdict was "no".
+    expect(checkTrust('svr', '/p/settings.json', 'third-sha')).toEqual({
+      decision: 'denied_remember',
+    });
+  });
+
+  test('an operator who changes their mind is not trapped by an old denial', () => {
+    // The reason the probe is scoped to the operator's MOST RECENT decision
+    // rather than "any denial ever". `INSERT OR REPLACE` is keyed per sha, so
+    // rows at different shas coexist; an unconditional probe would mean that
+    // denying one build poisons the server permanently and no later build
+    // could ever be approved.
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-2',
+      decision: 'trusted',
+    });
+    expect(checkTrust('svr', '/p/settings.json', 'sha-2')).toEqual({ decision: 'trusted' });
+    // A third, unseen build prompts rather than being silently refused.
+    expect(checkTrust('svr', '/p/settings.json', 'sha-3')).toEqual({ decision: 'first_seen' });
+  });
+
+  test("a denial on one server does not leak to another server's lookup", () => {
+    recordTrustDecision({
+      serverName: 'denied-one',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-1',
+      decision: 'denied_remember',
+    });
+    expect(checkTrust('other-one', '/p/settings.json', 'sha-9')).toEqual({
+      decision: 'first_seen',
+    });
   });
 
   test('null candidate sha (unresolvable target) never triggers hash_changed', () => {
@@ -335,5 +513,206 @@ describe('listForServer — history ordering', () => {
 
   test('returns empty when no decisions recorded', () => {
     expect(listForServer('nope', '/p/settings.json')).toEqual([]);
+  });
+});
+
+// ---- same-millisecond ties ----
+
+// Register D09. `ts` is `Date.now()`, so two decisions an operator makes inside
+// one millisecond tie, and `ORDER BY ts DESC` alone is unordered by contract.
+// It is also unordered in a specific, wrong direction: the scan walks the
+// (server_name, origin_path) index in rowid order, so a tie resolves to the
+// OLDEST row — the decision that was superseded.
+//
+// `checkTrust`'s recency probe already carried `id DESC` with that argument
+// written above it; the other four queries in the file did not, and now do.
+//
+// ONE case, not four, and the missing three are the honest part. A `ts` tie is
+// resolved by the query PLAN, and the plan differs per query: measured against
+// this schema, `listForServer` returns write order (oldest first — the opposite
+// of what it promises), while the pinned-hash probe already returns the newest
+// under its own plan, so removing its tiebreak changes nothing observable. The
+// two exact-key lookups can hold at most one row now that both uniqueness
+// constraints are live, so a tie cannot arise there at all. The tiebreaks on
+// those three are a specification fix — they make the answer defined instead of
+// plan-dependent — and are deliberately NOT given tests that would pass without
+// them.
+describe('[security] same-ts decisions resolve to the later one, not the earlier (D09)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_700_000_000_000));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test('history ordering puts the later decision first on a tie', () => {
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-older',
+      decision: 'trusted',
+    });
+    recordTrustDecision({
+      serverName: 'svr',
+      originPath: '/p/settings.json',
+      binarySha: 'sha-newer',
+      decision: 'denied_remember',
+    });
+    const rows = listForServer('svr', '/p/settings.json');
+    expect(rows[0].ts).toBe(rows[1].ts); // control: they really do tie
+    expect(rows.map((r) => r.binary_sha)).toEqual(['sha-newer', 'sha-older']);
+  });
+});
+
+// ---- firstDecisionTs ----
+
+// Register D09 fallout. `enrichWithTrustState` used to read `firstSeenAt` from
+// the OLDEST surviving row of `mcp_trust`, which answers "the oldest decision
+// not yet superseded" rather than "the first decision". That was already wrong
+// on the non-null-sha path — replaces have always deleted the older row — and
+// 033 makes the null-sha path behave the same way, so the accidental answer
+// goes too. The append-only chain is the source that survives both.
+describe('firstDecisionTs — the first decision, from the chain that keeps them all', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_700_000_000_000));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test('survives a replace that deletes the row it was recorded on', () => {
+    recordTrustDecision({
+      serverName: 'npx-svr',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'trusted',
+    });
+    vi.setSystemTime(new Date(1_700_000_060_000)); // a minute later
+    recordTrustDecision({
+      serverName: 'npx-svr',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'denied_remember',
+    });
+
+    // The lookup holds exactly one row, and it is the newer decision…
+    const rows = listForServer('npx-svr', '/p/settings.json');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ts).toBe(1_700_000_060_000);
+    // …while the first decision is still recoverable.
+    expect(firstDecisionTs('npx-svr', '/p/settings.json')).toBe(1_700_000_000_000);
+  });
+
+  test('null for a server that has never been decided on', () => {
+    expect(firstDecisionTs('never-seen', '/p/settings.json')).toBeNull();
+  });
+
+  test('does not leak across servers or origins', () => {
+    recordTrustDecision({
+      serverName: 'a',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'trusted',
+    });
+    vi.setSystemTime(new Date(1_700_000_060_000));
+    recordTrustDecision({
+      serverName: 'b',
+      originPath: '/p/settings.json',
+      binarySha: null,
+      decision: 'trusted',
+    });
+    recordTrustDecision({
+      serverName: 'a',
+      originPath: '/other/settings.json',
+      binarySha: null,
+      decision: 'trusted',
+    });
+    expect(firstDecisionTs('b', '/p/settings.json')).toBe(1_700_000_060_000);
+    expect(firstDecisionTs('a', '/other/settings.json')).toBe(1_700_000_060_000);
+    expect(firstDecisionTs('a', '/p/settings.json')).toBe(1_700_000_000_000);
+  });
+});
+
+/**
+ * [security] Register H02. `computeBinarySha` used to be a bare
+ * `fs.readFileSync(command)` on an ABSOLUTE PATH TAKEN FROM A PROJECT's
+ * `.claude/settings*.json`, reached from `resolveProjectAuthority` on the way
+ * into every session start. No file-type check, no size cap, no O_NONBLOCK.
+ *
+ * Reproduced before fixing: a bare `readFileSync` on a named pipe with no
+ * writer never returns — a child process doing it had to be SIGKILLed after
+ * 5s, while the bounded reader returns in ~1ms. On a single-threaded server
+ * that is the whole process, not one request.
+ */
+describe('[security] computeBinarySha — hostile paths from project settings', () => {
+  const posixOnly = process.platform === 'win32' ? test.skip : test;
+
+  test('an ordinary binary still hashes to the same value as before', () => {
+    // The regression that matters most: pins are compared across sessions, so
+    // the hash of a normal file must not change with this refactor.
+    const p = path.join(tmpRoot, 'ordinary.bin');
+    const contents = Buffer.from('#!/usr/bin/env node\nconsole.log(1)\n');
+    fs.writeFileSync(p, contents);
+    const expected = createHash('sha256').update(contents).digest('hex');
+    expect(computeBinarySha(p)).toBe(expected);
+  });
+
+  test('refuses an oversized file rather than hashing a prefix', () => {
+    // The register suggested "read a bounded prefix". That would silently
+    // change what binarySha MEANS — two different binaries sharing their first
+    // N bytes would pin identically, defeating the TOFU comparison the value
+    // exists for. `null` is an outcome this code already handles correctly.
+    const p = path.join(tmpRoot, 'huge.bin');
+    const fd = fs.openSync(p, 'w');
+    try {
+      // Sparse: 65 MiB of address space, ~no bytes written.
+      fs.ftruncateSync(fd, 65 * 1024 * 1024);
+    } finally {
+      fs.closeSync(fd);
+    }
+    expect(computeBinarySha(p)).toBeNull();
+  }, 30_000);
+
+  test('a modest binary is still hashed — the cap must not reject real ones', () => {
+    const p = path.join(tmpRoot, 'modest.bin');
+    fs.writeFileSync(p, Buffer.alloc(1024 * 1024, 0x41));
+    expect(computeBinarySha(p)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test('refuses a directory', () => {
+    expect(computeBinarySha(tmpRoot)).toBeNull();
+  });
+
+  posixOnly(
+    'refuses a FIFO without hanging — the DoS',
+    () => {
+      const fifo = path.join(tmpRoot, 'mcp-pipe');
+      execFileSync('mkfifo', [fifo]);
+      const started = Date.now();
+      expect(computeBinarySha(fifo)).toBeNull();
+      // A blocking open would sit here indefinitely, not for two seconds.
+      expect(Date.now() - started).toBeLessThan(2000);
+    },
+    10_000,
+  );
+
+  posixOnly(
+    'refuses an infinite character device',
+    () => {
+      expect(computeBinarySha('/dev/zero')).toBeNull();
+    },
+    10_000,
+  );
+
+  test('bare commands are still unresolvable (unchanged)', () => {
+    expect(computeBinarySha('npx')).toBeNull();
+    expect(computeBinarySha('node')).toBeNull();
+    expect(computeBinarySha('')).toBeNull();
+  });
+
+  test('a missing absolute path is still unresolvable (unchanged)', () => {
+    expect(computeBinarySha(path.join(tmpRoot, 'does-not-exist'))).toBeNull();
   });
 });

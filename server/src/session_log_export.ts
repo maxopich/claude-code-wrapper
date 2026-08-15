@@ -50,6 +50,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { pipeline } from 'node:stream';
 import type { Express, Request, Response } from 'express';
 import { redactSensitive } from '@cebab/shared';
 import { config } from './config.js';
@@ -163,11 +164,16 @@ export function sessionLogFilePath(sessionId: string): string {
 export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {}): void {
   const allowedOrigins = buildAllowedOrigins();
 
-  app.get('/session-log/:sid', (req: Request, res: Response): void => {
+  /**
+   * The Origin + Host gate (same as /auth-token). Extracted so the GET and the
+   * OPTIONS preflight below cannot drift — a preflight route with a looser
+   * origin check would be a way in that the GET doesn't have.
+   *
+   * Returns false and has already answered 403 when the request is rejected.
+   */
+  const passesOriginHostGate = (req: Request, res: Response): boolean => {
     const origin = String(req.headers.origin ?? '');
     const host = String(req.headers.host ?? '');
-
-    // ── Origin + Host gate (same as /auth-token). ────────────────────
     if (origin && !allowedOrigins.has(origin)) {
       console.warn(`[http] /session-log reject: bad origin ${JSON.stringify(origin)}`);
       recordRejection({
@@ -178,7 +184,7 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       });
       res.setHeader('X-Cebab-Reject-Reason', 'origin_not_allowed');
       res.status(403).end();
-      return;
+      return false;
     }
     if (!isAllowedHost(host)) {
       console.warn(`[http] /session-log reject: bad host ${JSON.stringify(host)}`);
@@ -190,8 +196,44 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       });
       res.setHeader('X-Cebab-Reject-Reason', 'host_not_allowed');
       res.status(403).end();
-      return;
+      return false;
     }
+    return true;
+  };
+
+  /**
+   * Register S03: CORS preflight for the export.
+   *
+   * The raw format requires the custom `x-cebab-acknowledge-raw` header, which
+   * is NOT CORS-safelisted — so a browser fetch preflights. There was no
+   * OPTIONS route and no `Access-Control-Allow-Headers`, so the preflight
+   * failed and the raw-export privilege path was unreachable from the very
+   * web origin it was built for. (curl worked, which is how it passed review.)
+   *
+   * Gated on the same Origin + Host check as the GET. Deliberately NOT gated
+   * on the auth token: a preflight response carries no data, and requiring the
+   * token here only adds a failure mode. The GET still requires it.
+   */
+  app.options('/session-log/:sid', (req: Request, res: Response): void => {
+    if (!passesOriginHostGate(req, res)) return;
+    const origin = String(req.headers.origin ?? '');
+    if (origin) {
+      // Reflective CORS, gated on allowedOrigins immediately above.
+      // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', RAW_ACK_HEADER);
+    res.setHeader('Access-Control-Max-Age', '600');
+    res.status(204).end();
+  });
+
+  app.get('/session-log/:sid', (req: Request, res: Response): void => {
+    const origin = String(req.headers.origin ?? '');
+
+    // ── Origin + Host gate (same as /auth-token, shared with OPTIONS). ──
+    if (!passesOriginHostGate(req, res)) return;
     if (!origin) {
       console.warn('[http] /session-log: serving to empty-Origin client');
     }
@@ -270,6 +312,10 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
+      // Register S03: without this the page gets the file but cannot read the
+      // filename it was sent — `Content-Disposition` is not a CORS-safelisted
+      // RESPONSE header, so cross-origin JS can't see it unless it's exposed.
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     }
     const startMs = deps.getSessionStartMs?.(sid) ?? null;
     const filename = exportFilename(sid, startMs);
@@ -277,26 +323,50 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
     // ── Stream the body. ─────────────────────────────────────────────
+    // Register S05, both paths: the operator can cancel a large download at
+    // any moment, and nothing here used to notice. `res` emits 'close' when
+    // that happens; without a teardown the read stream stays open and its
+    // descriptor is held for the life of the PROCESS, not the request.
     if (format === 'raw') {
+      // `pipeline` rather than `pipe`: `pipe` un-pipes when the destination
+      // goes away but does NOT destroy the source, so a cancelled raw export
+      // leaked its fd. `pipeline` destroys both ends on any outcome —
+      // success, source error, or the client hanging up.
       const stream = fs.createReadStream(filePath);
-      stream.on('error', (err: unknown) => {
+      pipeline(stream, res, (err) => {
+        if (!err) return;
+        // ERR_STREAM_PREMATURE_CLOSE is the ordinary "operator cancelled"
+        // signal, not a fault: the fd is already released by then, and
+        // logging it at error level would cry wolf on every cancelled
+        // download.
+        if ((err as NodeJS.ErrnoException).code === 'ERR_STREAM_PREMATURE_CLOSE') return;
         console.error('[http] /session-log raw stream error', err);
         if (!res.headersSent) res.status(500).end();
         else res.end();
       });
-      stream.pipe(res);
       return;
     }
 
     // Redacted path: line-by-line. `readline` handles CRLF + final-line
     // edge cases. Backpressure: pause the readline when `res.write`
-    // returns false; resume on drain. The HTTP socket may close mid-
-    // stream (operator cancelled the download) — in that case the
-    // readline gets a stream error and we just stop emitting; the next
-    // `res.write` would be a no-op (or throw `ERR_STREAM_DESTROYED`),
-    // which we swallow because the operator already has what they got.
+    // returns false; resume on drain.
     const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
     const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+
+    // Teardown. `rl.close()` alone does not close the underlying stream, so
+    // destroy both. Idempotent — 'close' can arrive after we already ended.
+    const teardown = (): void => {
+      rl.close();
+      stream.destroy();
+    };
+    res.on('close', teardown);
+
+    // `rl.pause()` does not discard lines readline has already buffered, so
+    // several more 'line' events arrive after the first failed write. Without
+    // this flag each of them parked ANOTHER `once('drain')` listener — enough
+    // to trip Node's MaxListenersExceededWarning at 11 on any large export,
+    // and to fire `rl.resume()` once per listener when drain finally landed.
+    let waitingForDrain = false;
     rl.on('line', (line: string) => {
       const out = redactJsonlLine(line);
       let ok: boolean;
@@ -305,12 +375,16 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       } catch (err) {
         // Socket closed mid-stream — log once and bail.
         console.warn('[http] /session-log redacted write after close', err);
-        rl.close();
+        teardown();
         return;
       }
-      if (!ok) {
+      if (!ok && !waitingForDrain) {
+        waitingForDrain = true;
         rl.pause();
-        res.once('drain', () => rl.resume());
+        res.once('drain', () => {
+          waitingForDrain = false;
+          rl.resume();
+        });
       }
     });
     rl.on('close', () => {
@@ -318,6 +392,7 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
     });
     rl.on('error', (err: unknown) => {
       console.error('[http] /session-log redacted stream error', err);
+      stream.destroy();
       if (!res.headersSent) res.status(500).end();
       else res.end();
     });

@@ -9,9 +9,20 @@
  * (different surface layers); the legacy block owns them with legacy
  * semantics (--bg-2 = panel, --bg-3 = card). New CSS uses these tokens. */
 
-/* Breakpoints (literals — CSS vars don't resolve in @media):
- *   sm 600 · md 900 · lg 1200 · xl 1440
- * JS counterpart: web/src/breakpoints.ts */
+/* Breakpoints. Literals here because CSS vars don't resolve inside @media —
+ * which is exactly why the table has to live somewhere a test can read it:
+ * `web/src/breakpoints.ts`, and `breakpoints.test.ts` fails if this file
+ * branches on a width that is not in it. Don't add a bare @media width here;
+ * name it there first.
+ *
+ * Buffered (via mqBelow, so the boundary pixel can't satisfy both sides):
+ *   599.98 narrow · 699.98 / 799.98 / 899.98 the .logs-row-summary collapse
+ * Exact (one-offs, no min-width partner):
+ *   640 allow-deny · 720 template panel · 768 template modal
+ * Only min-width in the sheet: 3840, the ultra-wide page cap on .app.
+ *
+ * The shell's own tiers (1120 / 830) are NOT here: they are measured on
+ * `.app`'s box by a ResizeObserver, not on the viewport. Same table, JS side. */
 
 :root {
   /* Surface ramp — neutral slate (–0 page · –1 panel · –4 hover · –5 pressed) */
@@ -36,12 +47,16 @@
   /* Semantic */
   --ok: #34d399;
   --ok-soft: rgba(52, 211, 153, 0.12);
+  --ok-ink: var(--ok);
   --warn: #fbbf24;
   --warn-soft: rgba(251, 191, 36, 0.12);
+  --warn-ink: var(--warn);
   --err: #f87171;
   --err-soft: rgba(248, 113, 113, 0.12);
+  --err-ink: var(--err);
   --info: #60a5fa;
   --info-soft: rgba(96, 165, 250, 0.1);
+  --info-ink: var(--info);
   /* Claude coral — BRAND MARK / LOGO ONLY (never interactive) */
   --coral: #cc785c;
   /* Per-agent identity ring — STRICT4 (locked). Exactly 4 hues, hash %4.
@@ -73,16 +88,6 @@
   --t-lg: 0.875rem; /* 14 */
   --t-xl: clamp(0.9375rem, 0.85rem + 0.25vw, 1.0625rem); /* 15→17 */
   --t-2xl: clamp(1.125rem, 0.95rem + 0.6vw, 1.375rem); /* 18→22 */
-  /* PR-4: template-preview typography mirror. Used by HTML elements
-   * around the SVG (panel rows, modal subtitle). SVG <text> reads
-   * numeric values from `templatePreview/tokens.ts` — kept in sync.
-   * Px on purpose — do not rem-ify; SVG/canvas geometry depends on
-   * the numeric value, and the tokens.ts mirror is also px. */
-  --tpl-fs-name: var(--t-sm);
-  --tpl-fs-name-compact: var(--t-md);
-  --tpl-fs-role: var(--t-xs);
-  --tpl-fs-hub: var(--t-md);
-  --tpl-fs-slug: var(--t-xs);
   /* Spacing — rem-based (1rem = 16px assumed) */
   --s-1: 0.25rem; /* 4 */
   --s-2: 0.5rem; /* 8 */
@@ -152,6 +157,17 @@
  * templatePreview/cssGate.test.ts regex-scans this file assuming flat rules,
  * and styleTokens.test.ts asserts all four fill the identical contract.
  * Source of truth for values: mockups/redesign/css/tokens.css.
+ *
+ * CONTRAST (register U04/U05). The ink ramp is retuned from the mockup
+ * values: --fg-3 failed WCAG AA as text in all four gammas (2.54–3.22:1
+ * against the worst surface it lands on), and daylight's --accent gave
+ * 4.31:1 under white on every primary button in the app. Raising --fg-3 to
+ * clear 4.5 pushed it past --fg-2 in daylight and slate — an inverted ramp,
+ * where "muted" read stronger than the tier above it — so --fg-2 moved with
+ * it. The ramp is now monotone and its bottom two rungs both clear AA:
+ * ~15/10/6.0/4.6 in every gamma. styleContrast.test.ts measures this on
+ * every run; hand-editing an ink or surface token here will fail the build
+ * rather than quietly cost legibility.
  * ════════════════════════════════════════════════════════════════════════ */
 
 /* AURORA — airy product · azure accent */
@@ -166,12 +182,17 @@
   --panel: #ffffff;
   --panel-2: #f1f3f8;
   --raised: #ffffff;
-  --canvas: radial-gradient(1100px 500px at 12% -8%, rgba(47, 111, 237, 0.07), transparent 60%), #eef1f6;
-  --header-bg: rgba(255, 255, 255, 0.82);
+  --canvas:
+    radial-gradient(1100px 500px at 12% -8%, rgba(47, 111, 237, 0.07), transparent 60%), #eef1f6;
   --fg-0: #191b24;
   --fg-1: #33384a;
-  --fg-2: #5a5f70;
-  --fg-3: #9296a6;
+  --fg-2: #565a6b;
+  /* Was #6a6c78, which measured 4.32:1 on `--bg-4` — below AA, at three sites
+   * that pair them (`.ask-user-q-chip`, `.session-search-redacted-badge`,
+   * `.input-box button:disabled`). The old contrast gate never saw it: `--bg-4`
+   * is darker than every surface `TEXT_SURFACES` listed. Three steps of grey
+   * buys 4.52:1 and is imperceptible; the ramp's own tiers are 20+ apart. */
+  --fg-3: #676975;
   --fg: #191b24;
   --line-1: rgba(20, 24, 50, 0.08);
   --line-2: rgba(20, 24, 50, 0.14);
@@ -183,16 +204,31 @@
   --accent-ink: #2456c8;
   --accent-2: #2456c8;
   --on-accent: #ffffff;
+  /* `--X` is the FILL (tint, border, glow) and `--X-ink` is the TEXT. One
+   * token cannot be both: a fill wants to sit near the surface, ink wants to
+   * sit far from it. Tuned for the fill, these read at 2.4–3.9:1 as text here
+   * — under AA — which is what `--X-ink` fixes, hue preserved and lightness
+   * lowered until the worst pairing clears 4.6:1. Same shape as `--accent` /
+   * `--accent-ink` above, which has always worked this way.
+   *
+   * Only the two LIGHT gammas need a different value. Slate and phosphor
+   * clear AA as ink already (5.7–9.1:1), so there `--X-ink: var(--X)` — the
+   * token exists so every call site reads the same in every gamma, not
+   * because the colour needed changing. `styleContrast.test.ts` measures all
+   * four either way. */
   --ok: #16a36a;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: #10794f;
   --warn: #d3920f;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: #8d6108;
   --err: #e0584a;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: #c63122;
   --info: #2f6fed;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: #175feb;
   --coral: #cc785c;
-  --teal: #22a7c4;
   --r-sm: 6px;
   --r-md: 10px;
   --r-lg: 18px;
@@ -203,9 +239,7 @@
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: var(--font-sans);
-  --grad-brand: linear-gradient(135deg, var(--accent), var(--teal));
   --grad-user: linear-gradient(135deg, var(--accent), #3b82f6);
-  --grad-cta: linear-gradient(135deg, var(--accent), var(--teal));
   --msg-user-bg: var(--grad-user);
   --msg-user-fg: #ffffff;
   --msg-user-border: transparent;
@@ -213,11 +247,7 @@
   --msg-asst-bg: var(--raised);
   --msg-asst-border: var(--line-1);
   --msg-asst-shadow: var(--shadow-md);
-  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
   --warn-border: rgba(211, 146, 15, 0.3);
-  --warn-bg: linear-gradient(180deg, rgba(211, 146, 15, 0.08), rgba(211, 146, 15, 0.03));
-  --scrollbar-thumb: rgba(20, 24, 50, 0.16);
-  --hover-tint: rgba(20, 24, 50, 0.06);
 }
 
 /* DAYLIGHT — warm light · coral accent (default) */
@@ -233,32 +263,36 @@
   --panel-2: #ece8dd;
   --raised: #ffffff;
   --canvas: #f3f1ea;
-  --header-bg: rgba(251, 250, 245, 0.82);
   --fg-0: #2a2620;
   --fg-1: #443f36;
-  --fg-2: #6f685b;
-  --fg-3: #9a9183;
+  --fg-2: #5b554b;
+  /* Was #6d665c — 4.38:1 on `--bg-4`, same sub-AA pairing as aurora above.
+   * Two steps to 4.52:1. */
+  --fg-3: #6b645a;
   --fg: #2a2620;
   --line-1: rgba(40, 32, 20, 0.1);
   --line-2: rgba(40, 32, 20, 0.16);
   --line-3: rgba(40, 32, 20, 0.22);
   --border: rgba(40, 32, 20, 0.16);
-  --accent: #bf5e3a;
+  --accent: #b85a38;
   --accent-soft: #a44d2c;
-  --accent-glow: rgba(191, 94, 58, 0.12);
-  --accent-ink: #a44d2c;
+  --accent-glow: rgba(184, 90, 56, 0.12);
+  --accent-ink: #a24b2a;
   --accent-2: #a44d2c;
   --on-accent: #ffffff;
   --ok: #2f9e5f;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: #217344;
   --warn: #b9851c;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: #835e12;
   --err: #c0402a;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: #b33b26;
   --info: #3a6db0;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: #3566a5;
   --coral: #cc785c;
-  --teal: #22a7c4;
   --r-sm: 5px;
   --r-md: 8px;
   --r-lg: 14px;
@@ -269,9 +303,7 @@
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: 'Newsreader', Georgia, serif;
-  --grad-brand: linear-gradient(135deg, var(--coral), #d99412);
   --grad-user: linear-gradient(135deg, var(--info), #5a87c9);
-  --grad-cta: var(--accent);
   --msg-user-bg: #ece8dd;
   --msg-user-fg: var(--fg);
   --msg-user-border: rgba(40, 32, 20, 0.1);
@@ -279,11 +311,7 @@
   --msg-asst-bg: #ffffff;
   --msg-asst-border: rgba(40, 32, 20, 0.1);
   --msg-asst-shadow: 0 1px 2px rgba(60, 50, 30, 0.06);
-  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), 0 14px 36px rgba(80, 60, 30, 0.16);
   --warn-border: rgba(185, 133, 28, 0.4);
-  --warn-bg: rgba(185, 133, 28, 0.07);
-  --scrollbar-thumb: rgba(40, 32, 20, 0.16);
-  --hover-tint: var(--panel-2);
 }
 
 /* SLATE — refined dark · teal accent (today's Cebab, polished) */
@@ -299,11 +327,10 @@
   --panel-2: #1a1d24;
   --raised: #20232b;
   --canvas: #0c0d10;
-  --header-bg: rgba(18, 20, 25, 0.85);
   --fg-0: #f4f5f7;
   --fg-1: #c4c7cf;
-  --fg-2: #888d99;
-  --fg-3: #6b7180;
+  --fg-2: #9ca0aa;
+  --fg-3: #868b97;
   --fg: #f4f5f7;
   --line-1: rgba(255, 255, 255, 0.08);
   --line-2: rgba(255, 255, 255, 0.14);
@@ -317,14 +344,17 @@
   --on-accent: #05181b;
   --ok: #34d399;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: var(--ok);
   --warn: #fbbf24;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: var(--warn);
   --err: #f87171;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: var(--err);
   --info: #60a5fa;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: var(--info);
   --coral: #cc785c;
-  --teal: #2fb6c4;
   --r-sm: 4px;
   --r-md: 6px;
   --r-lg: 10px;
@@ -335,9 +365,7 @@
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: var(--font-sans);
-  --grad-brand: linear-gradient(135deg, #2fb6c4, #cc785c);
   --grad-user: linear-gradient(135deg, #3b5db0, #2a4a94);
-  --grad-cta: var(--accent);
   --msg-user-bg: rgba(47, 182, 196, 0.1);
   --msg-user-fg: var(--fg);
   --msg-user-border: rgba(47, 182, 196, 0.28);
@@ -345,11 +373,7 @@
   --msg-asst-bg: var(--panel);
   --msg-asst-border: var(--line-1);
   --msg-asst-shadow: none;
-  --composer-focus-shadow: 0 0 0 4px var(--accent-glow), var(--shadow-lg);
   --warn-border: rgba(251, 191, 36, 0.35);
-  --warn-bg: rgba(251, 191, 36, 0.07);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.14);
-  --hover-tint: rgba(255, 255, 255, 0.05);
 }
 
 /* PHOSPHOR — terminal · monospace green */
@@ -365,11 +389,10 @@
   --panel-2: #0c151a;
   --raised: #0f1c20;
   --canvas: #04070a;
-  --header-bg: rgba(4, 7, 10, 0.9);
   --fg-0: #c9f5dd;
   --fg-1: #9ad3b5;
   --fg-2: #6cae8c;
-  --fg-3: #3f6a57;
+  --fg-3: #698b7c;
   --fg: #c9f5dd;
   --line-1: rgba(72, 220, 150, 0.13);
   --line-2: rgba(72, 220, 150, 0.26);
@@ -383,14 +406,17 @@
   --on-accent: #04140b;
   --ok: #3ddc84;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
+  --ok-ink: var(--ok);
   --warn: #f5b341;
   --warn-soft: color-mix(in srgb, var(--warn) 12%, transparent);
+  --warn-ink: var(--warn);
   --err: #ff6b5e;
   --err-soft: color-mix(in srgb, var(--err) 12%, transparent);
+  --err-ink: var(--err);
   --info: #5cc8ff;
   --info-soft: color-mix(in srgb, var(--info) 12%, transparent);
+  --info-ink: var(--info);
   --coral: #ff9e7a;
-  --teal: #3ddc84;
   --r-sm: 2px;
   --r-md: 2px;
   --r-lg: 3px;
@@ -401,9 +427,7 @@
   --font-sans: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --font-reading: var(--font-sans);
-  --grad-brand: linear-gradient(135deg, #3ddc84, #2cb56a);
   --grad-user: linear-gradient(135deg, #16442c, #0d2f1e);
-  --grad-cta: var(--accent);
   --msg-user-bg: rgba(61, 220, 132, 0.05);
   --msg-user-fg: var(--fg);
   --msg-user-border: rgba(72, 220, 150, 0.18);
@@ -411,35 +435,21 @@
   --msg-asst-bg: var(--panel);
   --msg-asst-border: rgba(72, 220, 150, 0.18);
   --msg-asst-shadow: none;
-  --composer-focus-shadow: 0 0 0 3px var(--accent-glow), 0 0 0 1px rgba(72, 220, 150, 0.3);
   --warn-border: rgba(245, 179, 65, 0.4);
-  --warn-bg: rgba(245, 179, 65, 0.06);
-  --scrollbar-thumb: rgba(72, 220, 150, 0.2);
-  --hover-tint: rgba(61, 220, 132, 0.06);
 }
 
-/* Mockup-named aliases + shared layout metrics. These resolve THROUGH the
+/* Mockup-named aliases that rules still reference. These resolve THROUGH the
  * per-theme primitives above (var() is late-bound), so a single declaration
  * re-themes with the active gamma. Kept out of the [data-theme] blocks so the
- * parity test only guards the color contract. */
+ * parity test only guards the color contract.
+ *
+ * This block held fifteen more (--radius, --shadow, --agent-orch…, --msg-max-w,
+ * --avatar-size…) that no rule ever read. A declared-but-unread alias is not an
+ * abstraction, it is a claim — `styleTokens.test.ts` now fails on one. If a new
+ * rule wants a mockup name, add it here next to that rule, not ahead of it. */
 :root {
   --font-ui: var(--font-sans);
-  --radius: var(--r-md);
   --radius-lg: var(--r-lg);
-  --avatar-radius: var(--r-md);
-  --shadow: var(--shadow-md);
-  --agent-orch: var(--agent-0);
-  --agent-ux: var(--agent-1);
-  --agent-qa: var(--agent-2);
-  --agent-4: var(--agent-3);
-  --agent-orch-soft: var(--agent-0-soft);
-  --agent-ux-soft: var(--agent-1-soft);
-  --agent-qa-soft: var(--agent-2-soft);
-  --agent-4-soft: var(--agent-3-soft);
-  --msg-max-w: 640px;
-  --chat-gap: 20px;
-  --avatar-size: 30px;
-  --content-indent: 42px;
 }
 
 * {
@@ -558,13 +568,23 @@ pre {
   width: var(--insp-col);
 }
 /* Hover-expand (unpinned, non-narrow): overlay to the expanded width WITHOUT
- * reflowing the center — the grid track stays at the rail width. */
-.app:not([data-tier='narrow'])[data-nav-pinned='false'] .sidebar:hover {
+ * reflowing the center — the grid track stays at the rail width.
+ *
+ * Register U02: `:focus-within` sits beside `:hover` in EVERY rail rule, here
+ * and in the fade rules below. `pointer-events: none` stops the mouse but not
+ * the keyboard, so an unpinned rail used to take Tab focus into controls it
+ * had faded to `opacity: 0`, with hover the only way to reveal them — an
+ * operator on a keyboard could reach the sidebar and never see it. The
+ * alternative the register floats, `inert`, would have made the collapsed rail
+ * unreachable instead, including the pin button that is the only self-rescue.
+ * Focus parity with hover is the fix; `railFocus.test.ts` holds the pairing
+ * for all nine rules. */
+.app:not([data-tier='narrow'])[data-nav-pinned='false'] .sidebar:is(:hover, :focus-within) {
   width: var(--nav-exp-w);
   box-shadow: var(--shadow-lg);
   z-index: 40;
 }
-.app:not([data-tier='narrow'])[data-insp-pinned='false'] .inspector:hover {
+.app:not([data-tier='narrow'])[data-insp-pinned='false'] .inspector:is(:hover, :focus-within) {
   width: var(--insp-exp-w);
   box-shadow: var(--shadow-lg);
   z-index: 40;
@@ -623,7 +643,9 @@ pre {
 .pin-btn {
   transition: opacity var(--dur-2) var(--ease);
 }
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) :is(h1, .sidebar-header-controls, .session-list, .project-name, .trust, .workspace-btn-label) {
+.app[data-nav-pinned='false']:not([data-tier='narrow'])
+  .sidebar:not(:hover):not(:focus-within)
+  :is(h1, .sidebar-header-controls, .session-list, .project-name, .trust, .workspace-btn-label) {
   opacity: 0;
   pointer-events: none;
 }
@@ -651,12 +673,16 @@ pre {
   border-color: var(--line-3);
 }
 .pin-btn[aria-pressed='true'] {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: var(--accent);
 }
 /* Hide the pin until the rail is expanded. */
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .pin-btn,
-.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) .pin-btn {
+.app[data-nav-pinned='false']:not([data-tier='narrow'])
+  .sidebar:not(:hover):not(:focus-within)
+  .pin-btn,
+.app[data-insp-pinned='false']:not([data-tier='narrow'])
+  .inspector:not(:hover):not(:focus-within)
+  .pin-btn {
   opacity: 0;
   pointer-events: none;
 }
@@ -675,7 +701,14 @@ pre {
   place-items: center;
   position: fixed;
   top: 18px;
-  z-index: 45;
+  /* Register U25: above the scrim (55) and the rails (60). It used to sit at
+   * 45, so once a drawer opened the scrim swallowed the click — and because
+   * the scrim's own handler closes both drawers, a tap on ☰ still *looked*
+   * right while ⧉ silently closed the sidebar instead of opening the
+   * inspector. `pointer-events` never blocked focus, so the keyboard could
+   * work a control the mouse could not. `railFocus.test.ts` pins the ordering
+   * against `.scrim` so bumping one and not the other fails the build. */
+  z-index: 65;
   width: 34px;
   height: 34px;
   background: var(--panel);
@@ -738,7 +771,9 @@ pre {
 .insp-body {
   transition: opacity var(--dur-2) var(--ease);
 }
-.app[data-insp-pinned='false']:not([data-tier='narrow']) .inspector:not(:hover) :is(.insp-title, .insp-body) {
+.app[data-insp-pinned='false']:not([data-tier='narrow'])
+  .inspector:not(:hover):not(:focus-within)
+  :is(.insp-title, .insp-body) {
   opacity: 0;
   pointer-events: none;
 }
@@ -972,18 +1007,61 @@ pre {
   gap: 8px;
   margin-left: auto;
 }
+/* U11: connection state used to be this dot and nothing else — 6px, green or
+ * red, no text. Three channels now carry it: shape (filled vs hollow), colour
+ * (as before), and a text label. 8px so the ring below has room to read as a
+ * ring rather than as a slightly-darker dot. */
 .dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: var(--r-pill);
+  flex: none;
 }
 .dot.on {
   background: var(--ok);
   box-shadow: 0 0 8px var(--ok);
 }
+/* Hollow, not filled — the shape difference is what survives a monochrome
+ * display or a red/green colour-blind operator. */
 .dot.off {
-  background: var(--err);
-  box-shadow: 0 0 8px var(--err);
+  background: transparent;
+  border: 2px solid var(--err);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--err) 60%, transparent);
+}
+.conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+/* Connected is the state the operator is in almost always, so its label is
+ * sr-only — the header stays uncluttered and a screen reader still finds the
+ * state by name. Disconnected shows the word, because that is the one worth a
+ * glance. (Same declarations as `.sr-only`; spelled out rather than composed
+ * because the visible branch has to override every one of them.) */
+.conn-status[data-connected='true'] .conn-status-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* Normal ink, NOT `--err`. Two reasons, and the second is the point of the
+ * finding. Measured, `--err` on `--panel` is 3.71:1 in daylight (the default
+ * gamma) — under AA for text this size, which would have added a 61st site to
+ * the ~60 the semantic-ink finding already tracks. And more importantly: U11
+ * is a complaint about a signal carried by colour alone, so answering it with
+ * red text would keep leaning on the channel that failed. The ring carries the
+ * colour; the word is always legible without it. */
+.conn-status[data-connected='false'] .conn-status-label {
+  font-size: var(--t-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--fg-1);
+  text-transform: uppercase;
 }
 
 .icon-btn {
@@ -1075,7 +1153,7 @@ pre {
 }
 .workspace-btn.warn {
   border-color: var(--warn);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .workspace-btn-icon {
   font-size: 15px;
@@ -1100,16 +1178,22 @@ pre {
  * to a compact, centered gear icon-button that sits cleanly inside the rail
  * (matches the icon-rail intent); it returns to the full labelled button on
  * hover / when pinned. */
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .sidebar-footer {
+.app[data-nav-pinned='false']:not([data-tier='narrow'])
+  .sidebar:not(:hover):not(:focus-within)
+  .sidebar-footer {
   padding: 10px 12px;
 }
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn {
+.app[data-nav-pinned='false']:not([data-tier='narrow'])
+  .sidebar:not(:hover):not(:focus-within)
+  .workspace-btn {
   width: 42px;
   padding: 9px 0;
   justify-content: center;
   gap: 0;
 }
-.app[data-nav-pinned='false']:not([data-tier='narrow']) .sidebar:not(:hover) .workspace-btn-label {
+.app[data-nav-pinned='false']:not([data-tier='narrow'])
+  .sidebar:not(:hover):not(:focus-within)
+  .workspace-btn-label {
   display: none;
 }
 .project-list .project-row {
@@ -1134,7 +1218,11 @@ pre {
   color: var(--fg);
 }
 .project-header.active {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent) 10%, transparent));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--accent) 18%, transparent),
+    color-mix(in srgb, var(--accent) 10%, transparent)
+  );
   color: var(--fg);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
 }
@@ -1148,6 +1236,35 @@ pre {
   /* Slight vertical nudge so the 8-spoke star aligns with the text baseline
    * rather than sitting heavy on the top of the line box. */
   margin-top: 1px;
+}
+/* Register U01: `.project-name` and `.session-name` became real <button>s so
+ * the sidebar has a keyboard path at all. Both already sat at `flex: 1` inside
+ * their flex row, so the geometry is unchanged — this only strips the UA
+ * button chrome so they still read as row labels. The row itself could not
+ * become the button: `<button>` and `role="button"` both forbid interactive
+ * descendants, and these rows contain two or three real buttons each.
+ *
+ * Declared BEFORE both classes on purpose: `font: inherit` is a shorthand, so
+ * if this sat after them it would wipe `.project-name`'s own weight/size and
+ * `.session-name`'s mono face. Reset first, then let each class re-state its
+ * own typography. */
+.project-name,
+.session-name {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: inherit;
+}
+.project-name:focus-visible,
+.session-name:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
 }
 .project-name {
   font-weight: 500;
@@ -1188,9 +1305,9 @@ pre {
   flex-shrink: 0;
 }
 .trust.on {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
-  border-color: rgba(251, 191, 36, 0.35);
+  border-color: var(--warn-border);
 }
 
 .session-list {
@@ -1252,6 +1369,10 @@ pre {
 }
 .session-name {
   flex: 1;
+  /* A flex item defaults to `min-width: auto`; as a <button> that resolves
+   * against the label's intrinsic width and would stop the row from shrinking.
+   * Explicit 0 keeps the ellipsis working, matching `.project-name`. */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1287,12 +1408,25 @@ pre {
   opacity: 0;
   transition: opacity 120ms ease;
 }
+/* Register U19: revealed by focus as well as hover, and by a coarse pointer
+ * unconditionally (see the media block at the end of this group).
+ *
+ * The shape is `.tpl-expand-btn`'s, which got this right first: ancestor
+ * `:hover`, ancestor `:focus-within`, and the control's own `:focus-visible`.
+ * The ⓘ button in this very row already had the focus half; `✎` and `⤓` never
+ * did, so a keyboard user tabbed onto two fully transparent buttons. */
 .session-row:hover .session-rename-btn,
+.session-row:focus-within .session-rename-btn,
+.session-rename-btn:focus-visible,
 .session-row.active .session-rename-btn {
   opacity: 1;
 }
 .session-rename-btn:hover {
   color: var(--fg);
+}
+.session-rename-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 /* Cluster I C2 UI: per-session JSONL download trigger. Same visual
  * weight as the Rename `✎` btn so the action cluster reads as one
@@ -1311,6 +1445,8 @@ pre {
   transition: opacity 120ms ease;
 }
 .session-row:hover .session-download-btn,
+.session-row:focus-within .session-download-btn,
+.session-download-btn:focus-visible,
 .session-row.active .session-download-btn,
 .session-download-btn[aria-busy='true'] {
   opacity: 1;
@@ -1318,8 +1454,23 @@ pre {
 .session-download-btn:hover:not(:disabled) {
   color: var(--fg);
 }
+.session-download-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
 .session-download-btn:disabled {
   cursor: progress;
+}
+
+/* Register U19, second half. A coarse pointer has no hover and (until you tap)
+ * no focus, so a hover-revealed control is permanently invisible on a phone
+ * while remaining perfectly tappable — the operator hits a rename they cannot
+ * see. Same query the touch-target block further down already uses. */
+@media (hover: none), (pointer: coarse) {
+  .session-rename-btn,
+  .session-download-btn {
+    opacity: 1;
+  }
 }
 
 /* Cluster I C5 UI: bulk session management — Select-mode toggle (project
@@ -1345,7 +1496,7 @@ pre {
   border-color: var(--line-3);
 }
 .session-select-toggle.on {
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
   border-color: var(--accent-soft);
   background: var(--accent-glow);
 }
@@ -1421,7 +1572,7 @@ pre {
   cursor: not-allowed;
 }
 .bulk-action-btn.danger {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: var(--err-soft);
 }
 .bulk-action-btn.danger:hover:not(:disabled) {
@@ -1495,7 +1646,12 @@ pre {
   flex: 1;
   min-height: 0;
   background:
-    radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--accent) 5%, transparent), transparent 60%), var(--bg);
+    radial-gradient(
+      1200px 600px at 50% -10%,
+      color-mix(in srgb, var(--accent) 5%, transparent),
+      transparent 60%
+    ),
+    var(--bg);
 }
 .chat.empty {
   align-items: center;
@@ -1573,9 +1729,15 @@ pre {
   background: var(--bg-4);
   color: var(--fg-2);
 }
+/* The avatars sit on `--bg-4`, a hover rung rather than one of the declared
+ * text surfaces the ink tokens are derived against, so they measure 4.39–4.50
+ * in the light gammas. Left alone deliberately: every `.avatar` is
+ * `aria-hidden="true"` and holds a decorative glyph, not text, so the 4.5:1
+ * text minimum does not apply to it. Named here so the exception reads as a
+ * decision — `semanticInk.test.ts` carries the same note as an exemption. */
 .avatar.tool {
   background: var(--bg-4);
-  color: var(--info);
+  color: var(--info-ink);
 }
 /* Redesign P6: message treatment — serif reading bodies (Daylight) + a
  * per-theme bubble for user turns and a card for assistant turns, driven by
@@ -1626,11 +1788,11 @@ pre {
 }
 .msg.error {
   border-color: var(--err);
-  color: var(--err);
+  color: var(--err-ink);
 }
 .msg.permission {
   border-left: 0;
-  border: 1px solid rgba(251, 191, 36, 0.35);
+  border: 1px solid var(--warn-border);
   background: var(--warn-soft);
   border-radius: var(--r-md);
   padding: 12px 14px;
@@ -1642,10 +1804,10 @@ pre {
 .msg.user-command pre {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--t-sm);
-  color: var(--info);
+  color: var(--info-ink);
 }
 .msg.user-command .role {
-  color: var(--info);
+  color: var(--info-ink);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--t-xs);
   text-transform: uppercase;
@@ -1653,7 +1815,7 @@ pre {
 }
 .msg.user-command .avatar.user {
   background: var(--bg-4);
-  color: var(--info);
+  color: var(--info-ink);
 }
 
 /* Slash-command output card (e.g. /context, /compact). Visually separated
@@ -1667,7 +1829,7 @@ pre {
   padding: 12px 14px;
 }
 .msg.command-output .role {
-  color: var(--info);
+  color: var(--info-ink);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
   font-size: var(--t-xs);
   text-transform: uppercase;
@@ -1676,7 +1838,9 @@ pre {
 .msg.permission .actions {
   margin-top: 6px;
   display: flex;
+  align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
 }
 .msg.permission button {
   background: var(--bg-3);
@@ -1686,18 +1850,44 @@ pre {
   padding: 4px 12px;
   cursor: pointer;
 }
-.msg.permission .actions button:first-child {
+/* Register U09: keyed on the class, not on `:first-child`. The affirmative
+ * button used to be green purely because it came first in the DOM, so
+ * reordering the pair would have repainted Deny as the safe-looking one with
+ * no CSS change to notice in review. */
+.msg.permission .actions .permission-allow {
   background: var(--ok);
   border-color: var(--ok);
   color: #0c1a12;
   font-weight: 600;
 }
-.msg.permission .actions button:first-child:hover {
-  background: #2bbf86;
+.msg.permission .actions .permission-allow:hover {
+  background: color-mix(in srgb, var(--ok) 88%, #000);
 }
-.msg.permission .actions button:last-child:hover {
+/* Armed half of the two-step `dangerous` confirm. Recoloured to the error hue
+ * so the button the operator is about to press a second time does not look
+ * like the ordinary safe-green Allow.
+ *
+ * Darkened to 70% before white is laid on it — the same recipe the MOCK badge
+ * uses, and for the same reason: `--err` is tuned to be read AS INK ON a
+ * panel, so using it raw as a BACKDROP behind white fails AA in three of the
+ * four gammas (measured 2.77-3.71 in #283). At 70% toward black, white clears
+ * 5.2:1 in every gamma. `styleContrast.test.ts` holds both ends of this. */
+.msg.permission .actions .permission-allow.is-armed {
+  background: color-mix(in srgb, var(--err) 70%, #000);
+  border-color: color-mix(in srgb, var(--err) 70%, #000);
+  color: #fff;
+}
+.msg.permission .actions .permission-allow.is-armed:hover {
+  background: color-mix(in srgb, var(--err) 60%, #000);
+  border-color: color-mix(in srgb, var(--err) 60%, #000);
+}
+.msg.permission .actions .permission-deny:hover {
   background: var(--bg-4);
   border-color: var(--line-3);
+}
+.msg.permission .permission-arm-hint {
+  font-size: 11px;
+  color: var(--fg-2);
 }
 .msg.permission .decided {
   color: var(--fg-3);
@@ -1712,7 +1902,7 @@ pre {
   margin-top: var(--s-2);
 }
 .block-tool-use .tool-name {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
@@ -1783,7 +1973,7 @@ pre {
   margin: 0.2em 0;
 }
 .markdown a {
-  color: var(--accent);
+  color: var(--accent-ink);
   text-decoration: none;
 }
 .markdown a:hover {
@@ -1862,6 +2052,17 @@ pre {
   gap: var(--s-2);
   background: linear-gradient(180deg, transparent, var(--bg) 40%);
 }
+/* U33: the one-line reason a disabled composer is disabled. Spans both grid
+ * tracks so it reads as a sentence above the field rather than a caption
+ * squeezed beside the Send button. `--fg-1` (not `--err`) — see the note in
+ * InputBox.tsx: a colour-only or low-contrast answer to "the UI told me
+ * nothing" is not an answer. */
+.input-box-disabled-reason {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
 .input-box textarea {
   background: var(--bg-3);
   color: var(--fg);
@@ -1918,6 +2119,21 @@ pre {
   height: 9px;
   cursor: ns-resize;
   touch-action: none;
+}
+/* U38 made the handle focusable, so it needs a ring. The outline stays ON the
+ * element — inset, because the strip is offset -4px over the composer's top
+ * border and an outward ring would collide with it. Deliberately not moved to
+ * the ::after grabber via `outline: none`: that would need an exemption in
+ * `focusVisible.test.ts`, and ringing the real hit area is more honest than
+ * ringing the 30 px nub that only marks its middle. The nub takes the accent
+ * too, as a second cue at the point the eye is already on. */
+.grow-textarea-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--r-sm);
+}
+.grow-textarea-handle:focus-visible::after {
+  background: var(--accent);
 }
 .grow-textarea-handle::after {
   content: '';
@@ -1983,7 +2199,7 @@ pre {
   /* Override the gray "disabled" baseline so the stopping state still
    * reads as the Stop button — operator knows the press registered. */
   background: var(--err-soft);
-  color: var(--err);
+  color: var(--err-ink);
   box-shadow: none;
   cursor: progress;
 }
@@ -2057,7 +2273,7 @@ pre {
   border: none;
   border-bottom: 1px solid var(--line-2, var(--border));
   background: transparent;
-  color: var(--ink, inherit);
+  color: var(--fg);
   font: inherit;
   font-size: var(--t-sm);
   padding: var(--s-2) var(--s-3);
@@ -2118,7 +2334,7 @@ pre {
 .slash-palette-row-command {
   font-family: var(--font-mono, monospace);
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
   background: transparent;
 }
@@ -2168,6 +2384,14 @@ pre {
 }
 .mode-toggle.is-disabled .pill {
   cursor: not-allowed;
+}
+/* U17: the pills use `aria-disabled` rather than the native attribute so the
+ * explanation stays reachable by keyboard. The shared press animation is keyed
+ * on `:not(:disabled)`, which no longer excludes them — suppress it here so a
+ * read-only pill doesn't animate as though the click did something. */
+.mode-toggle.is-disabled .pill:active {
+  transform: none;
+  opacity: 1;
 }
 
 /* ---- Streaming caret ---- */
@@ -2285,7 +2509,7 @@ pre {
   line-height: 1.5;
 }
 .modal .hint.warn {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .modal .hint code {
   font-size: 11.5px;
@@ -2454,16 +2678,11 @@ pre {
 }
 .keyboard-shortcuts-modal-description {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
-.keyboard-shortcuts-modal-footer {
-  padding: 12px 18px;
-  border-top: 1px solid var(--line-1);
-}
-.keyboard-shortcuts-modal-footer .hint {
-  margin: 0;
-  font-size: var(--t-xs, 11px);
-}
+/* U40 removed `.keyboard-shortcuts-modal-footer` — its only content was a
+ * contributor note telling the operator to edit a source file. Rules deleted
+ * with it rather than left orphaned. */
 
 /* Shared .kbd chip — keycap styling used by the cheatsheet and (later)
  * any inline shortcut hint in tooltips/banners. Monospace + a subtle
@@ -2472,7 +2691,7 @@ pre {
   display: inline-block;
   font-family: var(--font-mono, monospace);
   font-size: var(--t-xs, 11px);
-  color: var(--fg-1, var(--ink, inherit));
+  color: var(--fg-1);
   background: var(--bg-5, var(--bg-3));
   border: 1px solid var(--line-3, var(--border));
   border-bottom-width: 2px;
@@ -2595,12 +2814,12 @@ pre {
   background: var(--warn-soft);
 }
 .ma-stall-glyph {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: 13px;
   line-height: 1;
 }
 .ma-stall-word {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 /* Hop-budget chip: small uppercase pill at the right of the activity bar,
  * mirroring `.lifecycle-pill` typography. The `.is-warn` variant kicks in
@@ -2624,7 +2843,7 @@ pre {
   margin-left: 4px;
 }
 .ma-hop-budget-chip.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: var(--warn-soft);
 }
@@ -2657,7 +2876,7 @@ pre {
   white-space: nowrap;
 }
 .model-chip.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: var(--warn-soft);
 }
@@ -2670,13 +2889,13 @@ pre {
 }
 .model-chip-warn-icon {
   font-size: 11px;
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 /* Inline warn qualifier inside the Session-info "Hop budget" row. Sized to
  * sit next to the count without dominating it. */
 .settings-grid-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: var(--t-sm);
   margin-left: 2px;
 }
@@ -2697,7 +2916,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   margin-left: 12px;
   font-family: var(--font-sans);
@@ -2708,7 +2927,7 @@ pre {
   white-space: nowrap;
 }
 .ma-mutations-chip.has-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, var(--border));
 }
@@ -2720,7 +2939,7 @@ pre {
   padding: 2px 4px;
 }
 .mutations-danger-marker {
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 600;
   margin-left: 6px;
 }
@@ -2770,12 +2989,12 @@ pre {
   font-weight: 600;
 }
 .mutation-badge-mutate {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, transparent);
   background: var(--warn-soft);
 }
 .mutation-badge-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: color-mix(in srgb, var(--err) 45%, transparent);
   background: var(--err-soft);
   font-weight: 700;
@@ -2792,7 +3011,7 @@ pre {
   word-break: break-all;
 }
 .mutation-row .mutation-summary.mutation-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .mutation-ts {
   color: var(--fg-3);
@@ -2847,7 +3066,7 @@ pre {
   font-size: var(--t-sm);
   padding: 4px 8px;
   background: var(--bg-3);
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -2885,17 +3104,17 @@ pre {
   border: 1px solid;
 }
 .permission-badge-read {
-  color: var(--ok);
+  color: var(--ok-ink);
   background: var(--ok-soft);
   border-color: color-mix(in srgb, var(--ok) 35%, transparent);
 }
 .permission-badge-mutate {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, transparent);
 }
 .permission-badge-dangerous {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, transparent);
   font-weight: 700;
@@ -3055,12 +3274,12 @@ pre {
   text-overflow: ellipsis;
 }
 .trust-chip-ok {
-  color: var(--ok);
+  color: var(--ok-ink);
   background: var(--ok-soft);
   border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
 }
 .trust-chip-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -3082,7 +3301,7 @@ pre {
   flex-shrink: 0;
 }
 .trust-tag.trusted {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -3145,9 +3364,15 @@ pre {
   flex-direction: column;
   gap: var(--s-6);
 }
+/* Composer variant. The 24px used to be padding so the text lined up with the
+ * composer's own gutter; now that the base rule draws a box, it has to be
+ * margin instead — otherwise the frame runs edge-to-edge and the ⚠ sits
+ * outside it. The left padding stays whatever the base rule set, so the glyph
+ * keeps its gutter. */
 .multi-agent-warning-composer {
-  margin: 0;
-  padding: 6px 24px 0;
+  margin: 0 24px;
+  padding-top: 6px;
+  padding-bottom: 6px;
 }
 .ma-lifecycle-inline {
   display: flex;
@@ -3172,9 +3397,12 @@ pre {
   padding: 0;
   cursor: pointer;
   color: inherit;
-}
-.iterations-toggle h3 {
-  margin: 0;
+  /* U37 moved the <h3> from inside this button to around it, so the heading
+   * font no longer arrives with the element. `font: inherit` takes it from
+   * the wrapping h3 — without it a button falls back to the UA's small
+   * system font and the section title shrinks. */
+  font: inherit;
+  text-align: left;
 }
 .iterations-chevron {
   width: 10px;
@@ -3303,13 +3531,13 @@ pre {
   flex-shrink: 0;
 }
 .participant-bus-tag.installed {
-  color: var(--ok);
-  border-color: rgba(52, 211, 153, 0.35);
+  color: var(--ok-ink);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
 }
 .participant-bus-tag.missing {
-  color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.35);
+  color: var(--warn-ink);
+  border-color: var(--warn-border);
   background: var(--warn-soft);
 }
 
@@ -3331,9 +3559,9 @@ pre {
   font-weight: 500;
   padding: 3px 8px;
   border-radius: var(--r-pill);
-  border: 1px solid rgba(52, 211, 153, 0.35);
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
-  color: var(--ok);
+  color: var(--ok-ink);
   flex-shrink: 0;
   animation: bus-installed-badge-enter 240ms ease-out;
 }
@@ -3379,10 +3607,43 @@ pre {
   gap: 8px;
   flex-wrap: wrap;
 }
+/* Register U06. This was 12px of `color: var(--warn)` and nothing else — no
+ * background, no border, no glyph. Two failures in one rule: the ink measured
+ * 2.66:1 (aurora) / 3.12:1 (daylight) against the panel, and "this is a
+ * warning" was carried by hue alone (WCAG 1.4.1). `.tpl-banner` two thousand
+ * lines below already solved this — "shape-coded via ⚠/ⓘ glyphs, never
+ * relying on color alone" — over the SAME `--warn-soft` / `--warn-border`
+ * tokens, which every gamma has always declared and this rule never used.
+ * So: adopt the convention rather than invent a second one. The hue survives
+ * in the glyph and the frame, where it is decoration; the words move to
+ * `--fg-1`, which is ink.
+ *
+ * Absolute glyph rather than a grid column on purpose — this class is worn
+ * both by a bare <p> and by <SessionBanner layout="flat"> (which emits title,
+ * body and an actions row as siblings), so a `grid-template-columns` here
+ * would reflow those children into the wrong cells. */
 .multi-agent-warning {
+  position: relative;
   margin: 4px 0 0;
-  color: var(--warn);
+  padding: 8px 10px 8px 30px;
+  border: 1px solid var(--warn-border);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+  color: var(--fg-1);
   font-size: 12px;
+  line-height: 1.4;
+}
+.multi-agent-warning::before {
+  content: '⚠';
+  position: absolute;
+  left: 10px;
+  top: 8px;
+  font-size: 13px;
+  line-height: 1.25;
+  color: var(--warn-ink);
+  /* Text presentation, not a platform emoji: the shape is the signal and
+   * forced-colors mode has to be able to read it. Mirrors .tpl-banner-glyph. */
+  font-variant-emoji: text;
 }
 /* Item #4: Retry/Abandon/Jump button row inside the worker-failure banner.
  * Flexbox so buttons wrap on narrow widths; `align-items: center` keeps
@@ -3412,7 +3673,7 @@ pre {
   padding: 2px 6px;
 }
 .recovery-warn-marker {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-weight: 500;
 }
 .recovery-body {
@@ -3443,7 +3704,7 @@ pre {
   margin-bottom: 2px;
 }
 .recovery-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 /* Iterations browser */
@@ -3692,6 +3953,12 @@ pre {
   color: var(--fg-3);
   font-variant-numeric: tabular-nums;
 }
+/* F7: run cost, same weight as the hop counter beside it — a secondary
+   capacity fact, not a headline. */
+.tpl-preview-rail-cost {
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
 .tpl-preview-rail-chip {
   display: inline-block;
   padding: 1px 6px;
@@ -3703,19 +3970,22 @@ pre {
   font-variant-numeric: tabular-nums;
 }
 .tpl-preview-rail-chip--ok {
-  color: var(--ok, #1f7a3a);
-  background: color-mix(in srgb, var(--ok, #1f7a3a) 12%, var(--bg-2));
-  border-color: color-mix(in srgb, var(--ok, #1f7a3a) 35%, var(--border));
+  /* The `, #1f7a3a` fallbacks these carried could never fire — `--ok` is
+   * declared in :root and all four gammas — so they were a fifth green that
+   * no gamma contains, sitting in the source looking load-bearing. */
+  color: var(--ok-ink);
+  background: color-mix(in srgb, var(--ok) 12%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
 }
 .tpl-preview-rail-chip--at-cap {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
 .tpl-preview-rail-chip--failed {
-  color: var(--danger, #c0392b);
-  background: color-mix(in srgb, var(--danger, #c0392b) 12%, var(--bg-2));
-  border-color: color-mix(in srgb, var(--danger, #c0392b) 35%, var(--border));
+  color: var(--err-ink);
+  background: color-mix(in srgb, var(--err) 12%, var(--bg-2));
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
 }
 .tpl-preview-rail-chip--interrupted {
   color: var(--fg-3);
@@ -3766,15 +4036,27 @@ pre {
 .tpl-banner-body {
   color: var(--fg-2);
 }
+/* The glyph and the frame carry the hue; the words do not. Semantic inks are
+ * tuned to sit on a plain panel, and putting them on their own soft tint is
+ * the worst case for both — `--warn` on `--warn-soft` measures 2.39:1 in
+ * aurora. These banners were already shape-coded, so the colour channel is
+ * redundant here and can afford to be decorative. Same treatment as
+ * `.multi-agent-warning`; styleContrast.test.ts measures the shared pair. */
 .tpl-banner.is-warn {
-  color: var(--warn);
+  color: var(--fg-1);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
+.tpl-banner.is-warn .tpl-banner-glyph {
+  color: var(--warn-ink);
+}
 .tpl-banner.is-info {
-  color: var(--info);
+  color: var(--fg-1);
   background: var(--info-soft);
   border-color: color-mix(in srgb, var(--info) 35%, var(--border));
+}
+.tpl-banner.is-info .tpl-banner-glyph {
+  color: var(--info-ink);
 }
 
 /* PR-1: container for the bypass banner repeated inside the expanded modal.
@@ -3874,12 +4156,12 @@ pre {
  * always emits `is-${tier}` (never the BEM `--tier` form), so a single
  * selector per tier is enough. */
 .session-banner.is-info {
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   border-color: color-mix(in srgb, var(--info) 35%, var(--border));
 }
 .session-banner.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -3889,14 +4171,14 @@ pre {
   border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
 }
 .session-banner.is-error {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 30%, var(--border));
 }
 /* Danger = error's louder cousin: heavier border + accent shadow. The
  * focus-steal is the primary cue; the visual is the redundant one. */
 .session-banner.is-danger {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: var(--err);
   border-width: 1px;
@@ -3906,7 +4188,7 @@ pre {
  * the existing banner is `.tpl-banner.is-warn`; spec §8.2 only requires
  * it sit at the bottom of the stack. */
 .session-banner.is-invariant {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
 }
@@ -3982,7 +4264,7 @@ pre {
   padding: 0 6px;
   border-radius: var(--r-sm);
   background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--warn-ink);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -4058,11 +4340,15 @@ pre {
   font-size: var(--t-xs);
   cursor: pointer;
 }
-.rate-limit-banner-held-drop:hover,
-.rate-limit-banner-held-drop:focus-visible {
-  color: var(--warn);
+.rate-limit-banner-held-drop:hover {
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
-  outline: none;
+}
+.rate-limit-banner-held-drop:focus-visible {
+  color: var(--warn-ink);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* PR-1: lifecycle=temp inline note. Plain prose, not a banner — appears
@@ -4123,7 +4409,11 @@ pre {
   place-items: center;
   overflow: hidden;
   background-image:
-    radial-gradient(circle at center, color-mix(in srgb, var(--accent) 4%, transparent), transparent 60%),
+    radial-gradient(
+      circle at center,
+      color-mix(in srgb, var(--accent) 4%, transparent),
+      transparent 60%
+    ),
     linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
   background-size:
@@ -5086,8 +5376,8 @@ pre {
   background: var(--bg-3);
 }
 .lifecycle-pill-temp {
-  color: var(--warn);
-  border-color: rgba(251, 191, 36, 0.35);
+  color: var(--warn-ink);
+  border-color: var(--warn-border);
   background: var(--warn-soft);
 }
 
@@ -5159,7 +5449,7 @@ pre {
 .lifecycle-btn.active:nth-child(2) {
   /* Highlight 'temp' with a warn-tone so the destructive-on-End
    * semantics stay legible at a glance. */
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
 }
 .lifecycle-btn:disabled:not(.active) {
@@ -5204,6 +5494,28 @@ pre {
 }
 .add-participant-empty {
   margin-top: 8px;
+}
+/* Register U03: the draft view's keyboard/touch path into the participant
+ * list. Collapsed once the run has participants so the composed list stays the
+ * focus, open while it is empty because that is when there is nothing else to
+ * do. `<details>` gives the disclosure a real keyboard affordance for free. */
+.ma-draft-add {
+  margin-top: 8px;
+}
+.ma-draft-add > summary {
+  cursor: pointer;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  padding: 4px 2px;
+  border-radius: var(--r-sm);
+  list-style-position: inside;
+}
+.ma-draft-add > summary:hover {
+  color: var(--fg-0);
+}
+.ma-draft-add > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .add-participant-list {
   list-style: none;
@@ -5257,8 +5569,8 @@ pre {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .run-status-completed {
-  color: var(--ok);
-  border-color: rgba(52, 211, 153, 0.35);
+  color: var(--ok-ink);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent);
   background: var(--ok-soft);
 }
 .run-status-stopped {
@@ -5266,8 +5578,8 @@ pre {
   background: var(--bg-3);
 }
 .run-status-crashed {
-  color: var(--err);
-  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--err-ink);
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
   background: var(--err-soft);
 }
 
@@ -5336,7 +5648,7 @@ pre {
 .ma-scrollback-filter-chip.is-visible.ma-scrollback-filter-chip--error {
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 35%, var(--border));
-  color: var(--err);
+  color: var(--err-ink);
 }
 .ma-scrollback-filter-chip.is-visible.ma-scrollback-filter-chip--intro {
   background: var(--bg-1);
@@ -5570,7 +5882,7 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: var(--ok);
+  color: var(--ok-ink);
   font-size: 10px;
   letter-spacing: 0.04em;
 }
@@ -5595,10 +5907,15 @@ pre {
 
 /* ---------- Orchestrator user-prompt input (active runs only) ---------- */
 .multi-agent-input-section {
-  /* Stick to bottom of the multi-agent pane so the input is always reachable
-   * as the scrollback grows. The parent (.multi-agent) doesn't flex, but
-   * scrolling lands inside the scrollback list — this margin keeps a small
-   * gap from the events without colliding. */
+  /* Push the composer to the bottom of the pane when the content is SHORTER
+   * than the viewport — an `auto` margin in a flex column absorbs the free
+   * space. Once the scrollback overflows there is no free space left, so this
+   * does nothing and the composer simply follows the last event; scrolling to
+   * the bottom is how you reach it. (The comment here used to claim the
+   * composer sticks to the bottom "as the scrollback grows", i.e. exactly the
+   * case where an auto margin has no effect. It is not sticky. The blocking
+   * banners, which must be reachable without scrolling, are handled by DOM
+   * order instead — see the banner group in `ActiveRunView`.) */
   margin-top: auto;
 }
 .multi-agent-input {
@@ -5958,6 +6275,15 @@ pre {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+/* U30: the rows were focusable long before they were a grid, and had no focus
+ * style at all — only :hover and .is-selected. `outline-offset` is negative so
+ * the ring draws INSIDE the row; a positive offset on a <tr> is clipped by the
+ * scroll container and the sticky header. */
+.artifacts-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .artifacts-row td {
   padding: var(--s-2) var(--s-3);
   border-bottom: 1px solid var(--line-1);
@@ -6089,7 +6415,7 @@ pre {
   padding: 0 var(--s-1);
   border: 1px solid var(--warn);
   border-radius: var(--r-sm);
-  color: var(--warn);
+  color: var(--warn-ink);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -6120,7 +6446,7 @@ pre {
   align-items: center;
   gap: var(--s-2);
   font-size: var(--t-sm);
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 .artifact-content-error p {
@@ -6225,7 +6551,7 @@ pre {
   align-items: center;
   gap: 4px;
   margin-left: 6px;
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 600;
 }
 
@@ -6301,14 +6627,14 @@ pre {
 }
 
 .logs-modal-more {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 /* Cluster H D12 client: live-edge counter in the subtitle. Same tint as
  * `.logs-modal-more` (operator-positive "the feed is growing") but with
  * tabular-nums so the count column doesn't jitter as it climbs. */
 .logs-modal-live {
-  color: var(--accent);
+  color: var(--accent-ink);
   font-variant-numeric: tabular-nums;
 }
 
@@ -6534,12 +6860,12 @@ pre {
 
 .logs-row-kind-error {
   background: var(--err-soft);
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 .logs-row-kind-artifact {
   background: var(--ok-soft);
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 
 .logs-row-agent {
@@ -6561,7 +6887,7 @@ pre {
 
 .logs-row-redacted-badge {
   background: var(--warn-soft);
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: 10px;
   padding: 1px 5px;
   border-radius: var(--r-sm);
@@ -6681,7 +7007,7 @@ pre {
 }
 
 .logs-row-detail-meta dd a {
-  color: var(--accent);
+  color: var(--accent-ink);
   text-decoration: none;
 }
 
@@ -6701,7 +7027,7 @@ pre {
 
 .logs-row-detail-redacted code {
   font-family: var(--font-mono);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 .logs-row-detail-raw {
@@ -6881,19 +7207,19 @@ pre {
   color: var(--line-3); /* default; overridden per tier */
 }
 .notif[data-severity='info'] .notif-glyph svg {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif[data-severity='success'] .notif-glyph svg {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif[data-severity='warn'] .notif-glyph svg {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif[data-severity='error'] .notif-glyph svg {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif[data-severity='danger'] .notif-glyph svg {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
 .notif-body {
@@ -6912,19 +7238,19 @@ pre {
   margin-bottom: var(--s-1);
 }
 .notif[data-severity='info'] .notif-tier-label {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif[data-severity='success'] .notif-tier-label {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif[data-severity='warn'] .notif-tier-label {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif[data-severity='error'] .notif-tier-label {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif[data-severity='danger'] .notif-tier-label {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-count {
   padding: 1px var(--s-2);
@@ -6964,11 +7290,15 @@ pre {
   cursor: pointer;
   min-height: 32px;
 }
-.notif-action-btn:hover,
+.notif-action-btn:hover {
+  background: var(--bg-5);
+  border-color: var(--accent);
+}
 .notif-action-btn:focus-visible {
   background: var(--bg-5);
   border-color: var(--accent);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .notif-close {
@@ -7021,7 +7351,7 @@ pre {
 }
 .notif-bell[data-has-unread='true'] {
   opacity: 1;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-bell svg {
   width: 16px;
@@ -7094,7 +7424,7 @@ pre {
   margin: 0;
   font-size: var(--t-md);
   font-weight: 600;
-  color: var(--text-1, inherit);
+  color: var(--fg);
 }
 .notif-inbox-close {
   width: 24px;
@@ -7136,29 +7466,35 @@ pre {
   background: var(--bg-5);
 }
 .notif-inbox-chip[data-active='true'] {
-  background: var(--bg-5);
+  /* Was `--bg-5`, which is also what :hover uses — so the active chip was
+   * distinguishable from a hovered one only by its border, and every tier's
+   * ink measured 3.94–4.22:1 on it in the light gammas. `--panel-2` is a
+   * declared text surface (the one the ink tokens are derived against), it
+   * clears AA for all five tiers, and it gives active a fill that hover does
+   * not have. */
+  background: var(--panel-2);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-inbox-chip[data-tier='info'][data-active='true'] {
   border-color: var(--info);
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif-inbox-chip[data-tier='success'][data-active='true'] {
   border-color: var(--ok);
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif-inbox-chip[data-tier='warn'][data-active='true'] {
   border-color: var(--warn);
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif-inbox-chip[data-tier='error'][data-active='true'] {
   border-color: var(--err);
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif-inbox-chip[data-tier='danger'][data-active='true'] {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-inbox-toggle {
   font-size: var(--t-sm);
@@ -7260,19 +7596,19 @@ pre {
   font-size: 10px;
 }
 .notif-inbox-row-tier[data-tier='info'] {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .notif-inbox-row-tier[data-tier='success'] {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .notif-inbox-row-tier[data-tier='warn'] {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .notif-inbox-row-tier[data-tier='error'] {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .notif-inbox-row-tier[data-tier='danger'] {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .notif-inbox-row-ts {
   opacity: 0.6;
@@ -7319,11 +7655,15 @@ pre {
   border-radius: var(--r-sm);
   cursor: pointer;
 }
-.notif-inbox-row-ack:hover,
+.notif-inbox-row-ack:hover {
+  background: var(--bg-5);
+  border-color: var(--accent);
+}
 .notif-inbox-row-ack:focus-visible {
   background: var(--bg-5);
   border-color: var(--accent);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Mute button on the toast itself (matches .notif-action-btn but visually
@@ -7342,12 +7682,17 @@ pre {
   min-height: 32px;
   opacity: 0.65;
 }
-.notif-mute-btn:hover,
+.notif-mute-btn:hover {
+  opacity: 1;
+  border-color: var(--line-3);
+  background: var(--bg-5);
+}
 .notif-mute-btn:focus-visible {
   opacity: 1;
   border-color: var(--line-3);
   background: var(--bg-5);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ----------------------------------------------------------------------
@@ -7410,15 +7755,15 @@ pre {
   white-space: nowrap;
 }
 .gate-modal-reason-hash_changed {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: var(--warn);
 }
 .gate-modal-reason-first_seen {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: var(--accent);
 }
 .gate-modal-reason-env {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: var(--err);
 }
 
@@ -7427,6 +7772,15 @@ pre {
   font-size: var(--t-sm);
   color: var(--fg-1);
   line-height: 1.45;
+}
+
+/* Register H04: the "what Deny actually does" line under the primary help
+   text. Quieter than the warning above it — it is reassurance about the
+   controls, not another alarm — but it must stay legible, so it uses the
+   same --fg-1 rather than the muted token (which fails AA; see register U04). */
+.gate-modal-help-secondary {
+  margin-top: var(--s-2);
+  opacity: 0.9;
 }
 
 .gate-modal-facts {
@@ -7487,14 +7841,18 @@ pre {
   color: var(--bg-0);
   border-color: var(--accent);
 }
-.gate-modal-btn-primary:hover,
+.gate-modal-btn-primary:hover {
+  background: var(--accent);
+  filter: brightness(1.08);
+}
 .gate-modal-btn-primary:focus-visible {
   background: var(--accent);
   filter: brightness(1.08);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .gate-modal-btn-danger {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: var(--err);
 }
 .gate-modal-btn:disabled,
@@ -7548,7 +7906,7 @@ pre {
 }
 .gate-modal-injection-scope-local {
   /* project-local is the least-trusted tier (spec §5.3) — surface it. */
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: var(--warn);
 }
 .gate-modal-injection-set {
@@ -7557,8 +7915,11 @@ pre {
   border-radius: var(--r-sm);
 }
 .gate-modal-injection-set-yes {
-  background: rgba(255, 90, 90, 0.12);
-  color: var(--err);
+  /* Was a literal rgba(255, 90, 90, .12) — a fifth red matching no gamma's
+   * --err, so it did not re-theme. The #291 literal scan misses it precisely
+   * because it only knows the hexes the gammas declare. */
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--err-ink);
 }
 .gate-modal-injection-set-no {
   background: var(--bg-2);
@@ -7806,17 +8167,17 @@ pre {
 .model-identity-cwd {
   font-family: var(--font-mono);
   font-size: var(--t-xs);
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
   word-break: break-all;
 }
 .model-identity-perm-default {
   color: var(--fg-1);
 }
 .model-identity-perm-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .model-identity-perm-danger {
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 600;
 }
 .model-identity-perm-hint {
@@ -7824,10 +8185,10 @@ pre {
   font-style: italic;
 }
 .model-identity-key-ok {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .model-identity-key-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-weight: 600;
 }
 .model-identity-muted {
@@ -7934,10 +8295,10 @@ pre {
   color: var(--fg-1);
 }
 .tool-row-source-mcp {
-  color: var(--accent-ink, var(--accent));
+  color: var(--accent-ink);
 }
 .tool-row-source-cebab-injected {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .tool-row-mcp-server {
   margin-left: 4px;
@@ -7953,7 +8314,7 @@ pre {
   padding: 1px 6px;
   border-radius: var(--r-sm);
   background: var(--err-soft);
-  color: var(--err);
+  color: var(--err-ink);
   border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
   font-weight: 600;
 }
@@ -7985,7 +8346,7 @@ pre {
   font-style: italic;
 }
 .tool-row-reason {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 
 /* New "read" variant — matches existing -mutate / -dangerous shape so we
@@ -8023,10 +8384,13 @@ pre {
   align-items: center;
   gap: 6px;
 }
-.tools-list-usage-toggle-btn:hover,
-.tools-list-usage-toggle-btn:focus-visible {
-  outline: none;
+.tools-list-usage-toggle-btn:hover {
   border-color: var(--accent);
+}
+.tools-list-usage-toggle-btn:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .tools-list-usage-toggle-btn-active {
   background: var(--accent-soft, color-mix(in srgb, var(--accent) 12%, var(--bg-2)));
@@ -8039,12 +8403,12 @@ pre {
    * on it without having to read the label. Active state below promotes
    * to the err-soft fill. */
   border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
-  color: var(--err);
+  color: var(--err-ink);
 }
 .tools-list-usage-toggle-btn-attempted.tools-list-usage-toggle-btn-active {
   background: var(--err-soft);
   border-color: var(--err);
-  color: var(--err);
+  color: var(--err-ink);
 }
 .tools-list-usage-toggle-count {
   font-size: 10px;
@@ -8071,13 +8435,13 @@ pre {
   white-space: nowrap;
 }
 .tool-row-usage-chip-used {
-  color: var(--ok);
+  color: var(--ok-ink);
   background: color-mix(in srgb, var(--ok) 12%, var(--bg-3));
   border-color: color-mix(in srgb, var(--ok) 35%, var(--line-3));
 }
 .tool-row-usage-chip-attempted {
   /* The red signal-of-interest chip per UI-B31. */
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
   font-weight: 600;
@@ -8164,31 +8528,38 @@ pre {
   color: var(--fg-1);
 }
 .mcp-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
   border-color: color-mix(in srgb, var(--info) 35%, var(--line-3));
 }
 .mcp-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line-3));
 }
 .mcp-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .mcp-scope-cebab {
   color: var(--fg-2);
   font-style: italic;
 }
+/* SDK-reported but unattributable to any settings layer. Muted, and
+   deliberately not styled like .mcp-scope-cebab — that chip means
+   "Cebab-managed", which server-side implies an automatic trust grant. */
+.mcp-scope-unknown {
+  color: var(--fg-2);
+  border-style: dashed;
+}
 .mcp-trust-ok {
-  color: var(--ok);
+  color: var(--ok-ink);
   border-color: color-mix(in srgb, var(--ok) 35%, var(--line-3));
 }
 .mcp-trust-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .mcp-trust-err {
-  color: var(--err);
+  color: var(--err-ink);
   border-color: color-mix(in srgb, var(--err) 45%, var(--line-3));
 }
 .mcp-trust-muted {
@@ -8346,13 +8717,13 @@ pre {
   background: var(--bg-3);
 }
 .allow-deny-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .allow-deny-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .allow-deny-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .allow-deny-scope-default {
   color: var(--fg-2);
@@ -8399,7 +8770,7 @@ pre {
   font-size: var(--t-sm);
 }
 .env-scrub-banner strong {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .env-scrub-scope {
   border: 1px solid var(--line-3);
@@ -8424,15 +8795,15 @@ pre {
   color: var(--fg-1);
 }
 .env-injection-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .env-injection-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: color-mix(in srgb, var(--accent) 35%, var(--line-3));
 }
 .env-injection-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
   border-color: color-mix(in srgb, var(--info) 35%, var(--line-3));
 }
 .env-scrub-scope-path {
@@ -8483,7 +8854,7 @@ pre {
   border: 1px solid var(--line-3);
 }
 .env-injection-set-yes {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 35%, var(--line-3));
   font-weight: 600;
@@ -8556,7 +8927,7 @@ pre {
   flex-wrap: wrap;
 }
 .hook-card-warn-icon {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-size: var(--t-sm);
   font-weight: 700;
 }
@@ -8571,13 +8942,13 @@ pre {
   color: var(--fg-1);
 }
 .hook-scope-user {
-  color: var(--info);
+  color: var(--info-ink);
 }
 .hook-scope-project {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .hook-scope-local {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .hook-card-path {
@@ -8668,7 +9039,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   margin-left: 12px;
   display: inline-flex;
@@ -8677,10 +9048,13 @@ pre {
   white-space: nowrap;
   cursor: pointer;
 }
-.ma-router-drops-chip:hover,
-.ma-router-drops-chip:focus-visible {
-  outline: none;
+.ma-router-drops-chip:hover {
   filter: brightness(1.15);
+}
+.ma-router-drops-chip:focus-visible {
+  filter: brightness(1.15);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .ma-router-drops-chip-occasional {
   /* Default warn-tint (matches base) */
@@ -8692,7 +9066,7 @@ pre {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 25%, transparent);
 }
 .ma-router-drops-chip-burst {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, var(--border));
   font-weight: 700;
@@ -8738,10 +9112,13 @@ pre {
   cursor: pointer;
   text-align: left;
 }
-.router-drops-row-summary:hover,
-.router-drops-row-summary:focus-visible {
-  outline: none;
+.router-drops-row-summary:hover {
   background: var(--bg-2);
+}
+.router-drops-row-summary:focus-visible {
+  background: var(--bg-2);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .router-drops-row-ts {
   font-family: var(--font-mono);
@@ -8780,12 +9157,12 @@ pre {
   white-space: nowrap;
 }
 .router-drops-reason-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
 .router-drops-reason-danger {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 45%, var(--line-3));
   font-weight: 600;
@@ -8840,11 +9217,15 @@ pre {
     opacity 120ms ease,
     color 120ms ease;
 }
-.session-row:hover .session-row-authority-btn,
+.session-row:hover .session-row-authority-btn {
+  opacity: 1;
+  color: var(--accent-ink);
+}
 .session-row-authority-btn:focus-visible {
   opacity: 1;
-  color: var(--accent-ink, var(--accent));
-  outline: none;
+  color: var(--accent-ink);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 @media (prefers-reduced-motion: reduce) {
   .session-row-authority-btn {
@@ -8870,7 +9251,7 @@ pre {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   text-decoration: none;
-  color: var(--accent);
+  color: var(--accent-ink);
   background: var(--accent-glow);
   border: 1px solid var(--accent);
   border-radius: 999px;
@@ -8879,12 +9260,17 @@ pre {
   white-space: nowrap;
   cursor: pointer;
 }
-.trust-chip-authority-link:hover,
+.trust-chip-authority-link:hover {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
 .trust-chip-authority-link:focus-visible {
   color: var(--on-accent);
   background: var(--accent);
   border-color: var(--accent);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* AuthorityPreflightModal sizing — wider than the gate modals because it
@@ -8947,18 +9333,18 @@ pre {
   overflow-y: auto;
 }
 .reopen-modal-clean {
-  color: var(--ok);
+  color: var(--ok-ink);
 }
 .reopen-modal-no-git {
-  color: var(--warn);
+  color: var(--warn-ink);
 }
 .reopen-modal-dirty {
   /* Bold count is on `strong` inline; ambient color stays neutral so the
    * count itself reads as the data point. */
-  color: var(--ink);
+  color: var(--fg);
 }
 .reopen-modal-detail {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-size: var(--t-xs);
 }
 .reopen-modal-samples {
@@ -8973,7 +9359,7 @@ pre {
 }
 .reopen-modal-samples > li > code {
   font-size: var(--t-xs);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .reopen-modal-error {
   /* Inline validation error above the form (typed-gate / ack mismatch).
@@ -8983,7 +9369,7 @@ pre {
   background: color-mix(in oklab, var(--err) 12%, transparent);
   border: 1px solid color-mix(in oklab, var(--err) 35%, transparent);
   border-radius: var(--r-sm);
-  color: var(--err);
+  color: var(--err-ink);
   font-size: var(--t-sm);
 }
 .reopen-modal-ack {
@@ -8992,7 +9378,7 @@ pre {
   gap: 8px;
   margin-top: 12px;
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
   cursor: pointer;
 }
 .reopen-modal-ack > input {
@@ -9007,7 +9393,7 @@ pre {
 }
 .reopen-modal-typed-prompt {
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .reopen-modal-typed > input {
   font-family: var(--font-mono);
@@ -9016,7 +9402,7 @@ pre {
   border: 1px solid var(--line-3);
   border-radius: var(--r-sm);
   background: var(--bg-2);
-  color: var(--ink);
+  color: var(--fg);
 }
 .reopen-modal-typed > input:focus-visible {
   outline: 2px solid var(--accent);
@@ -9027,7 +9413,7 @@ pre {
    * shape but with a warn-tier background since the reason is "what went
    * wrong" rather than the McpTofu-style policy chip. */
   background: color-mix(in oklab, var(--warn) 18%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
 }
 
@@ -9058,7 +9444,7 @@ pre {
   font-family: var(--font-mono);
   font-size: var(--t-sm);
   line-height: 1.45;
-  color: var(--ink);
+  color: var(--fg);
   background: var(--bg-1);
   border: 1px solid var(--line-3);
   border-radius: var(--r-sm);
@@ -9071,35 +9457,35 @@ pre {
   word-break: break-word;
 }
 .auth-refresh-modal-output-placeholder {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-style: italic;
 }
 .auth-refresh-modal-pid {
   /* Subprocess PID chip — info tier (this is metadata, not a warning). */
   background: color-mix(in oklab, var(--info) 18%, transparent);
-  color: var(--info);
+  color: var(--info-ink);
   border: 1px solid color-mix(in oklab, var(--info) 35%, transparent);
 }
 .auth-refresh-modal-exit-success {
   background: color-mix(in oklab, var(--ok) 18%, transparent);
-  color: var(--ok);
+  color: var(--ok-ink);
   border: 1px solid color-mix(in oklab, var(--ok) 35%, transparent);
 }
 .auth-refresh-modal-exit-failed {
   background: color-mix(in oklab, var(--err) 18%, transparent);
-  color: var(--err);
+  color: var(--err-ink);
   border: 1px solid color-mix(in oklab, var(--err) 35%, transparent);
 }
 .auth-refresh-modal-failed-reason {
   /* Start-time failure (already_running / spawn_failed). Same warn tier
    * as the reopen modal's failed-reason chip. */
   background: color-mix(in oklab, var(--warn) 18%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   border: 1px solid color-mix(in oklab, var(--warn) 35%, transparent);
 }
 .auth-refresh-modal-existing-run-id,
 .auth-refresh-modal-error-detail {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-size: var(--t-sm);
 }
 
@@ -9199,12 +9585,12 @@ pre {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .recovery-log-inspector-empty {
   margin: 0;
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 
 .recovery-log-table {
@@ -9219,7 +9605,7 @@ pre {
   border-bottom: 1px solid var(--line-3);
 }
 .recovery-log-table thead th {
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-weight: 500;
   font-size: var(--t-xs, 11px);
   text-transform: uppercase;
@@ -9239,28 +9625,28 @@ pre {
   border-radius: 999px;
   font-size: var(--t-xs, 11px);
   font-weight: 500;
-  background: color-mix(in oklab, var(--ink-dim) 18%, transparent);
-  color: var(--ink);
-  border: 1px solid color-mix(in oklab, var(--ink-dim) 35%, transparent);
+  background: color-mix(in oklab, var(--fg-3) 18%, transparent);
+  color: var(--fg);
+  border: 1px solid color-mix(in oklab, var(--fg-3) 35%, transparent);
 }
 .recovery-log-class-rate_limit {
   background: color-mix(in oklab, var(--info) 18%, transparent);
-  color: var(--info);
+  color: var(--info-ink);
   border-color: color-mix(in oklab, var(--info) 35%, transparent);
 }
 .recovery-log-class-auth_expired {
   background: color-mix(in oklab, var(--warn) 18%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in oklab, var(--warn) 35%, transparent);
 }
 .recovery-log-class-sweep {
   background: color-mix(in oklab, var(--accent) 18%, transparent);
-  color: var(--accent);
+  color: var(--accent-ink);
   border-color: color-mix(in oklab, var(--accent) 35%, transparent);
 }
 .recovery-log-class-chain_crash {
   background: color-mix(in oklab, var(--err) 18%, transparent);
-  color: var(--err);
+  color: var(--err-ink);
   border-color: color-mix(in oklab, var(--err) 35%, transparent);
 }
 
@@ -9279,7 +9665,7 @@ pre {
 }
 .recovery-log-gauge-label {
   font-size: var(--t-xs, 11px);
-  color: var(--ink-dim);
+  color: var(--fg-3);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -9291,12 +9677,12 @@ pre {
 .recovery-log-gauge-value.recovery-log-gauge-empty {
   font-weight: 400;
   font-size: var(--t-sm);
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 .recovery-log-gauge-detail {
   font-size: var(--t-sm);
   font-weight: 400;
-  color: var(--ink-dim);
+  color: var(--fg-3);
 }
 
 .recovery-log-recent-list {
@@ -9324,14 +9710,14 @@ pre {
 }
 .recovery-log-recent-row-ts {
   margin-left: auto;
-  color: var(--ink-dim);
+  color: var(--fg-3);
   font-size: var(--t-xs, 11px);
   font-variant-numeric: tabular-nums;
 }
 .recovery-log-recent-row-meta {
   margin-top: 4px;
   font-size: var(--t-xs, 11px);
-  color: var(--ink-dim);
+  color: var(--fg-3);
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
@@ -9366,7 +9752,7 @@ pre {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  color: var(--err);
+  color: var(--err-ink);
   font-weight: 500;
 }
 .stopped-marker-glyph {
@@ -9380,12 +9766,12 @@ pre {
   display: flex;
   flex-direction: column;
   gap: var(--s-2, 8px);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 400;
 }
 .stopped-marker-prompt-label {
   font-size: var(--t-xs, 11px);
-  color: var(--ink-dim, var(--fg-3, inherit));
+  color: var(--fg-3);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -9402,7 +9788,7 @@ pre {
 .stopped-marker-btn.is-active {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .stopped-marker-skip {
   margin-left: auto;
@@ -9423,7 +9809,7 @@ pre {
   padding: 4px 8px;
   font-size: var(--t-sm);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -9447,7 +9833,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   margin-left: 12px;
   display: inline-flex;
@@ -9457,7 +9843,7 @@ pre {
 }
 .ma-participant-controls-chip.has-kicked {
   border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   font-weight: 600;
 }
@@ -9485,17 +9871,17 @@ pre {
   white-space: nowrap;
 }
 .ma-control-pill.is-muted {
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   border-color: color-mix(in srgb, var(--info) 30%, var(--border));
 }
 .ma-control-pill.is-paused {
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border-color: color-mix(in srgb, var(--warn) 30%, var(--border));
 }
 .ma-control-pill.is-kicked {
-  color: var(--err);
+  color: var(--err-ink);
   background: var(--err-soft);
   border-color: color-mix(in srgb, var(--err) 40%, var(--border));
   font-weight: 600;
@@ -9528,7 +9914,7 @@ pre {
 .ma-control-menu-trigger[aria-expanded='true'] {
   background: var(--bg-3);
   border-color: var(--line-3, var(--border));
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
 .ma-control-menu-trigger:focus-visible {
   outline: 2px solid var(--accent);
@@ -9565,7 +9951,7 @@ pre {
   text-align: left;
   padding: 6px 10px;
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   cursor: pointer;
   font-family: inherit;
   display: flex;
@@ -9573,23 +9959,34 @@ pre {
   gap: 8px;
   white-space: nowrap;
 }
-.ma-control-menu-item:hover,
-.ma-control-menu-item:focus-visible {
-  outline: none;
+.ma-control-menu-item:hover {
   background: var(--bg-3);
   border-color: var(--line-3, var(--border));
 }
+.ma-control-menu-item:focus-visible {
+  background: var(--bg-3);
+  border-color: var(--line-3, var(--border));
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .ma-control-menu-item.is-primary {
   font-weight: 600;
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 
-.ma-control-menu-hint {
-  padding: 6px 10px;
-  margin: 0;
-  font-size: var(--t-xs, 11px);
+/* U26: the chain-mode explanation used to be a `<p class="ma-control-menu-hint">`
+ * inside `role="menu"` — an illegal child that no screen reader reached. It is
+ * now a disabled menu item, so it keeps the item's box and picks up the
+ * dimming here. Not `:disabled`: a natively disabled button is unfocusable,
+ * and the whole point is that the arrow keys can land on it and read it out. */
+.ma-control-menu-item[aria-disabled='true'] {
   color: var(--fg-2, var(--fg));
   font-style: italic;
+  cursor: default;
+}
+.ma-control-menu-item[aria-disabled='true']:hover {
+  background: transparent;
+  border-color: transparent;
 }
 
 /* Cluster C Phase 4g2: divider between the everyday actions (mute/pause)
@@ -9601,7 +9998,7 @@ pre {
 }
 
 .ma-control-menu-item.is-danger {
-  color: var(--err);
+  color: var(--err-ink);
 }
 .ma-control-menu-item.is-danger:hover,
 .ma-control-menu-item.is-danger:focus-visible {
@@ -9668,7 +10065,7 @@ pre {
 }
 .kick-modal-reason-label-text {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
 }
 .kick-modal-reason-help {
@@ -9697,7 +10094,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   resize: vertical;
@@ -9772,7 +10169,7 @@ pre {
 }
 .mute-reason-modal-reason-label-text {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
 }
 .mute-reason-modal-reason-help {
@@ -9799,7 +10196,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   resize: vertical;
@@ -9874,7 +10271,7 @@ pre {
 .pause-reason-modal-reason-label-text,
 .pause-reason-modal-expiry-label-text {
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-weight: 500;
 }
 .pause-reason-modal-reason-help,
@@ -9908,7 +10305,7 @@ pre {
   background: var(--bg-3);
 }
 .pause-reason-modal-duration-text {
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
 
 /* Custom-minutes input — appears only when "Custom…" is selected. */
@@ -9931,7 +10328,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -9944,7 +10341,7 @@ pre {
 }
 .pause-reason-modal-custom-error {
   font-size: var(--t-xs, 11px);
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 .pause-reason-modal-text-label {
@@ -9967,7 +10364,7 @@ pre {
   font-size: var(--t-sm);
   padding: var(--s-1) var(--s-2);
   background: var(--bg-4, var(--bg-3));
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   resize: vertical;
@@ -9994,7 +10391,7 @@ pre {
   color: var(--fg-2, var(--fg));
 }
 .kick-forensics-status.is-error {
-  color: var(--err);
+  color: var(--err-ink);
   font-style: normal;
 }
 
@@ -10023,7 +10420,7 @@ pre {
 .kick-forensics-meta dd {
   margin: 0;
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
   word-break: break-word;
   align-self: center;
 }
@@ -10060,7 +10457,7 @@ pre {
   font-family: var(--font-mono);
   font-size: var(--t-xs, 11px);
   background: var(--bg-3);
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
   padding: var(--s-2);
@@ -10117,7 +10514,7 @@ pre {
   margin: 4px 0 0;
   font-family: var(--font-mono);
   font-size: var(--t-xs, 11px);
-  color: var(--ink, inherit);
+  color: var(--fg);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -10159,13 +10556,13 @@ pre {
   color: var(--fg-2, var(--fg));
 }
 .kick-forensics-mutation-unconfirmed {
-  color: var(--warn);
+  color: var(--warn-ink);
   font-weight: 600;
 }
 .kick-forensics-mutation-summary {
   margin: 4px 0 0;
   font-size: var(--t-sm);
-  color: var(--ink, inherit);
+  color: var(--fg);
 }
 .kick-forensics-mutation-path {
   margin: 2px 0 0;
@@ -10205,7 +10602,7 @@ pre {
   font-size: var(--t-sm);
   padding: 2px 6px;
   background: var(--bg-3);
-  color: var(--ink, inherit);
+  color: var(--fg);
   border: 1px solid var(--line-3, var(--border));
   border-radius: var(--r-sm, 4px);
 }
@@ -10245,7 +10642,7 @@ pre {
   white-space: nowrap;
 }
 .turn-counter-chip.is-warn {
-  color: var(--warn);
+  color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: var(--warn-soft);
 }
@@ -10271,7 +10668,7 @@ pre {
  * paragraph, an actions row, and an optional soft-cap warning. */
 .max-turns-card .max-turns-card-body {
   margin: 4px 0 8px;
-  color: var(--ink, inherit);
+  color: var(--fg);
   font-size: var(--t-sm);
 }
 .max-turns-card .max-turns-card-errors {
@@ -10300,7 +10697,7 @@ pre {
   margin: 8px 0 0;
   padding: 6px 10px;
   font-size: var(--t-xs, 11px);
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
   border-radius: var(--r-sm, 4px);
@@ -10324,7 +10721,7 @@ pre {
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid color-mix(in srgb, var(--info) 35%, var(--border));
-  color: var(--info);
+  color: var(--info-ink);
   background: var(--info-soft);
   margin-left: 12px;
   display: inline-flex;
@@ -10365,7 +10762,7 @@ pre {
   font-weight: 600;
   border-radius: var(--r-sm);
   border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
-  color: var(--warn);
+  color: var(--warn-ink);
   background: var(--warn-soft);
   /* Tooltip is the affordance — the badge isn't a button. */
   cursor: help;
@@ -10390,11 +10787,27 @@ pre {
  * the read-only "tooltip carries the detail" convention used by every
  * status chip in this app.
  *
- * The white text on the high-contrast red stripe is the worst-case
- * combination (operator may have applied a custom theme); we set
- * `color: #fff` explicitly rather than `var(--fg-0)` so the override
- * cannot accidentally lower text contrast below WCAG AA when the
- * background is the saturated `--err`.
+ * Register U07 — this comment used to claim the opposite of the truth. It
+ * read: "the white text on the high-contrast red stripe is the worst-case
+ * combination … we set `color: #fff` explicitly … so the override cannot
+ * accidentally lower text contrast below WCAG AA." Measured, white on
+ * `--err` was 3.71 (aurora), 2.77 (slate), 2.79 (phosphor) — the stripe the
+ * comment reasoned about failed AA in three gammas out of four. And it
+ * reasoned about the wrong stripe anyway: the second stop was
+ * `--err-soft` = `color-mix(in srgb, var(--err) 12%, transparent)`, which
+ * composites to roughly #f4e4dd on a light panel. White on that is 1.16:1.
+ * Half of the one badge that must never be missed was invisible in both
+ * light themes.
+ *
+ * The mistake was deriving a *backdrop* from `--err`, a token tuned to be
+ * read as ink ON a panel. A backdrop for white text has the opposite
+ * requirement, and no single value satisfies both across four gammas. So the
+ * stripes now mix `--err` down toward black — the hue is preserved (an sRGB
+ * mix with #000 scales all three channels alike), the diagonal texture that
+ * makes MOCK distinguishable without colour survives, and both stops clear
+ * AA under white everywhere: 8.4–12.3 for the 50% stop and 5.2–8.7 for the
+ * 70% one. styleContrast.test.ts measures both, so the claim above is now
+ * checked rather than asserted.
  */
 .mock-badge {
   font-family: var(--font-sans);
@@ -10409,10 +10822,16 @@ pre {
    * hue — operator can distinguish from agent-0 even at low color
    * acuity by the pattern alone. Each stripe pair is 12px so the
    * diagonal reads as texture, not just two parallel bands. */
-  background: repeating-linear-gradient(45deg, var(--err) 0 6px, var(--err-soft) 6px 12px);
+  background: repeating-linear-gradient(
+    45deg,
+    color-mix(in srgb, var(--err) 70%, #000) 0 6px,
+    color-mix(in srgb, var(--err) 50%, #000) 6px 12px
+  );
   color: #fff;
   /* Subtle text outline so MOCK stays legible across the lighter
-   * stripes. text-shadow keeps SR text rendering intact. */
+   * stripes. text-shadow keeps SR text rendering intact. It is a polish
+   * pass, not the contrast mechanism — a 2px blur is not measurable and
+   * both stripes clear AA on their own. */
   text-shadow: 0 0 2px color-mix(in srgb, var(--err) 80%, #000);
   margin-left: 8px;
   display: inline-flex;
@@ -10471,11 +10890,15 @@ pre {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   font-weight: 600;
 }
-.runs-badge:hover,
-.runs-badge:focus-visible {
-  outline: none;
+.runs-badge:hover {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.runs-badge:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .runs-badge[aria-expanded='true'] {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
@@ -10556,10 +10979,13 @@ pre {
 .runs-dropdown-list > li:last-child .runs-dropdown-row-btn {
   border-bottom: 0;
 }
-.runs-dropdown-row-btn:hover,
+.runs-dropdown-row-btn:hover {
+  background: var(--bg-3);
+}
 .runs-dropdown-row-btn:focus-visible {
   background: var(--bg-3);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .runs-dropdown-row-label {
@@ -10628,7 +11054,17 @@ pre {
   position: fixed;
   inset: 0;
   background: color-mix(in srgb, var(--bg-0) 70%, transparent);
-  z-index: var(--notif-stack-z);
+  /* U28: this sat at `--notif-stack-z` (90) while every modal overlay is 100
+   * and gate modals are 110 — so the one surface saying "Cebab cannot reach
+   * the server" rendered UNDER any open dialog, behind that dialog's opaque
+   * backdrop and unclickable. 120 puts it above the highest of them.
+   *
+   * The token is deliberately NOT raised: `--notif-stack-z` also drives the
+   * ordinary toast stack, and lifting every toast above every modal is a
+   * different design decision nobody asked for. This is the one surface whose
+   * message outranks whatever dialog is open, because while it is up, that
+   * dialog cannot be answered. */
+  z-index: 120;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -10652,6 +11088,14 @@ pre {
 .connection-lost-stripe {
   display: none;
 }
+/* U27: the alert region is now this wrapper (title + body + docs link) rather
+ * than the whole card, so the ticking countdown in the Retry label no longer
+ * re-announces everything. Carries the card's gap so the split is invisible. */
+.connection-lost-message {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
 .connection-lost-title {
   margin: 0;
   font-size: 16px;
@@ -10670,7 +11114,7 @@ pre {
   color: var(--fg-2);
 }
 .connection-lost-docs a {
-  color: var(--accent);
+  color: var(--accent-ink);
 }
 .connection-lost-actions {
   display: flex;
@@ -10692,21 +11136,28 @@ pre {
   border-color: var(--err);
   font-weight: 500;
 }
-.connection-lost-btn-primary:hover,
+.connection-lost-btn-primary:hover {
+  background: color-mix(in srgb, var(--err) 90%, white);
+}
 .connection-lost-btn-primary:focus-visible {
   background: color-mix(in srgb, var(--err) 90%, white);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .connection-lost-btn-ghost {
   background: transparent;
   color: var(--fg-2);
   border-color: var(--line-3);
 }
-.connection-lost-btn-ghost:hover,
+.connection-lost-btn-ghost:hover {
+  background: var(--bg-3);
+  color: var(--fg-1);
+}
 .connection-lost-btn-ghost:focus-visible {
   background: var(--bg-3);
   color: var(--fg-1);
-  outline: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .connection-lost-countdown {
   font-variant-numeric: tabular-nums;
@@ -10783,7 +11234,12 @@ pre {
 .session-search-chip.on {
   background: var(--accent-soft);
   border-color: var(--accent);
-  color: var(--fg-1);
+  /* `--accent-soft` reads like a pale tint and is not one — it is a saturated
+   * mid-tone in every gamma (#2456c8 / #a44d2c / #1f8e9b / #2cb56a). Neutral
+   * ink on it measured 1.56–2.30:1. `--on-accent` is the ink that belongs on
+   * an accent fill (4.68–7.14 here). Same defect as register .5.37: one token
+   * cannot be both the fill and the ink. */
+  color: var(--on-accent);
 }
 .session-search-chip:disabled {
   opacity: 0.5;
@@ -10858,7 +11314,7 @@ pre {
   background: var(--err-soft);
   border: 1px solid var(--err);
   border-radius: var(--r-sm);
-  color: var(--err);
+  color: var(--err-ink);
   font-size: var(--t-xs);
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -10878,6 +11334,17 @@ pre {
   padding: var(--s-3);
   margin: 0;
   text-align: center;
+}
+/* U18: the options moved from <button> to <li> so the combobox input keeps
+ * focus. The list itself carries the flex column the results container used to
+ * provide directly, and the two <p> hints are now its siblings. */
+.session-search-result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .session-search-result {
   display: flex;
@@ -10906,7 +11373,9 @@ pre {
 }
 .session-search-result-snippet mark {
   background: var(--accent-soft);
-  color: var(--fg-1);
+  /* The search-result highlight — the one span on screen whose whole job is to
+   * be read. It was neutral ink on the accent fill at 1.56:1 in phosphor. */
+  color: var(--on-accent);
   border-radius: 2px;
 }
 .session-search-result-meta {
@@ -10934,7 +11403,7 @@ pre {
   padding: 0 4px;
 }
 .session-search-raw-downgrade {
-  color: var(--err);
+  color: var(--err-ink);
 }
 
 /* Interactive AskUserQuestion card (AskUserQuestionCard.tsx) — rendered in the
@@ -10960,7 +11429,7 @@ pre {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--accent-ink);
-  background: rgba(47, 182, 196, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   border: 1px solid var(--line-3);
   border-radius: var(--r-pill);
   padding: 1px 8px;
@@ -11017,7 +11486,7 @@ pre {
 }
 .ask-user-option.selected {
   border-color: var(--accent);
-  background: rgba(47, 182, 196, 0.1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 .ask-user-option-label {
   font-size: var(--t-sm);

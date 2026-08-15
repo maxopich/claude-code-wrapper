@@ -183,3 +183,53 @@ describe('storage robustness', () => {
     expect(readMutes()).toEqual({});
   });
 });
+
+/**
+ * Register W24: the `'session'` scope was a silent no-op and is gone.
+ *
+ * It wrote `until: Date.now()`, and `isMuted` requires `Date.now() < until` —
+ * false the instant it was written. It suppressed nothing, and the next
+ * notification hit the lazy-expire branch and DELETED the entry, so the
+ * manage-mutes panel could not even show the operator what they had chosen.
+ *
+ * The type-level half is the real gate: `MuteScope` no longer admits it, so
+ * reintroducing the scope without an implementation is a `tsc` error rather
+ * than a runtime shrug. What is left to check here is that every scope the
+ * type DOES admit produces an `until` the checker can satisfy.
+ */
+describe('addMute — every accepted scope actually mutes (W24)', () => {
+  test('hour is live now and expired an hour and a bit later', () => {
+    const env = { dedupeKey: 'bus_auto_installed:p1', severity: 'info' } as const;
+    const entry = addMute(env, 'hour');
+    expect(entry).not.toBeNull();
+    expect(isMuted(env)).toBe(true);
+
+    // Not a fake-timer test: the point is the VALUE written, so read it back
+    // and compare against the window it claims.
+    expect(entry!.until).toBeGreaterThan(entry!.ts);
+    expect(entry!.until).toBe(entry!.ts + 60 * 60 * 1000);
+  });
+
+  test('forever never expires', () => {
+    const env = { dedupeKey: 'chain_not_reconstructed:s1', severity: 'warn' } as const;
+    const entry = addMute(env, 'forever');
+    expect(entry!.until).toBe('forever');
+    expect(isMuted(env)).toBe(true);
+  });
+
+  test('no accepted scope writes an already-expired entry', () => {
+    // The shape of the defect, stated as an invariant rather than a
+    // regression: an `until` at or before its own `ts` cannot suppress
+    // anything, because `isMuted` compares with a strict `<` against a later
+    // `Date.now()`.
+    for (const scope of ['hour', 'forever'] as const) {
+      const env = { dedupeKey: `k_${scope}:1`, severity: 'info' } as const;
+      const entry = addMute(env, scope);
+      expect(entry).not.toBeNull();
+      if (entry!.until !== 'forever') {
+        expect(entry!.until).toBeGreaterThan(entry!.ts);
+      }
+      expect(isMuted(env)).toBe(true);
+    }
+  });
+});

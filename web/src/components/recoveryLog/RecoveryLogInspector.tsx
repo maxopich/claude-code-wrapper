@@ -112,8 +112,8 @@ function RecoveryLogAggregatesSection({
       <section className="recovery-log-inspector-section">
         <h3 className="recovery-log-inspector-section-title">By class</h3>
         <p className="recovery-log-inspector-empty">
-          No recovery actions recorded yet. The log will populate as auto-retries,
-          sweeps, and archive actions fire.
+          No recovery actions recorded yet. The log will populate as auto-retries, sweeps, and
+          archive actions fire.
         </p>
       </section>
     );
@@ -125,9 +125,15 @@ function RecoveryLogAggregatesSection({
         <thead>
           <tr>
             <th scope="col">Class</th>
-            <th scope="col" className="recovery-log-table-num">Count</th>
-            <th scope="col" className="recovery-log-table-num">Reached final</th>
-            <th scope="col" className="recovery-log-table-num">Median time</th>
+            <th scope="col" className="recovery-log-table-num">
+              Count
+            </th>
+            <th scope="col" className="recovery-log-table-num">
+              Reached final
+            </th>
+            <th scope="col" className="recovery-log-table-num">
+              Median time
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -215,16 +221,12 @@ function RecoveryLogRecentSection({ rows }: { rows: RecoveryLogEntry[] }) {
   }
   return (
     <section className="recovery-log-inspector-section">
-      <h3 className="recovery-log-inspector-section-title">
-        Recent activity ({rows.length})
-      </h3>
+      <h3 className="recovery-log-inspector-section-title">Recent activity ({rows.length})</h3>
       <ul className="recovery-log-recent-list" aria-label="Recent recovery activity">
         {rows.map((row) => (
           <li key={row.id} className="recovery-log-recent-row">
             <div className="recovery-log-recent-row-head">
-              <span
-                className={`recovery-log-class-chip recovery-log-class-${row.failureClass}`}
-              >
+              <span className={`recovery-log-class-chip recovery-log-class-${row.failureClass}`}>
                 {FAILURE_CLASS_LABEL[row.failureClass]}
               </span>
               <span className="recovery-log-recent-row-action">

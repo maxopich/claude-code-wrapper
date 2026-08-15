@@ -143,6 +143,59 @@ describe('SessionSearchModal — scaffold + scope chips (C4-2)', () => {
   });
 });
 
+/**
+ * Register D11. The two cases above pin the scope at MOUNT. `scope` used to be
+ * plain state seeded once, so a project closing under an already-open modal
+ * left it at `this_project` with no id to scope by — and the dispatch effect
+ * refires on exactly that change, so the malformed request went out on its
+ * own. Re-rendering with a new `activeProjectId` is the same reconciliation
+ * the app performs, so component state survives it.
+ */
+describe('SessionSearchModal — scope follows the project closing (D11)', () => {
+  test('a project closing under an open modal drops the dispatched scope', () => {
+    render({ activeProjectId: 5 });
+    setValue(input(), 'mig');
+    advance(200);
+    expect(lastSearch()).toMatchObject({ scope: 'this_project', projectId: 5 });
+
+    render({ activeProjectId: null });
+    advance(200);
+
+    const last = lastSearch()!;
+    expect(last.scope).toBe('all_projects');
+    expect(last.projectId).toBeUndefined();
+  });
+
+  test('the chips stop claiming a scope that is not in force', () => {
+    render({ activeProjectId: 5 });
+    expect(chip('This project')?.getAttribute('aria-pressed')).toBe('true');
+
+    render({ activeProjectId: null });
+    expect(chip('This project')?.getAttribute('aria-pressed')).toBe('false');
+    expect(chip('All projects')?.getAttribute('aria-pressed')).toBe('true');
+    expect(chip('This project')?.disabled).toBe(true);
+  });
+
+  test('the operator preference is restored when the project comes back', () => {
+    render({ activeProjectId: 5 });
+    render({ activeProjectId: null });
+    render({ activeProjectId: 5 });
+    // Derived, not overwritten — closing a project must not silently discard
+    // the choice the operator made before it closed.
+    expect(chip('This project')?.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  test('an explicit All projects choice survives the project closing and reopening', () => {
+    render({ activeProjectId: 5 });
+    click(chip('All projects'));
+    render({ activeProjectId: null });
+    render({ activeProjectId: 5 });
+    // Control for the case above: the restore must return the operator's
+    // preference, not hardcode `this_project`.
+    expect(chip('All projects')?.getAttribute('aria-pressed')).toBe('true');
+  });
+});
+
 describe('SessionSearchModal — dispatch + scope/archived (C4-2)', () => {
   test('typing dispatches search_sessions with the active scope + projectId', () => {
     render({ activeProjectId: 5 });
@@ -198,6 +251,137 @@ describe('SessionSearchModal — results + navigation (C4-4)', () => {
     expect(rows()[1]?.classList.contains('selected')).toBe(true);
     keyDown(input(), 'Enter');
     expect(onNavigate.mock.calls[0]![0].sessionId).toBe('s2');
+  });
+
+  // ---- U18: the combobox announces the option it would activate -----------
+  //
+  // The arrow keys above always moved a selection index; nothing told assistive
+  // tech about it, so a screen-reader operator arrowing through hits heard
+  // silence and could not know what Enter would open. `SlashCommandPalette`
+  // already did this correctly and is the shape these follow.
+
+  test('[a11y] aria-activedescendant resolves to the highlighted option', () => {
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2')] });
+
+    const activeId = () => input().getAttribute('aria-activedescendant');
+    expect(activeId()).toBeTruthy();
+    // It must point at a real node, and at the one marked selected — a
+    // dangling or stale id is the same silence with extra steps.
+    const active = () => document.getElementById(activeId()!);
+    expect(active()).toBe(rows()[0]);
+    expect(active()?.getAttribute('aria-selected')).toBe('true');
+
+    keyDown(input(), 'ArrowDown');
+    expect(active()).toBe(rows()[1]);
+    expect(active()?.getAttribute('aria-selected')).toBe('true');
+    expect(rows()[0]?.getAttribute('aria-selected')).toBe('false');
+  });
+
+  test('[a11y] no active descendant is named while there are no results', () => {
+    render({ activeProjectId: 1 });
+    expect(input().getAttribute('aria-activedescendant')).toBeNull();
+  });
+
+  test('[a11y] options are not tab stops, so focus stays on the input', () => {
+    // They used to be <button>s: a 40-hit list was 40 tab stops, and clicking
+    // one moved focus off the combobox that owns the arrow keys.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2')] });
+
+    for (const row of rows()) {
+      expect(row.tagName).toBe('LI');
+      expect(row.getAttribute('tabindex')).toBeNull();
+    }
+  });
+
+  test('[a11y] the listbox contains only options', () => {
+    // Both hint paragraphs used to live inside role="listbox", which may hold
+    // only options and groups.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1')], truncated: true });
+
+    const listbox = container.querySelector('[role="listbox"]')!;
+    expect(listbox).not.toBeNull();
+    // The truncated hint is rendered (asserted elsewhere) — just not in here.
+    expect(container.querySelector('.session-search-truncated')).not.toBeNull();
+    const childRoles = Array.from(listbox.children).map((c) => c.getAttribute('role'));
+    expect(childRoles).toEqual(['option']);
+    // And the id the input controls is the listbox itself.
+    expect(input().getAttribute('aria-controls')).toBe(listbox.id);
+  });
+
+  test('[a11y] the arrow keys clamp at the ends of the result list', () => {
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2'), hit('s3')] });
+
+    keyDown(input(), 'ArrowDown');
+    keyDown(input(), 'ArrowDown');
+    expect(rows()[2]?.getAttribute('aria-selected')).toBe('true');
+    // A listbox clamps rather than wrapping.
+    keyDown(input(), 'ArrowDown');
+    expect(rows()[2]?.getAttribute('aria-selected')).toBe('true');
+    keyDown(input(), 'ArrowUp');
+    keyDown(input(), 'ArrowUp');
+    expect(rows()[0]?.getAttribute('aria-selected')).toBe('true');
+    keyDown(input(), 'ArrowUp');
+    expect(rows()[0]?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  test('[a11y] Home and End are left to the caret, not the result list', () => {
+    // This previously asserted the opposite, and the opposite was a defect:
+    // the handler is on the search INPUT, so claiming Home/End for the list
+    // also `preventDefault()`s them, and "jump to start of query" stopped
+    // working. In a combobox those two keys belong to the textbox — the
+    // listbox owns the arrows.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2'), hit('s3')] });
+
+    keyDown(input(), 'ArrowDown'); // selection is on row 1
+    expect(rows()[1]?.getAttribute('aria-selected')).toBe('true');
+
+    keyDown(input(), 'End');
+    expect(rows()[1]?.getAttribute('aria-selected')).toBe('true');
+    keyDown(input(), 'Home');
+    expect(rows()[1]?.getAttribute('aria-selected')).toBe('true');
+  });
+
+  test('[a11y] Home and End are not swallowed, so the caret can still move', () => {
+    // The selection staying put above would also be true if the component
+    // consumed the key and did nothing. What makes the caret work is that the
+    // event is left un-defaulted for the browser to act on.
+    render({ activeProjectId: 1 });
+    setValue(input(), 'mig');
+    advance(200);
+    reply({ query: 'mig', scope: 'this_project', results: [hit('s1'), hit('s2')] });
+
+    for (const key of ['Home', 'End']) {
+      const ev = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      input().dispatchEvent(ev);
+      expect({ key, defaultPrevented: ev.defaultPrevented }).toEqual({
+        key,
+        defaultPrevented: false,
+      });
+    }
+    // Positive control: the arrows ARE claimed, so a passing test above can't
+    // just mean the handler never runs.
+    const arrow = new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      bubbles: true,
+      cancelable: true,
+    });
+    input().dispatchEvent(arrow);
+    expect(arrow.defaultPrevented).toBe(true);
   });
 
   test('redacted badge shows when a hit carries redactedFields; truncated hint when capped', () => {
@@ -258,5 +442,27 @@ describe('SessionSearchModal — raw opt-in typed-ack gate (C4-3)', () => {
 
     expect(lastSearch()?.raw).toBe(true);
     expect(container.querySelector('.session-search-raw-pill')?.textContent).toBe('RAW');
+  });
+
+  // U29's defect, second site — unfiled; the register named only the
+  // bulk-delete gate. This input printed RAW_ACK_PHRASE as its placeholder:
+  // the phrase that arms an audited, unredacted search across session content,
+  // greyed out inside the field asking you to type it. The warning above the
+  // field still names the phrase, which is right — the friction of a typed
+  // gate is deliberate typing, not secrecy. Under the caret it is neither.
+  test('the ack input does not echo the phrase it is asking for (U29)', () => {
+    render({ activeProjectId: 1 });
+    click(rawLink());
+    const ack = container.querySelector('.session-search-raw-ack') as HTMLInputElement;
+    expect(ack).not.toBeNull();
+    expect(ack.getAttribute('placeholder')).toBeNull();
+    // The phrase is still stated where the operator reads instructions...
+    expect(container.querySelector('.session-search-raw-warn')?.textContent).toContain(
+      RAW_ACK_PHRASE,
+    );
+    // ...and the gate is still shut.
+    expect(
+      (container.querySelector('.session-search-raw-confirm') as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 });

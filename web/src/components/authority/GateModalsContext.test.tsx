@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { act, useEffect, useRef } from 'react';
+import { act, useEffect } from 'react';
 import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
 import { GateModalsProvider, useGateModalsActions, useGateModalsState } from './GateModalsContext';
 
@@ -106,7 +106,7 @@ describe('GateModalsProvider — enqueue + render', () => {
     const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}}>
+        <GateModalsProvider send={() => true}>
           <ActionsExposer actionsRef={actionsRef} />
         </GateModalsProvider>,
       );
@@ -128,7 +128,7 @@ describe('GateModalsProvider — enqueue + render', () => {
     const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}}>
+        <GateModalsProvider send={() => true}>
           <ActionsExposer actionsRef={actionsRef} />
         </GateModalsProvider>,
       );
@@ -145,7 +145,7 @@ describe('GateModalsProvider — enqueue + render', () => {
     const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}}>
+        <GateModalsProvider send={() => true}>
           <ActionsExposer actionsRef={actionsRef} />
         </GateModalsProvider>,
       );
@@ -166,7 +166,7 @@ describe('GateModalsProvider — FIFO queue', () => {
     const stateRef = { current: null as ReturnType<typeof useGateModalsState> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}}>
+        <GateModalsProvider send={() => true}>
           <ActionsExposer actionsRef={actionsRef} stateRef={stateRef} />
         </GateModalsProvider>,
       );
@@ -195,7 +195,7 @@ describe('GateModalsProvider — FIFO queue', () => {
     const stateRef = { current: null as ReturnType<typeof useGateModalsState> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}}>
+        <GateModalsProvider send={() => true}>
           <ActionsExposer actionsRef={actionsRef} stateRef={stateRef} />
         </GateModalsProvider>,
       );
@@ -212,7 +212,7 @@ describe('GateModalsProvider — FIFO queue', () => {
     const stateRef = { current: null as ReturnType<typeof useGateModalsState> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}}>
+        <GateModalsProvider send={() => true}>
           <ActionsExposer actionsRef={actionsRef} stateRef={stateRef} />
         </GateModalsProvider>,
       );
@@ -236,7 +236,7 @@ describe('GateModalsProvider — handlerRef bridge', () => {
     const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}} handlerRef={handlerRef}>
+        <GateModalsProvider send={() => true} handlerRef={handlerRef}>
           <ActionsExposer actionsRef={actionsRef} stateRef={stateRef} />
         </GateModalsProvider>,
       );
@@ -258,7 +258,7 @@ describe('GateModalsProvider — handlerRef bridge', () => {
     const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}} handlerRef={handlerRef}>
+        <GateModalsProvider send={() => true} handlerRef={handlerRef}>
           <ActionsExposer actionsRef={actionsRef} stateRef={stateRef} />
         </GateModalsProvider>,
       );
@@ -278,7 +278,7 @@ describe('GateModalsProvider — handlerRef bridge', () => {
     const actionsRef = { current: null as ReturnType<typeof useGateModalsActions> | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={() => {}} handlerRef={handlerRef}>
+        <GateModalsProvider send={() => true} handlerRef={handlerRef}>
           <ActionsExposer actionsRef={actionsRef} stateRef={stateRef} />
         </GateModalsProvider>,
       );
@@ -298,7 +298,13 @@ describe('GateModalsProvider — send wiring', () => {
     const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
     act(() => {
       root.render(
-        <GateModalsProvider send={(m) => sent.push(m)} handlerRef={handlerRef}>
+        <GateModalsProvider
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
+          handlerRef={handlerRef}
+        >
           <div />
         </GateModalsProvider>,
       );
@@ -354,9 +360,132 @@ describe('GateModalsProvider — hook safety', () => {
 });
 
 // Refs to satisfy ActionsExposer's ref-prop type.
+/**
+ * Register W28 + H15: dismissing a gate tells the server.
+ *
+ * Before this, `onClose` only popped the queue. Escape, a backdrop click, and
+ * the env gate's own "Refuse & edit" button all left the spawn parked on its
+ * promise with no trace in the UI, and the only escape was dropping the
+ * socket — the MCP modal called that intentional, on the strength of a
+ * re-emit-on-attach phase that never shipped.
+ *
+ * `cancel_gate` is NOT a denial: it routes to the same reject-don't-resolve
+ * path the disconnect drain uses, so nothing is recorded and the operator is
+ * asked again next time. The controls below are what stop this from being
+ * satisfied by "always send a cancel".
+ */
+describe('GateModalsProvider — dismissing cancels the gate (W28)', () => {
+  function mount(sent: ClientMsg[]) {
+    const actionsRef = {
+      current: null as ReturnType<typeof useGateModalsActions> | null,
+    };
+    act(() => {
+      root.render(
+        <GateModalsProvider
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
+        >
+          <ActionsExposer actionsRef={actionsRef} />
+        </GateModalsProvider>,
+      );
+    });
+    return actionsRef;
+  }
+
+  function pressEscape() {
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+  }
+
+  test('Escape on the MCP gate sends cancel_gate and pops the queue', () => {
+    const sent: ClientMsg[] = [];
+    const actionsRef = mount(sent);
+    act(() => actionsRef.current?.enqueue(mkMcp('mp-1')));
+    expect(container.querySelector('.gate-modal')).not.toBeNull();
+
+    pressEscape();
+
+    expect(sent).toEqual([{ type: 'cancel_gate', kind: 'mcp', pendingId: 'mp-1' }]);
+    expect(container.querySelector('.gate-modal')).toBeNull();
+  });
+
+  test('Escape on the bus gate cancels with the bus kind', () => {
+    const sent: ClientMsg[] = [];
+    const actionsRef = mount(sent);
+    act(() => actionsRef.current?.enqueue(mkBus('bp-1')));
+
+    pressEscape();
+
+    expect(sent).toEqual([{ type: 'cancel_gate', kind: 'bus', pendingId: 'bp-1' }]);
+  });
+
+  test("the env gate cancels as kind 'start', off its pendingStartId", () => {
+    // The two vocabularies for one gate: this file calls it `env`, the server
+    // calls it `start` (session_start_gated / startGate). The wire word
+    // follows the server, because that is whose pending map gets reached into.
+    const sent: ClientMsg[] = [];
+    const actionsRef = mount(sent);
+    act(() => actionsRef.current?.enqueue(mkEnv('sp-1')));
+
+    pressEscape();
+
+    expect(sent).toEqual([{ type: 'cancel_gate', kind: 'start', pendingId: 'sp-1' }]);
+  });
+
+  test('the env gate\'s "Refuse & edit" button cancels too, not just Escape', () => {
+    // The button is the reason this mattered most here: a labelled refusal
+    // affordance that sent nothing, on the one gate with no deny verb.
+    const sent: ClientMsg[] = [];
+    const actionsRef = mount(sent);
+    act(() => actionsRef.current?.enqueue(mkEnv('sp-2')));
+
+    const refuse = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
+      b.textContent?.includes('Refuse'),
+    );
+    act(() => refuse?.click());
+
+    expect(sent).toEqual([{ type: 'cancel_gate', kind: 'start', pendingId: 'sp-2' }]);
+    expect(container.querySelector('.gate-modal')).toBeNull();
+  });
+
+  test('CONTROL: deciding sends the DECISION and no cancel', () => {
+    // The failure this rules out is a cancel chasing every decision, which
+    // would reach the server after the gate had already resolved.
+    const sent: ClientMsg[] = [];
+    const actionsRef = mount(sent);
+    act(() => actionsRef.current?.enqueue(mkBus('bp-2')));
+
+    const trust = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
+      (b) => b.textContent === 'Trust',
+    );
+    act(() => trust?.click());
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'bus_trust_decision', decision: 'trust' });
+    expect(sent.some((m) => m.type === 'cancel_gate')).toBe(false);
+    expect(container.querySelector('.gate-modal')).toBeNull();
+  });
+
+  test('CONTROL: cancelling one gate surfaces the next, cancelling only the first', () => {
+    const sent: ClientMsg[] = [];
+    const actionsRef = mount(sent);
+    act(() => {
+      actionsRef.current?.enqueue(mkMcp('mp-a'));
+      actionsRef.current?.enqueue(mkMcp('mp-b'));
+    });
+
+    pressEscape();
+
+    expect(sent).toEqual([{ type: 'cancel_gate', kind: 'mcp', pendingId: 'mp-a' }]);
+    // The second gate is now the head, still parked and still asking.
+    expect(container.querySelector('.gate-modal')).not.toBeNull();
+  });
+});
+
 type _AssertActionsRef = React.MutableRefObject<ReturnType<typeof useGateModalsActions> | null>;
 type _AssertStateRef = React.MutableRefObject<ReturnType<typeof useGateModalsState> | null>;
 const _assertRefs = (a: _AssertActionsRef, s: _AssertStateRef) => [a, s];
 void _assertRefs;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _useRefUsage = () => useRef(null);

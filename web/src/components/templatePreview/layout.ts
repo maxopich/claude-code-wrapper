@@ -1,5 +1,6 @@
 import type { CustomLayout, Project } from '@cebab/shared/protocol';
 import { agentIdentity } from '../../agentIdentity';
+import { TPL_FS_UNDER_BADGE } from './tokens';
 
 /**
  * Layout strategy module for the template preview diagram.
@@ -712,7 +713,7 @@ function layoutOrchestratorRing(
   // accommodates ~6 chars at FS=11. The wrap is generous enough that
   // 2 lines cover most agent names; the second line ellipsises for
   // longer ones.
-  const UNDER_FS = 11;
+  const UNDER_FS = TPL_FS_UNDER_BADGE.ring;
   const UNDER_MAX_W = 2.5 * BADGE_R;
   const UNDER_PER_LINE = fitChars(UNDER_MAX_W, UNDER_FS, FACTOR_BOLD);
 
@@ -828,7 +829,7 @@ function layoutOrchestratorTwoRing(
   const FS_NAME = 10;
   const FS_ROLE = 10;
   const fsizes = { name: FS_NAME, role: FS_ROLE };
-  const UNDER_FS = 10;
+  const UNDER_FS = TPL_FS_UNDER_BADGE.twoRing;
   const UNDER_MAX_W = 65;
   const UNDER_PER_LINE = fitChars(UNDER_MAX_W, UNDER_FS, FACTOR_BOLD);
 
@@ -959,7 +960,7 @@ function layoutOrchestratorConcentric(
   const FS_NAME = 10;
   const FS_ROLE = 10;
   const fsizes = { name: FS_NAME, role: FS_ROLE };
-  const UNDER_FS = 9;
+  const UNDER_FS = TPL_FS_UNDER_BADGE.concentric;
   // Inner ring labels: span half the ring radius — tight enough that
   // labels don't collide with the next-ring badges above them.
   const UNDER_MAX_W = RING_R_BASE * 0.5;

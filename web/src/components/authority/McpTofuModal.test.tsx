@@ -53,7 +53,14 @@ function mkPending(
 describe('McpTofuModal — render + buttons', () => {
   test('renders all four decision buttons by default', () => {
     act(() => {
-      root.render(<McpTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
     });
     const buttons = container.querySelectorAll('.gate-modal-buttons button');
     const labels = Array.from(buttons).map((b) => b.textContent?.trim());
@@ -67,7 +74,9 @@ describe('McpTofuModal — render + buttons', () => {
     act(() => {
       const pending = mkPending();
       delete (pending as { binarySha?: string }).binarySha;
-      root.render(<McpTofuModal pending={pending} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal pending={pending} send={() => true} onClose={() => {}} onCancel={() => {}} />,
+      );
     });
     const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('button'));
     const pinBtn = buttons.find((b) => b.textContent?.includes('pin hash'));
@@ -85,8 +94,9 @@ describe('McpTofuModal — render + buttons', () => {
             binarySha: 'newsha',
             previousSha: 'oldsha',
           })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -101,8 +111,9 @@ describe('McpTofuModal — render + buttons', () => {
       root.render(
         <McpTofuModal
           pending={mkPending({ reason: 'first_seen' })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -114,7 +125,10 @@ describe('McpTofuModal — decision ClientMsg dispatch', () => {
   function setup() {
     const sent: ClientMsg[] = [];
     const closed = { count: 0 };
-    const send = (m: ClientMsg) => sent.push(m);
+    const send = (m: ClientMsg) => {
+      sent.push(m);
+      return true;
+    };
     const onClose = () => {
       closed.count += 1;
     };
@@ -124,7 +138,9 @@ describe('McpTofuModal — decision ClientMsg dispatch', () => {
   test('clicking Trust ships mcp_trust_decision { decision: "trust" }', () => {
     const { sent, send, onClose, closed } = setup();
     act(() => {
-      root.render(<McpTofuModal pending={mkPending()} send={send} onClose={onClose} />);
+      root.render(
+        <McpTofuModal pending={mkPending()} send={send} onClose={onClose} onCancel={() => {}} />,
+      );
     });
     const btn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
       (b) => b.textContent === 'Trust',
@@ -149,7 +165,9 @@ describe('McpTofuModal — decision ClientMsg dispatch', () => {
   test('clicking Trust & pin hash ships decision "trust_pinned" with binarySha', () => {
     const { sent, send } = setup();
     act(() => {
-      root.render(<McpTofuModal pending={mkPending()} send={send} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal pending={mkPending()} send={send} onClose={() => {}} onCancel={() => {}} />,
+      );
     });
     const btn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
       b.textContent?.includes('pin hash'),
@@ -166,7 +184,9 @@ describe('McpTofuModal — decision ClientMsg dispatch', () => {
   test('clicking Deny once ships decision "deny_once"', () => {
     const { sent, send } = setup();
     act(() => {
-      root.render(<McpTofuModal pending={mkPending()} send={send} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal pending={mkPending()} send={send} onClose={() => {}} onCancel={() => {}} />,
+      );
     });
     const btn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
       (b) => b.textContent === 'Deny once',
@@ -181,7 +201,9 @@ describe('McpTofuModal — decision ClientMsg dispatch', () => {
   test('clicking Deny & remember ships decision "deny_remember"', () => {
     const { sent, send } = setup();
     act(() => {
-      root.render(<McpTofuModal pending={mkPending()} send={send} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal pending={mkPending()} send={send} onClose={() => {}} onCancel={() => {}} />,
+      );
     });
     const btn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
       b.textContent?.includes('Deny & remember'),
@@ -198,7 +220,9 @@ describe('McpTofuModal — decision ClientMsg dispatch', () => {
     const pending = mkPending();
     delete (pending as { binarySha?: string }).binarySha;
     act(() => {
-      root.render(<McpTofuModal pending={pending} send={send} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal pending={pending} send={send} onClose={() => {}} onCancel={() => {}} />,
+      );
     });
     // The 'Trust' button (not pin hash, which is disabled).
     const btn = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
@@ -215,7 +239,14 @@ describe('McpTofuModal — decision ClientMsg dispatch', () => {
 describe('McpTofuModal — accessibility', () => {
   test('dialog has role + aria-modal + aria-labelledby', () => {
     act(() => {
-      root.render(<McpTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
     });
     const dialog = container.querySelector('[role="dialog"]') as HTMLElement;
     expect(dialog).not.toBeNull();
@@ -226,11 +257,79 @@ describe('McpTofuModal — accessibility', () => {
 
   test('initial focus lands on Deny once (safest default)', () => {
     act(() => {
-      root.render(<McpTofuModal pending={mkPending()} send={() => {}} onClose={() => {}} />);
+      root.render(
+        <McpTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
     });
     const denyOnce = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find(
       (b) => b.textContent === 'Deny once',
     );
     expect(document.activeElement).toBe(denyOnce);
+  });
+});
+
+// Register H04. Until 2026-08-02 Deny recorded a decision and the binary
+// loaded anyway, and the modal said nothing about it. The enforcement and this
+// copy have to move together — if a future change stops passing
+// `settings.deniedMcpServers` to the spawn, this assertion is what makes the
+// now-false promise fail CI instead of shipping.
+describe('[security] McpTofuModal — Deny copy matches what Deny does', () => {
+  function bodyText(): string {
+    return container.textContent ?? '';
+  }
+
+  test('states that Deny stops the server from starting', () => {
+    act(() => {
+      root.render(
+        <McpTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
+    });
+    expect(bodyText()).toContain('stops this server from starting');
+  });
+
+  test('distinguishes deny once from deny & remember', () => {
+    act(() => {
+      root.render(
+        <McpTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
+    });
+    const text = bodyText();
+    expect(text).toContain('re-asks on your next connection');
+    expect(text).toContain('persists the decision');
+  });
+
+  test('does not promise more than the audit trail actually gives', () => {
+    act(() => {
+      root.render(
+        <McpTofuModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
+      );
+    });
+    // The audit row is a real guarantee (dispatcher dual-write, BE-1), so
+    // saying so is honest. Anything stronger — "blocked everywhere", "removed
+    // from your project" — would not be: Cebab writes nothing into the
+    // operator's files.
+    const text = bodyText();
+    expect(text).toContain('recorded in the audit log');
+    expect(text).not.toMatch(/removed from your project|blocked everywhere/i);
   });
 });

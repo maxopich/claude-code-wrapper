@@ -1,6 +1,33 @@
-import { describe, expect, test } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { config } from '../config.js';
+import { closeDb } from '../db.js';
 import { translate } from './translate.js';
+
+// `translate()` reaches getSession() → getDb() for a couple of subtypes, and
+// this file did not swap `config.dataDir` — so running the suite opened,
+// migrated and read the operator's REAL ~/.cebab/cebab.sqlite. The assertions
+// below never depended on that; it was pure collateral. Redirect to a tmpdir
+// the way every other DB-touching suite does.
+let tmpRoot: string;
+let originalDataDir: string;
+
+beforeAll(() => {
+  tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-translate-b2-'));
+  originalDataDir = config.dataDir;
+  config.dataDir = path.join(tmpRoot, '.cebab');
+  closeDb();
+});
+
+afterAll(() => {
+  // closeDb before rm: Windows cannot unlink an open SQLite file.
+  closeDb();
+  config.dataDir = originalDataDir;
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
 
 // Cluster B Phase 2 (BE-B1): the SDK init payload (SDKSystemMessage subtype
 // 'init') ships cwd, permission_mode, apiKeySource, slash_commands, skills,

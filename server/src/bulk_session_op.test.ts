@@ -158,10 +158,9 @@ describe('executeBulkSessionOp — archive', () => {
       failed: [],
     });
     const audits = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'session.bulk_op'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'session.bulk_op'`,
+      )
       .get();
     expect(audits?.n).toBe(1);
   });
@@ -267,10 +266,9 @@ describe('executeBulkSessionOp — delete', () => {
 
     const payload = JSON.parse(
       getDb()
-        .prepare<
-          [],
-          { payload_json: string }
-        >(`SELECT payload_json FROM safety_audit WHERE kind = 'session.bulk_op' LIMIT 1`)
+        .prepare<[], { payload_json: string }>(
+          `SELECT payload_json FROM safety_audit WHERE kind = 'session.bulk_op' LIMIT 1`,
+        )
         .get()!.payload_json,
     ) as Record<string, unknown>;
     expect(payload).toMatchObject({ op: 'delete', count: 1, removeArtifacts: true });
@@ -294,10 +292,9 @@ describe('executeBulkSessionOp — delete', () => {
       failed: [],
     });
     const audits = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'session.bulk_op'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'session.bulk_op'`,
+      )
       .get();
     expect(audits?.n).toBe(1);
   });
@@ -367,10 +364,9 @@ describe('executeBulkSessionOp — guards', () => {
     expect(reply.failed[0]).toMatchObject({ sessionId: 'unknown', reason: 'unknown' });
     // No safety_audit row was written for the unknown id.
     const audits = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'session.bulk_op'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'session.bulk_op'`,
+      )
       .get();
     expect(audits?.n).toBe(1);
   });
@@ -480,10 +476,9 @@ describe('runSessionPurge', () => {
     // Session is gone but the audit row survives.
     expect(getSession('s1')).toBeUndefined();
     const audits = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM safety_audit WHERE session_id = 's1' AND kind = 'session.bulk_op'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM safety_audit WHERE session_id = 's1' AND kind = 'session.bulk_op'`,
+      )
       .get();
     expect(audits?.n).toBe(1);
   });
@@ -629,10 +624,9 @@ describe('runIdleSessionReclaim (P0-C part 2b)', () => {
     runIdleSessionReclaim(now);
 
     const audits = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM safety_audit WHERE session_id = 'old' AND kind = 'session.auto_reclaim' AND reason_code = 'auto_reclaim_idle'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM safety_audit WHERE session_id = 'old' AND kind = 'session.auto_reclaim' AND reason_code = 'auto_reclaim_idle'`,
+      )
       .get();
     expect(audits?.n).toBe(1);
     expect(getSetting<number>(LAST_AUTO_RECLAIM_AT_KEY)).toBe(now);

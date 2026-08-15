@@ -193,6 +193,12 @@ export function reconstructOrchestratorSession(
   // to have spoken it must have completed its briefed first turn, so its
   // resumed transcript already contains the briefing. The orchestrator is
   // never briefed (it learns the protocol from its workspace CLAUDE.md).
+  //
+  // DELIBERATELY UNBOUNDED (`Cebab-3nt`), unlike the session-log projector
+  // which now pages. A cap here would silently narrow the set of agents this
+  // reconstruction believes have been briefed: an agent whose only event fell
+  // outside the cap would be re-briefed after a restart, mid-task. The
+  // question this asks is "has this agent EVER spoken", so it needs every row.
   const allEvents = listMultiAgentEvents(row.id);
   const workerNameSet = new Set(workers.map((w) => w.agentName));
   const briefedAgents = [
@@ -282,7 +288,30 @@ export function reconstructOrchestratorSession(
   // the executor's defensive re-check catches diverged states and
   // no-ops cleanly.
   const activePauses = listActivePauseEntries(row.id);
+  // Register B04: reinstall the RUNNER gates, not just the timers. Mute and
+  // kick are router-set membership and were reseeded via the factory params
+  // above, but a pause is an `AgentRunner` turn-queue gate — in-memory, and
+  // gone with the old process. Reseeding only the timers left the operator
+  // looking at a paused worker with a live countdown whose next delegation
+  // would be delivered normally.
+  //
+  // Post-wire rather than a factory param: the gate lives in the runner, not
+  // the router, and reconstruct sets `awaiting_continue` and delivers no turn
+  // — so unlike the mute/kick reseed there is no window to close between
+  // wiring and the first event.
+  const rebuilt = getLiveSession(row.id);
+  const pauseGateHandle =
+    rebuilt?.mode === 'orchestrator'
+      ? (rebuilt.handle as unknown as { pauseAgent: (agentName: string) => boolean })
+      : undefined;
   for (const pauseEntry of activePauses) {
+    if (!pauseGateHandle?.pauseAgent(pauseEntry.agentName)) {
+      // Loud: an un-gated worker that the UI reports as paused is exactly
+      // the bug this reseed exists to prevent.
+      console.warn(
+        `[reconstruct] could not reinstall pause gate for ${row.id}/${pauseEntry.agentName}; it is shown paused but its turns are NOT held`,
+      );
+    }
     const recovered = findLatestControlReason(row.id, pauseEntry.projectId, 'agent_control.paused');
     if (!recovered) {
       console.warn(

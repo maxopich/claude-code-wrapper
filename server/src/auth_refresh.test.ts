@@ -68,6 +68,76 @@ function mkCallbacks(over: Partial<AuthRefreshCallbacks> = {}): {
   };
 }
 
+// Register Cebab-x1n.6.20 [security]. The `shell` option is the whole
+// difference between the Re-authenticate action working on Windows and
+// failing silently: an npm-installed `claude` is a `.cmd` shim, Node refuses
+// to spawn one without a shell (CVE-2024-27980 fix), and the throw is caught
+// and returned as `{ ok: false, reason: 'spawn_failed' }`.
+//
+// THESE CASES READ THE OPTIONS OBJECT DIRECTLY, not through
+// `expect.objectContaining`. The pre-existing happy-path assertion below uses
+// objectContaining and therefore passed whether or not `shell` was present —
+// which is exactly how a missing key survives. Asserting the value on both
+// platform branches is the only shape that can fail for the right reason.
+describe('[security] startAuthRefresh — win32 shell requirement', () => {
+  /** The options object actually handed to `spawnFn` for a given platform. */
+  function spawnOptsOn(platform: NodeJS.Platform) {
+    // Single-flight is process-wide, so a second call inside one test returns
+    // `already_running` and never reaches spawn. Clearing first is what lets a
+    // case compare two platforms; the length assertion below is what caught it.
+    _resetForTesting();
+    const child = makeMockChild();
+    const spawnFn = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    startAuthRefresh(mkCallbacks().callbacks, { spawnFn, platform });
+    const calls = (spawnFn as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    // Anti-vacuity: every assertion below indexes into this call. A spawnFn
+    // that was never invoked leaves `calls` empty, and `opts.shell` would then
+    // be a TypeError rather than a wrong value — loud, but for the wrong
+    // reason. Fail here instead, naming the cause.
+    expect(calls).toHaveLength(1);
+    return { command: calls[0][0], args: calls[0][1], opts: calls[0][2] };
+  }
+
+  test('shell is true on win32', () => {
+    expect(spawnOptsOn('win32').opts.shell).toBe(true);
+  });
+
+  test('shell is false on darwin and linux', () => {
+    // Both named explicitly rather than "not win32": the POSIX path must keep
+    // its exact no-shell behaviour, which is what makes the win32 branch a
+    // narrow fix instead of a blanket one.
+    expect(spawnOptsOn('darwin').opts.shell).toBe(false);
+    expect(spawnOptsOn('linux').opts.shell).toBe(false);
+  });
+
+  test('the command stays the bare name on win32 — not claude.cmd', () => {
+    // The three sibling call sites in scripts/ also swap to `npm.cmd`, and
+    // copying that here would be wrong: `claude` may be the npm shim OR a
+    // native-installer binary, and only the bare name resolves to both
+    // through cmd.exe's PATHEXT lookup.
+    const win = spawnOptsOn('win32');
+    expect(win.command).toBe('claude');
+    expect(win.args).toEqual(['login']);
+  });
+
+  test('the platform seam actually changes the outcome — anti-vacuity', () => {
+    // If `platform` were ignored (typo'd key, defaulted before the read), both
+    // branches would return whatever `process.platform` gives and every case
+    // above would agree with itself while testing nothing.
+    expect(spawnOptsOn('win32').opts.shell).not.toBe(spawnOptsOn('linux').opts.shell);
+  });
+
+  test('the default is read from process.platform, not hardcoded', () => {
+    // The seam exists for the tests; production passes no opts. Pin that the
+    // unseamed path still derives the flag rather than defaulting to false.
+    const child = makeMockChild();
+    const spawnFn = vi.fn(() => child) as unknown as typeof import('node:child_process').spawn;
+    startAuthRefresh(mkCallbacks().callbacks, { spawnFn });
+    const opts = (spawnFn as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2];
+    expect(opts.shell).toBe(process.platform === 'win32');
+  });
+});
+
 describe('startAuthRefresh — happy path', () => {
   test('spawns subprocess + fires onStarted + returns ok runId', () => {
     const child = makeMockChild({ pid: 9999 });

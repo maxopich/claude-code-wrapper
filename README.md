@@ -51,9 +51,10 @@ npm run bootstrap
 ```
 
 `npm run bootstrap` exists because the repo's `.npmrc` sets
-`ignore-scripts=true` (a supply-chain guard — bus agents run under
-`bypassPermissions`, so a malicious transitive `postinstall` would be direct
-RCE), which means a plain `npm install` deliberately does **not** build
+`ignore-scripts=true` (a supply-chain guard — no bus tool call is ever gated on
+a human, so auto-approve is bypass in effect and a malicious transitive
+`postinstall` would be direct RCE), which means a plain `npm install`
+deliberately does **not** build
 `better-sqlite3`. The bootstrap script — pure Node, no shell, runnable on a
 fresh clone — does the three required steps in order: `npm install`, then the
 one re-enabled native build via `prebuild-install` (a prebuilt binary on
@@ -75,8 +76,18 @@ npm run dev
 Then open http://127.0.0.1:5173. **Ctrl+C stops both.** Output is interleaved
 and line-tagged `[server]` / `[web]`.
 
+If `:5173` is already taken — another Vite project, most likely — the launch
+**fails instead of moving to the next port**. That is deliberate: the server
+trusts the web origin only because `npm run dev` is the thing that started it,
+so silently landing on `:5174` would leave `:5173` trusted and owned by
+somebody else. Free the port, or serve on another one and declare it via
+`CEBAB_ALLOWED_ORIGINS`.
+
 To run or debug one side on its own, the two-terminal form still works —
-`npm run dev:server` and `npm run dev:web` in separate terminals.
+`npm run dev:server` and `npm run dev:web` in separate terminals. That path
+makes no declaration (nothing there started Vite), so set
+`CEBAB_ALLOWED_ORIGINS=http://127.0.0.1:5173,http://localhost:5173` in your
+`.env` first, or the app will 403 its own token fetch. See `.env.example`.
 
 ## Mock mode
 

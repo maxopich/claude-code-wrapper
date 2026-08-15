@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { McpServerView, ToolView } from '@cebab/shared/protocol';
+import { nextIndex } from '../../listNavigation.js';
 
 // Cluster B Phase 6b + Phase 10 (UI-B4 / B10 / B11 / B12 / B31 / B33 / B34):
 // the inspector's Tools section.
@@ -173,29 +174,36 @@ export function ToolsList(props: ToolsListProps) {
     return { all: tools.length, used, unused, attempted };
   }, [tools, mode]);
 
+  /**
+   * Roving tabindex over the row `<summary>` elements.
+   *
+   * This used to keep a highlight in `activeIdx` and point the container's
+   * `aria-activedescendant` at it. `aria-activedescendant` is not supported on
+   * `role="list"` — it needs a composite role (listbox, menu, grid, …) — so the
+   * highlight moved and assistive tech announced nothing (register bead .41).
+   * `role="listbox"` was not available as a fix either: an `option` may not
+   * contain interactive content, and these rows are `<details>` disclosures.
+   *
+   * Moving real DOM focus needs no active-descendant contract at all — every AT
+   * announces focus. It also deleted the bespoke Enter handler that used to
+   * toggle the active row: a focused `<summary>` does that natively.
+   *
+   * Movement itself comes from the shared `nextIndex` (bead .40) rather than a
+   * fourth hand-rolled arrow ladder. Policy unchanged: clamps at the ends, and
+   * Home/End jump — `nextIndex` handles both.
+   */
+  function focusRow(idx: number) {
+    const rows = listRef.current?.querySelectorAll('details.tool-row > summary');
+    const el = rows?.[idx];
+    if (el instanceof HTMLElement) el.focus();
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
-    if (filtered.length === 0) return;
-    const last = filtered.length - 1;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setActiveIdx((i) => (i < 0 ? 0 : Math.min(last, i + 1)));
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setActiveIdx((i) => (i <= 0 ? 0 : i - 1));
-    } else if (e.key === 'Home') {
-      e.preventDefault();
-      setActiveIdx(0);
-    } else if (e.key === 'End') {
-      e.preventDefault();
-      setActiveIdx(last);
-    } else if (e.key === 'Enter' && activeIdx >= 0) {
-      // Toggle the active row's <details>.
-      const el = listRef.current?.querySelectorAll('details.tool-row')[activeIdx];
-      if (el instanceof HTMLDetailsElement) {
-        el.open = !el.open;
-        e.preventDefault();
-      }
-    }
+    const next = nextIndex({ key: e.key, current: activeIdx, count: filtered.length });
+    if (next === null) return;
+    e.preventDefault();
+    setActiveIdx(next);
+    focusRow(next);
   }
 
   return (
@@ -248,9 +256,7 @@ export function ToolsList(props: ToolsListProps) {
         id="authority-tools-results"
         className="tools-list"
         role="list"
-        tabIndex={0}
         onKeyDown={onKeyDown}
-        aria-activedescendant={activeIdx >= 0 ? `tool-row-${activeIdx}` : undefined}
       >
         {filtered.length === 0 ? (
           <div className="tools-list-empty">No tools match this filter.</div>
@@ -296,7 +302,17 @@ export function ToolsList(props: ToolsListProps) {
                 } ${stripeClass}`}
                 role="listitem"
               >
-                <summary className="tool-row-summary">
+                <summary
+                  className="tool-row-summary"
+                  // Roving tabindex: exactly one row is in the tab order, so
+                  // Tab enters and leaves the list rather than walking every
+                  // tool. Before any arrow key, that row is the first.
+                  tabIndex={idx === (activeIdx < 0 ? 0 : activeIdx) ? 0 : -1}
+                  // Clicking a row focuses it without going through the arrow
+                  // handler; without this the highlight and the focus ring
+                  // would sit on different rows.
+                  onFocus={() => setActiveIdx(idx)}
+                >
                   <span className="tool-row-name">{t.name}</span>
                   <span
                     className={`mutation-badge mutation-badge-${risk}`}

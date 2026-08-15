@@ -85,16 +85,25 @@ export function NotificationStack({ onAction }: NotificationStackProps) {
         announcedIds.current.delete(id);
       }
     }
+    // W06: both regions are written, then a single cleanup cancels whichever
+    // frames were scheduled. The previous shape set the polite region and
+    // RETURNED, so an assertive arrival in the same commit never reached its
+    // region — and because the loop above had already added its id to
+    // `announcedIds`, it was marked announced and no later render retried it.
+    // The urgent tier was the one silently dropped, which is backwards.
+    const frames: number[] = [];
     if (polite !== null) {
       setPoliteText(polite);
-      const raf = requestAnimationFrame(() => setPoliteText(''));
-      return () => cancelAnimationFrame(raf);
+      frames.push(requestAnimationFrame(() => setPoliteText('')));
     }
     if (assertive !== null) {
       setAssertiveText(assertive);
-      const raf = requestAnimationFrame(() => setAssertiveText(''));
-      return () => cancelAnimationFrame(raf);
+      frames.push(requestAnimationFrame(() => setAssertiveText('')));
     }
+    if (frames.length === 0) return;
+    return () => {
+      for (const frame of frames) cancelAnimationFrame(frame);
+    };
   }, [state.visible, state.queued]);
 
   return (

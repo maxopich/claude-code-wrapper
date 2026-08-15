@@ -29,12 +29,7 @@
  * sections appear automatically as registry entries grow.
  */
 export type ShortcutSection =
-  | 'Session'
-  | 'Composer'
-  | 'Notifications'
-  | 'Authority'
-  | 'Multi-agent'
-  | 'Help';
+  'Session' | 'Composer' | 'Notifications' | 'Authority' | 'Multi-agent' | 'Help';
 
 /**
  * Shortcut descriptor. `keyMatch` returns true when the keydown

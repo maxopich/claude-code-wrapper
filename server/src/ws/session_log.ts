@@ -26,12 +26,14 @@
 
 import { type LogRow, type MultiAgentEventKind, redactSensitive } from '@cebab/shared';
 import {
-  listMultiAgentEvents,
-  listMultiAgentMutations,
+  getMultiAgentEventsByIds,
+  getMultiAgentMutationsByIds,
+  listMultiAgentEventKeys,
+  listMultiAgentMutationKeys,
   type MultiAgentEventRow,
   type MutationRecord,
 } from '../repo/multi_agent.js';
-import { listEvents, type EventRow } from '../repo/events.js';
+import { getEventsByIds, listEventKeys, type EventRow } from '../repo/events.js';
 
 /**
  * ~2 MB byte budget per chunk. Computed against the JSON-serialized chunk
@@ -67,33 +69,70 @@ export type BuildLogRowsOpts = {
  */
 export function buildSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
   const { sessionId, offset, limit, revealSensitive } = opts;
-  const events = listMultiAgentEvents(sessionId);
-  const mutations = listMultiAgentMutations(sessionId);
 
-  const rows: LogRow[] = [];
-  for (const ev of events) rows.push(eventRowToLogRow(ev, revealSensitive));
-  for (const m of mutations) {
-    // Skip provisional mutations whose result never landed — they appear
-    // in the agent's lane as "working files" but a provisional log line
-    // is just noise. Their bus hop (if any) is still in the events stream.
-    if (m.confirmedAt === null) continue;
-    rows.push(mutationToLogRow(m, revealSensitive));
+  // Register S04. Read the SORT KEY for the whole stream, order and slice
+  // that, and only then fetch and convert the page's own rows. Converting a
+  // row runs `redactSensitive` over its payload, so the old shape — convert
+  // everything, sort, slice — redacted the entire session to return 200 rows.
+  //
+  // The comparator below is unchanged, byte for byte, and that is deliberate:
+  // it sorts on `agent`/`id` values DERIVED here (`event:<id>`, the source
+  // slug) using `String.localeCompare`, i.e. ICU collation. Pushing the order
+  // into SQL would mean arguing a collation equivalence; keeping the sort in
+  // JS over cheap keys means there is nothing to argue.
+  const eventKeys = listMultiAgentEventKeys(sessionId);
+  // Provisional mutations — result never landed — are filtered in SQL now.
+  // They appear in the agent's lane as "working files"; a log line for one is
+  // noise, and it must not count toward `total` either.
+  const mutationKeys = listMultiAgentMutationKeys(sessionId);
+
+  const keys: SortKey[] = [];
+  for (const k of eventKeys) {
+    keys.push({ ts: k.ts, agent: k.source, id: `event:${k.id}`, stream: 'event', rowId: k.id });
   }
+  for (const k of mutationKeys) {
+    keys.push({
+      ts: k.ts,
+      agent: k.agentName,
+      id: `mutation:${k.id}`,
+      stream: 'mutation',
+      rowId: k.id,
+    });
+  }
+  keys.sort(compareSortKeys);
 
-  rows.sort((a, b) => {
-    if (a.ts !== b.ts) return a.ts - b.ts;
-    if (a.agent !== b.agent) return a.agent.localeCompare(b.agent);
-    return a.id.localeCompare(b.id);
-  });
-
-  const total = rows.length;
+  const total = keys.length;
   const clampedOffset = Math.max(0, Math.min(offset, total));
   const clampedLimit = Math.max(0, limit);
+  // The byte cap can stop the page short, so fetch at most `limit` rows and
+  // let the cap trim from there. Fetching the whole tail "just in case" would
+  // reintroduce exactly the cost this change removes.
+  const pageKeys = keys.slice(clampedOffset, clampedOffset + clampedLimit);
+
+  const eventById = new Map(
+    getMultiAgentEventsByIds(pageKeys.filter((k) => k.stream === 'event').map((k) => k.rowId)).map(
+      (r) => [r.id, r],
+    ),
+  );
+  const mutationById = new Map(
+    getMultiAgentMutationsByIds(
+      pageKeys.filter((k) => k.stream === 'mutation').map((k) => k.rowId),
+    ).map((r) => [r.id, r]),
+  );
 
   const sliced: LogRow[] = [];
   let bytes = 0;
-  for (let i = clampedOffset; i < total && sliced.length < clampedLimit; i++) {
-    const row = rows[i]!;
+  for (const key of pageKeys) {
+    const source = key.stream === 'event' ? eventById.get(key.rowId) : mutationById.get(key.rowId);
+    // A row that vanished between the key scan and the fetch (a purge racing
+    // a page load) is skipped rather than faked. It still counted toward
+    // `total`, which is the honest read: the key scan is what `total` was
+    // measured from.
+    if (source === undefined) continue;
+    const row =
+      key.stream === 'event'
+        ? eventRowToLogRow(source as MultiAgentEventRow, revealSensitive)
+        : mutationToLogRow(source as MutationRecord, revealSensitive);
     // Estimate this row's contribution before adding so we stop BEFORE
     // crossing the cap. JSON.stringify on a single row is O(row size);
     // for the typical multi-agent run this is cheap.
@@ -105,6 +144,38 @@ export function buildSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
 
   const hasMore = clampedOffset + sliced.length < total;
   return { rows: sliced, total, hasMore, revealedSensitive: revealSensitive };
+}
+
+/**
+ * The projector's ordering key: what the old code sorted `LogRow`s by, lifted
+ * out so it can be built from a narrow DB read instead of a converted row.
+ *
+ * `stream` + `rowId` are the back-reference used to fetch the page — the
+ * numeric id, not the `event:`/`mutation:` string, because that string exists
+ * only to disambiguate the two streams inside one sorted list.
+ */
+type SortKey = {
+  ts: number;
+  agent: string;
+  id: string;
+  stream: 'event' | 'mutation';
+  rowId: number;
+};
+
+/**
+ * Stable order on `(ts ASC, agent ASC, id ASC)` so two rows minted in the same
+ * millisecond do not flip places between page loads.
+ *
+ * Identical to the comparator that ran over `LogRow`s before S04 — same
+ * fields, same `localeCompare`. `session_log.pagination.test.ts` keeps its own
+ * copy inside the pre-S04 oracle rather than importing this one, deliberately:
+ * an equivalence test that shared the comparator with the code under test
+ * would agree with itself no matter what either one did.
+ */
+function compareSortKeys(a: SortKey, b: SortKey): number {
+  if (a.ts !== b.ts) return a.ts - b.ts;
+  if (a.agent !== b.agent) return a.agent.localeCompare(b.agent);
+  return a.id.localeCompare(b.id);
 }
 
 /**
@@ -257,22 +328,36 @@ export type SingleAgentLogRowKind = Extract<LogRow['kind'], 'tool' | 'llm' | 'er
  */
 export function buildSingleAgentSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
   const { sessionId, offset, limit, revealSensitive } = opts;
-  const events = listEvents(sessionId);
-  const rows: LogRow[] = events.map((ev) => eventTableRowToLogRow(ev, revealSensitive));
 
-  rows.sort((a, b) => {
-    if (a.ts !== b.ts) return a.ts - b.ts;
-    return a.id.localeCompare(b.id);
-  });
+  // Register S04, the half the finding did not name. This is the SAME defect
+  // as `buildSessionLogChunk` over the `events` table — and the bigger one in
+  // practice, because `events` carries a full SDK envelope per row for every
+  // single-agent chat, where the bus table carries one hop.
+  //
+  // Same shape as above: key scan, sort, slice, then convert only the page.
+  // `agent` is the constant 'agent' for every single-agent row, so it drops
+  // out of the comparator exactly as it did before.
+  const keys: SortKey[] = listEventKeys(sessionId).map((k) => ({
+    ts: k.ts,
+    agent: 'agent',
+    id: `event:${k.id}`,
+    stream: 'event' as const,
+    rowId: k.id,
+  }));
+  keys.sort(compareSortKeys);
 
-  const total = rows.length;
+  const total = keys.length;
   const clampedOffset = Math.max(0, Math.min(offset, total));
   const clampedLimit = Math.max(0, limit);
+  const pageKeys = keys.slice(clampedOffset, clampedOffset + clampedLimit);
+  const byId = new Map(getEventsByIds(pageKeys.map((k) => k.rowId)).map((r) => [r.id, r]));
 
   const sliced: LogRow[] = [];
   let bytes = 0;
-  for (let i = clampedOffset; i < total && sliced.length < clampedLimit; i++) {
-    const row = rows[i]!;
+  for (const key of pageKeys) {
+    const source = byId.get(key.rowId);
+    if (source === undefined) continue;
+    const row = eventTableRowToLogRow(source, revealSensitive);
     const rowBytes = approxByteLength(row);
     if (bytes + rowBytes > CHUNK_BYTE_CAP && sliced.length > 0) break;
     sliced.push(row);

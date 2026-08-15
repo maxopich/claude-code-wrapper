@@ -5,7 +5,7 @@ import { formatResultDuration, messageCopyText } from '../format';
 import { Markdown } from './Markdown';
 import { ClaudeMark } from './ClaudeMark';
 import { CopyButton } from './CopyButton';
-import { badgeTooltip, renderPermissionBody } from './PermissionCards';
+import { badgeTooltip, PermissionActions, renderPermissionBody } from './PermissionCards';
 import { MaxTurnsResultCard } from './MaxTurnsResultCard';
 
 export function MessageBlock(props: {
@@ -197,12 +197,20 @@ export function MessageBlock(props: {
           )}
           {body}
           {m.decided ? (
-            <div className="decided">decided: {m.decided}</div>
-          ) : (
-            <div className="actions">
-              <button onClick={() => onPermissionDecide?.(m.requestId, 'allow')}>Allow</button>
-              <button onClick={() => onPermissionDecide?.(m.requestId, 'deny')}>Deny</button>
+            <div className="decided">
+              decided: {m.decided}
+              {/* Register S06: a drained request denies without the operator.
+                  Saying so is the difference between "you refused this" and
+                  "this was refused for you while you were gone". */}
+              {m.decidedReason === 'client_disconnected' && ' — automatic, you had disconnected'}
+              {m.decidedReason === 'interrupted' && ' — automatic, the turn was interrupted'}
             </div>
+          ) : (
+            <PermissionActions
+              toolName={m.toolName}
+              category={category}
+              onDecide={(decision) => onPermissionDecide?.(m.requestId, decision)}
+            />
           )}
         </div>
       </div>

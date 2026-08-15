@@ -277,6 +277,77 @@ describe('ToolsList — keyboard nav', () => {
   });
 });
 
+/**
+ * Bead .41: the list used to keep the highlight in `aria-activedescendant` on
+ * a `role="list"` container. That property needs a composite role (listbox,
+ * menu, grid, …); on `list` the ids resolved and the browser exposed nothing,
+ * so the arrow keys moved a highlight that assistive tech never announced —
+ * the same silent failure as U18, one container role over.
+ *
+ * `role="listbox"` was not available as the fix: an `option` may not contain
+ * interactive content and these rows are `<details>` disclosures. Moving real
+ * DOM focus needs no active-descendant contract at all.
+ */
+describe('ToolsList — keyboard highlight is real focus (.41)', () => {
+  function rows() {
+    return Array.from(container.querySelectorAll<HTMLElement>('details.tool-row > summary'));
+  }
+  function press(key: string) {
+    const list = container.querySelector('.tools-list') as HTMLElement;
+    act(() => {
+      list.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    });
+  }
+
+  beforeEach(() => {
+    act(() => {
+      root.render(<ToolsList tools={sampleTools} mcpServers={sampleServers} />);
+    });
+  });
+
+  test('no aria-activedescendant survives anywhere in the list', () => {
+    expect(container.querySelectorAll('[aria-activedescendant]')).toHaveLength(0);
+  });
+
+  test('exactly one row is in the tab order, and it starts at the first', () => {
+    // A roving tabindex: Tab enters and leaves the list rather than walking
+    // every tool, which on a 100-tool catalog is the difference between a
+    // usable panel and an unusable one.
+    const tabbable = rows().filter((r) => r.getAttribute('tabindex') === '0');
+    expect(tabbable).toHaveLength(1);
+    expect(tabbable[0]).toBe(rows()[0]);
+  });
+
+  test('arrow keys move DOM focus, and the tab stop follows it', () => {
+    press('ArrowDown');
+    expect(document.activeElement).toBe(rows()[0]);
+    press('ArrowDown');
+    expect(document.activeElement).toBe(rows()[1]);
+    expect(rows()[1]!.getAttribute('tabindex')).toBe('0');
+    expect(rows()[0]!.getAttribute('tabindex')).toBe('-1');
+  });
+
+  test('focusing a row by mouse keeps the highlight and the tab stop together', () => {
+    // Without the onFocus sync, clicking row 3 would leave the highlight and
+    // the roving tab stop on row 1 — two different rows claiming to be current.
+    act(() => rows()[2]!.focus());
+    expect(rows()[2]!.getAttribute('tabindex')).toBe('0');
+    expect(container.querySelector('.tool-row.tool-row-active')).toBe(rows()[2]!.parentElement);
+  });
+
+  test('Enter still toggles a row, now natively', () => {
+    // The bespoke Enter handler was deleted with the highlight it depended on.
+    // A focused <summary> opens its own <details>, so this is the browser's
+    // behaviour rather than ours — asserted because deleting code that looks
+    // load-bearing needs a check that the capability survived.
+    const first = rows()[0]!;
+    const details = first.parentElement as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+    act(() => first.click());
+    expect(details.open).toBe(true);
+  });
+});
+
 describe('ToolsList — mode=usage-diff (Phase 10 / UI-B31)', () => {
   const usageTools: ToolView[] = [
     mkTool({ name: 'Read', calledCount: 5 }),
