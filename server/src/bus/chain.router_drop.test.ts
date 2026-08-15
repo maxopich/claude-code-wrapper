@@ -453,7 +453,42 @@ describe('[Cebab-wsq] a dropped chain event parks the run instead of wedging it'
     });
     expect(explanation.text).toContain('cannot advance');
     expect(getPendingRetry(SESSION_ID)!.errorEventId).toBe(explanation.id);
-    expect(getMultiAgentSession(SESSION_ID)!.hops_used).toBeNull();
+  });
+
+  test('the explanatory row costs no hop against the budget', () => {
+    // The half above only proves a row was written. This proves WHICH writer
+    // wrote it: `forwardCebabEvent` would have been the obvious choice and it
+    // bumps the hop counter, so a park would quietly shorten every run it
+    // touched. The counter is private, so the budget is the observable —
+    // sized so the park is the difference between a third hop running and the
+    // run being torn down as `stopped`.
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+    fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
+    const onEnded = vi.fn();
+    const deliver = vi.fn();
+    const router = createChainRouter({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      agentNames: AGENTS,
+      paths,
+      onEvent: vi.fn(),
+      onEnded,
+      deliver,
+      hopBudget: 3,
+    });
+
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' })); // hop 1
+    // `self_addressed` drops above the persist, so the drop itself is free —
+    // any hop charged below this line came from the park.
+    router.handleEvent(ev({ source: 'reviewer', destination: 'reviewer' }));
+    router.onTurnSucceeded('reviewer');
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' })); // hop 2
+
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(onEnded).not.toHaveBeenCalled();
+    expect(getMultiAgentSession(SESSION_ID)!.status).toBe('running');
   });
 
   test('parking does NOT emit a second notification for the same drop', () => {
