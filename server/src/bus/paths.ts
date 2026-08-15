@@ -11,7 +11,7 @@
  *      computed via `computeSessionPaths`:
  *      ```
  *      <workspaceRoot>/.cebab-session-<sessionId>/
- *        orchestrator/{CLAUDE.md, .cebab/comm.md}   # Cebab-owned workspace
+ *        orchestrator/                              # empty Cebab-owned cwd
  *        iterations/NNN/<agent>/{prompt.md, reply.md, transcript.log,
  *                                final.md}
  *      ```
@@ -22,11 +22,18 @@
  *      `session_folder` column is NULL and by unit tests that don't need
  *      the per-session split.
  *
- * `comm.md` is the orchestrator's bus-protocol doc, imported from its
- * workspace `CLAUDE.md` via the project-relative `@.cebab/comm.md` (an
- * external/absolute import would trip claude-code's startup trust modal).
- * Worker projects get no comm.md and no project-file mutation at all —
- * their protocol arrives via the per-turn briefing.
+ * The orchestrator workspace is a directory and nothing else — register X16.
+ * This header used to draw `CLAUDE.md` and `.cebab/comm.md` into that tree and
+ * describe `comm.md` as a live `@.cebab/comm.md` import. Neither file is
+ * written: the orchestrator runs `settingSources: ['user']`, under which a
+ * workspace `CLAUDE.md` / `comm.md` / `settings.json` would never be loaded, so
+ * both were removed as dead (see `ensureOrchestratorWorkspace` in
+ * `orchestrator.ts`, and the test named "creates the workspace dir and writes
+ * NO files"). Every agent's protocol arrives via the per-turn briefing —
+ * `renderRosterPrompt` for the orchestrator, `renderWorkerBriefing` /
+ * `renderChainBriefing` for the rest. A layout diagram is the first thing
+ * anyone reads to learn the on-disk contract, so it drew two files that a test
+ * asserts are absent.
  */
 import path from 'node:path';
 import { config } from '../config.js';

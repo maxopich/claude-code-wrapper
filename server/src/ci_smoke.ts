@@ -4,8 +4,11 @@
  * Replaces the old bash pipeline (`MOCK=1 ... & ; nc -z ; timeout ; kill`)
  * which only ran on Linux. Pure Node: spawn the mock server, poll /health
  * over fetch, run ws_smoke, tear the server down. Works identically on
- * ubuntu-latest and windows-latest because it never shells out — children
- * are `node <tsx-cli> <script>`, no `.cmd` shims, no `&`, no `nc`.
+ * Linux and Windows because it never shells out — children are
+ * `node <tsx-cli> <script>`, no `.cmd` shims, no `&`, no `nc`. Named by OS
+ * rather than by runner image on purpose: portability does not stop being
+ * true when the matrix repins, and naming the image made this sentence
+ * outlive the image it named (register X12).
  *
  * Hermetic: the server's data dir derives from the home dir
  * (`config.dataDir = <home>/.cebab`), so we point HOME *and* USERPROFILE
@@ -88,8 +91,8 @@ async function main(): Promise<number> {
 /** Kill the server and AWAIT its real exit. On Windows the OS only
  *  releases the better-sqlite3 file handles on `<tmpHome>/.cebab` once the
  *  process is actually gone — deleting them while it lingers throws EPERM
- *  (POSIX tolerates unlink-while-open, which is why this only bit CI on
- *  windows-latest). Force-kill if a graceful stop doesn't land in time. */
+ *  (POSIX tolerates unlink-while-open, which is why this only bit the
+ *  Windows leg). Force-kill if a graceful stop doesn't land in time. */
 async function killAndWait(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>((resolve) => {

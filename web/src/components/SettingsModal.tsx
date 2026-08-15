@@ -211,11 +211,24 @@ export function SettingsModal(props: {
               autoFocus
             />
           </label>
+          {/* X17: this used to say the project's `CLAUDE.md`, its skills dir and
+              an MCP config "auto-load", unconditionally. Two things wrong, and
+              both mattered — this is the paragraph an operator reads while
+              deciding where to point Cebab. An UNTRUSTED project spawns with
+              `settingSources: ['user']` and loads none of its own files; and the
+              MCP path it named sat under `.claude/`, which the CLI does not read
+              for that purpose. The loading location is the project-root
+              `.mcp.json`, per the measured table in
+              `server/src/repo/project_authority.ts`. (The old path is described
+              rather than quoted so this comment does not trip the literal scan in
+              `scripts/configSurfaceClaims.test.mjs` that keeps it gone.) Kept
+              short because the Trust toggle that decides it lives on the project
+              row, not in this modal; README's "Switching projects" has the rule. */}
           <p className="hint">
             Absolute or <code>~</code>-prefixed path. Each subdirectory becomes a sidebar entry. The
-            agent runs with that directory as its <code>cwd</code>, so the project's{' '}
-            <code>CLAUDE.md</code>, <code>.claude/skills/</code>, and <code>.claude/mcp.json</code>{' '}
-            auto-load.
+            agent runs with that directory as its <code>cwd</code>. A project only loads its own{' '}
+            <code>CLAUDE.md</code>, <code>.claude/skills/</code> and <code>.mcp.json</code> once you
+            mark it trusted.
           </p>
           {props.settings.workspaceRoot === null && (
             // Cluster E Phase 3 (A4): when no workspace is saved, name
