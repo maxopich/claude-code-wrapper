@@ -302,13 +302,36 @@ describe('[security] the teardown ordering this exists to protect', () => {
     return { lines, restore: () => spy.mockRestore() };
   }
 
+  /**
+   * Wait for the stream to report, bounded.
+   *
+   * A fixed number of ticks is not portable here, and CI proved it: on POSIX
+   * the bad path fails at `open` (EISDIR) and reports almost immediately, while
+   * on Windows the open SUCCEEDS and the failure surfaces from the write
+   * ("EISDIR: illegal operation on a directory, write") several ticks later.
+   * Five `setImmediate`s were enough on macOS and not on windows-2022, where
+   * the spy was restored first and the line went to the real console —
+   * failing a test whose subject had actually worked.
+   */
+  async function waitForLoggerError(lines: string[], budgetMs = 3000): Promise<void> {
+    const deadline = Date.now() + budgetMs;
+    while (lines.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  }
+
   test('awaiting closeLogger before removing the dir emits no late [logger] error', async () => {
     // A REAL stream, because the defect is in the real one's async open.
     const { lines, restore } = captureLoggerErrors();
     await logEvent('sess-ordered', { n: 1 });
     await closeLogger();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
-    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    // Same bounded wait as the control, for the same portability reason: a
+    // handful of ticks is long enough to observe an error on POSIX and not on
+    // Windows, so an absence assertion built on tick-counting would hold
+    // vacuously there. Returns early only if a line DOES appear, which is
+    // exactly the failure this asserts against.
+    await waitForLoggerError(lines, 500);
     restore();
 
     expect(lines).toEqual([]);
@@ -334,7 +357,7 @@ describe('[security] the teardown ordering this exists to protect', () => {
     fs.mkdirSync(path.join(config.logsDir, 'sess-control.jsonl'), { recursive: true });
 
     await logEvent('sess-control', { n: 2 }).catch(() => undefined);
-    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+    await waitForLoggerError(lines);
     restore();
 
     expect(lines.some((l) => l.startsWith('[logger] write to sess-control.jsonl failed:'))).toBe(
