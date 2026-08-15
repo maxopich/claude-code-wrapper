@@ -347,7 +347,42 @@ let originalDataDir: string;
 let projectPath: string;
 let projectId: number;
 
-let originalHome: string | undefined;
+// `os.homedir()` reads $HOME on POSIX and %USERPROFILE% on Windows. Setting
+// only HOME redirects nothing on the Windows runner — measured: the guard
+// assertion below caught it as `expected 'C:\Users\runneradmin' to be
+// '<tmp>'`, which is precisely what the guard is for. Set both, restore both.
+const HOME_VARS = ['HOME', 'USERPROFILE'] as const;
+let originalHome: Partial<Record<(typeof HOME_VARS)[number], string | undefined>> = {};
+
+function redirectHome(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true });
+  originalHome = {};
+  for (const v of HOME_VARS) {
+    originalHome[v] = process.env[v];
+    process.env[v] = dir;
+  }
+}
+
+function restoreHome(): void {
+  for (const v of HOME_VARS) {
+    const prev = originalHome[v];
+    if (prev === undefined) delete process.env[v];
+    else process.env[v] = prev;
+  }
+}
+
+/** Compare paths through realpath: Windows temp dirs come back as 8.3 short
+ *  names (`RUNNER~1`) from one API and long names from another. */
+function samePath(a: string, b: string): boolean {
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return p;
+    }
+  };
+  return path.resolve(real(a)) === path.resolve(real(b));
+}
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-pauth-orch-'));
@@ -366,17 +401,14 @@ beforeEach(() => {
   // with a `claude mcp add --scope user` server would see an extra row in
   // every `resolveProjectAuthority` assertion below. CI has no such file, so
   // the failure would only ever appear locally, on someone else's machine.
-  // Point HOME at an empty dir; the cases that want a fixture write their own.
-  originalHome = process.env.HOME;
-  fs.mkdirSync(path.join(tmpRoot, 'home'), { recursive: true });
-  process.env.HOME = path.join(tmpRoot, 'home');
+  // Point home at an empty dir; the cases that want a fixture write their own.
+  redirectHome(path.join(tmpRoot, 'home'));
 });
 
 afterEach(() => {
   closeDb();
   config.dataDir = originalDataDir;
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
+  restoreHome();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -1271,26 +1303,32 @@ describe('[security] .mcp.json is the declaration that actually loads', () => {
 // because some other reader would have supplied the `originPath`.
 describe('readClaudeJsonServers (x1n.6.23) — the ungated class, closed', () => {
   let fakeHome: string;
-  let realHome: string | undefined;
 
   beforeEach(() => {
+    // The outer beforeEach already redirected home to this dir; re-assert it
+    // here because every case below is meaningless if it did not take. The
+    // reader calls os.homedir() at CALL time — if that ever moves to
+    // module-load time these tests would silently read the real config, which
+    // is the failure this guard exists to make loud rather than green.
     fakeHome = path.join(tmpRoot, 'home');
-    fs.mkdirSync(fakeHome, { recursive: true });
-    realHome = process.env.HOME;
-    process.env.HOME = fakeHome;
-    // Prove the redirect took, before any assertion depends on it. The reader
-    // calls os.homedir() at CALL time; if that ever changes to module-load
-    // time these tests would silently read the developer's real config.
-    expect(os.homedir()).toBe(fakeHome);
-  });
-
-  afterEach(() => {
-    if (realHome === undefined) delete process.env.HOME;
-    else process.env.HOME = realHome;
+    expect(samePath(os.homedir(), fakeHome)).toBe(true);
+    // Platform-independent half of the same guard, and the one that would
+    // have caught the Windows break on a POSIX dev machine: os.homedir()
+    // consults $HOME on POSIX and %USERPROFILE% on Windows, so redirecting
+    // only one passes locally and fails on the other runner. Asserting
+    // os.homedir() alone can never detect that from here.
+    //
+    // BOTH NAMES ARE WRITTEN OUT ON PURPOSE. Looping over `HOME_VARS` looks
+    // tidier and is worthless: dropping a name from that list would shrink
+    // what the loop checks, so the assertion would still pass on the exact
+    // regression it exists to catch. Verified by revert-check — the loop
+    // version stayed green with USERPROFILE removed.
+    expect(process.env.HOME).toBe(fakeHome);
+    expect(process.env.USERPROFILE).toBe(fakeHome);
   });
 
   const writeClaudeJson = (obj: unknown) =>
-    fs.writeFileSync(path.join(fakeHome, '.claude.json'), JSON.stringify(obj));
+    fs.writeFileSync(path.join(os.homedir(), '.claude.json'), JSON.stringify(obj));
 
   const server = { command: '/usr/local/bin/shady', args: ['--serve'] };
 
@@ -1303,7 +1341,7 @@ describe('readClaudeJsonServers (x1n.6.23) — the ungated class, closed', () =>
       const out = _testing.readClaudeJsonServers(projectPath, [...scopes]);
       expect(out.map((s) => s.name)).toEqual(['shady-mcp']);
       expect(out[0]!.scope).toBe('claude-json');
-      expect(out[0]!.originPath).toBe(path.join(fakeHome, '.claude.json'));
+      expect(out[0]!.originPath).toBe(path.join(os.homedir(), '.claude.json'));
     }
   });
 
@@ -1340,9 +1378,9 @@ describe('readClaudeJsonServers (x1n.6.23) — the ungated class, closed', () =>
 
   test('absent / malformed / oversized files yield no rows rather than throwing', () => {
     expect(_testing.readClaudeJsonServers(projectPath, ['user'])).toEqual([]);
-    fs.writeFileSync(path.join(fakeHome, '.claude.json'), '{ not json');
+    fs.writeFileSync(path.join(os.homedir(), '.claude.json'), '{ not json');
     expect(_testing.readClaudeJsonServers(projectPath, ['user'])).toEqual([]);
-    fs.writeFileSync(path.join(fakeHome, '.claude.json'), 'x'.repeat(8 * 1024 * 1024 + 1));
+    fs.writeFileSync(path.join(os.homedir(), '.claude.json'), 'x'.repeat(8 * 1024 * 1024 + 1));
     expect(_testing.readClaudeJsonServers(projectPath, ['user'])).toEqual([]);
   });
 
@@ -1352,7 +1390,7 @@ describe('readClaudeJsonServers (x1n.6.23) — the ungated class, closed', () =>
     const row = out!.mcpServers.find((m) => m.name === 'shady-mcp');
     expect(row).toBeDefined();
     expect(row!.scope).toBe('claude-json');
-    expect(row!.originPath).toBe(path.join(fakeHome, '.claude.json'));
+    expect(row!.originPath).toBe(path.join(os.homedir(), '.claude.json'));
   });
 
   // THE ASSERTION THAT MATTERS. A row with an originPath that still is not
@@ -1380,7 +1418,7 @@ describe('readClaudeJsonServers (x1n.6.23) — the ungated class, closed', () =>
     // Name AND origin, so this cannot pass on a prompt about something else —
     // the originPath IS the durable anchor the register said was missing.
     expect(env.serverName).toBe('shady-mcp');
-    expect(env.originPath).toBe(path.join(fakeHome, '.claude.json'));
+    expect(env.originPath).toBe(path.join(os.homedir(), '.claude.json'));
     expect(env.reason).toBe('first_seen');
 
     // Let the operator answer so the parked promise resolves and the gate
