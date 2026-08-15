@@ -222,8 +222,14 @@ export function hardDeleteSession(id: string): number {
  * equals `sum(modelUsage[*].costUSD)`, which are per-invocation counters). The
  * absolute-assignment sibling this replaced (`setSessionCost`) therefore left
  * `sessions.total_cost_usd` holding only the last turn's cost — and holding 0
- * whenever a session ended on a `num_turns: 0` slash-command result. See
- * migration 029, which backfills the damage from the `events` table.
+ * whenever a session ended on a `num_turns: 0` slash-command result.
+ *
+ * Register D19: this is a FIX-FORWARD only. Rows written before it still hold
+ * whatever the absolute-assignment path left there. Migration 029 is the
+ * record of that decision, not a repair of it — its header names the rewrite
+ * under "NOT INCLUDED" and says historical rows are left alone, because the
+ * observed data does not match what the code would have produced and that
+ * discrepancy is worth understanding before overwriting anyone's records.
  */
 export function bumpSession(id: string, totalCostUsdDelta = 0): void {
   getDb()

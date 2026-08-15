@@ -706,3 +706,132 @@ describe('migration 026 — tool input/output capture', () => {
     expect(JSON.parse(out!)).toEqual({ content: body });
   });
 });
+
+describe('migration 034 / register D20 — (session_id, tool_use_id) is unique', () => {
+  test('re-appending the same tool_use id returns the EXISTING row and adds none', () => {
+    createMultiAgentSession('d20a', 'orchestrator', '001');
+    const first = appendMultiAgentMutation('d20a', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_dup',
+      toolInput: { file_path: '/x' },
+    });
+    const second = appendMultiAgentMutation('d20a', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_dup',
+      toolInput: { file_path: '/x' },
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(listMultiAgentMutations('d20a')).toHaveLength(1);
+  });
+
+  test('the repeat does NOT throw — the caller path past it must stay reachable', () => {
+    // Both bus call sites catch a persist error and `return` BEFORE
+    // `applyPauseGate`, so an append that throws is a dangerous mutation with
+    // no operator gate. Enforcing uniqueness by letting the INSERT raise would
+    // have been a worse bug than the duplicate row it removed.
+    createMultiAgentSession('d20b', 'orchestrator', '001');
+    const args = ['d20b', 'worker', 'Bash', 'dangerous', 'delete a tree'] as const;
+    const extra = { filePath: null, cwd: '/repo', toolUseId: 'toolu_same' };
+    appendMultiAgentMutation(...args, extra);
+    expect(() => appendMultiAgentMutation(...args, extra)).not.toThrow();
+  });
+
+  test('control: two DIFFERENT tool_use ids still make two rows', () => {
+    // Anti-vacuity for the case above — an append that silently dropped
+    // everything would satisfy it.
+    createMultiAgentSession('d20c', 'orchestrator', '001');
+    const a = appendMultiAgentMutation('d20c', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_1',
+    });
+    const b = appendMultiAgentMutation('d20c', 'worker', 'Write', 'mutate', 'create /y', {
+      filePath: '/y',
+      cwd: '/repo',
+      toolUseId: 'toolu_2',
+    });
+    expect(b.id).not.toBe(a.id);
+    expect(listMultiAgentMutations('d20c')).toHaveLength(2);
+  });
+
+  test('control: the same tool_use id in a DIFFERENT session still makes a row', () => {
+    // The key is the pair. Collapsing on `tool_use_id` alone would silently
+    // drop one session's mutation because another session saw the same id.
+    createMultiAgentSession('d20d', 'orchestrator', '001');
+    createMultiAgentSession('d20e', 'orchestrator', '002');
+    appendMultiAgentMutation('d20d', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_shared',
+    });
+    appendMultiAgentMutation('d20e', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_shared',
+    });
+    expect(listMultiAgentMutations('d20d')).toHaveLength(1);
+    expect(listMultiAgentMutations('d20e')).toHaveLength(1);
+  });
+
+  test('control: repeated NULL tool_use ids still make separate rows', () => {
+    // What the partial predicate is for. PR #337 deliberately keeps recording
+    // `tool_use` blocks that arrive without an id, because an unidentifiable
+    // call cannot be recognised as a repeat.
+    createMultiAgentSession('d20f', 'orchestrator', '001');
+    for (let i = 0; i < 3; i++) {
+      appendMultiAgentMutation('d20f', 'worker', 'Bash', 'dangerous', 'delete a tree', {
+        filePath: null,
+        cwd: '/repo',
+        toolUseId: null,
+      });
+    }
+    expect(listMultiAgentMutations('d20f')).toHaveLength(3);
+  });
+
+  test('the absorbed repeat returns the row for ITS OWN key, not the last insert', () => {
+    // `lastInsertRowid` survives a DO NOTHING unchanged, so reading the
+    // returned row by it would hand back whichever row this connection
+    // inserted most recently — a different mutation entirely.
+    createMultiAgentSession('d20g', 'orchestrator', '001');
+    const target = appendMultiAgentMutation('d20g', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_target',
+    });
+    // A DIFFERENT mutation lands in between, so it owns `lastInsertRowid`.
+    appendMultiAgentMutation('d20g', 'worker', 'Write', 'mutate', 'create /y', {
+      filePath: '/y',
+      cwd: '/repo',
+      toolUseId: 'toolu_other',
+    });
+
+    const repeat = appendMultiAgentMutation('d20g', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_target',
+    });
+    expect(repeat.id).toBe(target.id);
+    expect(repeat.filePath).toBe('/x');
+  });
+
+  test('confirmMutationByToolUseId returns the same row on the already-confirmed path', () => {
+    // The `changes === 0` branch reads back independently of the UPDATE, so it
+    // needs its own case — it is the one a duplicate used to make arbitrary.
+    createMultiAgentSession('d20h', 'orchestrator', '001');
+    const appended = appendMultiAgentMutation('d20h', 'worker', 'Write', 'mutate', 'create /x', {
+      filePath: '/x',
+      cwd: '/repo',
+      toolUseId: 'toolu_conf',
+    });
+    const first = confirmMutationByToolUseId('d20h', 'toolu_conf', [{ type: 'text', text: 'ok' }]);
+    const again = confirmMutationByToolUseId('d20h', 'toolu_conf');
+
+    expect(first?.id).toBe(appended.id);
+    expect(again?.id).toBe(appended.id);
+    expect(again?.confirmedAt).toBe(first?.confirmedAt);
+    expect(again?.toolResult).toEqual([{ type: 'text', text: 'ok' }]);
+  });
+});
