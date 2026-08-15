@@ -182,4 +182,63 @@ describe('pause gate over a real DB [security]', () => {
     expect(gate('coder', 'rm -rf /tmp/y').paused).toBe(false);
     expect(listPendingMutations(SID)).toHaveLength(1);
   });
+
+  // D20 / migration 034. The unique index means a repeated `tool_use` id no
+  // longer inserts — and the append sites `return` on a throw, upstream of
+  // this gate. So "the constraint is enforced" and "the gate still runs" are
+  // the same question, and only the second one is about the operator.
+  describe('a repeated tool_use id still reaches the gate', () => {
+    /** `gate`, but with a real tool_use id so the index applies. */
+    function gateWithId(
+      agent: string,
+      summary: string,
+      toolUseId: string,
+    ): { row: MutationRecord; paused: boolean } {
+      const row = appendMultiAgentMutation(SID, agent, 'Bash', 'dangerous', summary, {
+        filePath: null,
+        cwd: `/ws/${agent}`,
+        toolUseId,
+      });
+      try {
+        applyPauseGate(row);
+        return { row, paused: false };
+      } catch (err) {
+        if (!isPausedForMutation(err)) throw err;
+        return { row, paused: true };
+      }
+    }
+
+    test('the replayed call halts the turn, on the row that already exists', () => {
+      // The scenario: the operator releases the pause, Continue replays the
+      // captured prompt, and the fresh turn re-issues the same command with
+      // the same id. Pre-034 that appended a second row. Post-034 it must
+      // resolve to the first one and pause again — migration 031 says the
+      // grant is one command, one agent, once.
+      const first = gateWithId('coder', 'rm -rf /tmp/x', 'toolu_replay');
+      expect(first.paused).toBe(true);
+
+      releasePauseForMutation(SID, first.row.id); // operator clicks Continue
+      const replay = gateWithId('coder', 'rm -rf /tmp/x', 'toolu_replay');
+
+      // The grant covers this exact command once, so the replay runs...
+      expect(replay.paused).toBe(false);
+      expect(replay.row.id).toBe(first.row.id);
+
+      // ...and the NEXT repeat of the same id pauses again on the same row,
+      // rather than sliding through on a spent grant or a duplicate.
+      const third = gateWithId('coder', 'rm -rf /tmp/x', 'toolu_replay');
+      expect(third.paused).toBe(true);
+      expect(third.row.id).toBe(first.row.id);
+      expect(listPendingMutations(SID).map((m) => m.id)).toEqual([first.row.id]);
+    });
+
+    test('control: an unarmed gate still lets the repeat through', () => {
+      // Anti-vacuity for the case above — an append that started throwing
+      // would fail both, so this pins that the pausing is the gate's doing.
+      setPauseOnDangerous(SID, false);
+      expect(gateWithId('coder', 'rm -rf /tmp/x', 'toolu_free').paused).toBe(false);
+      expect(gateWithId('coder', 'rm -rf /tmp/x', 'toolu_free').paused).toBe(false);
+      expect(listPendingMutations(SID)).toEqual([]);
+    });
+  });
 });

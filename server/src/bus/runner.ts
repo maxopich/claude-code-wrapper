@@ -779,9 +779,16 @@ export class AgentRunner {
 
     // B15: same lifetime as `turnIndex`, and for the same reason. A retry
     // re-runs THIS turn, so a `tool_use` id the tap already fired for is a
-    // repeat of a call already recorded — not a second call. Per-HOP, not
-    // per-runner: an id legitimately reappearing on a LATER hop is a genuine
-    // new call and must still be recorded.
+    // repeat of a call already recorded — not a second call.
+    //
+    // Per-HOP rather than per-runner because this set is only the cheap
+    // in-memory half. Holding every id a long bus run ever saw would grow
+    // without bound, and it would still miss the cross-restart case, where a
+    // rebuilt router starts with an empty set. The durable half is migration
+    // 034's unique index on `(session_id, tool_use_id)`, which absorbs a
+    // repeat from ANY hop or process (register D20). An id reappearing on a
+    // later hop is a repeat there too — distinct tool calls carry distinct
+    // ids — so it is silently absorbed rather than recorded twice.
     const tappedToolUseIds = new Set<string>();
 
     // Retry-with-backoff for transient API overloads ("API Error: 529",
