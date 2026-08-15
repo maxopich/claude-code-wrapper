@@ -28,6 +28,33 @@ const NEWER_SID = 'phase4-newer';
 const OLDER_SID = 'phase4-older';
 const CHAIN_SID = 'phase4-chain';
 
+/** Fixed `started_at` values, so ordering is stated rather than raced for. */
+const OLDER_TS = 1_700_000_000_000;
+const NEWER_TS = 1_700_000_000_500;
+/** Both rows on the same millisecond — the tie only `rowid DESC` can break. */
+const TIED_TS = 1_700_000_001_000;
+
+/**
+ * Stamp an explicit `started_at` on a row that was just created.
+ *
+ * Register C19. This replaces `await new Promise(r => setTimeout(r, 10))`,
+ * whose comment read "Tiny delay so started_at differs". A real sleep is not a
+ * way to make two timestamps differ: on Windows the clock granularity is
+ * around fifteen milliseconds, so both rows could land on the same tick and
+ * the ordering — and the assertion built on it — flipped. Injecting the value
+ * states the ordering the test is about instead of hoping the clock provides
+ * it, and it is faster.
+ *
+ * `createMultiAgentSession` stamps `Date.now()` internally with no seam, and
+ * adding a production parameter to serve a test is the wrong trade — this is
+ * one `UPDATE` against a table the test already owns.
+ */
+function stampStartedAt(sessionId: string, startedAt: number): void {
+  getDb()
+    .prepare('UPDATE multi_agent_sessions SET started_at = ? WHERE id = ?')
+    .run(startedAt, sessionId);
+}
+
 let tmpRoot: string;
 let originalDataDir: string;
 let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -62,9 +89,9 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
     // R-B reconstructed; we're only interested in the older-row sweep, not
     // the reattach.
     createMultiAgentSession(OLDER_SID, 'orchestrator');
-    // Tiny delay so started_at differs (sort order: newest first).
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const newer = createMultiAgentSession(NEWER_SID, 'orchestrator');
+    stampStartedAt(OLDER_SID, OLDER_TS);
+    createMultiAgentSession(NEWER_SID, 'orchestrator');
+    stampStartedAt(NEWER_SID, NEWER_TS);
 
     const sent: ServerMsg[] = [];
     const resumed = await attemptResumeMultiAgent({
@@ -85,7 +112,7 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       type: 'session_superseded',
       sessionId: OLDER_SID,
       supersedingSessionId: NEWER_SID,
-      supersedingTs: newer.started_at,
+      supersedingTs: NEWER_TS,
     });
 
     const toast = sent.find((m) => m.type === 'notification');
@@ -121,6 +148,48 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
     });
 
     expect(sent.find((m) => m.type === 'session_superseded')).toBeUndefined();
+  });
+
+  /**
+   * Register C20 — THE case that catches the missing tiebreaker, and the only
+   * one that can. The two tests above stamp DISTINCT timestamps, so they pass
+   * whether or not `listActiveMultiAgentSessions` breaks ties; they are the
+   * control for the primary sort, not a gate on C20.
+   *
+   * Measured before writing: with equal `started_at` and no tiebreaker, the
+   * planner walks `multi_agent_sessions_status_idx` in index order, which
+   * within an equal key is rowid ASC — so the OLDER row came back first and
+   * became the resume candidate, while the NEWER row was marked crashed. That
+   * is backwards for a query documented as "most recent first", and it is what
+   * this case pins.
+   *
+   * `, rowid ASC` would keep the index and cost nothing, and would leave this
+   * test red — which is the whole reason `rowid DESC` is what shipped. See
+   * SESSION_ORDER in `repo/multi_agent.ts`.
+   */
+  test('same-millisecond rows: the LATER-inserted one is the candidate, not the older', async () => {
+    createMultiAgentSession(OLDER_SID, 'orchestrator');
+    createMultiAgentSession(NEWER_SID, 'orchestrator');
+    // Identical timestamps: insertion order is the only thing left to sort on.
+    stampStartedAt(OLDER_SID, TIED_TS);
+    stampStartedAt(NEWER_SID, TIED_TS);
+
+    const sent: ServerMsg[] = [];
+    await attemptResumeMultiAgent({
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      sendServerMsg: (m) => sent.push(m),
+    });
+
+    // NEWER_SID was inserted second, so it is the candidate and survives the
+    // sweep; OLDER_SID is the orphan.
+    expect(getMultiAgentSession(OLDER_SID)!.status).toBe('crashed');
+    expect(sent.find((m) => m.type === 'session_superseded')).toMatchObject({
+      sessionId: OLDER_SID,
+      supersedingSessionId: NEWER_SID,
+      supersedingTs: TIED_TS,
+    });
   });
 });
 

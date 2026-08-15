@@ -11,8 +11,12 @@
 --                      recorded which template they came from, so the rail
 --                      simply shows "no last run" until the next post-013
 --                      run lands. Indexed because the rail's query is
---                      `WHERE template_id = ? ORDER BY started_at DESC
---                      LIMIT 1`.
+--                      `WHERE template_id = ? ORDER BY started_at DESC,
+--                      rowid DESC LIMIT 1`. (The `rowid DESC` tiebreaker
+--                      arrived later, with register C20 — see SESSION_ORDER
+--                      in repo/multi_agent.ts. It is deliberately NOT in this
+--                      index: the trailing sort it costs is measured and
+--                      pinned by query_plans.test.ts.)
 --   2. hop_budget    — the effective hop budget RESOLVED at session start
 --                      (per-template override → per-run override → DB
 --                      setting → CEBAB_HOP_BUDGET env → DEFAULT_HOP_BUDGET).

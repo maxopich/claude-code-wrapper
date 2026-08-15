@@ -330,11 +330,21 @@ export async function resumeMultiAgentTarget(
   };
 }
 
-/** List every running multi-agent session, most recent first. */
+/**
+ * List every running multi-agent session, most recent first.
+ *
+ * Register C20 — `rowid DESC` is the tiebreaker, and this is the query whose
+ * tie has teeth: `attemptResumeMultiAgent` takes `[0]` as the resume candidate
+ * and marks **every other row crashed**. Two rows stamped in the same
+ * millisecond therefore decided which run came back and which was destroyed.
+ *
+ * See `repo/multi_agent.ts`'s `SESSION_ORDER` comment for the measurements —
+ * in particular why the free tiebreaker was rejected.
+ */
 function listActiveMultiAgentSessions(): MultiAgentSessionRow[] {
   return getDb()
     .prepare<[], MultiAgentSessionRow>(
-      `SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC`,
+      `SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC, rowid DESC`,
     )
     .all();
 }
