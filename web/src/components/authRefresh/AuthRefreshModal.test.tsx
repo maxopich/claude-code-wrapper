@@ -11,6 +11,7 @@ import type { AuthRefreshState } from './AuthRefreshContext';
 //   - spawning: spinner + status text + no Cancel button
 //   - running: PID chip + output area + Cancel button (default focus)
 //   - running with empty output: placeholder text visible
+//   - running: the output pane follows the tail, and stops once scrolled up (W14)
 //   - completed (success): success title + exit chip + Close button
 //   - completed (failure): failure title + exit chip + output rendered
 //   - failed (already_running): tailored copy + existingRunId hint
@@ -96,6 +97,57 @@ describe('AuthRefreshModal — running state', () => {
     });
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Register W14 — the second copy of the chat pane's unguarded auto-scroll.
+ * Worse here than in the chat: this pane exists so the operator can read an
+ * OAuth URL, and every new chunk used to drag it off screen mid-read.
+ *
+ * Staging is mandatory, not tidiness: jsdom runs no layout, so an unstaged
+ * element reports `scrollTop`/`scrollHeight`/`clientHeight` all `0`, which the
+ * pin predicate reads as "at the bottom" whatever position is assigned. Without
+ * the two `defineProperty` calls the scrolled-up case below is not merely weak,
+ * it is unrepresentable — the same shape measured against `ChatView`, whose
+ * spec header records the experiment. `scrollTop` is writable and unclamped in
+ * jsdom, so it is both how the position is staged and how the component's own
+ * write is observed — no spy needed, unlike ChatView's `scrollTo`.
+ */
+describe('AuthRefreshModal — output pane follows the tail (W14)', () => {
+  function outputPane(): HTMLElement {
+    const el = container.querySelector('.auth-refresh-modal-output');
+    if (!el) throw new Error('no output pane rendered');
+    return el as HTMLElement;
+  }
+
+  function stage(el: HTMLElement, scrollTop: number) {
+    Object.defineProperty(el, 'scrollHeight', { value: 3000, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: 600, configurable: true });
+    el.scrollTop = scrollTop;
+    act(() => {
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+    });
+  }
+
+  test('a new chunk scrolls to the bottom while the operator is still at the tail', () => {
+    renderModal({ kind: 'running', runId: 'run-1', pid: 1, output: 'line one\n' });
+    const pane = outputPane();
+    stage(pane, 2400); // 3000 - 600 → exactly the bottom
+
+    renderModal({ kind: 'running', runId: 'run-1', pid: 1, output: 'line one\nline two\n' });
+
+    expect(outputPane().scrollTop).toBe(3000);
+  });
+
+  test('a new chunk does NOT yank the pane once the operator has scrolled up to read', () => {
+    renderModal({ kind: 'running', runId: 'run-1', pid: 1, output: 'line one\n' });
+    const pane = outputPane();
+    stage(pane, 400);
+
+    renderModal({ kind: 'running', runId: 'run-1', pid: 1, output: 'line one\nline two\n' });
+
+    expect(outputPane().scrollTop).toBe(400);
   });
 });
 

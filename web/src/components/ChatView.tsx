@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { StopReasonCode } from '@cebab/shared/protocol';
+import { isPinnedToBottom } from '../scrollAnchor';
 import { pendingToolName, sessionPhase, type SessionView } from '../store';
 import { MessageBlock, StreamingPlaceholder } from './MessageBlock';
 import { StoppedMarker } from './StoppedMarker';
@@ -44,7 +45,24 @@ export function ChatView(props: {
 }) {
   const phase = props.session ? sessionPhase(props.session, props.isLive) : 'idle';
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * Register W14: whether the operator is still following the tail. This used
+   * to be assumed — the effect below re-scrolled to `scrollHeight` on every
+   * streamed delta, and `store.ts` appends one per token, so reading back
+   * through a running session was impossible.
+   *
+   * Tracked here on `scroll` rather than measured in the effect, because by the
+   * time the effect runs `scrollHeight` has already grown: an operator pinned
+   * to the bottom would read as "scrolled up by the height of the new content"
+   * and one long tool result would un-stick the pane. See `scrollAnchor.ts`.
+   *
+   * Starts `true` so a fresh pane opens at the bottom.
+   */
+  const pinnedRef = useRef(true);
+
   useEffect(() => {
+    if (!pinnedRef.current) return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [
     props.session?.messages.length,
@@ -54,6 +72,15 @@ export function ChatView(props: {
     props.session?.lastInterrupt?.interruptAckId,
     props.session?.lastInterrupt?.reasonSubmitted,
   ]);
+
+  // Switching sessions re-pins: the previous session's scroll position says
+  // nothing about where the operator wants to be in this one, and a chat opens
+  // at its newest message.
+  const sessionId = props.session?.id;
+  useEffect(() => {
+    pinnedRef.current = true;
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [sessionId]);
 
   if (!props.session) {
     return (
@@ -67,7 +94,13 @@ export function ChatView(props: {
   const lastInterrupt = session.lastInterrupt;
 
   return (
-    <div className="chat" ref={scrollRef}>
+    <div
+      className="chat"
+      ref={scrollRef}
+      onScroll={(e) => {
+        pinnedRef.current = isPinnedToBottom(e.currentTarget);
+      }}
+    >
       {session.messages.map((m) => (
         <MessageBlock
           key={m.id}
