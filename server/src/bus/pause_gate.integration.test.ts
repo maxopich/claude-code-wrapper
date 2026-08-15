@@ -14,8 +14,12 @@ import {
   setPauseOnDangerous,
   type MutationRecord,
 } from '../repo/multi_agent.js';
-import { isPausedForMutation } from './errors.js';
-import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import {
+  applyPauseGate,
+  releasePauseForMutation,
+  shouldHaltUnrecordedMutation,
+} from './pause_gate.js';
 
 // The pause gate against a real DB. `pause_gate.test.ts` pins the pure decision
 // table; this file pins the three register bugs that only show up once the
@@ -240,5 +244,67 @@ describe('pause gate over a real DB [security]', () => {
       expect(gateWithId('coder', 'rm -rf /tmp/x', 'toolu_free').paused).toBe(false);
       expect(listPendingMutations(SID)).toEqual([]);
     });
+  });
+});
+
+// Cebab-aqd. `applyPauseGate` cannot run when the mutation could not be
+// persisted — it reads the same table and marks the pause by row id. The
+// routers' taps therefore take this decision in their catch instead, and it
+// has to be the SAME decision, which is why it lives beside the gate.
+describe('shouldHaltUnrecordedMutation — the gate when there is no row [security]', () => {
+  test('a dangerous call under an armed gate HALTS', () => {
+    expect(shouldHaltUnrecordedMutation(SID, 'dangerous')).toBe(true);
+  });
+
+  test('control: a dangerous call under a DISARMED gate runs', () => {
+    // Anti-vacuity, and a real behaviour requirement: an operator who turned
+    // the gate off chose that, and a failed write is no reason to kill their
+    // turn. Without this case the fix could be "always halt" and still pass.
+    setPauseOnDangerous(SID, false);
+    expect(shouldHaltUnrecordedMutation(SID, 'dangerous')).toBe(false);
+  });
+
+  test('control: a `mutate` call runs even under an armed gate', () => {
+    // Same rule `decidePauseForMutation` applies — the gate is for dangerous
+    // commands only. A fix that halted every unrecorded mutation would stop
+    // ordinary edits on a hiccup.
+    expect(shouldHaltUnrecordedMutation(SID, 'mutate')).toBe(false);
+  });
+
+  test('an unreadable gate state HALTS — unknown resolves to caution', () => {
+    // The database is sick enough that the mutation write failed; the session
+    // read can fail too. Dropping the table it reads makes that real rather
+    // than mocked.
+    getDb().exec('DROP TABLE multi_agent_sessions');
+    expect(shouldHaltUnrecordedMutation(SID, 'dangerous')).toBe(true);
+  });
+
+  test('control: an unreadable gate state still lets a `mutate` call run', () => {
+    // The category check must come FIRST. If the fix read the session before
+    // testing the category, a sick database would halt every mutation.
+    getDb().exec('DROP TABLE multi_agent_sessions');
+    expect(shouldHaltUnrecordedMutation(SID, 'mutate')).toBe(false);
+  });
+});
+
+describe('MutationNotRecordedError routes to worker-failed, not to a silent pause [security]', () => {
+  const err = new MutationNotRecordedError('Bash', 'rm -rf /tmp/x');
+
+  test('isPausedForMutation is FALSE for it — the whole fix depends on this', () => {
+    // Both routers' `deliver().catch` open with `if (isPausedForMutation(err))
+    // return;`. If this error were recognised there, the turn would die
+    // silently with no pending row and no banner, and the operator would see
+    // an agent that simply stopped. It has to fall through to onWorkerFailed,
+    // which parks a pending-retry slot and gives them Retry / Abandon.
+    expect(isPausedForMutation(err)).toBe(false);
+  });
+
+  test('and it is not mistaken for a stalled turn either', () => {
+    expect(isTurnStalled(err)).toBe(false);
+  });
+
+  test('its message says nothing ran, since it becomes the operator banner', () => {
+    expect(err.message).toContain('Nothing was run');
+    expect(err.message).toContain('rm -rf /tmp/x');
   });
 });

@@ -298,3 +298,98 @@ describe('[security] a relayed bus message is delivered as inert, fenced data', 
     expect(prompts[1]).not.toContain(`</${BUS_MESSAGE_TAG_STEM}0000000000000000>`);
   });
 });
+
+// Cebab-aqd. The mutation tap used to `catch (err) { log; return; }`, and that
+// `return` sits upstream of `applyPauseGate` — so a failed INSERT silently
+// disarmed the operator's only mechanical brake and the dangerous command ran.
+//
+// These drive the REAL router hook through the REAL AgentRunner tap, because
+// the decision helper passing its own unit tests would prove nothing if the
+// routers never called it.
+describe('[security] a dangerous call that cannot be recorded is halted, not run', () => {
+  /** A runner that issues one dangerous Bash call, then completes. */
+  function dangerousRunnerFactory(dispatched: string[]) {
+    return (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_rm',
+                name: 'Bash',
+                input: { command: 'rm -rf /tmp/victim' },
+              },
+            ],
+          },
+        } as unknown as SDKMessage;
+        // Only reached if the tap did NOT throw — i.e. the call went through.
+        dispatched.push('rm -rf /tmp/victim');
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function mkAgent(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  async function runWithBrokenLedger(pauseOnDangerous: boolean) {
+    const workspace = path.join(tmpRoot, `ws-${String(pauseOnDangerous)}`);
+    fs.mkdirSync(workspace, { recursive: true });
+    const dispatched: string[] = [];
+    const onPendingRetry = vi.fn();
+    // A genuine persist failure rather than a mock: the table the tap writes
+    // to is gone, while `multi_agent_sessions` — where the gate's own state
+    // lives — still answers.
+    getDb().exec('DROP TABLE multi_agent_mutations');
+    const handle = await startChainSession({
+      participants: [mkAgent('coder'), mkAgent('reviewer')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      onPendingRetry,
+      pauseOnDangerous,
+      runnerFactory: dangerousRunnerFactory(dispatched),
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    return { handle, dispatched, onPendingRetry };
+  }
+
+  test('the turn dies and the command is never dispatched', async () => {
+    const { handle, dispatched, onPendingRetry } = await runWithBrokenLedger(true);
+
+    // The point of the whole fix: nothing ran.
+    expect(dispatched).toEqual([]);
+
+    // And it died into the recovery the operator already has, rather than
+    // vanishing — `onWorkerFailed` parks a pending-retry slot and persists a
+    // `cebab → user kind=error` event carrying the reason.
+    expect(onPendingRetry).toHaveBeenCalled();
+    const errors = listMultiAgentEvents(handle.sessionId).filter((e) => e.kind === 'error');
+    expect(errors.length).toBeGreaterThan(0);
+    expect(errors.some((e) => e.text.includes('Nothing was run'))).toBe(true);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  test('control: with the gate DISARMED the same failure lets the turn run', async () => {
+    // Anti-vacuity, and a real requirement. Without this the fix could be
+    // "the tap now throws on any persist error", which would kill turns for
+    // operators who never asked to be gated.
+    const { handle, dispatched, onPendingRetry } = await runWithBrokenLedger(false);
+
+    expect(dispatched).toEqual(['rm -rf /tmp/victim']);
+    expect(onPendingRetry).not.toHaveBeenCalled();
+
+    unregisterLiveSession(handle.sessionId);
+  });
+});
