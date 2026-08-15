@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { EnvInjection, ServerMsg } from '@cebab/shared/protocol';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
+import { abandonPendingGates, GateAbandonedError, MAX_PENDING_GATES } from '../gate_abandon.js';
 
 // Cluster B Phase 5 (§4.5): Env-injection session-start gate.
 //
@@ -23,8 +24,8 @@ import { getOperatorId } from '../notifications/operator.js';
 // same BE-1 dual-write (audit first, then unblock). Differences:
 //
 //   - No "deny" path. The operator either acknowledges or never replies
-//     (the spawn hangs; closing the modal at the client just leaves it
-//     parked until WS disconnect clears `conn.startGate.pending`).
+//     (closing the modal at the client just leaves it parked; a WS
+//     disconnect is what releases it, by rejecting — see StartGateState).
 //   - One pending per project, not one per detected key — the modal
 //     enumerates all keys at once and a single `acknowledge_and_start`
 //     covers the whole project's injection set.
@@ -33,9 +34,18 @@ import { getOperatorId } from '../notifications/operator.js';
 //     ("CI sync, expected" / "deploy gate").
 
 /**
- * Per-connection gate state. Lives on `Conn` (in ws/server.ts) so the
- * pending Map clears on disconnect — a half-typed acknowledgment dies
- * with the operator's window and the next reconnect re-prompts.
+ * Per-connection gate state. Lives on `Conn` (in ws/server.ts), whose
+ * `ws.on('close')` calls `abandonPendingStartGates` — a half-typed
+ * acknowledgment dies with the operator's window and the next reconnect
+ * re-prompts.
+ *
+ * Register B20: this used to say the map "clears on disconnect", which it did
+ * not — dropping the `Conn` leaves the parked promise unsettled and its
+ * awaiting spawn suspended forever. **And this gate is the one where the
+ * mechanical repair is the regression**: `resolve()` here means *the operator
+ * acknowledged, proceed*, so draining it the way the two trust gates drain
+ * (resolve with a deny) would spawn a session whose credential-injection
+ * acknowledgment nobody gave. It rejects instead. See `gate_abandon.ts`.
  */
 export type StartGateState = {
   pending: Map<string, PendingStartEntry>;
@@ -50,8 +60,14 @@ export type PendingStartEntry = {
   injections: EnvInjection[];
   /** Called by the `acknowledge_and_start` handler after the typed string
    *  validates AND the audit row writes. Resolving unblocks the parked
-   *  start_session caller. */
+   *  start_session caller — i.e. resolving MEANS "acknowledged, spawn". */
   resolve: () => void;
+  /**
+   * Register B20: the parked promise's `reject`, used only by
+   * `abandonPendingStartGates`. It exists because `resolve` cannot serve as
+   * the drain here — see the note on `StartGateState`.
+   */
+  abandon: (err: Error) => void;
 };
 
 export function makeStartGateState(): StartGateState {
@@ -83,9 +99,11 @@ export type AwaitGateInput = {
  * `acknowledge_and_start` handler validates the typed string + writes the
  * audit row + calls `entry.resolve()`.
  *
- * No timeout, no auto-cancel: if the operator never replies, the spawn
- * never happens. The WS disconnect upstream is the only escape hatch
- * (which kills `conn.startGate.pending`).
+ * No timeout, no auto-cancel: if the operator never replies, the spawn never
+ * happens. The escape hatch is a WS disconnect, which runs
+ * `abandonPendingStartGates` and rejects the parked promise so the spawn
+ * unwinds instead of hanging. (Register B20: the disconnect used to be
+ * described as clearing the map by itself. It did not.)
  *
  * BE-1 (Cluster A): the audit row writes inside the handler (after
  * validation) before the resolve fires; if the audit append throws, the
@@ -94,13 +112,24 @@ export type AwaitGateInput = {
  */
 export async function awaitEnvInjectionAck(input: AwaitGateInput): Promise<void> {
   if (input.injections.length === 0) return;
+  // H15: fail closed rather than park an unbounded number of prompts. This
+  // gate parks one per project, so the ceiling is only reachable by a client
+  // starting sessions far faster than a human answers — and throwing is the
+  // fail-closed direction, since the alternative is spawning unacknowledged.
+  if (input.gate.pending.size >= MAX_PENDING_GATES) {
+    throw new GateAbandonedError(
+      'session-start',
+      `${MAX_PENDING_GATES} acknowledgments already parked on this connection`,
+    );
+  }
   const pendingStartId = randomUUID();
-  const promise = new Promise<void>((resolveSpawn) => {
+  const promise = new Promise<void>((resolveSpawn, rejectSpawn) => {
     input.gate.pending.set(pendingStartId, {
       pendingStartId,
       projectId: input.projectId,
       injections: input.injections,
       resolve: resolveSpawn,
+      abandon: rejectSpawn,
     });
   });
   input.send({
@@ -111,6 +140,19 @@ export async function awaitEnvInjectionAck(input: AwaitGateInput): Promise<void>
     detectedInjections: input.injections,
   });
   await promise;
+}
+
+/**
+ * Register B20: reject every acknowledgment still parked on this connection.
+ * Called from `ws.on('close')`. Returns how many were released.
+ *
+ * No audit row: `session.start_gated_override` records that an operator DID
+ * acknowledge, and nobody did here. The absence of a row for a
+ * `session_start_gated` envelope is itself the accurate trail — the question
+ * was asked and never answered.
+ */
+export function abandonPendingStartGates(gate: StartGateState, reason: string): number {
+  return abandonPendingGates(gate.pending, 'session-start', reason);
 }
 
 /**

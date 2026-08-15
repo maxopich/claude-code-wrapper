@@ -23,7 +23,7 @@
  * only return the inner body. Renders into a `.msg-body` that already has the
  * badge + actions row injected by the parent.
  */
-import type { ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { MutationCategory } from '@cebab/shared';
 
 /** Subset of the permission_request MessageView used by all subcomponents. */
@@ -34,6 +34,80 @@ export type PermissionMessageView = {
   cwd?: string;
   projectName?: string;
 };
+
+/** How long a `dangerous` card stays armed before falling back to the
+ *  two-click state. Long enough to be a deliberate double-click, short enough
+ *  that an armed card can't be completed by a stray click a minute later. */
+export const DANGEROUS_ARM_MS = 4000;
+
+/**
+ * Allow / Deny for a pending permission request (register U09).
+ *
+ * Three things were wrong with the bare `<button>Allow</button>` pair this
+ * replaces:
+ *
+ *   1. Its accessible name was "Allow" — the same for `Read("README.md")` and
+ *      `Bash("rm -rf /")`. Screen-reader users got a button with no object.
+ *   2. The green came from `.msg.permission .actions button:first-child`, i.e.
+ *      from DOM position. Swapping the two buttons would silently repaint Deny
+ *      as the safe-looking one.
+ *   3. Allowing a `dangerous` call cost exactly one click, the same as
+ *      allowing a file read. The card grew a red frame for `dangerous`, which
+ *      changes how it looks, not what it costs.
+ *
+ * So: explicit classes, the tool name in both accessible names, and for
+ * `dangerous` only, Allow arms first and commits on the second click. Deny
+ * stays one click — the safe answer must never be the slower one. Friction
+ * applied to every category would just train people to click through it.
+ */
+export function PermissionActions(props: {
+  toolName: string;
+  category?: MutationCategory;
+  onDecide: (decision: 'allow' | 'deny') => void;
+}): ReactNode {
+  const { toolName, category, onDecide } = props;
+  const needsConfirm = category === 'dangerous';
+  const [armed, setArmed] = useState(false);
+
+  useEffect(() => {
+    if (!armed) return;
+    const t = window.setTimeout(() => setArmed(false), DANGEROUS_ARM_MS);
+    return () => window.clearTimeout(t);
+  }, [armed]);
+
+  const allowLabel = armed ? 'Confirm allow' : 'Allow';
+  return (
+    <div className="actions">
+      <button
+        className={`permission-allow${armed ? ' is-armed' : ''}`}
+        aria-label={armed ? `Confirm allowing ${toolName}` : `Allow ${toolName}`}
+        onClick={() => {
+          if (needsConfirm && !armed) {
+            setArmed(true);
+            return;
+          }
+          onDecide('allow');
+        }}
+      >
+        {allowLabel}
+      </button>
+      <button
+        className="permission-deny"
+        aria-label={`Deny ${toolName}`}
+        onClick={() => onDecide('deny')}
+      >
+        Deny
+      </button>
+      {needsConfirm && (
+        <span className="permission-arm-hint" role="status" aria-live="polite">
+          {armed
+            ? 'Click Confirm allow again to run this command.'
+            : 'This is classified dangerous — Allow asks twice.'}
+        </span>
+      )}
+    </div>
+  );
+}
 
 /** Dispatch to the right tool-specific body renderer. Falls back to a
  *  pretty-printed JSON dump for unknown tools and pre-Item-5 replays. */

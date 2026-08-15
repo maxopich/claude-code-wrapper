@@ -14,8 +14,10 @@ import type {
   SessionPermissionMode,
   StopReasonCode,
 } from '@cebab/shared/protocol';
+import { SHELL } from './breakpoints';
 import { connectWs, type WsHandle } from './ws';
 import { activeSession, initialState, isSessionPending, reduce } from './store';
+import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
 import { ProjectList } from './components/ProjectList';
 import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
@@ -36,6 +38,7 @@ import { SHORTCUTS } from './shortcutRegistry';
 import { findShortcut, useKeyboardShortcuts } from './useKeyboardShortcuts';
 import { MultiAgentTab, MultiAgentActivityBar, TopRunBar } from './components/MultiAgentTab';
 import { ClaudeMark } from './components/ClaudeMark';
+import { ConnectionStatus } from './components/ConnectionStatus';
 import { MockBadge } from './components/MockBadge';
 import { Icon } from './components/Icon';
 import {
@@ -177,8 +180,11 @@ export function App() {
   }, []);
   // Cluster B Phase 6a: ClientMsg sink for the GateModalsProvider. Same
   // wsRef indirection as inboxSend — keeps the provider WS-agnostic.
-  const gateSend = useCallback((msg: ClientMsg) => {
-    wsRef.current?.send(msg);
+  // W29: returns whether the message went out, so a gate modal can decline to
+  // close on a decision that never reached the server. `=== true` because the
+  // optional chain yields `undefined`, not `false`, when the ref is null.
+  const gateSend = useCallback((msg: ClientMsg): boolean => {
+    return wsRef.current?.send(msg) === true;
   }, []);
   // Cluster B Phase 6e: ClientMsg sink for the AuthorityProvider — pipes
   // `get_project_authority` requests onto the active WS.
@@ -507,8 +513,12 @@ function AppShell({
   const [inspPinned, setInspPinned] = useState(() =>
     readStored('cebab.inspPinned', false, (r) => r === 'true'),
   );
-  const [navOpen, setNavOpen] = useState(false);
-  const [inspOpen, setInspOpen] = useState(false);
+  // Register U25: one piece of state for both narrow-tier drawers, so "only
+  // one is open" is an invariant of `toggleDrawer` rather than something two
+  // independent setters happen to preserve. See `drawerState.ts`.
+  const [drawers, setDrawers] = useState<DrawerState>(DRAWERS_CLOSED);
+  const navOpen = drawers.nav;
+  const inspOpen = drawers.insp;
   const [tier, setTier] = useState<'wide' | 'medium' | 'narrow'>('wide');
   // Widescreen (16:9-class) display → permanent side rails. Seeded from the
   // display ratio so there's no collapsed→expanded flash on first paint; kept in
@@ -533,14 +543,15 @@ function AppShell({
   }, [theme]);
 
   // Redesign Phase 2: responsive tier from a ResizeObserver on `.app`
-  // (replaces the matchMedia sidebar logic). wide ≥1120 · medium ≥830 · narrow
-  // below — below narrow both rails become off-canvas drawers. Threshold on the
-  // app's own box so the ultra-wide 1600px cap is respected.
+  // (replaces the matchMedia sidebar logic). Below `medium` both rails become
+  // off-canvas drawers. Threshold on the app's own box, not the viewport, so
+  // the ultra-wide page cap is respected — the tiers therefore live in
+  // `breakpoints.ts` alongside the CSS widths rather than in a media query.
   useEffect(() => {
     const el = appRef.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     const classify = (w: number): 'wide' | 'medium' | 'narrow' =>
-      w >= 1120 ? 'wide' : w >= 830 ? 'medium' : 'narrow';
+      w >= SHELL.wide ? 'wide' : w >= SHELL.medium ? 'medium' : 'narrow';
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? el.clientWidth;
       setTier((prev) => {
@@ -567,10 +578,7 @@ function AppShell({
   // Drawers exist only at the narrow tier — force them closed on the way out so
   // one can't linger off-screen (and keep pointer-events off the scrim).
   useEffect(() => {
-    if (tier !== 'narrow') {
-      setNavOpen(false);
-      setInspOpen(false);
-    }
+    if (tier !== 'narrow') setDrawers(closeDrawers());
   }, [tier]);
 
   // WS lifecycle bookkeeping for the reconnect toast (UX-11):
@@ -628,6 +636,15 @@ function AppShell({
   // directly (they don't repopulate the WS handle); the counter is
   // the cleanest "trigger this side-effect again" signal.
   const [wsRetryNonce, setWsRetryNonce] = useState(0);
+  // Cebab-1uk: hoisted out of the JSX. As an inline arrow this was a new
+  // identity on every AppShell render, and ConnectionLostOverlay's auto-retry
+  // effect lists `onRetry` in its dependencies — so the retry timeout was torn
+  // down and recreated on every render. Self-correcting (the effect recomputes
+  // the REMAINING delay, so the countdown did not restart), which is why it
+  // was churn rather than a bug — and why `exhaustive-deps` cannot see it: the
+  // dependency IS listed, it is just never equal. The linter has no opinion on
+  // stability, so this one still has to be found by reading.
+  const retryWs = useCallback(() => setWsRetryNonce((n) => n + 1), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -867,7 +884,27 @@ function AppShell({
     // the nonce in the deps array also makes the auto-retry timer's
     // `onRetry` callback trigger a real reconnect path rather than
     // closing over a stale effect closure.
-  }, [wsRef, notifPushRef, notifDismissRef, wsRetryNonce]);
+    //
+    // Cebab-1uk: the ref entries are listed for exhaustive-deps, which cannot
+    // prove they are stable — they arrive as PROPS of AppShell, so the rule
+    // sees plain values rather than the `useRef` results they are. Listing
+    // them costs nothing at runtime (a ref object's identity never changes)
+    // and the alternative was a suppression on the repo's single most
+    // important effect. `wsRetryNonce` is the only entry that actually varies.
+  }, [
+    wsRef,
+    notifPushRef,
+    notifDismissRef,
+    authTokenRef,
+    authorityHandlerRef,
+    authRefreshHandlerRef,
+    forensicViewerHandlerRef,
+    gateHandlerRef,
+    inboxHandlerRef,
+    recoveryLogHandlerRef,
+    reopenHandlerRef,
+    wsRetryNonce,
+  ]);
 
   // First-run UX: open the settings modal automatically when we learn the
   // workspace path is unset / invalid.
@@ -875,6 +912,14 @@ function AppShell({
     if (state.settings && !state.settings.workspaceRootValid) {
       setSettingsOpen(true);
     }
+    // Cebab-1uk: the narrow dependency is deliberate and behaviourally
+    // complete. The body reads `state.settings` only as a null guard, and
+    // every transition that matters also changes the optional-chained value —
+    // `undefined` ⇄ `false` ⇄ `true`. Depending on the object instead would
+    // re-run on every settings reply that changed nothing, which is the exact
+    // identity-churn class PR #322 removed. The rule cannot express "this
+    // field, plus its presence", so the omission is stated here instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.settings?.workspaceRootValid]);
 
   function selectProject(projectId: number) {
@@ -1149,7 +1194,28 @@ function AppShell({
   function interruptSession() {
     const sessionId = session?.id;
     if (!sessionId) return;
-    wsRef.current?.send({ type: 'interrupt', sessionId });
+    // W29: Stop is the other operator decision that must not fail quietly.
+    // Nothing optimistic is applied here — the server's `session_interrupted`
+    // drives the UI — so the failure mode was a click that did nothing at all,
+    // with the turn still running and no reason for the operator to click
+    // again. Same shape as the permission card so both read alike.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'interrupt', sessionId }) === true,
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `interrupt_undeliverable:${sessionId}`,
+          title: 'Stop not sent',
+          message:
+            'Cebab is not connected, so the stop did not reach the run. It is still going — ' +
+            'try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
 
   // Cluster E Phase 4 (H1): global keyboard bindings driven by the
@@ -1214,6 +1280,11 @@ function AppShell({
   // already made their choice; refreshing would be noise). The
   // server's silent drop on stale id is the right behavior: a late
   // reason for a stale Stop becomes a no-op on both sides.
+  //
+  // Cebab-u0s: that unmount is the problem when the send does NOT go out.
+  // Nothing re-opens the prompt, so a reason typed while the socket was down
+  // was gone for good. The send is now checked; on failure the prompt stays
+  // mounted and the operator can submit the same reason again.
   const submitStopReason = useCallback(
     (
       sessionId: string,
@@ -1221,16 +1292,34 @@ function AppShell({
       reasonCode: StopReasonCode,
       reasonText?: string,
     ) => {
-      wsRef.current?.send({
-        type: 'stop_reason',
-        sessionId,
-        interruptAckId,
-        reasonCode,
-        reasonText,
+      sendThenApply({
+        send: () =>
+          wsRef.current?.send({
+            type: 'stop_reason',
+            sessionId,
+            interruptAckId,
+            reasonCode,
+            reasonText,
+          }) === true,
+        apply: () => dispatch({ type: 'stop_reason_dismissed', sessionId }),
+        onUndeliverable: () =>
+          notifPushRef.current?.({
+            id: mintNotificationId(),
+            ts: Date.now(),
+            severity: 'error',
+            class: 'operational',
+            dedupeKey: `stop_reason_undeliverable:${interruptAckId}`,
+            title: 'Reason not sent',
+            message:
+              'Cebab is not connected, so your reason for stopping was not recorded. ' +
+              'The prompt is still here — submit it again once the connection is back.',
+            sticky: false,
+          }),
       });
-      dispatch({ type: 'stop_reason_dismissed', sessionId });
     },
-    [],
+    // Cebab-1uk: refs only — they are AppShell props, so exhaustive-deps
+    // cannot see the `useRef` behind them. Identity never changes.
+    [notifPushRef, wsRef],
   );
 
   const skipStopReason = useCallback((sessionId: string) => {
@@ -1346,10 +1435,13 @@ function AppShell({
   // one file. `triggerRetry` is shared between manual + auto fire — the
   // `auto` flag is the only difference, and it tags the recovery_log
   // row server-side (`'manual_retry'` vs `'auto_retry'`, spec §8.5).
-  const triggerRateLimitRetry = useCallback((sessionId: string, auto: boolean) => {
-    dispatch({ type: 'rl_retry_sent', sessionId });
-    wsRef.current?.send({ type: 'retry_rate_limited', sessionId, auto });
-  }, []);
+  const triggerRateLimitRetry = useCallback(
+    (sessionId: string, auto: boolean) => {
+      dispatch({ type: 'rl_retry_sent', sessionId });
+      wsRef.current?.send({ type: 'retry_rate_limited', sessionId, auto });
+    },
+    [wsRef],
+  );
   const setRateLimitPaused = useCallback((sessionId: string, paused: boolean) => {
     dispatch({ type: 'rl_set_paused', sessionId, paused });
   }, []);
@@ -1396,27 +1488,55 @@ function AppShell({
     session?.heldMessages,
     session?.status,
     state.liveSessions,
+    // Cebab-1uk: an AppShell prop, so the rule cannot see the useRef.
+    wsRef,
   ]);
 
   function decidePermission(requestId: string, decision: 'allow' | 'deny') {
     if (!session) return;
-    // Optimistic local update so the buttons flip to "decided: …" immediately.
-    // The server echoes a permission_decided ServerMsg back; the reducer is
-    // idempotent so the second arrival is a no-op.
-    dispatch({
-      type: 'server',
-      msg: {
-        type: 'permission_decided',
-        sessionId: session.id,
-        requestId,
-        decision,
-      },
-    });
-    wsRef.current?.send({
-      type: 'permission_decision',
-      sessionId: session.id,
-      requestId,
-      decision,
+    // W29: send FIRST, then apply the optimistic update — the reverse of what
+    // this used to do. The optimistic dispatch flips the buttons to
+    // "decided: …", and on a socket that is reconnecting the send used to
+    // vanish silently, so the operator was left looking at "Allowed" while
+    // the agent stayed parked in `canUseTool` with no way back to the card.
+    //
+    // Ordering rather than a rollback: there is then no window in which the
+    // UI claims something that has not happened. See `sendThenApply`.
+    sendThenApply({
+      // `=== true` because `wsRef.current?.send(...)` yields `undefined` —
+      // not `false` — when the ref itself is null.
+      send: () =>
+        wsRef.current?.send({
+          type: 'permission_decision',
+          sessionId: session.id,
+          requestId,
+          decision,
+        }) === true,
+      // The server echoes a permission_decided ServerMsg back; the reducer is
+      // idempotent so the second arrival is a no-op.
+      apply: () =>
+        dispatch({
+          type: 'server',
+          msg: {
+            type: 'permission_decided',
+            sessionId: session.id,
+            requestId,
+            decision,
+          },
+        }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `permission_decision_undeliverable:${requestId}`,
+          title: 'Decision not sent',
+          message:
+            'Cebab is not connected, so your answer to the tool request did not reach the agent. ' +
+            'It is still waiting — answer again once the connection is back.',
+          sticky: false,
+        }),
     });
   }
 
@@ -1468,33 +1588,77 @@ function AppShell({
   // PauseReasonModal) — the optional `reasonText?` field on each ClientMsg
   // shape. Undefined means the operator left the notes blank; we elide
   // the field entirely so the on-wire shape stays clean.
+  /**
+   * Cebab-u0s: all five control verbs share one failure story — the menu's
+   * modal closes on submit and takes the operator's typed `reasonText` with
+   * it — so they share one sender rather than five copies of the same block.
+   *
+   * Returns whether the verb actually went out. `ParticipantControlMenu` uses
+   * that to decide whether to close its modal, so on a dropped send the
+   * operator keeps both the dialog and everything they typed into it.
+   *
+   * The notification is `class: 'operational'`, not `'safety'`, even though
+   * these verbs are the safety controls. What failed is a *delivery*; the
+   * safety event would have been the mute/pause/kick itself and it never
+   * happened, so filing it under Safety would put a row in that filter with
+   * no `safety_audit` row behind it.
+   */
+  function sendControlVerb(msg: ClientMsg, title: string, dedupeKey: string): boolean {
+    return sendThenApply({
+      send: () => wsRef.current?.send(msg) === true,
+      // Nothing optimistic here — the reducer moves on the server's echo.
+      // The modal-close is the caller's, gated on the boolean below.
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey,
+          title,
+          message:
+            'Cebab is not connected, so the agent was not affected. Your reason is still ' +
+            'in the dialog — submit it again once the connection is back.',
+          sticky: false,
+        }),
+    });
+  }
   function muteParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    wsRef.current?.send({
-      type: 'mute_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'mute_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+      },
+      'Mute not sent',
+      `mute_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function unmuteParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    wsRef.current?.send({
-      type: 'unmute_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'unmute_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+      },
+      'Unmute not sent',
+      `unmute_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function pauseParticipant(
     sessionId: string,
@@ -1503,30 +1667,38 @@ function AppShell({
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) {
-    wsRef.current?.send({
-      type: 'pause_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-      timeoutMs,
-      expiryAction,
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'pause_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+        timeoutMs,
+        expiryAction,
+      },
+      'Pause not sent',
+      `pause_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function resumeParticipant(
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) {
-    wsRef.current?.send({
-      type: 'resume_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'resume_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+      },
+      'Resume not sent',
+      `resume_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   // Cluster C Phase 4g3: kick sender. Mode is currently always 'drain'
   // (server rejects 'hard' with `hard_kill_unsupported_v1`); KickModal
@@ -1537,15 +1709,19 @@ function AppShell({
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) {
-    wsRef.current?.send({
-      type: 'kick_participant',
-      sessionId,
-      projectId,
-      reasonCode,
-      ...(reasonText !== undefined ? { reasonText } : {}),
-      mode,
-    });
+  ): boolean {
+    return sendControlVerb(
+      {
+        type: 'kick_participant',
+        sessionId,
+        projectId,
+        reasonCode,
+        ...(reasonText !== undefined ? { reasonText } : {}),
+        mode,
+      },
+      'Kick not sent',
+      `kick_participant_undeliverable:${sessionId}:${projectId}`,
+    );
   }
   function removeParticipant(projectId: number) {
     dispatch({ type: 'ma_remove_participant', projectId });
@@ -1623,21 +1799,65 @@ function AppShell({
     // reducer flips to the active-run view), failure as `wrapper_error`.
     wsRef.current?.send({ type: 'resume_multi_agent', sessionId });
   }
-  function sendMultiAgentUserPrompt(sessionId: string, text: string) {
+  /**
+   * Cebab-u0s: returns whether the prompt actually went out, because
+   * `UserPromptInput` clears its textarea on submit. An unchecked send meant
+   * a message typed while the socket was down was erased along with any
+   * chance of resending it.
+   */
+  function sendMultiAgentUserPrompt(sessionId: string, text: string): boolean {
     // Caller (the active-run input) already trims; nothing else to validate
     // here. The reducer doesn't track an optimistic local copy — the prompt
     // round-trips through the in-process router as a `multi_agent_event`
     // with source=cebab, so it shows up in the scrollback like any other
     // event.
-    wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text });
+    return sendThenApply({
+      send: () =>
+        wsRef.current?.send({ type: 'multi_agent_user_prompt', sessionId, text }) === true,
+      // The composer clears itself — see the boolean this returns.
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `ma_user_prompt_undeliverable:${sessionId}`,
+          title: 'Prompt not sent',
+          message:
+            'Cebab is not connected, so the run never received your message. ' +
+            'It is still in the box — send it again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function continueMultiAgent(sessionId: string) {
     // R-B: the operator reviewed a restart-recovered (read-only) run and
-    // chose to continue. Optimistically drop the read-only gate; the server
-    // delivers the "continue where you left off" nudge to the orchestrator
-    // and the resumed turn streams back as normal events.
-    dispatch({ type: 'ma_clear_awaiting' });
-    wsRef.current?.send({ type: 'continue_multi_agent', sessionId });
+    // chose to continue. The server delivers the "continue where you left
+    // off" nudge to the orchestrator and the resumed turn streams back as
+    // normal events.
+    //
+    // Cebab-u0s: dropping the read-only gate used to happen BEFORE the send.
+    // On a socket that was down that left a session which looked live and
+    // resumable while nothing had been asked to resume, and the banner that
+    // would have let the operator try again was already gone.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'continue_multi_agent', sessionId }) === true,
+      apply: () => dispatch({ type: 'ma_clear_awaiting' }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `continue_multi_agent_undeliverable:${sessionId}`,
+          title: 'Continue not sent',
+          message:
+            'Cebab is not connected, so the recovered run was not resumed. ' +
+            'It stays read-only — try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   // Cluster D Phase 4d: bus auto-retry banner self-clears when the
   // CountdownChip's onElapsed fires (retry just fired or is firing now).
@@ -1653,15 +1873,54 @@ function AppShell({
     // clears the DB slot and replays; if the retried turn fails again,
     // the next `multi_agent_pending_retry` ServerMsg re-asserts a new
     // descriptor and the banner re-appears.
-    dispatch({ type: 'ma_clear_pending_retry' });
-    wsRef.current?.send({ type: 'retry_worker', sessionId });
+    //
+    // Cebab-u0s: "re-appears" only covers a retry the server actually ran.
+    // When the send itself was dropped the banner went away with nothing to
+    // bring it back, so the retry could never be attempted again.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'retry_worker', sessionId }) === true,
+      apply: () => dispatch({ type: 'ma_clear_pending_retry' }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `retry_worker_undeliverable:${sessionId}`,
+          title: 'Retry not sent',
+          message:
+            'Cebab is not connected, so the worker was not retried. ' +
+            'The banner is still here — try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function abandonSession(sessionId: string) {
     // Item #4: give up on the pending-retry slot and end the session as
     // 'stopped'. No optimistic update — the banner stays visible until
     // `multi_agent_ended` arrives (which the reducer uses to flip status
     // and also clears `pendingRetry` so the banner disappears).
-    wsRef.current?.send({ type: 'abandon_session', sessionId });
+    //
+    // Cebab-u0s: nothing to withhold, then, but a dropped send is a click on
+    // "give up on this run" that does nothing and says nothing. Same shape as
+    // `interruptSession` — an empty `apply`, purely for the failure branch.
+    sendThenApply({
+      send: () => wsRef.current?.send({ type: 'abandon_session', sessionId }) === true,
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `abandon_session_undeliverable:${sessionId}`,
+          title: 'Not ended',
+          message:
+            'Cebab is not connected, so the run was not ended. ' +
+            'It is still going — try again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function archiveSession(sessionId: string) {
     // Cluster D Phase 5e (UI-D17): in-session SweptSessionBanner's
@@ -1671,18 +1930,44 @@ function AppShell({
     // on this iteration until the operator navigates away (no auto-
     // redirect; the scrollback is still useful after archiving for
     // post-mortem). Idempotent server-side (Phase 5).
+    //
+    // Cebab-u0s: deliberately NOT routed through `sendThenApply`. Archiving
+    // applies no optimistic state, is idempotent and reversible, and its row
+    // stays on screen to click again — so a dropped send costs nothing but a
+    // second click. The console drop log from W29 is enough here.
     wsRef.current?.send({ type: 'archive_session', sessionId });
   }
-  function continueThroughMutation(sessionId: string) {
-    // Item #5: operator clicked Continue on the pause-on-first-mutation
-    // banner. Optimistically clear the slot + flip ack so the UI doesn't
-    // double-render or re-pause mid-flight; server echoes
-    // `multi_agent_pending_mutation { pending: null }` and re-delivers the
-    // captured prompt. A re-fail mid-replay would re-pause via the runner's
-    // mutation tap (gated on `mutations_acknowledged=0`, which is now 1 —
-    // subsequent mutations auto-allow, per the original review's intent).
-    dispatch({ type: 'ma_clear_pending_mutation' });
-    wsRef.current?.send({ type: 'continue_through_mutation', sessionId });
+  function continueThroughMutation(sessionId: string, mutationId: number) {
+    // Item #5: operator clicked Continue on ONE pause-on-dangerous banner.
+    // Optimistically drop just that banner so it can't be double-clicked;
+    // the server echoes the whole remaining set on
+    // `multi_agent_pending_mutations` and re-delivers that worker's captured
+    // prompt. The replayed turn re-issues the approved command once (the
+    // server's one-shot grant); anything else dangerous pauses again.
+    //
+    // Cebab-u0s: the highest-stakes send in this file. This is the operator
+    // releasing a worker halted before a `dangerous` command — the mechanical
+    // brake behind the consultant prompt. Dropping the banner before an
+    // unchecked send meant a failed approval left the worker paused for good
+    // and the operator certain they had approved it. Send first, always.
+    sendThenApply({
+      send: () =>
+        wsRef.current?.send({ type: 'continue_through_mutation', sessionId, mutationId }) === true,
+      apply: () => dispatch({ type: 'ma_clear_pending_mutation', mutationId }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `continue_through_mutation_undeliverable:${mutationId}`,
+          title: 'Approval not sent',
+          message:
+            'Cebab is not connected, so the command was not approved and the worker is ' +
+            'still paused. The banner is still here — approve again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function answerQuestion(
     sessionId: string,
@@ -1690,17 +1975,38 @@ function AppShell({
     toolUseId: string,
     answers: Record<string, string>,
   ) {
-    // Interactive AskUserQuestion: optimistically clear the card, then send the
-    // answer. The server resolves the parked turn (the agent receives the
-    // answer as the tool result and resumes) + echoes
-    // `multi_agent_ask_user_resolved`.
-    dispatch({ type: 'ma_clear_pending_question' });
-    wsRef.current?.send({
-      type: 'multi_agent_ask_user_answer',
-      sessionId,
-      agent,
-      toolUseId,
-      answers,
+    // Interactive AskUserQuestion: clear the card and send the answer. The
+    // server resolves the parked turn (the agent receives the answer as the
+    // tool result and resumes) + echoes `multi_agent_ask_user_resolved`.
+    //
+    // Cebab-u0s: the multi-agent twin of the permission card W29 fixed. The
+    // agent is parked on `AskUserQuestion` exactly as a single-agent turn
+    // parks on `canUseTool`, so clearing the card before an unchecked send
+    // left it waiting on an answer the operator had already given and could
+    // no longer re-give.
+    sendThenApply({
+      send: () =>
+        wsRef.current?.send({
+          type: 'multi_agent_ask_user_answer',
+          sessionId,
+          agent,
+          toolUseId,
+          answers,
+        }) === true,
+      apply: () => dispatch({ type: 'ma_clear_pending_question' }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `ask_user_answer_undeliverable:${toolUseId}`,
+          title: 'Answer not sent',
+          message:
+            'Cebab is not connected, so the agent never received your answer and is ' +
+            'still waiting. The question is still here — answer again once the connection is back.',
+          sticky: false,
+        }),
     });
   }
   function setDraftPauseOnDangerous(value: boolean) {
@@ -1741,9 +2047,13 @@ function AppShell({
   function dismissActiveRun() {
     dispatch({ type: 'ma_dismiss_active' });
   }
-  function refreshIterations() {
+  // Cebab-1uk: memoised because two lazy-load effects below depend on them.
+  // As plain function declarations they were a fresh identity every render, so
+  // listing them (which exhaustive-deps asks for) would have re-fired those
+  // effects on every render. `wsRef` is stable, so `[wsRef]` never changes.
+  const refreshIterations = useCallback(() => {
     wsRef.current?.send({ type: 'list_iterations' });
-  }
+  }, [wsRef]);
   function clearIterations() {
     // Server-side: deletes every multi_agent_sessions row whose status is
     // not 'running', along with its events and participants, then re-sends
@@ -1752,9 +2062,10 @@ function AppShell({
     // consistent with the DB even if the WS round-trip fails.
     wsRef.current?.send({ type: 'clear_iterations' });
   }
-  function refreshTemplates() {
+  // Cebab-1uk: memoised for the same reason as `refreshIterations` above.
+  const refreshTemplates = useCallback(() => {
     wsRef.current?.send({ type: 'list_templates' });
-  }
+  }, [wsRef]);
   function saveTemplate(name: string, mode: 'chain' | 'orchestrator') {
     const { draftLifecycle, draftParticipants } = state.multiAgent;
     // Mode comes from the active tab (passed down), not draft state. Per-agent
@@ -1820,14 +2131,21 @@ function AppShell({
       ...(scope !== undefined ? { scope } : {}),
     });
   }
-  function subscribeServerMsg(cb: (msg: ServerMsg) => void): () => void {
+  // W10: `useCallback([])`, not a plain `function`. Every consumer of this
+  // seam puts it in an effect dependency array (useLogStream, TemplatesPanel,
+  // SessionSearchModal, ArtifactContentContext's memo). A new identity per
+  // App render — and App renders on every WS message — meant each of those
+  // unsubscribed and resubscribed constantly, and defeated the memo outright.
+  // Only refs are touched here, so `[]` is exactly right; same shape as
+  // `handleAck` / `inboxSend` / `gateSend` above.
+  const subscribeServerMsg = useCallback((cb: (msg: ServerMsg) => void): (() => void) => {
     // Phase H side-channel subscription. Returns the unsubscribe fn so
     // useEffect cleanups can remove their listener on unmount.
     msgSubscribersRef.current.add(cb);
     return () => {
       msgSubscribersRef.current.delete(cb);
     };
-  }
+  }, []);
   function readProjectFacts(projectId: number) {
     // PR-6: WS round-trip for the per-participant facts disclosure inside
     // the template-preview modal. The matching `project_facts` reply lives
@@ -1836,14 +2154,20 @@ function AppShell({
     // on-disk state).
     wsRef.current?.send({ type: 'read_project_facts', projectId });
   }
-  function readLastRunForTemplate(templateId: string) {
-    // PR-7: WS round-trip for the templates UI's "Last run" rail. The reply
-    // (`last_run_for_template`) lives outside Redux; the templates panel
-    // owns a per-template cache keyed on templateId and refreshes on
-    // `multi_agent_ended` for a matching templateId (same side-channel
-    // pattern as project_facts above).
-    wsRef.current?.send({ type: 'get_last_run_for_template', templateId });
-  }
+  // W10: `useCallback([])` for the same reason as `subscribeServerMsg` above —
+  // TemplatesPanel's subscription effect depends on it, and narrowing that
+  // effect off `[props]` only helps if this identity is stable.
+  const readLastRunForTemplate = useCallback(
+    (templateId: string) => {
+      // PR-7: WS round-trip for the templates UI's "Last run" rail. The reply
+      // (`last_run_for_template`) lives outside Redux; the templates panel
+      // owns a per-template cache keyed on templateId and refreshes on
+      // `multi_agent_ended` for a matching templateId (same side-channel
+      // pattern as project_facts above).
+      wsRef.current?.send({ type: 'get_last_run_for_template', templateId });
+    },
+    [wsRef],
+  );
 
   // Lazy-load iterations on first switch into the Multi-Agent tab. Also
   // refresh after each `multi_agent_ended` so a just-finished run appears
@@ -1860,14 +2184,16 @@ function AppShell({
     if (onMultiTab && !templatesLoaded) {
       refreshTemplates();
     }
-  }, [maView, iterationsLoaded, templatesLoaded]);
+    // Cebab-1uk: both senders are `useCallback`d on `[wsRef]`, so listing them
+    // adds no re-runs — the guards above still decide when work happens.
+  }, [maView, iterationsLoaded, templatesLoaded, refreshIterations, refreshTemplates]);
   useEffect(() => {
     // status flips from 'running' → terminal exactly once per session.
     // Refresh so the iteration browser picks up the just-ended row.
     if (activeStatus && activeStatus !== 'running') {
       refreshIterations();
     }
-  }, [activeStatus]);
+  }, [activeStatus, refreshIterations]);
 
   const running = session?.status === 'running';
   const workspaceReady = state.settings?.workspaceRootValid ?? false;
@@ -1880,14 +2206,22 @@ function AppShell({
   // are themselves new prompts.
   const composerStructurallyDisabled = !state.activeProjectId || !workspaceReady;
   const inputDisabled = composerStructurallyDisabled || running;
+  // U33: the composer's disabled state and its stated reason are the same
+  // value, computed once. `null` = usable.
+  const composerReason = composerDisabledReason({
+    hasActiveProject: !!state.activeProjectId,
+    workspaceReady,
+    rateLimited: !!session?.rateLimit,
+    heldCount: session?.heldMessages.length ?? 0,
+  });
   const view = state.multiAgent.view;
 
   // On a widescreen display with enough width, force both rails permanently
   // expanded by reusing the pinned state (widens the grid track + reveals labels
   // via existing CSS). Display-derived only — never writes the persisted
   // navPinned/inspPinned prefs, so a narrow window or the MacBook restores the
-  // user's collapsible behavior. The `tier === 'wide'` floor (≥1120px) keeps a
-  // narrow window on a 16:9 monitor collapsible/drawer-based as before.
+  // user's collapsible behavior. The `tier === 'wide'` floor (SHELL.wide) keeps
+  // a narrow window on a 16:9 monitor collapsible/drawer-based as before.
   const permanentPanels = wideDisplay && tier === 'wide';
 
   return (
@@ -1933,10 +2267,11 @@ function AppShell({
                 global run/session activity, not sidebar chrome, and its
                 dropdown was overlaying (and blocking clicks on) the project
                 list when anchored here. */}
-              <span
-                className={state.connected ? 'dot on' : 'dot off'}
-                title={state.connected ? 'connected' : 'disconnected'}
-              />
+              {/* Register U11: was an inline 6×6 span carrying only a
+                  `title`, i.e. connection state signalled by colour alone.
+                  See `ConnectionStatus` for what replaced it and why it is
+                  deliberately not a live region. */}
+              <ConnectionStatus connected={state.connected} />
               {/*
               Cluster A Phase 5: notifications inbox bell. Per DEC-1 (XCT-3
               chrome lock), the bell ideally lives in an app-shell header
@@ -2002,7 +2337,7 @@ function AppShell({
         className="drawer-toggle nav"
         aria-label={navOpen ? 'Close sidebar' : 'Open sidebar'}
         aria-expanded={navOpen}
-        onClick={() => setNavOpen((v) => !v)}
+        onClick={() => setDrawers((d) => toggleDrawer(d, 'nav'))}
       >
         ☰
       </button>
@@ -2012,7 +2347,7 @@ function AppShell({
           className="drawer-toggle insp"
           aria-label={inspOpen ? 'Close inspector' : 'Open inspector'}
           aria-expanded={inspOpen}
-          onClick={() => setInspOpen((v) => !v)}
+          onClick={() => setDrawers((d) => toggleDrawer(d, 'insp'))}
         >
           ⧉
         </button>
@@ -2080,11 +2415,30 @@ function AppShell({
         ) : (
           <>
             <div className="main-top-bar">
+              {/* Register U36: these marked the active view with `aria-pressed`,
+               *  which announces "pressed" — a toggle that is currently down —
+               *  for a control that is really a destination. They sit inside a
+               *  <nav>, and `aria-current` is what a nav's current item uses;
+               *  `ProjectList` already makes exactly this distinction on one
+               *  button (`aria-pressed` for select mode, `aria-current` for the
+               *  active session).
+               *
+               *  The finding proposed a tablist instead. Rejected: a tablist
+               *  obliges tabpanels the tabs point at, and the chat branch below
+               *  expands to SEVERAL children of `.main` (header, the flex:1
+               *  scroller, the composer). One wrapper would collapse them into a
+               *  single flex child; `display: contents` avoids that but has a
+               *  history of dropping the element out of the accessibility tree,
+               *  which would leave the role doing nothing. A tablist whose
+               *  panels don't work announces "tab 1 of 3" and then goes nowhere
+               *  — worse than the wrong attribute. Same reasoning `ModeToggle`
+               *  gives for declining a radiogroup: don't adopt a role you are
+               *  not going to fulfil. */}
               <nav className="main-tabs" aria-label="Main view">
                 <button
                   className={`main-tab ${view === 'chat' ? 'active' : ''}`}
                   onClick={() => dispatch({ type: 'ma_set_view', view: 'chat' })}
-                  aria-pressed={view === 'chat'}
+                  aria-current={view === 'chat' ? 'page' : undefined}
                 >
                   <Icon name="chat" />
                   Chat
@@ -2092,7 +2446,7 @@ function AppShell({
                 <button
                   className={`main-tab ${view === 'multi-agent' ? 'active' : ''}`}
                   onClick={() => dispatch({ type: 'ma_set_view', view: 'multi-agent' })}
-                  aria-pressed={view === 'multi-agent'}
+                  aria-current={view === 'multi-agent' ? 'page' : undefined}
                 >
                   <Icon name="agents" />
                   Multi-Agent
@@ -2100,7 +2454,7 @@ function AppShell({
                 <button
                   className={`main-tab ${view === 'chained-chat' ? 'active' : ''}`}
                   onClick={() => dispatch({ type: 'ma_set_view', view: 'chained-chat' })}
-                  aria-pressed={view === 'chained-chat'}
+                  aria-current={view === 'chained-chat' ? 'page' : undefined}
                 >
                   <Icon name="chain" />
                   Chained Chat
@@ -2245,13 +2599,12 @@ function AppShell({
                    * project, workspace bad). `running` no longer hard-
                    * disables the composer — InputBox owns the running-
                    * state UI now (Send→Stop swap, textarea stays usable
-                   * for the next prompt). */
-                  disabled={
-                    composerStructurallyDisabled ||
-                    (session?.rateLimit && session.heldMessages.length >= HELD_MESSAGES_CAP
-                      ? true
-                      : false)
-                  }
+                   * for the next prompt).
+                   *
+                   * U33: the same conditions as before, now carrying the
+                   * sentence that says which one applies. See
+                   * `composerDisabledReason`. */
+                  disabled={composerReason ? { reason: composerReason } : undefined}
                   isRunning={running}
                   onSend={sendMessage}
                   onStop={interruptSession}
@@ -2282,7 +2635,7 @@ function AppShell({
                   onStart={view === 'chained-chat' ? startChain : startOrchestrator}
                   onStopMultiAgent={stopMultiAgent}
                   onResumeSession={resumeSession}
-                  wrapperErrorSeq={state.wrapperErrorSeq}
+                  failureSeq={state.failureSeq}
                   onSendUserPrompt={sendMultiAgentUserPrompt}
                   onContinueMultiAgent={continueMultiAgent}
                   onRetryWorker={retryWorker}
@@ -2330,14 +2683,7 @@ function AppShell({
       )}
       {/* Narrow-tier scrim — click closes whichever drawer is open. CSS keeps
        *  it non-interactive unless a drawer is open. */}
-      <div
-        className="scrim"
-        aria-hidden="true"
-        onClick={() => {
-          setNavOpen(false);
-          setInspOpen(false);
-        }}
-      />
+      <div className="scrim" aria-hidden="true" onClick={() => setDrawers(closeDrawers())} />
       {settingsOpen && state.settings && (
         <SettingsModal
           settings={state.settings}
@@ -2370,21 +2716,107 @@ function AppShell({
       <ConnectionLostOverlay
         view={state.connectionLost}
         onDismiss={() => dispatch({ type: 'connection_lost_dismissed' })}
-        onRetry={() => setWsRetryNonce((n) => n + 1)}
+        onRetry={retryWs}
       />
     </div>
   );
 }
 
 /**
- * Label for the sidebar footer's workspace button: the trailing folder name of
- * the workspace path (e.g. `/Users/foo/agents` → `agents`). The server resolves
- * `~`-paths and relative paths server-side, so by the time we see them here
- * they're absolute POSIX paths — split-pop is enough.
+ * U33: why the composer is disabled, or `null` when it isn't.
+ *
+ * Returns non-null for exactly the conditions that used to produce a bare
+ * `disabled` boolean, so this PR changes what the composer *says* and never
+ * what it *enables*. `InputBox` takes `{ reason }` rather than a boolean, so
+ * the two cannot drift: a disable with no reason no longer type-checks.
+ *
+ * On the workspace branch. It is unreachable today — `!workspaceReady`
+ * replaces the whole chat column with the "Choose a folder" screen, so the
+ * composer is never rendered in that state. It keeps its condition and its
+ * copy anyway: dropping it would be the one behavioural change in this
+ * change-set, and if the layout ever renders the composer there, it explains
+ * itself rather than regressing to the silence this finding is about.
+ *
+ * On the rate-limit branch. The banner above already says "N held messages
+ * waiting to send when this clears" — but it never names the cap, never links
+ * it to the dead composer, and never says that its own per-row Drop button is
+ * what re-opens it. The operator was looking at the explanation and the
+ * symptom simultaneously with nothing joining them.
+ *
+ * Exported for the gate — a pure function beats driving all of App.tsx
+ * through jsdom to enumerate four states.
  */
-function workspaceLabel(workspaceRoot: string | null): string {
+/**
+ * Register W29: apply the optimistic update only if the message went out.
+ *
+ * The permission card used to dispatch `permission_decided` FIRST — flipping
+ * its buttons to "decided: …" — and then call `send`, which returned nothing
+ * and silently swallowed the message on a socket that was still connecting.
+ * The operator was left looking at "Allowed" while the agent stayed parked in
+ * `canUseTool`, with no card left to answer.
+ *
+ * Ordering rather than a rollback: there is then no window in which the UI
+ * claims something that has not happened.
+ *
+ * Exported for the gate. The invariant is one line, and it is the line the
+ * whole finding is about, so it is worth being able to state it in a test
+ * instead of driving all of App.tsx through jsdom.
+ */
+export function sendThenApply(input: {
+  /** The WS write. Returns whether it actually went out. */
+  send: () => boolean;
+  /** The optimistic state change. Runs ONLY on a successful send. */
+  apply: () => void;
+  /** Tell the operator. Runs only on a failed send. */
+  onUndeliverable: () => void;
+}): boolean {
+  if (!input.send()) {
+    input.onUndeliverable();
+    return false;
+  }
+  input.apply();
+  return true;
+}
+
+export function composerDisabledReason(s: {
+  hasActiveProject: boolean;
+  workspaceReady: boolean;
+  rateLimited: boolean;
+  heldCount: number;
+}): string | null {
+  if (!s.hasActiveProject) return 'Pick a project in the sidebar to start a session.';
+  if (!s.workspaceReady) return 'No workspace folder is set. Open Settings to choose one.';
+  if (s.rateLimited && s.heldCount >= HELD_MESSAGES_CAP) {
+    return `Rate limited, and the queue is full at ${HELD_MESSAGES_CAP} messages. Drop one from the banner above to compose another.`;
+  }
+  return null;
+}
+
+/**
+ * Label for the sidebar footer's workspace button: the trailing folder name of
+ * the workspace path (e.g. `/Users/foo/agents` → `agents`).
+ *
+ * U41: this used to split on `/` alone, justified by a comment asserting that
+ * server-resolved paths are "absolute POSIX paths". They are absolute; they are
+ * not POSIX. The server builds this string with `path.resolve(path.join(...))`
+ * (`server/src/config.ts`), which is backslash-separated on Windows — a
+ * supported platform that CI exercises on every push. So a Windows operator saw
+ * `C:\Users\foo\agents` where the design called for `agents`, overflowing the
+ * rail. Splitting on either separator is correct on all three platforms: a
+ * literal backslash cannot appear inside a POSIX path component that this label
+ * would ever receive (the server produces it from its own `path` module, not
+ * from operator free-text).
+ *
+ * Exported for the gate — the alternative is driving all of App.tsx through
+ * jsdom to assert on one pure string transform.
+ */
+export function workspaceLabel(workspaceRoot: string | null): string {
   if (!workspaceRoot) return 'Set workspace';
-  const trimmed = workspaceRoot.replace(/\/+$/, '');
-  const base = trimmed.split('/').pop();
-  return base && base.length > 0 ? base : trimmed;
+  const trimmed = workspaceRoot.replace(/[/\\]+$/, '');
+  const base = trimmed.split(/[/\\]/).pop();
+  // Fall back to the ORIGINAL, not the trimmed value: a root of `/` trims to
+  // the empty string, and the fallback's whole purpose is "no folder name, so
+  // show the path" — which an empty button does not do. Pre-existing, found
+  // while pinning the Windows cases below.
+  return base && base.length > 0 ? base : workspaceRoot;
 }

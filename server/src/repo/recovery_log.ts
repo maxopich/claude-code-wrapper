@@ -148,10 +148,9 @@ export function updateRecoveryOutcome(id: number, outcome: RecoveryOutcome): boo
  */
 export function listForSession(sessionId: string): RecoveryLogRow[] {
   return getDb()
-    .prepare<
-      [string],
-      RecoveryLogRow
-    >('SELECT * FROM recovery_log WHERE session_id = ? ORDER BY ts ASC')
+    .prepare<[string], RecoveryLogRow>(
+      'SELECT * FROM recovery_log WHERE session_id = ? ORDER BY ts ASC',
+    )
     .all(sessionId);
 }
 
@@ -172,10 +171,9 @@ export function listForSession(sessionId: string): RecoveryLogRow[] {
  */
 export function listRecent(limit: number): RecoveryLogRow[] {
   return getDb()
-    .prepare<
-      [number],
-      RecoveryLogRow
-    >('SELECT * FROM recovery_log ORDER BY ts DESC, id DESC LIMIT ?')
+    .prepare<[number], RecoveryLogRow>(
+      'SELECT * FROM recovery_log ORDER BY ts DESC, id DESC LIMIT ?',
+    )
     .all(limit);
 }
 

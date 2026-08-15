@@ -19,7 +19,10 @@ import { CEBAB_SOURCE, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import { registerLiveSession, unregisterLiveSession } from './session_registry.js';
 import {
   createMultiAgentSession,
+  getMultiAgentSession,
+  listAgentSessions,
   listMultiAgentEvents,
+  listParticipants,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
@@ -94,7 +97,7 @@ describe('orchestrator routing (AgentRunner era)', () => {
     router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: 'coder', text: 'go' }));
     expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith('coder', 'go');
+    expect(deliver).toHaveBeenCalledWith('coder', 'go', ORCHESTRATOR_AGENT_NAME);
   });
 
   test('worker→orchestrator delivers a turn to the orchestrator', () => {
@@ -102,7 +105,7 @@ describe('orchestrator routing (AgentRunner era)', () => {
     router.handleEvent(
       ev({ source: 'coder', destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'done' }),
     );
-    expect(deliver).toHaveBeenCalledWith(ORCHESTRATOR_AGENT_NAME, 'done');
+    expect(deliver).toHaveBeenCalledWith(ORCHESTRATOR_AGENT_NAME, 'done', 'coder');
   });
 
   test('orchestrator→user persists + forwards but does not route', () => {
@@ -175,7 +178,9 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
       handle: originalHandle,
       rebind: () => {
         bound = true;
+        return 1; // register B01: rebind mints a sink-ownership epoch
       },
+      sendServerMsg: () => {},
     });
     const resumed = await resumeOrchestratorSession({
       sessionId: SESSION_ID,
@@ -202,6 +207,7 @@ describe('resumeOrchestratorSession (registry-based, R-A)', () => {
         continueThroughMutation: vi.fn(),
       },
       rebind: vi.fn(),
+      sendServerMsg: () => {},
     });
     expect(
       await resumeOrchestratorSession({
@@ -239,6 +245,7 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
     captured: Array<{ cwd: string; prompt: string }>,
     briefedAgents?: string[],
     executeMode?: boolean,
+    budget?: { hopBudget: number; initialHopsCount?: number; onEnded?: () => void },
   ) {
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
@@ -250,10 +257,14 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
       paths,
       workers,
       onEvent: vi.fn(),
-      onEnded: vi.fn(),
+      onEnded: budget?.onEnded ?? vi.fn(),
       briefedAgents,
       executeMode,
       runnerFactory: fakeFactory(captured),
+      ...(budget ? { hopBudget: budget.hopBudget } : {}),
+      ...(budget?.initialHopsCount !== undefined
+        ? { initialHopsCount: budget.initialHopsCount }
+        : {}),
     });
   }
 
@@ -397,6 +408,82 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
 
     unregisterLiveSession(SESSION_ID);
   });
+
+  // Register B14: `addWorker` was a hand-rolled copy of `sendUserPrompt` —
+  // the same cebab→orchestrator prompt event followed by the same deliver —
+  // minus its `ended` and hop-budget guards. Since `forwardCebabEvent` bumps
+  // the counter, the roster update could be the very hop that reached the cap
+  // and still wake the orchestrator, defeating the runaway brake.
+  function addNewWorker(name: string) {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    setProjectBusInstalled(proj.id, true, name);
+    return proj.id;
+  }
+
+  test('addWorker at the hop cap refuses to wake the orchestrator', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const onEnded = vi.fn();
+    // Seeded one hop below the cap: the roster event addWorker persists is
+    // the hop that reaches it.
+    const { handle } = wire([worker('coder', null)], captured, undefined, undefined, {
+      hopBudget: 3,
+      initialHopsCount: 2,
+      onEnded,
+    });
+
+    await handle.addWorker(addNewWorker('newbie'));
+    await flush();
+
+    // Nothing was woken: no orchestrator turn ran.
+    expect(captured.some((c) => c.prompt.includes('newbie'))).toBe(false);
+    // …and the operator is told why, in the trail and on the wire.
+    const persisted = listMultiAgentEvents(SESSION_ID);
+    expect(persisted.at(-1)).toMatchObject({ source: CEBAB_SOURCE, kind: 'error' });
+    expect(persisted.at(-1)!.text).toContain('Hop budget exhausted (3/3)');
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', 'iter-1');
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('CONTROL: below the cap, addWorker still wakes the orchestrator with the roster', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const onEnded = vi.fn();
+    const { handle } = wire([worker('coder', null)], captured, undefined, undefined, {
+      hopBudget: 50,
+      onEnded,
+    });
+
+    await handle.addWorker(addNewWorker('newbie2'));
+    await flush();
+
+    const orchTurn = captured.find((c) => c.prompt.includes('newbie2'));
+    expect(orchTurn).toBeDefined();
+    expect(onEnded).not.toHaveBeenCalled();
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('the worker is registered either way — the refusal is about waking, not joining', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle } = wire([worker('coder', null)], captured, undefined, undefined, {
+      hopBudget: 3,
+      initialHopsCount: 2,
+    });
+
+    const projectId = addNewWorker('newbie3');
+    const result = await handle.addWorker(projectId);
+
+    // The participant row and the roster event are durable before the check,
+    // so returning early leaves consistent state rather than a half-join.
+    // (`handle.participantAgentNames` is a start-time snapshot that does not
+    // grow on addWorker — the DB is the roster of record.)
+    expect(result.agentName).toBe('newbie3');
+    expect(listParticipants(SESSION_ID).map((p) => p.project_id)).toContain(projectId);
+
+    unregisterLiveSession(SESSION_ID);
+  });
 });
 
 describe('wireOrchestratorSession — agent_activity liveness wiring', () => {
@@ -466,6 +553,57 @@ describe('wireOrchestratorSession — agent_activity liveness wiring', () => {
       .map((c) => c[1] as { agentName: string; phase: string; currentTool?: string })
       .find((s) => s.phase === 'working');
     expect(working).toMatchObject({ agentName: 'coder', currentTool: 'Bash' });
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('F7: a delivered worker turn bills the hop to the agent and the session', async () => {
+    const dir = path.join(tmpRoot, 'coder-cost');
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject('coder-cost', dir);
+    const coder: ResolvedAgent = {
+      projectId: proj.id,
+      agentName: 'coder-cost',
+      cwd: dir,
+      projectName: 'coder-cost',
+    };
+    const workspace = path.join(tmpRoot, 'workspace-cost');
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+
+    function costFactory() {
+      return (): Runner => {
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield {
+            type: 'result',
+            subtype: 'success',
+            session_id: 's-c',
+            total_cost_usd: 0.0625,
+          } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      };
+    }
+
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers: [coder],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: costFactory(),
+    });
+
+    deliver('coder-cost', 'do the thing');
+    await flush();
+    await flush();
+
+    const row = listAgentSessions(SESSION_ID).find((r) => r.agent_name === 'coder-cost');
+    expect(row?.cost_usd).toBeCloseTo(0.0625, 10);
+    expect(getMultiAgentSession(SESSION_ID)!.total_cost_usd).toBeCloseTo(0.0625, 10);
 
     unregisterLiveSession(SESSION_ID);
   });

@@ -85,8 +85,9 @@ describe('EnvInjectionGateModal — render', () => {
               mkInjection('CLAUDE_CODE_USE_BEDROCK', { isSet: false, scope: 'local' }),
             ],
           })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -112,8 +113,9 @@ describe('EnvInjectionGateModal — render', () => {
           pending={mkPending({
             detectedInjections: [mkInjection('ANTHROPIC_API_KEY')],
           })}
-          send={() => {}}
+          send={() => true}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -127,7 +129,12 @@ describe('EnvInjectionGateModal — submit gating', () => {
   test('Submit is disabled until typed string === "inject" (case-sensitive)', () => {
     act(() => {
       root.render(
-        <EnvInjectionGateModal pending={mkPending()} send={() => {}} onClose={() => {}} />,
+        <EnvInjectionGateModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
       );
     });
     const submit = Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((b) =>
@@ -163,10 +170,14 @@ describe('EnvInjectionGateModal — submit gating', () => {
       root.render(
         <EnvInjectionGateModal
           pending={mkPending()}
-          send={(m) => sent.push(m)}
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
           onClose={() => {
             closed.count += 1;
           }}
+          onCancel={() => {}}
         />,
       );
     });
@@ -200,8 +211,12 @@ describe('EnvInjectionGateModal — submit gating', () => {
       root.render(
         <EnvInjectionGateModal
           pending={mkPending()}
-          send={(m) => sent.push(m)}
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
           onClose={() => {}}
+          onCancel={() => {}}
         />,
       );
     });
@@ -221,16 +236,31 @@ describe('EnvInjectionGateModal — submit gating', () => {
 });
 
 describe('EnvInjectionGateModal — refuse path', () => {
-  test('Refuse & edit closes without sending any ClientMsg', () => {
+  // Register W28. This case used to be "Refuse & edit closes without sending
+  // any ClientMsg" and asserted exactly that — it pinned the defect. On the
+  // one gate with no deny verb at all, a labelled refusal button that sent
+  // nothing left the spawn parked with no trace in the UI.
+  //
+  // It still sends no ACKNOWLEDGMENT (that would start the session, which is
+  // the opposite of refusing), and that is asserted below. What changed is
+  // that it routes to `onCancel` so the server hears about it.
+  test('Refuse & edit invokes onCancel and sends no acknowledgment', () => {
     const sent: ClientMsg[] = [];
     const closed = { count: 0 };
+    const cancelled = { count: 0 };
     act(() => {
       root.render(
         <EnvInjectionGateModal
           pending={mkPending()}
-          send={(m) => sent.push(m)}
+          send={(m) => {
+            sent.push(m);
+            return true;
+          }}
           onClose={() => {
             closed.count += 1;
+          }}
+          onCancel={() => {
+            cancelled.count += 1;
           }}
         />,
       );
@@ -241,8 +271,10 @@ describe('EnvInjectionGateModal — refuse path', () => {
     act(() => {
       refuse.click();
     });
+    expect(cancelled.count).toBe(1);
+    // Not `onClose`: popping the queue silently is the after-a-decision path.
+    expect(closed.count).toBe(0);
     expect(sent).toHaveLength(0);
-    expect(closed.count).toBe(1);
   });
 });
 
@@ -250,7 +282,12 @@ describe('EnvInjectionGateModal — accessibility', () => {
   test('dialog has role + aria-modal + aria-labelledby + default focus on Refuse', () => {
     act(() => {
       root.render(
-        <EnvInjectionGateModal pending={mkPending()} send={() => {}} onClose={() => {}} />,
+        <EnvInjectionGateModal
+          pending={mkPending()}
+          send={() => true}
+          onClose={() => {}}
+          onCancel={() => {}}
+        />,
       );
     });
     const dialog = container.querySelector('[role="dialog"]') as HTMLElement;

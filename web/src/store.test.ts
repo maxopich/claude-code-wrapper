@@ -5,6 +5,7 @@ import {
   initialState,
   isSessionPending,
   reduce,
+  sessionPhase,
   trustChipState,
 } from './store';
 import type { MultiAgentEventView, MultiAgentRun } from './store';
@@ -167,6 +168,67 @@ describe('store / permission_decided', () => {
       },
     });
     expect(activeSession(s)!.messages).toEqual(activeSession(before)!.messages);
+  });
+
+  // Register S06: a decision Cebab made on the operator's behalf carries a
+  // reason, and the card has to keep it — that is what lets the UI say "this
+  // was denied for you" instead of implying the operator refused something
+  // they never saw.
+  function withCard(sessionId: string) {
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_started', sessionId, projectId: PID, model: 'opus-4', tools: [] },
+    });
+    return reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'permission_request',
+        requestId: 'req-1',
+        sessionId,
+        toolName: 'Bash',
+        input: { cmd: 'ls' },
+      },
+    });
+  }
+
+  const card = (s: ReturnType<typeof open>) =>
+    activeSession(s)!.messages.find(
+      (m) => m.kind === 'permission_request' && m.requestId === 'req-1',
+    );
+
+  for (const reason of ['client_disconnected', 'interrupted'] as const) {
+    test(`a ${reason} decision keeps its reason on the card`, () => {
+      const s = reduce(withCard('sid-r'), {
+        type: 'server',
+        msg: {
+          type: 'permission_decided',
+          sessionId: 'sid-r',
+          requestId: 'req-1',
+          decision: 'deny',
+          reason,
+        },
+      });
+      expect(card(s)).toMatchObject({ decided: 'deny', decidedReason: reason });
+    });
+  }
+
+  test("an operator's own decision leaves the card without a reason", () => {
+    // POSITIVE CONTROL. Both cases above assert a reason lands; without this
+    // one, a reducer that stamped a constant reason on every decision would
+    // pass them and tell the operator they were disconnected when they were
+    // sitting there clicking Deny.
+    const s = reduce(withCard('sid-o'), {
+      type: 'server',
+      msg: {
+        type: 'permission_decided',
+        sessionId: 'sid-o',
+        requestId: 'req-1',
+        decision: 'deny',
+      },
+    });
+    expect(card(s)).toMatchObject({ decided: 'deny' });
+    expect(card(s)).not.toHaveProperty('decidedReason');
   });
 });
 
@@ -723,8 +785,8 @@ describe('store / session_started aggregates bus models (E2.x)', () => {
         sessionFolder: '/ws/.cebab/bus-1',
         hopBudget: 30,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       },
     });
     return s;
@@ -876,9 +938,8 @@ describe('store / eventDefaultCollapsed', () => {
       pendingRetry: null,
       pauseOnDangerous: false,
       executeMode: false,
-      mutationsAcknowledged: false,
       mutations: [],
-      pendingMutation: null,
+      pendingMutations: [],
       pendingQuestion: null,
       recoveryContext: null,
       routerDrops: [],
@@ -977,8 +1038,8 @@ describe('store / agent_activity (ephemeral liveness)', () => {
         sessionFolder: '/ws/.cebab/sess-A',
         hopBudget: 30,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       },
     });
   }
@@ -1074,8 +1135,8 @@ describe('store / hop budget', () => {
         sessionFolder: '/ws/.cebab/s-budget',
         hopBudget: 42,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       },
     });
     expect(s.multiAgent.active!.hopBudget).toBe(42);
@@ -1117,8 +1178,8 @@ describe('store / pending retry', () => {
     sessionFolder: '/ws/.cebab/s-pr',
     hopBudget: 30,
     pauseOnDangerous: false,
-    mutationsAcknowledged: false,
     mutations: [],
+    pendingMutations: [],
   };
 
   test('multi_agent_started without pendingRetry → null (fresh start)', () => {
@@ -1254,12 +1315,12 @@ describe('store / pending retry', () => {
   });
 });
 
-// Item #5: mutation visibility + pause-on-first-mutation reducer wiring.
+// Item #5: mutation visibility + pause-on-dangerous reducer wiring.
 // The protocol additions are:
-//   - `multi_agent_started.{pauseOnDangerous, mutationsAcknowledged, mutations,
-//     pendingMutation?}` — initial state hydration on R-A/R-B attach.
+//   - `multi_agent_started.{pauseOnDangerous, mutations, pendingMutations}` —
+//     initial state hydration on R-A/R-B attach.
 //   - `multi_agent_mutation` — append-with-dedupe per session.
-//   - `multi_agent_pending_mutation` — set/clear the pause slot wholesale.
+//   - `multi_agent_pending_mutations` — replace the held-worker set wholesale.
 //   - `ma_set_draft_pause_on_dangerous` — setup-screen toggle.
 //   - `ma_clear_pending_mutation` — optimistic Continue.
 describe('store / pause-on-dangerous + mutations', () => {
@@ -1273,8 +1334,8 @@ describe('store / pause-on-dangerous + mutations', () => {
     sessionFolder: '/ws/.cebab/s-pom',
     hopBudget: 30,
     pauseOnDangerous: false,
-    mutationsAcknowledged: false,
     mutations: [],
+    pendingMutations: [],
   };
 
   test('multi_agent_started hydrates pauseOnDangerous + mutations array', () => {
@@ -1283,7 +1344,6 @@ describe('store / pause-on-dangerous + mutations', () => {
       msg: {
         ...baseStarted,
         pauseOnDangerous: true,
-        mutationsAcknowledged: false,
         mutations: [
           {
             id: 1,
@@ -1303,7 +1363,7 @@ describe('store / pause-on-dangerous + mutations', () => {
     });
     expect(s.multiAgent.active!.pauseOnDangerous).toBe(true);
     expect(s.multiAgent.active!.mutations.length).toBe(1);
-    expect(s.multiAgent.active!.pendingMutation).toBeNull();
+    expect(s.multiAgent.active!.pendingMutations).toEqual([]);
   });
 
   test('multi_agent_started hydrates executeMode (and defaults to false when omitted)', () => {
@@ -1317,7 +1377,7 @@ describe('store / pause-on-dangerous + mutations', () => {
     expect(off.multiAgent.active!.executeMode).toBe(false);
   });
 
-  test('multi_agent_started with pendingMutation hydrates the banner (R-A/R-B)', () => {
+  test('multi_agent_started with pendingMutations hydrates the banner stack (R-A/R-B)', () => {
     const pending = {
       id: 7,
       sessionId: 's-pom',
@@ -1333,9 +1393,9 @@ describe('store / pause-on-dangerous + mutations', () => {
     };
     const s = reduce(initialState, {
       type: 'server',
-      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutation: pending },
+      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutations: [pending] },
     });
-    expect(s.multiAgent.active!.pendingMutation).toEqual(pending);
+    expect(s.multiAgent.active!.pendingMutations).toEqual([pending]);
   });
 
   test('multi_agent_mutation appends to the list, deduped by id', () => {
@@ -1367,7 +1427,7 @@ describe('store / pause-on-dangerous + mutations', () => {
     expect(s2.multiAgent.active!.mutations.length).toBe(1);
   });
 
-  test('multi_agent_pending_mutation sets and clears the slot wholesale', () => {
+  test('multi_agent_pending_mutations replaces the held-worker set wholesale', () => {
     let s = reduce(initialState, { type: 'server', msg: baseStarted });
     const pending = {
       id: 7,
@@ -1384,14 +1444,14 @@ describe('store / pause-on-dangerous + mutations', () => {
     };
     s = reduce(s, {
       type: 'server',
-      msg: { type: 'multi_agent_pending_mutation', sessionId: 's-pom', pending },
+      msg: { type: 'multi_agent_pending_mutations', sessionId: 's-pom', pending: [pending] },
     });
-    expect(s.multiAgent.active!.pendingMutation).toEqual(pending);
+    expect(s.multiAgent.active!.pendingMutations).toEqual([pending]);
     s = reduce(s, {
       type: 'server',
-      msg: { type: 'multi_agent_pending_mutation', sessionId: 's-pom', pending: null },
+      msg: { type: 'multi_agent_pending_mutations', sessionId: 's-pom', pending: [] },
     });
-    expect(s.multiAgent.active!.pendingMutation).toBeNull();
+    expect(s.multiAgent.active!.pendingMutations).toEqual([]);
   });
 
   test('multi_agent_ask_user_question sets the slot; _resolved clears it (matching id)', () => {
@@ -1494,20 +1554,22 @@ describe('store / pause-on-dangerous + mutations', () => {
       confirmedAt: null,
       promoted: false,
     };
+    // A second held worker, to pin that Continue releases ONLY the one clicked
+    // (the gate is per-agent — migration 031).
+    const other = { ...pending, id: 8, agentName: 'reviewer', summary: 'sudo rm y' };
     let s = reduce(initialState, {
       type: 'server',
-      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutation: pending },
+      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutations: [pending, other] },
     });
-    expect(s.multiAgent.active!.pendingMutation).not.toBeNull();
-    s = reduce(s, { type: 'ma_clear_pending_mutation' });
-    expect(s.multiAgent.active!.pendingMutation).toBeNull();
-    expect(s.multiAgent.active!.mutationsAcknowledged).toBe(true);
-    // Idempotent: a second click with the slot already empty no-ops.
-    const s2 = reduce(s, { type: 'ma_clear_pending_mutation' });
+    expect(s.multiAgent.active!.pendingMutations).toHaveLength(2);
+    s = reduce(s, { type: 'ma_clear_pending_mutation', mutationId: pending.id });
+    expect(s.multiAgent.active!.pendingMutations).toEqual([other]);
+    // Idempotent: a second click on an already-released row no-ops.
+    const s2 = reduce(s, { type: 'ma_clear_pending_mutation', mutationId: pending.id });
     expect(s2).toBe(s);
   });
 
-  test('multi_agent_ended clears pendingMutation too (no lingering banner on stopped/crashed)', () => {
+  test('multi_agent_ended clears pendingMutations too (no lingering banner on stopped/crashed)', () => {
     const pending = {
       id: 7,
       sessionId: 's-pom',
@@ -1523,13 +1585,13 @@ describe('store / pause-on-dangerous + mutations', () => {
     };
     let s = reduce(initialState, {
       type: 'server',
-      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutation: pending },
+      msg: { ...baseStarted, pauseOnDangerous: true, pendingMutations: [pending] },
     });
     s = reduce(s, {
       type: 'server',
       msg: { type: 'multi_agent_ended', sessionId: 's-pom', reason: 'stopped', iterationId: null },
     });
-    expect(s.multiAgent.active!.pendingMutation).toBeNull();
+    expect(s.multiAgent.active!.pendingMutations).toEqual([]);
   });
 
   test('ma_set_draft_pause_on_dangerous toggles setup-screen state', () => {
@@ -1592,8 +1654,8 @@ describe('store / recoveryContext (Item #7)', () => {
     sessionFolder: '/ws/.cebab/s-rec',
     hopBudget: 30,
     pauseOnDangerous: false,
-    mutationsAcknowledged: false,
     mutations: [],
+    pendingMutations: [],
   };
 
   test('multi_agent_started without recoveryContext → null', () => {
@@ -1681,8 +1743,8 @@ describe('store / router_drop accumulation (Phase 6d)', () => {
     sessionFolder: '/ws/.cebab/s-drop',
     hopBudget: 30,
     pauseOnDangerous: false,
-    mutationsAcknowledged: false,
     mutations: [],
+    pendingMutations: [],
   };
 
   test('multi_agent_started initializes routerDrops to empty', () => {
@@ -1797,8 +1859,8 @@ describe('store / participant control reducer cases', () => {
         sessionFolder: '/tmp/.cebab/bus-1',
         hopBudget: 30,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       },
     });
     return { state: s, sessionId: 'bus-1' };
@@ -1991,8 +2053,8 @@ describe('store / countControlledParticipants', () => {
         sessionFolder: '/tmp/.cebab/bus-2',
         hopBudget: 30,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       },
     });
     expect(countControlledParticipants(s.multiAgent.active)).toBe(0);
@@ -2014,8 +2076,8 @@ describe('store / countControlledParticipants', () => {
         sessionFolder: '/tmp/.cebab/bus-3',
         hopBudget: 30,
         pauseOnDangerous: false,
-        mutationsAcknowledged: false,
         mutations: [],
+        pendingMutations: [],
       },
     });
     // 1 muted
@@ -2592,8 +2654,8 @@ describe('store / multi_agent_started.mock projection (Phase 2c)', () => {
     sessionFolder: '/ws/.cebab/bus-m',
     hopBudget: 30,
     pauseOnDangerous: false,
-    mutationsAcknowledged: false,
     mutations: [],
+    pendingMutations: [],
   };
 
   test('multi_agent_started.mock=true → MultiAgentRun.mock=true', () => {
@@ -2943,5 +3005,128 @@ describe('store / result reducer carries durationMs (Cluster H B5)', () => {
     const last = sess.messages[sess.messages.length - 1];
     if (!last || last.kind !== 'result') throw new Error('expected result kind');
     expect(last.durationMs).toBeUndefined();
+  });
+});
+
+/**
+ * Register W01. Only `assistant_message` and `command_output` cleared the
+ * streaming buffer. `result`, `wrapper_error` and `user_send` all spread
+ * `...session` and kept it, so a turn that ended any other way — a Stop
+ * mid-stream, an error — left its partial text behind.
+ *
+ * `sessionPhase` checks status === 'done' | 'error' FIRST, so the litter stays
+ * hidden while the turn is over. That is why this survived casual use. Then the
+ * next `user_send` flips status back to 'running', `sessionPhase` falls through
+ * to its `streamingText.length > 0 -> 'streaming'` branch, and ChatView renders
+ * the PREVIOUS turn's abandoned answer as if it were arriving now.
+ */
+describe('store / W01 — the streaming buffer retires with its turn', () => {
+  const SID = 'sid-w01';
+
+  /** Open a project, start a session, and stream a partial answer into it. */
+  function streamPartial(text = 'partial answer so f') {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'question' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: SID,
+        projectId: PID,
+        model: 'opus-4',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'stream_delta',
+        sessionId: SID,
+        uuid: 'u-w01',
+        delta: { kind: 'text', blockIndex: 0, text },
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe(text);
+    return s;
+  }
+
+  test('a result clears it', () => {
+    let s = streamPartial();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: SID,
+        subtype: 'success',
+        durationMs: 1200,
+        totalCostUsd: 0.01,
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('an errored result clears it too', () => {
+    // The path a stopped turn takes — and the one that made this reachable.
+    let s = streamPartial();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: SID,
+        subtype: 'error_during_execution',
+        durationMs: 800,
+        totalCostUsd: 0.004,
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('a wrapper_error clears it', () => {
+    let s = streamPartial();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'wrapper_error',
+        sessionId: SID,
+        kind: 'process_crashed',
+        message: 'boom',
+      },
+    });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('a fresh user_send never inherits the previous turn s text', () => {
+    // The backstop, covering any turn-ending path that emits neither envelope.
+    let s = streamPartial();
+    s = reduce(s, { type: 'user_send', text: 'follow-up' });
+    expect(activeSession(s)!.streamingText).toBe('');
+  });
+
+  test('the aborted answer does not replay as live output on the next send', () => {
+    // The user-visible symptom, pinned end to end rather than by field: after
+    // an ended turn and a fresh send, the session must NOT read as 'streaming'
+    // — that phase is what mounts <StreamingPlaceholder> with the stale text.
+    let s = streamPartial('a half-finished sentence that the operator stopped');
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: SID,
+        subtype: 'error_during_execution',
+        durationMs: 800,
+        totalCostUsd: 0.004,
+      },
+    });
+    s = reduce(s, { type: 'user_send', text: 'never mind, different question' });
+
+    const sess = activeSession(s)!;
+    expect(sess.status).toBe('running');
+    expect(sessionPhase(sess, true)).not.toBe('streaming');
+  });
+
+  test('a genuinely streaming turn still reads as streaming', () => {
+    // Guard against over-correcting into "never streams".
+    const s = streamPartial();
+    expect(sessionPhase(activeSession(s)!, true)).toBe('streaming');
   });
 });

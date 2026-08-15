@@ -6,13 +6,10 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createOrchestratorRouter, ORCHESTRATOR_AGENT_NAME } from './orchestrator.js';
 import { computeSessionPaths } from './paths.js';
-import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
-import { createMultiAgentSession } from '../repo/multi_agent.js';
+import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT } from './runtime.js';
+import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
 import type { BusEvent } from './runner.js';
-import type {
-  NotificationEnvelope,
-  RouterDropReasonCode,
-} from '@cebab/shared/protocol';
+import type { NotificationEnvelope, RouterDropReasonCode } from '@cebab/shared/protocol';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
 
 // Cluster A Phase 3 (D4 / BE-9): every F2/F3 router-drop site in the
@@ -168,7 +165,36 @@ describe('[security][BE-9] orchestrator router-drop → safety_audit + envelope'
     expect(captured.drops[0]?.reasonCode).toBe('unknown_source');
   });
 
-  test('orchestrator → orchestrator (self-message) and orchestrator → worker do NOT drop', () => {
+  // Register B16. Note what makes this one different from the four above:
+  // they all reject before the event is persisted. This one is reached
+  // AFTER `sink.onEvent` has run and the hop has been counted, and after
+  // `handleBusSend` already answered the sending agent "delivered" — so
+  // before this it was a bare `console.warn` and the message was simply
+  // gone, with no audit row and nothing for the operator to see.
+  test('a real worker addressing a name nobody has drops as unknown_destination', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: 'ghost' }));
+
+    expect(selectAuditRows()[0]).toMatchObject({ reason_code: 'unknown_destination' });
+    expect(captured.notifications[0]).toMatchObject({ reasonCode: 'unknown_destination' });
+    expect(captured.drops[0]?.reasonCode).toBe('unknown_destination');
+  });
+
+  test('the drop envelope names who addressed whom, so the operator can find the typo', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: 'revewer' }));
+
+    expect(captured.drops[0]).toMatchObject({
+      source: ORCHESTRATOR_AGENT_NAME,
+      destination: 'revewer',
+    });
+  });
+
+  // Register B24: this case used to be titled "orchestrator → orchestrator
+  // (self-message) and orchestrator → worker do NOT drop" while its body only
+  // ever sent orchestrator → worker. The half it named but never exercised is
+  // the half that was wrong, and it now drops — see the B24 describe below.
+  test('orchestrator → worker does NOT drop', () => {
     const { router, captured } = makeRouter();
     // orchestrator → worker is a legit deliver path; the F2/F3 filters let
     // it through. We assert no audit row + no notification, regardless of
@@ -180,6 +206,76 @@ describe('[security][BE-9] orchestrator router-drop → safety_audit + envelope'
     expect(selectAuditRows()).toEqual([]);
     expect(captured.notifications).toHaveLength(0);
     expect(captured.drops).toHaveLength(0);
+  });
+});
+
+// Register B08: `_sink` is the chain terminator and means nothing in
+// hub-and-spoke mode, so nobody here may address it. The branch existed but
+// was a bare `console.warn` — no audit row, no operator notification — the
+// same shape B16 fixed for `unknown_destination`, left unmapped for want of a
+// reason code.
+describe('[security][B08] _sink has no meaning in orchestrator mode', () => {
+  test('a worker addressing _sink drops as unauthorized_sink', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: 'coder', destination: SINK_RECIPIENT }));
+
+    expect(selectAuditRows()[0]).toMatchObject({ reason_code: 'unauthorized_sink' });
+    expect(captured.notifications[0]).toMatchObject({
+      class: 'safety',
+      reasonCode: 'unauthorized_sink',
+    });
+    expect(captured.drops[0]).toMatchObject({ source: 'coder', destination: SINK_RECIPIENT });
+  });
+
+  test('the orchestrator itself may not address _sink either', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: SINK_RECIPIENT }));
+
+    expect(captured.drops[0]?.reasonCode).toBe('unauthorized_sink');
+  });
+
+  test('CONTROL: the orchestrator addressing the USER is still how a run reports out', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: USER_RECIPIENT }));
+
+    expect(selectAuditRows()).toEqual([]);
+    expect(captured.drops).toHaveLength(0);
+  });
+});
+
+// Register B24. In this router the worker case is already covered by the
+// `worker_to_worker` guard, so the live gap was orchestrator → orchestrator:
+// it fell into the `destination === ORCHESTRATOR_AGENT_NAME` deliver branch
+// and woke the orchestrator with its own text.
+describe('[security][B24] an agent may not address itself', () => {
+  test('orchestrator → orchestrator drops as self_addressed', () => {
+    const { router, captured } = makeRouter();
+    router.handleEvent(
+      ev({ source: ORCHESTRATOR_AGENT_NAME, destination: ORCHESTRATOR_AGENT_NAME }),
+    );
+
+    expect(selectAuditRows()[0]?.reason_code).toBe('self_addressed');
+    expect(captured.notifications[0]?.reasonCode).toBe('self_addressed');
+    expect(captured.drops[0]?.reasonCode).toBe('self_addressed');
+  });
+
+  test('the drop lands BEFORE the persist, so it costs no hop', () => {
+    const { router } = makeRouter();
+    router.handleEvent(
+      ev({ source: ORCHESTRATOR_AGENT_NAME, destination: ORCHESTRATOR_AGENT_NAME }),
+    );
+
+    expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(0);
+  });
+
+  test('a worker addressing itself keeps reporting worker_to_worker, not self_addressed', () => {
+    // Ordering is deliberate: the self-check sits AFTER the worker→worker
+    // guard so no drop that was already classified changes its reason code.
+    // A future author who moves it will redden here.
+    const { router, captured } = makeRouter();
+    router.handleEvent(ev({ source: 'coder', destination: 'coder' }));
+
+    expect(captured.drops[0]?.reasonCode).toBe('worker_to_worker');
   });
 });
 

@@ -8,9 +8,43 @@ import type {
   ProjectAuthority,
   ToolView,
 } from '@cebab/shared/protocol';
+import { isSensitiveKey } from '@cebab/shared';
 import { SCRUBBED_ENV_POSTURES, SCRUBBED_ENV_VAR_NAMES } from '../runner/claude.js';
+import { readTextBounded } from '../safe_fs.js';
+
+/**
+ * Register H03: ceiling on a project's `.claude/settings*.json`.
+ *
+ * Real ones are a few KB. 1 MiB leaves enormous headroom for a legitimately
+ * baroque config while refusing the multi-gigabyte file that would otherwise
+ * be read whole into memory during a pre-spawn resolve.
+ */
+const MAX_SETTINGS_BYTES = 1024 * 1024;
+
+/**
+ * Same ceiling for the project-root `.mcp.json`. Same threat, same shape: it
+ * is a project-supplied file read on the way into a spawn.
+ */
+const MAX_MCP_JSON_BYTES = 1024 * 1024;
+
+/** Project-root MCP manifest. See `readMcpJsonServers` for why this exists. */
+const MCP_JSON_FILENAME = '.mcp.json';
+
+/**
+ * `~/.claude.json` — the CLI's own state file, and the OTHER place MCP servers
+ * actually load from. See `readClaudeJsonServers`.
+ *
+ * A larger ceiling than its siblings on purpose: this is CLI-managed state, not
+ * a hand-written config. It accumulates a block per project the user has ever
+ * opened, so it grows without anyone editing it (measured: 138 KB across 62
+ * projects on the development machine). 1 MiB would be a live truncation risk
+ * within a year of ordinary use, and truncating this file means silently
+ * failing to gate a server.
+ */
+const MAX_CLAUDE_JSON_BYTES = 8 * 1024 * 1024;
+const CLAUDE_JSON_FILENAME = '.claude.json';
 import { getProject } from './projects.js';
-import { checkTrust, computeBinarySha, listForServer } from './mcp_trust.js';
+import { checkTrust, computeBinarySha, firstDecisionTs, listForServer } from './mcp_trust.js';
 import { listSessionsForProject } from './sessions.js';
 import { getDb } from '../db.js';
 
@@ -55,13 +89,42 @@ type RawSettings = {
   >;
 };
 
+/**
+ * `~/.claude.json`, typed to the two blocks we read. The real file carries
+ * dozens of other keys (caches, counters, per-project usage stats) — none of
+ * them are our business and none are typed here, deliberately: this file is
+ * read for MCP declarations only.
+ */
+type ClaudeJson = {
+  mcpServers?: RawSettings['mcpServers'];
+  projects?: Record<string, { mcpServers?: RawSettings['mcpServers'] } | undefined>;
+};
+
+/** A `settings.json` scope the SDK can be told to layer in. Structurally the
+ *  same set as `runner/claude.ts`'s `SettingSource`. */
+export type SettingScope = 'user' | 'project' | 'local';
+
 type SettingsLayer = {
-  scope: 'user' | 'project' | 'local';
+  scope: SettingScope;
   scopePath: string;
   data: RawSettings | null;
 };
 
 const USER_SCOPE_PATH = path.join(os.homedir(), '.claude', 'settings.json');
+
+/**
+ * MCP server names Cebab itself injects. Only these may carry
+ * `scope: 'cebab-injected'`, which grants an automatic `trust: 'trusted'`
+ * (`enrichWithTrustState`) and a skip in `awaitMcpTrustDecisions`.
+ *
+ * Keep in sync with the `mcpServers` keys in `bus/runner.ts`'s
+ * `runOneAttempt` — and keep it MINIMAL. `bus` used to be listed here for the
+ * deprecation alias; now that the alias is gone, leaving it would mean a
+ * participant's own server named `bus` — one Cebab does not inject and never
+ * saw in a settings layer — is laundered into permanently-trusted and skipped
+ * by TOFU. Only add a name here when `runOneAttempt` actually registers it.
+ */
+const CEBAB_INJECTED_MCP_NAMES: ReadonlySet<string> = new Set(['cebab_bus']);
 
 /**
  * Read + parse a `.claude/settings.json` (or `.claude/settings.local.json`).
@@ -71,45 +134,280 @@ const USER_SCOPE_PATH = path.join(os.homedir(), '.claude', 'settings.json');
  * once on session start.
  */
 function readSettingsFile(p: string): RawSettings | null {
+  // Register H03: this file belongs to the PROJECT, so on an untrusted one it
+  // is attacker-controlled, and this runs during the pre-spawn authority
+  // resolve — on the way into every session start. It used to be a bare
+  // `fs.readFileSync(p, 'utf8')`: a FIFO left at `.claude/settings.json`
+  // parked the single-threaded event loop for the whole server, and a
+  // multi-gigabyte file exhausted memory. `readFileBounded` opens once with
+  // O_NONBLOCK, fstats that descriptor (not the path — closing the TOCTOU
+  // swap window), rejects non-regular files and caps the size.
+  const read = readTextBounded(p, MAX_SETTINGS_BYTES);
+  if (!read.ok) {
+    // 'unreadable' covers the ENOENT case this function has always treated
+    // as a silent "no rules from this scope". The other refusals mean the
+    // path exists but is hostile or absurd, which the operator should hear
+    // about exactly once — same posture as malformed JSON below.
+    if (read.refusal !== 'unreadable') {
+      console.warn(`[project_authority] refused to read ${p}: ${read.refusal}`);
+    }
+    return null;
+  }
   try {
-    const raw = fs.readFileSync(p, 'utf8');
-    return JSON.parse(raw) as RawSettings;
+    return JSON.parse(read.text) as RawSettings;
   } catch (e: unknown) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    console.warn(`[project_authority] could not read ${p}: ${String(e)}`);
+    console.warn(`[project_authority] could not parse ${p}: ${String(e)}`);
     return null;
   }
 }
 
 /**
- * Collect the three settings layers for a project. User scope is always
- * read (whether the project is trusted or not — `~/.claude/settings.json`
- * is operator-controlled). Project + local scopes are only read for
- * trusted projects, matching the SDK's settingSources widening — see
- * `runner/claude.ts:76-80`. The inspector's `settingSourcesUsed` field
- * reflects this so the AuthorityPanel doesn't lie about layers that
- * weren't actually applied.
+ * Read the project-root `.mcp.json` — the only project-scoped location the
+ * CLI actually loads MCP servers from.
+ *
+ * WHY THIS EXISTS. Everything else in this module attributes MCP servers from
+ * `mcpServers` blocks in `.claude/settings*.json`. Measured against SDK
+ * 0.3.201 with a real MCP stdio server, reading `system/init.mcp_servers`,
+ * that key is **not loaded at any scope**:
+ *
+ *   <proj>/.claude/settings.json      → mcpServers  → NOT loaded
+ *   ...the same + enableAllProjectMcpServers: true  → NOT loaded
+ *   ~/.claude/settings.json           → mcpServers  → NOT loaded
+ *   <proj>/.mcp.json                                → LOADED, 'connected'
+ *
+ * `~/.claude.json` was missing from that table and is now measured too — see
+ * `readClaudeJsonServers`. Both of its blocks load, so `.mcp.json` was never
+ * "the only" loading location; it was the only one anyone had checked.
+ *
+ * So before this function the TOFU gate could only ever prompt about
+ * declarations that would never run, while the servers that DO run reached
+ * the spawn with no prompt, no `mcp_trust` row and no `safety_audit` row.
+ * The gate was watching the wrong file.
+ *
+ * SCOPE GATING is not a nicety — it is the contract `loadSettingsLayers`
+ * documents: read exactly what the spawn will load. `.mcp.json` loads iff the
+ * spawn's `settingSources` includes `'project'` (measured: `['user']` and `[]`
+ * do not load it, `['user','project','local']` does). That is every bus
+ * participant and every trusted single-agent project — and reading it for an
+ * untrusted single-agent project would prompt the operator about a server
+ * their Trust setting already prevents from loading.
+ *
+ * Returns `[]` for absent / unreadable / malformed, matching
+ * `readSettingsFile`'s "no rules from this scope" posture.
  */
-function loadSettingsLayers(projectPath: string, trusted: boolean): SettingsLayer[] {
-  const layers: SettingsLayer[] = [
-    { scope: 'user', scopePath: USER_SCOPE_PATH, data: readSettingsFile(USER_SCOPE_PATH) },
-  ];
-  if (trusted) {
-    const projectScopePath = path.join(projectPath, '.claude', 'settings.json');
-    const localScopePath = path.join(projectPath, '.claude', 'settings.local.json');
-    layers.push({
-      scope: 'project',
-      scopePath: projectScopePath,
-      data: readSettingsFile(projectScopePath),
-    });
-    layers.push({
-      scope: 'local',
-      scopePath: localScopePath,
-      data: readSettingsFile(localScopePath),
-    });
+export function readMcpJsonServers(
+  projectPath: string,
+  scopes: readonly SettingScope[],
+): McpServerView[] {
+  if (!scopes.includes('project')) return [];
+
+  const p = path.join(projectPath, MCP_JSON_FILENAME);
+  // Bounded + TOCTOU-safe for the same reasons as `readSettingsFile`: this is
+  // a project-controlled path read during a pre-spawn resolve.
+  const read = readTextBounded(p, MAX_MCP_JSON_BYTES);
+  if (!read.ok) {
+    if (read.refusal !== 'unreadable') {
+      console.warn(`[project_authority] refused to read ${p}: ${read.refusal}`);
+    }
+    return [];
+  }
+
+  let parsed: RawSettings;
+  try {
+    parsed = JSON.parse(read.text) as RawSettings;
+  } catch (e: unknown) {
+    console.warn(`[project_authority] could not parse ${p}: ${String(e)}`);
+    return [];
+  }
+  if (!parsed?.mcpServers) return [];
+
+  const out: McpServerView[] = [];
+  for (const [name, conf] of Object.entries(parsed.mcpServers)) {
+    if (!conf) continue;
+    const envKeys = conf.env ? Object.keys(conf.env) : undefined;
+    const config: { command?: string; args?: string[]; envKeys?: string[] } = {};
+    if (typeof conf.command === 'string') config.command = conf.command;
+    if (Array.isArray(conf.args)) config.args = conf.args;
+    if (envKeys && envKeys.length > 0) config.envKeys = envKeys;
+    const view: McpServerView = {
+      name,
+      status: 'unknown',
+      scope: 'mcp-json',
+      originPath: p,
+      tools: [],
+      trust: 'unknown',
+    };
+    if (config.command || config.args || config.envKeys) view.config = config;
+    out.push(view);
+  }
+  return out;
+}
+
+/**
+ * Read `~/.claude.json` — the CLI's own state file, and the second place MCP
+ * servers actually load from.
+ *
+ * WHY THIS EXISTS. `readMcpJsonServers` above closed the gap for
+ * project-declared servers. What was left reached a spawn with **no
+ * `originPath`**, so `mcp_trust_gate` skipped it (the `!server.originPath`
+ * check) and it ran with no TOFU prompt, no `mcp_trust` row and no
+ * `safety_audit` row. Register `x1n.6.23` guessed this was where they came
+ * from and could not act on it, because a runtime-observed server has no
+ * durable anchor to key `(server_name, origin_path, binary_sha)` on. Reading
+ * the declaration gives it one: this file's path.
+ *
+ * MEASURED against SDK 0.3.201 (same method as the table above — a bogus
+ * `command` in each location, read back off `system/init.mcp_servers`, with
+ * `.mcp.json` as the positive control):
+ *
+ *   ~/.claude.json  mcpServers                       → LOADED at EVERY scope
+ *                                                      set, ['user'] included
+ *   ~/.claude.json  projects[<cwd>].mcpServers       → LOADED iff scopes
+ *                                                      include 'local'
+ *   <proj>/.mcp.json (control)                       → LOADED iff 'project'
+ *
+ * The first row is the one that matters most and is easy to miss: **top-level
+ * `mcpServers` loads under `['user']`**, which is what an UNTRUSTED
+ * single-agent project runs. The Trust toggle stops a project's own
+ * `settings.local.json` from loading; it does not stop this. So a
+ * `claude mcp add --scope user` server reaches every Cebab spawn regardless of
+ * Trust, and before this function it did so ungated.
+ *
+ * KEYED BY RESOLVED PATH. The `projects` block is keyed by the CLI's resolved
+ * cwd. Measured: a key written with an UNRESOLVED path matches nothing — on
+ * macOS `/var/folders/…` is a symlink to `/private/var/…`, so looking up the
+ * raw path silently finds no servers and reports a clean, wrong negative. We
+ * look up the realpath and fall back to the literal path only when the
+ * directory cannot be resolved.
+ *
+ * Returns `[]` for absent / unreadable / malformed, matching
+ * `readSettingsFile`'s "no rules from this scope" posture.
+ */
+export function readClaudeJsonServers(
+  projectPath: string,
+  scopes: readonly SettingScope[],
+): McpServerView[] {
+  const p = path.join(os.homedir(), CLAUDE_JSON_FILENAME);
+  const read = readTextBounded(p, MAX_CLAUDE_JSON_BYTES);
+  if (!read.ok) {
+    if (read.refusal !== 'unreadable') {
+      console.warn(`[project_authority] refused to read ${p}: ${read.refusal}`);
+    }
+    return [];
+  }
+
+  let parsed: ClaudeJson;
+  try {
+    parsed = JSON.parse(read.text) as ClaudeJson;
+  } catch (e: unknown) {
+    console.warn(`[project_authority] could not parse ${p}: ${String(e)}`);
+    return [];
+  }
+
+  const out: McpServerView[] = [];
+  const push = (block: RawSettings['mcpServers'] | undefined) => {
+    if (!block) return;
+    for (const [name, conf] of Object.entries(block)) {
+      if (!conf) continue;
+      // A name already taken by the other block in the SAME file: keep the
+      // first. Both anchor to this path, so the trust row is identical either
+      // way and there is nothing to choose between them.
+      if (out.some((v) => v.name === name)) continue;
+      const envKeys = conf.env ? Object.keys(conf.env) : undefined;
+      const config: { command?: string; args?: string[]; envKeys?: string[] } = {};
+      if (typeof conf.command === 'string') config.command = conf.command;
+      if (Array.isArray(conf.args)) config.args = conf.args;
+      if (envKeys && envKeys.length > 0) config.envKeys = envKeys;
+      const view: McpServerView = {
+        name,
+        status: 'unknown',
+        scope: 'claude-json',
+        originPath: p,
+        tools: [],
+        trust: 'unknown',
+      };
+      if (config.command || config.args || config.envKeys) view.config = config;
+      out.push(view);
+    }
+  };
+
+  // Unconditional: measured to load at every scope set Cebab passes, including
+  // the `['user']` an untrusted project runs. Gating it on a scope would make
+  // Cebab stop prompting for a server that still loads.
+  push(parsed.mcpServers);
+
+  if (scopes.includes('local')) {
+    let key: string;
+    try {
+      key = fs.realpathSync(projectPath);
+    } catch {
+      key = projectPath;
+    }
+    push(parsed.projects?.[key]?.mcpServers);
+  }
+  return out;
+}
+
+/**
+ * Collect the settings layers for a project, for a GIVEN scope set.
+ *
+ * The scope set must be the one the spawn this resolution gates will
+ * actually pass to the SDK — that is the whole contract. Reading fewer
+ * layers than the spawn loads makes the inspector and, far worse, the
+ * spawn gates (`awaitMcpTrustDecisions` / `awaitEnvInjectionAck`) blind to
+ * rules that then execute.
+ *
+ * Two callers, two scope sets, and they genuinely differ:
+ *   - single-agent — trust-derived, matching `ws/server.ts`'s
+ *     `trusted ? ['user','project','local'] : ['user']`.
+ *   - bus participants — always `['user','project','local']`, because
+ *     `bus/{orchestrator,chain}.ts` register every worker with that literal
+ *     regardless of trust.
+ *
+ * `settingSourcesUsed` on the resolved authority reflects whatever was
+ * passed, so the AuthorityPanel never claims a layer that wasn't applied.
+ */
+function loadSettingsLayers(projectPath: string, scopes: readonly SettingScope[]): SettingsLayer[] {
+  const layers: SettingsLayer[] = [];
+  for (const scope of scopes) {
+    if (scope === 'user') {
+      layers.push({
+        scope: 'user',
+        scopePath: USER_SCOPE_PATH,
+        data: readSettingsFile(USER_SCOPE_PATH),
+      });
+      continue;
+    }
+    const scopePath = path.join(
+      projectPath,
+      '.claude',
+      scope === 'project' ? 'settings.json' : 'settings.local.json',
+    );
+    layers.push({ scope, scopePath, data: readSettingsFile(scopePath) });
   }
   return layers;
 }
+
+/**
+ * The scope set a project's SINGLE-AGENT run would use, derived from Trust.
+ * Mirrors `ws/server.ts`'s `const settingSources = trusted ? [...] : [...]`.
+ * Bus callers must NOT use this — see `BUS_SETTING_SCOPES`.
+ */
+export function trustDerivedScopes(trusted: boolean): readonly SettingScope[] {
+  return trusted ? (['user', 'project', 'local'] as const) : (['user'] as const);
+}
+
+/**
+ * The scope set every bus participant runs under, irrespective of Trust.
+ * Pinned here so the gate and the spawn read from one definition instead of
+ * three hardcoded literals drifting apart — the exact divergence that let an
+ * untrusted worker's project-declared MCP servers and `env:` block load
+ * without ever reaching a gate.
+ *
+ * Keep in sync with the `runner.register({ settingSources: ... })` calls in
+ * `bus/orchestrator.ts` and `bus/chain.ts`.
+ */
+export const BUS_SETTING_SCOPES: readonly SettingScope[] = ['user', 'project', 'local'];
 
 /**
  * Normalize a permissions.allow / .deny entry to the tool name it
@@ -225,7 +523,20 @@ export function detectEnvInjections(layers: SettingsLayer[]): EnvInjection[] {
   for (const layer of layers) {
     if (!layer.data?.env) continue;
     for (const envKey of Object.keys(layer.data.env)) {
-      if (!scrubbed.has(envKey)) continue;
+      // Register H05: this used to be `if (!scrubbed.has(envKey)) continue`,
+      // i.e. only the five Anthropic/cloud-backend switches counted. But this
+      // list is what `session_start_gate.awaitEnvInjectionAck` gates on, and
+      // it returns immediately when the list is EMPTY — so a project
+      // declaring `env: { GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY, NPM_TOKEN }`
+      // produced no gate, no operator prompt and no audit row, while the SDK
+      // layered those values straight into the agent's spawn env.
+      //
+      // `isSensitiveKey` is the redactor's own key heuristic, shared rather
+      // than re-implemented, so a name masked in a transcript is a name
+      // prompted for here. Fail-closed by design: it will also match things
+      // like AUTH_ENABLED or TOKEN_LIMIT, and asking about a non-credential
+      // is a far cheaper mistake than silently shipping a real one.
+      if (!scrubbed.has(envKey) && !isSensitiveKey(envKey)) continue;
       out.push({
         envKey,
         scope: layer.scope,
@@ -357,9 +668,14 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
  * are always `trust: 'trusted'` — Cebab pins them, no operator decision
  * is needed. They skip the lookup.
  *
- * `firstSeenAt` / `lastSeenAt` come from `listForServer` (most-recent
- * first); the oldest decision in the list is firstSeenAt. Absent when
- * the server has never had a recorded decision.
+ * `lastSeenAt` comes from `listForServer` (most-recent first). `firstSeenAt`
+ * comes from `firstDecisionTs`, i.e. the append-only `safety_audit` chain —
+ * NOT from the oldest surviving lookup row, which is a different question.
+ * `mcp_trust` replaces rows it supersedes, so its oldest survivor answers
+ * "the oldest decision not yet overwritten"; on the non-null-sha path that has
+ * never equalled the first decision, and register D09's migration 033 makes the
+ * null-sha path behave the same way. Both absent when the server has never had
+ * a recorded decision.
  */
 export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
   for (const view of views) {
@@ -386,11 +702,16 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
         view.trust = 'pending_tofu';
         break;
     }
-    // Decision history → first/last seen.
+    // Decision history → first/last seen, from the two sources that actually
+    // answer each question: the lookup for "most recent", the audit chain for
+    // "first ever".
     const history = listForServer(view.name, view.originPath);
     if (history.length > 0) {
       view.lastSeenAt = history[0].ts;
-      view.firstSeenAt = history[history.length - 1].ts;
+    }
+    const firstTs = firstDecisionTs(view.name, view.originPath);
+    if (firstTs !== null) {
+      view.firstSeenAt = firstTs;
     }
   }
   return views;
@@ -535,6 +856,16 @@ function bumpDenied(t: ToolUsageTally, name: string): void {
 export type ResolverInput = {
   projectId: number;
   mode: 'cache' | 'probe';
+  /**
+   * Scope set to resolve against. Omit for the trust-derived default, which
+   * is what the AuthorityPanel and the single-agent spawn gate want.
+   *
+   * A BUS spawn gate must pass `BUS_SETTING_SCOPES` — bus participants run
+   * with all three layers regardless of Trust, so resolving trust-derived
+   * here would hand the gates an empty MCP/env list for an untrusted project
+   * whose rules the SDK then loads anyway.
+   */
+  settingSources?: readonly SettingScope[];
   latestSessionStarted?: {
     tools?: string[];
     model?: string;
@@ -562,25 +893,72 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   }
 
   const trusted = project.trusted === 1;
-  const layers = loadSettingsLayers(project.path, trusted);
+  const scopes = input.settingSources ?? trustDerivedScopes(trusted);
+  const layers = loadSettingsLayers(project.path, scopes);
   const settingSourcesUsed = layers.map((l) => l.scope);
 
   // MCP servers: declared shape from layers, overlaid with effective status
   // from the cached session_started (when present).
+  //
+  // `.mcp.json` is merged in FIRST and wins on a name collision, because it is
+  // the declaration that actually loads — a same-named `mcpServers` entry in
+  // `.claude/settings.json` describes a server the CLI never starts (see
+  // `readMcpJsonServers`). Letting the settings row win would anchor the trust
+  // decision to the wrong file and the wrong binary path.
   const declaredMcp = detectMcpServers(layers);
+  // `~/.claude.json` is merged on the same rule and for the same reason: both
+  // it and `.mcp.json` are measured to load, and a settings row of the same
+  // name is a declaration the CLI never starts. `.mcp.json` is applied LAST so
+  // it wins a collision between the two loading files — an arbitrary but fixed
+  // choice (which one the CLI itself prefers on a duplicate name is not
+  // measured), and it preserves the precedence that shipped first.
+  for (const fromLoadingFile of [
+    ...readClaudeJsonServers(project.path, scopes),
+    ...readMcpJsonServers(project.path, scopes),
+  ]) {
+    const clash = declaredMcp.findIndex((d) => d.name === fromLoadingFile.name);
+    if (clash >= 0) declaredMcp.splice(clash, 1);
+    declaredMcp.push(fromLoadingFile);
+  }
   const initMcp = input.latestSessionStarted?.mcpServers ?? [];
   for (const dm of declaredMcp) {
     const init = initMcp.find((m) => m.name === dm.name);
     if (init) dm.status = init.status;
   }
-  // SDK-reported servers that aren't in any settings layer (e.g. the
-  // cebab_bus injection) get appended with scope='cebab-injected'.
+  // SDK-reported servers that aren't in any settings layer get appended.
+  //
+  // `scope: 'cebab-injected'` means "Cebab itself injected this", and
+  // `enrichWithTrustState` grants those `trust: 'trusted'` unconditionally
+  // while `mcp_trust_gate` skips them entirely. So the label must be reserved
+  // for servers Cebab actually injects — otherwise a server merely OBSERVED in
+  // a prior session's `session_started` (e.g. a project-scope one that the
+  // trust-truncated layer read missed) gets laundered into permanently
+  // trusted-and-never-prompted.
+  //
+  // Anything else unattributable stays `scope: 'unknown'` + `trust: 'unknown'`
+  // so it is visible in the panel.
+  //
+  // STILL NOT GATED, and the class that reaches here has shrunk twice. An
+  // appended row has no `originPath`, so `awaitMcpTrustDecisions` skips it at
+  // the `!server.originPath` check, and its `trust: 'unknown'` would hit the
+  // silent-continue case immediately after anyway. (An earlier version of this
+  // comment claimed these "still reach TOFU" — they never did.)
+  //
+  // `readMcpJsonServers` removed project-declared servers from this class;
+  // `readClaudeJsonServers` removed the `claude mcp add` ones at both scopes,
+  // which register x1n.6.23 correctly guessed were the bulk of the remainder.
+  // What is left is servers with NO on-disk declaration Cebab can find —
+  // plugin-provided ones, and anything a future CLI loads from a location not
+  // in the measured table above. Those genuinely have no durable anchor to key
+  // `(server_name, origin_path, binary_sha)` on, so they stay visible-but-
+  // ungated by design rather than by omission.
   for (const im of initMcp) {
     if (!declaredMcp.some((d) => d.name === im.name)) {
+      const isCebabInjected = CEBAB_INJECTED_MCP_NAMES.has(im.name);
       declaredMcp.push({
         name: im.name,
         status: im.status,
-        scope: 'cebab-injected',
+        scope: isCebabInjected ? 'cebab-injected' : 'unknown',
         tools: [],
         trust: 'unknown',
       });
@@ -655,5 +1033,7 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
 export const _testing = {
   loadSettingsLayers,
   readSettingsFile,
+  readMcpJsonServers,
+  readClaudeJsonServers,
   USER_SCOPE_PATH,
 };

@@ -17,6 +17,9 @@ import { initialState, reduce, type AppState } from './store';
 //   6. session_started clears the slice entirely (positive auth signal)
 //   7. session_started is a no-op when slice already empty (identity-
 //      preserve avoids re-render churn on every running turn)
+//   8. register W09: a REPLAYED session_started does NOT clear the slice —
+//      the positive-auth argument only holds for a live handshake
+//   9. …and the control: the next live session_started still does
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -28,10 +31,14 @@ afterEach(() => {
 });
 
 function seedProjectAndSession(): AppState {
-  // The wrapper_error reducer needs an activeProjectId so the per-
-  // session inline error has somewhere to land. Use the standard test
-  // dispatch chain: project_opened → select_project (or rely on
-  // sessionToProject mapping from a prior session_started).
+  // Seeds a project and selects it; despite the name it starts no session,
+  // and does not need to. The comment here used to say the reducer "needs an
+  // activeProjectId so the per-session inline error has somewhere to land" —
+  // that stopped being true in two steps. W16 stopped a sessionless error
+  // inventing a session, and Cebab-da6 stopped it borrowing the active one,
+  // so a sessionless error now lands nowhere by design and the auth slice is
+  // read straight off the early return. Kept as-is because these cases are
+  // about `authExpired`, not about where an error renders.
   let s = reduce(initialState, {
     type: 'server',
     msg: {
@@ -198,6 +205,73 @@ describe('store / auth_expired slice — clear on session_started', () => {
     // authExpired field stays undefined — verify by deep-checking it
     // didn't accidentally get reset to a fresh value.
     let s = seedProjectAndSession();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-1',
+        projectId: 1,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+        permissionMode: 'default',
+      },
+    });
+    expect(s.authExpired).toBeUndefined();
+  });
+
+  test('register W09: a REPLAYED session_started leaves the slice alone', () => {
+    // Case 6's justification — "the SDK only emits session_started after the
+    // OAuth handshake succeeds" — is a statement about a handshake happening
+    // now. A persisted `system/init` row replays as the same envelope and
+    // proves only that the credentials worked whenever this session ran, so
+    // opening an old session must not take a live warning down.
+    let s = seedProjectAndSession();
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'wrapper_error', kind: 'auth_expired', message: 'fail' },
+    });
+    const live = s.authExpired;
+    expect(live).toBeDefined();
+
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_history_start', projectId: 1, sessionId: 'old-1' },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'old-1',
+        projectId: 1,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+        permissionMode: 'default',
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_history_end', projectId: 1, sessionId: 'old-1' },
+    });
+
+    expect(s.authExpired).toBe(live);
+  });
+
+  test('register W09 CONTROL: the next LIVE session_started still clears it', () => {
+    let s = seedProjectAndSession();
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'wrapper_error', kind: 'auth_expired', message: 'fail' },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_history_start', projectId: 1, sessionId: 'old-1' },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_history_end', projectId: 1, sessionId: 'old-1' },
+    });
+    expect(s.authExpired).toBeDefined();
+
     s = reduce(s, {
       type: 'server',
       msg: {

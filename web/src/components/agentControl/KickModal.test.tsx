@@ -38,7 +38,11 @@ type Props = React.ComponentProps<typeof KickModal>;
 
 function render(over: Partial<Props> = {}): { onClose: () => void; onSubmit: Props['onSubmit'] } {
   const onClose = over.onClose ?? vi.fn();
-  const onSubmit = (over.onSubmit ?? vi.fn()) as Props['onSubmit'];
+  // Cebab-u0s: `onSubmit` reports whether the kick reached the server, and the
+  // modal now closes only when it did. The default returns `true` (delivered),
+  // which is the pre-existing behaviour — so every case using this default is
+  // the CONTROL for the dropped-send cases that pass `() => false`.
+  const onSubmit = (over.onSubmit ?? vi.fn(() => true)) as Props['onSubmit'];
   const { onClose: _o, onSubmit: _s, ...rest } = over;
   void _o;
   void _s;
@@ -169,7 +173,7 @@ describe('KickModal — other requires text', () => {
 
 describe('KickModal — dispatch', () => {
   test('Kick click calls onSubmit(projectId, reasonCode, undefined, "drain") then closes', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ projectId: 42, onSubmit, onClose });
     // Default reason topology_repair, no notes
@@ -181,7 +185,7 @@ describe('KickModal — dispatch', () => {
   });
 
   test('Kick with custom reason + notes passes trimmed text', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ projectId: 9, onSubmit });
     act(() => {
       findReasonInput('tool_misuse').click();
@@ -197,7 +201,7 @@ describe('KickModal — dispatch', () => {
   });
 
   test('Kick with "other" + text passes the text', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     render({ projectId: 5, onSubmit });
     act(() => {
       findReasonInput('other').click();
@@ -215,7 +219,7 @@ describe('KickModal — dispatch', () => {
 
 describe('KickModal — dismissal without dispatch', () => {
   test('Cancel calls onClose, not onSubmit', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ onSubmit, onClose });
     act(() => {
@@ -226,7 +230,7 @@ describe('KickModal — dismissal without dispatch', () => {
   });
 
   test('Escape closes the modal (via useModalKeys)', () => {
-    const onSubmit = vi.fn();
+    const onSubmit = vi.fn(() => true);
     const onClose = vi.fn();
     render({ onSubmit, onClose });
     act(() => {
@@ -234,5 +238,34 @@ describe('KickModal — dismissal without dispatch', () => {
     });
     expect(onClose).toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('KickModal — an undelivered kick keeps the dialog (Cebab-u0s)', () => {
+  test('onSubmit returning false leaves the modal open with the typed reason intact', () => {
+    // Of the five verbs this is the terminal one: a kick that quietly "worked"
+    // while the agent kept running is the worst version of the bug. The reason
+    // text is non-empty on purpose — on an empty textarea "the text survived"
+    // holds however the code behaves.
+    const onSubmit = vi.fn(() => false);
+    const onClose = vi.fn();
+    render({ projectId: 3, onSubmit, onClose });
+    const textarea = document.querySelector('.kick-modal-text-input') as HTMLTextAreaElement;
+    act(() => {
+      typeIntoTextarea(textarea, 'ignored three redirects, removing it');
+    });
+    act(() => {
+      findKickBtn().click();
+    });
+    expect(onSubmit).toHaveBeenCalledWith(
+      3,
+      'topology_repair',
+      'ignored three redirects, removing it',
+      'drain',
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(document.querySelector('.kick-modal')).not.toBeNull();
+    const after = document.querySelector('.kick-modal-text-input') as HTMLTextAreaElement;
+    expect(after.value).toBe('ignored three redirects, removing it');
   });
 });

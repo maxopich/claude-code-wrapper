@@ -164,8 +164,15 @@ export function useLogStream(opts: {
     onLoadRef.current(sessionId, 0, pageSize, reveal, scope);
   }, [sessionId, reveal, pageSize, scope]);
 
+  // Cebab-1uk: destructured rather than called as `opts.subscribeServerMsg(…)`
+  // inside the effect. exhaustive-deps asks for the whole `opts` object when a
+  // member is CALLED — the receiver is part of the call — and depending on
+  // `opts` would resubscribe on every render, since callers build it inline.
+  // Pulling the function out narrows the dependency to the thing that actually
+  // matters, which App.tsx now memoises (PR #322).
+  const { subscribeServerMsg } = opts;
   useEffect(() => {
-    const unsub = opts.subscribeServerMsg((msg) => {
+    const unsub = subscribeServerMsg((msg) => {
       if (msg.type === 'session_log_chunk' && msg.sessionId === sessionId) {
         // A chunk that disagrees with our current revealSensitive flag is
         // ALWAYS dropped — even if it's the newer of two concurrent requests
@@ -238,7 +245,7 @@ export function useLogStream(opts: {
       }
     });
     return unsub;
-  }, [sessionId, reveal, expectedTailScope, tailSafetyCap, opts.subscribeServerMsg]);
+  }, [sessionId, reveal, expectedTailScope, tailSafetyCap, subscribeServerMsg]);
 
   function loadMore() {
     if (stateRef.current.loading || !stateRef.current.hasMore) return;

@@ -1,7 +1,20 @@
 import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
 
 export type WsHandle = {
-  send(msg: ClientMsg): void;
+  /**
+   * Register W29: returns whether the message actually went out.
+   *
+   * A socket that is CONNECTING, CLOSING or CLOSED silently swallowed it
+   * before — no return value, no log — while callers had already applied
+   * their optimistic state. The permission card is the case that hurts: it
+   * dispatched `permission_decided` so the buttons flip to "decided: …", then
+   * called this, so a decision made during a reconnect left the operator
+   * looking at "Allowed" while the agent stayed parked in `canUseTool`.
+   *
+   * Callers that carry an operator DECISION must check this and act only on
+   * `true`. Everything else at least gets the console line.
+   */
+  send(msg: ClientMsg): boolean;
   close(): void;
 };
 
@@ -34,6 +47,30 @@ export type WsCloseInfo = {
   wasClean: boolean;
 };
 
+/**
+ * Open a socket and adapt its events into three callbacks.
+ *
+ * **Register W15: after `close()` the handle never calls back.** Closing is
+ * how the caller says it has let go of this socket, and a socket nobody is
+ * holding has no business steering the app.
+ *
+ * It matters because the close event is asynchronous and the effect that owns
+ * the socket re-runs — a Retry click, the auto-retry timer, a StrictMode
+ * remount. Cleanup calls `close()`, the effect immediately opens a *new*
+ * socket, and only then does the old one's `close` fire. Without this flag
+ * that stale event reaches `onClose`, which dispatches `ws_close` (wiping
+ * `liveSessions` / `activeRuns` / `lastBusInstallAt`) and `connection_lost`
+ * over a healthy connection. Closing a socket still in `CONNECTING` makes it
+ * worse: the browser reports code 1006 / `wasClean: false`, which the reason
+ * resolver reads as **server_unreachable** — an overlay announcing the server
+ * is gone while the replacement socket is happily streaming.
+ *
+ * `onMessage` and `onOpen` are gated by the same flag rather than `onClose`
+ * alone. A message already in flight when we closed would otherwise land in
+ * the store behind the live connection's back, and one invariant that can be
+ * stated in a sentence is worth more than three separate judgement calls at
+ * the call site.
+ */
 export function connectWs(opts: {
   url: string;
   onOpen: () => void;
@@ -41,13 +78,20 @@ export function connectWs(opts: {
   onMessage: (msg: ServerMsg) => void;
 }): WsHandle {
   const ws = new WebSocket(opts.url);
-  ws.addEventListener('open', opts.onOpen);
+  // Flipped by `close()` below; every listener checks it first.
+  let released = false;
+  ws.addEventListener('open', () => {
+    if (released) return;
+    opts.onOpen();
+  });
   // CloseEvent guarantees `code` + `wasClean`; `reason` is always
   // present but often the empty string for abnormal closures (1006).
   ws.addEventListener('close', (ev) => {
+    if (released) return;
     opts.onClose({ code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
   });
   ws.addEventListener('message', (ev) => {
+    if (released) return;
     try {
       opts.onMessage(JSON.parse(ev.data) as ServerMsg);
     } catch (err) {
@@ -56,9 +100,26 @@ export function connectWs(opts: {
   });
   return {
     send(msg) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+      // A released handle reports failure rather than transmitting, for the
+      // same reason its listeners are silent: the caller has let go of this
+      // socket. Checked before `readyState` because a just-closed socket can
+      // still read OPEN for a tick.
+      if (released) {
+        console.error(`[ws] dropped ${msg.type}: handle released`);
+        return false;
+      }
+      if (ws.readyState !== WebSocket.OPEN) {
+        // Only the message TYPE is logged. Payloads carry session ids, typed
+        // acknowledgments and operator reason text; a dropped message is a
+        // diagnostic, not a place to spill them into the console.
+        console.error(`[ws] dropped ${msg.type}: socket not open (readyState=${ws.readyState})`);
+        return false;
+      }
+      ws.send(JSON.stringify(msg));
+      return true;
     },
     close() {
+      released = true;
       ws.close();
     },
   };

@@ -119,6 +119,12 @@ export function CountdownChip(props: CountdownChipProps) {
     // typically inlines it); we capture the latest via the closure on
     // every tick anyway, so omitting it is intentional. `now` is an
     // injection seam.
+    //
+    // Cebab-1uk: that paragraph was already the justification; the disable
+    // below just makes the linter agree with it. Listing `onElapsed` would
+    // restart the interval on every parent render and the countdown would
+    // never advance.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetMs, intervalMs, paused]);
 
   const display = formatRemaining(remaining);

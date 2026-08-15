@@ -39,10 +39,9 @@ afterEach(() => {
 describe('migration 028_execute_mode schema shape', () => {
   function cols() {
     return getDb()
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('multi_agent_sessions')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('multi_agent_sessions')`,
+      )
       .all();
   }
 
@@ -61,14 +60,17 @@ describe('migration 028_execute_mode schema shape', () => {
     expect(getMultiAgentSession('s-exec')!.execute_mode).toBe(0);
   });
 
-  test('migration runner is idempotent — re-applying 028 does not throw', () => {
+  // Not an idempotence test, though it used to say so (register C10): the
+  // runner SKIPS a filename already in `schema_migrations`, so the body
+  // never re-executes. No migration here survives a second apply, and none
+  // needs to — the exactly-once contract is asserted in `db.migrations.test.ts`.
+  test('the runner applies 028 exactly once — reopening skips it', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '028_execute_mode.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '028_execute_mode.sql'`,
+      )
       .get();
     expect(sm?.n).toBe(1);
   });

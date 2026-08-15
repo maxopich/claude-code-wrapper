@@ -168,10 +168,9 @@ describe('[security][A] emit (safety)', () => {
 
     // safety_audit row exists with correct sub-code
     const auditCount = getDb()
-      .prepare<
-        [],
-        { c: number }
-      >(`SELECT COUNT(*) AS c FROM safety_audit WHERE reason_code = 'forged_source'`)
+      .prepare<[], { c: number }>(
+        `SELECT COUNT(*) AS c FROM safety_audit WHERE reason_code = 'forged_source'`,
+      )
       .get();
     expect(auditCount?.c).toBe(1);
 
@@ -222,10 +221,9 @@ describe('[security][A] emit (safety)', () => {
     }
     expect(sent).toHaveLength(50);
     const auditCount = getDb()
-      .prepare<
-        [],
-        { c: number }
-      >(`SELECT COUNT(*) AS c FROM safety_audit WHERE reason_code = 'forged_source'`)
+      .prepare<[], { c: number }>(
+        `SELECT COUNT(*) AS c FROM safety_audit WHERE reason_code = 'forged_source'`,
+      )
       .get();
     expect(auditCount?.c).toBe(50);
   });
@@ -243,10 +241,9 @@ describe('[security][A] emit (safety)', () => {
       recorder,
     );
     const row = getDb()
-      .prepare<
-        [],
-        { sticky: number; class: string }
-      >(`SELECT sticky, class FROM notifications LIMIT 1`)
+      .prepare<[], { sticky: number; class: string }>(
+        `SELECT sticky, class FROM notifications LIMIT 1`,
+      )
       .get();
     expect(row?.sticky).toBe(1);
     expect(row?.class).toBe('safety');
@@ -329,10 +326,9 @@ describe('getNotification / markNotificationAcked', () => {
     markNotificationAcked(r.id, 100, 'first', 'reason-1');
     markNotificationAcked(r.id, 200, 'second', 'reason-2');
     const row = getDb()
-      .prepare<
-        [string],
-        { acked_at: number; acked_by: string; acked_reason: string }
-      >(`SELECT acked_at, acked_by, acked_reason FROM notifications WHERE id = ?`)
+      .prepare<[string], { acked_at: number; acked_by: string; acked_reason: string }>(
+        `SELECT acked_at, acked_by, acked_reason FROM notifications WHERE id = ?`,
+      )
       .get(r.id)!;
     expect(row.acked_at).toBe(100); // first ack wins
     expect(row.acked_by).toBe('first');

@@ -1,0 +1,54 @@
+-- Move the pause-on-dangerous gate's state from the SESSION onto the MUTATION.
+--
+-- Migration 011 put two columns on multi_agent_sessions: `pending_mutation_id`
+-- (which single mutation is awaiting the operator) and `mutations_acknowledged`
+-- (has the operator ever clicked Continue). Both are session-scoped, and that
+-- scope is the bug — three of them, from the 1 Aug 2026 register:
+--
+--   B06  The gate requires `pending_mutation_id IS NULL`. Workers run genuinely
+--        in parallel (bus/runner.ts: "Different agents stay fully parallel"), so
+--        while worker A is paused, worker B's `rm -rf` reads a non-null slot and
+--        EXECUTES with no operator approval.
+--   B07  The gate also requires `mutations_acknowledged = 0`, and the first
+--        Continue sets it session-wide — one approval disarms the toggle for the
+--        rest of the run, though it still reads as on.
+--   B05  The mutation pause also set `awaiting_continue`, which is the R-B
+--        recovery state, so the operator saw two Continue buttons. The recovery
+--        one cleared `awaiting_continue` without touching `pending_mutation_id`,
+--        leaving the gate permanently off and the worker stranded.
+--
+-- `multi_agent_mutations` is already per-agent, already persisted, and already
+-- replayed on R-A re-attach and R-B reconstruct, so the pause belongs on the row
+-- it is about.
+--
+--   0  ordinary logged mutation, never gated
+--   1  PENDING   — this agent's turn is halted, awaiting the operator
+--   2  APPROVED  — operator clicked Continue; the grant has not been used yet
+--   3  CONSUMED  — the grant let the replayed call through
+--
+-- Why states 2 and 3 exist at all: resuming a pause is a REPLAY. The gate halts
+-- a worker by throwing out of the mutation tap, which kills its SDK turn;
+-- Continue re-delivers the captured prompt, and the fresh turn re-issues the
+-- same dangerous command. Under the old session-wide `mutations_acknowledged`
+-- that replay was covered by the blanket acknowledgment. Re-arming per mutation
+-- removes the blanket, so the approval has to survive as a one-shot grant keyed
+-- to (agent, tool_name, summary) — otherwise the session livelocks:
+-- pause → Continue → replay → pause → … The grant is deliberately narrow: one
+-- command, one agent, once. A reworded command in the replayed turn pauses again
+-- showing its actual text, and every cycle still needs a human click.
+--
+-- The two superseded columns on multi_agent_sessions are LEFT IN PLACE and are
+-- no longer read or written. Dropping a column rewrites the table on older
+-- SQLite builds; the dead weight is two integers per session row, and keeping
+-- them means an operator poking at an old DB still sees what the previous model
+-- recorded. If a future migration reclaims them, it should do both at once.
+
+ALTER TABLE multi_agent_mutations ADD COLUMN pause_state INTEGER NOT NULL DEFAULT 0;
+
+-- The gate runs on EVERY dangerous tool call, and asks two questions per call:
+-- "does this agent already have a pending pause?" and "does this agent have an
+-- unconsumed grant for this exact command?". Both are (session, agent,
+-- pause_state) lookups; without this index they are a scan of every mutation the
+-- session has ever recorded, which is the hottest table in a long bus run.
+CREATE INDEX idx_multi_agent_mutations_pause
+  ON multi_agent_mutations(session_id, agent_name, pause_state);

@@ -103,10 +103,7 @@ export function HopBudgetInput({
       <span className="ma-hop-budget-input-label-text">
         Hop budget
         {isShowingTemplateTag && (
-          <span
-            className="ma-hop-budget-input-source-tag"
-            data-testid="hop-budget-source-tag"
-          >
+          <span className="ma-hop-budget-input-source-tag" data-testid="hop-budget-source-tag">
             {' '}
             (from template)
           </span>

@@ -255,6 +255,61 @@ describe('searchSessions — scope', () => {
       searchSessions({ query: 'epsilon', scope: 'this_project', projectId: p1 }).results,
     ).toHaveLength(1);
   });
+
+  // Register D11. The two cases above are named for exactly the guarantee that
+  // was broken, and both pass a projectId — the one value at which the bug
+  // cannot happen. Omitting it used to drop the project predicate entirely and
+  // return every project's hits, under a reply still echoing `this_project`.
+  test('this_project with NO projectId returns nothing, not every project [security]', () => {
+    const p1 = seedProject('p1');
+    const p2 = seedProject('p2');
+    seedSessionWithText(p1, 's1', 'unscoped term zeta');
+    seedSessionWithText(p2, 's2', 'unscoped term zeta');
+
+    // Control: the term really is in both projects, so an empty result below
+    // means "restricted", not "nothing matched".
+    expect(searchSessions({ query: 'zeta', scope: 'all_projects' }).results).toHaveLength(2);
+
+    expect(searchSessions({ query: 'zeta', scope: 'this_project' })).toEqual({
+      results: [],
+      truncated: false,
+    });
+  });
+
+  test('this_project with NO projectId excludes bus hits too [security]', () => {
+    const p1 = seedProject('p1');
+    const busA = 'bus-a';
+    createMultiAgentSession(busA, 'orchestrator');
+    addParticipant(busA, p1, 'orchestrator');
+    appendMultiAgentEvent(busA, 'orchestrator', 'user', 'final', 'unscoped eta body');
+
+    // Control: reachable when the scope allows it.
+    expect(searchSessions({ query: 'eta', scope: 'all_projects' }).results).toHaveLength(1);
+
+    expect(searchSessions({ query: 'eta', scope: 'this_project' }).results).toEqual([]);
+  });
+
+  test('an explicitly undefined projectId is treated the same as an absent one', () => {
+    const p1 = seedProject('p1');
+    seedSessionWithText(p1, 's1', 'unscoped term theta');
+
+    expect(
+      searchSessions({ query: 'theta', scope: 'this_project', projectId: undefined }).results,
+    ).toEqual([]);
+  });
+
+  test('all_projects is unaffected by an absent projectId', () => {
+    const p1 = seedProject('p1');
+    const p2 = seedProject('p2');
+    seedSessionWithText(p1, 's1', 'wide term iota');
+    seedSessionWithText(p2, 's2', 'wide term iota');
+
+    expect(
+      searchSessions({ query: 'iota', scope: 'all_projects' })
+        .results.map((r) => r.sessionId)
+        .sort(),
+    ).toEqual(['s1', 's2']);
+  });
 });
 
 describe('searchSessions — multi-agent stream', () => {

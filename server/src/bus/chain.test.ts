@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createChainRouter, resumeChainSession, startChainSession } from './chain.js';
 import { computeSessionPaths } from './paths.js';
-import { CEBAB_SOURCE, SINK_RECIPIENT, type ResolvedAgent } from './runtime.js';
+import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import {
   getLiveSession,
   hasLiveSession,
@@ -17,7 +17,10 @@ import {
 import {
   createMultiAgentSession,
   getMultiAgentSession,
+  getPendingRetry,
+  listAgentSessions,
   listMultiAgentEvents,
+  setPendingRetry,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import type { BusEvent } from './runner.js';
@@ -92,7 +95,9 @@ describe('createChainRouter routing', () => {
 
     expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith('reviewer', 'do review');
+    // The 3rd argument is the pinned `ev.source` — the router's statement of
+    // who wrote these bytes, which is what the H08/F16 fence keys off.
+    expect(deliver).toHaveBeenCalledWith('reviewer', 'do review', 'coder');
     // coder's hop archived (empty incoming prompt → reply.md = the text)
     expect(
       fs.readFileSync(path.join(paths.iterationDir('iter-1', 'coder'), 'reply.md'), 'utf8'),
@@ -127,6 +132,95 @@ describe('createChainRouter routing', () => {
     expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
     expect(deliver).not.toHaveBeenCalled();
+  });
+
+  // Register B13. The archive's prompt map was written only by `handleEvent`,
+  // which never sees the run's originating prompt — Cebab wrote that one, so it
+  // arrives through `forwardCebabEvent`. Every chain run therefore archived
+  // participant[0]'s hop with an empty `prompt.md`.
+  //
+  // Note what kept this invisible: the routing test above archives a hop
+  // WITHOUT ever forwarding a prompt first, so its empty prompt.md is correct
+  // for its fixture. The defect needed an input no existing case supplied.
+  describe('B13 — the originating prompt reaches the archive', () => {
+    function promptMd(paths: ReturnType<typeof setup>['paths'], agent: string): string {
+      return fs.readFileSync(path.join(paths.iterationDir('iter-1', agent), 'prompt.md'), 'utf8');
+    }
+
+    test("participant[0]'s prompt.md holds the initial prompt, not ''", () => {
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'prompt',
+        text: 'audit the auth flow',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'done' }));
+
+      expect(promptMd(paths, 'coder')).toBe('audit the auth flow');
+    });
+
+    test("an 'intro' event does NOT become the archived prompt", () => {
+      // The briefing and the CLAUDE.md marker are both `kind: 'intro'` and both
+      // addressed to the participant. Seeding on destination alone would put
+      // the whole bus-protocol briefing into prompt.md, and the CLAUDE.md
+      // marker would then overwrite THAT — so the guard is on `kind`.
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'prompt',
+        text: 'audit the auth flow',
+      });
+      router.forwardCebabEvent({
+        ts: 2,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'intro',
+        text: 'you are on a bus, call bus_send to reply',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'done' }));
+
+      expect(promptMd(paths, 'coder')).toBe('audit the auth flow');
+    });
+
+    test('a routed peer message still wins for the DOWNSTREAM participant', () => {
+      // Anti-vacuity: the seed must not shadow `handleEvent`'s own write, which
+      // is what every participant after the first is archived from.
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'prompt',
+        text: 'audit the auth flow',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'please review' }));
+      router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'looks fine' }));
+
+      expect(promptMd(paths, 'coder')).toBe('audit the auth flow');
+      expect(promptMd(paths, 'reviewer')).toBe('please review');
+    });
+
+    test('a prompt addressed to a NON-participant is not recorded', () => {
+      // `_sink` and `user` are legitimate destinations that own no archive dir;
+      // writing one would create a stray folder outside the participant set.
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: USER_RECIPIENT,
+        kind: 'prompt',
+        text: 'not an agent',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'done' }));
+
+      expect(fs.existsSync(paths.iterationDir('iter-1', USER_RECIPIENT))).toBe(false);
+      // And coder's archive is untouched by it.
+      expect(promptMd(paths, 'coder')).toBe('');
+    });
   });
 
   test('detach silences the WS sink but keeps persisting; rebind restores it', () => {
@@ -193,8 +287,8 @@ describe('createChainRouter — hop-budget enforcement', () => {
     // Hops 1 and 2 fired deliver; hop 3 was the boundary trip (its deliver
     // call was refused by the budget check), hop 4 was dropped by `ended`.
     expect(deliver).toHaveBeenCalledTimes(2);
-    expect(deliver).toHaveBeenNthCalledWith(1, 'reviewer', 'h1');
-    expect(deliver).toHaveBeenNthCalledWith(2, 'coder', 'h2');
+    expect(deliver).toHaveBeenNthCalledWith(1, 'reviewer', 'h1', 'coder');
+    expect(deliver).toHaveBeenNthCalledWith(2, 'coder', 'h2', 'reviewer');
 
     // Teardown ran exactly once with reason='stopped'.
     expect(onEnded).toHaveBeenCalledTimes(1);
@@ -243,6 +337,77 @@ describe('createChainRouter — hop-budget enforcement', () => {
     // No synthetic error event was emitted.
     const persisted = listMultiAgentEvents(SESSION_ID);
     expect(persisted.every((p) => p.kind !== 'error' || p.source !== CEBAB_SOURCE)).toBe(true);
+  });
+
+  // Register B25: `hopsCount += 1` used to sit INSIDE the persist `try`, so a
+  // failing write left the counter frozen while the event was still forwarded
+  // and delivered. The brake stopped counting exactly when things were going
+  // wrong, and the session ran unbounded.
+  //
+  // The failure is injected without mocks: `multi_agent_events.session_id`
+  // has a FK to `multi_agent_sessions(id)` and `foreign_keys` is ON, so a
+  // router built on a session id nobody created makes every
+  // `appendMultiAgentEvent` throw — the same shape as a disk error, through
+  // the same catch.
+  describe('a failing persist must not stall the brake', () => {
+    function setupUnpersistable(hopBudget: number) {
+      const workspace = path.join(tmpRoot, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const paths = computeSessionPaths('session-that-was-never-created', workspace);
+      const onEnded = vi.fn();
+      const deliver = vi.fn();
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const router = createChainRouter({
+        sessionId: 'session-that-was-never-created',
+        iterationId: 'iter-1',
+        agentNames: AGENTS,
+        paths,
+        onEvent: vi.fn(),
+        onEnded,
+        deliver,
+        hopBudget,
+      });
+      return { router, onEnded, deliver, errSpy };
+    }
+
+    test('the counter still advances and the budget still trips', () => {
+      const { router, onEnded, deliver, errSpy } = setupUnpersistable(2);
+
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'h1' }));
+      router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'h2' }));
+
+      // Persistence really did fail — otherwise this test proves nothing
+      // about the failure path.
+      expect(errSpy).toHaveBeenCalled();
+      expect(listMultiAgentEvents('session-that-was-never-created')).toHaveLength(0);
+
+      // Hop 1 delivered; hop 2 hit the cap and was refused; teardown ran.
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(onEnded).toHaveBeenCalledWith('session-that-was-never-created', 'stopped', null);
+      errSpy.mockRestore();
+    });
+
+    test('forwardCebabEvent counts too, even when its row does not land', () => {
+      // Budget 3 against TWO cebab events + one agent hop, deliberately: with
+      // a smaller budget the agent hop's own increment could reach the cap on
+      // its own, and the test would pass whether or not `forwardCebabEvent`
+      // counted. Only 2 (cebab) + 1 (hop) = 3 trips it.
+      const { router, onEnded, deliver, errSpy } = setupUnpersistable(3);
+      for (const agent of AGENTS) {
+        router.forwardCebabEvent({
+          ts: 1,
+          source: CEBAB_SOURCE,
+          destination: agent,
+          kind: 'intro',
+          text: `briefing for ${agent}`,
+        });
+      }
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'work' }));
+
+      expect(deliver).not.toHaveBeenCalled();
+      expect(onEnded).toHaveBeenCalledWith('session-that-was-never-created', 'stopped', null);
+      errSpy.mockRestore();
+    });
   });
 });
 
@@ -395,7 +560,9 @@ describe('resumeChainSession (registry-based, R-A)', () => {
       handle: originalHandle,
       rebind: (s) => {
         bound = s;
+        return 1; // register B01: rebind mints a sink-ownership epoch
       },
+      sendServerMsg: () => {},
     });
 
     const onEvent = vi.fn();
@@ -426,6 +593,7 @@ describe('resumeChainSession (registry-based, R-A)', () => {
         continueThroughMutation: vi.fn(),
       },
       rebind: vi.fn(),
+      sendServerMsg: () => {},
     });
     expect(
       await resumeChainSession({ sessionId: SESSION_ID, onEvent: vi.fn(), onEnded: vi.fn() }),
@@ -500,6 +668,74 @@ describe('startChainSession — project CLAUDE.md injection', () => {
     unregisterLiveSession(handle.sessionId);
   });
 
+  test('a completed chain turn persists the participant --resume checkpoint', async () => {
+    // Orchestrator mode has always written these rows; chain mode never did,
+    // so `multi_agent_agent_sessions` was empty for every chain session. Two
+    // consequences, both independent of chain R-B (still unbuilt): the
+    // checkpoint a reconstruction would need is unrecoverable after the fact,
+    // and `computeRecoveryContext` reads a missing row as `?? 0`, scoring
+    // every chain participant "possibly interrupted".
+    const workspace = path.join(tmpRoot, 'ws-ckpt');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: string[] = [];
+    const participants = [participant('ckpt-a', null), participant('ckpt-b', null)];
+
+    const handle = await startChainSession({
+      participants,
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: fakeRunnerFactory(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Only participant[0] has taken a turn (the chain head); the checkpoint
+    // is the session id the faked runner reported on its `result` message.
+    const rows = listAgentSessions(handle.sessionId);
+    expect(rows.map((r) => r.agent_name)).toEqual(['ckpt-a']);
+    expect(rows[0]!.cli_session_id).toBe('s1');
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  test('a completed chain turn bills the hop to the agent and the session', async () => {
+    // F7: before this, an N-agent run recorded no cost anywhere — the only
+    // capacity signal was the hop count, which weighs a 2k-token routing turn
+    // the same as a 180k-token analysis turn.
+    const workspace = path.join(tmpRoot, 'ws-cost');
+    fs.mkdirSync(workspace, { recursive: true });
+    function costFactory() {
+      return (): Runner => {
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield {
+            type: 'result',
+            subtype: 'success',
+            session_id: 's1',
+            total_cost_usd: 0.125,
+          } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      };
+    }
+    const handle = await startChainSession({
+      participants: [participant('cost-a', null), participant('cost-b', null)],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: costFactory(),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const rows = listAgentSessions(handle.sessionId);
+    expect(rows.map((r) => [r.agent_name, r.cost_usd])).toEqual([['cost-a', 0.125]]);
+    expect(getMultiAgentSession(handle.sessionId)!.total_cost_usd).toBeCloseTo(0.125, 10);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
   test('participant without a CLAUDE.md is briefed normally, no marker', async () => {
     const workspace = path.join(tmpRoot, 'ws2');
     fs.mkdirSync(workspace, { recursive: true });
@@ -568,6 +804,130 @@ describe('startChainSession — project CLAUDE.md injection', () => {
       currentTool: 'Read',
     });
 
+    unregisterLiveSession(handle.sessionId);
+  });
+});
+
+// [security] Register H01 — bus session folders used the ambient umask.
+//
+// `<workspaceRoot>/.cebab-session-<id>/` accumulates every hop's prompt.md and
+// reply.md plus the transcript log — the same conversation content the
+// `~/.cebab` transcripts hold. The mode on this ONE directory is the whole
+// protection: everything written beneath it inherits the traversal gate, so
+// the per-file writes underneath deliberately stay at the ambient mode.
+//
+// Scope note: only folders Cebab CREATES are tightened. Pre-existing session
+// folders are left alone — they live in the operator's workspace root, and
+// silently re-permissioning directories in their tree could break a
+// deliberately shared setup. Windows-gated as auth.test.ts:32 is.
+describe('[security] chain session folder permissions', () => {
+  function nullRunnerFactory() {
+    return (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  test('the session folder is created owner-only', async () => {
+    if (process.platform === 'win32') return;
+    const workspace = path.join(tmpRoot, 'ws-perm');
+    fs.mkdirSync(workspace, { recursive: true });
+    const mk = (name: string): ResolvedAgent => {
+      const dir = path.join(tmpRoot, `p-${name}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const proj = upsertProject(name, dir);
+      return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+    };
+
+    const handle = await startChainSession({
+      participants: [mk('a1'), mk('a2')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: nullRunnerFactory(),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    const folder = computeSessionPaths(handle.sessionId, workspace).folder;
+    expect(fs.statSync(folder).mode & 0o777).toBe(0o700);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+});
+
+// Cebab-wsq. `createChainRouter` exposes `onTurnSucceeded`, and the router
+// tests in `chain.router_drop.test.ts` call it directly — which proves what
+// the router does when a turn ends, and nothing at all about whether a turn
+// ending ever calls it. The whole "park a stalled chain" behaviour hangs off
+// `deliver`'s `.then`, one line in `startChainSession`, and chain mode had no
+// coverage of it (`orchestrator.test.ts` covers the orchestrator's copy).
+// Without this the fix could be inert in production with every router test
+// green.
+//
+// The observable is the pre-existing "success clears" rule: a slot the
+// resolving agent owns is nulled. Seeding it while the turn is still in
+// flight is what makes the clear attributable to the turn ending.
+describe('startChainSession — a resolving turn reaches the router', () => {
+  test('deliverTurn resolving calls onTurnSucceeded', async () => {
+    const workspace = path.join(tmpRoot, 'ws-turn-wiring');
+    fs.mkdirSync(workspace, { recursive: true });
+    const mk = (name: string): ResolvedAgent => {
+      const dir = path.join(tmpRoot, `tw-${name}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const proj = upsertProject(name, dir);
+      return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+    };
+
+    // The turn blocks on `gate` so the test can seed the slot mid-flight.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const gatedRunnerFactory = (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        await gate;
+        yield { type: 'result', subtype: 'success', session_id: 'tw1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+
+    const handle = await startChainSession({
+      participants: [mk('head'), mk('tail')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: gatedRunnerFactory,
+    });
+    await new Promise((r) => setImmediate(r));
+
+    setPendingRetry(handle.sessionId, {
+      agentName: 'head',
+      prompt: 'bytes',
+      reason: 'an earlier failure',
+      ts: 1,
+      errorEventId: 1,
+    });
+    // The turn is still blocked, so nothing has cleared it yet. Without this
+    // half the assertion below could pass on a slot that never existed.
+    expect(getPendingRetry(handle.sessionId)).not.toBeNull();
+
+    release();
+    // Poll to a deadline rather than counting ticks: how many turns of the
+    // event loop the generator + `.then` take is not a constant, and a fixed
+    // count is a timeout in disguise that goes flaky or vacuous per platform.
+    const deadline = Date.now() + 3000;
+    while (getPendingRetry(handle.sessionId) !== null && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(getPendingRetry(handle.sessionId)).toBeNull();
+
+    await handle.stop('stopped');
     unregisterLiveSession(handle.sessionId);
   });
 });

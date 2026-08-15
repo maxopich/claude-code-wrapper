@@ -106,9 +106,15 @@ describe('redactJsonlLine', () => {
 
 const TEST_HOST = '127.0.0.1';
 
+/** Register H09: the Vite dev origin is not allow-listed by default — the
+ *  launcher that STARTS that web server declares it. `startServer()`
+ *  declares it here, standing in for `npm run dev`. */
+const DECLARED_WEB_ORIGIN = 'http://localhost:5173';
+
 let tmpRoot: string;
 let originalDataDir: string;
 let originalPort: number;
+let originalAllowedOrigins: string[];
 let server: http.Server;
 let serverPort: number;
 let token: string;
@@ -151,6 +157,8 @@ beforeEach(async () => {
   _resetOperatorIdCache();
   getDb(); // applies migrations including 015_safety_audit
   token = initAuthToken();
+  originalAllowedOrigins = [...config.allowedOrigins];
+  config.allowedOrigins.push(DECLARED_WEB_ORIGIN);
   await startServer();
 });
 
@@ -161,6 +169,8 @@ afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   config.port = originalPort;
+  config.allowedOrigins.length = 0;
+  config.allowedOrigins.push(...originalAllowedOrigins);
   _resetOperatorIdCache();
   vi.restoreAllMocks();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -189,6 +199,8 @@ function request(opts: {
   origin?: string;
   hostHeader?: string;
   extraHeaders?: Record<string, string>;
+  /** Register S03: the CORS preflight is an OPTIONS request. */
+  method?: 'GET' | 'OPTIONS';
 }): Promise<RawResponse> {
   const headers: Record<string, string> = {};
   if (opts.origin !== undefined) headers['Origin'] = opts.origin;
@@ -200,7 +212,7 @@ function request(opts: {
         host: TEST_HOST,
         port: serverPort,
         path: opts.path,
-        method: 'GET',
+        method: opts.method ?? 'GET',
         headers,
       },
       (res) => {
@@ -235,7 +247,7 @@ describe('[security] /session-log :: origin + host + token gates', () => {
     writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: 'wrong.host:9999',
     });
     expect(res.status).toBe(403);
@@ -246,7 +258,7 @@ describe('[security] /session-log :: origin + host + token gates', () => {
     writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
     const res = await request({
       path: `/session-log/sess-1`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -257,7 +269,7 @@ describe('[security] /session-log :: origin + host + token gates', () => {
     writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
     const res = await request({
       path: `/session-log/sess-1?token=garbage`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -283,7 +295,7 @@ describe('/session-log :: redacted format (default)', () => {
     ]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(200);
@@ -303,7 +315,7 @@ describe('/session-log :: redacted format (default)', () => {
     writeJsonl('sess-r', [{ apiKey: 'sk-leak' }]);
     const res = await request({
       path: `/session-log/sess-r?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(200);
@@ -315,7 +327,7 @@ describe('/session-log :: redacted format (default)', () => {
     writeJsonl('sess-known', [{ type: 'assistant' }]);
     const res = await request({
       path: `/session-log/sess-known?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(String(res.headers['content-disposition'])).toContain(
@@ -329,7 +341,7 @@ describe('[security] /session-log :: raw format', () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-leak' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -340,7 +352,7 @@ describe('[security] /session-log :: raw format', () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-leak' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
       extraHeaders: { [RAW_ACK_HEADER]: 'not-the-magic-value' },
     });
@@ -352,7 +364,7 @@ describe('[security] /session-log :: raw format', () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-leak-me' }]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
       extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
     });
@@ -369,7 +381,7 @@ describe('/session-log :: input validation', () => {
     // 'passwd' as :sid. The regex matches alphanumerics-only; this fails.
     const res = await request({
       path: `/session-log/abc%2Fdef?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(400);
@@ -380,7 +392,7 @@ describe('/session-log :: input validation', () => {
     writeJsonl('sess-1', [{}]);
     const res = await request({
       path: `/session-log/sess-1?token=${token}&format=html`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(400);
@@ -389,7 +401,7 @@ describe('/session-log :: input validation', () => {
   test('returns 404 when the on-disk log does not exist', async () => {
     const res = await request({
       path: `/session-log/sess-missing?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(404);
@@ -404,7 +416,7 @@ describe('[security] /session-log :: forensic safety_audit', () => {
       .get()!.c;
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(200);
@@ -416,7 +428,9 @@ describe('[security] /session-log :: forensic safety_audit', () => {
       .prepare<
         [],
         { kind: string; reason_code: string; session_id: string | null; payload_json: string }
-      >('SELECT kind, reason_code, session_id, payload_json FROM safety_audit ORDER BY ts DESC LIMIT 1')
+      >(
+        'SELECT kind, reason_code, session_id, payload_json FROM safety_audit ORDER BY ts DESC LIMIT 1',
+      )
       .get()!;
     expect(row.kind).toBe('session.exported');
     expect(row.reason_code).toBe('exported_redacted');
@@ -430,16 +444,15 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     writeJsonl('sess-raw', [{ apiKey: 'x' }]);
     const res = await request({
       path: `/session-log/sess-raw?token=${token}&format=raw`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
       extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
     });
     expect(res.status).toBe(200);
     const row = getDb()
-      .prepare<
-        [],
-        { reason_code: string; payload_json: string }
-      >("SELECT reason_code, payload_json FROM safety_audit WHERE session_id = 'sess-raw'")
+      .prepare<[], { reason_code: string; payload_json: string }>(
+        "SELECT reason_code, payload_json FROM safety_audit WHERE session_id = 'sess-raw'",
+      )
       .get()!;
     expect(row.reason_code).toBe('exported_raw');
     expect(JSON.parse(row.payload_json).format).toBe('raw');
@@ -453,7 +466,7 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     // Bad token → 403 before any audit attempt.
     const res = await request({
       path: `/session-log/sess-1?token=garbage`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(403);
@@ -470,11 +483,247 @@ describe('[security] /session-log :: forensic safety_audit', () => {
     });
     const res = await request({
       path: `/session-log/sess-1?token=${token}`,
-      origin: 'http://localhost:5173',
+      origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
     expect(res.status).toBe(500);
     expect(res.body).not.toContain('sk-leak-me');
     expect(spy).toHaveBeenCalled();
+  });
+});
+
+// Register S03. The raw format requires the custom `x-cebab-acknowledge-raw`
+// header, which is NOT CORS-safelisted, so a browser fetch preflights first.
+// There was no OPTIONS route and no `Access-Control-Allow-Headers`, so the
+// preflight failed and the raw-export privilege path was unreachable from the
+// very web origin it exists for. curl worked, which is how it passed review.
+//
+// `Content-Disposition` was set but never exposed, so even a successful export
+// left the page unable to read the filename it was being sent.
+describe('[security] /session-log :: CORS preflight + exposed headers', () => {
+  test('an OPTIONS preflight from an allowed origin permits the ack header', async () => {
+    const res = await request({
+      method: 'OPTIONS',
+      path: `/session-log/sess-1?token=${token}`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(204);
+    expect(res.headers['access-control-allow-origin']).toBe('http://localhost:5173');
+    // The whole point: without this the browser never sends the real request.
+    expect(String(res.headers['access-control-allow-headers']).toLowerCase()).toContain(
+      RAW_ACK_HEADER,
+    );
+    expect(String(res.headers['access-control-allow-methods'])).toContain('GET');
+  });
+
+  test('the preflight is NOT a looser way in — a bad origin is refused', async () => {
+    // A preflight route that skipped the origin gate would hand an attacker
+    // page the CORS grant the GET withholds.
+    const res = await request({
+      method: 'OPTIONS',
+      path: `/session-log/sess-1?token=${token}`,
+      origin: 'https://evil.example',
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers['x-cebab-reject-reason']).toBe('origin_not_allowed');
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  test('the preflight applies the same Host gate as the GET', async () => {
+    const res = await request({
+      method: 'OPTIONS',
+      path: `/session-log/sess-1?token=${token}`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: 'wrong.host:9999',
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers['x-cebab-reject-reason']).toBe('host_not_allowed');
+  });
+
+  test('the GET exposes Content-Disposition so the page can read the filename', async () => {
+    writeJsonl('sess-1', [{ type: 'assistant', text: 'hi' }]);
+    const res = await request({
+      path: `/session-log/sess-1?token=${token}`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain('attachment');
+    expect(String(res.headers['access-control-expose-headers'])).toContain('Content-Disposition');
+  });
+
+  test('the raw export actually completes with the ack header present', async () => {
+    // End-to-end for the path the preflight unblocks: header accepted, raw
+    // (unredacted) bytes served.
+    writeJsonl('sess-1', [{ apiKey: 'sk-raw-visible' }]);
+    const res = await request({
+      path: `/session-log/sess-1?token=${token}&format=raw`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: defaultHostHeader(),
+      extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('sk-raw-visible');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Register S05: an export that is cancelled mid-stream must release its file
+// descriptor. Both flavors leaked — the raw path because `pipe` un-pipes but
+// does not destroy the source, the redacted path because it waited for a
+// `drain` that a destroyed socket never emits.
+//
+// The assertion is on the READ STREAM's own `destroyed` flag, captured by
+// spying on `fs.createReadStream`. That is the fd's lifetime directly, not a
+// proxy for it.
+// ---------------------------------------------------------------------------
+
+describe('[security] /session-log :: cancelled downloads release the descriptor', () => {
+  /** A log big enough that the socket buffer fills and the server is still
+   *  mid-stream when the client hangs up. */
+  function writeBigJsonl(sid: string, lines = 4000): void {
+    const filler = 'y'.repeat(2048);
+    writeJsonl(
+      sid,
+      Array.from({ length: lines }, (_, i) => ({ type: 'assistant', i, text: filler })),
+    );
+  }
+
+  /** Capture every read stream the endpoint opens. */
+  function captureStreams(): fs.ReadStream[] {
+    const opened: fs.ReadStream[] = [];
+    const real = fs.createReadStream.bind(fs);
+    vi.spyOn(fs, 'createReadStream').mockImplementation(((...args: Parameters<typeof real>) => {
+      const s = real(...args);
+      opened.push(s);
+      return s;
+    }) as typeof fs.createReadStream);
+    return opened;
+  }
+
+  /** Issue a GET, abort as soon as the first byte lands, resolve after the
+   *  server has had a tick to react. */
+  function requestThenAbort(reqPath: string, extraHeaders: Record<string, string> = {}) {
+    return new Promise<void>((resolve, reject) => {
+      const req = http.request(
+        {
+          host: TEST_HOST,
+          port: serverPort,
+          path: reqPath,
+          method: 'GET',
+          headers: { Host: defaultHostHeader(), ...extraHeaders },
+        },
+        (res) => {
+          res.once('data', () => {
+            req.destroy();
+            setTimeout(resolve, 250);
+          });
+          res.on('error', () => {
+            /* expected on abort */
+          });
+        },
+      );
+      req.on('error', (err: NodeJS.ErrnoException) => {
+        // ECONNRESET is our own destroy coming back; anything else is real.
+        if (err.code === 'ECONNRESET') return;
+        reject(err);
+      });
+      req.end();
+    });
+  }
+
+  test('a cancelled RAW export destroys its read stream', async () => {
+    writeBigJsonl('sess-raw');
+    const opened = captureStreams();
+    await requestThenAbort(`/session-log/sess-raw?token=${token}&format=raw`, {
+      [RAW_ACK_HEADER]: RAW_ACK_VALUE,
+    });
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.destroyed).toBe(true);
+  });
+
+  test('a cancelled REDACTED export destroys its read stream', async () => {
+    writeBigJsonl('sess-red');
+    const opened = captureStreams();
+    await requestThenAbort(`/session-log/sess-red?token=${token}`);
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.destroyed).toBe(true);
+  });
+
+  test('a COMPLETED redacted export still delivers every line', async () => {
+    // Anti-vacuity for both cases above: a teardown that fires too eagerly
+    // would truncate an ordinary download, and "the stream is destroyed"
+    // would still pass.
+    writeJsonl('sess-ok', [
+      { type: 'assistant', text: 'first' },
+      { type: 'assistant', text: 'middle' },
+      { type: 'assistant', text: 'last' },
+    ]);
+    const res = await request({
+      path: `/session-log/sess-ok?token=${token}`,
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('first');
+    expect(res.body).toContain('middle');
+    expect(res.body).toContain('last');
+    expect(res.body.trimEnd().split('\n')).toHaveLength(3);
+  });
+
+  test('a COMPLETED raw export still delivers the whole body', async () => {
+    writeJsonl('sess-ok-raw', [{ marker: 'alpha' }, { marker: 'omega' }]);
+    const res = await request({
+      path: `/session-log/sess-ok-raw?token=${token}&format=raw`,
+      hostHeader: defaultHostHeader(),
+      extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('alpha');
+    expect(res.body).toContain('omega');
+  });
+
+  test('a backpressured redacted export parks at most one drain listener', async () => {
+    // `rl.pause()` does not discard the lines readline has already buffered,
+    // so without a guard every one of them parked its own `once('drain')`.
+    // Node reports that itself once the count passes ten — which is both the
+    // symptom and the cleanest way to observe it from outside the handler.
+    writeBigJsonl('sess-drain');
+    const warnings: string[] = [];
+    const onWarning = (w: Error): void => {
+      warnings.push(w.name);
+    };
+    process.on('warning', onWarning);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            host: TEST_HOST,
+            port: serverPort,
+            path: `/session-log/sess-drain?token=${token}`,
+            method: 'GET',
+            headers: { Host: defaultHostHeader() },
+          },
+          (res) => {
+            // Deliberately do not read: the socket buffer fills, every write
+            // returns false, and the server sits in the backpressure branch.
+            res.pause();
+            setTimeout(() => {
+              req.destroy();
+              setTimeout(resolve, 150);
+            }, 400);
+          },
+        );
+        req.on('error', (err: NodeJS.ErrnoException) => {
+          if (err.code === 'ECONNRESET') return;
+          reject(err);
+        });
+        req.end();
+      });
+    } finally {
+      process.off('warning', onWarning);
+    }
+    expect(warnings).not.toContain('MaxListenersExceededWarning');
   });
 });

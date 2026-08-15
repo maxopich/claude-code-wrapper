@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { MockOptions, RunOptions, Runner } from '../runner/index.js';
-import { AgentRunner, DELEGATE_ONLY_DISALLOWED, isDelegationAllowedTool } from './runner.js';
+import {
+  AgentRunner,
+  BUS_SEND_TOOL,
+  DELEGATE_ONLY_DISALLOWED,
+  isDelegationAllowedTool,
+} from './runner.js';
 
 // --- helpers (mirror runner.test.ts) -------------------------------------
 
@@ -61,15 +66,21 @@ async function captureTurn(spec: { name: string; toolPolicy?: 'delegate-only' })
 }
 
 describe('isDelegationAllowedTool', () => {
-  test('only bus_send (both server names) and AskUserQuestion are allowed', () => {
+  test('[security] only the canonical bus_send and AskUserQuestion are allowed', () => {
     expect(isDelegationAllowedTool('AskUserQuestion')).toBe(true);
-    expect(isDelegationAllowedTool('mcp__cebab_bus__bus_send')).toBe(true);
-    // Deprecation alias for the `bus` → `cebab_bus` rename must still pass.
-    expect(isDelegationAllowedTool('mcp__bus__bus_send')).toBe(true);
+    expect(isDelegationAllowedTool(BUS_SEND_TOOL)).toBe(true);
+    expect(BUS_SEND_TOOL).toBe('mcp__cebab_bus__bus_send');
     for (const t of ['Edit', 'Write', 'Bash', 'Read', 'Task', 'Glob', 'Grep', 'WebFetch']) {
       expect(isDelegationAllowedTool(t)).toBe(false);
     }
-    // Must not be spoofable by a look-alike suffix on an arbitrary MCP tool.
+    // Exact match, not `endsWith('__bus_send')`. The suffix test existed only
+    // because Cebab briefly registered the tool under two server keys; with
+    // the `bus` alias gone it would admit ANY MCP server exposing a tool of
+    // that name — including one from the operator's own user-scope config,
+    // which is a second, unpinned bus reachable by the one agent whose whole
+    // containment is "you may only call bus_send".
+    expect(isDelegationAllowedTool('mcp__bus__bus_send')).toBe(false);
+    expect(isDelegationAllowedTool('mcp__evil__bus_send')).toBe(false);
     expect(isDelegationAllowedTool('mcp__evil__bus_send_now')).toBe(false);
   });
 });
@@ -101,16 +112,13 @@ describe('delegate-only tool policy', () => {
     ]);
   });
 
-  test('canUseTool allows bus_send (both names) and still parks AskUserQuestion', async () => {
+  test('canUseTool allows the canonical bus_send and still parks AskUserQuestion', async () => {
     const { opts, violations } = await captureTurn({
       name: 'orchestrator',
       toolPolicy: 'delegate-only',
     });
 
-    for (const tool of ['mcp__cebab_bus__bus_send', 'mcp__bus__bus_send']) {
-      const res = await callGate(opts, tool);
-      expect(res.behavior).toBe('allow');
-    }
+    expect((await callGate(opts, BUS_SEND_TOOL)).behavior).toBe('allow');
 
     // AskUserQuestion is on the allowlist, so it bypasses the delegate-deny and
     // hits the existing park-for-operator branch (returns the answer as `deny`).

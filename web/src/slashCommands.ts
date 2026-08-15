@@ -84,9 +84,7 @@ export const SLASH_COMMANDS: ReadonlyArray<SlashCommand> = [
  * SDK payload is plain string names today (per `session_started`); the
  * description is left empty pending E2 / a future `/help` probe.
  */
-export function buildSdkSlashCommands(
-  sdkNames: readonly string[] | undefined,
-): SlashCommand[] {
+export function buildSdkSlashCommands(sdkNames: readonly string[] | undefined): SlashCommand[] {
   if (!sdkNames || sdkNames.length === 0) return [];
   const cebabSet = new Set(SLASH_COMMANDS.map((c) => c.command));
   const out: SlashCommand[] = [];
@@ -111,10 +109,7 @@ export function buildSdkSlashCommands(
  * command + description, debounced ≤50ms" — debouncing is the caller's
  * responsibility; this function is pure.
  */
-export function filterSlashCommands(
-  list: readonly SlashCommand[],
-  query: string,
-): SlashCommand[] {
+export function filterSlashCommands(list: readonly SlashCommand[], query: string): SlashCommand[] {
   const q = query.trim().toLowerCase();
   if (q.length === 0) return [...list];
   return list.filter((c) => {

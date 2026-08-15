@@ -113,7 +113,11 @@ describe('forensicViewerReducer', () => {
 });
 
 // Probe components — expose the context value to tests.
-function StateProbe({ onState }: { onState: (s: ReturnType<typeof useForensicViewerState>) => void }) {
+function StateProbe({
+  onState,
+}: {
+  onState: (s: ReturnType<typeof useForensicViewerState>) => void;
+}) {
   const s = useForensicViewerState();
   onState(s);
   return null;

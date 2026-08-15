@@ -1,51 +1,183 @@
-# Baseline ignore-list for OSV-Scanner. Matches the existing
-# `npm audit --audit-level=high` policy in ci.yml — medium/low advisories
-# are reported but don't block. Each entry has an `ignoreUntil` so this
-# file forces a re-evaluation in 3 months if Dependabot hasn't already
-# retired the entry by bumping the affected dep.
+# Shared advisory allowlist. Read by BOTH required security checks:
+#
+#   - the `OSV scan` workflow, natively (this is osv-scanner's own config)
+#   - the `Audit dependencies` step in ci.yml, via `scripts/audit-gate.mjs`
+#
+# npm audit has no per-advisory ignore of its own, so the gate script wraps
+# `npm audit --json` and applies these entries. That keeps one reviewable
+# place to excuse an advisory instead of two mechanisms with different
+# powers. Severity policy is unchanged: high/critical block, medium/low are
+# reported but don't. Each entry has an `ignoreUntil` so this file forces a
+# re-evaluation if Dependabot hasn't already retired the entry by bumping
+# the affected dep — and the date is enforced, not decorative: once it
+# lapses, the audit gate fails until the entry is fixed or re-dated.
 #
 # When Dependabot opens a PR to bump one of these packages past its
 # `FIXED VERSION`, REMOVE the entry rather than extending the date.
 #
-# Inventory captured at PR #39 (T2.2, 2026-05-14):
-#   @anthropic-ai/sdk 0.81.0 → 0.91.1
-#   hono              4.12.17 → 4.12.18
-#   ip-address        10.1.0 → 10.1.1
-#   brace-expansion   5.0.5  → 5.0.6   (added 2026-05-18, newly disclosed)
-#   qs                6.14.2 → 6.15.2  (added 2026-05-22, newly disclosed)
-# All transitives; no direct package.json change required.
-
-[[IgnoredVulns]]
-id = "GHSA-p7fg-763f-g4gf"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "@anthropic-ai/sdk 0.81.0 (transitive of @anthropic-ai/claude-agent-sdk). Medium (CVSS 4.8). Fix in 0.91.1. Awaiting upstream bump."
-
-[[IgnoredVulns]]
-id = "GHSA-hm8q-7f3q-5f36"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "hono 4.12.17 (transitive). Medium (CVSS 3.8). Fix in 4.12.18."
-
-[[IgnoredVulns]]
-id = "GHSA-p77w-8qqv-26rm"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "hono 4.12.17 (transitive). Medium (CVSS 5.3). Fix in 4.12.18."
-
-[[IgnoredVulns]]
-id = "GHSA-qp7p-654g-cw7p"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "hono 4.12.17 (transitive). Medium (CVSS 4.3). Fix in 4.12.18."
-
-[[IgnoredVulns]]
-id = "GHSA-v2v4-37r5-5v8g"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "ip-address 10.1.0 (transitive). Medium (CVSS 5.3). Fix in 10.1.1."
-
-[[IgnoredVulns]]
-id = "GHSA-jxxr-4gwj-5jf2"
-ignoreUntil = "2026-08-14T00:00:00Z"
-reason = "brace-expansion 5.0.5 (dev, transitive). Medium (CVSS 6.5, ReDoS). Fix in 5.0.6. Disclosed 2026-05-18; awaiting Dependabot bump."
-
-[[IgnoredVulns]]
-id = "GHSA-q8mj-m7cp-5q26"
-ignoreUntil = "2026-08-22T00:00:00Z"
-reason = "qs 6.14.2 (transitive of express 5.2.1 → body-parser 2.2.2). Medium (CVSS 6.3). Fix in 6.15.2. Disclosed 2026-05-22; awaiting express upstream bump."
+# PRUNE THIS FILE IN THE SAME PR THAT LANDS THE FIXING BUMP. A dead entry is
+# an excuse nobody re-reviews, and it is the one state neither gate reports
+# loudly: OSV-Scanner prints `osv-scanner.toml has unused ignores:` and then
+# exits 0, and `scripts/audit-gate.mjs` prints a `note:` line on an otherwise
+# passing run.
+#
+# That last paragraph is a correction. This file asserted the opposite in
+# four places — "OSV-Scanner fails the job on UNUSED ignores" — and the
+# bump-and-delete-together rule was justified by it. Measured 2026-08-08
+# against osv-scanner 2.4.0, with two genuinely unused entries and no
+# unfiltered findings: "No issues found", exit 0. The two CI runs cited as
+# proof (30242087493 and 30255443117, both 2026-07-27) each ALSO carried real
+# unfiltered vulnerabilities — six and seven of them — so the exit 1 was
+# those, and the unused-ignore notice merely shared the log. Upstream
+# documents exit 0 = no findings, 1 = findings, and offers no flag for unused
+# entries.
+#
+# Caveat, because the measurement is not quite the deployed thing: CI pins
+# the action at v2.3.8 and the run above was the 2.4.0 CLI. The supportable
+# claim is "undocumented, false at 2.4.0, and the runs cited as proof do not
+# show it" — not "proven false at the pinned version". The rule itself is
+# unchanged; only its justification moved, from a CI constraint to hygiene.
+#
+# Inventory refreshed 2026-08-02 (register C32). The original PR #39 batch
+# (T2.2, 2026-05-14: @anthropic-ai/sdk, hono, ip-address, brace-expansion
+# 5.0.5, qs) was fully retired by upstream bumps — all seven entries had
+# gone unused, which is what was failing the scan.
+#
+# The brace-expansion hold (GHSA-mh99-v99m-4gvg, high) is retired here: it
+# was a supply-chain cooldown wait, not an unfixed CVE, and 5.0.8 cleared
+# `.npmrc`'s min-release-age on 2026-07-30. The lockfile bump 5.0.7 → 5.0.8
+# lands in this same commit, exactly as the entry's own reason instructed.
+# (The commit message gave "OSV-Scanner hard-fails on unused ignores" as the
+# reason it HAD to be one commit; see the correction above — it is the right
+# practice for a reason that turned out not to be that one.) 5.0.9 existed
+# but was still inside the 7-day cooldown until 2026-08-06; 5.0.8 was the
+# fixed version at the time.
+#
+# Inventory refreshed 2026-08-06. The GHSA-frvp-7c67-39w9 hold
+# (@hono/node-server serve-static path traversal) is RETIRED here: the
+# lockfile bump in this same commit moves @hono/node-server past it, so the
+# entry went unused and had to go with it. (Same correction as above: the
+# stated reason was OSV hard-failing, which it does not.)
+#
+# Three entries are added, all for the SAME reason and none an unfixed CVE:
+# a patched version exists upstream but is still inside `.npmrc`'s
+# `min-release-age=7` supply-chain cooldown, so npm refuses to resolve it
+# ("No matching version found … with a date before …"). Overriding the
+# cooldown to clear an audit warning would trade a real supply-chain control
+# for a green check, which is the wrong direction. The dates below are set
+# just past each package's eligibility so the entry expires almost
+# immediately — the audit gate enforces `ignoreUntil`, so a forgotten excuse
+# fails the build rather than lingering.
+#
+# NOTE ON SEVERITY, because the two consumers of this file disagree. The
+# `Audit dependencies` gate blocks on high/critical only, and reports
+# medium/low. OSV-Scanner's action exits 1 on ANY finding it does not filter,
+# regardless of severity — so a MEDIUM advisory fails that required check
+# while sailing through the audit gate. GHSA-8j4g-w8fx-2239 below is such a
+# case; it needs an entry here even though the severity policy would not
+# block on it. That is not a policy change, it is the price of one shared
+# allowlist for two tools with different thresholds.
+#
+# Inventory refreshed 2026-08-08. One entry ADDED (nanoid), for the same
+# cooldown reason as the three below and by the same rule the file already
+# states: the patched version exists but `.npmrc`'s min-release-age=7 has not
+# elapsed, and overriding that to clear an audit warning trades a real
+# supply-chain control for a green check.
+#
+# ALSO NOW DUE, and deliberately NOT done here: brace-expansion 5.0.9 became
+# eligible 2026-08-06T10:00Z and fast-uri 3.1.5 on 2026-08-07T09:16Z, so both
+# of those entries are ready to be bumped-and-retired per their own reason
+# text. That is dependency work, not this PR's subject; it is tracked
+# separately so it lands as a reviewable lockfile change rather than riding
+# along inside a formatting commit.
+#
+# Then, while CI was running, three MORE hono advisories landed
+# (GHSA-54fx / GHSA-79qm / GHSA-f23p) — all fixed by the same 4.12.34 bump
+# the existing hono entry is already waiting on. They are added at the
+# bottom, and they are why this file is filtering seven IDs for what is
+# really four packages: OSV-Scanner filters by advisory ID, not by package.
+#
+# Inventory refreshed 2026-08-08 (second pass). The two entries the previous
+# note deferred are RETIRED here, with their lockfile bumps in this same
+# commit: brace-expansion 5.0.8 → 5.0.9 (GHSA-rgw5-rvv9-x895) and fast-uri
+# 3.1.4 → 3.1.5 (GHSA-7p8r-x3mc-p8w7). Both cooldowns had elapsed, so this is
+# that deferred dependency work landing on its own, exactly as planned.
+#
+# hono 4.12.33 is deliberately NOT taken. It cleared the cooldown on
+# 2026-08-07 and a blanket `npm install` reaches for it, but all four hono
+# advisories below are fixed in 4.12.34 — so 4.12.33 retires nothing and only
+# adds churn ahead of the real bump. `npm update <pkg> --package-lock-only`
+# keeps a retirement PR to the packages it is actually retiring.
+#
+# At this point the allowlist was empty, which is the intended resting state —
+# every excuse here is meant to be temporary. (This paragraph used to open
+# with the file's live entry-count claim; that claim now lives at the bottom,
+# where the current count is, because `scripts/osvAllowlist.test.mjs` reads the
+# FIRST one it finds and a historical count in the middle of the narrative
+# would shadow it.)
+#
+# Inventory refreshed 2026-08-11. All five remaining holds are RETIRED here
+# with their lockfile bumps in this same commit, exactly as each entry's own
+# reason text instructed:
+#
+#   GHSA-2v37-7h3g-55p8                   nanoid 3.3.16 → 3.3.17
+#   GHSA-8j4g-w8fx-2239, GHSA-54fx-42gc-7vw4,
+#   GHSA-79qm-7rj5-m7r9, GHSA-f23p-vx2j-j53r   hono   4.12.32 → 4.13.0
+#
+# Every one was a supply-chain cooldown wait, not an unfixed CVE. Both
+# cooldowns elapsed on 2026-08-10 (hono's fix at 02:36Z, nanoid's at 10:39Z);
+# this landed on 2026-08-11.
+#
+# hono went to 4.13.0, NOT the 4.12.34 the entries named, and that is a
+# deliberate departure from their instruction. Reasoning, so the next reader
+# does not "correct" it back:
+#
+#   - The four advisories are fixed in 4.12.34; 4.13.0 is above it, so all
+#     four are retired either way.
+#   - The entries were written 2026-08-08, when 4.13.0 (published
+#     2026-08-03T21:54Z) was still inside the 7-day cooldown and could not be
+#     resolved at all. Their "do not take 4.13.x" sat alongside "do not take
+#     4.12.33", whose stated reason — it retires nothing — does not apply to
+#     4.13.0.
+#   - `npm update hono nanoid --package-lock-only` resolves to 4.13.0 on its
+#     own: hono is a transitive peer under `^4.11.4` / `^4`. Forcing exactly
+#     4.12.34 would need an `overrides` pin (a permanent artifact to express a
+#     one-day preference) or a hand-written integrity hash. Both are worse
+#     than the version they would buy.
+#   - The resulting diff is six lines: version/resolved/integrity for the two
+#     packages. No package added, removed, or re-resolved — which is the check
+#     the "keeps a retirement PR to the packages it is actually retiring" rule
+#     above is really asking for.
+#
+# nanoid stopped at 3.3.17, the version its entry named. 3.3.18 existed
+# (published 2026-08-07T16:41Z) but was inside the cooldown until
+# 2026-08-14T16:41Z, so npm would not resolve it then — and it appeared to fix
+# nothing outstanding. (Both halves of that last clause expired: see the
+# correction immediately below, and the retirement note at the end of the
+# file.)
+#
+# ^ THAT LAST CLAUSE IS NO LONGER TRUE, and the way it stopped being true is
+# worth reading before you trust any other retirement note in this file.
+# GHSA-2v37-7h3g-55p8's affected range has since been WIDENED to `<3.3.18`, so
+# the very version chosen to retire the hold is now the version the advisory
+# names. The sentence was accurate the day it was written and became false
+# with nobody editing it, because what changed was upstream metadata, not
+# anything in this repo. A retired hold can come back under the SAME id: the
+# "bump and DELETE this entry together" rule retires the entry, not the id.
+#
+# If you are adding the first new entry after this line, keep the shape the
+# retired ones used: name the FIXED VERSION, the publish timestamp, the date
+# the cooldown elapses, and set `ignoreUntil` just past it so a forgotten
+# excuse fails the build instead of lingering.
+#
+# Inventory refreshed 2026-08-14, twice: once for the re-fire described above,
+# and again the same day to retire it.
+#
+# Zero entries remain. (The count claim has to start its own line: the gate in
+# `scripts/osvAllowlist.test.mjs` anchors on `^#\s*<word> entr…`, and it caught
+# this exact mistake when the sentence was folded into the line above.)
+#
+# The re-fire was retired at 16:41Z on 2026-08-14 — the minute 3.3.18 cleared
+# `min-release-age=7` — by `npm update nanoid --package-lock-only`, which
+# resolved exactly 3.3.18, and by deleting the entry in the same commit. The
+# empty state is the intended resting state, not an oversight.

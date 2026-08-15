@@ -3,6 +3,7 @@ import type { ServerMsg } from '@cebab/shared/protocol';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { getProject, getProjectBusTrust, setProjectBusTrust } from '../repo/projects.js';
 import { chooseAgentName } from './install.js';
+import { abandonPendingGates, MAX_PENDING_GATES } from '../gate_abandon.js';
 
 /**
  * Cluster G Phase 4 (D6/D11): TOFU gate for bus install.
@@ -44,20 +45,25 @@ import { chooseAgentName } from './install.js';
  *                                    block on the operator's
  *                                    `bus_trust_decision` reply.
  *
- * The gate's promise never times out: if the operator never replies,
- * the install caller hangs. A WS disconnect upstream blows away the
- * `Conn` (and with it `busTrustGate.pending`), which is the only
- * structural way out. This matches the MCP gate's
- * `awaitMcpTrustDecisions` contract and the spec's "the install does
- * not happen until the operator decides" framing.
+ * The gate's promise never times out: if the operator never replies, the
+ * install caller waits. The escape hatch is a WS disconnect, which runs
+ * `abandonPendingBusGates` from `ws.on('close')` and rejects everything
+ * parked. This matches the MCP gate's `awaitMcpTrustDecisions` contract and
+ * the spec's "the install does not happen until the operator decides".
+ *
+ * Register B20: this used to say the disconnect "blows away the `Conn` (and
+ * with it `busTrustGate.pending`), which is the only structural way out."
+ * False, and in the worst direction — dropping a reference does not settle a
+ * promise, so the awaiting install stayed suspended forever and its async
+ * frame kept the `Conn` alive. There was no way out at all. The drain makes
+ * the sentence true, rather than the sentence describing the drain.
  */
 
 /**
- * Per-Conn gate state. Lives on the Conn (in `ws/server.ts`) so the
- * pending Map clears on disconnect (any parked decisions die with their
- * session; a reconnect re-prompts), and the `denyOnce` set scopes to
- * one connection (operator's "no, just this once" doesn't bleed into
- * the next browser session).
+ * Per-Conn gate state. Lives on the Conn (in `ws/server.ts`), which drains
+ * `pending` explicitly on close; the `denyOnce` set scopes to one connection
+ * (operator's "no, just this once" doesn't bleed into the next browser
+ * session).
  */
 export type BusTrustGateState = {
   /**
@@ -80,6 +86,13 @@ export type PendingBusTrustEntry = {
   projectId: number;
   /** Resolved by the `bus_trust_decision` handler. */
   resolve: (decision: BusTrustDecisionKind) => void;
+  /**
+   * Register B20: the parked promise's `reject`, used only by
+   * `abandonPendingBusGates` when the operator's connection goes away.
+   * Separate from `resolve`, which carries a decision and drives
+   * `applyDecision`'s persistence.
+   */
+  abandon: (err: Error) => void;
 };
 
 /** The three operator decisions the gate accepts. */
@@ -175,10 +188,20 @@ export async function awaitBusTrustDecision(
     contextSessionId: input.contextSessionId,
   };
 
-  const decisionPromise = new Promise<BusTrustDecisionKind>((resolve) => {
+  // H15: fail closed rather than park an unbounded number of decisions.
+  if (input.gate.pending.size >= MAX_PENDING_GATES) {
+    console.warn(
+      `[bus-gate] refusing project ${input.projectId}: ${MAX_PENDING_GATES} decisions already parked on this connection`,
+    );
+    recordSilentRefusal(input.projectId, 'gate_backlog', input.contextSessionId);
+    return { approved: false, reason: 'deny_once' };
+  }
+
+  const decisionPromise = new Promise<BusTrustDecisionKind>((resolve, reject) => {
     input.gate.pending.set(pendingId, {
       pendingId,
       projectId: input.projectId,
+      abandon: reject,
       resolve: (decision) => {
         // Drop the entry before persistence so a throw inside the
         // applier can't leak a dangling pending registration.
@@ -196,6 +219,20 @@ export async function awaitBusTrustDecision(
     decision,
     contextSessionId: input.contextSessionId,
   });
+}
+
+/**
+ * Register B20: reject every install decision still parked on this
+ * connection. Called from `ws.on('close')`. Returns how many were released.
+ *
+ * The awaiting `awaitBusTrustDecision` throws rather than returning an
+ * outcome, so the install does not proceed — which is the point. No audit row
+ * is written: nothing was decided and nothing was refused; the operator was
+ * asked and then left. The parked prompt's own `bus_auto_install_pending`
+ * envelope is already the record that the question was raised.
+ */
+export function abandonPendingBusGates(gate: BusTrustGateState, reason: string): number {
+  return abandonPendingGates(gate.pending, 'bus-trust', reason);
 }
 
 /**
@@ -283,7 +320,15 @@ function applyDecision(args: {
  */
 function recordSilentRefusal(
   projectId: number,
-  reasonCode: 'denied_remember' | 'deny_once' | 'project_not_found' | 'agent_name_unavailable',
+  reasonCode:
+    | 'denied_remember'
+    | 'deny_once'
+    | 'project_not_found'
+    | 'agent_name_unavailable'
+    // H15: the per-connection parked-decision ceiling was hit. Its own code
+    // rather than a reused `deny_once`, because the operator denied nothing —
+    // they were never asked, and a forensic reader needs to tell those apart.
+    | 'gate_backlog',
   contextSessionId: string | null,
 ): void {
   appendSafetyAudit({

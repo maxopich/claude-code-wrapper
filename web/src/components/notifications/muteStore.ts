@@ -54,7 +54,24 @@ export type MuteEntry = {
 
 export type MuteMap = Record<string, MuteEntry>;
 
-export type MuteScope = 'session' | 'hour' | 'forever';
+/**
+ * Register W24: `'session'` is gone.
+ *
+ * It encoded a tab-lifetime mute as `until: Date.now()`, and `isMuted`
+ * requires `Date.now() < entry.until` — false the instant it was written. It
+ * never suppressed a single notification; worse, the first notification after
+ * it hit the lazy-expire branch and DELETED the entry, so the manage-mutes
+ * panel could not show the operator what they had chosen either. The doc
+ * comment called it "best-effort"; it was zero-effort.
+ *
+ * Deleted rather than implemented. `addMute` has exactly one caller
+ * (`NotificationStack`, with `'hour'`) and the toast offers exactly one
+ * affordance ("Mute this notification type for 1 hour"), so the in-memory
+ * session set the register offers as the alternative would be shipping a
+ * feature no UI exposes. Removing the member makes reintroducing it without
+ * an implementation a `tsc` error.
+ */
+export type MuteScope = 'hour' | 'forever';
 
 /**
  * Resolve a notification envelope to its mute key. Mute keys are the
@@ -126,11 +143,12 @@ export function isMuted(env: Pick<NotificationEnvelope, 'dedupeKey' | 'severity'
 
 /**
  * Add a mute for a specific prefix. `scope` determines `until`:
- *   - 'session': until next page reload (sessionStorage-equivalent;
- *     we encode this as `until: Date.now()` so a fresh load reads it
- *     as expired). Cross-tab semantics are best-effort.
  *   - 'hour': 1 hour from now.
  *   - 'forever': until manually unmuted.
+ *
+ * Every scope this accepts produces an `until` that `isMuted` can actually
+ * satisfy — see the note on `MuteScope` for the one that could not and was
+ * removed.
  *
  * Returns the entry written, or `null` if the operation was refused
  * (the panel never reaches here for error/danger, but defense in depth).
@@ -143,13 +161,8 @@ export function addMute(
   const map = readMutes();
   const key = muteKeyFor(env);
   const now = Date.now();
-  // 'session' scope: best-effort — until the tab reloads. We store a
-  // marker that won't match `isMuted` after reload (since `now` will be
-  // greater on the next page). Tab-life session mutes need an
-  // in-memory cache; Phase 5 ships the simpler model.
   const HOUR_MS = 60 * 60 * 1000;
-  const until: number | 'forever' =
-    scope === 'forever' ? 'forever' : scope === 'hour' ? now + HOUR_MS : now;
+  const until: number | 'forever' = scope === 'forever' ? 'forever' : now + HOUR_MS;
   const entry: MuteEntry = { until, ts: now };
   map[key] = entry;
   writeMutes(map);
