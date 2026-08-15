@@ -15,7 +15,7 @@ The security-critical _claims_ stay here on purpose — the live permission post
 
 A browser-based wrapper around the local `claude` CLI. The user has many agent projects under some workspace root (e.g. `~/agents/<name>/` — set per-install via the Settings modal, stored in SQLite); this app lists them in a sidebar, runs each as its own `cwd`, and renders the streamed output as a chat UI with inline tool-approval cards. Single-user, bound to `127.0.0.1`. **No Anthropic API** — it uses the user's existing Claude subscription via `~/.claude/.credentials.json`.
 
-**Cross-platform (macOS, Linux, Windows — no WSL).** Both the single-agent path and the multi-agent bus are pure in-process Agent SDK `query()` calls — no tmux, no shell scripts, no OS-specific IPC — so one codebase behaves identically on all three. CI runs `ubuntu-latest` + `windows-latest`. See `~/.claude/plans/now-it-s-time-to-lazy-castle.md` for the bus re-architecture (tmux → pure SDK) reasoning and decisions.
+**Cross-platform (macOS, Linux, Windows — no WSL).** Both the single-agent path and the multi-agent bus are pure in-process Agent SDK `query()` calls — no tmux, no shell scripts, no OS-specific IPC — so one codebase behaves identically on all three. CI runs `ubuntu-latest` + `windows-2022` — the Windows image is **pinned, not `-latest`**, because node-gyp does not recognise the newer image's toolchain ([`ci.yml`](.github/workflows/ci.yml) carries the full reason and the revert condition). See `~/.claude/plans/now-it-s-time-to-lazy-castle.md` for the bus re-architecture (tmux → pure SDK) reasoning and decisions.
 
 ## Architecture
 
