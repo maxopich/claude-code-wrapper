@@ -10,7 +10,8 @@ Single-user, bound to `127.0.0.1`, uses your existing Claude subscription via
 Runs natively on **macOS, Linux, and Windows** (no WSL). The multi-agent bus
 is a pure in-process SDK runtime — no tmux, no shell scripts — so the single
 codebase behaves the same on all three. CI exercises both `ubuntu-latest` and
-`windows-latest`.
+`windows-2022` — the Windows image is pinned rather than rolling, for a reason
+[`ci.yml`](.github/workflows/ci.yml) states along with the revert condition.
 
 ## Setup
 
@@ -139,13 +140,28 @@ installs and scripted launches.
 ## Switching projects
 
 The sidebar lists every subdirectory under the active workspace folder. Each
-project's `cwd` is set to its directory when the agent spawns, so the
-project's `CLAUDE.md`, `.claude/skills/`, and `.claude/mcp.json` all auto-load.
+project's `cwd` is set to its directory when the agent spawns. Whether the
+project's own configuration is _loaded_ from that directory depends on the
+Trust toggle below — it is not automatic.
 
-The "asks" / "trusted" toggle per project flips between `permissionMode:
-"default"` (every restricted tool prompts) and `"acceptEdits"` (file edits +
-common filesystem commands auto-approve). For a single-session override there's
-also an inline pill above the chat that flips the same modes mid-flight.
+The "asks" / "trusted" toggle per project controls **two** things, and the
+second one is the security-relevant half:
+
+- **`permissionMode`** — `"default"` (every restricted tool prompts) or
+  `"acceptEdits"` (file edits + common filesystem commands auto-approve).
+- **`settingSources`** — `['user']` when untrusted, and all three scopes when
+  trusted. Only a trusted project loads its own `CLAUDE.md`, `.claude/skills/`,
+  `.claude/settings*.json` (hooks, env injectors, MCP servers) and project-root
+  `.mcp.json`. Flipping a project to trusted authorises all of that to run.
+
+What Trust does **not** scope: MCP servers declared in `~/.claude.json`'s
+top-level `mcpServers` (`claude mcp add --scope user`) load under `['user']`
+too. Cebab gates those on first use instead. See
+[`server/src/repo/project_authority.ts`](server/src/repo/project_authority.ts),
+which reads exactly what the spawn will load and records what was measured.
+
+For a single-session override there's also an inline pill above the chat. It
+flips `permissionMode` only — `settingSources` is fixed when the run starts.
 
 ## Contributing
 

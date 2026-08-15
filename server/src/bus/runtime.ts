@@ -349,9 +349,13 @@ export function renderChainBriefing(opts: {
  * not a parser. Symmetric in style with `renderChainBriefing`. Pure
  * function with no IO so it's straightforward to unit-test.
  *
- * Note: the orchestrator's CLAUDE.md template documents the same
- * capability-handshake flow at a higher level; this prompt is the
- * per-session reminder with the concrete `bus_send` example.
+ * This is the orchestrator's ONLY prompt — register X24. A note here used to
+ * say an orchestrator `CLAUDE.md` template documented the same
+ * capability-handshake flow "at a higher level", implying a second source of
+ * orchestrator instructions to keep in sync. There is no such template: the
+ * orchestrator runs `settingSources: ['user']` in an empty Cebab-owned cwd, so
+ * the generated `CLAUDE.md` / `comm.md` were dead and were removed. Whatever
+ * this function does not say, the orchestrator is not told.
  */
 export function renderRosterPrompt(opts: {
   workers: Array<{ agentName: string; projectName: string }>;

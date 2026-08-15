@@ -121,18 +121,26 @@ jobs:
         # Pure-Node orchestrator (src/ci_smoke.ts): spawns the MOCK=1
         # server, polls /health over fetch, runs ws_smoke, tears it down.
         # Hermetic (isolated HOME/USERPROFILE) and shell-free, so it runs
-        # identically on ubuntu-latest and windows-latest — no `&` / `nc` /
-        # `timeout` / `kill` (the old Linux-only bash pipeline is gone).
+        # identically on Linux and Windows — no `&` / `nc` / `timeout` /
+        # `kill` (the old Linux-only bash pipeline is gone). Named by OS,
+        # not by image: this is a portability claim, and it does not stop
+        # being true when the matrix repins.
         run: npm --workspace server exec tsx src/ci_smoke.ts
 
   # Stable required-status-check context. Branch protection on `main`
   # requires the bare context "Lint, Typecheck, Test", but the matrix
-  # above reports per-OS contexts ("... (ubuntu-latest)" / "...
-  # (windows-latest)"), so the bare name is never produced and the
+  # above reports one context per matrix VALUE ("... (ubuntu-latest)" /
+  # "... (windows-2022)"), so the bare name is never produced and the
   # required check hangs forever in "Expected — waiting for status".
   # This 1-step aggregator emits exactly that context and is green iff
   # every matrix leg passed — so the gate keeps working even if the
   # matrix gains/renames OSes later, with no branch-protection edits.
+  #
+  # Register X12: the example above named the rolling image until 2026-08-15.
+  # Context names are generated from the matrix VALUES, so pinning the matrix
+  # silently falsified the one sentence that explains why this job exists —
+  # and the "gains/renames OSes later" line is precisely the case that had
+  # already happened. Keep the example in step with the matrix.
   required:
     name: Lint, Typecheck, Test
     needs: [quality]
