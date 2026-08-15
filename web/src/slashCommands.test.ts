@@ -68,7 +68,12 @@ describe('buildSdkSlashCommands', () => {
 
 describe('filterSlashCommands', () => {
   const sample: SlashCommand[] = [
-    { command: '/compact', label: '/compact', description: 'Compact the conversation', source: 'cebab' },
+    {
+      command: '/compact',
+      label: '/compact',
+      description: 'Compact the conversation',
+      source: 'cebab',
+    },
     { command: '/cost', label: '/cost', description: 'Show session cost', source: 'cebab' },
     { command: '/skills', label: '/skills', description: 'List available skills', source: 'cebab' },
   ];

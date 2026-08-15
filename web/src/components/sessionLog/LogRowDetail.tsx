@@ -8,6 +8,7 @@
  * which is more complex than v1 needs.
  */
 import type { LogRow } from '@cebab/shared/protocol';
+import { copyToClipboard } from '../../clipboard';
 
 export function LogRowDetail(props: { row: LogRow }) {
   const { row } = props;
@@ -157,9 +158,8 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+// U42: was a raw `navigator.clipboard` call. The shared helper adds the
+// execCommand fallback, so an insecure origin degrades instead of failing.
 function copyText(text: string): void {
-  navigator.clipboard?.writeText(text).catch(() => {
-    // Clipboard API can fail silently in some contexts (insecure origin,
-    // permissions). The operator can still select + copy manually.
-  });
+  void copyToClipboard(text);
 }

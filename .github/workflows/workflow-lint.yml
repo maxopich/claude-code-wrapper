@@ -2,9 +2,10 @@ name: workflow-lint
 
 # Lints GitHub Actions workflows themselves. Catches expression-injection in
 # `run:` blocks, schema errors, dangerous pull_request_target patterns, weak
-# permissions, and secret-injection sinks. Cebab runs bus workers under
-# bypassPermissions; a CI workflow that leaks the GITHUB_TOKEN or executes
-# attacker-controlled input is a higher-severity surface than usual.
+# permissions, and secret-injection sinks. No bus tool call in Cebab is gated
+# on a human — auto-approve is bypass in effect — so a CI workflow that leaks
+# the GITHUB_TOKEN or executes attacker-controlled input is a higher-severity
+# surface than usual.
 
 on:
   pull_request:

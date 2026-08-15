@@ -75,17 +75,15 @@ export function listSessionsForProject(
   const includeArchived = opts?.includeArchived === true;
   if (includeArchived) {
     return getDb()
-      .prepare<
-        [number],
-        SessionRow
-      >('SELECT * FROM sessions WHERE project_id = ? AND deleted_at IS NULL ORDER BY last_event_at DESC')
+      .prepare<[number], SessionRow>(
+        'SELECT * FROM sessions WHERE project_id = ? AND deleted_at IS NULL ORDER BY last_event_at DESC',
+      )
       .all(projectId);
   }
   return getDb()
-    .prepare<
-      [number],
-      SessionRow
-    >('SELECT * FROM sessions WHERE project_id = ? AND archived = 0 AND deleted_at IS NULL ORDER BY last_event_at DESC')
+    .prepare<[number], SessionRow>(
+      'SELECT * FROM sessions WHERE project_id = ? AND archived = 0 AND deleted_at IS NULL ORDER BY last_event_at DESC',
+    )
     .all(projectId);
 }
 
@@ -104,10 +102,9 @@ export function listSessionsForProject(
  */
 export function archiveSession(id: string): boolean {
   const result = getDb()
-    .prepare<
-      [string],
-      unknown
-    >('UPDATE sessions SET archived = 1 WHERE id = ? AND archived = 0 AND deleted_at IS NULL')
+    .prepare<[string], unknown>(
+      'UPDATE sessions SET archived = 1 WHERE id = ? AND archived = 0 AND deleted_at IS NULL',
+    )
     .run(id);
   return result.changes > 0;
 }
@@ -126,10 +123,9 @@ export function archiveSession(id: string): boolean {
  */
 export function softDeleteSession(id: string, ts: number = Date.now()): boolean {
   const result = getDb()
-    .prepare<
-      [number, string],
-      unknown
-    >('UPDATE sessions SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL')
+    .prepare<[number, string], unknown>(
+      'UPDATE sessions SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL',
+    )
     .run(ts, id);
   return result.changes > 0;
 }
@@ -185,33 +181,62 @@ export function listIdleSessionIds(cutoffMs: number): string[] {
  *
  * Returns the number of session rows actually removed (0 or 1).
  *
- * IMPORTANT: this does NOT touch the `safety_audit` table. Audit rows
- * are append-only (BE-1 invariant) and explicitly survive session
- * deletion per spec §7 — the audit lineage is the only surviving record
- * after the purge fires.
+ * WHAT SURVIVES, and why it is now a decision rather than an omission
+ * (register D31). This comment used to say the audit lineage was "the only
+ * surviving record after the purge fires". It was not: `notifications`,
+ * `controllability_forensics` and `recovery_log` all carry `session_id TEXT`
+ * with no REFERENCES and no cascade, so all three outlived the purge silently
+ * — leaving inbox rows and per-session badge counts pointing at a session that
+ * no longer exists. Spec §7 as quoted decides which side was wrong: the code.
+ *
+ *   DELETED — `events`, `sessions`, and the three soft-FK dependents. They are
+ *             operator-facing state about a session, and a purge is the
+ *             operator saying they are done with it.
+ *   KEPT    — `safety_audit`. Append-only (BE-1 invariant), hash-chained, and
+ *             explicitly exempt per spec §7: deleting a row would break
+ *             `verifyChain` for every row after it. The audit lineage really
+ *             is the only surviving record, once the above is true.
+ *
+ * All three dependent deletes are index-served (`notifications_session`,
+ * `controllability_forensics_session_ts`, `recovery_log_session_idx`), so this
+ * stays a lookup per table rather than three scans.
  */
 export function hardDeleteSession(id: string): number {
   const db = getDb();
   const tx = db.transaction((sessionId: string) => {
     db.prepare('DELETE FROM events WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM notifications WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM controllability_forensics WHERE session_id = ?').run(sessionId);
+    db.prepare('DELETE FROM recovery_log WHERE session_id = ?').run(sessionId);
     const info = db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
     return info.changes as number;
   });
   return tx(id) as number;
 }
 
+/**
+ * Touch `last_event_at`, and ADD `totalCostUsdDelta` to the running total.
+ *
+ * Additive is the only correct shape: the SDK's `result.total_cost_usd` is the
+ * cost of that one invocation, not a running total for the CLI session (it
+ * equals `sum(modelUsage[*].costUSD)`, which are per-invocation counters). The
+ * absolute-assignment sibling this replaced (`setSessionCost`) therefore left
+ * `sessions.total_cost_usd` holding only the last turn's cost — and holding 0
+ * whenever a session ended on a `num_turns: 0` slash-command result.
+ *
+ * Register D19: this is a FIX-FORWARD only. Rows written before it still hold
+ * whatever the absolute-assignment path left there. Migration 029 is the
+ * record of that decision, not a repair of it — its header names the rewrite
+ * under "NOT INCLUDED" and says historical rows are left alone, because the
+ * observed data does not match what the code would have produced and that
+ * discrepancy is worth understanding before overwriting anyone's records.
+ */
 export function bumpSession(id: string, totalCostUsdDelta = 0): void {
   getDb()
     .prepare(
       'UPDATE sessions SET last_event_at = ?, total_cost_usd = total_cost_usd + ? WHERE id = ?',
     )
     .run(Date.now(), totalCostUsdDelta, id);
-}
-
-export function setSessionCost(id: string, totalCostUsd: number): void {
-  getDb()
-    .prepare('UPDATE sessions SET last_event_at = ?, total_cost_usd = ? WHERE id = ?')
-    .run(Date.now(), totalCostUsd, id);
 }
 
 /** Read the user's last in-session mode preference, or null if unset. */

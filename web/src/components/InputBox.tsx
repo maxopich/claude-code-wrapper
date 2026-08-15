@@ -20,6 +20,16 @@ import { SlashCommandPalette } from './SlashCommandPalette';
  *   - `isRunning` = a turn is in flight. Textarea enabled (drafting
  *     next prompt); button shows Stop variant.
  *
+ * U33: `disabled` is an OBJECT carrying the reason, not a boolean. The
+ * composer used to grey out and say nothing, leaving the operator to guess
+ * which of several conditions applied and what would clear it. A boolean prop
+ * makes the silent version expressible, and anything expressible eventually
+ * gets written — so the obligation lives in the type rather than in a lint
+ * rule or a test that a future call site can simply not have. Truthiness is
+ * unchanged at every read site (`props.disabled != null`); only the shape
+ * moved. The reason renders as a line above the textarea and is wired to it
+ * via `aria-describedby`.
+ *
  * Esc keypress while the textarea has focus fires `onStop` (UI-7).
  * Until H1 ships the global ?-cheatsheet, this is the only Stop
  * keyboard shortcut. We don't try to intercept Esc globally — the
@@ -37,8 +47,15 @@ import { SlashCommandPalette } from './SlashCommandPalette';
  *     operator presses Send when ready (no auto-send).
  */
 
+/** Ties the reason line to the textarea. There is at most one composer on
+ *  screen, so a constant id is safe and keeps the association readable. */
+const REASON_ID = 'input-box-disabled-reason';
+
 export function InputBox(props: {
-  disabled?: boolean;
+  /** Absent = composer usable. Present = disabled, and `reason` is the
+   *  one-line on-screen explanation. There is deliberately no way to say
+   *  "disabled" without saying why (U33). */
+  disabled?: { reason: string };
   isRunning?: boolean;
   onSend: (text: string) => void;
   onStop?: () => void;
@@ -77,6 +94,18 @@ export function InputBox(props: {
   function send() {
     const v = text.trim();
     if (!v) return;
+    // Register W02: a turn is already running. While running the button is
+    // Stop, so Enter was the only way to submit — and it did, clobbering the
+    // first turn's in-flight entry and orphaning it from Stop. The server now
+    // refuses this too (register S02, `describeTurnInFlight`); this is the
+    // client half, so the operator is PREVENTED rather than shown an error
+    // toast for something the UI let them do.
+    //
+    // Returning BEFORE `setText('')` is deliberate: UI-6 keeps the textarea
+    // enabled while a turn runs precisely so the operator can compose the
+    // follow-up. Discarding that draft on a stray Enter would break the
+    // intent this guard exists to protect.
+    if (props.isRunning) return;
     props.onSend(v);
     setText('');
   }
@@ -189,8 +218,8 @@ export function InputBox(props: {
   //   - running → Stop button (always enabled regardless of textarea)
   //   - idle → Send button (enabled iff textarea non-empty)
   const showStop = props.isRunning === true;
-  const buttonDisabled =
-    props.disabled === true ? true : showStop ? stopping : !text.trim();
+  const isDisabled = props.disabled != null;
+  const buttonDisabled = isDisabled ? true : showStop ? stopping : !text.trim();
 
   return (
     <div className="input-box" ref={wrapRef}>
@@ -201,6 +230,19 @@ export function InputBox(props: {
           onClose={handlePaletteClose}
         />
       )}
+      {/* U33: the reason the composer is dead, on screen, next to the dead
+       *  composer. Deliberately NOT a live region — every transition into this
+       *  state is either operator-initiated (they changed project) or already
+       *  announced by the rate-limit banner directly above, and a third
+       *  announcer for an already-announced change is the defect #288 fixed.
+       *  Plain `--fg-1` rather than `--err`: semantic inks fail AA as body text
+       *  on the default gamma, and answering "nothing tells me why" with red
+       *  text would lean on the channel that already failed. */}
+      {props.disabled && (
+        <p className="input-box-disabled-reason" id={REASON_ID}>
+          {props.disabled.reason}
+        </p>
+      )}
       <GrowTextarea
         value={text}
         onChange={setText}
@@ -208,8 +250,18 @@ export function InputBox(props: {
         // UI-6: textarea remains usable while a turn runs so the
         // operator can compose the follow-up. Only "structurally
         // disabled" (no project / workspace bad) makes it read-only.
-        disabled={props.disabled}
-        placeholder="Message Claude. Enter to send, Shift+Enter for newline."
+        disabled={isDisabled}
+        ariaDescribedBy={props.disabled ? REASON_ID : undefined}
+        // Register W02: the idle copy promises "Enter to send", which the
+        // guard in `send()` makes false mid-turn. Swallowing Enter under a
+        // label that says it works trades a wrong action for a confusing
+        // one, so the hint tracks the state. `ariaLabel` stays constant — the
+        // field's identity hasn't changed, only its affordance.
+        placeholder={
+          showStop
+            ? 'Claude is responding. Esc to stop — Enter sends once it finishes.'
+            : 'Message Claude. Enter to send, Shift+Enter for newline.'
+        }
         ariaLabel="Message Claude"
       />
       {showStop ? (

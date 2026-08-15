@@ -6,12 +6,14 @@ import { WebSocket, WebSocketServer } from 'ws';
 import {
   classifyToolCall,
   isSessionPermissionMode,
+  redactSensitive,
   type ClientMsg,
   type ServerMsg,
   type SessionPermissionMode,
 } from '@cebab/shared';
 import { config } from '../config.js';
 import { getProject, setProjectTrusted, touchProject } from '../repo/projects.js';
+import { observeProjectHooks } from '../repo/hook_trust.js';
 import {
   createSession,
   getSession,
@@ -37,10 +39,12 @@ import {
 } from '../workspace.js';
 import type {
   AuthTransitionReasonCode,
+  HookView,
   MultiAgentLifecycle,
   NotificationAction,
   NotificationEnvelope,
   NotificationSeverity,
+  PermissionDecisionReason,
   ReopenSessionFailureReason,
   RouterDropReasonCode,
   SessionCrashedReasonCode,
@@ -50,15 +54,23 @@ import type {
 import { computeWorkspaceDiff } from '../workspace_diff.js';
 import { cancelAuthRefresh, startAuthRefresh, type AuthRefreshCallbacks } from '../auth_refresh.js';
 import { translate } from './translate.js';
-import { resolveProjectAuthority } from '../repo/project_authority.js';
+import { validateClientMsg } from './validate_client_msg.js';
+import {
+  BUS_SETTING_SCOPES,
+  resolveProjectAuthority,
+  type SettingScope,
+} from '../repo/project_authority.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import {
+  abandonPendingMcpGates,
   awaitMcpTrustDecisions,
   makeTrustGateState,
   type TrustGateOutcome,
   type TrustGateState,
 } from '../repo/mcp_trust_gate.js';
+import { abandonOnePendingGate } from '../gate_abandon.js';
 import {
+  abandonPendingStartGates,
   ACKNOWLEDGMENT_TRIGGER,
   awaitEnvInjectionAck,
   makeStartGateState,
@@ -75,6 +87,7 @@ import {
 } from './session_log.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
 import {
+  abandonPendingBusGates,
   awaitBusTrustDecision,
   type BusTrustGateState,
   makeBusTrustGateState,
@@ -84,19 +97,23 @@ import {
   emit as emitNotification,
   getNotification,
   markNotificationAcked,
+  type NotificationRow,
 } from '../notifications/dispatcher.js';
 import { getScrubbedEnvVars } from '../runner/claude.js';
 import {
   appendSafetyAudit,
   appendSafetyAuditAck,
+  HIGHEST_AUDIT_KINDS,
   HIGHEST_SUBCODES,
+  verifyChain,
 } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import { appendForensics, getLatestForensicsForAgent } from '../repo/controllability_forensics.js';
-import { _getSafetyAuditRow } from '../notifications/safety_audit.js';
+import { getSafetyAuditRow } from '../notifications/safety_audit.js';
 import {
   isControlReasonCode,
   isKickMode,
+  type ControllabilityFailureCode,
   type ForensicBusEvent,
   type ForensicMutation,
   type KickForensicsSnapshot,
@@ -149,8 +166,9 @@ import {
   endMultiAgentSession,
   getLastRunForTemplate,
   getMultiAgentSession,
-  getPendingMutation,
+  listPendingMutations,
   getPendingRetry,
+  lastEventIdFromSource,
   listMultiAgentEvents,
   listMultiAgentMutations,
   listMultiAgentSessionsWithIteration,
@@ -162,7 +180,14 @@ import {
 } from '../repo/multi_agent.js';
 import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
-import { getLiveSession, hasLiveSession } from '../bus/session_registry.js';
+import {
+  claimSessionStart,
+  getLiveSession,
+  hasLiveSession,
+  isSessionStartInFlight,
+  listLiveSessionIds,
+  releaseSessionStart,
+} from '../bus/session_registry.js';
 import {
   resolveQuestion,
   listParkedQuestions,
@@ -179,7 +204,7 @@ import {
   executeResumeParticipant,
   executeUnmuteParticipant,
 } from './control_verbs.js';
-import { getPauseExpiryRegistry } from './pause_expiry.js';
+import { getPauseExpiryRegistry, type PauseExpiryEntry } from './pause_expiry.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type {
   IterationSummary,
@@ -209,6 +234,62 @@ export type PendingPermission = {
 };
 
 /**
+ * Register S06: record a permission request that Cebab denied on the
+ * operator's behalf.
+ *
+ * WHY THIS HAS TO EXIST AT ALL. The `permission_request` is persisted the
+ * moment it is raised, and `translate` maps that row straight back to a live
+ * `permission_request` ServerMsg on replay. So the request survives a
+ * disconnect; the *resolution* did not. Reopening the session re-rendered
+ * working-looking Allow/Deny buttons for a promise that had already been
+ * settled and discarded — and clicking one hit `if (!pending) return` and did
+ * nothing at all, with no error and no explanation.
+ *
+ * WHY NOT JUST WRITE `decision: 'deny'`. Because the operator did not deny it.
+ * The row is read months later by someone reconstructing what happened; a bare
+ * deny says a human looked at a tool call and refused it. `reason` is what
+ * keeps the transcript honest about who decided.
+ *
+ * Contrast with the three SPAWN gates, whose disconnect drain deliberately
+ * persists nothing (`gate_drain.security.test.ts` asserts exactly that, and it
+ * is right): nothing replays a parked spawn gate, so there is no card to
+ * strand and no claim to correct. The asymmetry is the point.
+ *
+ * Fire-and-forget FOR THE CALLERS — a socket-close handler and a synchronous
+ * interrupt path, neither of which can await, and a failed bookkeeping write
+ * must not take down the drain it is describing. The rejection is swallowed
+ * here, so ignoring the returned promise is safe.
+ *
+ * It is still RETURNED, and that is not decoration. `persistMessage` awaits a
+ * JSONL append before it resolves, so the promise is the only handle on "the
+ * log file is closed". A test that drains and then deletes its temp directory
+ * without it races the write — on Windows that race is an `ENOTEMPTY` on
+ * teardown, which is how this was found.
+ */
+export type RecordDrainedPermission = (
+  sessionId: string,
+  requestId: string,
+  reason: PermissionDecisionReason,
+) => Promise<void>;
+
+export const recordDrainedPermission: RecordDrainedPermission =
+  async function recordDrainedPermission(sessionId, requestId, reason): Promise<void> {
+    try {
+      await persistMessage(sessionId, {
+        type: 'wrapper',
+        subtype: 'permission_decided',
+        session_id: sessionId,
+        uuid: randomUUID(),
+        requestId,
+        decision: 'deny',
+        reason,
+      } as never);
+    } catch (err) {
+      console.error(`[ws] failed to persist drained permission ${requestId}`, err);
+    }
+  };
+
+/**
  * F12: drain pending permission Promises for a given session before
  *      abort/interrupt. Otherwise their entries leak in the map until WS
  *      close — functionally benign (the SDK's canUseTool callback is
@@ -216,16 +297,59 @@ export type PendingPermission = {
  *      Filter by sessionId so other concurrent sessions on the same WS
  *      connection aren't affected. Same pattern is used on WS close,
  *      with no sessionId filter (close drains everything).
+ *
+ * Register S06: this records the denial itself rather than taking a callback
+ * the caller has to remember to pass. The bug being fixed was an omission —
+ * a drain that settled the promise and wrote nothing — so the repair should
+ * not leave a second thing to omit. `record` is injectable only so tests that
+ * are about map hygiene can opt out of the DB; production never passes it,
+ * and there is no argument order in which the recording gets lost.
+ *
+ * Returns the in-flight bookkeeping writes. Production ignores them (the
+ * interrupt handler is synchronous); a test awaits them before deleting its
+ * temp data directory, because `persistMessage` holds a JSONL handle until it
+ * resolves and Windows will not remove a directory out from under one.
  */
 export function cleanupPendingPermissionsForSession(
   pending: Map<string, PendingPermission>,
   sessionId: string,
-): void {
+  record: RecordDrainedPermission = recordDrainedPermission,
+): Promise<void>[] {
+  const writes: Promise<void>[] = [];
   for (const [requestId, p] of pending) {
     if (p.sessionId !== sessionId) continue;
     p.resolve({ behavior: 'deny', message: 'interrupted' });
     pending.delete(requestId);
+    writes.push(record(p.sessionId, requestId, 'interrupted'));
   }
+  return writes;
+}
+
+/**
+ * The socket-close sibling of the above: drain EVERY pending permission on
+ * this connection, whatever session it belongs to.
+ *
+ * Pulled out of the `ws.on('close')` body for the same reason its sibling was
+ * pulled out of the interrupt handler — the close handler cannot be reached
+ * from a test without standing up a WS server, and register S06's whole point
+ * is that what this loop does (and does not) persist is worth asserting.
+ *
+ * Deliberately not merged with `cleanupPendingPermissionsForSession`: they
+ * differ in the deny message the SDK sees, in the filter, and in the reason
+ * they record, and a single function with three switches reads worse than two
+ * that each say one thing.
+ */
+export function drainAllPendingPermissions(
+  pending: Map<string, PendingPermission>,
+  record: RecordDrainedPermission = recordDrainedPermission,
+): Promise<void>[] {
+  const writes: Promise<void>[] = [];
+  for (const [requestId, p] of pending) {
+    p.resolve({ behavior: 'deny', message: 'client disconnected' });
+    writes.push(record(p.sessionId, requestId, 'client_disconnected'));
+  }
+  pending.clear();
+  return writes;
 }
 
 /**
@@ -259,8 +383,13 @@ export function cleanupPendingPermissionsForSession(
  * async runner cancel — F12's guarantee is that the permission map
  * doesn't leak even if the runner cancellation hangs.
  */
+// Structural subset of the real in-flight record — just enough for
+// `executeInterrupt`, so tests can drive it with a stub. `interrupt`
+// resolves to `unknown` to stay in step with `Runner` (see runner/index.ts:
+// the SDK returns a response object here, and we use the promise only as a
+// completion signal — `emitAck` takes no arguments).
 type InterruptInFlight = {
-  runner: { interrupt?: () => Promise<void> };
+  runner: { interrupt?: () => Promise<unknown> };
   ac: AbortController;
 };
 
@@ -582,11 +711,24 @@ type WrapperErrorDispatch = {
   action?: NotificationAction;
 };
 
+/**
+ * Returns `null` when the kind should produce NO operator notification at all.
+ *
+ * Register S02b: `aborted` is that case. The operator pressing Stop, or their
+ * browser going away mid-turn, is not news to report back to them — and
+ * because this notification is `operational` + `sticky`, the dispatcher
+ * PERSISTS it (`persistNotification`), so every Stop left a durable "Turn
+ * failed" inbox row with a Restart button for a turn nobody lost. The
+ * decision lives here, with every other kind's, rather than as another
+ * special case at the call site.
+ */
 export function wrapperErrorDispatch(
   kind: WrapperErrorKind,
   sessionId: string,
-): WrapperErrorDispatch {
+): WrapperErrorDispatch | null {
   switch (kind) {
+    case 'aborted':
+      return null;
     case 'auth_expired':
       return {
         severity: 'error',
@@ -643,13 +785,24 @@ export function wrapperErrorDispatch(
  * signal — the SDK is back under the rate budget, or never crossed it).
  *
  * Heuristic:
- *   - resetsAt in the future → hit (warn)
- *   - resetsAt absent OR already in the past → cleared (info)
+ *   - resetsAtMs in the future → hit (warn)
+ *   - resetsAtMs absent OR already in the past → cleared (info)
  *
  * The SDK's `status` string is forward-compat noise and may differ per
- * provider; relying on `resetsAt` keeps the branch resilient. Pure
+ * provider; relying on the reset timestamp keeps the branch resilient. Pure
  * function so the runOneTurn live-stream call site stays a thin wrapper
  * and this branch can be unit-tested without spinning up the WS stack.
+ *
+ * Register S01: the parameter is `resetsAtMs`, with the unit in the NAME, and
+ * that is the whole fix. It used to be `resetsAt`, and the event carries both
+ * that (raw SDK **seconds**, ~1.7e9) and `resetsAtMs` — so the call site
+ * spread the event in and the seconds field silently won. Seconds are always
+ * "in the past" against a millisecond clock, so `isActiveLimit` was NEVER
+ * true: every rate-limit event dispatched as `cleared`/info, telling the
+ * operator the limit lifted at the exact moment they hit it. `translate.ts`
+ * already declares the convention ("Every consumer wants ms … code uses
+ * `resetsAtMs`"); this call site just never got the memo. Naming the unit is
+ * what stops the next caller repeating it.
  */
 export type RateLimitDispatch = {
   subCode: 'hit' | 'cleared';
@@ -659,12 +812,12 @@ export type RateLimitDispatch = {
 };
 
 export function rateLimitDispatch(
-  out: { status?: string; resetsAt?: number },
+  out: { status?: string; resetsAtMs?: number },
   now: number = Date.now(),
 ): RateLimitDispatch {
-  const isActiveLimit = typeof out.resetsAt === 'number' && out.resetsAt > now;
-  if (isActiveLimit && typeof out.resetsAt === 'number') {
-    const resetText = ` Retry after ${new Date(out.resetsAt).toLocaleTimeString()}.`;
+  const isActiveLimit = typeof out.resetsAtMs === 'number' && out.resetsAtMs > now;
+  if (isActiveLimit && typeof out.resetsAtMs === 'number') {
+    const resetText = ` Retry after ${new Date(out.resetsAtMs).toLocaleTimeString()}.`;
     return {
       subCode: 'hit',
       severity: 'warn',
@@ -738,6 +891,178 @@ export function resolveRetryRateLimited(
  * "row archived, folder still on disk" (operator can `rm -rf` by hand)
  * rather than "folder gone, row not archived" (confusing zombie).
  */
+/**
+ * [security] Register B05. Guard for the RECOVERY Continue
+ * (`continue_multi_agent`): refuse while the pause-on-dangerous gate is
+ * holding a worker, and say which. Returns the operator-facing message, or
+ * `null` when the session is free to continue.
+ *
+ * The two Continues used to be confusable — a mutation pause also set
+ * `awaiting_continue`, so both banners rendered and clicking the recovery one
+ * cleared the recovery flag while leaving the pause in place, silently
+ * disarming the gate for the rest of the session and stranding the worker.
+ * The pause no longer sets `awaiting_continue`, so the states are disjoint on
+ * fresh pauses; they can still coexist legitimately when a pause was live at
+ * restart, and refusing is the honest answer there: resuming the session while
+ * a worker is held at a dangerous command is the operator's decision to make
+ * explicitly, on that worker's own banner.
+ *
+ * Exported for direct testing — the case body is one `send` around it.
+ */
+export function describeHeldWorkers(sessionId: string): string | null {
+  const held = listPendingMutations(sessionId);
+  if (held.length === 0) return null;
+  const names = [...new Set(held.map((m) => m.agentName))].join(', ');
+  return `Cannot continue the session while a worker is held at a dangerous command (${names}). Use the Continue button on that worker's banner, or stop the session.`;
+}
+
+/**
+ * Register B02: the process-wide half of the single-active invariant.
+ *
+ * `start_multi_agent`'s original guard was `if (conn.multiAgent)` — per
+ * CONNECTION. Two browser windows could therefore each start a session and
+ * both stay live in this process; the next resume sweep then reported the
+ * older one `crashed` while its AgentRunner kept delivering turns, leaving
+ * agents executing with no session the UI could stop.
+ *
+ * Returns the operator-facing refusal, or `null` when starting is safe. Only
+ * genuinely live sessions block: a `running` row orphaned by a dead process
+ * is not in the registry, so a stale DB row can never wedge new starts.
+ *
+ * Exported for direct testing — the case body is one `send` around it.
+ */
+export function describeLiveSessionConflict(): string | null {
+  const ids = listLiveSessionIds();
+  if (ids.length > 0) {
+    return `another multi-agent session is already running in this Cebab (${ids.join(', ')}); stop it first — possibly from another browser window.`;
+  }
+  // Register B18: a session being STARTED is not in the registry yet. The
+  // start path awaits `gateProjectsForSpawn`, which parks until the operator
+  // answers a trust prompt, and only then reaches `registerLiveSession` — so
+  // the check above stays empty for as long as a human takes to click, and a
+  // second window sails through it. Two live sessions is the failure the B02
+  // guard exists to prevent; this is the same guard, covering the window
+  // where the session exists as an intention rather than a row.
+  //
+  // Its own message: there are no ids to name yet, and "wait" is different
+  // advice from "stop it first".
+  if (isSessionStartInFlight()) {
+    return 'another multi-agent session is already being started in this Cebab — possibly from another browser window. Wait for it to finish starting, or close that window.';
+  }
+  return null;
+}
+
+/**
+ * Register B17: what happens when a pause-expiry timer fires.
+ *
+ * Lifted out of the `pause_participant` case, where it was an inline closure
+ * over `conn.ws`. The extraction is the proof as much as the fix: **this
+ * function now captures nothing from any connection**, so it cannot be wrong
+ * about which connection it belongs to. It reads the live session at fire time
+ * and talks to whoever owns that session's sink right now.
+ *
+ * Why it mattered: `PauseExpiryRegistry` is a process singleton whose timers
+ * are cleared on session end, not on connection close — unlike the
+ * connection's own heartbeat and debounce timers, which `ws.on('close')`
+ * clears explicitly. So a timer armed by one browser window routinely fires
+ * after that window is gone, and the old `send(conn.ws, ...)` was a no-op
+ * while `executeExpireParticipant` still wrote the audit row and performed the
+ * kick. The durable trail recorded a kick the operator was never shown; their
+ * live window kept saying `paused`.
+ *
+ * Exported for direct testing, like its neighbours in this file.
+ */
+export function handlePauseExpiry(entry: PauseExpiryEntry): void {
+  // The fire-time orchestrator handle may differ from the
+  // schedule-time one (R-A reattach swapped the live session
+  // between bind and fire) — re-read at fire time.
+  const liveAtFire = getLiveSession(entry.sessionId);
+  const handleAtFire =
+    liveAtFire?.mode === 'orchestrator'
+      ? (liveAtFire.handle as unknown as OrchestratorSessionHandle)
+      : undefined;
+  // Register B17: and so must the SINK. `liveAtFire.sendServerMsg`
+  // resolves the router's current sink on every call, so a window
+  // that re-attached after the pause was armed receives the envelope
+  // and a session the operator detached correctly drops it. Falls
+  // back to nothing when the session is no longer live at all —
+  // there is no one to tell, and the audit row is the record.
+  const tellOperator = liveAtFire?.sendServerMsg;
+  const expireResult = executeExpireParticipant({
+    entry,
+    orchestratorHandle: handleAtFire,
+  });
+  if (!expireResult.ok) {
+    console.error(
+      `[ws] pause-expiry executor failed for ${entry.sessionId}/${entry.projectId}`,
+      expireResult.error,
+    );
+    return;
+  }
+  // Diverged state (operator resumed/kicked between schedule +
+  // fire): the trigger audit captured it; no state-change
+  // envelope ships because the state had already moved on
+  // and the operator's UI is already reconciled to the
+  // post-move state from the prior verb's echo.
+  if (expireResult.action === 'noop_diverged') return;
+  const fireTs = entry.pausedUntil; // approximate; the audit row's ts is the authoritative
+  if (expireResult.action === 'auto_resume') {
+    tellOperator?.(
+      buildParticipantPauseChangedMsg({
+        sessionId: entry.sessionId,
+        projectId: entry.projectId,
+        pausedUntil: null,
+        expiryAction: null,
+        reasonCode: entry.reasonCode,
+        ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
+        // No queued deliveries: the gate released, runner
+        // drained the count to zero. Reporting 0 keeps the
+        // wire shape consistent without re-querying the runner
+        // (which the executor doesn't hold a handle to).
+        queuedDeliveries: handleAtFire?.getPendingDeliveries(entry.agentName) ?? 0,
+        ts: fireTs,
+      }),
+    );
+    return;
+  }
+  // auto_kick: fan a `participant_kicked` envelope. The
+  // operator's UI dispatches on the same type the operator-
+  // kick path uses; the reasonCode is carried forward from
+  // the pause.
+  tellOperator?.(
+    buildParticipantKickedMsg({
+      sessionId: entry.sessionId,
+      projectId: entry.projectId,
+      mode: 'drain',
+      reasonCode: entry.reasonCode,
+      ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
+      ts: expireResult.kickedAt ?? fireTs,
+    }),
+  );
+}
+
+/**
+ * Register S02: is there already a turn running for this session?
+ *
+ * `runOneTurn` used to go straight from resolving `sessionId` to
+ * `conn.inFlight.set(...)` with no check between. Two `send_message`s for one
+ * session then started parallel SDK queries against the same `--resume` id,
+ * and turn one's `finally` (`conn.inFlight.delete(sessionId)`) removed TURN
+ * TWO's entry — after which Stop, permission-mode changes and the active-runs
+ * badge all silently targeted nothing. `resolveRetryRateLimited` already
+ * guards the identical hazard for the retry path.
+ *
+ * Returns the operator-facing refusal, or `null` when it is safe to start.
+ * Exported for direct testing — the case body is one `send` around it.
+ */
+export function describeTurnInFlight(
+  inFlight: ReadonlyMap<string, unknown>,
+  sessionId: string,
+): string | null {
+  if (!inFlight.has(sessionId)) return null;
+  return 'that session already has a turn running; wait for it to finish or stop it first.';
+}
+
 export async function executeArchiveSession(args: {
   sessionId: string;
   removeArtifacts: boolean;
@@ -915,7 +1240,7 @@ export function executeKickForensicsSnapshot(args: {
   // forensics FK guarantees the row exists; we still guard with
   // optional chaining + defensive parse because the payload shape is
   // by-convention, not schema-enforced.
-  const auditRow = _getSafetyAuditRow(row.safety_audit_id);
+  const auditRow = getSafetyAuditRow(row.safety_audit_id);
   let kickReasonText: string | null = null;
   let kickMode: KickForensicsSnapshot['kickMode'] = null;
   let kickReasonCode: KickForensicsSnapshot['kickReasonCode'] = null;
@@ -931,6 +1256,15 @@ export function executeKickForensicsSnapshot(args: {
     }
   }
 
+  // Register D18, read side. `appendForensics` masks every payload column on
+  // the way IN, so anything written from now on is already clean — but rows
+  // persisted BEFORE that landed are raw, and this is the only thing standing
+  // between them and the browser. Masking twice is a no-op, so this stays
+  // correct once the backlog ages out; it is not worth a migration to remove.
+  //
+  // Scoped to the payload fields, matching `redactColumn`'s column list. The
+  // ids, `operatorId`, `workdirTreeHash` and the kick provenance are
+  // Cebab-generated metadata and would only be damaged by masking.
   const snapshot: KickForensicsSnapshot = {
     auditId: row.safety_audit_id,
     ts: row.ts,
@@ -941,14 +1275,17 @@ export function executeKickForensicsSnapshot(args: {
     kickReasonCode,
     kickReasonText,
     kickMode,
-    effectivePrompt: parseJsonOrUndefined(row.effective_prompt_json),
-    busEvents: parseBusEvents(row.bus_inbox_outbox_json),
-    mutations: parseMutations(row.mutation_rationale_json),
+    effectivePrompt: redactSensitive(parseJsonOrUndefined(row.effective_prompt_json)).redacted,
+    // The two typed parsers validate field-by-field AFTER this, and a masked
+    // string is still a string — so redacting first cannot make a well-formed
+    // row fail validation and vanish.
+    busEvents: parseBusEvents(redactJsonString(row.bus_inbox_outbox_json)),
+    mutations: parseMutations(redactJsonString(row.mutation_rationale_json)),
     pendingToolCalls: row.pending_tool_calls_json
-      ? parseJsonOrUndefined(row.pending_tool_calls_json)
+      ? redactSensitive(parseJsonOrUndefined(row.pending_tool_calls_json)).redacted
       : null,
     activePermissions: row.active_permissions_json
-      ? parseJsonOrUndefined(row.active_permissions_json)
+      ? redactSensitive(parseJsonOrUndefined(row.active_permissions_json)).redacted
       : null,
     workdirTreeHash: row.workdir_tree_hash,
     snapshotFailedReason: row.snapshot_failed_reason,
@@ -961,6 +1298,77 @@ export function executeKickForensicsSnapshot(args: {
     found: true,
     snapshot,
   });
+}
+
+/**
+ * Register H06: decide whether this `load_session_log` turn may project
+ * UNREDACTED rows, recording the operator's intent first.
+ *
+ * Three surfaces serve raw transcript bytes and the rule — record intent
+ * before any unredacted byte ships — was enforced on two of them. The HTTP
+ * export writes `session.exported` / `exported_raw` before the body and 500s
+ * if the append throws; raw search writes `session.searched` / `searched_raw`
+ * and downgrades on failure. This path wrote nothing, justified by a comment
+ * saying the WS message "is enough server-side because the connection is
+ * already bound to 127.0.0.1" — which is an argument against the whole rule,
+ * not for exempting the cheapest route to the same data.
+ *
+ * On an audit-write failure this takes RAW SEARCH's posture, not the
+ * export's: return false, so the caller serves a redacted chunk. The operator
+ * still gets their logs, the untraced bytes never leave, and
+ * `revealedSensitive: false` on the reply tells the UI which it got.
+ * `search_sessions.ts` argued exactly this trade; a third posture here would
+ * be invention.
+ *
+ * The payload carries no transcript content — session id, scope and window
+ * only. Same discipline as the raw-search row, which omits the query string
+ * because a raw search is often FOR a secret and audit rows outlive the
+ * session they describe.
+ *
+ * Exported with an `appendAudit` seam for the same reason
+ * `executeSearchSessions` has one: the downgrade branch is the interesting
+ * behaviour and a real socket cannot make the append throw.
+ */
+export function resolveRevealAudit(args: {
+  requested: boolean;
+  sessionId: string;
+  scope: 'single' | 'multi_agent';
+  offset: number;
+  limit: number;
+  appendAudit?: typeof appendSafetyAudit;
+}): boolean {
+  if (!args.requested) return false;
+  const append = args.appendAudit ?? appendSafetyAudit;
+  try {
+    append({
+      ts: Date.now(),
+      sessionId: args.sessionId,
+      kind: 'session.revealed',
+      reasonCode: 'revealed_raw',
+      payload: { scope: args.scope, offset: args.offset, limit: args.limit },
+    });
+    return true;
+  } catch (err) {
+    console.error('[ws] load_session_log reveal audit append failed; downgrading to redacted', err);
+    return false;
+  }
+}
+
+/**
+ * Register D18: mask a persisted JSON column, keeping it a JSON string so the
+ * strict parsers below can still validate it. Null in, null out.
+ *
+ * Unparseable input is returned unchanged rather than nulled — the parsers
+ * already degrade a bad column to `[]`, and swallowing it here would turn a
+ * corrupt-row signal into a silent empty section.
+ */
+function redactJsonString(s: string | null): string | null {
+  if (s === null) return null;
+  try {
+    return JSON.stringify(redactSensitive(JSON.parse(s)).redacted);
+  } catch {
+    return s;
+  }
 }
 
 // Defensive JSON parse — returns undefined on any throw so the caller
@@ -1148,12 +1556,18 @@ export async function executeReopenSessionProbe(args: {
  * Cluster D Phase 5c (spec §6.3 / BE-D20, BE-D21, BE-D24): commit step
  * of the swept-session reopen flow. Validates the operator's typed
  * "reopen" gate (re-running the workspace diff for safety against a
- * stale modal), detaches the current active session (if any) and marks
- * it crashed with a `session_superseded` notification carrying
- * `reasonCode: 'operator_reopen'`, unarchives the target if needed,
- * then reactivates it via the existing `resumeMultiAgentTarget` (R-B)
- * path. Writes a `recovery_log` row so the spec §8.5
+ * stale modal), unarchives the target if needed, reactivates it via the
+ * existing `resumeMultiAgentTarget` (R-B) path, and only THEN detaches
+ * the current active session and marks it crashed with a
+ * `session_superseded` notification carrying `reasonCode:
+ * 'operator_reopen'`. Writes a `recovery_log` row so the spec §8.5
  * `sweepReopenRate()` roll-up sees this case.
+ *
+ * Register S09: reactivate-then-displace, in that order. The reverse
+ * (the original) crashed a working session on behalf of a reopen that
+ * could still fail four different ways, leaving the operator with
+ * neither. See the step comments for why the overlap is safe and why
+ * the unarchive is the one thing that stays ahead of it.
  *
  * The conn-bound concerns (detach + adopt) ride a small bridge object
  * (`detachCurrentActive` / `adoptResumed`) so the helper itself doesn't
@@ -1261,12 +1675,78 @@ export async function executeReopenSessionConfirmed(args: {
     return;
   }
 
-  // ---- Step 3: displace the current active (if any) ----
-  // Same posture as the existing auto-sweep in bus/resume.ts — the
-  // displaced row is marked crashed + a typed `session_superseded`
-  // notification fires. Different here: the reasonCode is
-  // `operator_reopen` (not `swept_competing`) so the inbox panel /
-  // recovery_log can distinguish the two causes.
+  // ---- Step 3: unarchive if needed (operator changed their mind) ----
+  // Stays AHEAD of the reactivate below, unlike the displacement: on the
+  // success path `resumeMultiAgentTarget` snapshots the row on entry and hands
+  // it back as `resumed.row`, so unarchiving afterwards would ship a stale
+  // `archived: 1` to the browser. This is also not a recovery affordance being
+  // destroyed — it is the target's own state, moving in the direction the
+  // operator just asked for, and one click puts it back. A failed reopen
+  // therefore leaves the target unarchived; that is the deliberate exception to
+  // the ordering rule below, not an oversight.
+  if (row.archived === 1) {
+    unarchiveMultiAgentSession(sessionId);
+  }
+
+  // ---- Step 4: reactivate via R-B / live re-attach ----
+  // Register S09: this runs BEFORE the incumbent is displaced, and the order is
+  // the fix. Reactivation has four ways to fail — a chain target, a guard
+  // failure, a row that vanished, and a throw — and the previous order crashed
+  // the operator's working session first, so any of the four left them with
+  // neither session and a toast. Nothing here needs a rollback: if this fails
+  // the incumbent was never touched.
+  //
+  // Safe to run while the incumbent is still `running`: the guards below key on
+  // the TARGET row only, nothing in `server/src` reads "the one running
+  // session", and there is no `await` between this returning and the
+  // displacement, so no other WS message can observe the overlap. The conn
+  // hand-off order is unchanged — detach (which nulls `conn.multiAgent`) still
+  // precedes adopt.
+  const reactivate = args.resumeTarget ?? resumeMultiAgentTarget;
+  let result: Awaited<ReturnType<typeof resumeMultiAgentTarget>>;
+  try {
+    result = await reactivate(sessionId, cbs);
+  } catch (err) {
+    console.error(`[reopen_session_confirmed] resumeMultiAgentTarget threw for ${sessionId}`, err);
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'reactivate_failed',
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  if (!result.ok) {
+    // Map TargetResumeFailure → ReopenSessionFailureReason. The two
+    // we expect here:
+    //   - 'reattach-failed' for chain mode (R-B is orchestrator-only)
+    //     OR a guard failure (folder missing, etc.). Mode-check
+    //     against the row distinguishes them.
+    //   - 'not-found' / 'already-running' shouldn't reach here (we
+    //     guarded above), but map defensively.
+    let reason: ReopenSessionFailureReason = 'reactivate_failed';
+    let message = 'Failed to reactivate the session.';
+    if (result.reason === 'reattach-failed' && row.mode === 'chain') {
+      reason = 'chain_reconstruction_unsupported';
+      message = 'Chain-mode reconstruction across a Cebab server restart is not supported in v1.';
+    } else if (result.reason === 'already-running') {
+      reason = 'still_running';
+      message = 'This session is already running.';
+    } else if (result.reason === 'not-found') {
+      reason = 'not_found';
+      message = 'Session vanished between confirm and reactivate.';
+    }
+    send({ type: 'reopen_session_failed', sessionId, reason, message });
+    return;
+  }
+
+  // ---- Step 5: displace the current active (if any) ----
+  // The target is back, so the swap is now safe to commit. Same posture as the
+  // existing auto-sweep in bus/resume.ts — the displaced row is marked crashed
+  // + a typed `session_superseded` notification fires. Different here: the
+  // reasonCode is `operator_reopen` (not `swept_competing`) so the inbox panel
+  // / recovery_log can distinguish the two causes.
   if (currentActiveSessionId && currentActiveSessionId !== sessionId) {
     try {
       detachCurrentActive();
@@ -1308,51 +1788,6 @@ export async function executeReopenSessionConfirmed(args: {
     }
   }
 
-  // ---- Step 4: unarchive if needed (operator changed their mind) ----
-  if (row.archived === 1) {
-    unarchiveMultiAgentSession(sessionId);
-  }
-
-  // ---- Step 5: reactivate via R-B / live re-attach ----
-  const reactivate = args.resumeTarget ?? resumeMultiAgentTarget;
-  let result: Awaited<ReturnType<typeof resumeMultiAgentTarget>>;
-  try {
-    result = await reactivate(sessionId, cbs);
-  } catch (err) {
-    console.error(`[reopen_session_confirmed] resumeMultiAgentTarget threw for ${sessionId}`, err);
-    send({
-      type: 'reopen_session_failed',
-      sessionId,
-      reason: 'reactivate_failed',
-      message: err instanceof Error ? err.message : String(err),
-    });
-    return;
-  }
-
-  if (!result.ok) {
-    // Map TargetResumeFailure → ReopenSessionFailureReason. The two
-    // we expect here:
-    //   - 'reattach-failed' for chain mode (R-B is orchestrator-only)
-    //     OR a guard failure (folder missing, etc.). Mode-check
-    //     against the row distinguishes them.
-    //   - 'not-found' / 'already-running' shouldn't reach here (we
-    //     guarded above), but map defensively.
-    let reason: ReopenSessionFailureReason = 'reactivate_failed';
-    let message = 'Failed to reactivate the session.';
-    if (result.reason === 'reattach-failed' && row.mode === 'chain') {
-      reason = 'chain_reconstruction_unsupported';
-      message = 'Chain-mode reconstruction across a Cebab server restart is not supported in v1.';
-    } else if (result.reason === 'already-running') {
-      reason = 'still_running';
-      message = 'This session is already running.';
-    } else if (result.reason === 'not-found') {
-      reason = 'not_found';
-      message = 'Session vanished between confirm and reactivate.';
-    }
-    send({ type: 'reopen_session_failed', sessionId, reason, message });
-    return;
-  }
-
   // ---- Step 6: adopt + emit ----
   adoptResumed(result.resumed);
 
@@ -1367,6 +1802,133 @@ export async function executeReopenSessionConfirmed(args: {
     });
   } catch (err) {
     console.error(`[reopen_session_confirmed] recovery_log append failed for ${sessionId}`, err);
+  }
+}
+
+/**
+ * Body of the `continue_multi_agent` handler — the RECOVERY Continue an
+ * operator clicks on a session Cebab rebuilt read-only after a restart (R-B).
+ *
+ * Extracted for the same reason as `executeArchiveSession` /
+ * `executeReopenSessionProbe` / `executeReopenSessionConfirmed`: the conn-bound
+ * concerns ride a small bridge (`sendUserPrompt`, `gateProjects`,
+ * `applyMcpDenials`, `send`) so the helper needs no Conn type and the failure
+ * paths below can be exercised directly. `sendUserPrompt` is `null` for a chain
+ * handle, which is how the caller expresses "this handle has no such method".
+ *
+ * Register S08. `awaiting_continue` is this session's ONLY way back: the guard
+ * a few lines down refuses any Continue once it is 0, and `emitResumedSession`
+ * re-reads it from the DB, so a reload does not help either. The flag is still
+ * cleared BEFORE delivery — that is deliberate and load-bearing, since a racing
+ * second click has to find 0 and no-op — but a delivery that FAILS now puts it
+ * back. Without that, one throw between the clear and the nudge landing left
+ * the session permanently unresumable, with the banner gone and no error the
+ * operator could act on.
+ */
+export async function executeContinueMultiAgent(args: {
+  sessionId: string;
+  /** `conn.multiAgent?.sessionId` — the run this connection is attached to. */
+  activeSessionId: string | null;
+  /** The active handle's `sendUserPrompt`; `null` for a chain handle. */
+  sendUserPrompt: ((text: string) => Promise<void>) | null;
+  /** Wraps `gateProjectsForSpawn(conn, …)` for the session's worker projects. */
+  gateProjects: (projectIds: number[]) => Promise<McpDenials>;
+  applyMcpDenials: (projectId: number, serverNames: readonly string[]) => void;
+  send: (msg: ServerMsg) => void;
+}): Promise<void> {
+  const { sessionId, activeSessionId, sendUserPrompt, gateProjects, applyMcpDenials, send } = args;
+  if (activeSessionId === null || activeSessionId !== sessionId) {
+    // Not the active session — drop (raced an ended, or never
+    // re-attached). The browser only shows Continue on the active run.
+    return;
+  }
+  if (sendUserPrompt === null) {
+    // Chain handles have no sendUserPrompt — chain reconstruction is
+    // out of scope, so this should be unreachable, but fail loud.
+    send({
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: 'Only orchestrator sessions can be continued.',
+    });
+    return;
+  }
+  const row = getMultiAgentSession(sessionId);
+  if (!row || row.awaiting_continue !== 1) {
+    // Already continued (or never a recovered session). Idempotent
+    // no-op so a double-click can't double-deliver the nudge.
+    return;
+  }
+  // [security] Register B05. This is the RECOVERY Continue (R-B: the
+  // session was rebuilt read-only after a restart). The pause-on-dangerous
+  // banner has its own Continue — `continue_through_mutation` — and the two
+  // used to be confusable: a mutation pause also set `awaiting_continue`,
+  // so both banners rendered and clicking this one cleared the recovery
+  // flag while leaving the pause in place. That silently disarmed the gate
+  // for the rest of the session AND stranded the paused worker.
+  //
+  // The pause no longer sets `awaiting_continue`, so the two states are
+  // disjoint on fresh pauses. They can still coexist legitimately: a pause
+  // that was live when Cebab restarted comes back alongside R-B's own
+  // `awaiting_continue`. Refuse rather than guess — resuming the session
+  // while a worker is held at a dangerous command is exactly the decision
+  // the operator has to make explicitly.
+  const heldMessage = describeHeldWorkers(sessionId);
+  if (heldMessage) {
+    send({
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: heldMessage,
+    });
+    return;
+  }
+  // [security] R-B reconstruction rebuilds the runner with the widened
+  // bus `settingSources` but is READ-ONLY — it delivers nothing. This
+  // Continue is the moment a `query()` actually spawns, so it is where
+  // the spawn gates belong. They matter more here than at the original
+  // start: a server restart is exactly the window in which a
+  // participant's `.claude/settings*.json` can have gained an MCP server,
+  // a hook, or an `env:` key since the operator last approved anything.
+  //
+  // Runs BEFORE `setAwaitingContinue(false)` so a refused/unanswered gate
+  // leaves the session in its recovered state rather than half-continued.
+  try {
+    const continueDenials = await gateProjects(
+      listResolvedParticipants(sessionId)
+        .filter((p) => p.role === 'worker')
+        .map((p) => p.project_id),
+    );
+    // H04: this session's specs already exist (R-B rebuilt them), so the
+    // denial is merged into them rather than passed at registration. It
+    // binds on the next turn — which is the one Continue is about to run.
+    for (const [projectId, serverNames] of continueDenials) {
+      applyMcpDenials(projectId, serverNames);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    send({ type: 'wrapper_error', kind: 'process_crashed', message });
+    return;
+  }
+  try {
+    // Clear the flag BEFORE delivering so a racing second click sees
+    // awaiting_continue=0 and the guard above no-ops it.
+    setAwaitingContinue(sessionId, false);
+    await sendUserPrompt(buildContinueNudge(sessionId));
+  } catch (err) {
+    // Register S08: the delivery never happened, so re-arm the recovery state
+    // the clear above gave up. The banner returns on the next attach and the
+    // guard accepts a retry; without this the operator's error toast is the
+    // last thing that ever happens to this session. Guarded in turn — if even
+    // the re-arm fails there is nothing further to try, and the original error
+    // is the one worth reporting.
+    try {
+      setAwaitingContinue(sessionId, true);
+    } catch (restoreErr) {
+      console.error(`[ws] restoring awaiting_continue for ${sessionId} failed`, restoreErr);
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    send({ type: 'wrapper_error', kind: 'process_crashed', message });
   }
 }
 
@@ -1449,25 +2011,54 @@ type Conn = {
    *  `sendUserPrompt` method; the WS handler narrows via `'sendUserPrompt'
    *  in active` rather than carrying a separate mode discriminator here. */
   multiAgent: ChainSessionHandle | OrchestratorSessionHandle | null;
+  /**
+   * Register B01: this connection's sink-ownership token for `multiAgent`.
+   * Minted by the `rebind` that bound this conn's sink (0 for a session this
+   * conn started itself). Passed to `detach()` on WS close so a stale
+   * window's teardown is ignored once a newer window has re-attached.
+   */
+  multiAgentSinkEpoch: number;
+  /**
+   * Register B18: this connection's token for the process-wide "a multi-agent
+   * session is being started" claim, or `null` when it holds no claim.
+   *
+   * Same shape as `multiAgentSinkEpoch` above — a per-connection token for a
+   * registry-owned concept. Held only across the start path's awaits and
+   * released by `ws.on('close')`, so a rejection between the claim and
+   * `registerLiveSession` cannot wedge every future start: the message
+   * dispatch wraps only `JSON.parse` in a try, and a claim that dies with its
+   * connection does not need one.
+   */
+  multiAgentStartClaim: string | null;
   /** Cluster B Phase 3: per-project authority cache; see CachedSessionStarted. */
   authorityCache: Map<number, CachedSessionStarted>;
   /**
    * Cluster B Phase 4b: TOFU spawn-gate state. Holds parked `pendingId`
    * promises (one per emitted `mcp_auto_install_pending`) and the per-session
-   * deny_once set. Cleared implicitly on disconnect via Conn drop.
+   * deny_once set. Drained by `abandonPendingMcpGates` in `ws.on('close')`.
+   *
+   * Register B20: said "Cleared implicitly on disconnect via Conn drop." A
+   * PROMISE map is not cleared by dropping its owner — the unsettled promise
+   * keeps the awaiting spawn's async frame alive, and that frame keeps this
+   * `Conn`. Contrast `capturedPrompts` below, which is plain data and really
+   * is collected with the Conn; the distinction is what makes one of these
+   * comments true and three of them false.
    */
   trustGate: TrustGateState;
   /**
    * Cluster G Phase 4 (D6/D11): bus-install TOFU gate state. Holds parked
    * `pendingId` promises (one per emitted `bus_auto_install_pending`) and
-   * the per-Conn `deny_once` set keyed by projectId. Cleared implicitly on
-   * disconnect via Conn drop.
+   * the per-Conn `deny_once` set keyed by projectId. Drained by
+   * `abandonPendingBusGates` in `ws.on('close')` — register B20, same
+   * correction as `trustGate` above.
    */
   busTrustGate: BusTrustGateState;
   /**
    * Cluster B Phase 5: env-injection start-gate state. Holds parked
    * `pendingStartId` promises (one per emitted `session_start_gated`).
-   * Cleared implicitly on disconnect.
+   * Drained by `abandonPendingStartGates` in `ws.on('close')` — register
+   * B20, and the one of the three where draining by RESOLVING would have
+   * spawned a session nobody acknowledged. It rejects.
    */
   startGate: StartGateState;
   /**
@@ -1490,7 +2081,11 @@ type Conn = {
    * Lives on the Conn (not in module-level state) so a second operator
    * pane attaching to the same session doesn't inherit the first
    * pane's held-prompt — each pane manages its own retry intent.
-   * Cleared implicitly on WS close.
+   *
+   * Cleared implicitly on WS close — and unlike the three gate maps above,
+   * that is literally true here: this holds plain data, not promises, so
+   * dropping the `Conn` really does collect it. Register B20 corrected the
+   * other three rather than this one; don't "fix" this to match them.
    *
    * The map's existence-as-signal is also the "this session is held"
    * indicator that gates `runOneTurn`'s finally-block status flip.
@@ -1507,10 +2102,28 @@ type Conn = {
   lastInterruptIds: Map<string, string>;
 };
 
+/**
+ * Register H10: cap on a single inbound WS frame.
+ *
+ * `ws` defaults to 100 MiB, and each frame is then duplicated twice more on
+ * the way in — `raw.toString()` and `JSON.parse` — so the default lets any
+ * token holder drive several hundred megabytes of transient allocation per
+ * message on a single-threaded server.
+ *
+ * 4 MiB is a bound on the absurd, not a tuned limit. The largest legitimate
+ * frame is an operator-edited tool input in a permission card (a `Write`
+ * payload) or a pasted prompt; the runner-up is `bulk_session_op` with every
+ * session selected, at ~39 bytes per id — over 100k sessions before it binds.
+ * Exceeding it makes `ws` close the connection with 1009, which the client's
+ * existing reconnect path already handles.
+ */
+export const MAX_WS_FRAME_BYTES = 4 * 1024 * 1024;
+
 export function startWsServer(server: HttpServer): WebSocketServer {
   const allowedOrigins = buildAllowedOrigins();
   const wss = new WebSocketServer({
     server,
+    maxPayload: MAX_WS_FRAME_BYTES,
     verifyClient: (info, cb) => {
       const req = info.req as IncomingMessage;
       const origin = String(req.headers.origin ?? '');
@@ -1552,10 +2165,11 @@ export function startWsServer(server: HttpServer): WebSocketServer {
         });
         return;
       }
-      // F4: per-launch auth token. Workers under bypassPermissions can
-      //     spoof Origin/Host from a Node WS client trivially, so the
-      //     only real defense against a worker→WS hijack is requiring a
-      //     secret they can't read (mode 0600 on ~/.cebab/auth-token).
+      // F4: per-launch auth token. A bus worker's tool calls are all
+      //     auto-approved (no human gate on Bash), so it can spoof
+      //     Origin/Host from a Node WS client trivially, and the only real
+      //     defense against a worker→WS hijack is requiring a secret it
+      //     can't read (mode 0600 on ~/.cebab/auth-token).
       const u = new URL(req.url ?? '/', 'http://x');
       if (!verifyToken(u.searchParams.get('token'))) {
         console.warn('[ws] reject: bad token');
@@ -1603,17 +2217,49 @@ function send(ws: WebSocket, msg: ServerMsg): void {
  * runs, then decide what credentials it sees."
  *
  * Duplicates are deduped here so a chain with `[A, A, B]` only re-prompts
- * once for A. Caller (`start_multi_agent` for bus, `runOneTurn` for
- * single-agent) MUST `await` this before calling `pickRunner` /
- * `startOrchestratorSession` / `startChainSession`. The await is the
- * structural block — if the operator never replies, the spawn never
- * happens.
+ * once for A. Every caller MUST `await` this before anything can spawn a
+ * `query()`. The await is the structural block — if the operator never
+ * replies, the spawn never happens.
+ *
+ * H04: callers must also PASS THE RETURN VALUE to the spawn. Awaiting alone
+ * only guarantees the operator was asked; the returned `McpDenials` is what
+ * makes their answer bind. A caller that drops it silently reintroduces the
+ * exact defect this fixed — the operator clicks Deny and the binary loads.
+ *
+ * The five call sites, i.e. every path to a spawn:
+ *   - `start_multi_agent` orchestrator + chain — bus scopes.
+ *   - `add_multi_agent_participant` — bus scopes. A mid-run add reaches the
+ *     same widened `runner.register`, and used to reach it with NO gate at
+ *     all (the bus-install TOFU it did run answers a different question).
+ *   - `continue_multi_agent` — bus scopes. R-B reconstruction rebuilds the
+ *     runner read-only; Continue is where a turn actually spawns, and a
+ *     restart is exactly when a participant's settings may have changed.
+ *   - `runOneTurn` (single-agent) — trust-derived scopes, the default.
+ *
+ * `settingSources` must match what the spawn will pass the SDK. See the
+ * note on the parameter.
  *
  * On a project_authority resolution miss (project row deleted mid-flight),
  * we skip silently — `getProject` upstream already rejected the start, so
  * this case is structurally unreachable in practice.
  */
-async function gateProjectsForSpawn(conn: Conn, projectIds: number[]): Promise<void> {
+/**
+ * H04: projectId → MCP server names the operator refused for that project.
+ *
+ * Every spawn path threads this from its gate call to the runner, where
+ * `runClaude` turns each name into `settings.deniedMcpServers` (the server
+ * does not load) plus `disallowedTools: mcp__<name>__*` (its tools are not in
+ * the model's context). An empty map is the overwhelmingly common case and
+ * produces byte-identical run options to before.
+ */
+export type McpDenials = Map<number, string[]>;
+
+export async function gateProjectsForSpawn(
+  conn: Conn,
+  projectIds: number[],
+  settingSources?: readonly SettingScope[],
+): Promise<McpDenials> {
+  const denials: McpDenials = new Map();
   const seen = new Set<number>();
   for (const projectId of projectIds) {
     if (seen.has(projectId)) continue;
@@ -1622,21 +2268,125 @@ async function gateProjectsForSpawn(conn: Conn, projectIds: number[]): Promise<v
     const authority = resolveProjectAuthority({
       projectId,
       mode: 'cache',
+      // [security] Resolve against the scopes the SPAWN will use, not the
+      // project's Trust setting. Bus callers pass BUS_SETTING_SCOPES because
+      // bus/{orchestrator,chain}.ts register every participant with all three
+      // layers regardless of Trust; resolving trust-derived here would hand
+      // both gates below an empty list for an untrusted project whose
+      // project-declared MCP servers and `env:` block the SDK then loads.
+      // Omitted (single-agent) keeps the trust-derived default.
+      ...(settingSources !== undefined && { settingSources }),
       ...(cached !== undefined && { latestSessionStarted: cached }),
     });
     if (!authority) continue;
-    await awaitMcpTrustDecisions({
+    const gateOutcome = await awaitMcpTrustDecisions({
       projectId,
       gate: conn.trustGate,
       send: (m) => send(conn.ws, m),
       servers: authority.mcpServers,
     });
+    // H04: the refusal list used to be computed and thrown away — this
+    // function returned `void`. Carrying it out is what turns Deny from a
+    // logged opinion into something the spawn obeys.
+    if (gateOutcome.refused.length > 0) {
+      denials.set(projectId, [...new Set(gateOutcome.refused.map((r) => r.serverName))]);
+    }
     await awaitEnvInjectionAck({
       projectId,
       gate: conn.startGate,
       send: (m) => send(conn.ws, m),
       injections: authority.detectedEnvInjections,
     });
+    // F6: record the hooks this spawn will run and report anything new or
+    // changed. Runs LAST and does NOT park: unlike the two gates above it has
+    // no operator prompt, so awaiting it would hang forever. See
+    // `reportHookObservations`.
+    reportHookObservations(projectId, authority.hooks, (m) => send(conn.ws, m));
+  }
+  return denials;
+}
+
+/**
+ * F6: observe a project's hooks on the way to a spawn, and tell the operator
+ * about anything they have not already seen.
+ *
+ * Hooks are the one authority surface with no gate at all. An MCP server is a
+ * process the model must choose to call; a hook is a shell command the CLI
+ * runs on its own schedule — `SessionStart` before the model acts,
+ * `PreToolUse`/`PostToolUse` around every tool call — and none of them pass
+ * through `canUseTool`, so none can be approved or denied. Since #260 widened
+ * bus participants to `['user', 'project', 'local']`, a participant project's
+ * hooks execute on every hop with no record anywhere.
+ *
+ * DETECTION, NOT PREVENTION — and deliberately so. The two gates above park
+ * the spawn on a promise that only an operator decision resolves. There is no
+ * operator prompt for hooks (a hooks UI is out of v1 scope), so a blocking
+ * hook gate would hang every spawn forever. What lands instead: a durable
+ * `hook_trust` row, a hash-chained `safety_audit` entry, and a notification —
+ * the operator learns, and the forensic trail exists, even though the hook
+ * still runs. Whether to add the blocking prompt is a separate decision with
+ * its own UI cost.
+ *
+ * Failures here can never block a spawn. A DB error while recording what a
+ * hook does must not stop the run the operator asked for; it is logged and
+ * the spawn proceeds, which is the same posture every other best-effort
+ * persistence path in the bus takes.
+ */
+export function reportHookObservations(
+  projectId: number,
+  hooks: HookView[],
+  send: (msg: ServerMsg) => void,
+): void {
+  if (hooks.length === 0) return;
+  const project = getProject(projectId);
+  if (!project) return;
+
+  let observations;
+  try {
+    observations = observeProjectHooks(projectId, hooks, project.path);
+  } catch (err) {
+    console.error('[ws] hook observation failed', err);
+    return;
+  }
+
+  for (const obs of observations) {
+    const isNew = obs.change === 'first_seen';
+    const label = `${obs.hookKind} hook in ${project.name}`;
+    const result = emitNotification(
+      {
+        class: 'safety',
+        severity: isNew ? 'warn' : 'danger',
+        // Per (project, kind, command) so two different hooks both surface;
+        // safety-class events are never coalesced anyway (BE-2), this only
+        // keys the client-side replace.
+        dedupeKey: `hook.${obs.change}:${projectId}:${obs.hookKind}:${obs.command}`,
+        title: isNew ? `New ${label}` : `Changed script behind ${label}`,
+        message: isNew
+          ? `\`${obs.command}\` will run automatically for this project — hooks are not gated by tool approval. Declared in ${obs.originPath}.`
+          : `\`${obs.command}\` is unchanged in ${obs.originPath}, but the file it runs was rewritten since Cebab last saw it.`,
+        projectId,
+        reasonCode: obs.change,
+        auditKind: `hook.${obs.change}`,
+        auditPayload: {
+          projectId,
+          hookKind: obs.hookKind,
+          originPath: obs.originPath,
+          command: obs.command,
+          args: obs.args,
+          scriptSha: obs.scriptSha,
+          ...(obs.previousScriptSha !== undefined
+            ? { previousScriptSha: obs.previousScriptSha }
+            : {}),
+        },
+      },
+      send,
+    );
+    if (!result.ok) {
+      // The audit row is the obligation; if it could not be written the
+      // operator got no notification either. Loud in the log — this is the
+      // BE-1 failure mode, not a routine miss.
+      console.error('[ws] hook observation dispatch failed', result.error);
+    }
   }
 }
 
@@ -1656,13 +2406,115 @@ function cacheSessionStartedIfNeeded(conn: Conn, out: ServerMsg): void {
   conn.authorityCache.set(out.projectId, snapshot);
 }
 
+/**
+ * Register H07: minimum gap between chain verifications outside boot.
+ *
+ * `verifyChain` walks every row after the anchor, one SHA-256 each. A measured
+ * install had 1784 rows after 8 weeks (~32/day), so a reconnect storm — a
+ * browser reload loop, or several tabs — could otherwise re-walk a growing
+ * chain on every socket. 60s keeps "tampering during a long uptime is noticed"
+ * without turning attach into a hot path.
+ */
+const CHAIN_REVERIFY_MIN_INTERVAL_MS = 60_000;
+/** Process-global on purpose: the cost being throttled is one walk of one
+ *  chain, shared by every socket. Per-connection state would let N tabs cost N
+ *  walks, which is the case that motivated the throttle. */
+let lastChainVerifyAt = 0;
+
+/** Test-only: clear the throttle so a case can observe a fresh verification.
+ *  Needed because the state is module-global and therefore survives between
+ *  tests in the same worker. */
+export function _resetChainVerifyThrottle(): void {
+  lastChainVerifyAt = 0;
+}
+
+/**
+ * Register H07: re-verify the audit chain on attach.
+ *
+ * Verification used to run at exactly one place — server boot — so tampering
+ * during a long uptime went unnoticed until the next restart. A Cebab instance
+ * that stays up for weeks (the normal case) would never re-check.
+ *
+ * Still FAILS OPEN, deliberately: this reports and continues, exactly as boot
+ * does. `index.ts` reasons that refusing to run on suspected tamper "bricks the
+ * whole app over a stale marker allowlist", and that argument holds here with
+ * more force — locking the operator out of their own tool because a migration
+ * forgot to register its chain-reset id would be a worse failure than the one
+ * being guarded against. The fix for H07 is that detection happens more than
+ * once, not that detection starts blocking.
+ *
+ * Exported for tests; the throttle is module state, reset via `_testing`.
+ */
+export function reverifyChainOnAttach(send: (msg: ServerMsg) => void, now = Date.now()): void {
+  if (now - lastChainVerifyAt < CHAIN_REVERIFY_MIN_INTERVAL_MS) return;
+  lastChainVerifyAt = now;
+
+  let result;
+  try {
+    result = verifyChain();
+  } catch (err) {
+    // A verification that throws must not take the attach down with it — the
+    // operator would lose the UI over a diagnostic.
+    console.error('[ws] chain re-verification failed to run', err);
+    return;
+  }
+  if (result.ok) return;
+
+  const where = result.brokenAt ? ` at ${result.brokenAt}` : '';
+  console.error(`[ws] safety_audit chain BROKEN (${result.reason})${where}`);
+  const emitted = emitNotification(
+    {
+      class: 'safety',
+      severity: 'danger',
+      // Same key boot uses: the dispatcher collapses repeats in the UI while
+      // every occurrence still writes its own audit row (BE-2).
+      dedupeKey: 'audit.tamper_detected',
+      title: 'Safety audit chain failed verification',
+      message: describeChainFailure(result.reason, result.brokenAt),
+      reasonCode: result.reason,
+      auditKind: 'audit.tamper_detected',
+      auditPayload: { reason: result.reason, brokenAt: result.brokenAt ?? null, at: 'attach' },
+    },
+    send,
+  );
+  if (!emitted.ok) {
+    // The chain is unverifiable AND unwritable. Nothing left but the log.
+    console.error(`[ws] could not record tamper notification: ${emitted.error}`);
+  }
+}
+
+/**
+ * Operator-facing text for each verification failure. Shared by the boot path
+ * (`index.ts`) and the attach path so the two cannot drift into describing the
+ * same condition differently.
+ */
+export function describeChainFailure(reason: string, brokenAt?: string): string {
+  switch (reason) {
+    case 'no_anchor':
+      return 'The safety audit log has no chain-reset anchor. Migrations always insert one, so it was removed.';
+    case 'forged_anchor':
+      return `The newest chain-reset anchor (${brokenAt}) is not one this build wrote.`;
+    case 'tail_truncated':
+      return `Audit rows were deleted: the chain ends before ${brokenAt}, which Cebab recorded outside the database. Entries the log should contain are gone.`;
+    case 'tip_mirror_missing':
+      return 'The out-of-database record of the audit chain tip is gone, so deletions from the log can no longer be detected. It was present before.';
+    default:
+      return `Row ${brokenAt} no longer matches its recorded hash.`;
+  }
+}
+
 function onConnection(ws: WebSocket): void {
   console.log('[ws] client connected');
+  // H07: re-check the chain whenever a browser attaches, so tampering during a
+  // long uptime surfaces without waiting for a restart.
+  reverifyChainOnAttach((msg) => send(ws, msg));
   const conn: Conn = {
     ws,
     pendingPermissions: new Map(),
     inFlight: new Map(),
     multiAgent: null,
+    multiAgentSinkEpoch: 0,
+    multiAgentStartClaim: null,
     authorityCache: new Map(),
     trustGate: makeTrustGateState(),
     busTrustGate: makeBusTrustGateState(),
@@ -1791,14 +2643,38 @@ function onConnection(ws: WebSocket): void {
   const heartbeatTimer = setInterval(emitActiveRuns, 10_000);
 
   ws.on('message', (raw) => {
-    let parsed: ClientMsg;
+    let parsed: unknown;
     try {
       parsed = JSON.parse(raw.toString());
     } catch {
       console.warn('[ws] bad client json');
       return;
     }
-    handleClientMsg(conn, parsed).catch((err) => {
+    // Register S17: `parsed` was asserted as `ClientMsg` here and handed
+    // straight to the switch below, so every handler indexed fields nothing
+    // had checked. `handleClientMsg` has exactly one call site — this one —
+    // so validating here covers the whole verb surface.
+    //
+    // A rejected frame is DROPPED with a log line and no wire reply, matching
+    // the JSON-parse failure three lines above. The browser app compiles
+    // against the same union and sends through one typed helper, so a rejected
+    // frame means a client bug or a non-browser client — a thing to find in
+    // this log, not a session event.
+    //
+    // This used to carry a second reason, and it is worth recording that it is
+    // gone rather than deleting it silently: answering with a `wrapper_error`
+    // was also unsafe, because the client reducer folded any error WITHOUT a
+    // `sessionId` onto whichever session was active and flipped it to
+    // `status: 'error'` — so a malformed frame from some other client marked
+    // the operator's live session failed. `Cebab-da6` removed that fold, so a
+    // sessionless `wrapper_error` is now a toast and nothing else. The drop
+    // stays on the argument above, which never depended on it.
+    const validated = validateClientMsg(parsed);
+    if (!validated.ok) {
+      console.warn(`[ws] rejected frame: ${validated.reason}`);
+      return;
+    }
+    handleClientMsg(conn, validated.msg).catch((err) => {
       console.error('[ws] handler error', err);
       send(ws, {
         type: 'wrapper_error',
@@ -1810,12 +2686,27 @@ function onConnection(ws: WebSocket): void {
 
   ws.on('close', () => {
     console.log('[ws] client disconnected');
-    for (const pending of conn.pendingPermissions.values()) {
-      pending.resolve({ behavior: 'deny', message: 'client disconnected' });
-    }
-    conn.pendingPermissions.clear();
+    // Register S06: persist each denial as well as resolving it. The request
+    // row replays as a live card; without a matching decision row the operator
+    // reopens the session to buttons that do nothing. `reason` says Cebab
+    // decided this, not them.
+    drainAllPendingPermissions(conn.pendingPermissions);
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
+    // Register B20: the three spawn gates park a promise per pending decision
+    // and each one's doc claimed a disconnect took care of it. None did —
+    // dropping the `Conn` does not settle a promise, so the awaiting spawn
+    // stayed suspended forever and its async frame held the `Conn` alive.
+    // These three lines are what makes those docs true. They REJECT rather
+    // than resolve: a resolve carries an operator decision, and for the start
+    // gate it means "acknowledged, spawn". See `gate_abandon.ts`.
+    const abandoned =
+      abandonPendingMcpGates(conn.trustGate, 'client disconnected') +
+      abandonPendingBusGates(conn.busTrustGate, 'client disconnected') +
+      abandonPendingStartGates(conn.startGate, 'client disconnected');
+    if (abandoned > 0) {
+      console.log(`[ws] released ${abandoned} parked spawn gate(s) on disconnect`);
+    }
     // Cluster G Phase 3 (G1): tear down the active-runs dispatcher so its
     // listener + heartbeat don't outlive the WS. The closed-ws guard inside
     // `emitActiveRuns` would no-op the send, but the timer still fires; the
@@ -1834,8 +2725,22 @@ function onConnection(ws: WebSocket): void {
     // intentionally tears a session down. (A Cebab server restart empties
     // the registry; an orchestrated run is then rebuilt from persisted
     // state and re-attached READ-ONLY — R-B — pending an operator Continue.)
+    //
+    // Register B01: pass THIS conn's sink epoch. If another window has since
+    // re-attached (bumping the epoch), the detach is ignored — closing an
+    // older window must not blank the live window's event stream.
+    // Register B18: release a start claim this connection was still holding.
+    // The claim's `finally` covers the normal paths; this covers the one that
+    // matters — the message dispatch wraps only `JSON.parse` in a try, so a
+    // rejection out of the start path would skip the `finally` and leave the
+    // slot claimed forever, refusing every future start until a restart. A
+    // claim cannot outlive the connection that took it.
+    if (conn.multiAgentStartClaim !== null) {
+      releaseSessionStart(conn.multiAgentStartClaim);
+      conn.multiAgentStartClaim = null;
+    }
     if (conn.multiAgent) {
-      conn.multiAgent.detach();
+      conn.multiAgent.detach(conn.multiAgentSinkEpoch);
       conn.multiAgent = null;
     }
   });
@@ -1924,9 +2829,9 @@ function resumeCallbacks(
     },
     onPendingMutation: (sessionId, pending) => {
       send(conn.ws, {
-        type: 'multi_agent_pending_mutation',
+        type: 'multi_agent_pending_mutations',
         sessionId,
-        pending: pending ? mutationRecordToView(pending) : null,
+        pending: pending.map(mutationRecordToView),
       });
     },
     // Cluster A Phase 3 (D4): rebound on every reconnect so router-drop
@@ -2074,6 +2979,9 @@ function dispatchGuardrailViolationForConn(
  */
 function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   conn.multiAgent = resumed.handle;
+  // Register B01: remember which sink generation this conn owns, so its WS
+  // close only silences the stream if nobody re-attached in the meantime.
+  conn.multiAgentSinkEpoch = resumed.sinkEpoch;
   // Fresh read: R-B reconstruction sets `awaiting_continue` AFTER the
   // resume sweep snapshots its `candidate` row, so `resumed.row` can be
   // stale. The DB is authoritative.
@@ -2103,13 +3011,12 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   const sessionRow = getMultiAgentSession(resumed.handle.sessionId);
   const pauseOnDangerous = sessionRow?.pause_on_dangerous === 1;
   const executeMode = sessionRow?.execute_mode === 1;
-  const mutationsAcknowledged = sessionRow?.mutations_acknowledged === 1;
   const mutationsList = listMultiAgentMutations(resumed.handle.sessionId);
-  const pendingMutationRow = getPendingMutation(resumed.handle.sessionId);
   const mutations: MultiAgentMutationView[] = mutationsList.map(mutationRecordToView);
-  const pendingMutationView = pendingMutationRow
-    ? mutationRecordToView(pendingMutationRow)
-    : undefined;
+  // Migration 031: every worker the gate is currently holding, not just one.
+  const pendingMutations: MultiAgentMutationView[] = listPendingMutations(
+    resumed.handle.sessionId,
+  ).map(mutationRecordToView);
   // Interactive AskUserQuestion: a parked question (if any) so the card
   // reappears on R-A re-attach. The Promise lives in the in-process registry
   // (survives the sink swap); one card at a time.
@@ -2128,7 +3035,10 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // Original `participants` (project ids) only ride the start request,
     // not the DB row; the reducer doesn't use this field post-start.
     participants: [],
-    participantAgentNames: resumed.handle.participantAgentNames,
+    // Register Cebab-74q: from the DB, not `resumed.handle`. The handle's
+    // array is a start-time snapshot that `addWorker` never grows, so a
+    // worker added mid-run used to disappear on the operator's next refresh.
+    participantAgentNames: rosterAgentNames(resumed.handle.sessionId, resumed.mode),
     lifecycle: resumed.handle.lifecycle,
     sessionFolder: resumed.handle.sessionFolder,
     // R-A: re-attaches a live handle → use the original session's budget.
@@ -2139,9 +3049,8 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     ...(pendingRetry ? { pendingRetry } : {}),
     pauseOnDangerous,
     executeMode,
-    mutationsAcknowledged,
     mutations,
-    ...(pendingMutationView ? { pendingMutation: pendingMutationView } : {}),
+    pendingMutations,
     ...(pendingQuestion
       ? {
           pendingQuestion: {
@@ -2241,6 +3150,66 @@ function resolveHopBudget(): number {
  * **Exported** so tests can verify the precedence chain without
  * round-tripping through `emitSettings` or a WS connection.
  */
+/**
+ * Register H13 (BE-7): does acknowledging this notification demand a typed
+ * reason?
+ *
+ * Two independent sources, because the highest sub-class is identified two
+ * different ways and conflating them is the bug this fixes:
+ *
+ *   REASON CODE — `forged_source`, `defang.bypass_suspected`. Carried directly
+ *                 on the notification row.
+ *   AUDIT KIND  — `audit.tamper_detected`. Never appears as a reason code: the
+ *                 tamper emitter puts the specific failure
+ *                 (`row_mismatch` / `no_anchor` / `tail_truncated` / …) in
+ *                 `reasonCode` and the kind in `auditKind`. Testing only
+ *                 `reason_code` meant the audit-chain alarm — the most severe
+ *                 event Cebab raises — needed no justification at all.
+ *
+ * The kind is read from the `safety_audit` row behind `audit_row_id`, which
+ * every safety-class notification carries (the dispatcher writes the audit row
+ * first and stores its id, BE-1). One extra SELECT on a path that runs once per
+ * operator click.
+ *
+ * Pure-ish + exported so the invariant is pinned by a test rather than living
+ * only inside the WS switch, matching `isUngatedTrustDecisionAllowed` below.
+ */
+export function requiresTypedAckReason(row: NotificationRow): boolean {
+  if (row.class !== 'safety') return false;
+  if (row.reason_code && HIGHEST_SUBCODES.has(row.reason_code)) return true;
+  if (!row.audit_row_id) return false;
+  const audit = getSafetyAuditRow(row.audit_row_id);
+  return audit ? HIGHEST_AUDIT_KINDS.has(audit.kind) : false;
+}
+
+/** The four outcomes an operator can pick on an MCP trust prompt. */
+export type McpTrustDecisionKind = 'trust' | 'trust_pinned' | 'deny_once' | 'deny_remember';
+
+/**
+ * [security] May this `mcp_trust_decision` be persisted with NO parked gate
+ * entry behind it (the `mcp_trust_decision` handler's "path B")?
+ *
+ * Only decisions that REDUCE authority may. An ungated `trust` / `trust_pinned`
+ * writes an `mcp_trust` row that nobody was prompted for, and those rows are
+ * exactly what `awaitMcpTrustDecisions` consults — so a pre-seeded row silently
+ * passes the operator's NEXT session-start gate, self-approving past the TOFU
+ * check. Denials need no prompt: refusing authority you were never granted is
+ * always safe.
+ *
+ * Pure + exported so the invariant is pinned by a test rather than living only
+ * inside the WS switch. A new decision kind must be classified here explicitly.
+ */
+export function isUngatedTrustDecisionAllowed(decision: McpTrustDecisionKind): boolean {
+  switch (decision) {
+    case 'deny_once':
+    case 'deny_remember':
+      return true;
+    case 'trust':
+    case 'trust_pinned':
+      return false;
+  }
+}
+
 export function resolveMaxTurns(override?: number): number {
   if (typeof override === 'number' && Number.isFinite(override) && override >= 1) {
     return Math.floor(override);
@@ -2303,18 +3272,17 @@ function resumeFailureMessage(sessionId: string): string {
  * landed after its last action — not the whole log. Excludes the
  * cebab→user recovery banner (operator-facing, not orchestrator input).
  */
-function buildContinueNudge(sessionId: string): string {
-  const events = listMultiAgentEvents(sessionId);
-  let lastOrchIdx = -1;
-  for (let i = events.length - 1; i >= 0; i--) {
-    if (events[i]!.source === ORCHESTRATOR_AGENT_NAME) {
-      lastOrchIdx = i;
-      break;
-    }
-  }
-  const since = events
-    .slice(lastOrchIdx + 1)
-    .filter((e) => !(e.source === 'cebab' && e.destination === 'user'));
+export function buildContinueNudge(sessionId: string): string {
+  // `Cebab-3nt`: this used to load the whole transcript and scan backwards in
+  // JS for the last orchestrator row. `listMultiAgentEvents` has taken a
+  // `sinceId` since it was written and every caller passed 0, so the seam for
+  // "only what landed after X" was already here and unused. Asking SQL for the
+  // boundary and then for the tail reads the same rows the old code kept, and
+  // none of the ones it threw away.
+  const lastOrchId = lastEventIdFromSource(sessionId, ORCHESTRATOR_AGENT_NAME);
+  const since = listMultiAgentEvents(sessionId, lastOrchId).filter(
+    (e) => !(e.source === 'cebab' && e.destination === 'user'),
+  );
   const log =
     since.length > 0
       ? since.map((e) => `- ${e.source} → ${e.destination} [${e.kind}]: ${e.text}`).join('\n')
@@ -2363,6 +3331,35 @@ function seedPermissionMode(
 }
 
 /**
+ * Register Cebab-74q: who is in this session, according to the DB.
+ *
+ * There were two answers to that question and they disagreed. The iteration
+ * browser derived it from `multi_agent_participants` (correct); the re-attach
+ * envelope shipped `handle.participantAgentNames`, an array built once at
+ * start time from the initial worker list. `addWorker` updates the router, the
+ * participant row, and three maps — but not that array, because nothing holds
+ * a reference that would make a push visible. So a worker added mid-run
+ * vanished the moment the operator refreshed the browser, taking its
+ * per-participant controls (mute / pause / kick) with it.
+ *
+ * The fix is one builder reading the durable side, not a `push` in
+ * `addWorker`: the push fixes today's symptom and leaves the next mid-run
+ * mutation to rediscover the same split.
+ *
+ * `bus_agent_name` is null for a participant whose project row is gone, so
+ * those are dropped rather than rendered as blanks. Chain mode has no
+ * orchestrator, hence the mode branch.
+ *
+ * Exported for direct testing, like its neighbours in this file.
+ */
+export function rosterAgentNames(sessionId: string, mode: 'chain' | 'orchestrator'): string[] {
+  const workerNames = listResolvedParticipants(sessionId)
+    .map((p) => p.bus_agent_name)
+    .filter((n): n is string => n !== null);
+  return mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+}
+
+/**
  * Build the iteration browser list from the DB. Exported for direct unit
  * testing without standing up a WS connection.
  *
@@ -2378,12 +3375,7 @@ export async function buildIterationsList(): Promise<IterationSummary[]> {
   const rows = listMultiAgentSessionsWithIteration();
   const out: IterationSummary[] = [];
   for (const row of rows) {
-    const participants = listResolvedParticipants(row.id);
-    const workerNames = participants
-      .map((p) => p.bus_agent_name)
-      .filter((n): n is string => n !== null);
-    const participantAgentNames =
-      row.mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+    const participantAgentNames = rosterAgentNames(row.id, row.mode as 'chain' | 'orchestrator');
     const artifactsDir =
       row.session_folder !== null
         ? sessionPathsFromFolder(row.session_folder).iterationDir(row.iteration_id!)
@@ -2409,6 +3401,83 @@ export async function buildIterationsList(): Promise<IterationSummary[]> {
     });
   }
   return out;
+}
+
+/** Operator-facing name for each control verb, used in the toast title. */
+const CONTROL_VERB_LABEL: Record<ControlVerb, string> = {
+  mute: 'Mute',
+  unmute: 'Unmute',
+  pause: 'Pause',
+  resume: 'Resume',
+  kick: 'Kick',
+};
+
+type ControlVerb = 'mute' | 'unmute' | 'pause' | 'resume' | 'kick';
+
+/**
+ * Register B21/B12/B19: report a refused control verb to the operator.
+ *
+ * The four `mute_participant` / `pause_participant` / `resume_participant` /
+ * `kick_participant` handlers each used to answer a rejection with
+ * `wrapper_error { kind: 'process_crashed', message: '<code>: <text>' }`,
+ * which arrived nowhere. `notifyFromServerMsg` skips any `wrapper_error`
+ * carrying a `sessionId` (it assumes the store renders a session banner);
+ * the store can't, because a bus session id is deliberately absent from
+ * `sessionToProject`, so its fallback invented a `SessionView` in whatever
+ * single-agent project was selected and flagged it `status: 'error'`.
+ * Refusing to mute the orchestrator therefore produced a phantom crashed
+ * chat session in an unrelated project and nothing in the multi-agent UI.
+ *
+ * Two channels now, both of which actually land:
+ *
+ *   - the typed `participant_control_failed` envelope, which the store
+ *     routes onto the active `MultiAgentRun` (matching the `auto_retry`
+ *     guard) and which bumps `failureSeq` so pending row spinners stop; and
+ *   - a dispatcher notification, per `notifyFromServerMsg`'s own header
+ *     ("route via the dispatcher instead" of adding client cases).
+ *
+ * The notification is **operational**, including for `audit_write_failed`,
+ * which reads like a miscategorisation and is not: a safety-class emit
+ * appends to `safety_audit` first, through the very path that just threw —
+ * the emit would fail and the operator would learn nothing. The audit gap
+ * itself is already logged by the executor. Every failure gets a toast (not
+ * just the surprising ones): the UI disables the impossible actions, so a
+ * rejection reaching here means a client-side guard missed.
+ */
+function sendControlFailure(
+  conn: Conn,
+  verb: ControlVerb,
+  args: {
+    sessionId: string;
+    projectId: number;
+    failureCode: ControllabilityFailureCode;
+    message: string;
+  },
+): void {
+  send(conn.ws, {
+    type: 'participant_control_failed',
+    sessionId: args.sessionId,
+    projectId: args.projectId,
+    verb,
+    failureCode: args.failureCode,
+    message: args.message,
+    ts: Date.now(),
+  });
+  emitNotification(
+    {
+      class: 'operational',
+      severity: args.failureCode === 'audit_write_failed' ? 'error' : 'warn',
+      // Same participant + verb + code collapses; a different code does not,
+      // because "already muted" and "the audit trail broke" are not the same
+      // event even when the operator clicked the same button twice.
+      dedupeKey: `control_failed:${args.sessionId}:${args.projectId}:${verb}:${args.failureCode}`,
+      title: `${CONTROL_VERB_LABEL[verb]} refused`,
+      message: args.message,
+      sessionId: args.sessionId,
+      reasonCode: args.failureCode,
+    },
+    (out) => send(conn.ws, out),
+  );
 }
 
 async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
@@ -2492,6 +3561,50 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'set_trusted': {
+      // [security] Trust drives both the initial permissionMode and the
+      // settingSources scope for this project's future single-agent runs, so
+      // flipping it is an authority change and belongs in the hash-chained
+      // audit log alongside every other trust decision. It had no audit row.
+      //
+      // Audit BEFORE the state change (the BE-1 dual-write ordering that
+      // `recordTrustDecision` also follows): if the append fails we refuse to
+      // proceed rather than leaving an unrecorded authority change behind.
+      //
+      // This does not PREVENT an ungated flip — anything holding the auth
+      // token can send this verb, and a bus agent runs as the operator's uid
+      // (see server/src/auth.ts). Detection is what is achievable here.
+      const beforeRow = getProject(msg.projectId);
+      const auditResult = emitNotification(
+        {
+          class: 'safety',
+          severity: 'warn',
+          dedupeKey: `project.trust_decided:${msg.projectId}`,
+          title: msg.trusted ? 'Project marked trusted' : 'Project trust revoked',
+          message: beforeRow ? `${beforeRow.name} (${beforeRow.path})` : `project ${msg.projectId}`,
+          projectId: msg.projectId,
+          reasonCode: msg.trusted ? 'project_trusted' : 'project_untrusted',
+          auditKind: 'project.trust_decided',
+          auditPayload: {
+            projectId: msg.projectId,
+            path: beforeRow?.path ?? null,
+            from: beforeRow?.trusted === 1,
+            to: msg.trusted,
+          },
+          // Operational visibility is the audit row; a sticky toast for every
+          // Trust toggle would be noise the operator just dismissed.
+          sticky: false,
+        },
+        (m) => send(conn.ws, m),
+      );
+      if (!auditResult.ok) {
+        console.error('[ws] set_trusted audit append failed', auditResult.error);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: `set_trusted: could not record the authority change (${auditResult.error}); trust unchanged.`,
+        });
+        return;
+      }
       setProjectTrusted(msg.projectId, msg.trusted);
       const rows = await syncWorkspaceProjects();
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
@@ -2582,12 +3695,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // BE-7: highest sub-class safety events require a typed reason. Without
       // it, the typed-ack affordance hasn't been collected — reject so the
       // UI can re-prompt rather than silently logging an empty acked_reason.
-      if (
-        row.class === 'safety' &&
-        row.reason_code &&
-        HIGHEST_SUBCODES.has(row.reason_code) &&
-        (!msg.ackReason || msg.ackReason.trim() === '')
-      ) {
+      //
+      // Register H13: the test used to be reason-code-only, and
+      // `audit.tamper_detected` — an audit KIND that never appears as a reason
+      // code — sat in the reason-code set. The audit-chain tamper alarm
+      // therefore required nothing, while lesser events required a
+      // justification. Both fields are consulted now; see
+      // `requiresTypedAckReason`.
+      if (requiresTypedAckReason(row) && (!msg.ackReason || msg.ackReason.trim() === '')) {
         send(conn.ws, {
           type: 'wrapper_error',
           kind: 'process_crashed',
@@ -2681,14 +3796,27 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       //      mcp_trust + safety_audit dual-write and unblocks the spawn.
       //   B) Operator-initiated (no `pendingId`, OR pendingId stale/unknown):
       //      decision came from the AuthorityPanel Trust/Deny affordance
-      //      with no parked spawn. We persist directly here. trust_pinned
-      //      still validates binarySha. deny_once with no parked gate is
-      //      a no-op (in-memory state has no anchor without a project id;
-      //      the next gate pass will re-prompt anyway).
+      //      with no parked spawn. Path B may only ever REDUCE authority.
+      //      deny_once with no parked gate is a no-op (in-memory state has
+      //      no anchor without a project id; the next gate pass re-prompts
+      //      anyway); deny_remember persists.
       //
       // Path A always wins when both could apply — the parked spawn needs
       // to be unstuck before any other side effect, and the gate handles
       // the dual-write internally with the right project id + sessionKey.
+      //
+      // [security] Why `trust` / `trust_pinned` are path-A-only: path B used
+      // to persist them too, so ANY client on this socket could write
+      // `mcp_trust` rows for a server name of its choosing with no operator
+      // prompt in the loop. Those rows are exactly what
+      // `awaitMcpTrustDecisions` consults, so a pre-seeded row silently
+      // passes the operator's NEXT session-start gate — a self-approving
+      // bypass of the TOFU gate. That matters because a bus worker runs as
+      // the operator's uid: it can read ~/.cebab/auth-token and open its own
+      // WS connection (see server/src/auth.ts's residual note). Requiring a
+      // live parked entry means an escalating decision can only ever answer a
+      // prompt Cebab itself raised. Denials stay reachable from path B —
+      // reducing authority needs no gate.
       if (msg.pendingId) {
         const entry = conn.trustGate.pending.get(msg.pendingId);
         if (entry) {
@@ -2728,7 +3856,26 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // case: the operator's client retried a decision after the gate
         // already resolved (or the spawn aborted upstream).
       }
-      // Path B: operator-initiated persistence.
+      // Path B: operator-initiated persistence — denials only.
+      //
+      // [security] An escalating decision that reaches here has no parked
+      // gate behind it, so nothing proves an operator was ever asked.
+      // Refuse it rather than persisting a trust row nobody approved. The
+      // AuthorityPanel's Trust affordance must go through a gate; the
+      // wrapper_error tells it (and a scripted caller) why.
+      if (!isUngatedTrustDecisionAllowed(msg.decision)) {
+        console.warn(
+          `[mcp_trust] refused ungated ${msg.decision} for ${msg.serverName} @ ${msg.originPath} — no parked gate`,
+        );
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message:
+            `mcp_trust_decision: ${msg.decision} requires a live trust prompt ` +
+            `(server=${msg.serverName}). Start the session and answer the prompt it raises.`,
+        });
+        return;
+      }
       if (msg.decision === 'deny_once') {
         // deny_once without a parked gate has nowhere to land (no project
         // anchor for the in-memory set). Log and acknowledge silently — the
@@ -2739,30 +3886,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         );
         return;
       }
-      const persisted =
-        msg.decision === 'trust'
-          ? 'trusted'
-          : msg.decision === 'trust_pinned'
-            ? 'trusted_pinned_hash'
-            : 'denied_remember';
-      // trust_pinned without a binarySha is a UX bug (the client should
-      // grey out the affordance) AND a meaningless lookup state — reject
-      // explicitly so the operator gets a wrapper_error instead of a
-      // silently-stored junk row.
-      if (persisted === 'trusted_pinned_hash' && !msg.binarySha) {
-        send(conn.ws, {
-          type: 'wrapper_error',
-          kind: 'process_crashed',
-          message: `mcp_trust_decision: trust_pinned requires binarySha (server=${msg.serverName})`,
-        });
-        return;
-      }
+      // Only `deny_remember` reaches here — the two escalating decisions
+      // returned above and `deny_once` returned just now.
       try {
         recordTrustDecision({
           serverName: msg.serverName,
           originPath: msg.originPath,
           binarySha: msg.binarySha ?? null,
-          decision: persisted,
+          decision: 'denied_remember',
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -2798,6 +3929,84 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           `[bus_trust] decision for unknown pendingId=${msg.pendingId} (project=${msg.projectId}) — no-op`,
         );
       }
+      return;
+    }
+    case 'cancel_gate': {
+      // Register H15 / W28: the operator dismissed a gate modal instead of
+      // deciding it. Before this verb the client had nothing to send, so the
+      // spawn stayed parked until the socket dropped — including when they
+      // pressed the env gate's own "Refuse & edit" button.
+      //
+      // Routed to `abandonOnePendingGate`, i.e. the SAME reject-don't-resolve
+      // path `ws.on('close')` drains with. That is the whole answer to "does
+      // cancelling deny?": it does not. Nothing is written to
+      // `projects.bus_trust_decision`, no MCP hash is pinned, no env override
+      // is acknowledged. The spawn fails with `GateAbandonedError` and the
+      // operator is asked again next time.
+      //
+      // Dispatched with a switch rather than a lookup table so each call
+      // infers `abandonOnePendingGate`'s generic from ONE concrete entry
+      // type. A table would union the three maps, and `Map` is invariant in
+      // its value type, so the union is assignable to none of them.
+      const CANCEL_REASON = 'operator cancelled';
+      let gateName: string;
+      let matched: boolean;
+      switch (msg.kind) {
+        case 'mcp':
+          gateName = 'mcp-trust';
+          matched = abandonOnePendingGate(
+            conn.trustGate.pending,
+            gateName,
+            CANCEL_REASON,
+            msg.pendingId,
+          );
+          break;
+        case 'bus':
+          gateName = 'bus-trust';
+          matched = abandonOnePendingGate(
+            conn.busTrustGate.pending,
+            gateName,
+            CANCEL_REASON,
+            msg.pendingId,
+          );
+          break;
+        case 'start':
+          gateName = 'session-start';
+          matched = abandonOnePendingGate(
+            conn.startGate.pending,
+            gateName,
+            CANCEL_REASON,
+            msg.pendingId,
+          );
+          break;
+        default:
+          // The validator checks `kind` is a string, not which string. An
+          // unknown one is a client bug, not an attack surface — nothing is
+          // parked under it either way.
+          console.log(`[gate] cancel for unknown kind=${JSON.stringify(msg.kind)} — no-op`);
+          return;
+      }
+      if (!matched) {
+        // Same stale-reply contract as `bus_trust_decision` above: a
+        // reconnect empties the map, so an id the server has forgotten is
+        // expected traffic, not an error.
+        console.log(`[gate] cancel for unknown ${gateName} pendingId=${msg.pendingId} — no-op`);
+        return;
+      }
+      // The disconnect drain deliberately writes NO audit row — "nothing was
+      // decided and nothing was refused; the operator was asked and then
+      // left" (install_trust_gate.ts). Half of that still holds here: nothing
+      // was decided. The other half does not — the operator ACTED. "The
+      // socket dropped" and "they explicitly backed out of a security gate"
+      // are exactly the distinction a forensic walker needs, and it is
+      // invisible from the pending envelope alone.
+      appendSafetyAudit({
+        ts: Date.now(),
+        sessionId: null,
+        kind: 'gate.cancelled',
+        reasonCode: msg.kind,
+        payload: { pendingId: msg.pendingId, gate: gateName },
+      });
       return;
     }
     case 'acknowledge_and_start': {
@@ -2977,9 +4186,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // in-memory mutedSet (handle.setMute), writes safety_audit, then
       // emits the participant_mute_changed state-change echo. Topology
       // failures (chain-mode, orchestrator target, unknown participant,
-      // already-in-state) return as wrapper_error with a typed
-      // ControllabilityFailureCode in the `message` field so the client
-      // reducer can roll back the optimistic flip cleanly.
+      // already-in-state) ship as `participant_control_failed` — see
+      // `sendControlFailure` for why they stopped being `wrapper_error`.
       const live = getLiveSession(msg.sessionId);
       const orchestratorHandle =
         live?.mode === 'orchestrator'
@@ -2993,11 +4201,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, msg.type === 'mute_participant' ? 'mute' : 'unmute', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
@@ -3040,19 +4248,32 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, 'pause', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
-      // Phase 4c2: register the expiry timer. The fire callback is
-      // captured-by-closure so it can call back into the handler's
-      // `conn.ws` for the state-change envelope. If the connection has
-      // closed by fire time, `send(conn.ws, ...)` is a no-op — the DB
-      // + audit writes still land (durable trail survives).
+      // Phase 4c2: register the expiry timer.
+      //
+      // Register B17: the fire callback used to send the state-change
+      // envelope to `conn.ws` — the socket that issued the pause — and the
+      // comment here accepted the consequence: "If the connection has closed
+      // by fire time, send(conn.ws, ...) is a no-op; the DB + audit writes
+      // still land." That is precisely the failure. `PauseExpiryRegistry` is
+      // a process singleton cleared on session end, not on connection close
+      // (unlike this connection's own heartbeat/debounce timers, which
+      // `ws.on('close')` clears explicitly), so a timer armed by one window
+      // routinely fires after that window is gone. The operator's LIVE window
+      // then kept showing `paused` for an agent the audit log records as
+      // kicked.
+      //
+      // The callback already re-reads the orchestrator HANDLE at fire time
+      // for exactly this reason (see its comment below). The sink needed the
+      // same treatment; it now goes through the registry entry's
+      // `sendServerMsg`, which resolves the router's current sink.
       getPauseExpiryRegistry().schedule(
         {
           sessionId: msg.sessionId,
@@ -3063,69 +4284,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           reasonCode: msg.reasonCode,
           reasonText: msg.reasonText ?? null,
         },
-        (entry) => {
-          // The fire-time orchestrator handle may differ from the
-          // schedule-time one (R-A reattach swapped the live session
-          // between bind and fire) — re-read at fire time.
-          const liveAtFire = getLiveSession(entry.sessionId);
-          const handleAtFire =
-            liveAtFire?.mode === 'orchestrator'
-              ? (liveAtFire.handle as unknown as OrchestratorSessionHandle)
-              : undefined;
-          const expireResult = executeExpireParticipant({
-            entry,
-            orchestratorHandle: handleAtFire,
-          });
-          if (!expireResult.ok) {
-            console.error(
-              `[ws] pause-expiry executor failed for ${entry.sessionId}/${entry.projectId}`,
-              expireResult.error,
-            );
-            return;
-          }
-          // Diverged state (operator resumed/kicked between schedule +
-          // fire): the trigger audit captured it; no state-change
-          // envelope ships because the state had already moved on
-          // and the operator's UI is already reconciled to the
-          // post-move state from the prior verb's echo.
-          if (expireResult.action === 'noop_diverged') return;
-          const fireTs = entry.pausedUntil; // approximate; the audit row's ts is the authoritative
-          if (expireResult.action === 'auto_resume') {
-            send(
-              conn.ws,
-              buildParticipantPauseChangedMsg({
-                sessionId: entry.sessionId,
-                projectId: entry.projectId,
-                pausedUntil: null,
-                expiryAction: null,
-                reasonCode: entry.reasonCode,
-                ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
-                // No queued deliveries: the gate released, runner
-                // drained the count to zero. Reporting 0 keeps the
-                // wire shape consistent without re-querying the runner
-                // (which the executor doesn't hold a handle to).
-                queuedDeliveries: handleAtFire?.getPendingDeliveries(entry.agentName) ?? 0,
-                ts: fireTs,
-              }),
-            );
-            return;
-          }
-          // auto_kick: fan a `participant_kicked` envelope. The
-          // operator's UI dispatches on the same type the operator-
-          // kick path uses; the reasonCode is carried forward from
-          // the pause.
-          send(
-            conn.ws,
-            buildParticipantKickedMsg({
-              sessionId: entry.sessionId,
-              projectId: entry.projectId,
-              mode: 'drain',
-              reasonCode: entry.reasonCode,
-              ...(entry.reasonText !== null ? { reasonText: entry.reasonText } : {}),
-              ts: expireResult.kickedAt ?? fireTs,
-            }),
-          );
-        },
+        handlePauseExpiry,
       );
       send(
         conn.ws,
@@ -3165,11 +4324,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, 'resume', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
@@ -3216,11 +4375,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
-        send(conn.ws, {
-          type: 'wrapper_error',
+        sendControlFailure(conn, 'kick', {
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: `${result.failureCode}: ${result.message}`,
+          projectId: msg.projectId,
+          failureCode: result.failureCode,
+          message: result.message,
         });
         return;
       }
@@ -3324,6 +4483,23 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         });
         return;
       }
+      // Register B18: one token per start attempt on this connection. Reused
+      // by the claim below and by `ws.on('close')`, which releases whatever
+      // this connection still holds.
+      const startClaimId = randomUUID();
+      // Register B02: the guard above is per-CONNECTION; this one is
+      // process-wide. Register B18 widened it to cover a start that has been
+      // claimed but has not reached the registry yet. See
+      // `describeLiveSessionConflict`.
+      const liveConflict = describeLiveSessionConflict();
+      if (liveConflict) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: liveConflict,
+        });
+        return;
+      }
       if (!Array.isArray(msg.participants) || msg.participants.length === 0) {
         send(conn.ws, {
           type: 'wrapper_error',
@@ -3375,6 +4551,16 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         reason: 'completed' | 'stopped' | 'crashed',
         iterationId: string | null,
       ) => {
+        // Register B11: cancel every pause-expiry timer for the ending
+        // session. This is the SECOND of two `onEnded` closures — the shared
+        // sink used by resume/re-attach has done this since Phase 4c2, and
+        // this fresh-start one did not, so a session started in this
+        // connection left its timers armed past teardown. They then fired
+        // `executeExpireParticipant`, which re-checks durable state and
+        // returns `noop_diverged` — but only AFTER writing its trigger audit
+        // row, so the hash-chained log accrued expiry events for a session
+        // that had ended.
+        getPauseExpiryRegistry().clearSession(sessionId);
         send(conn.ws, {
           type: 'multi_agent_ended',
           sessionId,
@@ -3431,13 +4617,14 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // toast independent of the dangerous-category dispatch.
         dispatchGuardrailViolationForConn(sessionId, mutation, conn);
       };
-      // Item #5: pause-on-dangerous slot set/clear → wire. Fresh starts never
-      // carry a pending slot on `multi_agent_started`; this is the delta.
-      const onPendingMutation = (sessionId: string, pending: MutationRecord | null) => {
+      // Item #5: the set of gate-halted workers changed → wire. Fresh starts
+      // never carry pending rows on `multi_agent_started`; this is the delta.
+      // Whole-set, not a delta-of-a-delta, so a re-attach re-emit is idempotent.
+      const onPendingMutation = (sessionId: string, pending: MutationRecord[]) => {
         send(conn.ws, {
-          type: 'multi_agent_pending_mutation',
+          type: 'multi_agent_pending_mutations',
           sessionId,
-          pending: pending ? mutationRecordToView(pending) : null,
+          pending: pending.map(mutationRecordToView),
         });
       };
       // Cluster A Phase 3 (D4): the orchestrator/chain router calls these
@@ -3514,18 +4701,36 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
           return;
         }
+        // Register B18: claim the process-wide start slot on the last
+        // synchronous line before the first `await`. Everything from the
+        // guards at the top of this case down to here runs without yielding,
+        // and Node cannot deliver a second `start_multi_agent` except at an
+        // await point — so claiming here is equivalent to claiming at the
+        // guard, while leaving exactly ONE exit below to release rather than
+        // the seven early returns in between.
+        if (!claimSessionStart(startClaimId)) {
+          send(conn.ws, {
+            type: 'wrapper_error',
+            kind: 'process_crashed',
+            message: describeLiveSessionConflict() ?? 'another multi-agent session is starting.',
+          });
+          return;
+        }
+        conn.multiAgentStartClaim = startClaimId;
         // Cluster B Phase 4b (§4.4): TOFU spawn-gate. Per unique worker
         // project, prompt the operator for any declared MCP server that
         // isn't currently 'trusted'. Awaiting blocks the spawn until every
         // decision arrives. The orchestrator itself runs from an empty
         // cwd (no MCPs to gate); only workers carry project-declared MCPs.
-        await gateProjectsForSpawn(
+        const orchestratorDenials = await gateProjectsForSpawn(
           conn,
           workers.map((w) => w.projectId),
+          BUS_SETTING_SCOPES,
         );
         try {
           const handle = await startOrchestratorSession({
             workers,
+            mcpDenials: orchestratorDenials,
             initialPrompt: msg.initialPrompt,
             workspaceRoot,
             lifecycle,
@@ -3548,6 +4753,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
           });
           conn.multiAgent = handle;
+          // Register B01: a freshly-built router's sink epoch is 0 and this
+          // conn owns it. Reset explicitly — a conn that previously re-attached
+          // to some other session would otherwise carry a stale non-zero epoch
+          // and its own close would no-op, leaking events to a dead WS.
+          conn.multiAgentSinkEpoch = 0;
           // Cluster G Phase 2c (UI-A3): read the freshly-inserted session
           // row to project the `mock` column onto the wire. `createMultiAgentSession`
           // (called inside `startOrchestratorSession`) stamps `mock` from
@@ -3559,22 +4769,34 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             sessionId: handle.sessionId,
             mode: 'orchestrator',
             participants: msg.participants,
-            participantAgentNames: handle.participantAgentNames,
+            // Register Cebab-74q: the same DB-derived roster the re-attach
+            // envelope uses. Identical content at fresh start (the start path
+            // writes participant rows before it returns the handle) — the
+            // point is that the WS layer has ONE answer to "who is in this
+            // session", so a mid-run change cannot leave two.
+            participantAgentNames: rosterAgentNames(handle.sessionId, 'orchestrator'),
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
             hopBudget: handle.hopBudget,
-            // Item #5: fresh start — no mutations recorded yet, no pending,
-            // ack flag false. `pauseOnDangerous` echoes the operator's choice
-            // so the UI mirrors its own setup checkbox.
+            // Item #5: fresh start — no mutations recorded yet and nothing
+            // held by the gate. `pauseOnDangerous` echoes the operator's
+            // choice so the UI mirrors its own setup checkbox.
             pauseOnDangerous: handle.pauseOnDangerous,
             executeMode: handle.executeMode,
-            mutationsAcknowledged: false,
             mutations: [],
+            pendingMutations: [],
             ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
           });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        } finally {
+          // Register B18: the claim covered the gap between the guard and
+          // `registerLiveSession` (which runs inside `startOrchestratorSession`).
+          // By here the session is either in the registry — where the B02 check
+          // takes over — or the start failed. Either way the slot is free.
+          releaseSessionStart(startClaimId);
+          conn.multiAgentStartClaim = null;
         }
         return;
       }
@@ -3593,16 +4815,30 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
         return;
       }
+      // Register B18: claim the start slot — mirror of the orchestrator
+      // branch above; see its comment for why the claim sits on the last
+      // synchronous line before the first await.
+      if (!claimSessionStart(startClaimId)) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: describeLiveSessionConflict() ?? 'another multi-agent session is starting.',
+        });
+        return;
+      }
+      conn.multiAgentStartClaim = startClaimId;
       // Cluster B Phase 4b (§4.4): TOFU spawn-gate, mirror of the
       // orchestrator path. Chain participants may repeat (e.g. [A, B, A])
       // and the helper dedupes on projectId so A is gated once.
-      await gateProjectsForSpawn(
+      const chainDenials = await gateProjectsForSpawn(
         conn,
         participants.map((p) => p.projectId),
+        BUS_SETTING_SCOPES,
       );
       try {
         const handle = await startChainSession({
           participants,
+          mcpDenials: chainDenials,
           initialPrompt: msg.initialPrompt,
           workspaceRoot,
           lifecycle,
@@ -3621,6 +4857,9 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
         });
         conn.multiAgent = handle;
+        // Register B01: see the orchestrator path — reset to the fresh
+        // router's epoch 0 so this conn's own close still silences its sink.
+        conn.multiAgentSinkEpoch = 0;
         // Cluster G Phase 2c (UI-A3): same per-session MOCK projection as
         // the orchestrator path — chain sessions also stamp `mock` at row
         // INSERT (via `createMultiAgentSession` inside `startChainSession`).
@@ -3630,7 +4869,8 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           sessionId: handle.sessionId,
           mode: 'chain',
           participants: msg.participants,
-          participantAgentNames: handle.participantAgentNames,
+          // Register Cebab-74q: see the orchestrator branch.
+          participantAgentNames: rosterAgentNames(handle.sessionId, 'chain'),
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
           hopBudget: handle.hopBudget,
@@ -3638,13 +4878,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           // Execute mode is orchestrator-only (chain briefings have no
           // consultant clause to relax) — always false for chain sessions.
           executeMode: false,
-          mutationsAcknowledged: false,
           mutations: [],
+          pendingMutations: [],
           ...(chainRow?.mock === 1 ? { mock: true } : {}),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+      } finally {
+        // Register B18: mirror of the orchestrator branch — see its comment.
+        releaseSessionStart(startClaimId);
+        conn.multiAgentStartClaim = null;
       }
       return;
     }
@@ -3741,38 +4985,23 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'continue_multi_agent': {
+      // Body delegated to `executeContinueMultiAgent` for testability — same
+      // bridge-object pattern as `executeReopenSessionConfirmed` above.
       const active = conn.multiAgent;
-      if (!active || active.sessionId !== msg.sessionId) {
-        // Not the active session — drop (raced an ended, or never
-        // re-attached). The browser only shows Continue on the active run.
-        return;
-      }
-      if (!('sendUserPrompt' in active)) {
-        // Chain handles have no sendUserPrompt — chain reconstruction is
-        // out of scope, so this should be unreachable, but fail loud.
-        send(conn.ws, {
-          type: 'wrapper_error',
-          sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: 'Only orchestrator sessions can be continued.',
-        });
-        return;
-      }
-      const row = getMultiAgentSession(msg.sessionId);
-      if (!row || row.awaiting_continue !== 1) {
-        // Already continued (or never a recovered session). Idempotent
-        // no-op so a double-click can't double-deliver the nudge.
-        return;
-      }
-      try {
-        // Clear the flag BEFORE delivering so a racing second click sees
-        // awaiting_continue=0 and the guard above no-ops it.
-        setAwaitingContinue(msg.sessionId, false);
-        await active.sendUserPrompt(buildContinueNudge(msg.sessionId));
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
-      }
+      // Narrow once: `sendUserPrompt` and `applyMcpDenials` both live on the
+      // orchestrator handle only, and the helper's `sendUserPrompt: null` is
+      // how "this is a chain handle" reaches it.
+      const orch = active && 'sendUserPrompt' in active ? active : null;
+      await executeContinueMultiAgent({
+        sessionId: msg.sessionId,
+        activeSessionId: active?.sessionId ?? null,
+        sendUserPrompt: orch ? (text) => orch.sendUserPrompt(text) : null,
+        gateProjects: (projectIds) => gateProjectsForSpawn(conn, projectIds, BUS_SETTING_SCOPES),
+        applyMcpDenials: (projectId, serverNames) => {
+          orch?.applyMcpDenials(projectId, serverNames);
+        },
+        send: (m) => send(conn.ws, m),
+      });
       return;
     }
     case 'retry_worker': {
@@ -3841,16 +5070,17 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'continue_through_mutation': {
-      // Item #5: operator clicked Continue on the pause-on-first-mutation
-      // banner. Idempotent — the handle reads its own pending slot and no-ops
-      // if cleared. Clearing `awaiting_continue` happens inside the handle's
-      // `continueThroughMutation` (it set it on pause; clears it on resume).
+      // Item #5: operator clicked Continue on one pause-on-dangerous banner.
+      // `mutationId` says which worker it releases — a session can hold one
+      // pause per worker. Idempotent: the handle looks the id up among the
+      // CURRENTLY pending rows, so a double-click (or a stale id from a client
+      // that missed a broadcast) finds nothing and no-ops.
       const active = conn.multiAgent;
       if (!active || active.sessionId !== msg.sessionId) {
         return;
       }
       try {
-        await active.continueThroughMutation();
+        await active.continueThroughMutation(msg.mutationId);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, {
@@ -3981,7 +5211,22 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           });
           return;
         }
-        const result = await active.addWorker(msg.projectId);
+        // [security] Same MCP-TOFU + env-injection gates the two session-start
+        // paths run. This path had NONE of them: a worker added mid-run
+        // reached `runner.register({ settingSources: ['user','project',
+        // 'local'] })` in orchestrator.ts without the operator ever being
+        // prompted about that project's declared MCP servers or credential-
+        // class `env:` keys — for trusted and untrusted projects alike. The
+        // bus-install TOFU above governs whether the project gets a bus slug,
+        // which is a different question.
+        //
+        // Ordering matches the start paths: trust decisions first, then the
+        // credential prompt (see gateProjectsForSpawn's header).
+        const addDenials = await gateProjectsForSpawn(conn, [msg.projectId], BUS_SETTING_SCOPES);
+        // H04: `addWorker` registers the participant and delivers its first
+        // turn in one call, so the denial must go in as an argument — applying
+        // it afterwards would be one turn too late.
+        const result = await active.addWorker(msg.projectId, addDenials.get(msg.projectId) ?? []);
         send(conn.ws, {
           type: 'multi_agent_participant_added',
           sessionId: msg.sessionId,
@@ -4211,11 +5456,18 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       return;
     }
     case 'load_session_log': {
-      // Phase H: paginated session log. Pure read — no DB mutation, no side
-      // effects, no permission check beyond session existence.
-      // `revealSensitive=true` requires the operator's explicit confirm
-      // client-side (the WS message is enough server-side because the
-      // connection is already bound to 127.0.0.1).
+      // Phase H: paginated session log. Pure read — no DB mutation beyond the
+      // reveal audit below, no permission check beyond session existence.
+      //
+      // Register H06: `revealSensitive=true` used to be honoured with no
+      // acknowledgment, no confirmation and NO AUDIT ROW, justified by "the
+      // WS message is enough server-side because the connection is already
+      // bound to 127.0.0.1". That is an argument against the whole
+      // record-intent-before-unredacted-bytes rule, not for exempting one
+      // path — the HTTP raw export (`session_log_export.ts`) and raw search
+      // (`search_sessions.ts`) serve from the same 127.0.0.1 server and both
+      // audit first. This was the cheapest route to raw transcripts and the
+      // only one that left no trail.
       //
       // Cluster H C3 backend: branch on `msg.scope`. Default is the original
       // multi-agent projector ('multi_agent'); `'single'` reads the
@@ -4248,12 +5500,21 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       const offset = Number.isFinite(msg.offset) ? Math.max(0, Math.floor(msg.offset)) : 0;
       const limit = Number.isFinite(msg.limit) ? Math.max(1, Math.floor(msg.limit)) : 200;
+
+      const reveal = resolveRevealAudit({
+        requested: msg.revealSensitive === true,
+        sessionId: msg.sessionId,
+        scope,
+        offset,
+        limit,
+      });
+
       const project = scope === 'single' ? buildSingleAgentSessionLogChunk : buildSessionLogChunk;
       const chunk = project({
         sessionId: msg.sessionId,
         offset,
         limit,
-        revealSensitive: msg.revealSensitive === true,
+        revealSensitive: reveal,
       });
       send(conn.ws, {
         type: 'session_log_chunk',
@@ -4374,6 +5635,11 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           status: row.status as 'running' | 'completed' | 'stopped' | 'crashed',
           hopsUsed: row.hops_used,
           hopBudget: row.hop_budget,
+          // F7. Sent only when > 0: a pre-029 row (or one whose hops all
+          // predate the column) has cost 0 because nothing was recorded, not
+          // because the run was free. Omitting lets the rail say "cost n/a"
+          // rather than assert "$0.0000".
+          ...(row.total_cost_usd > 0 ? { totalCostUsd: row.total_cost_usd } : {}),
           ...(row.first_error ? { firstError: row.first_error } : {}),
           ...(artifactsDir ? { artifactsDir } : {}),
         },
@@ -4501,6 +5767,28 @@ async function runOneTurn(
   }
 
   const sessionId = msg.sessionId ?? randomUUID();
+  // Register S02: refuse a second turn on a session that already has one in
+  // flight. Without this, two `send_message`s for one session start parallel
+  // SDK queries against the same `--resume` id, and turn one's `finally`
+  // (`conn.inFlight.delete(sessionId)`) removes TURN TWO's entry — after
+  // which Stop, permission-mode changes and the active-runs badge all
+  // silently target nothing. `resolveRetryRateLimited` already guards the
+  // identical hazard for the retry path; this is the same rule at the main
+  // entry point.
+  //
+  // Before any side effect (no session row, no project touch, no spawn gate).
+  // A brand-new session takes a fresh `randomUUID()` and can never collide,
+  // so only a genuine resume is ever rejected.
+  const inFlightConflict = describeTurnInFlight(conn.inFlight, sessionId);
+  if (inFlightConflict) {
+    send(conn.ws, {
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: inFlightConflict,
+    });
+    return;
+  }
   if (!msg.sessionId) createSession(sessionId, project.id);
   touchProject(project.id);
 
@@ -4509,7 +5797,9 @@ async function runOneTurn(
   // every declared MCP is already 'trusted' it's a silent no-op (one
   // checkTrust lookup per row). On first_seen / hash_changed the operator
   // is prompted and the spawn awaits their decision before pickRunner.
-  await gateProjectsForSpawn(conn, [project.id]);
+  // H04: the return value is not optional bookkeeping — it is what makes a
+  // Deny bind on this turn. Threaded into `pickRunner` below.
+  const turnDenials = await gateProjectsForSpawn(conn, [project.id]);
 
   const ac = new AbortController();
 
@@ -4615,6 +5905,13 @@ async function runOneTurn(
     settingSources: [...settingSources],
     canUseTool,
     abortController: ac,
+    // H04: MCP servers the operator refused at the gate above. `runClaude`
+    // turns these into `settings.deniedMcpServers` (the server does not load)
+    // + `disallowedTools` (its tools are not in context). Empty in the common
+    // case, which leaves the options byte-identical to before.
+    ...(turnDenials.get(project.id)?.length
+      ? { deniedMcpServers: turnDenials.get(project.id) }
+      : {}),
     // Cluster F Phase A1a (UI-A1): resolver picks the per-turn
     // override (msg.maxTurns) over the persisted setting over the env
     // default. Re-read on every send so a SettingsModal change between
@@ -4707,7 +6004,7 @@ async function runOneTurn(
         // operator-facing toast is fanned out by the dispatcher as a
         // sticky safety notification.
         if (out.type === 'result' && out.subtype === 'error_max_turns') {
-          emitNotification(
+          const capNotified = emitNotification(
             {
               class: 'safety',
               severity: 'warn',
@@ -4729,6 +6026,20 @@ async function runOneTurn(
             },
             (m) => send(conn.ws, m),
           );
+          // Register S10: this result used to be discarded, alone among the
+          // safety-class emits in this file — so a failed hash-chained
+          // append for a cap hit was completely silent, in the one
+          // subsystem whose value is that it has no gaps. There is nothing
+          // to roll back (the cap already fired and the `result` message is
+          // already on the wire), so the log line IS the remedy: it gives
+          // the operator something to correlate against `verifyChain()`'s
+          // next boot report. `safety_emit_result.test.ts` is the gate that
+          // keeps every future safety emit from re-acquiring this shape.
+          if (!capNotified.ok) {
+            console.error(
+              `[ws] max_turns.hit safety notification failed for ${sessionId}: ${capNotified.error}`,
+            );
+          }
         }
         // Cluster A Phase 3 (B2): typed `rate_limit_event` also fans out as
         // an operational warn toast via the dispatcher. We do this only on
@@ -4793,21 +6104,28 @@ async function runOneTurn(
     // stream via the typed `rate_limit_event` path; we skip it here to
     // avoid double-toasting.
     if (wrap.kind !== 'rate_limited') {
+      // Register S02b: `null` means "this ended deliberately, say nothing" —
+      // see `wrapperErrorDispatch`. The `wrapper_error` above still reaches
+      // the client (so the session banner can show it stopped) and the turn is
+      // still persisted to the transcript; what's suppressed is the sticky,
+      // durable inbox row that claimed a failure.
       const dispatch = wrapperErrorDispatch(wrap.kind, sessionId);
-      emitNotification(
-        {
-          class: 'operational',
-          severity: dispatch.severity,
-          dedupeKey: `${dispatch.auditKind}:${sessionId}`,
-          title: dispatch.title,
-          message: wrap.message,
-          sessionId,
-          sticky: true,
-          reasonCode: dispatch.reasonCode,
-          ...(dispatch.action ? { action: dispatch.action } : {}),
-        },
-        (out) => send(conn.ws, out),
-      );
+      if (dispatch) {
+        emitNotification(
+          {
+            class: 'operational',
+            severity: dispatch.severity,
+            dedupeKey: `${dispatch.auditKind}:${sessionId}`,
+            title: dispatch.title,
+            message: wrap.message,
+            sessionId,
+            sticky: true,
+            reasonCode: dispatch.reasonCode,
+            ...(dispatch.action ? { action: dispatch.action } : {}),
+          },
+          (out) => send(conn.ws, out),
+        );
+      }
     }
     // Cluster D Phase 4b: rate-limited classification → keep the
     // captured prompt for `retry_rate_limited` to find. Other kinds
@@ -4845,6 +6163,46 @@ async function runOneTurn(
   }
 }
 
+/**
+ * Register S16: turn persisted event rows back into ServerMsgs, and let one
+ * bad row cost one row.
+ *
+ * WHAT WAS WRONG. `replaySession` did `JSON.parse(row.raw) as SDKMessage` and
+ * guarded only the parse, with `continue` — the right instinct, applied to
+ * half the hazard. The cast checks nothing, so a row written by an older
+ * build, a hand-edited fixture, or a truncated write reaches `translate`
+ * shaped however it happens to be shaped. A throw there escaped the loop:
+ * `session_history_end` never shipped and the operator's session hung
+ * half-rendered, with no way to reach the rest of its own history.
+ *
+ * WHY A COUNT AND NOT A SILENT SKIP. A replay that quietly drops history is
+ * the same bug wearing a quieter coat. The caller logs the number, which is
+ * what a future reader needs to tell "this session was short" from "this
+ * session is damaged".
+ *
+ * Extracted from the loop so that property is testable: it streams (the caller
+ * still emits row by row, no history is materialised) while returning
+ * something a test can assert on.
+ */
+export function streamPersistedHistory(
+  rows: Iterable<{ raw: string }>,
+  projectId: number,
+  emit: (msg: ServerMsg) => void,
+): number {
+  let skipped = 0;
+  for (const row of rows) {
+    let out: ServerMsg | null;
+    try {
+      out = translate(JSON.parse(row.raw) as SDKMessage, projectId);
+    } catch {
+      skipped += 1;
+      continue;
+    }
+    if (out) emit(out);
+  }
+  return skipped;
+}
+
 async function replaySession(conn: Conn, projectId: number, sessionId: string): Promise<void> {
   const session = getSession(sessionId);
   if (!session || session.project_id !== projectId) {
@@ -4857,18 +6215,15 @@ async function replaySession(conn: Conn, projectId: number, sessionId: string): 
     return;
   }
   send(conn.ws, { type: 'session_history_start', projectId, sessionId });
-  for (const row of listEvents(sessionId)) {
-    let parsed: SDKMessage;
-    try {
-      parsed = JSON.parse(row.raw) as SDKMessage;
-    } catch {
-      continue;
-    }
-    const out = translate(parsed, projectId);
-    if (out) {
-      cacheSessionStartedIfNeeded(conn, out);
-      send(conn.ws, out);
-    }
+  const skippedRows = streamPersistedHistory(listEvents(sessionId), projectId, (out) => {
+    cacheSessionStartedIfNeeded(conn, out);
+    send(conn.ws, out);
+  });
+  if (skippedRows > 0) {
+    console.warn(
+      `[ws] replay of ${sessionId}: skipped ${skippedRows} unrenderable event row(s); ` +
+        `the rest of the history was sent`,
+    );
   }
   send(conn.ws, { type: 'session_history_end', projectId, sessionId });
 

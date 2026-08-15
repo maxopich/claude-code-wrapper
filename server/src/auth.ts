@@ -9,14 +9,36 @@
  *
  * What this closes: browser-tab Cross-Site WebSocket Hijacking (a
  * cross-origin tab can't pass the Origin gate to fetch the token) and
- * cross-uid local attackers (mode 0600 = owner-only read).
+ * OTHER local users on POSIX (mode 0600 = owner-only read; see the
+ * Windows caveat below).
  *
- * What this does NOT close: bus workers under `bypassPermissions` run
- * as the operator's uid, so they can read `~/.cebab/auth-token`
- * directly OR call `GET /auth-token` (empty-Origin branch returns the
- * token to local non-browser clients). A token-holding worker's
- * surface is direct WS control-plane abuse — primarily `set_trusted`
- * flipping a future session's Trust state.
+ * What this does NOT close — and cannot: a bus agent runs as the
+ * operator's own uid, so it can read `~/.cebab/auth-token` off disk and
+ * open its own WS connection. There is no same-uid boundary to build
+ * here. Origin/Host are not one either — a Node client sets any header it
+ * likes — which is why `/auth-token` requiring an Origin (index.ts) only
+ * removes the convenience path, not the capability.
+ *
+ * So the posture is DETECT, not prevent, and the control-plane verbs are
+ * hardened where an ungated call was never legitimate in the first place:
+ *
+ *   - `mcp_trust_decision` only persists `trust`/`trust_pinned` when a
+ *     live gate entry is parked, so a trust row can never be pre-seeded to
+ *     silently pass the operator's next session-start gate. Denials stay
+ *     ungated (reducing authority needs no prompt).
+ *   - `set_trusted` writes a `project.trust_decided` row to the
+ *     hash-chained audit log before it flips anything, and refuses if that
+ *     append fails.
+ *
+ * Everything else a token-holder can reach (starting sessions, reading
+ * transcripts, template CRUD) is inside what the operator's own uid could
+ * do regardless. Treat the token as a boundary against other local users
+ * and browser tabs, never against the agents Cebab itself runs.
+ *
+ * Windows: the 0600 mode below is deliberately NOT passed (`win32` gets
+ * `{}` — see `initAuthToken`), because it is meaningless without an ACL
+ * call. On a multi-user Windows box the token file is readable by other
+ * users of that machine. SECURITY.md records this as a known residual.
  *
  * Bus identity spoofing is closed by construction in the pure-SDK
  * model: a worker's `source` is pinned by Cebab in the per-agent
@@ -35,6 +57,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
+import { secureMkdir } from './data_perms.js';
 
 let token: string | null = null;
 
@@ -48,7 +71,7 @@ export function authTokenPath(): string {
  * value. Always call once at server boot before mounting routes.
  */
 export function initAuthToken(): string {
-  fs.mkdirSync(config.dataDir, { recursive: true });
+  secureMkdir(config.dataDir);
   token = crypto.randomBytes(32).toString('hex');
   const p = authTokenPath();
   // writeFileSync + mode: ensure file is created 0600 even if it pre-exists

@@ -145,7 +145,28 @@ describe('AuthorityPanel — cache-miss empty state', () => {
       handlerRef.current!({ type: 'project_authority', projectId: 1, authority: null });
     });
     expect(container.querySelector('.authority-panel-empty')).not.toBeNull();
-    expect(container.textContent).toContain('No authority snapshot cached');
+    expect(container.textContent).toContain('No authority snapshot for this project yet');
+  });
+
+  // U32: the copy here used to name two internal build phases and an SDK
+  // parameter, and to claim the Refresh button "returns the empty cache for
+  // now" — which is not what the resolver does. Both halves are pinned: no
+  // developer vocabulary, and the operator is told what Refresh DOES return.
+  test('the empty state speaks to an operator, not to a build plan', () => {
+    const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({ type: 'project_authority', projectId: 1, authority: null });
+    });
+    const empty = container.querySelector('.authority-panel-empty');
+    expect(empty).not.toBeNull();
+    const text = empty!.textContent ?? '';
+    // Anti-vacuity: there is real copy to inspect, not an empty div.
+    expect(text.length).toBeGreaterThan(80);
+    expect(text).not.toMatch(/\bPhase\s*\d/i);
+    expect(text).not.toContain('maxTurns');
+    // ...and it says what the button actually does, so removing the jargon
+    // cannot be satisfied by removing the sentence.
+    expect(text).toContain('settings files');
   });
 });
 

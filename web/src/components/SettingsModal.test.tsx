@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { SettingsView } from '../store';
 import { SettingsModal } from './SettingsModal';
+import type { Theme } from '../theme';
 import type { ClientMsg, ServerMsg } from '@cebab/shared';
 
 // Cluster E Phase 3 (A4) — SettingsModal contract additions:
@@ -329,5 +330,244 @@ describe('SettingsModal — Storage section', () => {
     expect(text).toContain('Auto-reclaim: on');
     expect(text).toContain('30d');
     expect(text).toContain('reclaimed 4');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The theme picker as a radio group.
+//
+// Not a register finding — surfaced by `widgetRoles.test.ts` while fixing U17/
+// U18/U26/U30. It declared `role="radiogroup"` with correct `aria-checked` and
+// none of the keyboard model that role obliges: four native buttons meant four
+// tab stops where a radio group promises one, and the arrow keys did nothing.
+//
+// Arrows SELECT as they move here, which is correct radiogroup behaviour and
+// safe for a theme: it applies instantly, costs nothing and arrowing back
+// undoes it. (ModeToggle deliberately does NOT work this way — there,
+// select-on-move would flip a live session's permission posture.)
+// ---------------------------------------------------------------------------
+
+describe('SettingsModal — theme radio group keyboard model', () => {
+  function renderThemes(theme: Theme, onThemeChange = vi.fn<(t: Theme) => void>()) {
+    act(() => {
+      root.render(
+        <SettingsModal
+          settings={settings()}
+          onSave={vi.fn()}
+          onClose={vi.fn()}
+          send={vi.fn()}
+          subscribeServerMsg={() => () => {}}
+          theme={theme}
+          onThemeChange={onThemeChange}
+        />,
+      );
+    });
+    return onThemeChange;
+  }
+  const cards = () =>
+    Array.from(document.querySelectorAll<HTMLElement>('.theme-grid [role="radio"]'));
+  const group = () => document.querySelector('[role="radiogroup"]') as HTMLElement;
+
+  function arrow(key: string) {
+    act(() => {
+      group().dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    });
+  }
+
+  test('the group is one tab stop: only the checked card is tabbable', () => {
+    renderThemes('daylight');
+    expect(cards().length).toBeGreaterThanOrEqual(4);
+    const tabbable = cards().filter((c) => c.getAttribute('tabindex') === '0');
+    expect(tabbable).toHaveLength(1);
+    expect(tabbable[0]!.getAttribute('aria-checked')).toBe('true');
+  });
+
+  test('the roving index follows the checked card', () => {
+    renderThemes('slate');
+    const states = cards().map((c) => [c.getAttribute('aria-checked'), c.getAttribute('tabindex')]);
+    // Exactly one card is both checked and tabbable, and they are the same one.
+    expect(states.filter(([checked]) => checked === 'true')).toHaveLength(1);
+    for (const [checked, tabindex] of states) {
+      expect(tabindex).toBe(checked === 'true' ? '0' : '-1');
+    }
+  });
+
+  test('arrow keys move the selection in both axes', () => {
+    // 'both' orientation, because the cards wrap into a visual grid — Up/Down
+    // and Left/Right are equally natural gestures over it.
+    const onChange = renderThemes('aurora'); // index 1 of [daylight, aurora, slate, phosphor]
+    arrow('ArrowDown');
+    expect(onChange).toHaveBeenLastCalledWith('slate');
+    arrow('ArrowRight');
+    expect(onChange).toHaveBeenLastCalledWith('slate');
+    arrow('ArrowUp');
+    expect(onChange).toHaveBeenLastCalledWith('daylight');
+    arrow('ArrowLeft');
+    expect(onChange).toHaveBeenLastCalledWith('daylight');
+  });
+
+  test('the selection wraps, as a radio group does', () => {
+    const first = renderThemes('daylight');
+    arrow('ArrowUp');
+    expect(first).toHaveBeenLastCalledWith('phosphor');
+    const last = renderThemes('phosphor');
+    arrow('ArrowDown');
+    expect(last).toHaveBeenLastCalledWith('daylight');
+  });
+
+  test('keys the group does not own are left alone', () => {
+    // Escape must still reach useModalKeys and close the modal; Tab must still
+    // leave the group. Swallowing every keystroke is the usual way a roving
+    // handler breaks the rest of the dialog.
+    const onChange = renderThemes('daylight');
+    for (const key of ['Escape', 'Tab', 'a']) arrow(key);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// U14 — Cancel must cancel the theme too.
+//
+// The theme applies instantly and is deliberately outside the save payload;
+// that part is right, because previewing a colour gamma is the point of the
+// picker. What was wrong is that the footer offered a two-button contract and
+// one of the modal's contents ignored it. The arrow-key radiogroup added in
+// #287 sharpened it: arrows SELECT as they move, so an operator exploring four
+// gammas and then pressing Cancel kept whichever one they last passed over.
+//
+// All four exits are asserted, because they are four separate code paths and
+// only one of them is the obvious button.
+// ---------------------------------------------------------------------------
+
+describe('SettingsModal — theme is restored on cancel (U14)', () => {
+  /**
+   * The harness has to feed the new theme BACK in as a prop, because App does:
+   * `onThemeChange` sets state up there and the modal re-renders with it. A
+   * fixture that pins `theme` to a constant would make the component believe
+   * nothing ever changed, and every assertion below would pass or fail for the
+   * wrong reason. (It did, on the first run — the restore is guarded on
+   * "the theme actually moved", so a frozen prop silently skipped it.)
+   */
+  function mount(initial: Theme) {
+    const onThemeChange = vi.fn<(t: Theme) => void>();
+    const onClose = vi.fn();
+    const onSave = vi.fn();
+    let current = initial;
+    const draw = () => {
+      act(() => {
+        root.render(
+          <SettingsModal
+            settings={settings()}
+            onSave={onSave}
+            onClose={onClose}
+            send={vi.fn()}
+            subscribeServerMsg={() => () => {}}
+            theme={current}
+            onThemeChange={(t) => {
+              onThemeChange(t);
+              current = t;
+              draw();
+            }}
+          />,
+        );
+      });
+    };
+    draw();
+    return { onThemeChange, onClose, onSave, themeNow: () => current };
+  }
+
+  /** Preview a different gamma the way the operator would — clicking a card. */
+  function previewSecondCard() {
+    const cards = Array.from(document.querySelectorAll<HTMLElement>('.theme-grid [role="radio"]'));
+    act(() => cards[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+  }
+
+  const footerCancel = () =>
+    Array.from(document.querySelectorAll<HTMLButtonElement>('.modal footer button')).find(
+      (b) => b.textContent?.trim() === 'Cancel',
+    ) ?? null;
+
+  test('the Cancel button restores the theme in effect when the modal opened', () => {
+    const h = mount('daylight');
+    previewSecondCard();
+    expect(h.onThemeChange).toHaveBeenLastCalledWith('aurora');
+
+    act(() => footerCancel()!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(h.onThemeChange).toHaveBeenLastCalledWith('daylight');
+    // The end state is what the operator actually experiences — asserted
+    // separately from the call, because a restore that fired and was then
+    // overwritten would satisfy the first check alone.
+    expect(h.themeNow()).toBe('daylight');
+    expect(h.onClose).toHaveBeenCalled();
+  });
+
+  test('Save keeps the previewed theme — committing is not cancelling', () => {
+    const h = mount('daylight');
+    previewSecondCard();
+    // Make the form savable, or the Save button stays disabled and this test
+    // would pass by never clicking anything.
+    const workspace = document.querySelector('.modal input[type="text"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!;
+    setter.call(workspace, '/tmp/elsewhere');
+    act(() => workspace.dispatchEvent(new Event('input', { bubbles: true })));
+
+    const saveBtn = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.modal footer button'),
+    ).find((b) => b.textContent?.trim() === 'Save')!;
+    expect(saveBtn.disabled).toBe(false);
+    act(() => saveBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+    expect(h.onSave).toHaveBeenCalled();
+    expect(h.themeNow()).toBe('aurora');
+  });
+
+  test('the header ✕ restores it too', () => {
+    const h = mount('daylight');
+    previewSecondCard();
+    const close = document.querySelector('.modal .icon-btn') as HTMLButtonElement;
+    act(() => close.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(h.onThemeChange).toHaveBeenLastCalledWith('daylight');
+  });
+
+  test('Esc restores it too', () => {
+    const h = mount('daylight');
+    previewSecondCard();
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(h.onThemeChange).toHaveBeenLastCalledWith('daylight');
+  });
+
+  test('a backdrop click restores it too', () => {
+    const h = mount('daylight');
+    previewSecondCard();
+    const overlay = document.querySelector('.modal-backdrop');
+    expect(overlay).not.toBeNull();
+    act(() => overlay!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+    expect(h.onThemeChange).toHaveBeenLastCalledWith('daylight');
+  });
+
+  test('the appearance hint describes the behaviour the modal now has', () => {
+    // The old line said only "Changes the color palette instantly" — true, and
+    // the whole problem: instantly, and then permanently, whatever the footer
+    // claimed next. Copy that describes the previous behaviour is its own
+    // defect (see the operator-copy PR), so it moves with the fix.
+    mount('daylight');
+    const hint = Array.from(document.querySelectorAll('[data-testid="appearance-section"] .hint'))
+      .map((el) => el.textContent ?? '')
+      .join(' ');
+    expect(hint).toMatch(/[Pp]review/);
+    expect(hint).toContain('Cancel');
+  });
+
+  test('closing WITHOUT previewing does not write the theme back', () => {
+    // Restoring a value already in effect is a spurious localStorage write and
+    // would make every Esc look like a theme change to anything watching.
+    const h = mount('daylight');
+    act(() => footerCancel()!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(h.onThemeChange).not.toHaveBeenCalled();
   });
 });

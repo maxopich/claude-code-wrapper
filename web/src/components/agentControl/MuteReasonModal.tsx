@@ -104,11 +104,17 @@ export type MuteReasonModalProps = {
   projectId: number;
   agentLabel: string;
   onClose: () => void;
+  /**
+   * Cebab-u0s: returns whether the verb actually reached the server. On
+   * `false` this modal stays open with everything the operator typed still
+   * in it, so they can submit again rather than lose the reason to a socket
+   * that was not connected.
+   */
   onSubmit: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
 };
 
 export function MuteReasonModal({
@@ -140,7 +146,10 @@ export function MuteReasonModal({
   function handleSubmit() {
     if (!canSubmit) return;
     const trimmed = reasonText.trim();
-    onSubmit(projectId, reasonCode, trimmed.length > 0 ? trimmed : undefined);
+    // Cebab-u0s: close only once the verb has gone out. Returning early keeps
+    // this component mounted, which is what preserves `reasonText` — the
+    // state lives here, so an unmount is what used to destroy it.
+    if (!onSubmit(projectId, reasonCode, trimmed.length > 0 ? trimmed : undefined)) return;
     onClose();
   }
 

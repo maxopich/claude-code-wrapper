@@ -327,6 +327,15 @@ export function AgentDiagram(props: {
     // animKey is stable (it covers pids, names, mode, reduce, editing).
     // Adding the array refs to deps would cause spurious re-runs on
     // every parent render and reset the cycle.
+    //
+    // Cebab-1uk: the rule names six values. `animKey` (line 238) encodes five
+    // of them directly — geometry.mode, reduce, editingId, paused, and
+    // workersForTrip via its orchPids/orchNames content hashes. `flowPaths` is
+    // NOT in the key; it rests on the paragraph above instead — derived from
+    // the same geometry, so content-stable whenever animKey is, with only its
+    // array identity changing. Stated precisely because "the key covers them
+    // all" would have been a tidier claim and a false one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [animKey]);
 
   if (n === 0) {

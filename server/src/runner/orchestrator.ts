@@ -1,5 +1,5 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { setSessionCost, bumpSession } from '../repo/sessions.js';
+import { bumpSession } from '../repo/sessions.js';
 import { insertEvent, nextSeq } from '../repo/events.js';
 import { logEvent, type LogFailureReason } from './logger.js';
 
@@ -39,12 +39,24 @@ export async function persistMessage(
   // Other high-volume types in the future should also be excluded here so
   // last_event_at stays semantically meaningful.
   if (type === 'result') {
+    // `total_cost_usd` is this INVOCATION's cost, not a running session total:
+    // it equals `sum(modelUsage[*].costUSD)`, and those are per-invocation
+    // token counters. Observed sequences confirm it — a two-turn session
+    // reports $0.4205 then $0.0571, which no cumulative counter could do. So
+    // the session total is a SUM, and this must add rather than assign.
+    //
+    // It used to call `setSessionCost` (absolute assignment), which recorded
+    // only the final turn — and recorded $0.00 outright whenever a session
+    // ended on a `num_turns: 0` slash-command result.
+    //
+    // Historical rows are deliberately NOT rewritten. Existing
+    // `sessions.total_cost_usd` values in a real install were found to hold
+    // correct SUMS, which the assigning code could not have produced; that
+    // discrepancy is unexplained, and rewriting records on the strength of a
+    // model that does not predict the data would be the wrong trade. Fixing
+    // forward costs nothing and risks nothing.
     const cost = (msg as { total_cost_usd?: number }).total_cost_usd;
-    if (typeof cost === 'number') {
-      setSessionCost(sessionId, cost);
-    } else {
-      bumpSession(sessionId);
-    }
+    bumpSession(sessionId, typeof cost === 'number' && Number.isFinite(cost) ? cost : 0);
   } else if (type === 'assistant' || type === 'user' || type === 'system') {
     bumpSession(sessionId);
   }

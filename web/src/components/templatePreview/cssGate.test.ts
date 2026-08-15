@@ -72,11 +72,137 @@ function findTplAnimationRules(css: string): string[] {
   return violations;
 }
 
+/**
+ * The rule above, generalised past `.tpl-*` — WCAG 2.2.2.
+ *
+ * Register U12 claimed the sidebar live dot, the session-row live marker and
+ * the streaming caret "run an infinite pulse … while twelve other animations
+ * are carefully gated". That finding is WRONG, and this is how it was
+ * settled: all three are already cancelled in the big reduce block ~4,600
+ * lines below where they are declared, and so are both spinners. The distance
+ * between the `animation:` and its cancellation is what made the gap look
+ * real to a reader — and is exactly why a scan beats reading.
+ *
+ * What was actually missing was any check at all beyond the `.tpl-*` prefix,
+ * so the next ungated loop would have shipped unnoticed. Hence: no CSS
+ * change, a real gate. The rule is not "no animations" — a one-shot enter or
+ * fade is fine under reduce — it is that content moving *indefinitely* must
+ * be stoppable, so only `infinite` counts.
+ */
+
+/** Selectors whose infinite animation may survive `reduce`, with the reason.
+ *  EMPTY, and that is the finding: every infinite animation in this
+ *  stylesheet is gated today, including the two busy spinners, so the gate
+ *  needs no exceptions to pass. Adding one is a decision to leave a
+ *  reduced-motion user with movement on screen — it belongs in review, not in
+ *  a quiet pattern tweak, which is why the list is asserted below. */
+const MOTION_EXEMPT: Array<{ selector: string; why: string }> = [];
+
+/** Rules that set an `infinite` animation, paired with their selector. */
+function findInfiniteAnimationRules(css: string): string[] {
+  const violations: string[] = [];
+  const ruleRe = /([^{}@][^{}]*?)\{([^{}]*?)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = ruleRe.exec(css)) !== null) {
+    const selector = m[1]!.trim();
+    const body = m[2]!;
+    for (const am of body.matchAll(/animation:\s*([^;]+)/g)) {
+      const value = am[1]!.trim();
+      if (!/\binfinite\b/.test(value)) continue;
+      if (MOTION_EXEMPT.some((e) => selector.split(',').some((s) => s.trim() === e.selector))) {
+        continue;
+      }
+      violations.push(`${selector} { animation: ${value} }`);
+    }
+  }
+  return violations;
+}
+
+/** Strip every `@media (prefers-reduced-motion: reduce)` block, so a rule
+ *  that only exists to cancel motion isn't itself reported as motion. */
+function stripReduceBlocks(css: string): string {
+  const OPEN = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{/g;
+  let out = css;
+  for (;;) {
+    OPEN.lastIndex = 0;
+    const m = OPEN.exec(out);
+    if (!m) return out;
+    let depth = 1;
+    let i = m.index + m[0].length;
+    while (i < out.length && depth > 0) {
+      if (out[i] === '{') depth++;
+      else if (out[i] === '}') depth--;
+      i++;
+    }
+    out = out.slice(0, m.index) + out.slice(i);
+  }
+}
+
+/** Selectors this stylesheet cancels under `reduce`. */
+function reduceCancelledSelectors(css: string): Set<string> {
+  const out = new Set<string>();
+  const OPEN = /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = OPEN.exec(css)) !== null) {
+    let depth = 1;
+    let i = m.index + m[0].length;
+    const start = i;
+    while (i < css.length && depth > 0) {
+      if (css[i] === '{') depth++;
+      else if (css[i] === '}') depth--;
+      i++;
+    }
+    const inner = css.slice(start, i - 1);
+    for (const r of inner.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      if (!/animation:\s*none/.test(r[2]!)) continue;
+      for (const s of r[1]!.split(',')) out.add(s.trim());
+    }
+  }
+  return out;
+}
+
 describe('CSS gate (Risk #1)', () => {
   test('every .tpl-* animation: lives inside the no-preference block', () => {
     const stripped = stripNoPreferenceBlocks(stylesCss);
     const violations = findTplAnimationRules(stripped);
     expect(violations).toEqual([]);
+  });
+
+  test('[a11y] every infinite animation is motion-gated or explicitly exempt', () => {
+    // Outside a no-preference block AND outside a reduce block: what is left
+    // is motion that runs for everyone, forever.
+    const ungated = findInfiniteAnimationRules(
+      stripReduceBlocks(stripNoPreferenceBlocks(stylesCss)),
+    );
+    const cancelled = reduceCancelledSelectors(stylesCss);
+    const survives = ungated.filter((v) => {
+      const selector = v.slice(0, v.indexOf(' {')).trim();
+      return !selector.split(',').every((s) => cancelled.has(s.trim()));
+    });
+    expect(survives).toEqual([]);
+  });
+
+  test('[a11y] the five perpetual indicators stay cancelled under reduce', () => {
+    // Positive lock, and the evidence that register U12 was a false finding.
+    // The negative scan above also passes if a selector is simply deleted;
+    // this one fails if a cancellation is dropped while its element stays.
+    const cancelled = reduceCancelledSelectors(stylesCss);
+    for (const s of [
+      '.project-live-dot.on', // sidebar live-session dot
+      '.session-marker.live', // session-row live marker
+      '.caret', // streaming caret
+      '.btn-spinner', // in-button busy state
+      '.input-box-btn-stop.is-stopping::after', // stop-button spinner
+    ]) {
+      expect(cancelled, `${s} must be cancelled under reduce`).toContain(s);
+    }
+  });
+
+  test('[a11y] no infinite animation is exempted from the motion gate', () => {
+    // Every entry here would be a place a reduced-motion user still sees
+    // movement. The list is empty today and adding to it should be a visible
+    // decision, not a quiet edit that turns the scan above into a formality.
+    expect(MOTION_EXEMPT).toEqual([]);
   });
 
   test('reduce-motion block still cancels .tpl-flow-dot animation', () => {

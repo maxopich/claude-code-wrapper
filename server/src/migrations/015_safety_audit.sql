@@ -10,8 +10,15 @@
 -- hash_self) || hash_prev). Mutating any row breaks the chain at that row,
 -- detected by the repository's verifyChain() on server boot and (Phase 3+)
 -- on every WS attach. A broken chain emits an `audit.tamper_detected` danger
--- notification and the dispatcher refuses further safety emissions until
--- acknowledged.
+-- notification.
+--
+-- PLANNED, NOT SHIPPED (register X22): this paragraph used to end "and the
+-- dispatcher refuses further safety emissions until acknowledged", stated as
+-- fact. It is not implemented. `server/src/index.ts` says so where the walk
+-- happens — boot deliberately CONTINUES, because refusing to start on a
+-- suspected tamper turns a fail-open into a fail-closed that bricks the app
+-- over a stale marker allowlist. Detection ships; the tamper RESPONSE does
+-- not. Read this table as an obligation to record, not as a kill switch.
 --
 -- Per validation-report.md XCT-1 (cross-cluster amendment, applied here as
 -- precedent for the matching forensics/recovery tables in Clusters C & D):

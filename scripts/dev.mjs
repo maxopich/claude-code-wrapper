@@ -18,6 +18,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEV_WEB_PORT, withDeclaredWebOrigins } from './dev-origins.mjs';
 
 const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,6 +42,11 @@ const targets = [
     name: 'server',
     cwd: path.join(root, 'server'),
     args: [tsxCli, 'watch', '--env-file-if-exists=../.env', 'src/index.ts'],
+    // Register H09: this launcher starts the Vite server below, so it is the
+    // one caller entitled to declare that origin to the API. `origin.ts` no
+    // longer hardcodes :5173 — nothing else on the machine gets to claim it.
+    // Only the server child; declaring it to Vite would mean nothing.
+    env: withDeclaredWebOrigins(process.env),
   },
   { name: 'web', cwd: path.join(root, 'web'), args: [viteBin] },
 ];
@@ -100,7 +106,7 @@ spawnSync(process.execPath, [path.join(root, 'scripts', 'predev-server.mjs')], {
 for (const t of targets) {
   const child = spawn(process.execPath, t.args, {
     cwd: t.cwd,
-    env: process.env,
+    env: t.env ?? process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   prefix(child.stdout, t.name, process.stdout);
@@ -121,6 +127,6 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGBREAK']) {
 }
 
 console.log(
-  '[dev] starting…  server → http://127.0.0.1:4319   web → http://127.0.0.1:5173\n' +
-    '[dev] open http://127.0.0.1:5173   (Ctrl+C stops both)',
+  `[dev] starting…  server → http://127.0.0.1:4319   web → http://127.0.0.1:${DEV_WEB_PORT}\n` +
+    `[dev] open http://127.0.0.1:${DEV_WEB_PORT}   (Ctrl+C stops both)`,
 );

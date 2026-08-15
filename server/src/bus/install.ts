@@ -41,10 +41,7 @@ export type InstallResult = {
 export class InstallError extends Error {
   constructor(
     public readonly code:
-      | 'project_not_found'
-      | 'agent_name_empty'
-      | 'agent_name_taken'
-      | 'project_path_missing',
+      'project_not_found' | 'agent_name_empty' | 'agent_name_taken' | 'project_path_missing',
     message: string,
   ) {
     super(message);

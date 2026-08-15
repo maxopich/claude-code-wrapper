@@ -31,24 +31,21 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  addAgentCost,
   appendMultiAgentEvent,
   appendMultiAgentMutation,
   addParticipant,
+  clearPendingMutations,
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
-  getMultiAgentSession,
-  getPendingMutation,
   getPendingRetry,
   getProjectBusState,
   recordSessionTeardown,
-  setAwaitingContinue,
   setMultiAgentSessionLifecycle,
   setExecuteMode,
-  setMutationsAcknowledged,
   setMutationPromoted,
   setPauseOnDangerous,
-  setPendingMutation,
   setPendingRetry,
   upsertAgentSession,
   type EventKind,
@@ -57,16 +54,23 @@ import {
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
 import type { BashClassifierReason } from '@cebab/shared';
+import { config } from '../config.js';
 import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
   RouterDropReasonCode,
+  ServerMsg,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { PausedForMutationError, isPausedForMutation, isTurnStalled } from './errors.js';
-import { shouldPauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import {
+  applyPauseGate,
+  releasePauseForMutation,
+  shouldHaltUnrecordedMutation,
+} from './pause_gate.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
+import { secureMkdir } from '../data_perms.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
   CEBAB_SOURCE,
@@ -83,6 +87,7 @@ import {
   type ProjectRules,
   type ResolvedAgent,
 } from './runtime.js';
+import { fenceRelayedMessage } from './message_fence.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
 import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
@@ -150,6 +155,13 @@ export type StartOrchestratorOpts = {
   workers: ResolvedAgent[];
   initialPrompt: string;
   workspaceRoot: string;
+  /**
+   * Register H04: projectId → MCP server names the operator denied at the
+   * pre-spawn TOFU gate. Applied to each worker's spec at `register()` time,
+   * so the denial is in force on the worker's very first turn rather than
+   * from the second one on. Omit when nothing was denied (the common case).
+   */
+  mcpDenials?: ReadonlyMap<number, readonly string[]>;
   lifecycle?: MultiAgentLifecycle;
   onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
@@ -171,9 +183,15 @@ export type StartOrchestratorOpts = {
    *  before invoking. */
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
   /**
-   * Item #5: opt-in pause-on-first-mutation. When `true`, the bus runner's
-   * mutation tap fires `awaiting_continue` + a banner before the first
-   * non-`read` tool call from any worker. Persisted into
+   * Item #5: opt-in pause-on-dangerous. When `true`, the bus runner's
+   * mutation tap halts a worker's turn before each `dangerous` tool call and
+   * puts it in front of the operator — NOT before the first non-`read` call;
+   * ordinary edits and MCP calls classify as `mutate` and run free. Every
+   * dangerous command needs its own approval (migration 031 moved the state
+   * onto the mutation row), and the halt throws `PausedForMutationError`
+   * rather than setting `awaiting_continue`, which is the R-B recovery state
+   * and produced two Continue buttons while the two were coupled (B05).
+   * Persisted into
    * `multi_agent_sessions.pause_on_dangerous` at session start; survives R-B.
    * Default `false` (resolved at `start_multi_agent` handler from
    * `msg.pauseOnDangerous`).
@@ -196,12 +214,13 @@ export type StartOrchestratorOpts = {
    */
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
   /**
-   * Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`
-   * ServerMsg. Fires when a worker is paused (set, with the offending
-   * mutation row) and when the operator clicks Continue (cleared,
-   * `pending: null`). Optional; the wire layer null-checks.
+   * Item #5: the set of workers halted by the pause-on-dangerous gate changed
+   * → `multi_agent_pending_mutations` ServerMsg. Fires when a worker is paused
+   * and when the operator releases one. Carries the whole current set (`[]`
+   * when nothing is waiting) because the gate is per-agent — several workers
+   * can be halted at once. Optional; the wire layer null-checks.
    */
-  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  onPendingMutation?: (sessionId: string, pending: MutationRecord[]) => void;
   /**
    * Cluster A Phase 3 (D4): dispatcher notification fan-out — the orchestrator
    * router calls this on every F2/F3 source-allowlist drop AFTER the
@@ -249,15 +268,27 @@ export type OrchestratorSessionHandle = {
    *  it on the wire in `multi_agent_started`; UI reads `events.length /
    *  hopBudget` for the activity-bar chip. */
   hopBudget: number;
-  /** Item #5: resolved pause-on-first-mutation flag for this session. */
+  /** Item #5: resolved pause-on-dangerous flag for this session. */
   pauseOnDangerous: boolean;
   /** Resolved execute-mode flag for this session (orchestrator mode only).
    *  Echoed on `multi_agent_started` so the UI shows the right banner. */
   executeMode: boolean;
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   sendUserPrompt: (text: string) => Promise<void>;
-  detach: () => void;
-  addWorker: (projectId: number) => Promise<AddWorkerResult>;
+  /** Register B01: pass the epoch `rebind` handed you and a stale window's
+   *  close can't silence the live one. Bare call is unconditional. */
+  detach: (sinkEpoch?: number) => void;
+  /** `deniedMcpServers`: register H04 — the gate result for THIS project,
+   *  applied at register time because the new worker is delivered a turn in
+   *  the same call. */
+  addWorker: (projectId: number, deniedMcpServers?: readonly string[]) => Promise<AddWorkerResult>;
+  /**
+   * Register H04: apply MCP denials to already-registered participants of
+   * `projectId`. Used by `continue_multi_agent`, which re-gates a session
+   * rebuilt by R-B reconstruction — the specs already exist there, so the
+   * denial is merged in rather than passed at registration.
+   */
+  applyMcpDenials: (projectId: number, serverNames: readonly string[]) => void;
   setLifecycle: (lifecycle: MultiAgentLifecycle) => Promise<void>;
   getCurrentWorkerNames: () => readonly string[];
   getCurrentLifecycle: () => MultiAgentLifecycle;
@@ -266,12 +297,13 @@ export type OrchestratorSessionHandle = {
    *  slot is cleared BEFORE re-delivery so a racing second click no-ops. */
   retry: () => Promise<void>;
   /**
-   * Item #5: operator clicked Continue on the pause-on-first-mutation
-   * banner. Clears the pending-mutation slot, sets
-   * `mutations_acknowledged=1`, clears `awaiting_continue`, re-delivers the
-   * paused worker's last captured prompt. No-op when no pause is active.
+   * Item #5: operator clicked Continue on one pause-on-dangerous banner.
+   * Moves that mutation from `pending` to `approved` (the one-shot grant the
+   * replayed turn spends) and re-delivers the paused worker's last captured
+   * prompt. No-op when `mutationId` isn't currently pending — which is what
+   * makes a double-click safe.
    */
-  continueThroughMutation: () => Promise<void>;
+  continueThroughMutation: (mutationId: number) => Promise<void>;
   /**
    * Cluster C Phase 4b: flip the orchestrator router's in-memory mute set
    * for an agent. Returns the router's `setMute` result — true iff the
@@ -339,8 +371,16 @@ type OrchestratorRouter = {
   handleEvent: (ev: BusEvent) => void;
   forwardCebabEvent: (ev: BusEvent) => void;
   sendUserPrompt: (text: string) => Promise<void>;
-  detach: () => void;
-  rebind: (sink: BusSink) => void;
+  /** Register B01: no-op unless `epoch` still owns the sink. Bare call
+   *  silences unconditionally — see `BusSessionHandle.detach`. */
+  detach: (epoch?: number) => void;
+  /** Returns the new sink epoch (register B01). */
+  rebind: (sink: BusSink) => number;
+  /** Register B17: send a ServerMsg through the sink that owns this session
+   *  RIGHT NOW. For callers that outlive a connection — the pause-expiry
+   *  timers are process-scoped and routinely fire after the window that armed
+   *  them has gone. */
+  sendServerMsg: (msg: ServerMsg) => void;
   registerWorker: (agentName: string) => void;
   getWorkerNames: () => readonly string[];
   setLifecycle: (lifecycle: MultiAgentLifecycle) => void;
@@ -405,8 +445,24 @@ export function createOrchestratorRouter(params: {
   /** Always-run finalizer (stop/crash/completion), independent of
    *  `onTeardown`'s temp/crashed gating and of sink detach/rebind. Disposes
    *  the liveness observer. */
-  onFinalize?: () => void;
-  deliver?: (agentName: string, text: string) => void;
+  /**
+   * Register B09: receives the teardown `reason` so a finalizer can tell an
+   * ending the operator asked for from one a turn produced. The bus handles
+   * use it to decide whether to abort the runner — see their closures.
+   */
+  onFinalize?: (reason: MultiAgentEndedReason) => void;
+  /**
+   * Wake `agentName` with `text`.
+   *
+   * `from` is the slug of the AGENT that wrote `text`, and it is present on
+   * exactly the calls that relay agent-authored bytes. Its absence is the
+   * signal that Cebab or the operator wrote them (roster prompts, the user's
+   * prompt, a replay of already-composed wire bytes), and the session-level
+   * composer keys the H08/F16 message fence off it. Passing it here rather
+   * than fencing inside the router keeps this module about routing and leaves
+   * one place that knows how a prompt is assembled.
+   */
+  deliver?: (agentName: string, text: string, from?: string) => void;
   /** Hard cap on persisted hops. Required so the router enforces the
    *  ceiling; the caller resolves precedence. */
   hopBudget: number;
@@ -507,6 +563,10 @@ export function createOrchestratorRouter(params: {
     sendRouterDrop: params.sendRouterDrop,
     sendServerMsg: params.sendServerMsg,
   };
+  // Register B01: monotonic owner token for `sink`. Starts at 0 (the sink
+  // installed at construction, owned by the window that started the run);
+  // every `rebind` mints a fresh one.
+  let sinkEpoch = 0;
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Bumped on every successful append (both `handleEvent` and
@@ -538,7 +598,7 @@ export function createOrchestratorRouter(params: {
     // First: kill any pending liveness timer so it can't fire a spurious
     // `stalled` mid-teardown. Always runs, exactly once (ended-guarded).
     try {
-      onFinalize?.();
+      onFinalize?.(reason);
     } catch (err) {
       console.error('[orchestrator] onFinalize failed', err);
     }
@@ -716,6 +776,29 @@ export function createOrchestratorRouter(params: {
       });
       return;
     }
+    // Register B24: an agent addressing itself, which used to fall through to
+    // the orchestrator/worker deliver branches and wake the sender again with
+    // its own text — a loop bounded only by the hop budget.
+    //
+    // Placed AFTER the worker→worker guard on purpose: a worker addressing
+    // itself is caught there and keeps reporting `worker_to_worker`, so no
+    // drop that was already classified changes its reason code. What reaches
+    // here is orchestrator → orchestrator, which is the gap.
+    //
+    // Dropped before the persist below, like its chain-mode twin: the harm is
+    // the budget, so a message that goes nowhere must not advance the counter.
+    if (ev.source === ev.destination) {
+      console.warn(`[orchestrator] drop self-addressed event from ${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'self_addressed',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Agent addressed itself',
+        message: `${ev.source} sent to itself — the message was dropped rather than waking the sender again`,
+      });
+      return;
+    }
     // F2 round-2: source must be the orchestrator or a known worker.
     if (ev.source !== ORCHESTRATOR_AGENT_NAME && !workerSet.has(ev.source)) {
       console.warn(`[orchestrator] drop event from non-participant source=${ev.source}`);
@@ -816,10 +899,19 @@ export function createOrchestratorRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[orchestrator] persist event failed', err);
     }
+    // Register B25: OUTSIDE the try. The counter is the runaway brake, and a
+    // brake that stops counting when writes start failing is exactly backwards
+    // — everything below runs whether or not the row landed, so a session with
+    // a sick database used to run unbounded.
+    //
+    // This does mean the displayed ratio can exceed `events.length` while
+    // persistence is failing. That divergence is true information (events ARE
+    // missing); under healthy persistence the two stay in lockstep exactly as
+    // before.
+    hopsCount += 1;
     // PR-7: capture kind='error' events as the run's first_error. F2/F3
     // filters above have already dropped forged source=cebab and bad
     // routing — anything reaching this point is a legitimate participant
@@ -841,24 +933,63 @@ export function createOrchestratorRouter(params: {
       return;
     }
     if (ev.destination === SINK_RECIPIENT) {
+      // Register B08: this was the last bare `console.warn` drop in the
+      // router — no audit row, no operator notification, exactly the shape
+      // B16 fixed for `unknown_destination`. It was left that way for want of
+      // a reason code ("a recipient that exists in the protocol but has no
+      // meaning in orchestrator mode"); `unauthorized_sink` is that code.
+      //
+      // The rule differs from chain mode's by who is entitled, not by kind:
+      // there, only the terminal participant may end the run; here, `_sink`
+      // is not a routable recipient at all, so nobody may.
       console.warn(`[orchestrator] unexpected destination=_sink from ${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'unauthorized_sink',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Agent addressed the chain terminator',
+        message: `${ev.source} addressed _sink, which has no meaning in orchestrator mode — the message was dropped`,
+      });
       return;
     }
     if (checkBudgetExhausted()) return;
+    // `ev.source` is pinned per-agent in `makeBusToolServer`'s closure and has
+    // already passed the F2/F3 allowlist above, so it is a trustworthy label
+    // for who wrote `ev.text` — which is what the fence needs.
     if (ev.destination === ORCHESTRATOR_AGENT_NAME) {
-      deliver?.(ORCHESTRATOR_AGENT_NAME, ev.text);
+      deliver?.(ORCHESTRATOR_AGENT_NAME, ev.text, ev.source);
       return;
     }
     if (workerSet.has(ev.destination)) {
-      deliver?.(ev.destination, ev.text);
+      deliver?.(ev.destination, ev.text, ev.source);
       return;
     }
+    // Register B16 (filed against chain.ts; this router had it too). The
+    // event is already persisted and counted against the hop budget, and
+    // `handleBusSend` has already told the sending agent "delivered" — so a
+    // bare warn here lost the message with no audit row and no operator
+    // signal. Every other drop in this router goes through
+    // `dispatchRouterDrop`; so does this one now.
+    //
+    // The `_sink` case above stays a plain warn: it is a worker addressing a
+    // recipient that exists in the protocol but has no meaning in
+    // orchestrator mode, which is a different (and unmapped) category.
     console.warn(`[orchestrator] event for unknown destination: ${ev.destination}`);
+    dispatchRouterDrop({
+      reasonCode: 'unknown_destination',
+      source: ev.source,
+      destination: ev.destination,
+      kind: ev.kind,
+      title: 'Message addressed to an unknown agent',
+      message: `${ev.source} addressed ${ev.destination}, who is not in this session's roster — the message was dropped`,
+    });
   };
 
   // Cebab-originated events (briefings, roster prompts, user prompts):
-  // persist + forward. Bumps `hopsCount` on successful persist so the
-  // counter stays in lockstep with `run.events.length`.
+  // persist + forward. Bumps `hopsCount` so the counter stays in lockstep
+  // with `run.events.length` — register B25 moved the bump out of the persist
+  // `try` so a failed write can no longer stall the brake; see `handleEvent`.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -871,10 +1002,11 @@ export function createOrchestratorRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[orchestrator] persist cebab event failed', err);
     }
+    // Register B25: outside the persist try — see `handleEvent`.
+    hopsCount += 1;
     try {
       sink.onEvent(sessionId, ev, dbId);
     } catch (err) {
@@ -894,14 +1026,36 @@ export function createOrchestratorRouter(params: {
     // The user's prompt just landed as a persisted hop; check the cap
     // before waking the orchestrator for it.
     if (checkBudgetExhausted()) return;
+    // No `from`: the operator is the principal here, and the whole point of
+    // the fence is to mark text an AGENT wrote. Wrapping the operator's own
+    // prompt would label the actual task as untrusted peer data.
     deliver?.(ORCHESTRATOR_AGENT_NAME, text);
   };
 
-  const detach = () => {
+  // Register B01: who currently owns the sink. Bumped on every rebind, so a
+  // window that re-attached later holds a higher epoch than the one that
+  // attached before it. `detach(epoch)` silences only if the caller's epoch is
+  // still the current one — otherwise a closing stale window would blank the
+  // live window's event stream.
+  const detach = (epoch?: number) => {
+    if (epoch !== undefined && epoch !== sinkEpoch) return;
     sink = NOOP_SINK;
   };
-  const rebind = (next: BusSink) => {
+  const rebind = (next: BusSink): number => {
     sink = next;
+    return ++sinkEpoch;
+  };
+  /**
+   * Register B17: send to whoever owns the sink right now.
+   *
+   * Reads the mutable `sink` at call time — which is the whole point. A caller
+   * that captured a sink when it armed a timer would keep sending to a window
+   * that has since closed, and would keep sending after `detach()` swapped in
+   * `NOOP_SINK`. Going through here, both cases behave: a rebound session
+   * reaches the new window, a detached one drops.
+   */
+  const sendServerMsg = (msg: ServerMsg): void => {
+    sink.sendServerMsg?.(msg);
   };
   const registerWorker = (agentName: string) => {
     if (workerSet.has(agentName)) return;
@@ -1052,6 +1206,7 @@ export function createOrchestratorRouter(params: {
     sendUserPrompt,
     detach,
     rebind,
+    sendServerMsg,
     registerWorker,
     getWorkerNames,
     setLifecycle,
@@ -1098,6 +1253,9 @@ export function wireOrchestratorSession(p: {
   lifecycle: MultiAgentLifecycle;
   paths: SessionPaths;
   workers: ResolvedAgent[];
+  /** Register H04 — see `StartOrchestratorOpts.mcpDenials`. Also reaches the
+   *  R-B reconstruct path, which calls this directly. */
+  mcpDenials?: StartOrchestratorOpts['mcpDenials'];
   onEvent: StartOrchestratorOpts['onEvent'];
   onEnded: StartOrchestratorOpts['onEnded'];
   onActivity?: StartOrchestratorOpts['onActivity'];
@@ -1123,7 +1281,7 @@ export function wireOrchestratorSession(p: {
    *  starts from this value so enforcement carries over a server restart.
    *  Defaults to 0 (fresh start). */
   initialHopsCount?: number;
-  /** Item #5: opt-in pause-on-first-mutation. Surfaced on the handle; read
+  /** Item #5: opt-in pause-on-dangerous. Surfaced on the handle; read
    *  inside the `onMutation` hook to decide whether to gate. Default false. */
   pauseOnDangerous?: boolean;
   /** Execute mode: threaded into the briefing renderers so workers are told
@@ -1213,9 +1371,10 @@ export function wireOrchestratorSession(p: {
   // Item #5: mutation tap closure. Fired by the runner's stream tap for every
   // classified non-`read` `tool_use` block, BEFORE the SDK dispatches the
   // tool. Persists the row, fires the live `multi_agent_mutation` sink, and
-  // — when pause-on-first-mutation is armed and not yet acknowledged — sets
-  // the pending slot, emits `multi_agent_pending_mutation`, and throws
-  // `PausedForMutationError` to abort the turn cleanly.
+  // — when pause-on-dangerous is armed and this agent has no unspent
+  // Continue grant for this exact call — marks the row pending, emits
+  // `multi_agent_pending_mutations`, and throws `PausedForMutationError`
+  // to abort the turn cleanly.
   const onMutationHook: AgentRunnerDeps['onMutation'] = async (agentName, toolName, cwd, cls) => {
     let row: MutationRecord;
     try {
@@ -1249,6 +1408,14 @@ export function wireOrchestratorSession(p: {
       });
     } catch (err) {
       console.error('[orchestrator] persist mutation failed', err);
+      // Cebab-aqd: this `return` is upstream of `applyPauseGate`, so returning
+      // unconditionally let a failed INSERT disarm the operator's brake and the
+      // dangerous call ran. Same reasoning register B25 applied to the hop
+      // counter one function over: a brake that stops working when writes start
+      // failing is exactly backwards.
+      if (shouldHaltUnrecordedMutation(sessionId, cls.category)) {
+        throw new MutationNotRecordedError(toolName, cls.summary);
+      }
       return;
     }
     try {
@@ -1257,25 +1424,12 @@ export function wireOrchestratorSession(p: {
       console.error('[orchestrator] onMutation sink threw', err);
     }
     // Pause gate — fires only on `dangerous`-category mutations (see
-    // `shouldPauseForMutation`). MCP calls and ordinary edits classify as
-    // `mutate` and run free. Fresh DB read each time — handles the operator
-    // flipping `mutations_acknowledged` mid-turn via Continue, and R-B
-    // reconstructed sessions where the in-memory closure has no value to read.
-    const session = getMultiAgentSession(sessionId);
-    if (shouldPauseForMutation(cls.category, session)) {
-      try {
-        setPendingMutation(sessionId, row.id);
-        setAwaitingContinue(sessionId, true);
-      } catch (err) {
-        console.error('[orchestrator] persist pending-mutation failed', err);
-      }
-      try {
-        p.onPendingMutation?.(sessionId, row);
-      } catch (err) {
-        console.error('[orchestrator] onPendingMutation sink threw', err);
-      }
-      throw new PausedForMutationError(`paused before ${cls.summary}`);
-    }
+    // `decidePauseForMutation`). MCP calls and ordinary edits classify as
+    // `mutate` and run free. Fresh DB reads each time — handles a Continue
+    // landing mid-turn, and R-B reconstructed sessions where the in-memory
+    // closure has no value to read. Per-agent (migration 031): another
+    // worker's pause does not suppress this one's gate.
+    applyPauseGate(row, p.onPendingMutation);
   };
 
   // Migration 012: tool-result tap. Flips `confirmed_at` on the matching
@@ -1365,6 +1519,16 @@ export function wireOrchestratorSession(p: {
         console.error('[orchestrator] persist agent session failed', err);
       }
     },
+    onTurnCost: (agent, costUsd) => {
+      // F7: accumulate the hop's cost per agent AND into the session total.
+      // Best-effort like every other persistence hook here — a DB hiccup must
+      // not abort the turn, it just loses that hop from the accounting.
+      try {
+        addAgentCost(sessionId, agent, costUsd);
+      } catch (err) {
+        console.error('[orchestrator] persist agent cost failed', err);
+      }
+    },
     onMutation: onMutationHook,
     onToolResult: onToolResultHook,
     onAskUserQuestion: onAskUserQuestionHook,
@@ -1401,6 +1565,22 @@ export function wireOrchestratorSession(p: {
     },
     abortController,
     runnerFactory: p.runnerFactory,
+    // Mock replay (MOCK=1). The orchestrator's own slug is fixed, so a shipped
+    // fixture addresses it by name; the workers' slugs are the operator's
+    // project names, so their scripts address `${ORCHESTRATOR}` and the
+    // orchestrator's script addresses `${NEXT}` (its first worker) or
+    // `${USER}` (the terminal answer). Read from the live roster so a mid-run
+    // `addWorker` is routable too.
+    mockScenario: config.mockScenario ?? 'orchestrator',
+    mockVars: (agent) => ({
+      SELF: agent,
+      NEXT:
+        agent === ORCHESTRATOR_AGENT_NAME
+          ? (router.getWorkerNames()[0] ?? USER_RECIPIENT)
+          : ORCHESTRATOR_AGENT_NAME,
+      ORCHESTRATOR: ORCHESTRATOR_AGENT_NAME,
+      USER: USER_RECIPIENT,
+    }),
     // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): mirror the chain.ts
     // wiring — every transient-overload retry emits an `auto_retry`
     // ServerMsg + writes a `recovery_log` row. Identical shape; both
@@ -1501,12 +1681,16 @@ export function wireOrchestratorSession(p: {
   });
   // Workers load their project's full settings stack — MCPs,
   // allowedTools/disallowedTools, env injectors, hooks — exactly as a
-  // standalone `claude` session in the same cwd would. Combined with
-  // `permissionMode: 'bypassPermissions'` (no human gate), this means a
-  // worker's project-defined hooks auto-execute on every bus turn for that
-  // worker; the consultant-mode guardrail in `runtime.ts` is the only
-  // behavioral brake.
+  // standalone `claude` session in the same cwd would. Because the runner's
+  // `canUseTool` auto-allows every tool except `AskUserQuestion` for agents
+  // without `toolPolicy: 'delegate-only'` (i.e. every worker), there is no
+  // human gate on any of it: a worker's project-defined hooks auto-execute on
+  // every bus turn for that worker. The consultant-mode guardrail in
+  // `runtime.ts` is the only behavioral brake.
   for (const w of p.workers) {
+    // H04: denials must be on the spec BEFORE the first turn — a worker's
+    // first hop is where a hostile `.mcp.json` would land.
+    const denied = p.mcpDenials?.get(w.projectId);
     runner.register({
       name: w.agentName,
       cwd: w.cwd,
@@ -1514,6 +1698,7 @@ export function wireOrchestratorSession(p: {
       // Cluster G Phase 3 (G1): see chain.ts mirror — per-participant
       // project for the active-runs registry snapshot.
       projectId: w.projectId,
+      ...(denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {}),
     });
   }
 
@@ -1539,8 +1724,15 @@ export function wireOrchestratorSession(p: {
   // briefing (its resumed transcript still has it), so it is pre-marked
   // here and `deliver` won't duplicate it.
   const briefed = new Set<string>(p.briefedAgents ?? []);
-  const deliver = (agentName: string, text: string) => {
-    let prompt = text;
+  const deliver = (agentName: string, text: string, from?: string) => {
+    // H08/F16: a `from` means another AGENT wrote these bytes, so they get the
+    // nonce fence — the recipient can then tell Cebab's framing from a peer's
+    // prose no matter what the prose contains. No `from` means Cebab or the
+    // operator wrote them (roster prompt, roster update, the user's prompt, or
+    // a replay of bytes this function already composed), and those must stay
+    // bare: fencing the operator's own task would label it untrusted, and
+    // re-fencing a replay would nest one wrapper inside another.
+    let prompt = from ? fenceRelayedMessage(from, text).text : text;
     if (agentName !== ORCHESTRATOR_AGENT_NAME && !briefed.has(agentName)) {
       briefed.add(agentName);
       // Order: bus protocol → project rules → task (same as chain mode).
@@ -1549,7 +1741,7 @@ export function wireOrchestratorSession(p: {
         executeMode: p.executeMode ?? false,
       });
       const pr = workerProjectRules.get(agentName) ?? null;
-      prompt = pr ? `${brief}\n\n${pr.framed}\n\n${text}` : `${brief}\n\n${text}`;
+      prompt = pr ? `${brief}\n\n${pr.framed}\n\n${prompt}` : `${brief}\n\n${prompt}`;
       if (pr) {
         // Compact scrollback marker only — the full CLAUDE.md is in the
         // delivered prompt + the on-disk iteration transcript, not echoed
@@ -1621,11 +1813,38 @@ export function wireOrchestratorSession(p: {
     onEvent: p.onEvent,
     onEnded: p.onEnded,
     onTeardown,
-    onFinalize: () => {
+    onFinalize: (reason) => {
       // Interactive AskUserQuestion: drain any parked questions so a
       // stopped/ended session doesn't leave a canUseTool Promise dangling.
       rejectQuestionsForSession(sessionId, 'session ended');
       activity.dispose();
+      // Register B09: stop the runner too. `router.teardown()` ended the DB
+      // row, unregistered the live session and fired `sink.onEnded` — but
+      // only `handle.stop()` ever called `runner.stop()`, so the operator's
+      // Stop button was clean and every OTHER route out was not. A
+      // budget-exhaust, a completion or a crash reported `ended` while an
+      // in-flight SDK turn kept running: the exact leak `runner/lifecycle.ts`
+      // exists to prevent, burning subscription quota with nobody watching.
+      //
+      // It goes here rather than in the router because the router has no
+      // `runner` in scope — which is why it never stopped it. `onFinalize`
+      // already exists for this same class of dangling-promise cleanup and
+      // is called first inside `teardown`, so the seam was sitting right
+      // there. `runner.stop()` is `abortController?.abort()`, idempotent, so
+      // `handle.stop()` calling it too is harmless.
+      //
+      // NOT on 'completed', and this is the half the finding conflated. A
+      // completion happens BECAUSE a turn produced the terminal event — from
+      // inside that turn's `bus_send`, before its own `result` message — and
+      // the `--resume` checkpoint (`onSessionId` → `upsertAgentSession`) is
+      // written on `result`. Aborting there destroys Cebab's own lineage row
+      // for the agent that just finished, which `computeRecoveryContext`
+      // reads. `mock_replay.test.ts` documents the ordering and was the test
+      // that caught it. A completing turn also ends on its own moments later
+      // and closes its query in the `finally`, so there is nothing to leak:
+      // the leak this fixes is 'stopped' and 'crashed', where nothing else
+      // will ever end the turn.
+      if (reason !== 'completed') runner.stop();
     },
     deliver,
     hopBudget,
@@ -1639,7 +1858,10 @@ export function wireOrchestratorSession(p: {
     initialKickedAgents: p.initialKickedAgents,
   });
 
-  async function addWorker(projectId: number): Promise<AddWorkerResult> {
+  async function addWorker(
+    projectId: number,
+    deniedMcpServers?: readonly string[],
+  ): Promise<AddWorkerResult> {
     if (workerProjectIds.includes(projectId)) {
       throw new Error(`project ${projectId} is already a participant in this session`);
     }
@@ -1657,6 +1879,12 @@ export function wireOrchestratorSession(p: {
       // initial-workers loop so mid-run added workers also appear in the
       // active-runs snapshot with the right project.
       projectId,
+      // H04: this function registers and then `deliver`s in the same breath,
+      // so the caller's gate result has to arrive HERE — applying it after
+      // the call would land one turn too late.
+      ...(deniedMcpServers && deniedMcpServers.length > 0
+        ? { deniedMcpServers: [...deniedMcpServers] }
+        : {}),
     });
     router.registerWorker(newAgent.agentName);
     addParticipant(sessionId, projectId, 'worker', null);
@@ -1676,14 +1904,24 @@ export function wireOrchestratorSession(p: {
       hopBudget,
       executeMode: p.executeMode ?? false,
     });
-    router.forwardCebabEvent({
-      ts: Date.now(),
-      source: CEBAB_SOURCE,
-      destination: ORCHESTRATOR_AGENT_NAME,
-      kind: 'prompt',
-      text: rosterText,
-    });
-    deliver(ORCHESTRATOR_AGENT_NAME, rosterText);
+    // Register B14: this was a hand-rolled copy of `sendUserPrompt` — the
+    // same `forwardCebabEvent(cebab → orchestrator, kind:'prompt')` followed
+    // by the same `deliver(ORCHESTRATOR_AGENT_NAME, …)` — minus both of its
+    // guards. `forwardCebabEvent` bumps `hopsCount`, so the roster update
+    // could be the very hop that reached the cap and STILL wake the
+    // orchestrator, defeating the runaway brake the operator was promised;
+    // the `ended` check was missing too.
+    //
+    // Calling the shared path rather than adding a third copy of the guards:
+    // "wake the orchestrator with Cebab-authored prompt text" is one
+    // operation, and a roster update is an instance of it. No fence, for the
+    // reason `sendUserPrompt` gives — this text is Cebab's, not an agent's.
+    //
+    // Refusing here happens AFTER the worker is registered, deliberately: the
+    // participant row and the roster event are already durable, so the early
+    // return leaves consistent state and the budget-exhausted teardown is
+    // what explains the stop to the operator.
+    await router.sendUserPrompt(rosterText);
     return { agentName: newAgent.agentName, busWasAlreadyInstalled };
   }
 
@@ -1711,18 +1949,21 @@ export function wireOrchestratorSession(p: {
         console.error('[orchestrator] clear pending-retry on stop failed', err);
       }
       try {
-        setPendingMutation(sessionId, null);
+        // Live pauses AND unconsumed Continue grants: a grant that outlived its
+        // session would silently pre-approve a command in a reconstructed run.
+        clearPendingMutations(sessionId);
       } catch (err) {
-        console.error('[orchestrator] clear pending-mutation on stop failed', err);
+        console.error('[orchestrator] clear pending-mutations on stop failed', err);
       }
       runner.stop();
       await router.teardown(reason);
     },
     sendUserPrompt: (text) => router.sendUserPrompt(text),
-    detach() {
-      router.detach();
+    detach(sinkEpoch) {
+      router.detach(sinkEpoch);
     },
     addWorker,
+    applyMcpDenials: (projectId, serverNames) => runner.applyMcpDenials(projectId, serverNames),
     setLifecycle: setLifecycleHandle,
     getCurrentWorkerNames: () => router.getWorkerNames(),
     getCurrentLifecycle: () => router.getLifecycle(),
@@ -1753,23 +1994,12 @@ export function wireOrchestratorSession(p: {
       // re-delivering the same wire bytes.
       deliver(pending.agentName, pending.prompt);
     },
-    async continueThroughMutation() {
-      // Item #5: idempotent operator-Continue path. Slot is read by id so a
-      // racing second click returns null and no-ops.
-      const pending = getPendingMutation(sessionId);
+    async continueThroughMutation(mutationId: number) {
+      // Item #5: idempotent operator-Continue path. The row is looked up among
+      // the CURRENTLY pending ones, so a racing second click (or a stale id
+      // from a client that missed a broadcast) finds nothing and no-ops.
+      const pending = releasePauseForMutation(sessionId, mutationId, p.onPendingMutation);
       if (!pending) return;
-      try {
-        setPendingMutation(sessionId, null);
-        setMutationsAcknowledged(sessionId, true);
-        setAwaitingContinue(sessionId, false);
-      } catch (err) {
-        console.error('[orchestrator] persist continue-through-mutation failed', err);
-      }
-      try {
-        p.onPendingMutation?.(sessionId, null);
-      } catch (err) {
-        console.error('[orchestrator] continue onPendingMutation-null callback threw', err);
-      }
       const replayPrompt = lastPrompt.get(pending.agentName);
       if (!replayPrompt) {
         console.warn(
@@ -1778,9 +2008,10 @@ export function wireOrchestratorSession(p: {
         return;
       }
       // Same idempotency rules as `retry()`: re-deliver the captured
-      // post-briefing bytes. A second mutation in the same session does NOT
-      // re-pause because `mutations_acknowledged=1` is read inside
-      // `onMutationHook`.
+      // post-briefing bytes. The replayed turn re-issues the approved command;
+      // the `approved` row left behind by `releasePauseForMutation` is the
+      // one-shot grant that lets it through. Any OTHER dangerous command in
+      // that turn pauses again — the gate re-arms per command.
       deliver(pending.agentName, replayPrompt);
     },
     setMute: (agentName, muted) => router.setMute(agentName, muted),
@@ -1797,6 +2028,7 @@ export function wireOrchestratorSession(p: {
     mode: 'orchestrator',
     handle,
     rebind: (s) => router.rebind(s),
+    sendServerMsg: (m) => router.sendServerMsg(m),
   });
 
   return { handle, router, deliver };
@@ -1817,7 +2049,10 @@ export async function startOrchestratorSession(
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...opts.workers.map((w) => w.agentName)];
 
   const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
-  fs.mkdirSync(paths.folder, { recursive: true });
+  // H01: owner-only. See the matching comment in `chain.ts` — the mode on this
+  // one directory gates everything written beneath it, and pre-existing
+  // session folders in the operator's workspace are left alone.
+  secureMkdir(paths.folder);
   ensureOrchestratorWorkspace(paths.orchestratorWorkspace);
 
   const iterationId = nextIterationId(paths);
@@ -1858,6 +2093,7 @@ export async function startOrchestratorSession(
     lifecycle,
     paths,
     workers: opts.workers,
+    ...(opts.mcpDenials ? { mcpDenials: opts.mcpDenials } : {}),
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onActivity: opts.onActivity,

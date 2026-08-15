@@ -1,0 +1,20 @@
+{
+  // Build-only config. `tsconfig.json` is what `npm run typecheck` uses
+  // (`tsc --noEmit -p server`), and it deliberately has NO exclude so every
+  // test file is typechecked.
+  //
+  // Register C11: the build used that same config, which emits, so `dist/`
+  // filled up with compiled tests — 87 of 186 emitted `.js` files, 174 of 318
+  // files overall. That is why `vitest.config.ts` had to blacklist `**/dist/**`
+  // to stop the runner picking up stale compiled copies of its own suite.
+  //
+  // Excluding tests in `tsconfig.json` instead would have fixed the build and
+  // silently dropped all 161 test files from typechecking, since both commands
+  // read that one file. Hence the split: emit from here, typecheck from there.
+  // `test_support/` is excluded for the same reason as the tests themselves:
+  // it imports vitest's lifecycle hooks, so emitting it would ship a module
+  // that pulls a devDependency into dist/. It is not named `*.test.ts` because
+  // it defines no tests — the runner must not collect it.
+  "extends": "./tsconfig.json",
+  "exclude": ["**/*.test.ts", "src/test_support/**"]
+}

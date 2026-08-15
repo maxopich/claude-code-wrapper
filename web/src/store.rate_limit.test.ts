@@ -448,7 +448,7 @@ function bootstrapMulti(): AppState {
       hopBudget: 30,
       pauseOnDangerous: false,
       mutations: [],
-      mutationsAcknowledged: false,
+      pendingMutations: [],
     },
   });
   return s;
