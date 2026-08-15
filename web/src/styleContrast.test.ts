@@ -531,21 +531,87 @@ describe('[a11y] semantic ink is readable as text', () => {
  */
 type Pairing = { ink: string; surface: string; selectors: string[] };
 
-/** `color: var(--fg-N)` + `background[-color]: var(--X)` in one rule. */
+/**
+ * The token a `color:` / `background:` value names, in EITHER `var()` form.
+ *
+ * `var(--x, <fallback>)` is the form that hid two of the three sub-AA pairings
+ * this scan was widened to catch: the old pattern ended at `\s*\)$`, so a
+ * declaration with a fallback argument matched nothing and the rule was
+ * skipped entirely — 55 declarations in this stylesheet use it. The fallback
+ * is deliberately NOT modelled: it applies only when the token is undefined,
+ * which is a different rule than the one shipping, and `.tools-list-usage-
+ * toggle-btn-active` is the cautionary tale — it was written
+ * `var(--accent-soft, <a 12% tint>)` by an author who believed they were
+ * getting the tint, while `--accent-soft` was a saturated fill and the
+ * fallback never fired.
+ */
+function namedToken(value: string | null): string | null {
+  if (value === null) return null;
+  return /^var\(\s*(--[a-z0-9-]+)\s*[,)]/.exec(value.trim())?.[1] ?? null;
+}
+
+/**
+ * Tokens the scan cannot put a number on, recorded rather than swallowed.
+ *
+ * Two kinds reach here, both legitimate: properties set from JS
+ * (`--agent-hue`, `--identity-hue`) which no gamma block declares, and
+ * `--grad-user`, a `linear-gradient` — a gradient has no single contrast
+ * value, the same class of limitation as the "tint over a surface darker than
+ * `--panel`" one documented on `pairingRatio`.
+ *
+ * The reason this is a Set and not a bare `continue`: a silent skip is how a
+ * widened scan narrows again without anyone noticing. The test below asserts
+ * these BY NAME, so a new unmeasurable surface reddens and forces a decision
+ * rather than quietly leaving a rule unguarded.
+ */
+const UNMEASURABLE = new Set<string>();
+
+function measurable(token: string): boolean {
+  for (const theme of THEMES) {
+    try {
+      resolveColor(blocks[theme]!, token);
+    } catch {
+      UNMEASURABLE.add(token);
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * `color: var(--X)` + `background[-color]: var(--Y)` in one rule.
+ *
+ * NO ALLOWLIST OF INK NAMES, and that is the point. A previous version matched
+ * `--fg-[0-3]`, the four `--X-ink` partners and `--on-accent`, on the
+ * reasonable-sounding premise that those are "the inks". Three real sub-AA
+ * pairings shipped past it because they used a token that was not on the list:
+ *
+ *   - bare `--fg` on `--accent-2`   (2.22:1) — `.sidebar-reopen-btn:hover`
+ *   - `--bg-0` on `--err`           (3.27:1) — `.notif-bell-badge`
+ *   - `--bg-0` on `--accent`        (4.02:1) — `.gate-modal-btn-primary`,
+ *                                              `.logs-filter-count`
+ *
+ * The last two are the interesting shape: `--bg-0` is an INVERSE ink, reached
+ * for because "the background colour" reads like the safe opposite of the
+ * foreground. It is not — it tracks the gamma, so on a saturated fill it is
+ * right in the dark gammas and wrong in the light ones.
+ *
+ * A name list cannot anticipate that, and the header of this file already
+ * argues the general case: a hand-kept list is exactly the artifact that goes
+ * stale silently. So every token named in a `color:` beside a `background:` is
+ * measured, whatever it is called. Measured cost of the widening: 121
+ * pairings, of which the four above were the only ones below AA.
+ */
 function declaredPairings(): Pairing[] {
   const byPair = new Map<string, Pairing>();
   for (const rule of topLevelRules(stylesCss)) {
-    const color = findDeclaration(rule.body, 'color');
-    if (color === null) continue;
-    const ink = /^var\(\s*(--fg-[0-3]|--(?:ok|warn|err|info|accent)-ink|--on-accent)\s*\)$/.exec(
-      color.trim(),
-    )?.[1];
+    const ink = namedToken(findDeclaration(rule.body, 'color'));
     if (!ink) continue;
-    const bg =
-      findDeclaration(rule.body, 'background') ?? findDeclaration(rule.body, 'background-color');
-    if (bg === null) continue;
-    const surface = /^var\(\s*(--[a-z0-9-]+)\s*\)$/.exec(bg.trim())?.[1];
+    const surface = namedToken(
+      findDeclaration(rule.body, 'background') ?? findDeclaration(rule.body, 'background-color'),
+    );
     if (!surface) continue;
+    if (!measurable(ink) || !measurable(surface)) continue;
     const key = `${ink} on ${surface}`;
     const entry = byPair.get(key) ?? { ink, surface, selectors: [] };
     entry.selectors.push(rule.selector.replace(/\s+/g, ' '));
@@ -582,6 +648,20 @@ function pairingRatio(theme: string, p: Pairing): number {
   return contrastRatio(ink, tintOverPanel(theme, p.surface));
 }
 
+/**
+ * A neutral ramp tier sitting on a saturated, fully opaque semantic fill.
+ *
+ * Extracted so it can be exercised on its own — see the cases at the bottom of
+ * this file for why that is not optional.
+ */
+function isRampOnOpaqueFill(p: Pairing): boolean {
+  return (
+    (p.ink === '--fg' || p.ink.startsWith('--fg-')) &&
+    /^--(ok|warn|err|info|accent|accent-2)(-soft)?$/.test(p.surface) &&
+    THEMES.every((theme) => resolveColor(blocks[theme]!, p.surface).a >= 1)
+  );
+}
+
 describe('[a11y] theme contrast — pairings the stylesheet declares', () => {
   test('the scan found the pairings', () => {
     // Without this the two assertions below iterate an empty list and pass —
@@ -594,6 +674,39 @@ describe('[a11y] theme contrast — pairings the stylesheet declares', () => {
     const surfaces = new Set(PAIRINGS.map((p) => p.surface));
     expect([...surfaces]).toContain('--bg-4');
     expect([...surfaces]).toContain('--bg-3');
+  });
+
+  test('the widened scan still reaches the three shapes that used to escape it', () => {
+    // A floor of 18 was set when the ink pattern was an allowlist. Dropping
+    // back to it would not redden anything above, so each shape the widening
+    // added is named here. All three shipped a sub-AA pairing past the old
+    // scan; each is now represented by a rule that still exists.
+    const inks = new Set(PAIRINGS.map((p) => p.ink));
+    // 1. bare `--fg`, which `--fg-[0-3]` did not match. 41 rules use it.
+    expect([...inks], 'bare --fg is measured').toContain('--fg');
+    // 2. NO allowlist at all. `--on-err` did not exist when the old pattern
+    //    was written, so no list could have contained it — if the ink filter
+    //    ever becomes an enumeration again, this is the case that says so.
+    //    (The `--bg-0` inverse inks that motivated the widening were all
+    //    repaired in the same change, so there is no live example of that
+    //    shape left to anchor on; a token invented here is the stronger
+    //    proof anyway.)
+    expect([...inks], 'a token no allowlist could contain is measured').toContain('--on-err');
+    // 3. the `var(--x, <fallback>)` form, which the old `\\s*\\)$` anchor
+    //    rejected outright. `.kbd` uses it and is NOT one of the rules this
+    //    change edited, so the case cannot be satisfied by the repair.
+    const kbd = PAIRINGS.find((p) => p.selectors.some((s) => s.includes('.kbd')));
+    expect(kbd, 'a var(--x, fallback) rule is measured').toBeDefined();
+  });
+
+  test('every token the scan gave up on is one we have looked at', () => {
+    // Named, not counted. A count passes when one unmeasurable token is
+    // swapped for another, which is exactly when a rule silently stops being
+    // guarded. One entry, inspected: `--msg-user-bg` is `var(--grad-user)` in
+    // the dark gammas — a `linear-gradient`, which has no single contrast
+    // value. Same class of limitation as the "tint over a surface darker than
+    // --panel" one on `pairingRatio`, and written down for the same reason.
+    expect([...UNMEASURABLE].sort()).toEqual(['--msg-user-bg']);
   });
 
   test.each(THEMES)('%s: every declared ink/surface pairing clears AA', (theme) => {
@@ -621,15 +734,65 @@ describe('[a11y] theme contrast — pairings the stylesheet declares', () => {
     //
     // A first draft keyed on the `-soft` SUFFIX and flagged all six legitimate
     // tints. Naming is not the invariant; opacity is.
-    const onOpaqueFill = PAIRINGS.filter(
-      (p) =>
-        p.ink.startsWith('--fg-') &&
-        /^--(ok|warn|err|info|accent)(-soft)?$/.test(p.surface) &&
-        THEMES.every((theme) => resolveColor(blocks[theme]!, p.surface).a >= 1),
-    );
+    //
+    // UPDATE: the surface filter was `/^--(ok|warn|err|info|accent)(-soft)?$/`
+    // and `--accent-2` was not in it — while `--accent-soft`, which it DID
+    // name, carried the identical value in all five blocks. So the same colour
+    // was guarded under one name and unguarded under the other, and `--fg` on
+    // `--accent-2` shipped at 2.22:1 on `.sidebar-reopen-btn:hover`. The
+    // duplicate is gone now (`--accent-soft` deleted, uses repointed at
+    // `--accent-2`), and the filter names the token that survived.
+    //
+    // The ink side had the mirror hole: `startsWith('--fg-')` misses bare
+    // `--fg`, which is the ink that actually shipped the failure. Naming was
+    // not the invariant on the surface side and it is not on the ink side
+    // either — this is the neutral ramp, all of it.
+    const onOpaqueFill = PAIRINGS.filter(isRampOnOpaqueFill);
     expect(
       onOpaqueFill.map((p) => `${p.ink} on ${p.surface} at ${p.selectors[0]}`),
       'an opaque semantic fill takes its own ink (--on-accent / --X-ink), not a --fg-N tier',
     ).toEqual([]);
+  });
+
+  // The predicate, not the stylesheet.
+  //
+  // Widening it to `--fg` and `--accent-2` reverts GREEN against the shipped
+  // CSS, and that is not a reason to skip the widening — it is a reason not to
+  // pretend the stylesheet covers it. Every rule that used to trip this
+  // predicate was repaired in the same change, so the only live net is the AA
+  // test above; the predicate's value is the sharper message it gives the NEXT
+  // author, and a predicate nothing exercises is a comment.
+  //
+  // So it is exercised directly, with synthetic pairings. Each case names the
+  // hole it stands for.
+  describe('the opaque-fill predicate itself', () => {
+    const pair = (ink: string, surface: string): Pairing => ({ ink, surface, selectors: ['x'] });
+
+    test('flags bare --fg on --accent-2 — the pairing that shipped at 2.22:1', () => {
+      expect(isRampOnOpaqueFill(pair('--fg', '--accent-2'))).toBe(true);
+    });
+
+    test('flags a --fg-N tier on --accent-2 — the surface half of the hole', () => {
+      expect(isRampOnOpaqueFill(pair('--fg-1', '--accent-2'))).toBe(true);
+    });
+
+    test('flags bare --fg on --accent — the ink half of the hole', () => {
+      expect(isRampOnOpaqueFill(pair('--fg', '--accent'))).toBe(true);
+    });
+
+    test('CONTROL: a translucent tint is not flagged', () => {
+      // `--ok-soft` is a 12% tint. Flagging it would make the predicate cry
+      // wolf on six pairings that ship correctly, which this file's header
+      // says is how a gate gets deleted.
+      expect(isRampOnOpaqueFill(pair('--fg-1', '--ok-soft'))).toBe(false);
+    });
+
+    test('CONTROL: a fill taking its own ink is not flagged', () => {
+      expect(isRampOnOpaqueFill(pair('--on-accent', '--accent-2'))).toBe(false);
+    });
+
+    test('CONTROL: a neutral surface is not flagged', () => {
+      expect(isRampOnOpaqueFill(pair('--fg', '--bg-4'))).toBe(false);
+    });
   });
 });

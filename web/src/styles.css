@@ -41,7 +41,6 @@
   --line-3: rgba(255, 255, 255, 0.13);
   /* Action accent — teal (NOT coral; coral is brand-mark only) */
   --accent: #2fb6c4;
-  --accent-soft: #1f8e9b;
   --accent-glow: rgba(47, 182, 196, 0.13);
   --accent-ink: #8adfe7;
   /* Semantic */
@@ -199,11 +198,11 @@
   --line-3: rgba(20, 24, 50, 0.2);
   --border: rgba(20, 24, 50, 0.14);
   --accent: #2f6fed;
-  --accent-soft: #2456c8;
   --accent-glow: rgba(47, 111, 237, 0.1);
   --accent-ink: #2456c8;
   --accent-2: #2456c8;
   --on-accent: #ffffff;
+  --on-err: #1a0505; /* 5.30:1 on --err */
   /* `--X` is the FILL (tint, border, glow) and `--X-ink` is the TEXT. One
    * token cannot be both: a fill wants to sit near the surface, ink wants to
    * sit far from it. Tuned for the fill, these read at 2.4–3.9:1 as text here
@@ -275,11 +274,11 @@
   --line-3: rgba(40, 32, 20, 0.22);
   --border: rgba(40, 32, 20, 0.16);
   --accent: #b85a38;
-  --accent-soft: #a44d2c;
   --accent-glow: rgba(184, 90, 56, 0.12);
   --accent-ink: #a24b2a;
   --accent-2: #a44d2c;
   --on-accent: #ffffff;
+  --on-err: #ffffff; /* 5.24:1 on --err */
   --ok: #2f9e5f;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
   --ok-ink: #217344;
@@ -337,11 +336,11 @@
   --line-3: rgba(255, 255, 255, 0.2);
   --border: rgba(255, 255, 255, 0.14);
   --accent: #2fb6c4;
-  --accent-soft: #1f8e9b;
   --accent-glow: rgba(47, 182, 196, 0.14);
   --accent-ink: #8adfe7;
   --accent-2: #1f8e9b;
   --on-accent: #05181b;
+  --on-err: #1a0505; /* 7.11:1 on --err */
   --ok: #34d399;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
   --ok-ink: var(--ok);
@@ -399,11 +398,11 @@
   --line-3: rgba(72, 220, 150, 0.36);
   --border: rgba(72, 220, 150, 0.26);
   --accent: #3ddc84;
-  --accent-soft: #2cb56a;
   --accent-glow: rgba(61, 220, 132, 0.12);
   --accent-ink: #7af0aa;
   --accent-2: #2cb56a;
   --on-accent: #04140b;
+  --on-err: #1a0505; /* 7.04:1 on --err */
   --ok: #3ddc84;
   --ok-soft: color-mix(in srgb, var(--ok) 12%, transparent);
   --ok-ink: var(--ok);
@@ -981,7 +980,13 @@ pre {
 }
 .sidebar-reopen-btn:hover {
   background: var(--accent-2);
-  color: var(--fg);
+  /* `--fg` here measured 2.22–3.56:1 in the four gammas — below AA. Same
+   * defect as the `--accent-soft` sites PR #305 fixed, on literally the same
+   * colour: `--accent-2` is a saturated opaque fill, and a fill takes its own
+   * ink. Two name-shaped holes hid it — `declaredPairings` matched `--fg-[0-3]`
+   * but not bare `--fg`, and the opaque-fill surface list named `--accent` but
+   * not `--accent-2`. Both are closed in `styleContrast.test.ts`. */
+  color: var(--on-accent);
 }
 .sidebar header {
   display: flex;
@@ -1497,7 +1502,7 @@ pre {
 }
 .session-select-toggle.on {
   color: var(--accent-ink);
-  border-color: var(--accent-soft);
+  border-color: var(--accent-2);
   background: var(--accent-glow);
 }
 /* The checkbox is a read-only visual mirror — the row owns the click
@@ -1529,7 +1534,7 @@ pre {
   border: 1px solid var(--line-2);
 }
 .bulk-action-bar.has-selection {
-  border-color: var(--accent-soft);
+  border-color: var(--accent-2);
 }
 .bulk-action-bar.confirming {
   border-color: var(--err-soft);
@@ -6719,7 +6724,8 @@ pre {
 
 .logs-filter-count {
   background: var(--accent);
-  color: var(--bg-0);
+  /* Was `--bg-0` at 4.02:1. See `.gate-modal-btn-primary`. */
+  color: var(--on-accent);
   padding: 0 6px;
   border-radius: var(--r-pill);
   font-size: var(--t-xs);
@@ -7375,7 +7381,13 @@ pre {
   justify-content: center;
   border-radius: 7px;
   background: var(--err);
-  color: var(--bg-0, #fff);
+  /* 9px count text on the error fill, so AA applies at 4.5 — this is not
+   * "large text". `--bg-0` measured 3.27:1 (worst, aurora) because it tracks
+   * the GAMMA's background: light in the light gammas, which is the wrong
+   * direction on a light-ish red. No existing token cleared AA on `--err`
+   * (best was 3.71), so `--on-err` was added alongside `--on-accent`, tuned
+   * the way this file already documents for `--X-ink`: 5.24–7.11:1. */
+  color: var(--on-err);
   font-size: 9px;
   font-weight: 600;
   font-family: var(--font-sans);
@@ -7838,7 +7850,9 @@ pre {
 }
 .gate-modal-btn-primary {
   background: var(--accent);
-  color: var(--bg-0);
+  /* `--bg-0` measured 4.02:1 here — it is the theme BACKGROUND, which
+   * follows the gamma; the right ink for a saturated fill does not. */
+  color: var(--on-accent);
   border-color: var(--accent);
 }
 .gate-modal-btn-primary:hover {
@@ -8393,7 +8407,13 @@ pre {
   outline-offset: 2px;
 }
 .tools-list-usage-toggle-btn-active {
-  background: var(--accent-soft, color-mix(in srgb, var(--accent) 12%, var(--bg-2)));
+  /* The tint this rule always meant. It was written `var(--accent-soft, <this
+   * tint>)`, and `--accent-soft` was a saturated opaque fill, not a tint — so
+   * the fallback never fired and `--fg-0` sat on the fill at 2.22:1. The
+   * `var(--x, y)` form is also why no gate saw it: `declaredPairings` matched
+   * only a bare `var(--x)`. Written out so the rule cannot silently change
+   * meaning again with a token edit. */
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-2));
   border-color: var(--accent);
   color: var(--fg-0);
   font-weight: 600;
@@ -11232,13 +11252,14 @@ pre {
   cursor: pointer;
 }
 .session-search-chip.on {
-  background: var(--accent-soft);
+  background: var(--accent-2);
   border-color: var(--accent);
-  /* `--accent-soft` reads like a pale tint and is not one — it is a saturated
-   * mid-tone in every gamma (#2456c8 / #a44d2c / #1f8e9b / #2cb56a). Neutral
-   * ink on it measured 1.56–2.30:1. `--on-accent` is the ink that belongs on
-   * an accent fill (4.68–7.14 here). Same defect as register .5.37: one token
-   * cannot be both the fill and the ink. */
+  /* `--accent-2` is a saturated mid-tone in every gamma (#2456c8 / #a44d2c /
+   * #1f8e9b / #2cb56a), not a tint. Neutral ink on it measured 1.56–2.30:1.
+   * `--on-accent` is the ink that belongs on an accent fill (4.68–7.14 here).
+   * Same defect as register .5.37: one token cannot be both the fill and the
+   * ink. This rule used to name `--accent-soft`, a second token carrying the
+   * identical value in all five blocks; that duplicate is gone. */
   color: var(--on-accent);
 }
 .session-search-chip:disabled {
@@ -11372,7 +11393,7 @@ pre {
   text-overflow: ellipsis;
 }
 .session-search-result-snippet mark {
-  background: var(--accent-soft);
+  background: var(--accent-2);
   /* The search-result highlight — the one span on screen whose whole job is to
    * be read. It was neutral ink on the accent fill at 1.56:1 in phosphor. */
   color: var(--on-accent);
