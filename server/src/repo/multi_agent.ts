@@ -379,13 +379,40 @@ export function recordSessionTeardown(
  * Sort by `started_at DESC` — the rail is "most recent attempt for this
  * template", not "most recent successful run". A failed run is still
  * informative.
+ *
+ * SESSION_ORDER — why every `started_at DESC` here ends `, rowid DESC`.
+ * Register C20. `started_at` is `Date.now()`, so two sessions started in the
+ * same millisecond tie, and SQLite does not specify how a tie resolves. Three
+ * things were measured before picking, because the obvious answer is the wrong
+ * one:
+ *
+ *   1. Today's untiebroken order is not merely unspecified, it is BACKWARDS.
+ *      With the index `(status, started_at DESC)` the planner walks index
+ *      order, which within an equal key is rowid ASC — the OLDEST-inserted row
+ *      first, from queries that all say "most recent first". In
+ *      `bus/resume.ts` that meant the older run was reattached and the newer
+ *      one marked crashed.
+ *   2. `, rowid ASC` keeps the index and costs nothing — and is byte-identical
+ *      to (1). It would bless the inversion, could not be tested by output,
+ *      and its revert-check would come back green. Free because it does
+ *      nothing.
+ *   3. `, rowid DESC` gives newest-inserted-first, matching what these queries
+ *      claim, and costs `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`. That is
+ *      the trade taken: this table holds one row per bus run, and
+ *      `query_plans.test.ts` pins the resulting plan so the cost is a recorded
+ *      decision rather than a surprise. Making it ASC to "recover" the index
+ *      reddens that gate AND the tie test in `bus/resume.phase_4.test.ts`.
+ *
+ * `rowid` survives the one `DELETE` this module issues (`WHERE status !=
+ * 'running'`): SQLite assigns `max(rowid) + 1` over the rows that remain, so a
+ * delete can never invert the relative order of surviving rows.
  */
 export function getLastRunForTemplate(templateId: string): MultiAgentSessionRow | undefined {
   return getDb()
     .prepare<[string], MultiAgentSessionRow>(
       `SELECT * FROM multi_agent_sessions
         WHERE template_id = ?
-        ORDER BY started_at DESC
+        ORDER BY started_at DESC, rowid DESC
         LIMIT 1`,
     )
     .get(templateId);
@@ -976,19 +1003,24 @@ export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefin
  * Returns the currently-running multi-agent session, if any. Per v1 design
  * there is at most one — we enforce this at the WS handler layer rather than
  * with a partial unique index (which SQLite supports but adds complexity).
+ *
+ * `, rowid DESC`: see SESSION_ORDER on `getLastRunForTemplate`. This is one of
+ * the two sites where the tie has a consequence rather than being cosmetic —
+ * a tie here changes which run the handlers treat as active.
  */
 export function getActiveMultiAgentSession(): MultiAgentSessionRow | undefined {
   return getDb()
     .prepare<[], MultiAgentSessionRow>(
-      `SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`,
+      `SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1`,
     )
     .get();
 }
 
+/** `, rowid DESC`: see SESSION_ORDER on `getLastRunForTemplate`. */
 export function listMultiAgentSessions(): MultiAgentSessionRow[] {
   return getDb()
     .prepare<[], MultiAgentSessionRow>(
-      'SELECT * FROM multi_agent_sessions ORDER BY started_at DESC',
+      'SELECT * FROM multi_agent_sessions ORDER BY started_at DESC, rowid DESC',
     )
     .all();
 }
@@ -1006,6 +1038,11 @@ export function listMultiAgentSessions(): MultiAgentSessionRow[] {
  * `list_archived_iterations` ClientMsg (later phase) calls
  * `listMultiAgentSessionsWithIteration({ includeArchived: true })` to
  * surface them on demand.
+ *
+ * `, rowid DESC` on both branches: see SESSION_ORDER on
+ * `getLastRunForTemplate`. Cosmetic here — it makes the picker's order stable
+ * across renders rather than changing which row anything acts on — but the
+ * branches must agree with each other and with their siblings above.
  */
 export function listMultiAgentSessionsWithIteration(opts?: {
   includeArchived?: boolean;
@@ -1016,7 +1053,7 @@ export function listMultiAgentSessionsWithIteration(opts?: {
       .prepare<[], MultiAgentSessionRow>(
         `SELECT * FROM multi_agent_sessions
           WHERE iteration_id IS NOT NULL
-          ORDER BY started_at DESC`,
+          ORDER BY started_at DESC, rowid DESC`,
       )
       .all();
   }
@@ -1024,7 +1061,7 @@ export function listMultiAgentSessionsWithIteration(opts?: {
     .prepare<[], MultiAgentSessionRow>(
       `SELECT * FROM multi_agent_sessions
         WHERE iteration_id IS NOT NULL AND archived = 0
-        ORDER BY started_at DESC`,
+        ORDER BY started_at DESC, rowid DESC`,
     )
     .all();
 }

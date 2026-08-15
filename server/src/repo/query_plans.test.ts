@@ -22,6 +22,12 @@
  * gate: a query that changes in its module and not here goes on being checked
  * in its old shape. `sameShapeAsSource` pins each one against the module file
  * so that drift fails instead of passing quietly.
+ *
+ * TWO BLOCKS, TWO RULES. The `describe` immediately below holds queries that
+ * must never sort. The C20 block at the bottom holds six that deliberately do,
+ * and records the expected shape per query instead — because a blanket rule
+ * plus an exception list puts the next defect in the exception list. Read that
+ * block's header before adding a query to either.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -156,5 +162,148 @@ describe('query plans — the hot paths are index-served', () => {
     const p = plan('SELECT * FROM sessions WHERE id = ?', ['x']);
     expect(p.length).toBeGreaterThan(0);
     expect(p[0]!.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Register C20 — the session-ordering queries, pinned as a plan SHAPE.
+ *
+ * The block above asserts one rule for everybody: name an index, never sort.
+ * These six cannot use it. `ORDER BY started_at DESC, rowid DESC` is a
+ * deliberate trade — the tiebreaker is what stops a same-millisecond tie from
+ * deciding which run gets reattached and which gets marked crashed, and the
+ * only tiebreaker SQLite can serve from these indexes is `rowid ASC`, which is
+ * byte-identical to having none at all (see SESSION_ORDER in `multi_agent.ts`).
+ *
+ * So the expectation is recorded per query rather than waived. Each entry
+ * states the index the plan must name — or that it legitimately scans — plus
+ * exactly which sort the planner is expected to need, and the assertion is an
+ * EQUALITY. That fails in every direction:
+ *
+ *   - a query that starts scanning where it used to search,
+ *   - a query whose sort grows from the last term to the whole ORDER BY,
+ *   - and a query that STOPS needing its sort, so a recorded exception cannot
+ *     quietly outlive the reason it was granted.
+ *
+ * Worth reading off the table: two of the six were already sorting their whole
+ * result before the tiebreaker existed, because nothing indexes their WHERE.
+ * The trade actually bought by C20 is four queries gaining a last-term sort.
+ */
+type SortShape = 'none' | 'last-term' | 'whole';
+
+function sortShape(planText: string): SortShape {
+  if (planText.includes('USE TEMP B-TREE FOR LAST TERM OF ORDER BY')) return 'last-term';
+  if (planText.includes('USE TEMP B-TREE FOR ORDER BY')) return 'whole';
+  return 'none';
+}
+
+const SESSION_ORDER_QUERIES: ReadonlyArray<{
+  label: string;
+  file: string;
+  fragment: string;
+  sql: string;
+  params: unknown[];
+  /** Index the plan must name, or `null` when this query legitimately scans. */
+  index: string | null;
+  sort: SortShape;
+}> = [
+  {
+    label: 'resume candidate selection — the tie with teeth',
+    file: 'bus/resume.ts',
+    fragment: "WHERE status = 'running' ORDER BY started_at DESC, rowid DESC",
+    sql: "SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC, rowid DESC",
+    params: [],
+    index: 'multi_agent_sessions_status_idx',
+    sort: 'last-term',
+  },
+  {
+    label: 'getActiveMultiAgentSession',
+    file: 'repo/multi_agent.ts',
+    fragment: "WHERE status = 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    sql: "SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    params: [],
+    index: 'multi_agent_sessions_status_idx',
+    sort: 'last-term',
+  },
+  {
+    label: 'getLastRunForTemplate',
+    file: 'repo/multi_agent.ts',
+    fragment: 'WHERE template_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1',
+    sql: 'SELECT * FROM multi_agent_sessions WHERE template_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1',
+    params: ['t'],
+    index: 'idx_multi_agent_sessions_template',
+    sort: 'last-term',
+  },
+  {
+    label: 'listMultiAgentSessionsWithIteration — active only',
+    file: 'repo/multi_agent.ts',
+    fragment:
+      'WHERE iteration_id IS NOT NULL AND archived = 0 ORDER BY started_at DESC, rowid DESC',
+    sql: 'SELECT * FROM multi_agent_sessions WHERE iteration_id IS NOT NULL AND archived = 0 ORDER BY started_at DESC, rowid DESC',
+    params: [],
+    index: 'multi_agent_sessions_archived_idx',
+    sort: 'last-term',
+  },
+  {
+    label: 'listMultiAgentSessions — nothing to search on, scans by design',
+    file: 'repo/multi_agent.ts',
+    fragment: 'SELECT * FROM multi_agent_sessions ORDER BY started_at DESC, rowid DESC',
+    sql: 'SELECT * FROM multi_agent_sessions ORDER BY started_at DESC, rowid DESC',
+    params: [],
+    index: null,
+    sort: 'whole',
+  },
+  {
+    label: 'listMultiAgentSessionsWithIteration — including archived',
+    file: 'repo/multi_agent.ts',
+    fragment: 'WHERE iteration_id IS NOT NULL ORDER BY started_at DESC, rowid DESC',
+    sql: 'SELECT * FROM multi_agent_sessions WHERE iteration_id IS NOT NULL ORDER BY started_at DESC, rowid DESC',
+    params: [],
+    index: null,
+    sort: 'whole',
+  },
+];
+
+describe('C20: every session-ordering query keeps its recorded plan shape', () => {
+  withTempDataDir('queryplans-session-order');
+
+  for (const q of SESSION_ORDER_QUERIES) {
+    test(q.label, () => {
+      sameShapeAsSource(q.file, q.fragment);
+      const p = plan(q.sql, q.params).join(' ');
+      if (q.index === null) {
+        expect(p, p).toContain('SCAN multi_agent_sessions');
+      } else {
+        expect(p, p).toContain(`USING INDEX ${q.index}`);
+        expect(p, p).not.toContain('SCAN multi_agent_sessions');
+      }
+      expect(sortShape(p), p).toBe(q.sort);
+    });
+  }
+
+  test('the table covers every started_at ordering in the source — completeness', () => {
+    // A per-query table is only as good as its coverage: adding a seventh
+    // `ORDER BY started_at` and not listing it here would be invisible. Count
+    // the real thing instead of trusting the list.
+    const files = ['repo/multi_agent.ts', 'bus/resume.ts'];
+    const found = files.flatMap((rel) => {
+      const src = fs.readFileSync(path.join(SERVER_SRC, rel), 'utf8');
+      return [...src.matchAll(/ORDER BY started_at/g)].map(() => rel);
+    });
+    expect(found.length, `sources: ${found.join(', ')}`).toBe(SESSION_ORDER_QUERIES.length);
+    expect(found.filter((f) => f === 'bus/resume.ts').length).toBe(1);
+    expect(found.filter((f) => f === 'repo/multi_agent.ts').length).toBe(5);
+  });
+
+  test('sortShape tells the three cases apart — positive control', () => {
+    // The equality assertions above are only meaningful if the classifier can
+    // actually return each arm. `last-term` must not be read as `whole`: one
+    // string contains the other's words but not its substring, and getting
+    // that backwards would silently collapse two expectations into one.
+    expect(
+      sortShape('SEARCH x USING INDEX i (a=?) USE TEMP B-TREE FOR LAST TERM OF ORDER BY'),
+    ).toBe('last-term');
+    expect(sortShape('SCAN x USE TEMP B-TREE FOR ORDER BY')).toBe('whole');
+    expect(sortShape('SEARCH x USING INDEX i (a=?)')).toBe('none');
   });
 });
