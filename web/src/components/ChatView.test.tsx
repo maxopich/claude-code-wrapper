@@ -30,6 +30,13 @@ import { SCROLL_STICK_THRESHOLD_PX } from '../scrollAnchor';
  * assertion you can write without staging is the one the bug also satisfies.
  * Every case below stages the three metrics explicitly, and each "does not
  * scroll" assertion is paired with a positive control in the same shape.
+ *
+ * The `scroll` events are dispatched with `bubbles: false`, which is what a
+ * browser actually emits — `scroll` on an element does not bubble. React
+ * attaches this one directly to the node rather than delegating it at the root
+ * (unlike `onBlur`/`onMouseEnter`, which ride `focusout`/`mouseover`), so the
+ * handler fires either way; dispatching it bubbling would pass here and prove
+ * less. Checked both ways.
  */
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -111,7 +118,7 @@ describe('ChatView auto-scroll (W14)', () => {
     render(session);
     const scrollTo = stage(pane(), AT_BOTTOM);
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
 
     render(mkSession({ streamingText: 'token' }));
@@ -123,7 +130,7 @@ describe('ChatView auto-scroll (W14)', () => {
     render(mkSession());
     const scrollTo = stage(pane(), SCROLLED_UP);
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
 
     render(mkSession({ streamingText: 'token' }));
@@ -135,7 +142,7 @@ describe('ChatView auto-scroll (W14)', () => {
     render(mkSession());
     const scrollTo = stage(pane(), SCROLLED_UP);
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
 
     render(
@@ -154,7 +161,7 @@ describe('ChatView auto-scroll (W14)', () => {
     render(mkSession());
     const near = stage(pane(), { scrollTop: 2400 - SCROLL_STICK_THRESHOLD_PX, scrollHeight: 3000 });
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
     render(mkSession({ streamingText: 'a' }));
     expect(near).toHaveBeenCalledTimes(1);
@@ -164,7 +171,7 @@ describe('ChatView auto-scroll (W14)', () => {
       scrollHeight: 3000,
     });
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
     render(mkSession({ streamingText: 'ab' }));
     expect(past).not.toHaveBeenCalled();
@@ -174,7 +181,7 @@ describe('ChatView auto-scroll (W14)', () => {
     render(mkSession());
     const scrollTo = stage(pane(), SCROLLED_UP);
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
     render(mkSession({ streamingText: 'a' }));
     expect(scrollTo).not.toHaveBeenCalled();
@@ -182,7 +189,7 @@ describe('ChatView auto-scroll (W14)', () => {
     // Operator scrolls back to the bottom.
     pane().scrollTop = 2400;
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
     render(mkSession({ streamingText: 'ab' }));
 
@@ -193,7 +200,7 @@ describe('ChatView auto-scroll (W14)', () => {
     render(mkSession());
     const scrollTo = stage(pane(), SCROLLED_UP);
     act(() => {
-      pane().dispatchEvent(new Event('scroll', { bubbles: true }));
+      pane().dispatchEvent(new Event('scroll', { bubbles: false }));
     });
     render(mkSession({ streamingText: 'a' }));
     expect(scrollTo).not.toHaveBeenCalled();
