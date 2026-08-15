@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import type { ServerMsg } from '@cebab/shared/protocol';
+import { awaitMcpTrustDecisions, makeTrustGateState } from './mcp_trust_gate.js';
 import {
   BUS_SETTING_SCOPES,
   _testing,
@@ -345,6 +347,8 @@ let originalDataDir: string;
 let projectPath: string;
 let projectId: number;
 
+let originalHome: string | undefined;
+
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-pauth-orch-'));
   originalDataDir = config.dataDir;
@@ -357,11 +361,22 @@ beforeEach(() => {
   fs.mkdirSync(path.join(projectPath, '.claude'), { recursive: true });
   projectId = upsertProject('proj', projectPath).id;
   setProjectTrusted(projectId, true);
+  // `readClaudeJsonServers` reads `~/.claude.json`, so without this the whole
+  // file's expectations depend on the DEVELOPER'S real CLI config: a machine
+  // with a `claude mcp add --scope user` server would see an extra row in
+  // every `resolveProjectAuthority` assertion below. CI has no such file, so
+  // the failure would only ever appear locally, on someone else's machine.
+  // Point HOME at an empty dir; the cases that want a fixture write their own.
+  originalHome = process.env.HOME;
+  fs.mkdirSync(path.join(tmpRoot, 'home'), { recursive: true });
+  process.env.HOME = path.join(tmpRoot, 'home');
 });
 
 afterEach(() => {
   closeDb();
   config.dataDir = originalDataDir;
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
@@ -1240,5 +1255,151 @@ describe('[security] .mcp.json is the declaration that actually loads', () => {
     // on the way into a spawn must not be able to exhaust the server.
     fs.writeFileSync(path.join(projectPath, '.mcp.json'), 'x'.repeat(1024 * 1024 + 1));
     expect(_testing.readMcpJsonServers(projectPath, ['project'])).toEqual([]);
+  });
+});
+
+// ---- ~/.claude.json: the second location that actually loads servers ----
+//
+// Register x1n.6.23. Before `readClaudeJsonServers`, a server declared here
+// reached the spawn as an SDK-observed row with NO `originPath` — and
+// `awaitMcpTrustDecisions` skips exactly on that, so it ran with no TOFU
+// prompt, no `mcp_trust` row and no `safety_audit` row.
+//
+// THE FIXTURE IS THE WHOLE TEST. Every case below declares the server ONLY in
+// `~/.claude.json` — never in `.mcp.json`, never in a settings layer. A
+// fixture that also declared it elsewhere would pass on the broken code,
+// because some other reader would have supplied the `originPath`.
+describe('readClaudeJsonServers (x1n.6.23) — the ungated class, closed', () => {
+  let fakeHome: string;
+  let realHome: string | undefined;
+
+  beforeEach(() => {
+    fakeHome = path.join(tmpRoot, 'home');
+    fs.mkdirSync(fakeHome, { recursive: true });
+    realHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    // Prove the redirect took, before any assertion depends on it. The reader
+    // calls os.homedir() at CALL time; if that ever changes to module-load
+    // time these tests would silently read the developer's real config.
+    expect(os.homedir()).toBe(fakeHome);
+  });
+
+  afterEach(() => {
+    if (realHome === undefined) delete process.env.HOME;
+    else process.env.HOME = realHome;
+  });
+
+  const writeClaudeJson = (obj: unknown) =>
+    fs.writeFileSync(path.join(fakeHome, '.claude.json'), JSON.stringify(obj));
+
+  const server = { command: '/usr/local/bin/shady', args: ['--serve'] };
+
+  test('top-level mcpServers is read at EVERY scope, including [user]', () => {
+    // Measured: this block loads even under settingSources ['user'], which is
+    // what an UNTRUSTED single-agent project runs. Gating it on a scope would
+    // leave Cebab silent about a server that still loads.
+    writeClaudeJson({ mcpServers: { 'shady-mcp': server } });
+    for (const scopes of [['user'], ['user', 'project', 'local']] as const) {
+      const out = _testing.readClaudeJsonServers(projectPath, [...scopes]);
+      expect(out.map((s) => s.name)).toEqual(['shady-mcp']);
+      expect(out[0]!.scope).toBe('claude-json');
+      expect(out[0]!.originPath).toBe(path.join(fakeHome, '.claude.json'));
+    }
+  });
+
+  test('the per-project block is read only when scopes include local', () => {
+    writeClaudeJson({
+      projects: { [fs.realpathSync(projectPath)]: { mcpServers: { 'local-mcp': server } } },
+    });
+    expect(_testing.readClaudeJsonServers(projectPath, ['user'])).toEqual([]);
+    expect(_testing.readClaudeJsonServers(projectPath, ['user', 'project'])).toEqual([]);
+    expect(
+      _testing.readClaudeJsonServers(projectPath, ['user', 'local']).map((s) => s.name),
+    ).toEqual(['local-mcp']);
+  });
+
+  test('the per-project block is keyed by RESOLVED path, not the literal one', () => {
+    // On macOS os.tmpdir() is /var/folders/… -> /private/var/folders/…, so a
+    // reader that looks up the unresolved path finds nothing and reports a
+    // clean, wrong negative. This asserts we look up what the CLI writes.
+    const resolved = fs.realpathSync(projectPath);
+    writeClaudeJson({ projects: { [resolved]: { mcpServers: { 'local-mcp': server } } } });
+    expect(
+      _testing.readClaudeJsonServers(projectPath, ['user', 'local']).map((s) => s.name),
+    ).toEqual(['local-mcp']);
+  });
+
+  test('env is exposed as NAMES only (BE-B12)', () => {
+    writeClaudeJson({
+      mcpServers: { 'shady-mcp': { command: 'x', env: { TOKEN: 'super-secret-value' } } },
+    });
+    const out = _testing.readClaudeJsonServers(projectPath, ['user']);
+    expect(out[0]!.config?.envKeys).toEqual(['TOKEN']);
+    expect(JSON.stringify(out)).not.toContain('super-secret-value');
+  });
+
+  test('absent / malformed / oversized files yield no rows rather than throwing', () => {
+    expect(_testing.readClaudeJsonServers(projectPath, ['user'])).toEqual([]);
+    fs.writeFileSync(path.join(fakeHome, '.claude.json'), '{ not json');
+    expect(_testing.readClaudeJsonServers(projectPath, ['user'])).toEqual([]);
+    fs.writeFileSync(path.join(fakeHome, '.claude.json'), 'x'.repeat(8 * 1024 * 1024 + 1));
+    expect(_testing.readClaudeJsonServers(projectPath, ['user'])).toEqual([]);
+  });
+
+  test('resolveProjectAuthority surfaces it with a durable originPath', () => {
+    writeClaudeJson({ mcpServers: { 'shady-mcp': server } });
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' });
+    const row = out!.mcpServers.find((m) => m.name === 'shady-mcp');
+    expect(row).toBeDefined();
+    expect(row!.scope).toBe('claude-json');
+    expect(row!.originPath).toBe(path.join(fakeHome, '.claude.json'));
+  });
+
+  // THE ASSERTION THAT MATTERS. A row with an originPath that still is not
+  // gated would satisfy every test above and fix nothing — the bug was never
+  // "the panel does not show it", it was "the gate does not stop for it".
+  test('[security] the gate now PROMPTS for it, where before it skipped silently', async () => {
+    writeClaudeJson({ mcpServers: { 'shady-mcp': server } });
+    const resolved = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+    const row = resolved.mcpServers.find((m) => m.name === 'shady-mcp')!;
+
+    const sent: ServerMsg[] = [];
+    const gateState = makeTrustGateState();
+    // The prompt envelope is emitted synchronously; the returned promise then
+    // parks on the operator's decision. `mcp_auto_install_pending` is the TOFU
+    // prompt — the name is historical (Phase 4a), not a different mechanism.
+    const gatePromise = awaitMcpTrustDecisions({
+      projectId,
+      gate: gateState,
+      send: (m: ServerMsg) => sent.push(m),
+      servers: [row],
+    });
+    expect(sent).toHaveLength(1);
+    const env = sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
+    expect(env.type).toBe('mcp_auto_install_pending');
+    // Name AND origin, so this cannot pass on a prompt about something else —
+    // the originPath IS the durable anchor the register said was missing.
+    expect(env.serverName).toBe('shady-mcp');
+    expect(env.originPath).toBe(path.join(fakeHome, '.claude.json'));
+    expect(env.reason).toBe('first_seen');
+
+    // Let the operator answer so the parked promise resolves and the gate
+    // state is cleaned up rather than left pending for the whole file.
+    gateState.pending.get(env.pendingId)!.resolve({ kind: 'allow' });
+    expect((await gatePromise).approvals).toBe(1);
+
+    // CONTROL, and it is what makes the line above mean anything: the SAME
+    // server shaped as it arrived BEFORE this change — SDK-observed, no
+    // originPath — emits nothing at all. Without this the assertion could
+    // pass on a gate that prompts for everything.
+    const sentBefore: ServerMsg[] = [];
+    const outcome = await awaitMcpTrustDecisions({
+      projectId,
+      gate: makeTrustGateState(),
+      send: (m: ServerMsg) => sentBefore.push(m),
+      servers: [{ ...row, scope: 'unknown', originPath: undefined }],
+    });
+    expect(sentBefore).toEqual([]);
+    expect(outcome.refused).toEqual([]);
   });
 });

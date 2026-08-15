@@ -3419,7 +3419,17 @@ export type ToolView = {
 export type McpServerView = {
   name: string;
   status: string;
-  scope: 'user' | 'project' | 'local' | 'mcp-json' | 'cebab-injected' | 'unknown';
+  /**
+   * WHERE the declaration was found. Two of these describe files the CLI
+   * ACTUALLY loads servers from — `'mcp-json'` (project-root `.mcp.json`) and
+   * `'claude-json'` (`~/.claude.json`, both its top-level `mcpServers` and its
+   * per-project block). `'user' | 'project' | 'local'` describe `mcpServers`
+   * keys in `.claude/settings*.json`, which are measured NOT to load at any
+   * scope — see `readMcpJsonServers`' header table in `project_authority.ts`.
+   * The distinction is the point: a settings row is a declaration the CLI
+   * ignores, the other two are live servers.
+   */
+  scope: 'user' | 'project' | 'local' | 'mcp-json' | 'claude-json' | 'cebab-injected' | 'unknown';
   originPath?: string;
   tools: string[];
   config?: {
