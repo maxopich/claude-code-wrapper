@@ -110,8 +110,8 @@ function RunningBody({
   // re-run when state.output length changes, which captures every
   // new chunk regardless of which stream it came from.
   //
-  // Register W14 (found in the chat pane, and this was the second copy of the
-  // same two lines): "terminal convention" is only half the convention — a
+  // Register W14 (found in the chat pane, and this was the second instance of
+  // the same defect): "terminal convention" is only half the convention — a
   // terminal also stops following once you scroll up. This pane's whole job is
   // to show an OAuth URL the operator must read and act on, and an unguarded
   // re-scroll drags it off screen on the next chunk. `pinnedRef` tracks whether

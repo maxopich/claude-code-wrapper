@@ -4,9 +4,10 @@
  * Register W14: the chat pane re-scrolled to `scrollHeight` on every streamed
  * delta with no check of where the operator was, so reading back through a
  * running session was impossible — each token yanked the pane down. The same
- * two lines existed a second time in `AuthRefreshModal`, where it is worse in
- * kind: that modal exists so the operator can read an OAuth URL, and every new
- * chunk dragged it off screen mid-read.
+ * unguarded re-scroll existed a second time in `AuthRefreshModal`, spelled
+ * `scrollTop = scrollHeight` rather than `scrollTo` but identical in effect,
+ * and worse in kind there: that modal exists so the operator can read an OAuth
+ * URL, and every new chunk dragged it off screen mid-read.
  *
  * THE DECISION THAT MATTERS, because the obvious implementation is wrong.
  * Measuring the offset *inside the effect that reacts to new content* does not
