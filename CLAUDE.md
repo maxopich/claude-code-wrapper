@@ -46,7 +46,7 @@ This is the most important architectural decision in the repo — see `~/.claude
 **Trust model**. The per-project Trust toggle controls TWO things: the initial `permissionMode` AND the `settingSources` scope passed to the SDK.
 
 - _Trusted_: `permissionMode: "acceptEdits"` and `settingSources: ['user', 'project', 'local']`. The project's own `.claude/settings*.json` (hooks, env injectors, MCP servers) are layered in.
-- _Untrusted_: `permissionMode: "default"` and `settingSources: ['user']`. Only `~/.claude/settings.json` applies. A hostile or careless `.claude/settings.local.json` checked into a sibling repo can't auto-load hooks the moment the user clicks that project.
+- _Untrusted_: `permissionMode: "default"` and `settingSources: ['user']`. The project's own files don't apply, so a hostile or careless `.claude/settings.local.json` checked into a sibling repo can't auto-load hooks the moment the user clicks that project. **What Trust does NOT stop: MCP servers declared in `~/.claude.json`'s top-level `mcpServers` (`claude mcp add --scope user`) load under `['user']` too** — measured, see `readClaudeJsonServers` in `repo/project_authority.ts`. Trust scopes the _project's_ files; a home-directory declaration is outside its reach. Cebab gates those through TOFU instead, which is the only brake on them.
 
 The chat UI also exposes a per-session toggle that flips between `default` and `acceptEdits` mid-flight via `query.setPermissionMode()`. This is independent of the project Trust setting; it doesn't alter `settingSources` (already locked in when the run started).
 
