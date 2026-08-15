@@ -78,8 +78,12 @@ import type {
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { isPausedForMutation, isTurnStalled } from './errors.js';
-import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import {
+  applyPauseGate,
+  releasePauseForMutation,
+  shouldHaltUnrecordedMutation,
+} from './pause_gate.js';
 import {
   archiveAgentHop,
   CEBAB_SOURCE,
@@ -671,6 +675,21 @@ export function createChainRouter(params: {
     } catch (err) {
       console.error('[chain] cebab onEvent threw', err);
     }
+    // Register B13: the archive's prompt map is otherwise written only by
+    // `handleEvent`, which never sees the run's ORIGINATING prompt — that
+    // arrives here, because Cebab wrote it rather than an agent. So
+    // `archiveAgentHop` read `undefined ?? ''` for the first participant and
+    // every chain run wrote the operator's instruction to disk as an empty
+    // `prompt.md`.
+    //
+    // Keyed on `kind`, not on "is this the first participant". `'prompt'` is
+    // Cebab-to-participant task text and is exactly what an archived prompt
+    // should hold; the briefing and the CLAUDE.md marker are `'intro'` and must
+    // NOT overwrite it (they are already in the on-disk transcript). Any future
+    // Cebab-originated prompt is then archived correctly with no second fix.
+    if (ev.kind === 'prompt' && participantSet.has(ev.destination)) {
+      lastPromptForAgent.set(ev.destination, ev.text);
+    }
   };
 
   const detach = (epoch?: number) => {
@@ -963,6 +982,13 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       });
     } catch (err) {
       console.error('[chain] persist mutation failed', err);
+      // Cebab-aqd (mirrors orchestrator.ts): halt rather than run a dangerous
+      // call the armed gate was unable to record. See
+      // `shouldHaltUnrecordedMutation` for why the gate below cannot be used
+      // on this path.
+      if (shouldHaltUnrecordedMutation(sessionId, cls.category)) {
+        throw new MutationNotRecordedError(toolName, cls.summary);
+      }
       return;
     }
     try {

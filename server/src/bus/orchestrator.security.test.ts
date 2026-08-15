@@ -13,7 +13,11 @@ import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import { BUS_MESSAGE_TAG_STEM } from './message_fence.js';
 import { realOpenTags } from '../test_support/fence_probe.js';
-import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
+import {
+  createMultiAgentSession,
+  listMultiAgentEvents,
+  setPauseOnDangerous,
+} from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import { unregisterLiveSession } from './session_registry.js';
 import type { BusEvent } from './runner.js';
@@ -380,6 +384,100 @@ describe('[security] the orchestrator receives worker text as inert, fenced data
     deliver(ORCHESTRATOR_AGENT_NAME, composed);
     await new Promise((r) => setImmediate(r));
     expect(prompts.at(-1)!.prompt).toBe(composed);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+});
+
+// Cebab-aqd, orchestrator half. The identical fix lives in chain.ts and has its
+// own end-to-end case there; this is not redundant coverage. Reverting THIS
+// router's catch reddened nothing until these existed, so half of a security
+// fix was riding on the other half's tests.
+describe('[security] a dangerous call that cannot be recorded is halted, not run', () => {
+  /** A runner that issues one dangerous Bash call, then completes. */
+  function dangerousRunnerFactory(dispatched: string[]) {
+    return (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_rm',
+                name: 'Bash',
+                input: { command: 'rm -rf /tmp/victim' },
+              },
+            ],
+          },
+        } as unknown as SDKMessage;
+        // Only reached if the tap did NOT throw — i.e. the call went through.
+        dispatched.push('rm -rf /tmp/victim');
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function mkWorker(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  async function runWithBrokenLedger(pauseOnDangerous: boolean) {
+    const workspace = path.join(tmpRoot, `ws-${String(pauseOnDangerous)}`);
+    fs.mkdirSync(workspace, { recursive: true });
+    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const dispatched: string[] = [];
+    const onPendingRetry = vi.fn();
+    // Arm the gate on the ROW, not just the handle. `wireOrchestratorSession`
+    // does not create or update DB rows — its `pauseOnDangerous` option is the
+    // handle's self-report for the UI, while the tap's read is always
+    // DB-fresh. Setting only the option leaves the gate disarmed where it
+    // counts, and this test would then pass for the wrong reason.
+    setPauseOnDangerous(SESSION_ID, pauseOnDangerous);
+    // A genuine persist failure rather than a mock: the table the tap writes
+    // to is gone, while `multi_agent_sessions` — where the gate's own state
+    // lives — still answers.
+    getDb().exec('DROP TABLE multi_agent_mutations');
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers: [mkWorker('coder')],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      onPendingRetry,
+      pauseOnDangerous,
+      runnerFactory: dangerousRunnerFactory(dispatched),
+    });
+    deliver('coder', 'go');
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    return { dispatched, onPendingRetry };
+  }
+
+  test('the turn dies and the command is never dispatched', async () => {
+    const { dispatched, onPendingRetry } = await runWithBrokenLedger(true);
+
+    expect(dispatched).toEqual([]);
+    // Died into the recovery the operator already has, rather than vanishing.
+    expect(onPendingRetry).toHaveBeenCalled();
+    const errors = listMultiAgentEvents(SESSION_ID).filter((e) => e.kind === 'error');
+    expect(errors.some((e) => e.text.includes('Nothing was run'))).toBe(true);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('control: with the gate DISARMED the same failure lets the turn run', async () => {
+    const { dispatched, onPendingRetry } = await runWithBrokenLedger(false);
+
+    expect(dispatched).toEqual(['rm -rf /tmp/victim']);
+    expect(onPendingRetry).not.toHaveBeenCalled();
 
     unregisterLiveSession(SESSION_ID);
   });

@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createChainRouter, resumeChainSession, startChainSession } from './chain.js';
 import { computeSessionPaths } from './paths.js';
-import { CEBAB_SOURCE, SINK_RECIPIENT, type ResolvedAgent } from './runtime.js';
+import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import {
   getLiveSession,
   hasLiveSession,
@@ -130,6 +130,95 @@ describe('createChainRouter routing', () => {
     expect(listMultiAgentEvents(SESSION_ID)).toHaveLength(1);
     expect(onEvent).toHaveBeenCalledTimes(1);
     expect(deliver).not.toHaveBeenCalled();
+  });
+
+  // Register B13. The archive's prompt map was written only by `handleEvent`,
+  // which never sees the run's originating prompt — Cebab wrote that one, so it
+  // arrives through `forwardCebabEvent`. Every chain run therefore archived
+  // participant[0]'s hop with an empty `prompt.md`.
+  //
+  // Note what kept this invisible: the routing test above archives a hop
+  // WITHOUT ever forwarding a prompt first, so its empty prompt.md is correct
+  // for its fixture. The defect needed an input no existing case supplied.
+  describe('B13 — the originating prompt reaches the archive', () => {
+    function promptMd(paths: ReturnType<typeof setup>['paths'], agent: string): string {
+      return fs.readFileSync(path.join(paths.iterationDir('iter-1', agent), 'prompt.md'), 'utf8');
+    }
+
+    test("participant[0]'s prompt.md holds the initial prompt, not ''", () => {
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'prompt',
+        text: 'audit the auth flow',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'done' }));
+
+      expect(promptMd(paths, 'coder')).toBe('audit the auth flow');
+    });
+
+    test("an 'intro' event does NOT become the archived prompt", () => {
+      // The briefing and the CLAUDE.md marker are both `kind: 'intro'` and both
+      // addressed to the participant. Seeding on destination alone would put
+      // the whole bus-protocol briefing into prompt.md, and the CLAUDE.md
+      // marker would then overwrite THAT — so the guard is on `kind`.
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'prompt',
+        text: 'audit the auth flow',
+      });
+      router.forwardCebabEvent({
+        ts: 2,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'intro',
+        text: 'you are on a bus, call bus_send to reply',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'done' }));
+
+      expect(promptMd(paths, 'coder')).toBe('audit the auth flow');
+    });
+
+    test('a routed peer message still wins for the DOWNSTREAM participant', () => {
+      // Anti-vacuity: the seed must not shadow `handleEvent`'s own write, which
+      // is what every participant after the first is archived from.
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: 'coder',
+        kind: 'prompt',
+        text: 'audit the auth flow',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'please review' }));
+      router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'looks fine' }));
+
+      expect(promptMd(paths, 'coder')).toBe('audit the auth flow');
+      expect(promptMd(paths, 'reviewer')).toBe('please review');
+    });
+
+    test('a prompt addressed to a NON-participant is not recorded', () => {
+      // `_sink` and `user` are legitimate destinations that own no archive dir;
+      // writing one would create a stray folder outside the participant set.
+      const { router, paths } = setup();
+      router.forwardCebabEvent({
+        ts: 1,
+        source: CEBAB_SOURCE,
+        destination: USER_RECIPIENT,
+        kind: 'prompt',
+        text: 'not an agent',
+      });
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'done' }));
+
+      expect(fs.existsSync(paths.iterationDir('iter-1', USER_RECIPIENT))).toBe(false);
+      // And coder's archive is untouched by it.
+      expect(promptMd(paths, 'coder')).toBe('');
+    });
   });
 
   test('detach silences the WS sink but keeps persisting; rebind restores it', () => {

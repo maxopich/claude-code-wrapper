@@ -75,6 +75,44 @@ export function decidePauseForMutation(
 }
 
 /**
+ * Cebab-aqd: the gate's answer for a mutation that could NOT be persisted.
+ *
+ * `applyPauseGate` below cannot be used on that path, and not for want of
+ * trying — it reads `hasPendingMutation` and `listPendingMutations` from the
+ * very table whose write just failed, and it marks the pause by `row.id`, which
+ * does not exist. It also could not honour a Continue grant it is unable to
+ * read. So the failure path gets the two inputs that touch a different table:
+ * the classifier's category, and the session's toggle.
+ *
+ * Returns `true` when the caller must halt the turn rather than let the call
+ * through. Lives here, beside `decidePauseForMutation`, for that function's
+ * stated reason — orchestrator.ts and chain.ts must not drift on a gate
+ * decision, and this is a gate decision taken in a different place.
+ *
+ * **Reads `true` when the session read itself throws.** With the database far
+ * enough gone that neither table answers, the armed/disarmed state is unknown,
+ * and unknown on a `dangerous` command resolves to halt. That is the only
+ * branch here that trades a live turn for caution, and it is the correct
+ * direction for a control whose whole purpose is to stop a destructive command.
+ *
+ * A `mutate` call, or an explicitly disarmed gate, still runs: the operator who
+ * turned the gate off chose that, and a failed write is no reason to revisit
+ * their choice. Same rule `decidePauseForMutation` applies.
+ */
+export function shouldHaltUnrecordedMutation(
+  sessionId: string,
+  category: MutationCategory,
+): boolean {
+  if (category !== 'dangerous') return false;
+  try {
+    return getMultiAgentSession(sessionId)?.pause_on_dangerous === 1;
+  } catch (err) {
+    console.error('[bus] gate-state read failed for an unrecorded mutation; halting', err);
+    return true;
+  }
+}
+
+/**
  * The impure half: read the gate's inputs, apply `decidePauseForMutation`, and
  * carry out the verdict. Lives here rather than in each router so
  * orchestrator.ts and chain.ts run byte-identical gate logic — the whole point
