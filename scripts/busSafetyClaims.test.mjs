@@ -272,6 +272,13 @@ describe('[security] the claim checkers actually catch the claims', () => {
     // (see POSTURE_QUALIFIER's header), so without it the tightening above
     // could be reverted and every case would still pass.
     "Bus agents run one of **two permission postures** (`server/src/bus/runner.ts`): with no ask-gate hook wired (chain participants, tests — the pure-headless path) they run `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions`;",
+    // Register X31, verbatim from `.github/CODEOWNERS` before 2026-08-15. It
+    // survived the correction of every other copy because the walk cannot
+    // reach an extensionless file beside the `workflows` root — the claim was
+    // fine, the gate's REACH was not. Kept as a fixture so that if
+    // `.github/CODEOWNERS` is ever dropped from `collectFiles`, the wording
+    // that hid there is still provably detectable.
+    '# Worker / orchestrator both run with --permission-mode bypassPermissions.',
   ];
 
   test.each(REAL_POSTURE_CLAIMS)('flags: %s', (line) => {
@@ -367,6 +374,26 @@ describe('[security] no artifact may claim the superseded bus safety model', () 
     expect(read('CLAUDE.md')).toContain('permissionMode');
   });
 
+  test('the docs/ split is in range, both files, with claim-bearing content', () => {
+    // CLAUDE.md was split behind an index on 2026-08-15 and the deep bus and
+    // safety reference moved here. If `docs` is dropped from the roots, the
+    // scans below still pass — on a corpus that no longer contains the
+    // material they exist to check. That is the same failure the CLAUDE.md
+    // exemption was: green because nothing looked.
+    expect(files).toContain('docs/bus-architecture.md');
+    expect(files).toContain('docs/safety-and-security.md');
+    expect(read('docs/safety-and-security.md')).toContain('pause');
+  });
+
+  test('.github/CODEOWNERS is in range', () => {
+    // Extensionless and beside — not inside — the `workflows` root, so the
+    // directory walk cannot reach it however the roots are arranged; it is
+    // listed by name or not at all. It held a superseded posture claim until
+    // this file started collecting it.
+    expect(files).toContain('.github/CODEOWNERS');
+    expect(read('.github/CODEOWNERS')).toContain('@');
+  });
+
   test('every file naming bypassPermissions is on the allowlist', () => {
     const unlisted = scanned.filter(
       (rel) => /bypassPermissions/.test(read(rel)) && !POSTURE_ALLOWLIST.has(rel),
@@ -402,18 +429,37 @@ describe('[security] no artifact may claim the superseded bus safety model', () 
  * both CI runners and needs no subprocess.
  */
 function collectFiles() {
-  const roots = ['server/src', 'shared/src', 'web/src', 'scripts', '.github/workflows'];
+  // `docs` joined the roots when CLAUDE.md was split behind an index: the deep
+  // bus and safety reference moved there, and content does not stop being a
+  // claim by changing files. A scan whose roots do not follow its subject
+  // matter goes green by looking away.
+  const roots = ['server/src', 'shared/src', 'web/src', 'scripts', 'docs', '.github/workflows'];
   const exts = new Set(['.ts', '.tsx', '.sql', '.mjs', '.yml', '.md']);
   const out = [];
   for (const root of roots) walk(root, out, exts);
   // `CLAUDE.md` joined this list when the convention that kept it out of PRs
   // was reversed (2026-08-14). It is the artifact that most needed scanning
-  // and was the only one exempt: `bus/runtime.ts`'s `readProjectClaudeMd`
-  // injects a project's CLAUDE.md verbatim into every bus agent's first turn,
-  // so a superseded claim in it is not documentation drift — it is a false
-  // statement delivered to a running model. It carried four of them (register
-  // X01, X02, X04, X05) for as long as nothing was allowed to look.
-  for (const top of ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'CLAUDE.md', '.npmrc']) {
+  // and was the only one exempt: it is loaded as project memory into every
+  // `claude` session run in this checkout, and `bus/runtime.ts`'s
+  // `readProjectClaudeMd` injects each bus PARTICIPANT's own project-root
+  // CLAUDE.md into that participant's first turn (per `w.cwd` / `p.cwd`; the
+  // orchestrator is excluded). So a superseded claim here is not documentation
+  // drift — it is a false statement delivered to a running model. It carried
+  // four of them (register X01, X02, X04, X05) for as long as nothing looked.
+  //
+  // `.github/CODEOWNERS` is extensionless and lives beside — not inside — the
+  // `workflows` root, so the walk could never reach it. It held a fourth copy
+  // of the superseded posture claim until 2026-08-15, found only because
+  // arming this gate on CLAUDE.md prompted a sweep for the places it cannot
+  // see. Listed explicitly for that reason.
+  for (const top of [
+    'README.md',
+    'SECURITY.md',
+    'CONTRIBUTING.md',
+    'CLAUDE.md',
+    '.npmrc',
+    '.github/CODEOWNERS',
+  ]) {
     if (fs.existsSync(path.join(repoRoot, top))) out.push(top);
   }
   return out;

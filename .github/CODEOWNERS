@@ -12,7 +12,10 @@
 /server/src/ws/server.ts              @maxopich
 
 # Bus runtime: orchestrator, chain, scripts, install.
-# Worker / orchestrator both run with --permission-mode bypassPermissions.
+# Every production bus turn runs permissionMode 'default' with a live
+# canUseTool that auto-allows every tool except AskUserQuestion — so no human
+# is in the loop for a Bash/Edit/MCP call from a worker. The severity argument
+# for owning this directory survives; the earlier wording of it did not.
 /server/src/bus/                      @maxopich
 /server/src/bus/scripts/              @maxopich
 /server/src/bus/install.ts            @maxopich
