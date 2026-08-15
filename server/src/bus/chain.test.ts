@@ -17,8 +17,10 @@ import {
 import {
   createMultiAgentSession,
   getMultiAgentSession,
+  getPendingRetry,
   listAgentSessions,
   listMultiAgentEvents,
+  setPendingRetry,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import type { BusEvent } from './runner.js';
@@ -853,6 +855,79 @@ describe('[security] chain session folder permissions', () => {
     const folder = computeSessionPaths(handle.sessionId, workspace).folder;
     expect(fs.statSync(folder).mode & 0o777).toBe(0o700);
 
+    unregisterLiveSession(handle.sessionId);
+  });
+});
+
+// Cebab-wsq. `createChainRouter` exposes `onTurnSucceeded`, and the router
+// tests in `chain.router_drop.test.ts` call it directly — which proves what
+// the router does when a turn ends, and nothing at all about whether a turn
+// ending ever calls it. The whole "park a stalled chain" behaviour hangs off
+// `deliver`'s `.then`, one line in `startChainSession`, and chain mode had no
+// coverage of it (`orchestrator.test.ts` covers the orchestrator's copy).
+// Without this the fix could be inert in production with every router test
+// green.
+//
+// The observable is the pre-existing "success clears" rule: a slot the
+// resolving agent owns is nulled. Seeding it while the turn is still in
+// flight is what makes the clear attributable to the turn ending.
+describe('startChainSession — a resolving turn reaches the router', () => {
+  test('deliverTurn resolving calls onTurnSucceeded', async () => {
+    const workspace = path.join(tmpRoot, 'ws-turn-wiring');
+    fs.mkdirSync(workspace, { recursive: true });
+    const mk = (name: string): ResolvedAgent => {
+      const dir = path.join(tmpRoot, `tw-${name}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const proj = upsertProject(name, dir);
+      return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+    };
+
+    // The turn blocks on `gate` so the test can seed the slot mid-flight.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const gatedRunnerFactory = (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        await gate;
+        yield { type: 'result', subtype: 'success', session_id: 'tw1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+
+    const handle = await startChainSession({
+      participants: [mk('head'), mk('tail')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: gatedRunnerFactory,
+    });
+    await new Promise((r) => setImmediate(r));
+
+    setPendingRetry(handle.sessionId, {
+      agentName: 'head',
+      prompt: 'bytes',
+      reason: 'an earlier failure',
+      ts: 1,
+      errorEventId: 1,
+    });
+    // The turn is still blocked, so nothing has cleared it yet. Without this
+    // half the assertion below could pass on a slot that never existed.
+    expect(getPendingRetry(handle.sessionId)).not.toBeNull();
+
+    release();
+    // Poll to a deadline rather than counting ticks: how many turns of the
+    // event loop the generator + `.then` take is not a constant, and a fixed
+    // count is a timeout in disguise that goes flaky or vacuous per platform.
+    const deadline = Date.now() + 3000;
+    while (getPendingRetry(handle.sessionId) !== null && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(getPendingRetry(handle.sessionId)).toBeNull();
+
+    await handle.stop('stopped');
     unregisterLiveSession(handle.sessionId);
   });
 });
