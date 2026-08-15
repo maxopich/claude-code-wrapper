@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import stylesCss from './styles.css?raw';
-import { tokenBlockRanges } from './cssColor.js';
+import { parseColor, resolveVar, tokenBlockRanges } from './cssColor.js';
 
 /**
  * One token cannot be both the fill and the ink (bead .5.37).
@@ -116,5 +116,97 @@ describe('[a11y] a fill token is never used as ink', () => {
     // argument, not a free ride on this entry.
     const coral = SITES.filter((s) => s.token === '--coral');
     expect(coral).toHaveLength(EXEMPT.length);
+  });
+});
+
+/**
+ * Cebab-rsw: a `-soft` token must be TRANSLUCENT.
+ *
+ * The rule above keeps the five fills out of `color:`. It says nothing about
+ * what a *surface* named `-soft` may be, and that gap is how `--fg-1` on
+ * `--accent-soft` shipped at 1.56:1: `--accent-soft` read as a pale tint and
+ * was a solid saturated hex in every block, so neutral ink went onto it the
+ * way it safely goes onto `--ok-soft` and friends.
+ *
+ * `--accent-soft` is now deleted — it duplicated `--accent-2` byte-for-byte in
+ * all five blocks, so the repair was a deletion and this guard holds with NO
+ * exemption list. That matters here specifically: the `EXEMPT` comment above
+ * says an unchecked exemption list is where the next one hides, and an
+ * accessibility defect is the last thing that should be parked on one.
+ *
+ * ALL FIVE BLOCKS, including `:root`, and that is not incidental.
+ * `parseThemeBlocks` returns the four `[data-theme]` blocks only, and the four
+ * `--agent-N-soft` tints are declared in `:root` and nowhere else — so a guard
+ * built on it would have reported a clean pass over half the `-soft` tokens in
+ * the file. Measured, not assumed: the control below counts what each block
+ * actually contributes.
+ */
+function tokenMap(blockText: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const m of blockText.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/g)) {
+    map.set(m[1]!, m[2]!.trim());
+  }
+  return map;
+}
+
+/**
+ * The declarations of every block with this name, concatenated.
+ *
+ * `:root` appears THREE times in `styles.css`, so a `.find()` here would have
+ * read the first and reported a clean pass over the other two — and
+ * `--accent-2` lives in the second. Aggregate, never find.
+ */
+function blockText(blockName: string): string {
+  const ranges = tokenBlockRanges(stylesCss).filter((b) => b.name === blockName);
+  if (ranges.length === 0) throw new Error(`no token block named ${blockName}`);
+  return ranges.map((r) => stylesCss.slice(r.start, r.end)).join('\n');
+}
+
+/** Every `-soft` token in one named block that resolves to a FULLY OPAQUE
+ *  colour — i.e. a fill wearing a tint's name. */
+function opaqueSoftTokens(blockName: string): string[] {
+  const tokens = tokenMap(blockText(blockName));
+  const offenders: string[] = [];
+  for (const [name, raw] of tokens) {
+    if (!name.endsWith('-soft')) continue;
+    // `color-mix(…, transparent)` is the light-gamma spelling of a tint and
+    // `rgba()` the dark-gamma one; `parseColor` resolves both. Anything that
+    // lands at full alpha is the defect.
+    if (parseColor(resolveVar(tokens, raw)).a >= 1) offenders.push(`${name}: ${raw}`);
+  }
+  return offenders.sort();
+}
+
+// Written out per block rather than looped: a loop cannot catch the list of
+// blocks itself being wrong, which is how a guard passes while measuring a
+// fraction of what it claims (this one nearly did — see the header).
+describe('[a11y] a -soft token is a tint, not a fill (Cebab-rsw)', () => {
+  test(':root', () => expect(opaqueSoftTokens(':root')).toEqual([]));
+  test('aurora', () => expect(opaqueSoftTokens('aurora')).toEqual([]));
+  test('daylight', () => expect(opaqueSoftTokens('daylight')).toEqual([]));
+  test('slate', () => expect(opaqueSoftTokens('slate')).toEqual([]));
+  test('phosphor', () => expect(opaqueSoftTokens('phosphor')).toEqual([]));
+
+  test('CONTROL: the scan reaches -soft tokens in every block it claims', () => {
+    // Without this, an empty token map — or a suffix test that matched
+    // nothing — makes all five cases above pass while measuring zero tokens.
+    // The counts are asserted per block because they are NOT uniform: the
+    // agent tints live only in `:root`, which is the asymmetry that made a
+    // themes-only scan look complete.
+    const counted = (name: string) =>
+      [...tokenMap(blockText(name)).keys()].filter((k) => k.endsWith('-soft')).length;
+    expect(counted(':root'), 'root: 4 semantic + 4 agent tints').toBe(8);
+    for (const theme of ['aurora', 'daylight', 'slate', 'phosphor']) {
+      expect(counted(theme), `${theme}: the 4 semantic tints`).toBe(4);
+    }
+  });
+
+  test('--accent-soft is gone, not merely unused', () => {
+    // The deletion IS the fix. A revert that restored the declaration while
+    // leaving call sites on `--accent-2` would redden the guard above too,
+    // but this states plainly which token was removed, so a future re-add
+    // needs a new argument rather than passing as a fresh idea.
+    expect(stylesCss).not.toMatch(/^\s*--accent-soft\s*:/m);
+    expect(stylesCss).not.toContain('var(--accent-soft)');
   });
 });
