@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef } from 'react';
+import { isPinnedToBottom } from '../../scrollAnchor';
 import { useModalSurface } from '../../useModalSurface';
 import type { AuthRefreshState } from './AuthRefreshContext';
 
@@ -14,7 +15,8 @@ import type { AuthRefreshState } from './AuthRefreshContext';
 //                   cancel; the spawn never started).
 //
 // The output display uses a `<pre>` with overflow-auto, monospace
-// font, and auto-scroll-to-bottom on new chunks. We don't try to
+// font, and auto-scroll-to-bottom on new chunks — but only while the
+// operator is still at the tail (register W14). We don't try to
 // parse ANSI color codes — `claude login` produces plain text status
 // + the OAuth URL. If a future version starts emitting color codes,
 // the modal will render them as gibberish but the URL extraction will
@@ -107,9 +109,18 @@ function RunningBody({
   // operator always sees the latest line (terminal convention). We
   // re-run when state.output length changes, which captures every
   // new chunk regardless of which stream it came from.
+  //
+  // Register W14 (found in the chat pane, and this was the second copy of the
+  // same two lines): "terminal convention" is only half the convention — a
+  // terminal also stops following once you scroll up. This pane's whole job is
+  // to show an OAuth URL the operator must read and act on, and an unguarded
+  // re-scroll drags it off screen on the next chunk. `pinnedRef` tracks whether
+  // they are still at the tail; see `scrollAnchor.ts` for why it is sampled on
+  // `scroll` rather than measured here.
+  const pinnedRef = useRef(true);
   useEffect(() => {
     const el = outputRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [state.output]);
 
   return (
@@ -132,6 +143,9 @@ function RunningBody({
         className="auth-refresh-modal-output"
         aria-label="claude login output"
         aria-live="polite"
+        onScroll={(e) => {
+          pinnedRef.current = isPinnedToBottom(e.currentTarget);
+        }}
       >
         {state.output || (
           <span className="auth-refresh-modal-output-placeholder">Waiting for output…</span>
