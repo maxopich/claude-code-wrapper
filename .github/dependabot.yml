@@ -29,6 +29,34 @@ updates:
       day: 'monday'
     cooldown:
       default-days: 7
+    # Cebab-yc3: keep the codeql-action family in ONE pull request.
+    #
+    # Dependabot treats each sub-path as its own dependency, so a single
+    # codeql-action release arrives as three PRs — `init` (codeql.yml:37),
+    # `analyze` (codeql.yml:66) and `upload-sarif` (scorecard.yml:52). CodeQL
+    # requires init and analyze to run the SAME version, so each of those two
+    # PRs is red on its own, in either order:
+    #
+    #     Loaded a configuration file for version '4.36.2',
+    #     but running version '4.37.1'
+    #
+    # Measured on #251 and #253 (4.36.2 -> 4.37.1) — both failed `Analyze`
+    # after a fresh run against a green main, with every other check passing.
+    # Neither can be merged alone and merging both leaves main's CodeQL red
+    # between the two merges. `upload-sarif` is in a different workflow and is
+    # not version-coupled, but it belongs to the same release and grouping it
+    # keeps the family on one version, which is the invariant that actually
+    # matters. Pinned SHAs are what hide the coupling from a reviewer: three
+    # unrelated-looking hashes, one version comment each.
+    #
+    # NOT VERIFIABLE IN CI. No gate reads this file, so a pattern that matches
+    # nothing looks exactly like a pattern that works. The proof is the next
+    # codeql-action release: ONE pull request titled for the group, not three.
+    # If three arrive again, the pattern is wrong — not the premise.
+    groups:
+      codeql-action:
+        patterns:
+          - 'github/codeql-action*'
     labels:
       - 'dependencies'
       - 'github-actions'
