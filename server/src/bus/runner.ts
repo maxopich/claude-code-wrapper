@@ -777,6 +777,13 @@ export class AgentRunner {
     const turnIndex = this.turnCounts.get(agentName) ?? 0;
     this.turnCounts.set(agentName, turnIndex + 1);
 
+    // B15: same lifetime as `turnIndex`, and for the same reason. A retry
+    // re-runs THIS turn, so a `tool_use` id the tap already fired for is a
+    // repeat of a call already recorded — not a second call. Per-HOP, not
+    // per-runner: an id legitimately reappearing on a LATER hop is a genuine
+    // new call and must still be recorded.
+    const tappedToolUseIds = new Set<string>();
+
     // Retry-with-backoff for transient API overloads ("API Error: 529",
     // "Overloaded"). The interactive CLI absorbs these internally; the SDK
     // propagates them raw to our iterator. Without this layer, Item #4's
@@ -796,7 +803,7 @@ export class AgentRunner {
     let lastErr: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        await this.runOneAttempt(agentName, promptText, spec, turnIndex);
+        await this.runOneAttempt(agentName, promptText, spec, turnIndex, tappedToolUseIds);
         return; // success
       } catch (err) {
         lastErr = err;
@@ -898,6 +905,13 @@ export class AgentRunner {
     promptText: string,
     spec: AgentSpec,
     turnIndex: number,
+    /**
+     * B15: `tool_use` ids the mutation tap has already fired for during THIS
+     * hop. Owned by `runOneTurn` and shared across its retry attempts, for the
+     * same reason `turnIndex` is claimed once per hop — a retry replays the
+     * same turn, so anything it re-emits is a repeat, not a new call.
+     */
+    tappedToolUseIds: Set<string>,
   ): Promise<void> {
     const factory = this.deps.runnerFactory ?? pickRunner;
     // Read INSIDE the serialized turn (not when `deliverTurn` was called) so
@@ -919,8 +933,8 @@ export class AgentRunner {
     // built-ins stripped from the model's context entirely — the "remove from
     // view" layer complementing the authoritative default-deny in
     // `makeCanUseTool`. Works in either permission posture.
-    const toolLock =
-      spec.toolPolicy === 'delegate-only' ? { disallowedTools: [...DELEGATE_ONLY_DISALLOWED] } : {};
+    const delegateOnly = spec.toolPolicy === 'delegate-only';
+    const toolLock = delegateOnly ? { disallowedTools: [...DELEGATE_ONLY_DISALLOWED] } : {};
 
     // H04: MCP servers this agent's operator denied. Read from `this.specs`
     // at turn time (not captured at register time) so a denial applied
@@ -1095,9 +1109,33 @@ export class AgentRunner {
               if (block?.type !== 'tool_use') continue;
               const toolName = typeof block.name === 'string' ? block.name : '';
               if (!toolName) continue;
+              // B10: this block says the SDK is ABOUT to dispatch — not that it
+              // will. For a `delegate-only` agent, `makeCanUseTool` denies
+              // everything outside `isDelegationAllowedTool` when the SDK asks,
+              // which is AFTER this message. Without this check the orchestrator
+              // writing a stray `Bash` gets a dangerous mutation row, and can
+              // trip the pause-on-dangerous gate and halt the session, for a
+              // command that never ran.
+              //
+              // Deliberately the SAME predicate the gate uses rather than a
+              // copy: two spellings of "what may the orchestrator call" would
+              // drift, and the copy that drifts is the one nobody is testing.
+              if (delegateOnly && !isDelegationAllowedTool(toolName)) continue;
               const cls = classifyToolCall(toolName, block.input);
               if (cls.category === 'read') continue;
               const toolUseId = typeof block.id === 'string' ? block.id : undefined;
+              // B15: a retry re-runs this turn with the same prompt and may
+              // `--resume` the failed attempt's checkpoint, so a block seen
+              // once can arrive again. Fire once per id per hop.
+              //
+              // An id-less block always fires: it cannot be recognised as a
+              // repeat, and silently dropping it would lose a real mutation.
+              // Over-recording an unidentifiable call is the safer error for a
+              // ledger the pause gate reads.
+              if (toolUseId !== undefined) {
+                if (tappedToolUseIds.has(toolUseId)) continue;
+                tappedToolUseIds.add(toolUseId);
+              }
               // Cluster F Phase D5+: classify path scope vs agent cwd. The
               // consultant-mode prompt forbids out-of-scope mutations; this
               // surfaces violations post-hoc rather than denying them. (Not
