@@ -41,6 +41,7 @@ import path from 'node:path';
 import { afterEach, beforeEach } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
+import { closeLogger } from '../runner/logger.js';
 
 export type TempDataDir = {
   /** The temp root containing `.cebab/`. Valid only inside a test body. */
@@ -82,8 +83,19 @@ export function withTempDataDir(label: string, openDb = true): TempDataDir {
     if (openDb) getDb();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     closeDb();
+    // Cebab-kji: BEFORE the rmSync, and awaited. The transcript logger keeps a
+    // module-level map of open write streams pointing into this directory, and
+    // `fs.createWriteStream` opens its fd on a later tick. Removing the
+    // directory first raced that open; the failure surfaced as a `console.error`
+    // from the stream's `'error'` handler AFTER the test had finished, which
+    // vitest turns into an `EnvironmentTeardownError` that fails the entire run
+    // with every test green.
+    //
+    // Cheap for the files that never log: with no streams open this resolves
+    // without waiting on anything.
+    await closeLogger();
     config.dataDir = originalDataDir;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
