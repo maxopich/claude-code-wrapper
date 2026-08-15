@@ -471,10 +471,15 @@ describe('AgentRunner', () => {
   // production) propagates out of `deliverTurn`; the router's `.catch`
   // recognises the sentinel as a controlled pause.
   describe('mutation tap', () => {
-    function assistantWithTool(name: string, input: unknown): SDKMessage {
+    // `id` is explicit because B15 made it load-bearing: the tap now fires at
+    // most once per `tool_use` id per hop. Distinct calls carry distinct ids in
+    // real SDK output, so a fixture that reuses one is describing something
+    // that cannot happen — which is exactly how the three-call case below used
+    // to read before this parameter existed.
+    function assistantWithTool(name: string, input: unknown, id = 'x'): SDKMessage {
       return {
         type: 'assistant',
-        message: { content: [{ type: 'tool_use', id: 'x', name, input }] },
+        message: { content: [{ type: 'tool_use', id, name, input }] },
       } as unknown as SDKMessage;
     }
 
@@ -503,9 +508,9 @@ describe('AgentRunner', () => {
         },
         runnerFactory: () =>
           fakeRunner([
-            assistantWithTool('Write', { file_path: '/foo', content: 'x' }),
-            assistantWithTool('Bash', { command: 'git commit -m m' }),
-            assistantWithTool('Bash', { command: 'rm -rf node_modules' }),
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }, 'x'),
+            assistantWithTool('Bash', { command: 'git commit -m m' }, 'y'),
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'z'),
             resultMsg('sess-1'),
           ]),
       });
@@ -524,6 +529,184 @@ describe('AgentRunner', () => {
       expect(seen[1]!.filePath).toBeUndefined();
       expect(seen[2]!.category).toBe('dangerous');
       expect(seen[2]!.summary).toContain('rm -rf');
+    });
+
+    // --- B10: the tap must not record a call the policy will deny ---------
+    //
+    // A `tool_use` block says the SDK is ABOUT to dispatch. For a
+    // `delegate-only` agent (the orchestrator) `makeCanUseTool` denies
+    // everything outside `isDelegationAllowedTool`, but that runs when the SDK
+    // asks — AFTER this message. The tap used to record first and let the
+    // denial happen later, so a blocked `Bash` still wrote a `dangerous`
+    // mutation row and could trip the pause gate for a command that never ran.
+
+    test('[security] a delegate-only agent gets NO mutation row for a tool its policy denies', async () => {
+      const seen: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, toolName) => {
+          seen.push(toolName);
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf /' }, 'a'),
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }, 'b'),
+            resultMsg('sess-deny'),
+          ]),
+      });
+      runner.register({ name: 'orchestrator', cwd: '/tmp/orch', toolPolicy: 'delegate-only' });
+      await runner.deliverTurn('orchestrator', 'go');
+      expect(seen).toEqual([]);
+    });
+
+    test('the same blocks DO fire for an agent without delegate-only', async () => {
+      // The control for the case above. Without it, "the tap fired zero times"
+      // is also satisfied by a tap that never fires at all — which would pass
+      // while silently disabling the pause gate for every worker.
+      const seen: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, toolName) => {
+          seen.push(toolName);
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf /' }, 'a'),
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }, 'b'),
+            resultMsg('sess-allow'),
+          ]),
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/worker' });
+      await runner.deliverTurn('worker', 'go');
+      expect(seen).toEqual(['Bash', 'Write']);
+    });
+
+    // --- B15: one row per tool_use id per hop ------------------------------
+    //
+    // `runOneTurn` retries a transient 529 by re-running the SAME turn, and the
+    // retry may `--resume` the failed attempt's checkpoint. Anything re-emitted
+    // is a repeat of a call already recorded, not a second call.
+
+    test('a 529 retry re-emitting the SAME tool_use id records it once', async () => {
+      const seen: string[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(String(cls.toolUseId));
+        },
+        runnerFactory: () => {
+          n++;
+          if (n === 1) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              yield assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'dup');
+              throw new Error('API Error: 529 Overloaded');
+            }
+            const it = boom();
+            return { [Symbol.asyncIterator]: () => it, close: () => {} };
+          }
+          return fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'dup'),
+            resultMsg('sess-retry'),
+          ]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('coder', 'go');
+      warnSpy.mockRestore();
+      expect(n).toBe(2); // the retry really happened
+      expect(seen).toEqual(['dup']); // ...and recorded the call once
+    });
+
+    test('a 529 retry emitting a DIFFERENT id records both', async () => {
+      // Anti-vacuity control for the case above: a filter that drops everything
+      // after the first block would satisfy it. These are two genuinely
+      // different calls and both must survive.
+      const seen: string[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(String(cls.toolUseId));
+        },
+        runnerFactory: () => {
+          n++;
+          if (n === 1) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              yield assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'first');
+              throw new Error('API Error: 529 Overloaded');
+            }
+            const it = boom();
+            return { [Symbol.asyncIterator]: () => it, close: () => {} };
+          }
+          return fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'second'),
+            resultMsg('sess-retry2'),
+          ]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('coder', 'go');
+      warnSpy.mockRestore();
+      expect(seen).toEqual(['first', 'second']);
+    });
+
+    test('the seen-id set is per HOP: the same id on a later turn records again', async () => {
+      // The filter must not become a runner-lifetime dedupe. A later hop
+      // reusing an id is a genuine new call, and suppressing it would drop a
+      // real mutation from the ledger the pause gate reads.
+      const seen: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(String(cls.toolUseId));
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'same'),
+            resultMsg('sess-hop'),
+          ]),
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await runner.deliverTurn('coder', 'hop one');
+      await runner.deliverTurn('coder', 'hop two');
+      expect(seen).toEqual(['same', 'same']);
+    });
+
+    test('blocks with no tool_use id always fire, even repeated in one hop', async () => {
+      // An id-less block cannot be recognised as a repeat. Dropping it would
+      // lose a real mutation; over-recording an unidentifiable call is the
+      // safer error for a ledger the pause gate reads.
+      const seen: Array<string | undefined> = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(cls.toolUseId);
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            {
+              type: 'assistant',
+              message: {
+                content: [{ type: 'tool_use', name: 'Bash', input: { command: 'rm -rf a' } }],
+              },
+            } as unknown as SDKMessage,
+            {
+              type: 'assistant',
+              message: {
+                content: [{ type: 'tool_use', name: 'Bash', input: { command: 'rm -rf a' } }],
+              },
+            } as unknown as SDKMessage,
+            resultMsg('sess-noid'),
+          ]),
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await runner.deliverTurn('coder', 'go');
+      expect(seen).toEqual([undefined, undefined]);
     });
 
     test('does NOT fire for read-only tool calls (Read, Grep, git status)', async () => {

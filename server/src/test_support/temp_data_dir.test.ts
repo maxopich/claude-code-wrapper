@@ -14,12 +14,14 @@
  * hygiene, not correctness, and pretending otherwise would put a fake gate in
  * the count.
  */
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { getDb } from '../db.js';
+import { __setStreamFactoryForTests, logEvent } from '../runner/logger.js';
 import { withTempDataDir } from './temp_data_dir.js';
 
 describe('withTempDataDir', () => {
@@ -79,5 +81,55 @@ describe('withTempDataDir with openDb false', () => {
   test('creates the directory but leaves the database unopened', () => {
     expect(fs.existsSync(tmp.dataDir())).toBe(true);
     expect(fs.existsSync(path.join(tmp.dataDir(), 'cebab.sqlite'))).toBe(false);
+  });
+});
+
+/**
+ * Cebab-kji. The teardown closes the transcript logger BEFORE `fs.rmSync`, and
+ * awaits it. Without the await, the directory goes while `fs.createWriteStream`
+ * may still be opening its fd; that open then fails ENOENT, the stream's
+ * `'error'` handler logs AFTER the test has finished, and vitest turns a
+ * console line arriving during worker teardown into an
+ * `EnvironmentTeardownError` that fails the whole run with every test green.
+ *
+ * Pinned by ORDER rather than by timing, so it is deterministic: the injected
+ * stream records whether the temp directory still existed at the moment it
+ * closed. Awaited, it does; not awaited, `rmSync` has already run.
+ */
+describe('withTempDataDir closes the transcript logger before removing the directory', () => {
+  const tmp = withTempDataDir('helper-logger-order');
+  const observed: string[] = [];
+
+  /** A stream that closes one tick later, like the real one. */
+  class SlowStream extends EventEmitter {
+    writableNeedDrain = false;
+    closed = false;
+    constructor(private readonly root: string) {
+      super();
+    }
+    write(): boolean {
+      return true;
+    }
+    end(): void {
+      setImmediate(() => {
+        observed.push(fs.existsSync(this.root) ? 'dir-present-at-close' : 'dir-already-removed');
+        this.closed = true;
+        this.emit('close');
+      });
+    }
+  }
+
+  test('a test writes a transcript and leaves the stream open', async () => {
+    const root = tmp.root();
+    __setStreamFactoryForTests(() => new SlowStream(root) as unknown as fs.WriteStream);
+    await logEvent('sess-teardown-order', { n: 1 });
+    // Reset the factory now; the stream for this session is already cached, so
+    // the teardown still closes the injected one and no later test is affected.
+    __setStreamFactoryForTests(null);
+    expect(observed).toEqual([]); // nothing has closed yet
+  });
+
+  test('the previous test closed its stream while the directory still existed', () => {
+    expect(observed).toEqual(['dir-present-at-close']);
   });
 });

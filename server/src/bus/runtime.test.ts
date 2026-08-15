@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import {
-  MAX_PROJECT_CLAUDE_MD,
   MAX_PROJECT_CLAUDE_MD_BYTES,
   nextIterationId,
   PROJECT_CLAUDE_MD_HEAD_MAX_BYTES,
@@ -389,16 +388,25 @@ describe('readProjectClaudeMd', () => {
     expect(r!.framed).toContain('<project_claude_md>');
   });
 
-  test('oversized file is truncated with a visible marker and labelled', () => {
+  test('a long-but-ordinary CLAUDE.md is injected WHOLE, no truncation', () => {
+    // This case replaces one that asserted the opposite. A second, codepoint
+    // cap of 16,000 used to cut the body here; it was removed because every
+    // project this function injects for also has the file auto-loaded by the
+    // SDK, so truncating our copy shortened Cebab's RECORD of what the model
+    // was told without keeping a byte from the model.
+    //
+    // 21,000 characters is not an arbitrary "over the old cap" number: it is
+    // the size Cebab's own CLAUDE.md reached, which is how the silent
+    // truncation was found. The tail is what got cut, so the tail is what this
+    // asserts survives.
+    const body = `# Rules\n${'x'.repeat(21_000)}\nTRAILING-MARKER`;
     const dir = projDir();
-    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), 'x'.repeat(MAX_PROJECT_CLAUDE_MD + 500));
+    fs.writeFileSync(path.join(dir, 'CLAUDE.md'), body);
     const r = readProjectClaudeMd(dir);
     expect(r).not.toBeNull();
-    expect(r!.framed).toContain(`truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD} chars`);
-    expect(r!.sizeLabel).toContain('(truncated)');
-    // Body capped at the limit (+ framing + marker + delimiters), nowhere
-    // near the full oversized input.
-    expect(r!.framed.length).toBeLessThan(MAX_PROJECT_CLAUDE_MD + 2000);
+    expect(r!.framed).toContain('TRAILING-MARKER');
+    expect(r!.framed).not.toContain('truncated by Cebab');
+    expect(r!.sizeLabel).not.toContain('(truncated)');
   });
 
   // ---- Register H11: the read itself is bounded, not just the string ----
@@ -422,9 +430,10 @@ describe('readProjectClaudeMd', () => {
     expect(r).not.toBeNull();
     expect(r!.framed).toContain('# Rules');
     expect(r!.framed).toContain(`truncated by Cebab at ${MAX_PROJECT_CLAUDE_MD_BYTES} bytes`);
-    // The char cap did NOT apply here, so its marker must not appear — the
-    // two branches have to stay distinguishable.
-    expect(r!.framed).not.toContain(`${MAX_PROJECT_CLAUDE_MD} chars`);
+    // The byte cap is the only one left, so the marker can only ever name
+    // bytes. Kept as an assertion rather than dropped: if a second cap is ever
+    // reintroduced, this is where the marker stops being unambiguous.
+    expect(r!.framed).not.toContain('chars…]');
     expect(r!.sizeLabel).toContain('(truncated)');
   });
 

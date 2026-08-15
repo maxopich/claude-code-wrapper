@@ -1,11 +1,12 @@
 import http from 'node:http';
 import express from 'express';
 import { config } from './config.js';
-import { closeDb, declareRealDataDirIntent, getDb } from './db.js';
+import { closeDb, declareRealDataDirIntent, getDb, resolveMigrationsDir } from './db.js';
 import { runDataPermsBootCheck } from './data_perms_boot.js';
 import { closeLogger } from './runner/logger.js';
 import { closeAllQueries } from './runner/lifecycle.js';
 import { verifyChain } from './notifications/safety_audit.js';
+import { runMigrationIntegrityBootCheck } from './migration_integrity.js';
 import { emit as emitNotification } from './notifications/dispatcher.js';
 import { describeChainFailure, startWsServer } from './ws/server.js';
 import { createShutdown, registerSignalHandlers } from './shutdown.js';
@@ -85,6 +86,15 @@ function main(): void {
       console.error(`[cebab] could not record tamper notification: ${result.error}`);
     }
   }
+
+  // Cebab-x1n.7.31: has an already-applied migration been edited since it was
+  // applied? The runner keys on filename alone, so without this an edited
+  // `.sql` splits installs silently — old schema here, new schema on a fresh
+  // install, identical ledgers on both. Everything (the log lines, the ONE
+  // safety notification, and the decision to carry on booting) sits behind
+  // this call for the same reason `runDataPermsBootCheck` does: `main()` is
+  // not reachable from a unit test.
+  runMigrationIntegrityBootCheck({ db: getDb(), migrationsDir: resolveMigrationsDir() });
 
   const root = resolveWorkspaceRoot();
   console.log(

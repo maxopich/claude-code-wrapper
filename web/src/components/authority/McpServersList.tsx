@@ -6,13 +6,16 @@ import { useCopyFeedback } from '../../useCopyFeedback';
 //
 // One card per declared MCP server. Each card answers:
 //   - WHO    — `name` + tools it exposes
-//   - WHERE  — `scope` chip (user / project / local / mcp-json /
+//   - WHERE  — `scope` chip (user / project / local / mcp-json / claude-json /
 //              cebab-injected) + `originPath` (which file declared it).
-//              `mcp-json` is the project-root `.mcp.json`, and it is the
-//              scope that actually runs: measured against SDK 0.3.201,
-//              `mcpServers` in `.claude/settings.json` is not loaded at any
-//              scope, so a `project`-scoped row describes a declaration the
-//              CLI ignores while an `mcp-json` row describes a live server.
+//              TWO of these describe servers that actually run: `mcp-json`
+//              (project-root `.mcp.json`) and `claude-json` (`~/.claude.json`).
+//              Measured against SDK 0.3.201, `mcpServers` in
+//              `.claude/settings*.json` is not loaded at any scope — so a
+//              `user`/`project`/`local` row describes a declaration the CLI
+//              ignores, while those two describe live servers. See
+//              `readClaudeJsonServers` in `server/src/repo/project_authority.ts`
+//              for the full measured table.
 //   - WHAT   — `command` + `args` from `config`
 //   - TRUST  — `trust` chip from the mcp_trust JOIN (Phase 4):
 //                trusted / pending_tofu / hash_changed / denied / unknown
@@ -61,6 +64,12 @@ const SCOPE_CHIP_CLASS: Record<McpServerView['scope'], string> = {
   // actually loads MCP servers from. Styled like `project` because that is
   // what an operator reads it as; the chip LABEL carries the distinction.
   'mcp-json': 'mcp-scope-project',
+  // `~/.claude.json` — the CLI's own state file, and the OTHER location
+  // measured to actually load servers (both its top-level `mcpServers` and its
+  // per-project block). Styled like `user` because that is where an operator
+  // reads a home-directory declaration as coming from; the chip LABEL carries
+  // the distinction, same as `mcp-json` above.
+  'claude-json': 'mcp-scope-user',
   'cebab-injected': 'mcp-scope-cebab',
   // Reported by the SDK but matching no settings layer Cebab read, and not a
   // Cebab injection. Shares the muted styling of an unresolved row — it is

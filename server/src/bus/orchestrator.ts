@@ -63,8 +63,12 @@ import type {
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { isPausedForMutation, isTurnStalled } from './errors.js';
-import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import {
+  applyPauseGate,
+  releasePauseForMutation,
+  shouldHaltUnrecordedMutation,
+} from './pause_gate.js';
 import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
 import { secureMkdir } from '../data_perms.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
@@ -1404,6 +1408,14 @@ export function wireOrchestratorSession(p: {
       });
     } catch (err) {
       console.error('[orchestrator] persist mutation failed', err);
+      // Cebab-aqd: this `return` is upstream of `applyPauseGate`, so returning
+      // unconditionally let a failed INSERT disarm the operator's brake and the
+      // dangerous call ran. Same reasoning register B25 applied to the hop
+      // counter one function over: a brake that stops working when writes start
+      // failing is exactly backwards.
+      if (shouldHaltUnrecordedMutation(sessionId, cls.category)) {
+        throw new MutationNotRecordedError(toolName, cls.summary);
+      }
       return;
     }
     try {

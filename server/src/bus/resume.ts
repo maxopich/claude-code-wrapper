@@ -32,7 +32,7 @@ import {
   type MultiAgentStatus,
 } from '../repo/multi_agent.js';
 import { getDb } from '../db.js';
-import { getLiveSession, type BusSink } from './session_registry.js';
+import { getLiveSession, unregisterLiveSession, type BusSink } from './session_registry.js';
 import { reconstructOrchestratorSession } from './reconstruct.js';
 import type { ChainSessionHandle, ResumeChainOpts } from './chain.js';
 import type { OrchestratorSessionHandle } from './orchestrator.js';
@@ -246,6 +246,9 @@ export async function resumeMultiAgentTarget(
   if (row.status === 'running') return { ok: false, reason: 'already-running' };
 
   let live = getLiveSession(sessionId);
+  // Register B32: did THIS call put the entry in the registry? Only what we
+  // built here may be torn down in the catch below — see the comment there.
+  const reconstructedHere = live === undefined;
   if (!live) {
     // R-B: operator clicked Resume on a session whose owning process is
     // gone (Cebab restarted). Rebuild it read-only — same conservative
@@ -294,6 +297,24 @@ export async function resumeMultiAgentTarget(
   } catch (err) {
     console.error(`[resume] targeted resume threw for ${sessionId}`, err);
     endMultiAgentSession(sessionId, prevStatus);
+    // Register B32: the row went back to its terminal status, but the registry
+    // entry outlived it — and `reconstructOrchestratorSession` early-returns
+    // `true` on `hasLiveSession`, so the NEXT resume would skip the rebuild and
+    // re-attach to a half-built session nobody owns. Unregister so the two
+    // agree again.
+    //
+    // Conditional, and the condition is the point. The register's suggested fix
+    // was an unconditional unregister; applied literally that evicts a HEALTHY
+    // entry whenever the session was already live (R-A) and only the rebind
+    // failed — turning a recoverable re-attach into an unrecoverable one, the
+    // exact class of bug this change exists to remove. Only tear down what this
+    // call built.
+    //
+    // Reachability, stated plainly: neither production `rebind` can throw
+    // (both are `sink = next; return ++sinkEpoch`), so this is hardening of a
+    // defensive path, not a live bug. The registry accepts any `LiveBusSession`,
+    // so the guarantee is worth pinning before some future handle does throw.
+    if (reconstructedHere) unregisterLiveSession(sessionId);
     return { ok: false, reason: 'reattach-failed' };
   }
 

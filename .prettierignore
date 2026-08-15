@@ -8,3 +8,10 @@ package-lock.json
 # descends into every one of them and takes minutes. vitest.config.ts excludes
 # `**/.claude/**` for the same reason and says so there.
 .claude
+# Cebab's own runtime output. When the repo IS the workspace root, running the
+# app writes .cebab/ next to the source — and it holds operator-authored
+# markdown that was never ours to format. It is excluded via
+# .git/info/exclude, so it is untracked and CI's fresh clone never sees it:
+# `format:check` was green on CI and red for anyone who had actually run
+# Cebab, which is the split that teaches people to ignore the gate.
+.cebab

@@ -671,6 +671,20 @@ function parseToolIoJson(json: string | null): unknown {
  * can resolve `filePath` relative to the worktree root); `toolUseId` is the
  * SDK's `tool_use.id` so the matching `tool_result` can flip `confirmed_at`
  * later via `confirmMutationByToolUseId`.
+ *
+ * IDEMPOTENT ON `toolUseId` (migration 034 / register D20). Re-appending a
+ * `(sessionId, toolUseId)` pair that is already recorded is absorbed by the
+ * unique index and returns the EXISTING row rather than inserting a second
+ * one or throwing.
+ *
+ * The no-throw half is load-bearing, not politeness. Both bus call sites wrap
+ * this in `try { … } catch { log; return; }` and that `return` is upstream of
+ * `applyPauseGate` — so an append that throws is a `dangerous` mutation that
+ * runs with no operator gate. Enforcing uniqueness with a plain INSERT would
+ * have traded a duplicate row for a missed pause. Returning the canonical row
+ * instead keeps the caller's path intact: the sink re-emits (the wire reducer
+ * dedupes by `id`) and the gate still evaluates. See `Cebab-aqd` for the
+ * persist-failure route into that same hole, which this does not close.
  */
 export function appendMultiAgentMutation(
   sessionId: string,
@@ -709,7 +723,9 @@ export function appendMultiAgentMutation(
           file_path, cwd, tool_use_id,
           guardrail_violation_path, guardrail_reason,
           classifier_reason_json, tool_input_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (session_id, tool_use_id) WHERE tool_use_id IS NOT NULL
+         DO NOTHING`,
     )
     .run(
       sessionId,
@@ -726,6 +742,20 @@ export function appendMultiAgentMutation(
       extra.classifierReason ? JSON.stringify(extra.classifierReason) : null,
       capToolIoJson(extra.toolInput),
     );
+  if (info.changes === 0) {
+    // The ON CONFLICT above absorbed a repeat. `lastInsertRowid` is NOT usable
+    // here: it still holds whatever this connection inserted last, so reading
+    // by it would silently return an unrelated row. Re-read by the key that
+    // actually conflicted. `toolUseId` is necessarily non-null on this branch
+    // (the partial index cannot fire otherwise), and the row is unique by
+    // construction, so `.get()` is single-row here rather than arbitrary.
+    const existing = getDb()
+      .prepare<[string, string], MultiAgentMutationRow>(
+        'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?',
+      )
+      .get(sessionId, extra.toolUseId!)!;
+    return rowToMutation(existing);
+  }
   const row = getDb()
     .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')
     .get(Number(info.lastInsertRowid))!;
@@ -741,6 +771,20 @@ export function appendMultiAgentMutation(
  * classify as a mutation, e.g. a `Read`, or for a pre-012 mutation that has
  * no `tool_use_id`). Idempotent: re-confirming an already-confirmed row
  * leaves `confirmed_at` unchanged (UPDATE WHERE confirmed_at IS NULL).
+ *
+ * SINGLE-ROW BY CONSTRUCTION (migration 034 / register D20). `(session_id,
+ * tool_use_id)` is uniquely indexed for non-null ids, and this function only
+ * ever takes a non-null `toolUseId`, so the UPDATE can match at most one row
+ * and each read-back has at most one candidate. Before 034 it could match
+ * several: the UPDATE flipped `confirmed_at` on every duplicate and the
+ * read-backs returned an arbitrary one.
+ *
+ * The `ORDER BY id` below is therefore redundant against the current schema
+ * and deliberately kept: it makes the row this returns a stated choice rather
+ * than SQLite's, so the function still behaves predictably if the index is
+ * ever dropped. The register's other suggestion — a LIMIT on the UPDATE —
+ * was not taken: `UPDATE … LIMIT 1` has no ORDER BY clause, so it would have
+ * hidden the fan-out behind an arbitrary pick instead of removing it.
  */
 export function confirmMutationByToolUseId(
   sessionId: string,
@@ -766,14 +810,14 @@ export function confirmMutationByToolUseId(
     // round-trips its current state to the caller for a sanity re-emit.
     const row = getDb()
       .prepare<[string, string], MultiAgentMutationRow>(
-        'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?',
+        'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ? ORDER BY id LIMIT 1',
       )
       .get(sessionId, toolUseId);
     return row ? rowToMutation(row) : null;
   }
   const row = getDb()
     .prepare<[string, string], MultiAgentMutationRow>(
-      'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?',
+      'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ? ORDER BY id LIMIT 1',
     )
     .get(sessionId, toolUseId);
   return row ? rowToMutation(row) : null;

@@ -149,10 +149,12 @@
 #     the "keeps a retirement PR to the packages it is actually retiring" rule
 #     above is really asking for.
 #
-# nanoid stopped at 3.3.17, the version its entry named. 3.3.18 exists
-# (published 2026-08-07T16:41Z) but is inside the cooldown until
-# 2026-08-14T16:41Z, so npm will not resolve it yet — and it fixes nothing
-# outstanding.
+# nanoid stopped at 3.3.17, the version its entry named. 3.3.18 existed
+# (published 2026-08-07T16:41Z) but was inside the cooldown until
+# 2026-08-14T16:41Z, so npm would not resolve it then — and it appeared to fix
+# nothing outstanding. (Both halves of that last clause expired: see the
+# correction immediately below, and the retirement note at the end of the
+# file.)
 #
 # ^ THAT LAST CLAUSE IS NO LONGER TRUE, and the way it stopped being true is
 # worth reading before you trust any other retirement note in this file.
@@ -168,14 +170,14 @@
 # the cooldown elapses, and set `ignoreUntil` just past it so a forgotten
 # excuse fails the build instead of lingering.
 #
-# Inventory refreshed 2026-08-14, for the re-fire described above.
+# Inventory refreshed 2026-08-14, twice: once for the re-fire described above,
+# and again the same day to retire it.
 #
-# One entry remains, due back 2026-08-16 — hours after its fix first becomes
-# installable. (The count claim has to start its own line: the gate in
+# Zero entries remain. (The count claim has to start its own line: the gate in
 # `scripts/osvAllowlist.test.mjs` anchors on `^#\s*<word> entr…`, and it caught
 # this exact mistake when the sentence was folded into the line above.)
-
-[[IgnoredVulns]]
-id = "GHSA-2v37-7h3g-55p8"
-ignoreUntil = "2026-08-16T00:00:00Z"
-reason = "nanoid 3.3.17 (transitive of postcss <- vite, build toolchain only). High -- a custom generator can loop indefinitely when size is zero. RE-FIRE: this id was retired 2026-08-11 (#309) by bumping 3.3.16 -> 3.3.17, which was the fixed version the advisory named then; its affected range has since widened to <3.3.18. FIXED VERSION 3.3.18, published 2026-08-07T16:41:05Z, eligible under min-release-age=7 from 2026-08-14T16:41Z -- hours after this entry was written, which is why the date below is two days out and not two weeks. Cooldown wait, not an unfixed defect: bump and DELETE this entry together. Cebab never calls nanoid; postcss uses it internally with default parameters during the web build, so the custom-generator path is unreachable and nothing here runs in a request path."
+#
+# The re-fire was retired at 16:41Z on 2026-08-14 — the minute 3.3.18 cleared
+# `min-release-age=7` — by `npm update nanoid --package-lock-only`, which
+# resolved exactly 3.3.18, and by deleting the entry in the same commit. The
+# empty state is the intended resting state, not an oversight.

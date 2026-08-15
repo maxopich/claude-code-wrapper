@@ -3,7 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from './config.js';
-import { closeDb, getDb } from './db.js';
+import { closeDb, getDb, resolveMigrationsDir } from './db.js';
+import { checkAppliedMigrationHashes, hashMigrationSql } from './migration_integrity.js';
 
 /**
  * The migration runner's contract, which eight `*.schema.test.ts` files lean on
@@ -106,5 +107,94 @@ describe('migration runner — applied exactly once', () => {
         .prepare('INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)')
         .run(first.filename, first.applied_at + 1),
     ).toThrow(/UNIQUE|PRIMARY KEY|constraint/i);
+  });
+});
+
+/**
+ * Cebab-x1n.7.31 — the ledger now records WHAT it applied, not just that it
+ * applied something. Exactly-once (above) is what makes non-re-runnable
+ * migrations safe; this is what makes the record of them honest.
+ */
+describe('migration runner — the ledger records content, not just a filename', () => {
+  function shas(): Array<{ filename: string; content_sha: string | null }> {
+    return getDb()
+      .prepare<[], { filename: string; content_sha: string | null }>(
+        'SELECT filename, content_sha FROM schema_migrations ORDER BY filename',
+      )
+      .all();
+  }
+
+  test('every applied migration records a content hash', () => {
+    const rows = shas();
+    expect(rows.length).toBeGreaterThan(30);
+    expect(rows.filter((r) => r.content_sha === null)).toEqual([]);
+  });
+
+  test('the recorded hash matches the file the runner actually read', () => {
+    // Not a tautology check of hashMigrationSql against itself: this reads the
+    // bytes off disk independently and confirms the ledger agrees.
+    const dir = resolveMigrationsDir();
+    for (const row of shas()) {
+      const sql = fs.readFileSync(path.join(dir, row.filename), 'utf8');
+      expect(row.content_sha, row.filename).toBe(hashMigrationSql(sql));
+    }
+  });
+
+  test('the shipped corpus reports no drift against itself', () => {
+    // The control for the whole feature: a fresh, untouched install must be
+    // clean. If this ever goes red on main, a migration was edited after
+    // shipping and that is exactly what the check is for.
+    const result = checkAppliedMigrationHashes(getDb(), resolveMigrationsDir());
+    expect(result.drifted).toEqual([]);
+    expect(result.missingOnDisk).toEqual([]);
+    expect(result.adopted).toEqual([]); // fresh install records on apply, never adopts
+    expect(result.verified).toBe(shas().length);
+  });
+
+  test('reopening the database does not rewrite the hashes', () => {
+    const before = shas();
+    closeDb();
+    getDb();
+    expect(shas()).toEqual(before);
+  });
+
+  test('the column is added to a pre-existing two-column ledger, and adopted', () => {
+    // The upgrade path, end to end: a database created before this shipped has
+    // the old two-column table and no hashes at all. Rebuild exactly that
+    // shape — keeping every filename, so the runner still skips all 33 and we
+    // are testing the upgrade rather than a re-apply — then reopen.
+    const db = getDb();
+    const names = db
+      .prepare<[], { filename: string }>('SELECT filename FROM schema_migrations')
+      .all()
+      .map((r) => r.filename);
+    db.exec('DROP TABLE schema_migrations');
+    db.exec(
+      'CREATE TABLE schema_migrations (filename TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)',
+    );
+    const ins = db.prepare('INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)');
+    for (const n of names) ins.run(n, 1);
+    closeDb();
+
+    // Reopening runs ensureMigrationsTable against the old shape.
+    const cols = getDb()
+      .prepare<[string], { name: string }>('SELECT name FROM pragma_table_info(?)')
+      .all('schema_migrations')
+      .map((c) => c.name);
+    expect(cols).toContain('content_sha');
+
+    // Every row is NULL at this point — the runner records on APPLY, and these
+    // were all skipped. That is precisely the population adopt-on-first-sight
+    // exists for.
+    expect(shas().every((r) => r.content_sha === null)).toBe(true);
+
+    const adopt = checkAppliedMigrationHashes(getDb(), resolveMigrationsDir());
+    expect(adopt.adopted.length).toBe(names.length);
+    expect(adopt.drifted).toEqual([]);
+
+    // And the second pass verifies rather than re-adopting.
+    const second = checkAppliedMigrationHashes(getDb(), resolveMigrationsDir());
+    expect(second.adopted).toEqual([]);
+    expect(second.verified).toBe(names.length);
   });
 });

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type {
@@ -28,8 +29,22 @@ const MAX_MCP_JSON_BYTES = 1024 * 1024;
 
 /** Project-root MCP manifest. See `readMcpJsonServers` for why this exists. */
 const MCP_JSON_FILENAME = '.mcp.json';
+
+/**
+ * `~/.claude.json` — the CLI's own state file, and the OTHER place MCP servers
+ * actually load from. See `readClaudeJsonServers`.
+ *
+ * A larger ceiling than its siblings on purpose: this is CLI-managed state, not
+ * a hand-written config. It accumulates a block per project the user has ever
+ * opened, so it grows without anyone editing it (measured: 138 KB across 62
+ * projects on the development machine). 1 MiB would be a live truncation risk
+ * within a year of ordinary use, and truncating this file means silently
+ * failing to gate a server.
+ */
+const MAX_CLAUDE_JSON_BYTES = 8 * 1024 * 1024;
+const CLAUDE_JSON_FILENAME = '.claude.json';
 import { getProject } from './projects.js';
-import { checkTrust, computeBinarySha, listForServer } from './mcp_trust.js';
+import { checkTrust, computeBinarySha, firstDecisionTs, listForServer } from './mcp_trust.js';
 import { listSessionsForProject } from './sessions.js';
 import { getDb } from '../db.js';
 
@@ -72,6 +87,17 @@ type RawSettings = {
       }>;
     }>
   >;
+};
+
+/**
+ * `~/.claude.json`, typed to the two blocks we read. The real file carries
+ * dozens of other keys (caches, counters, per-project usage stats) — none of
+ * them are our business and none are typed here, deliberately: this file is
+ * read for MCP declarations only.
+ */
+type ClaudeJson = {
+  mcpServers?: RawSettings['mcpServers'];
+  projects?: Record<string, { mcpServers?: RawSettings['mcpServers'] } | undefined>;
 };
 
 /** A `settings.json` scope the SDK can be told to layer in. Structurally the
@@ -149,6 +175,10 @@ function readSettingsFile(p: string): RawSettings | null {
  *   ~/.claude/settings.json           → mcpServers  → NOT loaded
  *   <proj>/.mcp.json                                → LOADED, 'connected'
  *
+ * `~/.claude.json` was missing from that table and is now measured too — see
+ * `readClaudeJsonServers`. Both of its blocks load, so `.mcp.json` was never
+ * "the only" loading location; it was the only one anyone had checked.
+ *
  * So before this function the TOFU gate could only ever prompt about
  * declarations that would never run, while the servers that DO run reached
  * the spawn with no prompt, no `mcp_trust` row and no `safety_audit` row.
@@ -209,6 +239,111 @@ export function readMcpJsonServers(
     };
     if (config.command || config.args || config.envKeys) view.config = config;
     out.push(view);
+  }
+  return out;
+}
+
+/**
+ * Read `~/.claude.json` — the CLI's own state file, and the second place MCP
+ * servers actually load from.
+ *
+ * WHY THIS EXISTS. `readMcpJsonServers` above closed the gap for
+ * project-declared servers. What was left reached a spawn with **no
+ * `originPath`**, so `mcp_trust_gate` skipped it (the `!server.originPath`
+ * check) and it ran with no TOFU prompt, no `mcp_trust` row and no
+ * `safety_audit` row. Register `x1n.6.23` guessed this was where they came
+ * from and could not act on it, because a runtime-observed server has no
+ * durable anchor to key `(server_name, origin_path, binary_sha)` on. Reading
+ * the declaration gives it one: this file's path.
+ *
+ * MEASURED against SDK 0.3.201 (same method as the table above — a bogus
+ * `command` in each location, read back off `system/init.mcp_servers`, with
+ * `.mcp.json` as the positive control):
+ *
+ *   ~/.claude.json  mcpServers                       → LOADED at EVERY scope
+ *                                                      set, ['user'] included
+ *   ~/.claude.json  projects[<cwd>].mcpServers       → LOADED iff scopes
+ *                                                      include 'local'
+ *   <proj>/.mcp.json (control)                       → LOADED iff 'project'
+ *
+ * The first row is the one that matters most and is easy to miss: **top-level
+ * `mcpServers` loads under `['user']`**, which is what an UNTRUSTED
+ * single-agent project runs. The Trust toggle stops a project's own
+ * `settings.local.json` from loading; it does not stop this. So a
+ * `claude mcp add --scope user` server reaches every Cebab spawn regardless of
+ * Trust, and before this function it did so ungated.
+ *
+ * KEYED BY RESOLVED PATH. The `projects` block is keyed by the CLI's resolved
+ * cwd. Measured: a key written with an UNRESOLVED path matches nothing — on
+ * macOS `/var/folders/…` is a symlink to `/private/var/…`, so looking up the
+ * raw path silently finds no servers and reports a clean, wrong negative. We
+ * look up the realpath and fall back to the literal path only when the
+ * directory cannot be resolved.
+ *
+ * Returns `[]` for absent / unreadable / malformed, matching
+ * `readSettingsFile`'s "no rules from this scope" posture.
+ */
+export function readClaudeJsonServers(
+  projectPath: string,
+  scopes: readonly SettingScope[],
+): McpServerView[] {
+  const p = path.join(os.homedir(), CLAUDE_JSON_FILENAME);
+  const read = readTextBounded(p, MAX_CLAUDE_JSON_BYTES);
+  if (!read.ok) {
+    if (read.refusal !== 'unreadable') {
+      console.warn(`[project_authority] refused to read ${p}: ${read.refusal}`);
+    }
+    return [];
+  }
+
+  let parsed: ClaudeJson;
+  try {
+    parsed = JSON.parse(read.text) as ClaudeJson;
+  } catch (e: unknown) {
+    console.warn(`[project_authority] could not parse ${p}: ${String(e)}`);
+    return [];
+  }
+
+  const out: McpServerView[] = [];
+  const push = (block: RawSettings['mcpServers'] | undefined) => {
+    if (!block) return;
+    for (const [name, conf] of Object.entries(block)) {
+      if (!conf) continue;
+      // A name already taken by the other block in the SAME file: keep the
+      // first. Both anchor to this path, so the trust row is identical either
+      // way and there is nothing to choose between them.
+      if (out.some((v) => v.name === name)) continue;
+      const envKeys = conf.env ? Object.keys(conf.env) : undefined;
+      const config: { command?: string; args?: string[]; envKeys?: string[] } = {};
+      if (typeof conf.command === 'string') config.command = conf.command;
+      if (Array.isArray(conf.args)) config.args = conf.args;
+      if (envKeys && envKeys.length > 0) config.envKeys = envKeys;
+      const view: McpServerView = {
+        name,
+        status: 'unknown',
+        scope: 'claude-json',
+        originPath: p,
+        tools: [],
+        trust: 'unknown',
+      };
+      if (config.command || config.args || config.envKeys) view.config = config;
+      out.push(view);
+    }
+  };
+
+  // Unconditional: measured to load at every scope set Cebab passes, including
+  // the `['user']` an untrusted project runs. Gating it on a scope would make
+  // Cebab stop prompting for a server that still loads.
+  push(parsed.mcpServers);
+
+  if (scopes.includes('local')) {
+    let key: string;
+    try {
+      key = fs.realpathSync(projectPath);
+    } catch {
+      key = projectPath;
+    }
+    push(parsed.projects?.[key]?.mcpServers);
   }
   return out;
 }
@@ -533,9 +668,14 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
  * are always `trust: 'trusted'` — Cebab pins them, no operator decision
  * is needed. They skip the lookup.
  *
- * `firstSeenAt` / `lastSeenAt` come from `listForServer` (most-recent
- * first); the oldest decision in the list is firstSeenAt. Absent when
- * the server has never had a recorded decision.
+ * `lastSeenAt` comes from `listForServer` (most-recent first). `firstSeenAt`
+ * comes from `firstDecisionTs`, i.e. the append-only `safety_audit` chain —
+ * NOT from the oldest surviving lookup row, which is a different question.
+ * `mcp_trust` replaces rows it supersedes, so its oldest survivor answers
+ * "the oldest decision not yet overwritten"; on the non-null-sha path that has
+ * never equalled the first decision, and register D09's migration 033 makes the
+ * null-sha path behave the same way. Both absent when the server has never had
+ * a recorded decision.
  */
 export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
   for (const view of views) {
@@ -562,11 +702,16 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
         view.trust = 'pending_tofu';
         break;
     }
-    // Decision history → first/last seen.
+    // Decision history → first/last seen, from the two sources that actually
+    // answer each question: the lookup for "most recent", the audit chain for
+    // "first ever".
     const history = listForServer(view.name, view.originPath);
     if (history.length > 0) {
       view.lastSeenAt = history[0].ts;
-      view.firstSeenAt = history[history.length - 1].ts;
+    }
+    const firstTs = firstDecisionTs(view.name, view.originPath);
+    if (firstTs !== null) {
+      view.firstSeenAt = firstTs;
     }
   }
   return views;
@@ -761,10 +906,19 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // `readMcpJsonServers`). Letting the settings row win would anchor the trust
   // decision to the wrong file and the wrong binary path.
   const declaredMcp = detectMcpServers(layers);
-  for (const fromMcpJson of readMcpJsonServers(project.path, scopes)) {
-    const clash = declaredMcp.findIndex((d) => d.name === fromMcpJson.name);
+  // `~/.claude.json` is merged on the same rule and for the same reason: both
+  // it and `.mcp.json` are measured to load, and a settings row of the same
+  // name is a declaration the CLI never starts. `.mcp.json` is applied LAST so
+  // it wins a collision between the two loading files — an arbitrary but fixed
+  // choice (which one the CLI itself prefers on a duplicate name is not
+  // measured), and it preserves the precedence that shipped first.
+  for (const fromLoadingFile of [
+    ...readClaudeJsonServers(project.path, scopes),
+    ...readMcpJsonServers(project.path, scopes),
+  ]) {
+    const clash = declaredMcp.findIndex((d) => d.name === fromLoadingFile.name);
     if (clash >= 0) declaredMcp.splice(clash, 1);
-    declaredMcp.push(fromMcpJson);
+    declaredMcp.push(fromLoadingFile);
   }
   const initMcp = input.latestSessionStarted?.mcpServers ?? [];
   for (const dm of declaredMcp) {
@@ -784,15 +938,20 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // Anything else unattributable stays `scope: 'unknown'` + `trust: 'unknown'`
   // so it is visible in the panel.
   //
-  // NOT gated, and this comment used to claim otherwise ("still reaches
-  // TOFU"). It does not: an appended row has no `originPath`, so
-  // `awaitMcpTrustDecisions` skips it at mcp_trust_gate.ts:143, and its
-  // `trust: 'unknown'` would hit the silent-continue case immediately after
-  // anyway. Gating these needs a durable anchor to key the `mcp_trust` row on,
-  // which an observed-at-runtime server has no obvious candidate for —
-  // tracked separately. Reading `.mcp.json` above removes the case that
-  // mattered most (project-declared servers that actually load); what is left
-  // here is user-scope `claude mcp add` entries and plugin-provided servers.
+  // STILL NOT GATED, and the class that reaches here has shrunk twice. An
+  // appended row has no `originPath`, so `awaitMcpTrustDecisions` skips it at
+  // the `!server.originPath` check, and its `trust: 'unknown'` would hit the
+  // silent-continue case immediately after anyway. (An earlier version of this
+  // comment claimed these "still reach TOFU" — they never did.)
+  //
+  // `readMcpJsonServers` removed project-declared servers from this class;
+  // `readClaudeJsonServers` removed the `claude mcp add` ones at both scopes,
+  // which register x1n.6.23 correctly guessed were the bulk of the remainder.
+  // What is left is servers with NO on-disk declaration Cebab can find —
+  // plugin-provided ones, and anything a future CLI loads from a location not
+  // in the measured table above. Those genuinely have no durable anchor to key
+  // `(server_name, origin_path, binary_sha)` on, so they stay visible-but-
+  // ungated by design rather than by omission.
   for (const im of initMcp) {
     if (!declaredMcp.some((d) => d.name === im.name)) {
       const isCebabInjected = CEBAB_INJECTED_MCP_NAMES.has(im.name);
@@ -875,5 +1034,6 @@ export const _testing = {
   loadSettingsLayers,
   readSettingsFile,
   readMcpJsonServers,
+  readClaudeJsonServers,
   USER_SCOPE_PATH,
 };

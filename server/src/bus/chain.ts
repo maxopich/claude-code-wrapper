@@ -78,8 +78,12 @@ import type {
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { isPausedForMutation, isTurnStalled } from './errors.js';
-import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import {
+  applyPauseGate,
+  releasePauseForMutation,
+  shouldHaltUnrecordedMutation,
+} from './pause_gate.js';
 import {
   archiveAgentHop,
   CEBAB_SOURCE,
@@ -344,9 +348,28 @@ export function createChainRouter(params: {
     firstError = text.slice(0, 200);
   };
 
+  /**
+   * Cebab-wsq: how many times this router has WOKEN someone.
+   *
+   * Bumped at the single `deliver?.()` below — the router's only wake — and
+   * read only by the stall bookkeeping. Distinct from `hopsCount`, which
+   * counts persisted rows and moves for events that wake nobody.
+   */
+  let deliveries = 0;
+  /**
+   * Cebab-wsq: a drop is waiting to be turned into a parked session.
+   *
+   * Set by every drop branch in `handleEvent`, consumed by `onTurnSucceeded`.
+   * The delay is the whole point — see `parkIfStalled`.
+   */
+  let stallPending: { reasonCode: RouterDropReasonCode; detail: string; wakes: number } | null =
+    null;
+
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
     ended = true;
+    // Cebab-wsq: an unconsumed drop note must not outlive the session.
+    stallPending = null;
     // First: kill any pending liveness timer so it can't fire a spurious
     // `stalled` mid-teardown. Always runs, exactly once (ended-guarded).
     try {
@@ -428,6 +451,127 @@ export function createChainRouter(params: {
     }
   };
 
+  /**
+   * Cebab-wsq: record that a drop just left the chain with nobody woken.
+   *
+   * Only a record — the parking itself happens in `onTurnSucceeded`. Reasons,
+   * in order of how easy each is to get wrong:
+   *
+   * 1. `bus_send` runs INSIDE the sending agent's turn (`handleBusSend` →
+   *    `onEvent` → here, all synchronous), so that turn resolves moments
+   *    later and `onTurnSucceeded` runs `setPendingRetry(sessionId, null)`
+   *    for exactly this agent. A slot written here would be erased by the
+   *    sender's own success, silently, with every router test still green.
+   * 2. Until that turn ends the run is not actually stalled: the same turn
+   *    may still make a legal `bus_send`, which wakes someone and makes the
+   *    drop moot. `wakes` is the check — see `parkIfStalled`.
+   * 3. `ev.source` is not usable as the agent to re-prompt. Two of the six
+   *    drops (`forged_source`, `unknown_source`) fire precisely because the
+   *    source is NOT a participant. `onTurnSucceeded` is handed the name of
+   *    the agent whose turn ended, which is always a real one.
+   */
+  const noteStall = (reasonCode: RouterDropReasonCode, detail: string) => {
+    stallPending = { reasonCode, detail, wakes: deliveries };
+  };
+
+  /**
+   * Cebab-wsq: `agentName`'s turn just ended and no wake happened since the
+   * drop, so this chain run cannot advance on its own. Park it.
+   *
+   * "Park", not "end": chain mode refuses mid-flight operator prompts
+   * (`multi_agent_user_prompt` in `ws/server.ts` answers chain sessions with a
+   * `wrapper_error`), so before this the operator's only move was Stop. The
+   * pending-retry slot is the one re-entry a live chain session has, and it
+   * already carries Retry + Abandon in the UI, survives a detach, and is
+   * restored by R-A re-attach and R-B reconstruction. Reusing it costs no new
+   * protocol and no new state machine.
+   *
+   * Deliberately NOT a second notification: `dispatchRouterDrop` has already
+   * emitted a `safety`/`danger` envelope for this exact event. The drop stays
+   * the thing the operator is told about; this adds the way back.
+   *
+   * The retry prompt is a CORRECTION, not a replay of the sender's last
+   * prompt. Re-running the identical turn invites the identical mistake; the
+   * agent's real next hop is a fact this router already holds (`agentNames`
+   * is the chain order, so successor-or-`_sink` is the same rule
+   * `renderChainBriefing` renders), so we can say what to do instead.
+   */
+  const parkIfStalled = (agentName: string) => {
+    const stall = stallPending;
+    if (!stall) return;
+    if (stall.wakes !== deliveries) {
+      // Somebody was woken between the drop and now — the chain is advancing.
+      stallPending = null;
+      return;
+    }
+    stallPending = null;
+    const idx = agentNames.indexOf(agentName);
+    const nextHop = idx === -1 ? SINK_RECIPIENT : (agentNames[idx + 1] ?? SINK_RECIPIENT);
+    const reasonText = `\`${agentName}\`'s message was dropped (${stall.reasonCode}): ${stall.detail} No agent was woken, so this chain cannot advance on its own.`;
+    captureError(reasonText);
+    let errorEventId = 0;
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        USER_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      errorEventId = row.id;
+      try {
+        sink.onEvent(
+          sessionId,
+          {
+            ts: Date.now(),
+            source: CEBAB_SOURCE,
+            destination: USER_RECIPIENT,
+            kind: 'error',
+            text: reasonText,
+          },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[chain] stalled-drop onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      console.error('[chain] persist stalled-drop event failed', persistErr);
+    }
+    // Persisted directly, NOT via `forwardCebabEvent`, so this explanatory row
+    // does not spend a hop — same treatment the budget-exhaust and
+    // worker-failed events get.
+    const prompt =
+      `Your last \`bus_send\` was rejected by the Cebab router and reached nobody, ` +
+      `so this chain run stopped with no agent awake.\n\n` +
+      `Reason: ${stall.detail}\n\n` +
+      `You are \`${agentName}\` in this chain and your one destination is ` +
+      `\`${nextHop}\`. Send your result there with \`bus_send\` now, and address ` +
+      `nobody else.`;
+    const descriptor: PendingRetryDescriptor = {
+      agentName,
+      reason: reasonText,
+      lastPrompt: prompt,
+      ts: Date.now(),
+      errorEventId,
+    };
+    try {
+      setPendingRetry(sessionId, {
+        agentName,
+        prompt,
+        reason: reasonText,
+        ts: descriptor.ts,
+        errorEventId,
+      });
+    } catch (dbErr) {
+      console.error('[chain] persist stalled-drop pending-retry failed', dbErr);
+    }
+    try {
+      sink.onPendingRetry?.(sessionId, descriptor);
+    } catch (sinkErr) {
+      console.error('[chain] stalled-drop onPendingRetry threw', sinkErr);
+    }
+  };
+
   const handleEvent = (ev: BusEvent) => {
     if (ended) return;
     // F3: source=cebab is Cebab's own traffic, routed in-process via
@@ -442,6 +586,10 @@ export function createChainRouter(params: {
         title: 'Forged source=cebab dropped',
         message: `dest=${ev.destination} kind=${ev.kind}`,
       });
+      noteStall(
+        'forged_source',
+        `it claimed to come from \`${CEBAB_SOURCE}\`, which no agent may.`,
+      );
       return;
     }
     // F2: chain terminates at `_sink`, never at `user`. dest=user is a spoof.
@@ -455,6 +603,10 @@ export function createChainRouter(params: {
         title: 'Agent tried to address user directly',
         message: `from=${ev.source}`,
       });
+      noteStall(
+        'worker_to_user',
+        `it was addressed to \`${USER_RECIPIENT}\`, and a chain terminates at \`${SINK_RECIPIENT}\`, never at the user.`,
+      );
       return;
     }
     // F2: source must be a known participant. (Defense-in-depth — the
@@ -469,6 +621,10 @@ export function createChainRouter(params: {
         title: 'Unknown source on bus',
         message: `source=${ev.source}`,
       });
+      noteStall(
+        'unknown_source',
+        `it claimed to come from \`${ev.source}\`, who is not in this chain.`,
+      );
       return;
     }
     // Register B24: an agent addressing itself. Nothing rejected this, so
@@ -490,6 +646,7 @@ export function createChainRouter(params: {
         title: 'Agent addressed itself',
         message: `${ev.source} sent to itself — the message was dropped rather than waking the sender again`,
       });
+      noteStall('self_addressed', `it was addressed to \`${ev.source}\` — that is you.`);
       return;
     }
 
@@ -565,6 +722,10 @@ export function createChainRouter(params: {
           title: 'Agent tried to end the chain early',
           message: `${ev.source} addressed _sink, which only the last participant may do — the chain was not completed`,
         });
+        noteStall(
+          'unauthorized_sink',
+          `it was addressed to \`${SINK_RECIPIENT}\`, which only the last participant in the chain may do.`,
+        );
         return;
       }
       try {
@@ -594,6 +755,10 @@ export function createChainRouter(params: {
         title: 'Message addressed to an unknown agent',
         message: `${ev.source} addressed ${ev.destination}, who is not in this chain — the message was dropped`,
       });
+      noteStall(
+        'unknown_destination',
+        `it was addressed to \`${ev.destination}\`, who is not in this chain.`,
+      );
       return;
     }
     // Hop-budget enforcement: the hop we just persisted is in the trail; if
@@ -640,6 +805,13 @@ export function createChainRouter(params: {
     // `ev.source` is pinned per-agent in `makeBusToolServer`'s closure and has
     // already passed the participant allowlist above, so it is a trustworthy
     // label for who wrote `ev.text` — which is what the fence needs.
+    //
+    // Cebab-wsq: the router's ONE wake, so this is where `deliveries` moves.
+    // A drop earlier in the same turn is cancelled by reaching here (the run
+    // is advancing after all); a drop AFTER it still parks, because
+    // `parkIfStalled` compares the count captured at the drop, not "has this
+    // turn ever woken anyone".
+    deliveries += 1;
     deliver?.(ev.destination, ev.text, ev.source);
   };
 
@@ -670,6 +842,21 @@ export function createChainRouter(params: {
       sink.onEvent(sessionId, ev, dbId);
     } catch (err) {
       console.error('[chain] cebab onEvent threw', err);
+    }
+    // Register B13: the archive's prompt map is otherwise written only by
+    // `handleEvent`, which never sees the run's ORIGINATING prompt — that
+    // arrives here, because Cebab wrote it rather than an agent. So
+    // `archiveAgentHop` read `undefined ?? ''` for the first participant and
+    // every chain run wrote the operator's instruction to disk as an empty
+    // `prompt.md`.
+    //
+    // Keyed on `kind`, not on "is this the first participant". `'prompt'` is
+    // Cebab-to-participant task text and is exactly what an archived prompt
+    // should hold; the briefing and the CLAUDE.md marker are `'intro'` and must
+    // NOT overwrite it (they are already in the on-disk transcript). Any future
+    // Cebab-originated prompt is then archived correctly with no second fix.
+    if (ev.kind === 'prompt' && participantSet.has(ev.destination)) {
+      lastPromptForAgent.set(ev.destination, ev.text);
     }
   };
 
@@ -711,6 +898,11 @@ export function createChainRouter(params: {
   // teardown — there's nothing to retry.
   const onWorkerFailed = (agentName: string, prompt: string, err: unknown) => {
     if (ended) return;
+    // Cebab-wsq: this turn failed, so it will never reach `onTurnSucceeded`,
+    // and the slot below is the right one to show. Dropping the note keeps a
+    // drop earlier in the same turn from re-parking over the failure reason on
+    // some later agent's success.
+    stallPending = null;
     const errMessage =
       err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
     const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
@@ -786,16 +978,28 @@ export function createChainRouter(params: {
     if (ended) return;
     try {
       const pending = getPendingRetry(sessionId);
-      if (!pending || pending.agentName !== agentName) return;
-      setPendingRetry(sessionId, null);
-      try {
-        sink.onPendingRetry?.(sessionId, null);
-      } catch (sinkErr) {
-        console.error('[chain] turn-succeeded onPendingRetry-null threw', sinkErr);
+      if (pending && pending.agentName === agentName) {
+        setPendingRetry(sessionId, null);
+        try {
+          sink.onPendingRetry?.(sessionId, null);
+        } catch (sinkErr) {
+          console.error('[chain] turn-succeeded onPendingRetry-null threw', sinkErr);
+        }
       }
     } catch (err) {
       console.error('[chain] clear pending-retry on success failed', err);
     }
+    // Cebab-wsq: AFTER the clear above, and unconditionally — not inside it.
+    //
+    // Order first: a drop happens mid-turn, so the slot this parks is written
+    // moments before that same turn resolves. Parking above the clear would
+    // hand the sender's own success the slot to erase, which is the exact
+    // shape that makes this whole fix inert.
+    //
+    // Unconditional second: the clear returns early when the slot belongs to
+    // a different agent (or when there is none at all), and a stalled chain
+    // must still be parked in both of those cases.
+    parkIfStalled(agentName);
   };
 
   return {
@@ -963,6 +1167,13 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       });
     } catch (err) {
       console.error('[chain] persist mutation failed', err);
+      // Cebab-aqd (mirrors orchestrator.ts): halt rather than run a dangerous
+      // call the armed gate was unable to record. See
+      // `shouldHaltUnrecordedMutation` for why the gate below cannot be used
+      // on this path.
+      if (shouldHaltUnrecordedMutation(sessionId, cls.category)) {
+        throw new MutationNotRecordedError(toolName, cls.summary);
+      }
       return;
     }
     try {

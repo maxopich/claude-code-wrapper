@@ -30,7 +30,8 @@ export type ShutdownDeps = {
   closeWss: () => void;
   /** Close the HTTP server; `cb` fires once connections have drained. */
   closeServer: (cb: () => void) => void;
-  closeLogger: () => void;
+  /** Resolves once the transcript streams are closed; see `runner/logger.ts`. */
+  closeLogger: () => void | Promise<void>;
   closeDb: () => void;
   /** Injected so tests can observe it; production passes `process.exit`. */
   exit: (code: number) => void;
@@ -75,10 +76,18 @@ export function createShutdown(deps: ShutdownDeps): (signal: string) => void {
     deps.terminateClients();
     deps.closeWss();
     deps.closeServer(() => {
-      deps.closeLogger();
-      deps.closeDb();
-      log('[cebab] bye');
-      deps.exit(0);
+      // Cebab-kji: awaited. `closeLogger` initiates the close synchronously but
+      // only RESOLVES once the transcript streams have finished, and everything
+      // after this line used to run while buffered bytes were still in flight —
+      // so a Ctrl+C could exit with the tail of a transcript unwritten. The
+      // wait is bounded twice over: `closeLogger` has its own per-stream
+      // timeout, and the failsafe below still fires at 3s regardless.
+      void (async () => {
+        await deps.closeLogger();
+        deps.closeDb();
+        log('[cebab] bye');
+        deps.exit(0);
+      })();
     });
 
     // Failsafe: a connection that never drains must not hang the process

@@ -81,6 +81,37 @@ type InboxRow = {
   reason_code: string | null;
 };
 
+/**
+ * Register D10: tolerant parse for the two JSON columns. Both were parsed
+ * bare, so ONE malformed row threw out of `rowToEnvelope` → `listInbox` →
+ * `buildInboxSnapshot` — which the attach path calls unguarded. The blast
+ * radius of a single bad column was the operator's whole attach snapshot
+ * rather than one missing notification.
+ *
+ * Reachability is the same one `parseClassifierReason` already documents for
+ * `classifier_reason_json`: a row written by an older binary, or a row touched
+ * by `sqlite3` CLI edits. The shape is enforced at write time, so this is the
+ * degraded path, not the expected one.
+ *
+ * Falling back to `undefined` matches what an absent column already produces,
+ * so a malformed `details` renders exactly like a notification that never
+ * carried details — the row itself, and every other row, still ships.
+ *
+ * Deliberately local rather than a shared helper: the repo has four of these
+ * (`getSetting`, `listSettings`, `parseClassifierReason`, `parseToolIoJson`,
+ * `safeParseJson`) and each has a different result type and a different
+ * fallback — `null`, the raw string, `undefined`. One helper over five
+ * incompatible contracts would be abstraction for its own sake.
+ */
+function parseJsonColumn<T>(json: string | null): T | undefined {
+  if (!json) return undefined;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToEnvelope(row: InboxRow): NotificationEnvelope {
   return {
     id: row.id,
@@ -90,10 +121,10 @@ function rowToEnvelope(row: InboxRow): NotificationEnvelope {
     dedupeKey: row.dedupe_key,
     title: row.title,
     message: row.message ?? undefined,
-    details: row.details_json ? JSON.parse(row.details_json) : undefined,
+    details: parseJsonColumn(row.details_json),
     sessionId: row.session_id ?? undefined,
     projectId: row.project_id ?? undefined,
-    action: row.action_json ? (JSON.parse(row.action_json) as NotificationAction) : undefined,
+    action: parseJsonColumn<NotificationAction>(row.action_json),
     sticky: row.sticky === 1,
     auditRowId: row.audit_row_id ?? undefined,
     reasonCode: row.reason_code ?? undefined,

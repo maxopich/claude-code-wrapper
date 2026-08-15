@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { config } from './config.js';
 import { precreateDbFile, secureMkdir } from './data_perms.js';
+import { hashMigrationSql } from './migration_integrity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
@@ -162,6 +163,43 @@ function ensureMigrationsTable(db: Database.Database): void {
       applied_at INTEGER NOT NULL
     )
   `);
+
+  // Cebab-x1n.7.31: `content_sha` records the hash of the NORMALIZED SQL this
+  // database actually applied, so a later edit to a shipped `.sql` is
+  // detectable instead of silently splitting installs. See
+  // `migration_integrity.ts` for why the hash is over normalized SQL and not
+  // over bytes.
+  //
+  // WHY THIS IS NOT A NUMBERED MIGRATION, deliberately. `schema_migrations` is
+  // the runner's OWN bookkeeping table — it is created here, outside the
+  // migration system, before any migration runs. A migration that alters the
+  // ledger it is recorded in would add a bootstrap ordering dependency for no
+  // benefit, and would make `npm run smoke`'s migration count mean something
+  // other than "application schema". The table's owner extends it.
+  const cols = db
+    .prepare<[string], { name: string }>('SELECT name FROM pragma_table_info(?)')
+    .all('schema_migrations');
+  if (!cols.some((c) => c.name === 'content_sha')) {
+    db.exec('ALTER TABLE schema_migrations ADD COLUMN content_sha TEXT');
+  }
+}
+
+/**
+ * tsx runs from src/, tsc-built code runs from dist/. The migrations dir is
+ * copied next to the build output, but during dev we read from src/.
+ *
+ * Exported because the integrity check and the runner must agree on WHICH
+ * directory they are looking at — two independent copies of this resolution
+ * could disagree in a built tree and the check would then compare against
+ * files the runner never applied.
+ */
+export function resolveMigrationsDir(): string {
+  const dirs = [MIGRATIONS_DIR, path.join(__dirname, '..', 'src', 'migrations')];
+  const migrationsDir = dirs.find((d) => fs.existsSync(d));
+  if (!migrationsDir) {
+    throw new Error(`No migrations directory found. Tried: ${dirs.join(', ')}`);
+  }
+  return migrationsDir;
 }
 
 function applyMigrations(db: Database.Database): void {
@@ -172,13 +210,7 @@ function applyMigrations(db: Database.Database): void {
       .map((r) => r.filename),
   );
 
-  // tsx runs from src/, tsc-built code runs from dist/. The migrations dir is
-  // copied next to the build output, but during dev we read from src/.
-  const dirs = [MIGRATIONS_DIR, path.join(__dirname, '..', 'src', 'migrations')];
-  const migrationsDir = dirs.find((d) => fs.existsSync(d));
-  if (!migrationsDir) {
-    throw new Error(`No migrations directory found. Tried: ${dirs.join(', ')}`);
-  }
+  const migrationsDir = resolveMigrationsDir();
 
   const files = fs
     .readdirSync(migrationsDir)
@@ -188,10 +220,15 @@ function applyMigrations(db: Database.Database): void {
   for (const file of files) {
     if (applied.has(file)) continue;
     const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-    const insert = db.prepare('INSERT INTO schema_migrations (filename, applied_at) VALUES (?, ?)');
+    const insert = db.prepare(
+      'INSERT INTO schema_migrations (filename, applied_at, content_sha) VALUES (?, ?, ?)',
+    );
+    // Hashed inside the transaction alongside the exec, so a row can never
+    // record a hash for SQL that did not apply.
+    const sha = hashMigrationSql(sql);
     db.transaction(() => {
       db.exec(sql);
-      insert.run(file, Date.now());
+      insert.run(file, Date.now(), sha);
     })();
     console.log(`[db] applied ${file}`);
   }

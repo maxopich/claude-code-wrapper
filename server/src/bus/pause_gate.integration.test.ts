@@ -14,8 +14,12 @@ import {
   setPauseOnDangerous,
   type MutationRecord,
 } from '../repo/multi_agent.js';
-import { isPausedForMutation } from './errors.js';
-import { applyPauseGate, releasePauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import {
+  applyPauseGate,
+  releasePauseForMutation,
+  shouldHaltUnrecordedMutation,
+} from './pause_gate.js';
 
 // The pause gate against a real DB. `pause_gate.test.ts` pins the pure decision
 // table; this file pins the three register bugs that only show up once the
@@ -181,5 +185,126 @@ describe('pause gate over a real DB [security]', () => {
     // call — but if it does, it must not duplicate the banner.
     expect(gate('coder', 'rm -rf /tmp/y').paused).toBe(false);
     expect(listPendingMutations(SID)).toHaveLength(1);
+  });
+
+  // D20 / migration 034. The unique index means a repeated `tool_use` id no
+  // longer inserts — and the append sites `return` on a throw, upstream of
+  // this gate. So "the constraint is enforced" and "the gate still runs" are
+  // the same question, and only the second one is about the operator.
+  describe('a repeated tool_use id still reaches the gate', () => {
+    /** `gate`, but with a real tool_use id so the index applies. */
+    function gateWithId(
+      agent: string,
+      summary: string,
+      toolUseId: string,
+    ): { row: MutationRecord; paused: boolean } {
+      const row = appendMultiAgentMutation(SID, agent, 'Bash', 'dangerous', summary, {
+        filePath: null,
+        cwd: `/ws/${agent}`,
+        toolUseId,
+      });
+      try {
+        applyPauseGate(row);
+        return { row, paused: false };
+      } catch (err) {
+        if (!isPausedForMutation(err)) throw err;
+        return { row, paused: true };
+      }
+    }
+
+    test('the replayed call halts the turn, on the row that already exists', () => {
+      // The scenario: the operator releases the pause, Continue replays the
+      // captured prompt, and the fresh turn re-issues the same command with
+      // the same id. Pre-034 that appended a second row. Post-034 it must
+      // resolve to the first one and pause again — migration 031 says the
+      // grant is one command, one agent, once.
+      const first = gateWithId('coder', 'rm -rf /tmp/x', 'toolu_replay');
+      expect(first.paused).toBe(true);
+
+      releasePauseForMutation(SID, first.row.id); // operator clicks Continue
+      const replay = gateWithId('coder', 'rm -rf /tmp/x', 'toolu_replay');
+
+      // The grant covers this exact command once, so the replay runs...
+      expect(replay.paused).toBe(false);
+      expect(replay.row.id).toBe(first.row.id);
+
+      // ...and the NEXT repeat of the same id pauses again on the same row,
+      // rather than sliding through on a spent grant or a duplicate.
+      const third = gateWithId('coder', 'rm -rf /tmp/x', 'toolu_replay');
+      expect(third.paused).toBe(true);
+      expect(third.row.id).toBe(first.row.id);
+      expect(listPendingMutations(SID).map((m) => m.id)).toEqual([first.row.id]);
+    });
+
+    test('control: an unarmed gate still lets the repeat through', () => {
+      // Anti-vacuity for the case above — an append that started throwing
+      // would fail both, so this pins that the pausing is the gate's doing.
+      setPauseOnDangerous(SID, false);
+      expect(gateWithId('coder', 'rm -rf /tmp/x', 'toolu_free').paused).toBe(false);
+      expect(gateWithId('coder', 'rm -rf /tmp/x', 'toolu_free').paused).toBe(false);
+      expect(listPendingMutations(SID)).toEqual([]);
+    });
+  });
+});
+
+// Cebab-aqd. `applyPauseGate` cannot run when the mutation could not be
+// persisted — it reads the same table and marks the pause by row id. The
+// routers' taps therefore take this decision in their catch instead, and it
+// has to be the SAME decision, which is why it lives beside the gate.
+describe('shouldHaltUnrecordedMutation — the gate when there is no row [security]', () => {
+  test('a dangerous call under an armed gate HALTS', () => {
+    expect(shouldHaltUnrecordedMutation(SID, 'dangerous')).toBe(true);
+  });
+
+  test('control: a dangerous call under a DISARMED gate runs', () => {
+    // Anti-vacuity, and a real behaviour requirement: an operator who turned
+    // the gate off chose that, and a failed write is no reason to kill their
+    // turn. Without this case the fix could be "always halt" and still pass.
+    setPauseOnDangerous(SID, false);
+    expect(shouldHaltUnrecordedMutation(SID, 'dangerous')).toBe(false);
+  });
+
+  test('control: a `mutate` call runs even under an armed gate', () => {
+    // Same rule `decidePauseForMutation` applies — the gate is for dangerous
+    // commands only. A fix that halted every unrecorded mutation would stop
+    // ordinary edits on a hiccup.
+    expect(shouldHaltUnrecordedMutation(SID, 'mutate')).toBe(false);
+  });
+
+  test('an unreadable gate state HALTS — unknown resolves to caution', () => {
+    // The database is sick enough that the mutation write failed; the session
+    // read can fail too. Dropping the table it reads makes that real rather
+    // than mocked.
+    getDb().exec('DROP TABLE multi_agent_sessions');
+    expect(shouldHaltUnrecordedMutation(SID, 'dangerous')).toBe(true);
+  });
+
+  test('control: an unreadable gate state still lets a `mutate` call run', () => {
+    // The category check must come FIRST. If the fix read the session before
+    // testing the category, a sick database would halt every mutation.
+    getDb().exec('DROP TABLE multi_agent_sessions');
+    expect(shouldHaltUnrecordedMutation(SID, 'mutate')).toBe(false);
+  });
+});
+
+describe('MutationNotRecordedError routes to worker-failed, not to a silent pause [security]', () => {
+  const err = new MutationNotRecordedError('Bash', 'rm -rf /tmp/x');
+
+  test('isPausedForMutation is FALSE for it — the whole fix depends on this', () => {
+    // Both routers' `deliver().catch` open with `if (isPausedForMutation(err))
+    // return;`. If this error were recognised there, the turn would die
+    // silently with no pending row and no banner, and the operator would see
+    // an agent that simply stopped. It has to fall through to onWorkerFailed,
+    // which parks a pending-retry slot and gives them Retry / Abandon.
+    expect(isPausedForMutation(err)).toBe(false);
+  });
+
+  test('and it is not mistaken for a stalled turn either', () => {
+    expect(isTurnStalled(err)).toBe(false);
+  });
+
+  test('its message says nothing ran, since it becomes the operator banner', () => {
+    expect(err.message).toContain('Nothing was run');
+    expect(err.message).toContain('rm -rf /tmp/x');
   });
 });
