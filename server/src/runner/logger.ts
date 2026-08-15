@@ -103,12 +103,72 @@ export async function logEvent(sessionId: string, payload: unknown): Promise<Log
   return { ok: true };
 }
 
-export function closeLogger(sessionId?: string): void {
+/** How long a single stream gets to finish closing before we stop waiting. */
+const CLOSE_TIMEOUT_MS = 2000;
+
+/**
+ * Resolve when `stream` has actually closed, or when the budget runs out.
+ *
+ * Waits for `'close'` rather than `'finish'` on purpose. A stream whose
+ * `open(2)` failed emits `'error'` and may never emit `'finish'`, so awaiting
+ * the latter would hang exactly the case this exists for; `fs.WriteStream`
+ * defaults to `autoClose`, so `'close'` follows `'error'` too. An
+ * already-closed stream resolves immediately rather than waiting for an event
+ * that has been and gone.
+ *
+ * The timeout is shorter than `DRAIN_TIMEOUT_MS` deliberately: a caller that
+ * reaches here has already given up on the data, and this budget is spent
+ * inside a SIGINT handler that the shutdown failsafe will kill at 3s.
+ */
+function closedOrTimeout(stream: fs.WriteStream): Promise<void> {
+  if (stream.closed) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      stream.off('close', done);
+      resolve();
+    }, CLOSE_TIMEOUT_MS);
+    // `.unref()` where available: a pending timer must not be the reason a
+    // clean shutdown stays alive.
+    timer.unref?.();
+    stream.once('close', done);
+    stream.end();
+  });
+}
+
+/**
+ * Close the session's transcript stream (or every stream), and **resolve once
+ * it is really closed**.
+ *
+ * The returned promise is the point. `stream.end()` does not block, and
+ * `fs.createWriteStream` opens its fd on a later tick, so the old `void`
+ * version returned while a write — or even the initial `open` — was still in
+ * flight. Two consequences, one per caller:
+ *
+ *   - a test that removed its temp data dir straight afterwards raced that
+ *     `open`, which then failed `ENOENT` and logged from the stream's `'error'`
+ *     handler AFTER the test had finished. vitest ships console output to its
+ *     parent over rpc, and a line landing during worker teardown fails the
+ *     whole run with every test green (`Cebab-kji`);
+ *   - `shutdown.ts` called this and then `process.exit`, so a Ctrl+C could
+ *     drop buffered transcript bytes.
+ *
+ * The map is cleared BEFORE awaiting so a concurrent `logEvent` opens a fresh
+ * stream instead of writing into one being torn down. Callers that do not care
+ * may still ignore the promise — the close is initiated synchronously either
+ * way.
+ */
+export function closeLogger(sessionId?: string): Promise<void> {
   if (sessionId) {
-    streams.get(sessionId)?.stream.end();
+    const entry = streams.get(sessionId);
     streams.delete(sessionId);
-    return;
+    if (!entry) return Promise.resolve();
+    return closedOrTimeout(entry.stream);
   }
-  for (const e of streams.values()) e.stream.end();
+  const entries = [...streams.values()];
   streams.clear();
+  return Promise.all(entries.map((e) => closedOrTimeout(e.stream))).then(() => undefined);
 }
