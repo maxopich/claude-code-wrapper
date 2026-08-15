@@ -9,6 +9,7 @@ import type { MockOptions, RunOptions, Runner } from '../runner/index.js';
 import {
   AgentRunner,
   BUS_KINDS,
+  BUS_SEND_TEXT_MAX_BYTES,
   DEFAULT_OVERLOAD_BACKOFF_MS,
   handleBusSend,
   isTransientOverload,
@@ -67,6 +68,41 @@ describe('handleBusSend', () => {
     expect(onEvent).not.toHaveBeenCalled();
   });
 
+  test('[security] a text body over the byte cap is rejected, not truncated', () => {
+    const onEvent = vi.fn();
+    const justUnder = 'a'.repeat(BUS_SEND_TEXT_MAX_BYTES);
+    expect(
+      handleBusSend('a', { recipient: 'b', kind: 'reply', text: justUnder }, onEvent).isError,
+    ).toBeFalsy();
+    expect(onEvent).toHaveBeenCalledTimes(1);
+
+    onEvent.mockClear();
+    const over = 'a'.repeat(BUS_SEND_TEXT_MAX_BYTES + 1);
+    const res = handleBusSend('a', { recipient: 'b', kind: 'reply', text: over }, onEvent);
+    expect(res.isError).toBe(true);
+    // Rejected outright — a truncated body would reach the peer looking
+    // complete, so the router must never see the event at all.
+    expect(onEvent).not.toHaveBeenCalled();
+    // The message has to be actionable: the model reads this tool result and
+    // is expected to resend something shorter.
+    expect(res.content[0]!.text).toContain(String(BUS_SEND_TEXT_MAX_BYTES + 1));
+    expect(res.content[0]!.text).toContain(String(BUS_SEND_TEXT_MAX_BYTES));
+  });
+
+  test('[security] the cap counts UTF-8 bytes, not codepoints', () => {
+    const onEvent = vi.fn();
+    // Every char here is 4 bytes, so a string one quarter the cap in
+    // codepoints is exactly at it — a `.length` check would let 4x through.
+    const fourByteChar = '𝄞';
+    expect(Buffer.byteLength(fourByteChar, 'utf8')).toBe(4);
+    const over = fourByteChar.repeat(BUS_SEND_TEXT_MAX_BYTES / 4 + 1);
+    expect(over.length).toBeLessThan(BUS_SEND_TEXT_MAX_BYTES);
+    expect(handleBusSend('a', { recipient: 'b', kind: 'reply', text: over }, onEvent).isError).toBe(
+      true,
+    );
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
   test('[security] an agent cannot forge its source identity', () => {
     // The agent only controls recipient/kind/text. Even if it injects a
     // `source` (or `from`) field, the signature drops it — the stamped
@@ -86,22 +122,12 @@ describe('handleBusSend', () => {
   });
 });
 
-test('makeBusToolServer builds a `cebab_bus` MCP server by default', () => {
+test('makeBusToolServer builds a `cebab_bus` MCP server', () => {
   const server = makeBusToolServer('alpha', () => {}) as { type: string; name: string };
   expect(server).toBeTruthy();
   expect(server.type).toBe('sdk');
   expect(server.name).toBe('cebab_bus');
   expect(BUS_KINDS).toEqual(['intro', 'prompt', 'reply', 'final']);
-});
-
-test('makeBusToolServer honors a custom server name (used for the `bus` deprecation shim)', () => {
-  // runOneAttempt registers a second instance under the `bus` key to keep
-  // resumed CLI sessions whose JSONL history calls `mcp__bus__bus_send`
-  // resolving after PR #99 renamed the canonical key. The metadata `name`
-  // must match the mcpServers key so the SDK advertises the prefix that
-  // the resumed history references.
-  const server = makeBusToolServer('alpha', () => {}, 'bus') as { type: string; name: string };
-  expect(server.name).toBe('bus');
 });
 
 // --- AgentRunner ---------------------------------------------------------
@@ -143,27 +169,28 @@ describe('AgentRunner', () => {
     expect(calls[0]!.allowDangerouslySkipPermissions).toBe(true);
     // Canonical key is `cebab_bus` (the rename was deliberate so a worker's
     // own project-defined `mcpServers.bus` cannot collide with the identity-
-    // pinned bus_send injection). `bus` is ALSO registered as a deprecation
-    // shim so resumed CLI sessions whose JSONL history calls
-    // `mcp__bus__bus_send` keep resolving — see the alias coverage below.
+    // pinned bus_send injection).
     expect(calls[0]!.mcpServers).toHaveProperty('cebab_bus');
-    expect(calls[0]!.mcpServers).toHaveProperty('bus');
     expect(calls[1]!.resume).toBe('sess-7');
   });
 
-  test('both `cebab_bus` and `bus` mcpServers expose identity-pinned bus_send (rename deprecation shim)', async () => {
-    // Regression for the silent-stall bug seen on Cebab session
-    // 67a5e371: PR #99 renamed `bus` → `cebab_bus`, and resumed CLI
-    // sessions that still called `mcp__bus__bus_send` from their JSONL
-    // history hit "No such tool available", fell back to plain assistant
-    // text, and the router dropped the reply. Registering `bus` under the
-    // same identity-pinned handler keeps those resumed turns working.
+  test('[security] `cebab_bus` is the ONLY mcpServer Cebab injects (no `bus` alias)', async () => {
+    // PR #99 renamed `bus` → `cebab_bus` and a second registration under the
+    // bare `bus` key was kept as a deprecation shim, so CLI sessions resumed
+    // across that commit — whose JSONL history calls `mcp__bus__bus_send` —
+    // would not hit "No such tool available". That window closed; the shim
+    // is now a liability rather than a convenience, in two ways:
     //
-    // The alias must remain identity-pinned: each registration is a
-    // separately-built McpSdkServerConfigWithInstance with its own closure
-    // capturing the agent name. They are NOT the same object reference, so
-    // the two instances cannot share mutable state that an agent could
-    // poison.
+    //   1. It clobbers a legitimate `mcpServers.bus` in a participant's own
+    //      `.claude/settings*.json` — the exact collision the namespaced key
+    //      was introduced to prevent, now reachable because workers load
+    //      project + local scopes.
+    //   2. `bus` had to be allow-listed in `project_authority`'s
+    //      CEBAB_INJECTED_MCP_NAMES, and anything on that list is granted
+    //      `trust: 'trusted'` and skipped by the MCP TOFU gate.
+    //
+    // Pinned as a set-equality (not just `not.toHaveProperty('bus')`) so any
+    // future injection has to be added here deliberately.
     const calls: (RunOptions & Partial<MockOptions>)[] = [];
     const runner = new AgentRunner({
       onEvent: () => {},
@@ -176,11 +203,71 @@ describe('AgentRunner', () => {
     await runner.deliverTurn('alpha', 'go');
 
     const servers = calls[0]!.mcpServers as Record<string, { type: string; name: string }>;
+    expect(Object.keys(servers)).toEqual(['cebab_bus']);
     expect(servers.cebab_bus?.type).toBe('sdk');
     expect(servers.cebab_bus?.name).toBe('cebab_bus');
-    expect(servers.bus?.type).toBe('sdk');
-    expect(servers.bus?.name).toBe('bus');
-    expect(servers.cebab_bus).not.toBe(servers.bus);
+  });
+
+  test('onTurnCost fires with the hop cost, including on a failed turn', async () => {
+    // F7. Two things are pinned here beyond "the hook is called":
+    //   - the value is the raw per-invocation `total_cost_usd`, forwarded
+    //     unaggregated (the repo layer accumulates), and
+    //   - a NON-SUCCESS result still bills. A turn that burned quota and then
+    //     errored cost real money; skipping it would make the recorded total
+    //     under-report exactly the runs an operator wants to account for.
+    const costs: Array<[string, number]> = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onTurnCost: (agent, usd) => costs.push([agent, usd]),
+      // `error_during_execution` is on the transient-overload retry heuristic;
+      // disable backoff so the test doesn't sit through the schedule (same
+      // reason as the checkpoint-ordering tests below).
+      overloadBackoffMs: [],
+      runnerFactory: () =>
+        fakeRunner([
+          {
+            type: 'result',
+            subtype: 'error_during_execution',
+            session_id: 's-cost',
+            total_cost_usd: 0.1234,
+          } as unknown as SDKMessage,
+        ]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    // The non-success subtype is normalized into a throw for the routers;
+    // the cost hook must already have fired by then.
+    await expect(runner.deliverTurn('alpha', 'go')).rejects.toThrow(/error_during_execution/);
+    expect(costs).toEqual([['alpha', 0.1234]]);
+  });
+
+  test('onTurnCost is skipped when the result carries no numeric cost', async () => {
+    const costs: Array<[string, number]> = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onTurnCost: (agent, usd) => costs.push([agent, usd]),
+      runnerFactory: () =>
+        fakeRunner([
+          { type: 'result', subtype: 'success', session_id: 's-nocost' } as unknown as SDKMessage,
+        ]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await runner.deliverTurn('alpha', 'go');
+    expect(costs).toEqual([]);
+  });
+
+  test('a throwing onTurnCost cannot abort the turn', async () => {
+    // Same best-effort posture as onSessionId: accounting is not worth losing
+    // a turn over.
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      onTurnCost: () => {
+        throw new Error('db down');
+      },
+      runnerFactory: () => fakeRunner([resultMsg('s-ok')]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await expect(runner.deliverTurn('alpha', 'go')).resolves.toBeUndefined();
   });
 
   test('register passes the spec.settingSources through to the SDK', async () => {
@@ -384,10 +471,15 @@ describe('AgentRunner', () => {
   // production) propagates out of `deliverTurn`; the router's `.catch`
   // recognises the sentinel as a controlled pause.
   describe('mutation tap', () => {
-    function assistantWithTool(name: string, input: unknown): SDKMessage {
+    // `id` is explicit because B15 made it load-bearing: the tap now fires at
+    // most once per `tool_use` id per hop. Distinct calls carry distinct ids in
+    // real SDK output, so a fixture that reuses one is describing something
+    // that cannot happen — which is exactly how the three-call case below used
+    // to read before this parameter existed.
+    function assistantWithTool(name: string, input: unknown, id = 'x'): SDKMessage {
       return {
         type: 'assistant',
-        message: { content: [{ type: 'tool_use', id: 'x', name, input }] },
+        message: { content: [{ type: 'tool_use', id, name, input }] },
       } as unknown as SDKMessage;
     }
 
@@ -416,9 +508,9 @@ describe('AgentRunner', () => {
         },
         runnerFactory: () =>
           fakeRunner([
-            assistantWithTool('Write', { file_path: '/foo', content: 'x' }),
-            assistantWithTool('Bash', { command: 'git commit -m m' }),
-            assistantWithTool('Bash', { command: 'rm -rf node_modules' }),
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }, 'x'),
+            assistantWithTool('Bash', { command: 'git commit -m m' }, 'y'),
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'z'),
             resultMsg('sess-1'),
           ]),
       });
@@ -437,6 +529,184 @@ describe('AgentRunner', () => {
       expect(seen[1]!.filePath).toBeUndefined();
       expect(seen[2]!.category).toBe('dangerous');
       expect(seen[2]!.summary).toContain('rm -rf');
+    });
+
+    // --- B10: the tap must not record a call the policy will deny ---------
+    //
+    // A `tool_use` block says the SDK is ABOUT to dispatch. For a
+    // `delegate-only` agent (the orchestrator) `makeCanUseTool` denies
+    // everything outside `isDelegationAllowedTool`, but that runs when the SDK
+    // asks — AFTER this message. The tap used to record first and let the
+    // denial happen later, so a blocked `Bash` still wrote a `dangerous`
+    // mutation row and could trip the pause gate for a command that never ran.
+
+    test('[security] a delegate-only agent gets NO mutation row for a tool its policy denies', async () => {
+      const seen: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, toolName) => {
+          seen.push(toolName);
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf /' }, 'a'),
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }, 'b'),
+            resultMsg('sess-deny'),
+          ]),
+      });
+      runner.register({ name: 'orchestrator', cwd: '/tmp/orch', toolPolicy: 'delegate-only' });
+      await runner.deliverTurn('orchestrator', 'go');
+      expect(seen).toEqual([]);
+    });
+
+    test('the same blocks DO fire for an agent without delegate-only', async () => {
+      // The control for the case above. Without it, "the tap fired zero times"
+      // is also satisfied by a tap that never fires at all — which would pass
+      // while silently disabling the pause gate for every worker.
+      const seen: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, toolName) => {
+          seen.push(toolName);
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf /' }, 'a'),
+            assistantWithTool('Write', { file_path: '/foo', content: 'x' }, 'b'),
+            resultMsg('sess-allow'),
+          ]),
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/worker' });
+      await runner.deliverTurn('worker', 'go');
+      expect(seen).toEqual(['Bash', 'Write']);
+    });
+
+    // --- B15: one row per tool_use id per hop ------------------------------
+    //
+    // `runOneTurn` retries a transient 529 by re-running the SAME turn, and the
+    // retry may `--resume` the failed attempt's checkpoint. Anything re-emitted
+    // is a repeat of a call already recorded, not a second call.
+
+    test('a 529 retry re-emitting the SAME tool_use id records it once', async () => {
+      const seen: string[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(String(cls.toolUseId));
+        },
+        runnerFactory: () => {
+          n++;
+          if (n === 1) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              yield assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'dup');
+              throw new Error('API Error: 529 Overloaded');
+            }
+            const it = boom();
+            return { [Symbol.asyncIterator]: () => it, close: () => {} };
+          }
+          return fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'dup'),
+            resultMsg('sess-retry'),
+          ]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('coder', 'go');
+      warnSpy.mockRestore();
+      expect(n).toBe(2); // the retry really happened
+      expect(seen).toEqual(['dup']); // ...and recorded the call once
+    });
+
+    test('a 529 retry emitting a DIFFERENT id records both', async () => {
+      // Anti-vacuity control for the case above: a filter that drops everything
+      // after the first block would satisfy it. These are two genuinely
+      // different calls and both must survive.
+      const seen: string[] = [];
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(String(cls.toolUseId));
+        },
+        runnerFactory: () => {
+          n++;
+          if (n === 1) {
+            async function* boom(): AsyncGenerator<SDKMessage> {
+              yield assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'first');
+              throw new Error('API Error: 529 Overloaded');
+            }
+            const it = boom();
+            return { [Symbol.asyncIterator]: () => it, close: () => {} };
+          }
+          return fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'second'),
+            resultMsg('sess-retry2'),
+          ]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('coder', 'go');
+      warnSpy.mockRestore();
+      expect(seen).toEqual(['first', 'second']);
+    });
+
+    test('the seen-id set is per HOP: the same id on a later turn records again', async () => {
+      // The filter must not become a runner-lifetime dedupe. A later hop
+      // reusing an id is a genuine new call, and suppressing it would drop a
+      // real mutation from the ledger the pause gate reads.
+      const seen: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(String(cls.toolUseId));
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            assistantWithTool('Bash', { command: 'rm -rf node_modules' }, 'same'),
+            resultMsg('sess-hop'),
+          ]),
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await runner.deliverTurn('coder', 'hop one');
+      await runner.deliverTurn('coder', 'hop two');
+      expect(seen).toEqual(['same', 'same']);
+    });
+
+    test('blocks with no tool_use id always fire, even repeated in one hop', async () => {
+      // An id-less block cannot be recognised as a repeat. Dropping it would
+      // lose a real mutation; over-recording an unidentifiable call is the
+      // safer error for a ledger the pause gate reads.
+      const seen: Array<string | undefined> = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onMutation: (_a, _t, _c, cls) => {
+          seen.push(cls.toolUseId);
+        },
+        runnerFactory: () =>
+          fakeRunner([
+            {
+              type: 'assistant',
+              message: {
+                content: [{ type: 'tool_use', name: 'Bash', input: { command: 'rm -rf a' } }],
+              },
+            } as unknown as SDKMessage,
+            {
+              type: 'assistant',
+              message: {
+                content: [{ type: 'tool_use', name: 'Bash', input: { command: 'rm -rf a' } }],
+              },
+            } as unknown as SDKMessage,
+            resultMsg('sess-noid'),
+          ]),
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+      await runner.deliverTurn('coder', 'go');
+      expect(seen).toEqual([undefined, undefined]);
     });
 
     test('does NOT fire for read-only tool calls (Read, Grep, git status)', async () => {
@@ -1429,5 +1699,127 @@ describe('AgentRunner stalled-turn watchdog', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Register H04: a denied MCP server must not reach a bus agent's spawn.
+//
+// The bus is where this matters most — every worker and chain participant runs
+// with settingSources ['user','project','local'], so a participant project's
+// `.mcp.json` loads on every hop with no human gate on any tool call.
+// ---------------------------------------------------------------------------
+describe('[security] AgentRunner — MCP denials reach the spawn', () => {
+  test('no denials leaves the options untouched', async () => {
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-none')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    await runner.deliverTurn('alpha', 'go');
+    // Byte-identical to before H04 for the common case.
+    expect(calls[0]!.deniedMcpServers).toBeUndefined();
+  });
+
+  test('a denial registered up-front binds on the FIRST turn', async () => {
+    // Not the second: a worker's first hop is exactly where a hostile
+    // `.mcp.json` would land, so applying the denial after start would be too
+    // late by the only turn that matters.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-first')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', deniedMcpServers: ['evil'] });
+    await runner.deliverTurn('alpha', 'go');
+    expect(calls[0]!.deniedMcpServers).toEqual(['evil']);
+  });
+
+  test('applyMcpDenials tightens a LIVE agent from its next turn', async () => {
+    // The mid-session paths — `addWorker` and `continue_multi_agent` — re-gate
+    // a session whose specs already exist. Re-registering would clobber the
+    // rest of a live spec, so denials are merged in place instead.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-live')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', projectId: 42 });
+    await runner.deliverTurn('alpha', 'before');
+    expect(calls[0]!.deniedMcpServers).toBeUndefined();
+
+    runner.applyMcpDenials(42, ['evil']);
+    await runner.deliverTurn('alpha', 'after');
+    expect(calls[1]!.deniedMcpServers).toEqual(['evil']);
+  });
+
+  test('applyMcpDenials only touches agents of that project', async () => {
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-scope')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', projectId: 1 });
+    runner.register({ name: 'beta', cwd: '/tmp/beta', projectId: 2 });
+    runner.applyMcpDenials(1, ['evil']);
+
+    await runner.deliverTurn('alpha', 'a');
+    await runner.deliverTurn('beta', 'b');
+    expect(calls[0]!.deniedMcpServers).toEqual(['evil']);
+    // A denial for project 1 must not silently strip project 2's servers.
+    expect(calls[1]!.deniedMcpServers).toBeUndefined();
+  });
+
+  test('applyMcpDenials unions rather than replaces', async () => {
+    // A deny_once is scoped to the operator's connection, so a later gate pass
+    // may not re-report it. Forgetting it mid-session would silently re-admit
+    // a server the operator already refused.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-union')]);
+      },
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha', projectId: 9, deniedMcpServers: ['one'] });
+    runner.applyMcpDenials(9, ['two']);
+    await runner.deliverTurn('alpha', 'go');
+    expect([...calls[0]!.deniedMcpServers!].sort()).toEqual(['one', 'two']);
+  });
+
+  test('a denial composes with the orchestrator delegate-only tool lock', async () => {
+    // Both restrictions have to survive together — `runClaude` unions the two
+    // disallowedTools lists rather than letting either overwrite the other.
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('s-both')]);
+      },
+    });
+    runner.register({
+      name: 'orch',
+      cwd: '/tmp/orch',
+      toolPolicy: 'delegate-only',
+      deniedMcpServers: ['evil'],
+    });
+    await runner.deliverTurn('orch', 'go');
+    expect(calls[0]!.deniedMcpServers).toEqual(['evil']);
+    expect(calls[0]!.disallowedTools).toContain('Bash');
   });
 });

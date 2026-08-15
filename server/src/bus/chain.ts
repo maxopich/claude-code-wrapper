@@ -35,6 +35,15 @@
  * chain run still does NOT survive a server restart (the old R-A behavior);
  * orchestrated runs do (R-B, see `reconstruct.ts`). Single-agent resume is
  * unaffected; that is a different path.
+ *
+ * Chain runs DO persist each participant's `--resume` checkpoint
+ * (`onSessionId` → `upsertAgentSession`), even though nothing reads them
+ * back yet. Two reasons the write is not deferred until reconstruction is
+ * built: it is the missing prerequisite for it (a checkpoint can only be
+ * recorded while the run is live — after the restart the value is gone), and
+ * `computeRecoveryContext` derives "possibly interrupted" from
+ * checkpoint-vs-last-event timestamps, so with no rows at all every chain
+ * participant scores as interrupted.
  */
 import fs from 'node:fs';
 import crypto from 'node:crypto';
@@ -42,35 +51,39 @@ import path from 'node:path';
 import {
   appendMultiAgentEvent,
   appendMultiAgentMutation,
+  addAgentCost,
   addParticipant,
+  clearPendingMutations,
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
-  getMultiAgentSession,
-  getPendingMutation,
   getPendingRetry,
   recordSessionTeardown,
-  setAwaitingContinue,
-  setMutationsAcknowledged,
   setMutationPromoted,
   setPauseOnDangerous,
-  setPendingMutation,
   setPendingRetry,
+  upsertAgentSession,
   type EventKind,
   type MultiAgentLifecycle,
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
 import type { BashClassifierReason } from '@cebab/shared';
+import { config } from '../config.js';
 import type {
   NotificationEnvelope,
   PendingRetryDescriptor,
   RouterDropReasonCode,
+  ServerMsg,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { PausedForMutationError, isPausedForMutation, isTurnStalled } from './errors.js';
-import { shouldPauseForMutation } from './pause_gate.js';
+import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import {
+  applyPauseGate,
+  releasePauseForMutation,
+  shouldHaltUnrecordedMutation,
+} from './pause_gate.js';
 import {
   archiveAgentHop,
   CEBAB_SOURCE,
@@ -85,12 +98,14 @@ import {
   type ProjectRules,
   type ResolvedAgent,
 } from './runtime.js';
+import { fenceRelayedMessage } from './message_fence.js';
 import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
 import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import { DEFAULT_HOP_BUDGET } from './orchestrator.js';
 import { uninstallBusForProject } from './install.js';
 import { computeSessionPaths, type SessionPaths } from './paths.js';
+import { secureMkdir } from '../data_perms.js';
 import {
   getLiveSession,
   NOOP_SINK,
@@ -104,6 +119,12 @@ export type StartChainOpts = {
   participants: ResolvedAgent[];
   initialPrompt: string;
   workspaceRoot: string;
+  /**
+   * Register H04: projectId → MCP server names the operator denied at the
+   * pre-spawn TOFU gate. Mirror of `StartOrchestratorOpts.mcpDenials` —
+   * applied at `register()` so a denial binds on the participant's first hop.
+   */
+  mcpDenials?: ReadonlyMap<number, readonly string[]>;
   lifecycle?: MultiAgentLifecycle;
   /** Per-event callback → `multi_agent_event` ServerMsg. `sessionId` is
    *  passed explicitly so callbacks firing during the awaited start (the
@@ -130,13 +151,15 @@ export type StartChainOpts = {
    *  abandon); a descriptor sets/replaces. Optional so tests can skip it;
    *  the router null-checks before invoking. */
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
-  /** Item #5: opt-in pause-on-first-mutation (see orchestrator.ts for the
+  /** Item #5: opt-in pause-on-dangerous (see orchestrator.ts for the
    *  full docstring; same semantics in chain mode). Default false. */
   pauseOnDangerous?: boolean;
   /** Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. */
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
-  /** Item #5: per-session pending-mutation slot change → `multi_agent_pending_mutation`. */
-  onPendingMutation?: (sessionId: string, pending: MutationRecord | null) => void;
+  /** Item #5: the set of workers halted by the pause-on-dangerous gate changed
+   *  → `multi_agent_pending_mutations`. Carries the whole current set (`[]`
+   *  when nothing is waiting) — the gate is per-agent (migration 031). */
+  onPendingMutation?: (sessionId: string, pending: MutationRecord[]) => void;
   /** Cluster A Phase 3 (D4): dispatcher notification fan-out. */
   sendNotification?: BusSink['sendNotification'];
   /** Cluster A Phase 3 (D4): typed router_drop fan-out. */
@@ -172,30 +195,42 @@ export type ChainSessionHandle = {
    *  `multi_agent_started`; the UI reads `events.length / hopBudget` for
    *  the activity-bar chip. */
   hopBudget: number;
-  /** Item #5: resolved pause-on-first-mutation flag for this session. */
+  /** Item #5: resolved pause-on-dangerous flag for this session. */
   pauseOnDangerous: boolean;
   /** Stop the session and tear it down. Idempotent. */
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   /** Detach the WS sink without tearing down — agents keep running
-   *  in-process; a reconnect re-attaches via the session registry. */
-  detach: () => void;
+   *  in-process; a reconnect re-attaches via the session registry.
+   *
+   *  Register B01: pass the epoch `rebind` handed you and the detach is
+   *  ignored unless you still own the sink, so a stale window's close can't
+   *  blank the live one. Bare call is unconditional. */
+  detach: (sinkEpoch?: number) => void;
   /** Re-deliver the captured prompt of the worker named in this session's
    *  pending-retry slot. No-op when the slot is empty (idempotent). The
    *  slot is cleared BEFORE re-delivery so a racing second click sees the
    *  cleared slot. A re-fail re-asserts the slot with a fresh reason. */
   retry: () => Promise<void>;
-  /** Item #5: operator clicked Continue on the pause-on-first-mutation
-   *  banner. Clears the slot, sets `mutations_acknowledged=1`, re-delivers
-   *  the paused worker's last captured prompt. No-op when no pause active. */
-  continueThroughMutation: () => Promise<void>;
+  /** Item #5: operator clicked Continue on one pause-on-dangerous banner.
+   *  Moves that mutation from `pending` to `approved` (the one-shot grant the
+   *  replayed turn spends) and re-delivers the paused worker's last captured
+   *  prompt. No-op when `mutationId` isn't currently pending. */
+  continueThroughMutation: (mutationId: number) => Promise<void>;
 };
 
 type ChainRouter = {
   teardown: (reason: MultiAgentEndedReason) => Promise<void>;
   handleEvent: (ev: BusEvent) => void;
   forwardCebabEvent: (ev: BusEvent) => void;
-  detach: () => void;
-  rebind: (sink: BusSink) => void;
+  /** Register B01: no-op unless `epoch` still owns the sink. */
+  detach: (epoch?: number) => void;
+  /** Returns the new sink epoch (register B01). */
+  rebind: (sink: BusSink) => number;
+  /** Register B17: send a ServerMsg through the sink that owns this session
+   *  RIGHT NOW. For callers that outlive a connection — the pause-expiry
+   *  timers are process-scoped and routinely fire after the window that armed
+   *  them has gone. */
+  sendServerMsg: (msg: ServerMsg) => void;
   /** Called from the `deliver` .catch handler when a worker's `deliverTurn`
    *  rejects (iterator throw OR non-success `result.subtype` — the runner
    *  unifies both into a thrown error). Persists a synthetic
@@ -221,6 +256,12 @@ type ChainRouter = {
 export function createChainRouter(params: {
   sessionId: string;
   iterationId: string;
+  /**
+   * Participants in **chain order**. Register B08: the last entry is the only
+   * agent permitted to address `_sink`, so reordering this list reassigns who
+   * may end the run. Keep it the same order `startChainSession` builds
+   * `nextHops` and the briefings from.
+   */
   agentNames: string[];
   paths: SessionPaths;
   onEvent: StartChainOpts['onEvent'];
@@ -229,9 +270,23 @@ export function createChainRouter(params: {
   /** Always-run finalizer (every terminal path: stop, crash, completion),
    *  independent of `onTeardown`'s temp/crashed gating and of the sink's
    *  detach/rebind state. Used to dispose the liveness observer. */
-  onFinalize?: () => void;
+  /**
+   * Register B09: receives the teardown `reason` so a finalizer can tell an
+   * ending the operator asked for from one a turn produced. The bus handles
+   * use it to decide whether to abort the runner — see their closures.
+   */
+  onFinalize?: (reason: MultiAgentEndedReason) => void;
   /** Wake the destination agent with `text` as its next turn. */
-  deliver?: (agentName: string, text: string) => void;
+  /**
+   * Wake `agentName` with `text`.
+   *
+   * `from` is the slug of the AGENT that wrote `text`, present on exactly the
+   * calls that relay agent-authored bytes. Its absence means Cebab or the
+   * operator wrote them (the initial prompt, a replay of already-composed wire
+   * bytes), and the session-level composer keys the H08/F16 message fence off
+   * it. Mirrors `createOrchestratorRouter`.
+   */
+  deliver?: (agentName: string, text: string, from?: string) => void;
   /** Hard cap on persisted hops. Required so the router enforces the
    *  ceiling; the caller resolves precedence. */
   hopBudget: number;
@@ -252,6 +307,13 @@ export function createChainRouter(params: {
   const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
     params;
   const participantSet = new Set(agentNames);
+  // Register B08: the only participant entitled to address `_sink` and end
+  // the run. `agentNames` is the chain order (`participants.map(p =>
+  // p.agentName)`), the same list `startChainSession` walks to build
+  // `nextHops` — so this is the agent whose next hop IS `_sink`, and the one
+  // whose briefing says so. `undefined` for an empty chain, which no source
+  // can equal.
+  const terminalAgent = agentNames.at(-1);
   const lastPromptForAgent = new Map<string, string>();
 
   // Mutable WS sink: swapped on reconnect (`rebind`), silenced on `detach`.
@@ -265,6 +327,10 @@ export function createChainRouter(params: {
     sendRouterDrop: params.sendRouterDrop,
     sendServerMsg: params.sendServerMsg,
   };
+  // Register B01: monotonic owner token for `sink`, bumped on every rebind.
+  // Epoch 0 is the sink installed here, owned by the window that started the
+  // run.
+  let sinkEpoch = 0;
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Incremented on every successful append (handleEvent + forwardCebabEvent)
@@ -282,13 +348,32 @@ export function createChainRouter(params: {
     firstError = text.slice(0, 200);
   };
 
+  /**
+   * Cebab-wsq: how many times this router has WOKEN someone.
+   *
+   * Bumped at the single `deliver?.()` below — the router's only wake — and
+   * read only by the stall bookkeeping. Distinct from `hopsCount`, which
+   * counts persisted rows and moves for events that wake nobody.
+   */
+  let deliveries = 0;
+  /**
+   * Cebab-wsq: a drop is waiting to be turned into a parked session.
+   *
+   * Set by every drop branch in `handleEvent`, consumed by `onTurnSucceeded`.
+   * The delay is the whole point — see `parkIfStalled`.
+   */
+  let stallPending: { reasonCode: RouterDropReasonCode; detail: string; wakes: number } | null =
+    null;
+
   const teardown = async (reason: MultiAgentEndedReason) => {
     if (ended) return;
     ended = true;
+    // Cebab-wsq: an unconsumed drop note must not outlive the session.
+    stallPending = null;
     // First: kill any pending liveness timer so it can't fire a spurious
     // `stalled` mid-teardown. Always runs, exactly once (ended-guarded).
     try {
-      onFinalize?.();
+      onFinalize?.(reason);
     } catch (err) {
       console.error('[chain] onFinalize failed', err);
     }
@@ -366,6 +451,127 @@ export function createChainRouter(params: {
     }
   };
 
+  /**
+   * Cebab-wsq: record that a drop just left the chain with nobody woken.
+   *
+   * Only a record — the parking itself happens in `onTurnSucceeded`. Reasons,
+   * in order of how easy each is to get wrong:
+   *
+   * 1. `bus_send` runs INSIDE the sending agent's turn (`handleBusSend` →
+   *    `onEvent` → here, all synchronous), so that turn resolves moments
+   *    later and `onTurnSucceeded` runs `setPendingRetry(sessionId, null)`
+   *    for exactly this agent. A slot written here would be erased by the
+   *    sender's own success, silently, with every router test still green.
+   * 2. Until that turn ends the run is not actually stalled: the same turn
+   *    may still make a legal `bus_send`, which wakes someone and makes the
+   *    drop moot. `wakes` is the check — see `parkIfStalled`.
+   * 3. `ev.source` is not usable as the agent to re-prompt. Two of the six
+   *    drops (`forged_source`, `unknown_source`) fire precisely because the
+   *    source is NOT a participant. `onTurnSucceeded` is handed the name of
+   *    the agent whose turn ended, which is always a real one.
+   */
+  const noteStall = (reasonCode: RouterDropReasonCode, detail: string) => {
+    stallPending = { reasonCode, detail, wakes: deliveries };
+  };
+
+  /**
+   * Cebab-wsq: `agentName`'s turn just ended and no wake happened since the
+   * drop, so this chain run cannot advance on its own. Park it.
+   *
+   * "Park", not "end": chain mode refuses mid-flight operator prompts
+   * (`multi_agent_user_prompt` in `ws/server.ts` answers chain sessions with a
+   * `wrapper_error`), so before this the operator's only move was Stop. The
+   * pending-retry slot is the one re-entry a live chain session has, and it
+   * already carries Retry + Abandon in the UI, survives a detach, and is
+   * restored by R-A re-attach and R-B reconstruction. Reusing it costs no new
+   * protocol and no new state machine.
+   *
+   * Deliberately NOT a second notification: `dispatchRouterDrop` has already
+   * emitted a `safety`/`danger` envelope for this exact event. The drop stays
+   * the thing the operator is told about; this adds the way back.
+   *
+   * The retry prompt is a CORRECTION, not a replay of the sender's last
+   * prompt. Re-running the identical turn invites the identical mistake; the
+   * agent's real next hop is a fact this router already holds (`agentNames`
+   * is the chain order, so successor-or-`_sink` is the same rule
+   * `renderChainBriefing` renders), so we can say what to do instead.
+   */
+  const parkIfStalled = (agentName: string) => {
+    const stall = stallPending;
+    if (!stall) return;
+    if (stall.wakes !== deliveries) {
+      // Somebody was woken between the drop and now — the chain is advancing.
+      stallPending = null;
+      return;
+    }
+    stallPending = null;
+    const idx = agentNames.indexOf(agentName);
+    const nextHop = idx === -1 ? SINK_RECIPIENT : (agentNames[idx + 1] ?? SINK_RECIPIENT);
+    const reasonText = `\`${agentName}\`'s message was dropped (${stall.reasonCode}): ${stall.detail} No agent was woken, so this chain cannot advance on its own.`;
+    captureError(reasonText);
+    let errorEventId = 0;
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        USER_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      errorEventId = row.id;
+      try {
+        sink.onEvent(
+          sessionId,
+          {
+            ts: Date.now(),
+            source: CEBAB_SOURCE,
+            destination: USER_RECIPIENT,
+            kind: 'error',
+            text: reasonText,
+          },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[chain] stalled-drop onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      console.error('[chain] persist stalled-drop event failed', persistErr);
+    }
+    // Persisted directly, NOT via `forwardCebabEvent`, so this explanatory row
+    // does not spend a hop — same treatment the budget-exhaust and
+    // worker-failed events get.
+    const prompt =
+      `Your last \`bus_send\` was rejected by the Cebab router and reached nobody, ` +
+      `so this chain run stopped with no agent awake.\n\n` +
+      `Reason: ${stall.detail}\n\n` +
+      `You are \`${agentName}\` in this chain and your one destination is ` +
+      `\`${nextHop}\`. Send your result there with \`bus_send\` now, and address ` +
+      `nobody else.`;
+    const descriptor: PendingRetryDescriptor = {
+      agentName,
+      reason: reasonText,
+      lastPrompt: prompt,
+      ts: Date.now(),
+      errorEventId,
+    };
+    try {
+      setPendingRetry(sessionId, {
+        agentName,
+        prompt,
+        reason: reasonText,
+        ts: descriptor.ts,
+        errorEventId,
+      });
+    } catch (dbErr) {
+      console.error('[chain] persist stalled-drop pending-retry failed', dbErr);
+    }
+    try {
+      sink.onPendingRetry?.(sessionId, descriptor);
+    } catch (sinkErr) {
+      console.error('[chain] stalled-drop onPendingRetry threw', sinkErr);
+    }
+  };
+
   const handleEvent = (ev: BusEvent) => {
     if (ended) return;
     // F3: source=cebab is Cebab's own traffic, routed in-process via
@@ -380,6 +586,10 @@ export function createChainRouter(params: {
         title: 'Forged source=cebab dropped',
         message: `dest=${ev.destination} kind=${ev.kind}`,
       });
+      noteStall(
+        'forged_source',
+        `it claimed to come from \`${CEBAB_SOURCE}\`, which no agent may.`,
+      );
       return;
     }
     // F2: chain terminates at `_sink`, never at `user`. dest=user is a spoof.
@@ -393,6 +603,10 @@ export function createChainRouter(params: {
         title: 'Agent tried to address user directly',
         message: `from=${ev.source}`,
       });
+      noteStall(
+        'worker_to_user',
+        `it was addressed to \`${USER_RECIPIENT}\`, and a chain terminates at \`${SINK_RECIPIENT}\`, never at the user.`,
+      );
       return;
     }
     // F2: source must be a known participant. (Defense-in-depth — the
@@ -407,6 +621,32 @@ export function createChainRouter(params: {
         title: 'Unknown source on bus',
         message: `source=${ev.source}`,
       });
+      noteStall(
+        'unknown_source',
+        `it claimed to come from \`${ev.source}\`, who is not in this chain.`,
+      );
+      return;
+    }
+    // Register B24: an agent addressing itself. Nothing rejected this, so
+    // `deliver` woke the sender again with its own text — a loop bounded only
+    // by the hop budget, which a confused model can burn entirely without
+    // another participant ever running.
+    //
+    // Dropped HERE, before the persist below, unlike `unknown_destination`.
+    // The harm B24 names is the budget, so a message that goes nowhere must
+    // not advance the counter; the safety-audit row is the record that it was
+    // attempted.
+    if (ev.source === ev.destination) {
+      console.warn(`[chain] drop self-addressed event from ${ev.source}`);
+      dispatchRouterDrop({
+        reasonCode: 'self_addressed',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Agent addressed itself',
+        message: `${ev.source} sent to itself — the message was dropped rather than waking the sender again`,
+      });
+      noteStall('self_addressed', `it was addressed to \`${ev.source}\` — that is you.`);
       return;
     }
 
@@ -420,10 +660,19 @@ export function createChainRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[chain] persist event failed', err);
     }
+    // Register B25: OUTSIDE the try. The counter is the runaway brake, and a
+    // brake that stops counting when writes start failing is exactly backwards
+    // — the event below is forwarded and delivered whether or not the row
+    // landed, so a session with a sick database used to run unbounded.
+    //
+    // This does mean the displayed ratio can exceed `events.length` while
+    // persistence is failing. That divergence is true information (events ARE
+    // missing); under healthy persistence the two stay in lockstep exactly as
+    // before, which is what the UI test asserts.
+    hopsCount += 1;
     // PR-7: capture kind='error' events as the run's first_error for the rail.
     if (ev.kind === 'error') {
       captureError(ev.text);
@@ -451,6 +700,34 @@ export function createChainRouter(params: {
     lastPromptForAgent.set(ev.destination, ev.text);
 
     if (ev.destination === SINK_RECIPIENT) {
+      // Register B08: `_sink` was the ONE destination with no source check.
+      // Reaching it publishes the sender's text as the run's `final.md` and
+      // tears the session down as `completed`, so a middle participant that
+      // addressed it answered on the chain's behalf and skipped every
+      // downstream hop.
+      //
+      // The entitlement is not a new rule. `startChainSession` builds
+      // `nextHops` from the same ordered participant list `agentNames` comes
+      // from — last participant → `_sink`, everyone else → their successor —
+      // and `renderChainBriefing` reads that map to tell each agent its one
+      // destination. `terminalAgent` is that same fact, available where the
+      // rule has to be enforced.
+      if (ev.source !== terminalAgent) {
+        console.warn(`[chain] drop dest=_sink from non-terminal source=${ev.source}`);
+        dispatchRouterDrop({
+          reasonCode: 'unauthorized_sink',
+          source: ev.source,
+          destination: ev.destination,
+          kind: ev.kind,
+          title: 'Agent tried to end the chain early',
+          message: `${ev.source} addressed _sink, which only the last participant may do — the chain was not completed`,
+        });
+        noteStall(
+          'unauthorized_sink',
+          `it was addressed to \`${SINK_RECIPIENT}\`, which only the last participant in the chain may do.`,
+        );
+        return;
+      }
       try {
         const idir = paths.iterationDir(iterationId);
         fs.mkdirSync(idir, { recursive: true });
@@ -462,7 +739,26 @@ export function createChainRouter(params: {
       return;
     }
     if (!participantSet.has(ev.destination)) {
+      // Register B16: this was a bare `console.warn` while its three sibling
+      // drops above all went through `dispatchRouterDrop`. By the time we
+      // get here the event has been persisted, counted against the hop
+      // budget and folded into `lastPromptForAgent` — and `handleBusSend`
+      // already answered the sending agent "delivered". So the message was
+      // gone with no audit row and no operator notification, in a session
+      // whose hop count silently moved.
       console.warn(`[chain] event for non-participant: ${ev.destination}`);
+      dispatchRouterDrop({
+        reasonCode: 'unknown_destination',
+        source: ev.source,
+        destination: ev.destination,
+        kind: ev.kind,
+        title: 'Message addressed to an unknown agent',
+        message: `${ev.source} addressed ${ev.destination}, who is not in this chain — the message was dropped`,
+      });
+      noteStall(
+        'unknown_destination',
+        `it was addressed to \`${ev.destination}\`, who is not in this chain.`,
+      );
       return;
     }
     // Hop-budget enforcement: the hop we just persisted is in the trail; if
@@ -505,14 +801,27 @@ export function createChainRouter(params: {
     // Fire-and-forget: must NOT block the sending agent's in-flight turn
     // (this runs inside its bus_send tool call). Mirrors the old
     // `sendKeys(...).catch(...)`.
-    deliver?.(ev.destination, ev.text);
+    //
+    // `ev.source` is pinned per-agent in `makeBusToolServer`'s closure and has
+    // already passed the participant allowlist above, so it is a trustworthy
+    // label for who wrote `ev.text` — which is what the fence needs.
+    //
+    // Cebab-wsq: the router's ONE wake, so this is where `deliveries` moves.
+    // A drop earlier in the same turn is cancelled by reaching here (the run
+    // is advancing after all); a drop AFTER it still parks, because
+    // `parkIfStalled` compares the count captured at the drop, not "has this
+    // turn ever woken anyone".
+    deliveries += 1;
+    deliver?.(ev.destination, ev.text, ev.source);
   };
 
   // Cebab-originated events (briefings, initial prompt): persist + forward so
   // the operator's scrollback + DB transcript include them. No routing — the
   // briefing/prompt is delivered as the agent's actual turn separately.
-  // Bumps `hopsCount` on a successful persist so the counter stays in
-  // lockstep with `run.events.length` as the UI sees it.
+  // Bumps `hopsCount` so the counter stays in lockstep with
+  // `run.events.length` as the UI sees it — register B25 moved the bump out
+  // of the persist `try` so a failed write can no longer stall the brake;
+  // see `handleEvent` for the reasoning.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -525,23 +834,55 @@ export function createChainRouter(params: {
         ev.text,
       );
       dbId = row.id;
-      hopsCount += 1;
     } catch (err) {
       console.error('[chain] persist cebab event failed', err);
     }
+    hopsCount += 1;
     try {
       sink.onEvent(sessionId, ev, dbId);
     } catch (err) {
       console.error('[chain] cebab onEvent threw', err);
     }
+    // Register B13: the archive's prompt map is otherwise written only by
+    // `handleEvent`, which never sees the run's ORIGINATING prompt — that
+    // arrives here, because Cebab wrote it rather than an agent. So
+    // `archiveAgentHop` read `undefined ?? ''` for the first participant and
+    // every chain run wrote the operator's instruction to disk as an empty
+    // `prompt.md`.
+    //
+    // Keyed on `kind`, not on "is this the first participant". `'prompt'` is
+    // Cebab-to-participant task text and is exactly what an archived prompt
+    // should hold; the briefing and the CLAUDE.md marker are `'intro'` and must
+    // NOT overwrite it (they are already in the on-disk transcript). Any future
+    // Cebab-originated prompt is then archived correctly with no second fix.
+    if (ev.kind === 'prompt' && participantSet.has(ev.destination)) {
+      lastPromptForAgent.set(ev.destination, ev.text);
+    }
   };
 
-  const detach = () => {
+  const detach = (epoch?: number) => {
+    // Register B01: a window that re-attached later holds a higher epoch. If
+    // the caller no longer owns the sink, its close is stale — ignore it
+    // rather than blanking the live window's stream.
+    if (epoch !== undefined && epoch !== sinkEpoch) return;
     // Keep persisting/routing; just stop forwarding to the (now dead) WS.
     sink = NOOP_SINK;
   };
-  const rebind = (next: BusSink) => {
+  const rebind = (next: BusSink): number => {
     sink = next;
+    return ++sinkEpoch;
+  };
+  /**
+   * Register B17: send to whoever owns the sink right now.
+   *
+   * Reads the mutable `sink` at call time — which is the whole point. A caller
+   * that captured a sink when it armed a timer would keep sending to a window
+   * that has since closed, and would keep sending after `detach()` swapped in
+   * `NOOP_SINK`. Going through here, both cases behave: a rebound session
+   * reaches the new window, a detached one drops.
+   */
+  const sendServerMsg = (msg: ServerMsg): void => {
+    sink.sendServerMsg?.(msg);
   };
 
   // Worker failure handler — same shape in both routers (Item #4). The
@@ -557,6 +898,11 @@ export function createChainRouter(params: {
   // teardown — there's nothing to retry.
   const onWorkerFailed = (agentName: string, prompt: string, err: unknown) => {
     if (ended) return;
+    // Cebab-wsq: this turn failed, so it will never reach `onTurnSucceeded`,
+    // and the slot below is the right one to show. Dropping the note keeps a
+    // drop earlier in the same turn from re-parking over the failure reason on
+    // some later agent's success.
+    stallPending = null;
     const errMessage =
       err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
     const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
@@ -632,16 +978,28 @@ export function createChainRouter(params: {
     if (ended) return;
     try {
       const pending = getPendingRetry(sessionId);
-      if (!pending || pending.agentName !== agentName) return;
-      setPendingRetry(sessionId, null);
-      try {
-        sink.onPendingRetry?.(sessionId, null);
-      } catch (sinkErr) {
-        console.error('[chain] turn-succeeded onPendingRetry-null threw', sinkErr);
+      if (pending && pending.agentName === agentName) {
+        setPendingRetry(sessionId, null);
+        try {
+          sink.onPendingRetry?.(sessionId, null);
+        } catch (sinkErr) {
+          console.error('[chain] turn-succeeded onPendingRetry-null threw', sinkErr);
+        }
       }
     } catch (err) {
       console.error('[chain] clear pending-retry on success failed', err);
     }
+    // Cebab-wsq: AFTER the clear above, and unconditionally — not inside it.
+    //
+    // Order first: a drop happens mid-turn, so the slot this parks is written
+    // moments before that same turn resolves. Parking above the clear would
+    // hand the sender's own success the slot to erase, which is the exact
+    // shape that makes this whole fix inert.
+    //
+    // Unconditional second: the clear returns early when the slot belongs to
+    // a different agent (or when there is none at all), and a stalled chain
+    // must still be parked in both of those cases.
+    parkIfStalled(agentName);
   };
 
   return {
@@ -650,6 +1008,7 @@ export function createChainRouter(params: {
     forwardCebabEvent,
     detach,
     rebind,
+    sendServerMsg,
     onWorkerFailed,
     onTurnSucceeded,
   };
@@ -682,7 +1041,14 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   const hopBudget = opts.hopBudget ?? DEFAULT_HOP_BUDGET;
 
   const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
-  fs.mkdirSync(paths.folder, { recursive: true });
+  // H01: the session folder holds every hop's prompt/reply and the transcript
+  // log, so it is created owner-only. The mode on this one directory is the
+  // whole protection — everything below inherits the traversal gate, so the
+  // per-file writes underneath deliberately stay at the ambient mode.
+  // Existing session folders are NOT retrofitted: they live under the
+  // operator's workspace root, and silently re-permissioning directories in
+  // their tree could break a deliberately shared setup.
+  secureMkdir(paths.folder);
 
   const iterationId = nextIterationId(paths);
 
@@ -735,9 +1101,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   // doesn't surface). The duplication is a small token cost, intentional.
   const briefings = new Map<string, string>();
   const projectRules = new Map<string, ProjectRules | null>();
+  /** agentName → where its hop goes. Mock replay reads it (see `mockVars`). */
+  const nextHops = new Map<string, string>();
   opts.participants.forEach((p, i) => {
     const nextHop =
       i === opts.participants.length - 1 ? SINK_RECIPIENT : opts.participants[i + 1]!.agentName;
+    nextHops.set(p.agentName, nextHop);
     briefings.set(
       p.agentName,
       renderChainBriefing({
@@ -798,6 +1167,13 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       });
     } catch (err) {
       console.error('[chain] persist mutation failed', err);
+      // Cebab-aqd (mirrors orchestrator.ts): halt rather than run a dangerous
+      // call the armed gate was unable to record. See
+      // `shouldHaltUnrecordedMutation` for why the gate below cannot be used
+      // on this path.
+      if (shouldHaltUnrecordedMutation(sessionId, cls.category)) {
+        throw new MutationNotRecordedError(toolName, cls.summary);
+      }
       return;
     }
     try {
@@ -806,23 +1182,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       console.error('[chain] onMutation sink threw', err);
     }
     // Pause gate — fires only on `dangerous`-category mutations (see
-    // `shouldPauseForMutation`, shared with orchestrator.ts). MCP calls and
-    // ordinary edits classify as `mutate` and run free.
-    const session = getMultiAgentSession(sessionId);
-    if (shouldPauseForMutation(cls.category, session)) {
-      try {
-        setPendingMutation(sessionId, row.id);
-        setAwaitingContinue(sessionId, true);
-      } catch (err) {
-        console.error('[chain] persist pending-mutation failed', err);
-      }
-      try {
-        opts.onPendingMutation?.(sessionId, row);
-      } catch (err) {
-        console.error('[chain] onPendingMutation sink threw', err);
-      }
-      throw new PausedForMutationError(`paused before ${cls.summary}`);
-    }
+    // `applyPauseGate`, shared with orchestrator.ts so the two routers cannot
+    // drift). MCP calls and ordinary edits classify as `mutate` and run free.
+    applyPauseGate(row, opts.onPendingMutation);
   };
 
   // Migration 012 + Phase E: tool-result tap (mirrors orchestrator.ts's
@@ -891,11 +1253,48 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       writeTranscript(paths, iterationId, agent, msg);
       activity.onMessage(agent, msg);
     },
+    onSessionId: (agent, cli) => {
+      // Persist each participant's `--resume` checkpoint. Orchestrator mode
+      // has always done this (orchestrator.ts); chain mode did not, so a
+      // chain session's `multi_agent_agent_sessions` rows never existed —
+      // which is *why* chain reconstruction could not be built, and why
+      // `computeRecoveryContext` would report every chain participant as
+      // possibly-interrupted (no checkpoint row ⇒ `?? 0`). Writing the rows
+      // is independent of, and a prerequisite for, chain R-B.
+      try {
+        upsertAgentSession(sessionId, agent, cli);
+      } catch (err) {
+        console.error('[chain] persist agent session failed', err);
+      }
+    },
+    onTurnCost: (agent, costUsd) => {
+      // F7: same accounting as orchestrator mode — chain hops cost exactly as
+      // much and were equally invisible.
+      try {
+        addAgentCost(sessionId, agent, costUsd);
+      } catch (err) {
+        console.error('[chain] persist agent cost failed', err);
+      }
+    },
     onMutation: onMutationHook,
     onToolResult: onToolResultHook,
     onAskUserQuestion: onAskUserQuestionHook,
     abortController,
     runnerFactory: opts.runnerFactory,
+    // Mock replay (MOCK=1). A shipped fixture cannot name the operator's
+    // projects, so it addresses `${NEXT}` and the chain — which owns the
+    // pipeline order — resolves it. `${KIND}` distinguishes a hand-off
+    // (`reply`) from the terminal hop into `_sink` (`final`), the difference
+    // that decides whether the run writes final.md and completes.
+    mockScenario: config.mockScenario ?? 'chain',
+    mockVars: (agent) => {
+      const next = nextHops.get(agent) ?? SINK_RECIPIENT;
+      return {
+        SELF: agent,
+        NEXT: next,
+        KIND: next === SINK_RECIPIENT ? 'final' : 'reply',
+      };
+    },
     // Cluster D Phase 4a (BE-D5 / BE-D8 / spec §4.2): every transient-
     // overload retry fans out an `auto_retry` ServerMsg AND writes a
     // `recovery_log` row. The row is the durable record the
@@ -981,6 +1380,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     },
   });
   for (const p of opts.participants) {
+    // H04: see the orchestrator mirror — the denial has to be on the spec
+    // before the first hop, not applied after the session is running.
+    const denied = opts.mcpDenials?.get(p.projectId);
     runner.register({
       name: p.agentName,
       cwd: p.cwd,
@@ -989,19 +1391,27 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       // lifecycle registry's per-hop snapshot can name it for the
       // active-runs sidebar dropdown.
       projectId: p.projectId,
+      ...(denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {}),
     });
   }
 
-  const deliver = (agentName: string, text: string) => {
+  const deliver = (agentName: string, text: string, from?: string) => {
     const briefing = briefings.get(agentName);
-    let prompt = text;
+    // H08/F16: a `from` means another AGENT wrote these bytes, so they get the
+    // nonce fence — the recipient can then tell Cebab's framing from a peer's
+    // prose no matter what the prose contains. No `from` means Cebab or the
+    // operator wrote them (the initial prompt, or a replay of bytes this
+    // function already composed), and those must stay bare: fencing the
+    // operator's own task would label it untrusted, and re-fencing a replay
+    // would nest one wrapper inside another.
+    let prompt = from ? fenceRelayedMessage(from, text).text : text;
     if (briefing && !briefed.has(agentName)) {
       briefed.add(agentName);
       // Order: bus protocol → project rules → task. Rules sit after the
       // protocol so the "bus protocol wins" framing holds; the task still
       // visibly follows the fenced block.
       const pr = projectRules.get(agentName);
-      prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${text}` : `${briefing}\n\n${text}`;
+      prompt = pr ? `${briefing}\n\n${pr.framed}\n\n${prompt}` : `${briefing}\n\n${prompt}`;
     }
     // Capture the post-briefing-and-rules bytes so the .catch can hand them
     // to onWorkerFailed for the pending-retry slot, AND so
@@ -1048,11 +1458,15 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onTeardown,
-    onFinalize: () => {
+    onFinalize: (reason) => {
       // Interactive AskUserQuestion: drain any parked questions so a
       // stopped/ended session doesn't leave a canUseTool Promise dangling.
       rejectQuestionsForSession(sessionId, 'session ended');
       activity.dispose();
+      // Register B09, same as the orchestrator and with the same
+      // completion exemption — which chain mode is exactly where it bites.
+      // See the orchestrator's copy of this note.
+      if (reason !== 'completed') runner.stop();
     },
     deliver,
     hopBudget,
@@ -1081,15 +1495,17 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         console.error('[chain] clear pending-retry on stop failed', err);
       }
       try {
-        setPendingMutation(sessionId, null);
+        // Live pauses AND unconsumed Continue grants: a grant that outlived its
+        // session would silently pre-approve a command in a reconstructed run.
+        clearPendingMutations(sessionId);
       } catch (err) {
-        console.error('[chain] clear pending-mutation on stop failed', err);
+        console.error('[chain] clear pending-mutations on stop failed', err);
       }
       runner.stop();
       await router.teardown(reason);
     },
-    detach() {
-      router.detach();
+    detach(sinkEpoch) {
+      router.detach(sinkEpoch);
     },
     async retry() {
       const pending = getPendingRetry(sessionId);
@@ -1115,21 +1531,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       // double-prepend the briefing.
       deliver(pending.agentName, pending.prompt);
     },
-    async continueThroughMutation() {
-      const pending = getPendingMutation(sessionId);
+    async continueThroughMutation(mutationId: number) {
+      const pending = releasePauseForMutation(sessionId, mutationId, opts.onPendingMutation);
       if (!pending) return;
-      try {
-        setPendingMutation(sessionId, null);
-        setMutationsAcknowledged(sessionId, true);
-        setAwaitingContinue(sessionId, false);
-      } catch (err) {
-        console.error('[chain] persist continue-through-mutation failed', err);
-      }
-      try {
-        opts.onPendingMutation?.(sessionId, null);
-      } catch (err) {
-        console.error('[chain] continue onPendingMutation-null callback threw', err);
-      }
       const replayPrompt = lastPromptOut.get(pending.agentName);
       if (!replayPrompt) {
         console.warn(
@@ -1146,6 +1550,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     mode: 'chain',
     handle,
     rebind: (s) => router.rebind(s),
+    sendServerMsg: (m) => router.sendServerMsg(m),
   });
 
   // Briefings + initial prompt → UI scrollback + DB parity (source=cebab).

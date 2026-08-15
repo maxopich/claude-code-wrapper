@@ -7,6 +7,7 @@ import {
 } from 'react';
 import type { ClientMsg, SearchResult, SearchScope, ServerMsg } from '@cebab/shared';
 import { useModalSurface } from '../useModalSurface';
+import { nextIndex } from '../listNavigation';
 import { MIN_SEARCH_QUERY_LEN, useSessionSearch } from '../useSessionSearch';
 
 /**
@@ -41,9 +42,21 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
   const { onClose, send, subscribeServerMsg, activeProjectId, onNavigate } = props;
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
 
-  const [scope, setScope] = useState<SearchScope>(
+  // Register D11: the operator's PREFERENCE, seeded from the open project.
+  const [scopePref, setScope] = useState<SearchScope>(
     activeProjectId != null ? 'this_project' : 'all_projects',
   );
+  // ...and the scope actually in force. The seed above only runs on mount, so
+  // a project closing under an open modal used to leave the preference at
+  // `this_project` with no id to scope by — the request went out naming a
+  // project that wasn't there. The server now fails closed on that (see
+  // `searchSessions`), which is the correct answer but an opaque one: the
+  // operator would be looking at an empty result list under a chip still
+  // reading "This project". Deriving instead of storing keeps the chip, the
+  // dispatch and the server's view in agreement on every render, with no
+  // intermediate frame that dispatches the stale scope — and restores the
+  // preference if the project comes back.
+  const scope: SearchScope = activeProjectId == null ? 'all_projects' : scopePref;
   const [includeArchived, setIncludeArchived] = useState(false);
   // Raw opt-in: `rawArmed` only flips true after the typed ack lands.
   const [rawArmed, setRawArmed] = useState(false);
@@ -77,20 +90,39 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
   }
 
   function onInputKeyDown(e: ReactKeyboardEvent<HTMLInputElement>): void {
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      setSelected((s) => Math.min(s + 1, Math.max(0, results.length - 1)));
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      setSelected((s) => Math.max(s - 1, 0));
-    } else if (e.key === 'Enter') {
+    if (e.key === 'Enter') {
       e.preventDefault();
       navigate(results[selected]);
+      return;
     }
+    // A listbox clamps at the ends (unlike a menu, which wraps) — the previous
+    // hand-rolled Math.min/Math.max did the same thing; it just said so in two
+    // places instead of one.
+    //
+    // `homeEnd: false` because this handler is on the search INPUT. The
+    // helper's Home/End support was adopted here as a freebie, which quietly
+    // took Home and End away from the caret: the list jumped and
+    // `preventDefault()` below stopped the text cursor from moving at all. In
+    // a combobox those two keys belong to the textbox.
+    const target = nextIndex({
+      key: e.key,
+      current: selected,
+      count: results.length,
+      homeEnd: false,
+    });
+    if (target === null) return;
+    e.preventDefault();
+    setSelected(target);
   }
 
   const tooShort = query.trim().length < MIN_SEARCH_QUERY_LEN;
   const titleId = 'session-search-title';
+  const listboxId = 'session-search-results';
+  const optionId = (i: number) => `session-search-option-${i}`;
+  // Undefined rather than a dangling id when there is nothing highlighted —
+  // an aria-activedescendant pointing at a node that isn't there is worse
+  // than none at all.
+  const activeOptionId = results.length > 0 ? optionId(selected) : undefined;
 
   return (
     <div
@@ -117,8 +149,14 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
             onKeyDown={onInputKeyDown}
             role="combobox"
             aria-expanded={results.length > 0}
-            aria-controls="session-search-results"
+            aria-controls={listboxId}
             aria-label="Search session content"
+            // U18: the arrow keys moved an index and told nobody. The combobox
+            // now names the option it would activate, so a screen reader reads
+            // each hit as the operator arrows through them — the same shape
+            // `SlashCommandPalette` already used.
+            aria-autocomplete="list"
+            aria-activedescendant={activeOptionId}
           />
         </div>
 
@@ -188,8 +226,16 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
                   type="text"
                   value={rawAck}
                   onChange={(e) => setRawAck(e.target.value)}
-                  placeholder={RAW_ACK_PHRASE}
-                  aria-label="Type the acknowledgment phrase to enable raw search"
+                  autoComplete="off"
+                  spellCheck={false}
+                  /* U29's defect, second site — unfiled, found while fixing the
+                   * bulk-delete gate. This printed RAW_ACK_PHRASE as the
+                   * placeholder: the phrase that arms an audited, unredacted
+                   * search across session content, sitting greyed-out inside the
+                   * field asking you to type it. The warning above still names
+                   * the phrase, which is the point — the friction is deliberate
+                   * typing, not secrecy. Inside the input it is neither. */
+                  aria-label={`Type "${RAW_ACK_PHRASE}" to enable unredacted search`}
                 />
                 <button
                   type="button"
@@ -225,7 +271,10 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
           )}
         </div>
 
-        <div className="session-search-results" id="session-search-results" role="listbox">
+        {/* U18: the hints below used to live INSIDE `role="listbox"`, which may
+         *  only contain options and groups. They are siblings now, and the
+         *  <ul> renders unconditionally so `aria-controls` never dangles. */}
+        <div className="session-search-results">
           {tooShort ? (
             <p className="session-search-hint">
               Type at least {MIN_SEARCH_QUERY_LEN} characters to search across sessions.
@@ -234,15 +283,29 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
             <p className="session-search-hint">Searching…</p>
           ) : results.length === 0 ? (
             <p className="session-search-hint">No matches.</p>
-          ) : (
-            results.map((r, i) => (
-              <button
+          ) : null}
+
+          <ul
+            className="session-search-result-list"
+            id={listboxId}
+            role="listbox"
+            aria-label="Search results"
+          >
+            {results.map((r, i) => (
+              /* An <li>, not a <button>: in the activedescendant pattern the
+               * input keeps focus and owns the keyboard, so a focusable option
+               * would both steal that focus on click and turn a 40-hit list
+               * into 40 tab stops. `onMouseDown`'s preventDefault is what
+               * stops the click from moving focus; `onClick` still activates,
+               * so mouse behaviour is unchanged. */
+              <li
                 key={`${r.matchedField}:${r.sessionId}:${r.ts}:${i}`}
-                type="button"
+                id={optionId(i)}
                 role="option"
                 aria-selected={i === selected}
                 className={`session-search-result${i === selected ? ' selected' : ''}`}
                 onMouseEnter={() => setSelected(i)}
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => navigate(r)}
               >
                 <span className="session-search-result-snippet">
@@ -260,9 +323,9 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
                   ) : null}
                   <span className="session-search-result-time">{formatRelative(r.ts)}</span>
                 </span>
-              </button>
-            ))
-          )}
+              </li>
+            ))}
+          </ul>
 
           {truncated ? (
             <p className="session-search-truncated">

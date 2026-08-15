@@ -27,9 +27,8 @@ threat-model summary.
 -->
 
 - [ ] Touches auth / origin / WS handshake (F4 / F5)? Regression test added or updated.
-- [ ] Adds a `writeInboxMessage` call site (F1 / F3)? Return forwarded via `forwardCebabEvent` (or captured + passed to a forwarder).
 - [ ] Adds or modifies bus router `handleEvent` logic (F2 / F3)? Source-allowlist branch covered by a test in `*.security.test.ts`.
-- [ ] Adds or modifies a bus shell script (F6 / R3)? Bats case added in [server/src/bus/scripts/](../tree/main/server/src/bus/scripts/).
+- [ ] Adds or edits a Semgrep rule in `.semgrep/`? Fixture added in `.semgrep/cebab-bus.ts` proving it fires (enforced by `scripts/semgrepRules.test.mjs`).
 - [ ] Adds a fixture under [fixtures/](../tree/main/fixtures/)? Manually verified no real OAuth tokens or API keys; CODEOWNER review enforced by `awaiting-fixture-review` label.
 - [ ] Adds a runtime dependency? `postinstall` script reviewed; OSV-Scanner + `dependency-review` checks pass.
 - [ ] Modifies CI / GitHub Actions workflows? actionlint + zizmor green; SHA-pinning per [.github/CODEOWNERS](.github/CODEOWNERS) policy.

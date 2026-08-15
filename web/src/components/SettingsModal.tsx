@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useCallback, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { SettingsView } from '../store';
 import { useModalSurface } from '../useModalSurface';
 import { useStorageStats } from '../useStorageStats';
+import { nextIndex } from '../listNavigation';
 import { THEME_META, type Theme } from '../theme';
 import type { ClientMsg, ServerMsg } from '@cebab/shared';
 
@@ -94,6 +95,42 @@ export function SettingsModal(props: {
     props.settings.workspaceRoot === null && trimmed === props.settings.defaultWorkspaceRoot;
   const fallbackSource = props.settings.defaultWorkspaceRootSource;
 
+  /**
+   * U14: the theme applies instantly and is deliberately outside the save
+   * payload — that part is right, because previewing a colour gamma is the
+   * whole point of the picker. What was wrong is that **Cancel did not
+   * cancel it**: the footer offers a two-button contract over the modal's
+   * contents, and one of those contents ignored it.
+   *
+   * #287 sharpened this by my own hand. The theme group became a proper
+   * radiogroup with arrow-key navigation, and arrows SELECT as they move —
+   * justified at the time with "the theme applies instantly, costs nothing,
+   * and arrowing back undoes it". True only if you remember where you
+   * started. An operator arrowing across four gammas and then pressing
+   * Cancel kept whichever one they last passed over.
+   *
+   * Snapshot on mount, restore on every path that closes without saving.
+   *
+   * Save needs no counterpart: `saveSettings` in App.tsx calls
+   * `setSettingsOpen(false)`, so the modal unmounts and `cancel` never runs.
+   * A `themeOnOpen.current = null` in `save()` looked like the matching half
+   * of this and was unreachable — the exact shape of machinery this series
+   * keeps finding, so it is not here. The "Save keeps the previewed theme"
+   * test is the live guard if that host contract ever changes.
+   */
+  const themeOnOpen = useRef<Theme>(props.theme);
+
+  const cancel = useCallback(() => {
+    // Only restore when there is something to restore. `onThemeChange` writes
+    // through to localStorage, so firing it to set the value already in effect
+    // is a spurious write — and it would make every Esc-to-close look like a
+    // theme change to anything observing the callback.
+    if (themeOnOpen.current !== props.theme) props.onThemeChange(themeOnOpen.current);
+    props.onClose();
+    // `props` is read through the closure on every call, so the identity of
+    // the callbacks is all that matters for correctness here.
+  }, [props]);
+
   const save = () => {
     if (!canSave) return;
     props.onSave({
@@ -104,17 +141,47 @@ export function SettingsModal(props: {
   };
 
   const { overlayRef, onBackdropMouseDown } = useModalSurface({
-    onClose: props.onClose,
+    // Esc and backdrop-click route here, so they revert too — all four exits
+    // (button, ✕, Esc, backdrop) mean the same thing.
+    onClose: cancel,
     onConfirm: save,
     canConfirm: canSave,
   });
 
+  /**
+   * Arrow keys across the theme radio group. `orientation: 'both'` because the
+   * cards wrap into a visual grid, so Left/Right and Up/Down are both natural;
+   * `wrap: true` because a radio group cycles.
+   */
+  function onThemeKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    const current = THEME_META.findIndex((t) => t.id === props.theme);
+    const target = nextIndex({
+      key: e.key,
+      current,
+      count: THEME_META.length,
+      wrap: true,
+      orientation: 'both',
+    });
+    if (target === null) return;
+    e.preventDefault();
+    props.onThemeChange(THEME_META[target]!.id);
+    const card = e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[target];
+    card?.focus();
+  }
+
   return (
-    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+    <div
+      ref={overlayRef}
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settings-modal-title"
+      onMouseDown={onBackdropMouseDown}
+    >
       <div className="modal modal-surface">
         <header>
-          <h2>Settings</h2>
-          <button className="icon-btn" onClick={props.onClose} title="Close">
+          <h2 id="settings-modal-title">Settings</h2>
+          <button className="icon-btn" onClick={cancel} title="Close">
             ✕
           </button>
         </header>
@@ -219,13 +286,28 @@ export function SettingsModal(props: {
            *  effect without a round-trip and without a pending "unsaved"
            *  state. */}
           <div className="label">Appearance</div>
-          <div className="theme-grid" role="radiogroup" aria-label="Color theme">
+          {/* Found while verifying U17/U18/U26/U30, not filed in the register:
+           *  this declared `role="radiogroup"` with correct `aria-checked` and
+           *  none of the keyboard model that role obliges — four native
+           *  buttons meant four tab stops instead of one, and the arrow keys
+           *  did nothing. Roving tabIndex + arrows below. Arrows SELECT as
+           *  they move, which is correct radiogroup behaviour and safe here:
+           *  the theme applies instantly, costs nothing, and arrowing back
+           *  undoes it. (Contrast ModeToggle, where select-on-move would flip
+           *  a live session's permission posture — hence toggle buttons.) */}
+          <div
+            className="theme-grid"
+            role="radiogroup"
+            aria-label="Color theme"
+            onKeyDown={onThemeKeyDown}
+          >
             {THEME_META.map((t) => (
               <button
                 key={t.id}
                 type="button"
                 role="radio"
                 aria-checked={props.theme === t.id}
+                tabIndex={props.theme === t.id ? 0 : -1}
                 className={`theme-card${props.theme === t.id ? ' active' : ''}`}
                 onClick={() => props.onThemeChange(t.id)}
                 title={t.description}
@@ -241,7 +323,13 @@ export function SettingsModal(props: {
               </button>
             ))}
           </div>
-          <p className="hint">Changes the color palette instantly. Saved to this browser only.</p>
+          {/* U14: this used to say only "Changes the color palette instantly",
+           *  which was true and was the whole problem — instantly, and then
+           *  permanently, whatever the footer said next. Now that Cancel
+           *  reverts, the line says both halves. */}
+          <p className="hint">
+            Previews instantly; Cancel restores the current theme. Saved to this browser only.
+          </p>
         </section>
         <section data-testid="storage-section">
           <div className="label">Storage</div>
@@ -287,7 +375,7 @@ export function SettingsModal(props: {
           )}
         </section>
         <footer>
-          <button className="ghost-btn" onClick={props.onClose}>
+          <button className="ghost-btn" onClick={cancel}>
             Cancel
           </button>
           <button className="primary-btn" disabled={!canSave} onClick={save}>

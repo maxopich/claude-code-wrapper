@@ -126,7 +126,10 @@ describe('Notification — auto-dismiss timer', () => {
     const onDismiss = vi.fn();
     act(() => {
       root.render(
-        <Notification notification={makeNotification({ severity: 'info' })} onDismiss={onDismiss} />,
+        <Notification
+          notification={makeNotification({ severity: 'info' })}
+          onDismiss={onDismiss}
+        />,
       );
     });
     expect(onDismiss).not.toHaveBeenCalled();
@@ -196,8 +199,13 @@ describe('Notification — auto-dismiss timer', () => {
   });
 });
 
-describe('Notification — aria role mapping (UX-7)', () => {
-  test('danger uses role=alertdialog', () => {
+describe('Notification — aria role mapping (UX-7, revised by register U34)', () => {
+  // U34: danger used to be `alertdialog`, which tells assistive tech the
+  // dialog blocks the app. Nothing made that true — focus never moved into
+  // the toast, there was no `aria-modal`, and a toast with no action isn't
+  // even tabbable. It now shares `alert` with error: assertive, non-blocking,
+  // which is what a toast actually is.
+  test('danger uses role=alert, not alertdialog', () => {
     act(() => {
       root.render(
         <Notification
@@ -206,7 +214,21 @@ describe('Notification — aria role mapping (UX-7)', () => {
         />,
       );
     });
-    expect(container.querySelector('.notif')?.getAttribute('role')).toBe('alertdialog');
+    expect(container.querySelector('.notif')?.getAttribute('role')).toBe('alert');
+  });
+
+  test('no severity claims a modal role', () => {
+    for (const severity of ['info', 'warn', 'error', 'danger'] as const) {
+      act(() => {
+        root.render(
+          <Notification notification={makeNotification({ severity })} onDismiss={() => {}} />,
+        );
+      });
+      const role = container.querySelector('.notif')?.getAttribute('role');
+      expect(role).not.toBe('alertdialog');
+      expect(role).not.toBe('dialog');
+      expect(container.querySelector('.notif')?.hasAttribute('aria-modal')).toBe(false);
+    }
   });
 
   test('error uses role=alert', () => {

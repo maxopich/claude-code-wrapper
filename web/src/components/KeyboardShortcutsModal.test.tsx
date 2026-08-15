@@ -167,10 +167,21 @@ describe('KeyboardShortcutsModal — dismissal', () => {
   });
 });
 
-describe('KeyboardShortcutsModal — footer hint', () => {
-  test('footer mentions where to edit the registry', () => {
+// U40: this used to assert the OPPOSITE — that a footer told the reader to go
+// edit `web/src/shortcutRegistry.ts`. That is contributor documentation, and
+// the audience of a keyboard cheatsheet in a shipped app is not a contributor.
+// The fact moved to a comment at the top of the component; the assertion
+// inverts to guard the removal, because a "the footer is gone" test that only
+// looks for the element would pass just as well if the whole modal failed to
+// render.
+describe('KeyboardShortcutsModal — operator-facing copy', () => {
+  test('names no repository source path anywhere in the dialog', () => {
     render();
-    const footer = document.querySelector('.keyboard-shortcuts-modal-footer');
-    expect(footer?.textContent).toContain('shortcutRegistry');
+    const modal = document.querySelector('.keyboard-shortcuts-modal');
+    expect(modal).not.toBeNull();
+    // Anti-vacuity: the dialog really did render its content.
+    expect(modal!.textContent?.length ?? 0).toBeGreaterThan(50);
+    expect(modal!.textContent).not.toMatch(/\b(web|server|shared)\/src\//);
+    expect(modal!.textContent).not.toContain('shortcutRegistry');
   });
 });

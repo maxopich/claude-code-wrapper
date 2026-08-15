@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { Project, SessionSummary } from '@cebab/shared/protocol';
-import { ProjectList } from './ProjectList';
+import { BULK_DELETE_TOKEN, ProjectList } from './ProjectList';
 
 // Cluster I Phase C5 UI — pins the sidebar's bulk-select behavior:
 //
@@ -224,7 +224,11 @@ describe('ProjectList — Archive / Export (single-step)', () => {
 });
 
 describe('ProjectList — Delete typed-confirmation (C5-2)', () => {
-  test('Delete opens a confirm substate; the Delete button is disabled until the count is typed', () => {
+  // U29: the required token used to be the selection COUNT — a single
+  // character, printed three times including as the input's own placeholder.
+  // It is now the fixed verb `delete`, which the surrounding sentence does not
+  // spell out.
+  test('Delete opens a confirm substate; the Delete button is disabled until the token is typed', () => {
     const h = render({ expanded: true, sessions: [summary('a'), summary('b')] });
     click(toggleBtn());
     click(sessionRows()[0]);
@@ -239,17 +243,40 @@ describe('ProjectList — Delete typed-confirmation (C5-2)', () => {
     const confirmBtn = actionButton('Delete 2');
     expect(confirmBtn?.disabled).toBe(true);
 
-    // Wrong value keeps it disabled.
-    setInputValue(confirmInput, '5');
+    // The OLD token — the selection count — must no longer arm it. Without
+    // this the fix could be reverted to `String(count)` and still pass.
+    setInputValue(confirmInput, '2');
     expect(actionButton('Delete 2')?.disabled).toBe(true);
 
-    // Correct count arms it.
-    setInputValue(confirmInput, '2');
+    // Any other wrong value keeps it disabled.
+    setInputValue(confirmInput, 'Delete');
+    expect(actionButton('Delete 2')?.disabled).toBe(true);
+
+    // The verb arms it.
+    setInputValue(confirmInput, BULK_DELETE_TOKEN);
     expect(actionButton('Delete 2')?.disabled).toBe(false);
 
     click(actionButton('Delete 2'));
     expect(h.onBulkSessionOp).toHaveBeenCalledWith('delete', ['a', 'b']);
     expect(actionBar()).toBeNull();
+  });
+
+  test('the confirm input does not echo the token it is asking for (U29)', () => {
+    const h = render({ expanded: true, sessions: [summary('a')] });
+    click(toggleBtn());
+    click(sessionRows()[0]);
+    click(actionButton('Delete'));
+
+    const confirmInput = container.querySelector('.bulk-action-confirm-input') as HTMLInputElement;
+    expect(confirmInput).not.toBeNull();
+    // The whole defect: the answer sitting greyed-out under the caret.
+    expect(confirmInput.getAttribute('placeholder')).toBeNull();
+    // ...and the prompt names the TARGET, so the operator confirms what as
+    // well as that.
+    const prompt = container.querySelector('.bulk-action-confirm-prompt');
+    expect(prompt?.textContent).toContain(BULK_DELETE_TOKEN);
+    expect(prompt?.textContent).toContain('demo');
+    expect(h.onBulkSessionOp).not.toHaveBeenCalled();
   });
 
   test('Cancel in the confirm substate returns to the action bar without deleting', () => {

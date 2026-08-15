@@ -45,10 +45,9 @@ afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-function stopReasonMsg(overrides: Partial<Extract<ClientMsg, { type: 'stop_reason' }>> = {}): Extract<
-  ClientMsg,
-  { type: 'stop_reason' }
-> {
+function stopReasonMsg(
+  overrides: Partial<Extract<ClientMsg, { type: 'stop_reason' }>> = {},
+): Extract<ClientMsg, { type: 'stop_reason' }> {
   return {
     type: 'stop_reason',
     sessionId: 'sess-1',
@@ -73,9 +72,10 @@ describe('executeStopReason — happy path', () => {
       latestAckId: 'ack-1',
     });
     const row = getDb()
-      .prepare<[string], { kind: string; reason_code: string; session_id: string; payload_json: string }>(
-        'SELECT kind, reason_code, session_id, payload_json FROM safety_audit WHERE kind = ?',
-      )
+      .prepare<
+        [string],
+        { kind: string; reason_code: string; session_id: string; payload_json: string }
+      >('SELECT kind, reason_code, session_id, payload_json FROM safety_audit WHERE kind = ?')
       .get('session.stop_reason');
     expect(row).toBeDefined();
     expect(row?.kind).toBe('session.stop_reason');
@@ -187,9 +187,7 @@ describe('executeStopReason — testability seams', () => {
       appendAudit,
       now: () => 1_700_000_000_000,
     });
-    expect(appendAudit).toHaveBeenCalledWith(
-      expect.objectContaining({ ts: 1_700_000_000_000 }),
-    );
+    expect(appendAudit).toHaveBeenCalledWith(expect.objectContaining({ ts: 1_700_000_000_000 }));
   });
 
   test('audit append throw is swallowed (no crash)', () => {

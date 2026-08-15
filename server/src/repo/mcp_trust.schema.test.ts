@@ -37,10 +37,9 @@ describe('migration 016_mcp_trust schema shape', () => {
   test('mcp_trust table exists with the expected columns', () => {
     const db = getDb();
     const cols = db
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; pk: number }
-      >(`PRAGMA table_info('mcp_trust')`)
+      .prepare<[], { name: string; type: string; notnull: number; pk: number }>(
+        `PRAGMA table_info('mcp_trust')`,
+      )
       .all();
     const byName = Object.fromEntries(cols.map((c) => [c.name, c]));
     // All declared columns present in exactly the right shape.
@@ -84,10 +83,9 @@ describe('migration 016_mcp_trust schema shape', () => {
         VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(2000, 'srv', '/etc/mcp.json', 'sha-v2', 'denied_remember', 'local-user');
     const rows = db
-      .prepare<
-        [],
-        { binary_sha: string; decision: string }
-      >(`SELECT binary_sha, decision FROM mcp_trust WHERE server_name = 'srv' ORDER BY ts`)
+      .prepare<[], { binary_sha: string; decision: string }>(
+        `SELECT binary_sha, decision FROM mcp_trust WHERE server_name = 'srv' ORDER BY ts`,
+      )
       .all();
     expect(rows).toEqual([
       { binary_sha: 'sha-v1', decision: 'trusted_pinned_hash' },
@@ -95,11 +93,24 @@ describe('migration 016_mcp_trust schema shape', () => {
     ]);
   });
 
-  test('multiple NULL binary_sha rows for same (server_name, origin_path) are allowed (SQLite NULL UNIQUE semantics)', () => {
-    // SQLite treats NULL as distinct in UNIQUE constraints — multiple
-    // unresolvable-target rows (npx commands) can coexist. The Phase 4
-    // repo's lookup logic handles "any matching name+origin with NULL sha"
-    // as a separate path; this just pins SQLite's default behavior.
+  test('a second NULL binary_sha row for the same (server_name, origin_path) conflicts (D09 / 033)', () => {
+    // THIS TEST USED TO ASSERT THE OPPOSITE, and that is the finding.
+    //
+    // It read: "multiple NULL binary_sha rows ... are allowed (SQLite NULL
+    // UNIQUE semantics)", with a comment noting that SQLite treats NULL as
+    // distinct in a UNIQUE constraint, that unresolvable-target rows can
+    // therefore coexist, and that "this just pins SQLite's default behavior".
+    // Every word of that was true. What it missed is that the schema and the
+    // repository both promise the opposite three lines away: 016's UNIQUE is
+    // documented as making the table a decision LOOKUP, and
+    // `recordTrustDecision` writes through INSERT OR REPLACE so a changed mind
+    // replaces the prior row. At a NULL sha the conflict never fired, so every
+    // decision appended — and this test pinned that as the contract rather than
+    // asking whether it should be.
+    //
+    // Migration 033's partial unique index closes it. The SQLite fact the old
+    // comment documented is still true; it is now a fact about the table-level
+    // UNIQUE alone, which is why 033 exists.
     const db = getDb();
     db.prepare(
       `INSERT INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
@@ -112,18 +123,37 @@ describe('migration 016_mcp_trust schema shape', () => {
             VALUES (?, ?, ?, NULL, ?, ?)`,
         )
         .run(2000, 'srv', '/etc/mcp.json', 'denied_remember', 'local-user'),
-    ).not.toThrow();
+    ).toThrowError(/UNIQUE constraint/);
     const count = db.prepare<[], { n: number }>(`SELECT COUNT(*) AS n FROM mcp_trust`).get();
-    expect(count?.n).toBe(2);
+    expect(count?.n).toBe(1);
+  });
+
+  test('…and a plain INSERT OR REPLACE at NULL sha now replaces, which is the point', () => {
+    // The behavioural half, at the schema layer: the constraint is only useful
+    // because it makes the repository's INSERT OR REPLACE do what its comment
+    // says. Without it this is two rows and "most recent wins" is left to an
+    // ORDER BY.
+    const db = getDb();
+    const write = db.prepare(
+      `INSERT OR REPLACE INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
+        VALUES (?, ?, ?, NULL, ?, ?)`,
+    );
+    write.run(1000, 'srv', '/etc/mcp.json', 'trusted', 'local-user');
+    write.run(2000, 'srv', '/etc/mcp.json', 'denied_remember', 'local-user');
+    const rows = db
+      .prepare<[], { ts: number; decision: string }>(
+        `SELECT ts, decision FROM mcp_trust WHERE server_name = 'srv'`,
+      )
+      .all();
+    expect(rows).toEqual([{ ts: 2000, decision: 'denied_remember' }]);
   });
 
   test('index mcp_trust_server_origin exists', () => {
     const db = getDb();
     const idx = db
-      .prepare<
-        [],
-        { name: string }
-      >(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'mcp_trust' AND name = 'mcp_trust_server_origin'`)
+      .prepare<[], { name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'mcp_trust' AND name = 'mcp_trust_server_origin'`,
+      )
       .get();
     expect(idx?.name).toBe('mcp_trust_server_origin');
   });
@@ -138,18 +168,16 @@ describe('migration 016_mcp_trust schema shape', () => {
     expect(() => getDb()).not.toThrow();
     // Schema still intact, no duplicate table creation attempt.
     const tables = getDb()
-      .prepare<
-        [],
-        { name: string }
-      >(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_trust'`)
+      .prepare<[], { name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'mcp_trust'`,
+      )
       .all();
     expect(tables).toHaveLength(1);
     // schema_migrations row for 016 lands exactly once.
     const rows = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '016_mcp_trust.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '016_mcp_trust.sql'`,
+      )
       .get();
     expect(rows?.n).toBe(1);
   });

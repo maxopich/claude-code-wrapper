@@ -48,10 +48,9 @@ afterEach(() => {
 describe('migration 018 — recovery_log table exists', () => {
   test('table is queryable after migrations run', () => {
     const tables = getDb()
-      .prepare<
-        [],
-        { name: string }
-      >(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'recovery_log'`)
+      .prepare<[], { name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'recovery_log'`,
+      )
       .all();
     expect(tables.map((t) => t.name)).toEqual(['recovery_log']);
   });
@@ -127,10 +126,9 @@ describe('appendRecoveryLog', () => {
       operatorAction: 'in_session_resume',
     });
     const row = getDb()
-      .prepare<
-        [number],
-        { session_id: string | null }
-      >('SELECT session_id FROM recovery_log WHERE id = ?')
+      .prepare<[number], { session_id: string | null }>(
+        'SELECT session_id FROM recovery_log WHERE id = ?',
+      )
       .get(id);
     expect(row?.session_id).toBeNull();
   });

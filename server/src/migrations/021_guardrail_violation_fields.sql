@@ -5,13 +5,22 @@
 -- a write whose target path falls outside the agent's project folder is
 -- visible as a violation in the mutation row itself.
 --
--- The detection is post-hoc — bus workers run with bypassPermissions, so
--- canUseTool is never called and we can't deny at the SDK gate. The
--- mutation has already happened by the time we record it. The signal here
--- is forensic: operator sees the violation in the MutationsDisclosure +
--- a safety_audit row carries the durable record of which path was
--- targeted and which agent did it. Enforcement-by-deny is a future slice
--- and would require a different permission posture for bus workers.
+-- The detection is post-hoc: the mutation has already happened by the time
+-- we record it. The signal here is forensic — operator sees the violation
+-- in the MutationsDisclosure + a safety_audit row carries the durable
+-- record of which path was targeted and which agent did it.
+--
+-- CORRECTED (register X11). This paragraph used to say the detection was
+-- post-hoc BECAUSE "bus workers run with bypassPermissions, so canUseTool is
+-- never called", and that enforcement-by-deny "would require a different
+-- permission posture". Both routers wire `onAskUserQuestion`, so every
+-- production turn already runs `permissionMode: 'default'` with a live
+-- `canUseTool` — the deny seam exists today and needs no posture change.
+-- The real reason enforcement is not wired is coverage, not capability:
+-- this classifier sees Write/Edit/MultiEdit/NotebookEdit only, while `Bash`
+-- carries no file path and symlinks are not resolved. Enforcing a guarantee
+-- with those holes open is worse than not claiming one — the argument is
+-- written out in `server/src/bus/guardrail.ts`.
 --
 -- Why two columns:
 --   guardrail_violation_path  Absolute (resolved) path the agent attempted to

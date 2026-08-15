@@ -94,7 +94,6 @@ export function ProjectList(props: {
                     ? p.name
                     : `${p.name}\n\nNo CLAUDE.md found in ${p.path} — this folder doesn't look like an agent project. You can still run Claude here, but project-level instructions, skills, and MCP servers won't auto-load.`
                 }
-                aria-label={p.name}
                 draggable
                 onDragStart={(e) => {
                   // JSON payload with a kind tag so the Multi-Agent drop zone
@@ -105,6 +104,13 @@ export function ProjectList(props: {
                   );
                   e.dataTransfer.effectAllowed = 'copy';
                 }}
+                // Register U01: the row's own click is a MOUSE CONVENIENCE for
+                // its dead space (padding, the live dot, the Claude mark). The
+                // accessible control is `.project-name` below — a real button,
+                // so it is in tab order and activates on Enter/Space for free.
+                // The header itself cannot be the button: `<button>` and
+                // `role="button"` both forbid interactive descendants, and this
+                // row already contains two of them (Select…, trust).
                 onClick={() => props.onSelectProject(p.id)}
               >
                 <span
@@ -116,7 +122,20 @@ export function ProjectList(props: {
                 ) : (
                   <span className="claude-mark-spacer" aria-hidden="true" />
                 )}
-                <span className="project-name">{p.name}</span>
+                <button
+                  type="button"
+                  className="project-name"
+                  aria-expanded={expanded}
+                  onClick={(e) => {
+                    // Without this the click bubbles to the header and selects
+                    // twice — harmless in the reducer, but it ships a second
+                    // `open_project` over the wire for no reason.
+                    e.stopPropagation();
+                    props.onSelectProject(p.id);
+                  }}
+                >
+                  {p.name}
+                </button>
                 {/* Cluster I C5 UI: Select-mode toggle. Only meaningful when the
                  *  project is expanded (its session list is visible), so it's
                  *  gated on `expanded`. Hidden when the project has no sessions
@@ -161,6 +180,7 @@ export function ProjectList(props: {
                   {inSelectMode ? (
                     <BulkActionBar
                       count={selectedIds.size}
+                      projectName={p.name}
                       onArchive={() => {
                         props.onBulkSessionOp('archive', [...selectedIds]);
                         exitSelectMode();
@@ -178,10 +198,24 @@ export function ProjectList(props: {
                   ) : (
                     <li
                       className={`session-row new ${!activeSessionId ? 'active' : ''}`}
+                      // U01: mouse convenience for the row's dead space; the
+                      // button below is the control. See the project header.
                       onClick={() => props.onNewSession(p.id)}
                     >
-                      <span className="session-marker">+</span>
-                      <span className="session-name">new chat</span>
+                      <span className="session-marker" aria-hidden="true">
+                        +
+                      </span>
+                      <button
+                        type="button"
+                        className="session-name"
+                        aria-label={`Start a new chat in ${p.name}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onNewSession(p.id);
+                        }}
+                      >
+                        new chat
+                      </button>
                       {/* Cluster B Phase 6e (UI-B5): trailing ⓘ button opens the
                        *  AuthorityPreflightModal scoped to this project. stopPropagation
                        *  so the click doesn't also fire onNewSession. */}
@@ -234,15 +268,38 @@ export function ProjectList(props: {
  * expanded project is in select mode. Renders the live selection count
  * (announced via `aria-live="polite"` per C5-4) and the three ops.
  *
- * Delete is gated behind a typed-confirmation substate (C5-2): the
- * operator must type the selection count to arm the destructive button,
- * and Cancel is the default/safe action. Archive + Export are single-step
- * (C5-3). Escape exits — backing out of the confirm substate first, then
- * out of select mode entirely — so a reflexive Esc never nukes a
- * selection mid-confirm.
+ * Delete is gated behind a typed-confirmation substate (C5-2), and Cancel is
+ * the default/safe action. Archive + Export are single-step (C5-3). Escape
+ * exits — backing out of the confirm substate first, then out of select mode
+ * entirely — so a reflexive Esc never nukes a selection mid-confirm.
+ *
+ * U29: the required token used to be the SELECTION COUNT, and the gate printed
+ * it three times — in the prompt (`Type **3** to delete 3`), in the input's
+ * `aria-label`, and as the input's `placeholder`. So the friction the gate
+ * exists to create was gone twice over: the answer was a single character, and
+ * it was already sitting in the field, greyed out, under the cursor. The
+ * register asks for the placeholder to be dropped; that alone would change
+ * nothing, because "to delete 3" still spells out the answer in the same
+ * sentence. The token had to change.
+ *
+ * It is now the fixed verb `delete` — the rule this codebase already uses
+ * twice (`inject` in EnvInjectionGateModal, `reopen` in ReopenSessionModal),
+ * and one that cannot be read off the surrounding prose. The target moved into
+ * the sentence instead: "Delete 7 sessions from Cebab?" confirms *what* as
+ * well as *that*.
+ *
+ * Naming the token in a label is not the defect the placeholder was. The
+ * friction a typed gate creates is deliberate typing, not secrecy — GitHub
+ * prints the repository name directly above the field. Greyed text INSIDE the
+ * input is different: the eye and the caret are already there.
  */
+export const BULK_DELETE_TOKEN = 'delete';
+
 function BulkActionBar(props: {
   count: number;
+  /** The project the selected sessions belong to. Named in the confirm prompt
+   *  so the operator confirms a target, not just a number. */
+  projectName: string;
   onArchive: () => void;
   onDelete: () => void;
   onExport: () => void;
@@ -252,10 +309,7 @@ function BulkActionBar(props: {
   const [confirmText, setConfirmText] = useState('');
   const confirmInputRef = useRef<HTMLInputElement>(null);
   const hasSelection = props.count > 0;
-  // The operator types the selection count to arm Delete (C5-2). Using the
-  // count (vs a project name) keeps the gate self-contained in this bar.
-  const confirmTarget = String(props.count);
-  const deleteArmed = confirmingDelete && confirmText.trim() === confirmTarget;
+  const deleteArmed = confirmingDelete && confirmText.trim() === BULK_DELETE_TOKEN;
 
   useEffect(() => {
     if (confirmingDelete) confirmInputRef.current?.focus();
@@ -281,15 +335,18 @@ function BulkActionBar(props: {
     return (
       <li className="bulk-action-bar confirming" aria-label="Confirm bulk delete">
         <span className="bulk-action-confirm-prompt">
-          Type <strong>{confirmTarget}</strong> to delete {props.count}
+          Delete {props.count} session{props.count === 1 ? '' : 's'} from{' '}
+          <strong>{props.projectName}</strong>? Type <code>{BULK_DELETE_TOKEN}</code> to confirm.
         </span>
         <input
           ref={confirmInputRef}
           className="bulk-action-confirm-input"
           value={confirmText}
-          inputMode="numeric"
-          aria-label={`Type ${confirmTarget} to confirm deleting ${props.count} sessions`}
-          placeholder={confirmTarget}
+          autoComplete="off"
+          spellCheck={false}
+          aria-label={`Type ${BULK_DELETE_TOKEN} to confirm deleting ${props.count} sessions from ${props.projectName}`}
+          /* No `placeholder` — that was the U29 defect, and
+           * `confirmationStyle.test.ts` fails if one comes back. */
           onChange={(e) => setConfirmText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && deleteArmed) {
@@ -413,12 +470,16 @@ function SessionRow(props: {
       className={`session-row ${props.active ? 'active' : ''} ${editing ? 'editing' : ''} ${
         props.selectMode ? 'selecting' : ''
       } ${props.selectMode && props.selected ? 'selected' : ''}`}
-      aria-selected={props.selectMode ? props.selected : undefined}
       title={
         editing || props.selectMode
           ? undefined
           : `${s.id}\n${formatRelative(s.lastEventAt)} • $${s.totalCostUsd.toFixed(4)}\nDouble-click name to rename`
       }
+      // Register U01: mouse convenience only — `.session-name` below is the
+      // real control. The row previously carried `aria-selected` here, which
+      // assistive tech ignores on a bare <li> (that attribute needs an
+      // option/row/tab role, and this list has none); the state now rides on
+      // the button as `aria-pressed`, which is what a toggle actually maps to.
       onClick={() => {
         if (props.selectMode) props.onToggleSelect();
         else if (!editing) props.onSelect();
@@ -466,18 +527,28 @@ function SessionRow(props: {
           onBlur={commit}
         />
       ) : (
-        <span
+        <button
+          type="button"
           className="session-name"
+          aria-pressed={props.selectMode ? props.selected : undefined}
+          aria-current={!props.selectMode && props.active ? 'true' : undefined}
+          aria-label={props.selectMode ? `Select session ${label}` : `Open session ${label}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (props.selectMode) props.onToggleSelect();
+            else props.onSelect();
+          }}
           onDoubleClick={(e) => {
             // Rename is disabled in select mode — the double-click would
-            // otherwise fight the selection toggle.
+            // otherwise fight the selection toggle. The keyboard path to
+            // rename is the ✎ button below, not this.
             if (props.selectMode) return;
             e.stopPropagation();
             startEdit();
           }}
         >
           {label}
-        </span>
+        </button>
       )}
       {/* Per-row action buttons (rename + download) are hidden in select
        *  mode: the row is a selection target there, not an action surface. */}

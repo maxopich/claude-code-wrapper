@@ -82,6 +82,22 @@ function pendingKey(p: Pending): string {
   return `bus:${p.pendingId}`;
 }
 
+/**
+ * Register H15 / W28: the `cancel_gate` envelope for a parked gate.
+ *
+ * The one place the two vocabularies for the same gate are reconciled. This
+ * file calls it `env` (it is raised by an env injection); the server calls it
+ * `start` (`session_start_gated`, `startGate`, `session_start_gate.ts`), and
+ * the wire word follows the server, because that is where the pending map the
+ * handler reaches into lives. Both names are already load-bearing in their own
+ * halves, so this maps rather than renaming either.
+ */
+function cancelMsgFor(p: Pending): Extract<ClientMsg, { type: 'cancel_gate' }> {
+  if (p.kind === 'mcp') return { type: 'cancel_gate', kind: 'mcp', pendingId: p.pendingId };
+  if (p.kind === 'env') return { type: 'cancel_gate', kind: 'start', pendingId: p.pendingStartId };
+  return { type: 'cancel_gate', kind: 'bus', pendingId: p.pendingId };
+}
+
 // ---- context ----
 
 type ActionsValue = {
@@ -96,7 +112,7 @@ type ActionsValue = {
    *  from the modal after the operator submits/closes. */
   dismissHead: (matchKey: string) => void;
   /** Outbound WS sink; modals call this to ship their decision ClientMsg. */
-  send: (msg: ClientMsg) => void;
+  send: (msg: ClientMsg) => boolean;
 };
 
 const StateCtx = createContext<State | null>(null);
@@ -106,7 +122,7 @@ export type GateModalsProviderProps = {
   children: ReactNode;
   /** WS ClientMsg sink. Modals call this to send mcp_trust_decision /
    *  acknowledge_and_start. */
-  send: (msg: ClientMsg) => void;
+  send: (msg: ClientMsg) => boolean;
   /** App.tsx populates this ref so the WS message bridge can route
    *  matching envelopes into the provider without prop-drilling. Mirror of
    *  the NotificationsBridge / InboxProvider pattern from Cluster A. */
@@ -194,12 +210,33 @@ function GateModalHost() {
   const head = queue[0];
   if (!head) return null;
   const matchKey = pendingKey(head);
+  /**
+   * Register W28: dismissing tells the server, instead of only popping the
+   * queue. Escape and a backdrop click both land here (via `useModalSurface`),
+   * and so does the env gate's own "Refuse & edit" button — which is why this
+   * mattered most there: a labelled refusal affordance that left the spawn
+   * parked with no trace in the UI.
+   *
+   * `cancel_gate` is not a denial. It routes to the same reject-don't-resolve
+   * path the disconnect drain uses, so nothing is recorded and the operator is
+   * asked again next time. The modal closes either way — an undeliverable
+   * cancel means the socket is already down, which drains the gate server-side
+   * anyway, so holding the modal open would strand the operator instead.
+   */
+  const onCancel = () => {
+    send(cancelMsgFor(head));
+    dismissHead(matchKey);
+  };
+  /** Pop only. Used after a decision has already been sent — cancelling then
+   *  would chase a resolved gate with a message that means the opposite. */
   const onClose = () => dismissHead(matchKey);
   if (head.kind === 'mcp') {
-    return <McpTofuModal pending={head} send={send} onClose={onClose} />;
+    return <McpTofuModal pending={head} send={send} onClose={onClose} onCancel={onCancel} />;
   }
   if (head.kind === 'env') {
-    return <EnvInjectionGateModal pending={head} send={send} onClose={onClose} />;
+    return (
+      <EnvInjectionGateModal pending={head} send={send} onClose={onClose} onCancel={onCancel} />
+    );
   }
-  return <BusTofuModal pending={head} send={send} onClose={onClose} />;
+  return <BusTofuModal pending={head} send={send} onClose={onClose} onCancel={onCancel} />;
 }

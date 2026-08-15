@@ -115,3 +115,97 @@ describe('AskUserQuestionCard', () => {
     expect(onSubmit).toHaveBeenCalledWith('a', 'tu2', { 'Which checks?': 'lint, types' });
   });
 });
+
+/**
+ * W04 — answers belong to the question they were typed for.
+ *
+ * The host renders this card ungated for the whole run, so `pending: null`
+ * hides it without unmounting. `picks` / `other` are keyed by question INDEX,
+ * which only means anything relative to one `toolUseId`. Before the fix the
+ * next question inherited index 0 of the last one, arrived already marked
+ * complete, and was one click from shipping a different agent's answer.
+ *
+ * Every case below re-renders the SAME root — which is exactly why the suite
+ * above never caught this: each of its tests gets a fresh mount in
+ * `beforeEach`, so the state never had a chance to outlive its question.
+ */
+describe('AskUserQuestionCard — answers are stamped with their question (W04)', () => {
+  const second: PendingAskUserQuestionView = {
+    agent: 'bran',
+    toolUseId: 'tu-second',
+    questions: [
+      {
+        question: 'Roll back?',
+        header: 'Rollback',
+        options: [{ label: 'Yes' }, { label: 'No' }],
+        multiSelect: false,
+      },
+    ],
+  };
+
+  test('a second question arrives blank and cannot be sent', () => {
+    const onSubmit = render(single);
+    act(() => optionByLabel('Prod').click());
+    expect(sendBtn().disabled).toBe(false);
+
+    render(second, onSubmit);
+    expect(container.querySelector('.ask-user-q-text')?.textContent).toBe('Roll back?');
+    expect(
+      [...container.querySelectorAll('.ask-user-option')].some(
+        (b) => b.getAttribute('aria-pressed') === 'true',
+      ),
+    ).toBe(false);
+    expect((container.querySelector('.ask-user-other') as HTMLInputElement).value).toBe('');
+    expect(sendBtn().disabled).toBe(true);
+  });
+
+  test('the stale answer is not resurrected by answering the new question', () => {
+    const onSubmit = render(single);
+    act(() => optionByLabel('Prod').click());
+    render(second, onSubmit);
+    act(() => optionByLabel('Yes').click());
+    act(() => sendBtn().click());
+    expect(onSubmit).toHaveBeenCalledWith('bran', 'tu-second', { 'Roll back?': 'Yes' });
+  });
+
+  test('a question that clears and returns is still blank', () => {
+    // The real sequence: `multi_agent_ask_user_resolved` nulls the slot, the
+    // card renders nothing, and the next question mounts into the same node.
+    const onSubmit = render(single);
+    act(() => optionByLabel('Prod').click());
+    render(null, onSubmit);
+    render(second, onSubmit);
+    expect(sendBtn().disabled).toBe(true);
+  });
+
+  test('CONTROL: re-rendering the SAME question keeps the in-progress answer', () => {
+    // A reset-on-every-render would satisfy the three cases above and fail
+    // here — the card re-renders constantly while a run streams.
+    const onSubmit = render(single);
+    act(() => optionByLabel('Prod').click());
+    render({ ...single }, onSubmit);
+    expect(sendBtn().disabled).toBe(false);
+    act(() => sendBtn().click());
+    expect(onSubmit).toHaveBeenCalledWith('hodor', 'tu1', { 'Deploy where?': 'Prod' });
+  });
+
+  test('CONTROL: free-text carries the same stamp as the option picks', () => {
+    const onSubmit = render(single);
+    const type = (value: string) => {
+      const other = container.querySelector('.ask-user-other') as HTMLInputElement;
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype,
+          'value',
+        )?.set;
+        if (setter) setter.call(other, value);
+        other.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+    type('us-east-2');
+    expect(sendBtn().disabled).toBe(false);
+    render(second, onSubmit);
+    expect((container.querySelector('.ask-user-other') as HTMLInputElement).value).toBe('');
+    expect(sendBtn().disabled).toBe(true);
+  });
+});

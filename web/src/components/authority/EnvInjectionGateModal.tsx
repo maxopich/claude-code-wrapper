@@ -13,9 +13,15 @@ import { useModalSurface } from '../../useModalSurface';
 //   - Optional reason text field (free-form, persisted into the audit row)
 //   - Confirm-input field that must equal "inject" exactly (case-sensitive,
 //     matches the server-side ACKNOWLEDGMENT_TRIGGER)
-//   - Two buttons: "Refuse & edit" (default focus, closes modal, gate
-//     stays parked; operator handles via settings.json edit + reconnect)
-//     and "Submit override" (disabled until typed string matches)
+//   - Two buttons: "Refuse & edit" (default focus) and "Submit override"
+//     (disabled until the typed string matches)
+//
+// Register W28: "Refuse & edit" used to close the modal and leave the gate
+// parked — a labelled refusal that sent nothing, on the one gate with no deny
+// verb at all (its only reply, `acknowledge_and_start`, STARTS the session).
+// It now sends `cancel_gate`, which rejects the parked promise so the spawn
+// fails instead of hanging. The operator still edits settings.json and starts
+// again; the difference is that the old attempt is actually over.
 //
 // BE-B12 [security] preserved: the modal never receives or displays env
 // VALUES — only keys + posture + isSet — same shape as the wire envelope.
@@ -28,11 +34,23 @@ const REQUIRED_ACK = 'inject';
 
 export function EnvInjectionGateModal(props: {
   pending: Pending;
-  send: (msg: ClientMsg) => void;
+  send: (msg: ClientMsg) => boolean;
+  /** Pop the queue. Called after the acknowledgment has gone out. */
   onClose: () => void;
+  /**
+   * Register W28: refuse without acknowledging — sends `cancel_gate`, which
+   * unparks the awaiting spawn without starting it.
+   *
+   * This gate is where dismissing hurt most. There is no "deny" ClientMsg
+   * here — the only reply is `acknowledge_and_start`, which STARTS the
+   * session — so the "Refuse & edit" button below had nothing to send and
+   * merely popped the queue, leaving the spawn parked with no trace in the
+   * UI. A labelled refusal that did nothing.
+   */
+  onCancel: () => void;
 }) {
-  const { pending, send, onClose } = props;
-  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
+  const { pending, send, onClose, onCancel } = props;
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: onCancel });
 
   const [typedAck, setTypedAck] = useState('');
   const [reasonText, setReasonText] = useState('');
@@ -53,7 +71,10 @@ export function EnvInjectionGateModal(props: {
       typedAcknowledgment: typedAck,
       ...(reasonText.trim() ? { reasonText: reasonText.trim() } : {}),
     };
-    send(msg);
+    // W29: only close once the override has actually gone out. Closing on a
+    // dropped send would leave the operator believing they had authorised a
+    // credential-injecting start that never happened.
+    if (!send(msg)) return;
     onClose();
   }
 
@@ -146,7 +167,7 @@ export function EnvInjectionGateModal(props: {
             type="button"
             ref={refuseRef}
             className="ghost-btn gate-modal-btn gate-modal-btn-primary"
-            onClick={onClose}
+            onClick={onCancel}
           >
             Refuse &amp; edit
           </button>

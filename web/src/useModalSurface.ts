@@ -24,6 +24,14 @@ import { useModalKeys } from './useModalKeys';
  * inner surface element for full-bleed behavior below the sm
  * breakpoint.
  */
+/**
+ * Marks an element the `inert` focus-trap must leave alone. Exported so the
+ * one call site and its test spell it the same way — a typo'd attribute here
+ * fails silently, in the direction of "still inert", which is invisible until
+ * an operator hits it.
+ */
+export const INERT_EXEMPT_ATTR = 'data-modal-inert-exempt';
+
 export function useModalSurface(opts: {
   onClose: () => void;
   onConfirm?: () => void;
@@ -73,6 +81,14 @@ export function useModalSurface(opts: {
         if (sib === node) continue;
         if (!(sib instanceof HTMLElement)) continue;
         if (sib.hasAttribute('inert')) continue;
+        // U28: one exemption, for a surface that must be able to interrupt a
+        // modal rather than be buried by it — today only the connection-lost
+        // overlay. If the server is unreachable, the modal behind it cannot
+        // be answered anyway, so inert-ing the only control that says so (and
+        // offers Retry) traps the operator with a dialog that cannot succeed.
+        // Deliberately opt-IN and attribute-driven: the default stays "inert
+        // every sibling", so nothing becomes reachable by accident.
+        if (sib.hasAttribute(INERT_EXEMPT_ATTR)) continue;
         sib.setAttribute('inert', '');
         inerted.push(sib);
       }

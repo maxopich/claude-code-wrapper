@@ -94,10 +94,9 @@ describe('chooseAgentName', () => {
     expect(chooseAgentName('###', id)).toBe(`agent-${id}`);
   });
 
-  test('falls back to <slug>-<id> when the slug is a reserved system name', () => {
-    // Reserved set is {orchestrator, user, cebab}. A project named
-    // "Orchestrator" must not become agent `orchestrator` — that's the
-    // routing agent's reserved name.
+  test('falls back to <slug>-<id> when the slug is a reserved protocol name', () => {
+    // The bus sentinels. A project named "Orchestrator" must not become agent
+    // `orchestrator` — that's the routing agent's reserved name.
     const idA = makeProject('Orchestrator', 'orchA');
     expect(chooseAgentName('Orchestrator', idA)).toBe(`orchestrator-${idA}`);
 
@@ -106,6 +105,40 @@ describe('chooseAgentName', () => {
 
     const idC = makeProject('Cebab', 'cebabC');
     expect(chooseAgentName('Cebab', idC)).toBe(`cebab-${idC}`);
+  });
+
+  test('falls back to <slug>-<id> for a Windows device name (register H17)', () => {
+    // The slug becomes a DIRECTORY (`SessionPaths.iterationDir` joins it into
+    // the artifact path), and on Windows these names address a device — so
+    // `mkdir con` fails and every hop archive for that project fails with it.
+    // Runs on all platforms deliberately: the bug is Windows-only, but the
+    // guard is a name choice, and a POSIX-only test would let a regression
+    // through until the Windows runner caught it.
+    const idA = makeProject('Con', 'conA');
+    expect(chooseAgentName('Con', idA)).toBe(`con-${idA}`);
+
+    const idB = makeProject('AUX', 'auxB');
+    expect(chooseAgentName('AUX', idB)).toBe(`aux-${idB}`);
+
+    const idC = makeProject('COM1', 'com1C');
+    expect(chooseAgentName('COM1', idC)).toBe(`com1-${idC}`);
+
+    const idD = makeProject('lpt9', 'lpt9D');
+    expect(chooseAgentName('lpt9', idD)).toBe(`lpt9-${idD}`);
+  });
+
+  test('a name that merely CONTAINS a device name is left alone', () => {
+    // Anti-vacuity: the reservation is exact-match. Windows only reserves the
+    // bare names, so bumping `console` or `aux-helper` would rename real
+    // projects for nothing.
+    const idA = makeProject('Console', 'consoleA');
+    expect(chooseAgentName('Console', idA)).toBe('console');
+
+    const idB = makeProject('Aux Helper', 'auxHelperB');
+    expect(chooseAgentName('Aux Helper', idB)).toBe('aux-helper');
+
+    const idC = makeProject('COM10', 'com10C');
+    expect(chooseAgentName('COM10', idC)).toBe('com10');
   });
 });
 

@@ -13,12 +13,13 @@ import type {
   PendingRetryDescriptor,
   Project,
   RecoveryContextView,
+  RouterDropReasonCode,
   ServerMsg,
   SessionPermissionMode,
   SessionSummary,
   WrapperErrorKind,
 } from '@cebab/shared/protocol';
-import type { MutationCategory } from '@cebab/shared';
+import type { MutationCategory, PermissionDecisionReason } from '@cebab/shared';
 
 export type MessageView =
   | { kind: 'user'; id: string; text: string }
@@ -70,6 +71,11 @@ export type MessageView =
       toolName: string;
       input: unknown;
       decided?: 'allow' | 'deny';
+      /** Register S06: set when Cebab decided this instead of the operator —
+       *  the socket closed, or the turn was interrupted, with the card still
+       *  open. Absent on an operator's own answer, which is what tells the two
+       *  apart when the session is read back later. */
+      decidedReason?: PermissionDecisionReason;
       /** Item #5: server-classified category from `classifyToolCall`. Optional
        *  so a replay of a pre-Item-5 permission_request still renders via the
        *  JSON-fallback subcomponent. */
@@ -303,7 +309,7 @@ export type MultiAgentRun = {
    *  click via `ma_clear_pending_retry` and authoritatively by
    *  `multi_agent_pending_retry { pending: null }` on success/abandon. */
   pendingRetry: PendingRetryDescriptor | null;
-  /** Item #5: opt-in pause-on-first-mutation flag for this session. Reflects
+  /** Item #5: opt-in pause-on-dangerous flag for this session. Reflects
    *  the operator's choice at session start. UI surfaces it as a read-only
    *  row in Session info (the toggle itself lives in setup). */
   pauseOnDangerous: boolean;
@@ -311,24 +317,22 @@ export type MultiAgentRun = {
    *  change their own project; drives the "Execute mode" banner/chip in place
    *  of the consultant-mode one. Mirrored from `multi_agent_started`. */
   executeMode: boolean;
-  /** Item #5: true once the operator has clicked Continue at least once.
-   *  When true, subsequent mutations auto-allow. Mirrored from server. */
-  mutationsAcknowledged: boolean;
   /** Item #5: all classified non-'read' tool calls observed during this
    *  session, ordered by ts ascending. Drives the Session-info "Mutations"
    *  disclosure + activity-bar counter chip. Deduped by `mutation.id` so
    *  the live `multi_agent_mutation` ServerMsg + the initial replay on
    *  attach can both populate it without doubling rows. */
   mutations: MultiAgentMutationView[];
-  /** Item #5: pause-on-first-mutation slot. Populated when a worker is
-   *  about to mutate AND `pauseOnDangerous && !mutationsAcknowledged`. Drives
-   *  the pause banner; gates `UserPromptInput` (same one-decision-at-a-time
-   *  pattern as `awaitingContinue` / `pendingRetry`). Cleared optimistically
-   *  on Continue click and authoritatively by
-   *  `multi_agent_pending_mutation { pending: null }`. */
-  pendingMutation: MultiAgentMutationView | null;
+  /** Item #5: every worker currently halted by the pause-on-dangerous gate,
+   *  oldest first. One entry per paused worker — the gate is per-agent
+   *  (migration 031), so several can be waiting at once. Drives the pause
+   *  banner stack; a non-empty list gates `UserPromptInput` (same
+   *  one-decision-at-a-time pattern as `awaitingContinue` / `pendingRetry`).
+   *  An entry is dropped optimistically on its Continue click and the whole
+   *  list is replaced authoritatively by `multi_agent_pending_mutations`. */
+  pendingMutations: MultiAgentMutationView[];
   /** Interactive AskUserQuestion: the active question awaiting the operator,
-   *  or null. Mirrors `pendingMutation` — gates `UserPromptInput`, cleared
+   *  or null. Mirrors `pendingMutations` — gates `UserPromptInput`, cleared
    *  optimistically on submit (`ma_clear_pending_question`) and
    *  authoritatively by `multi_agent_ask_user_resolved`. Hydrated on attach
    *  from `multi_agent_started.pendingQuestion` (R-A). */
@@ -450,18 +454,12 @@ export type MultiAgentAutoRetry = {
  */
 export type RouterDropView = {
   auditRowId: string;
-  // Cluster C Phase 4b adds `muted_source`; Phase 4d adds `kicked_source`
-  // and `kicked_destination`. Keep this in sync with the server's
-  // RouterDropReasonCode in shared/src/protocol.ts. Inline-list rather
-  // than `import type` to keep the type fully local for the reducer.
-  reasonCode:
-    | 'forged_source'
-    | 'worker_to_user'
-    | 'worker_to_worker'
-    | 'unknown_source'
-    | 'muted_source'
-    | 'kicked_source'
-    | 'kicked_destination';
+  // Was an inline copy of the server's union, with a comment asking the next
+  // author to keep it in sync by hand. Adding `unknown_destination` (register
+  // B16) is what made it diverge, and this module already imports
+  // `WrapperErrorKind` from the same file — so "keep the type local for the
+  // reducer" was buying nothing. One declaration, in shared.
+  reasonCode: RouterDropReasonCode;
   source: string;
   destination: string;
   kind: string;
@@ -548,7 +546,7 @@ export type MultiAgentState = {
   /** The seed input the operator types before clicking Start. In chain
    *  mode it rides the first participant's opening turn. */
   draftPrompt: string;
-  /** Item #5: setup-screen opt-in for pause-on-first-mutation. Persists
+  /** Item #5: setup-screen opt-in for pause-on-dangerous. Persists
    *  during the session draft; sent on `start_multi_agent` as
    *  `pauseOnDangerous`. Default false; the operator opts in explicitly. */
   draftPauseOnDangerous: boolean;
@@ -738,6 +736,36 @@ export type AppState = {
   // can route incoming messages to the right project bucket.
   sessionToProject: Record<string, number>;
 
+  /**
+   * Registers W08/W09: the replay currently in flight, or `null` when every
+   * message on the wire is live.
+   *
+   * A persisted `system/init` row translates back into a `session_started`, so
+   * the reducer sees the same envelope for "a turn just started" and "here is
+   * what happened last Tuesday". Two of its side effects are only ever true of
+   * the live one — migrating the pending optimistic session, and treating the
+   * SDK's successful handshake as proof the credentials are good. This slice
+   * is how the reducer tells the two apart.
+   *
+   * **Matched on `projectId`, not `sessionId`.** `translate` takes its
+   * `sessionId` from the persisted row's own `session_id` field, while
+   * `projectId` is injected by the server for every row it replays. Matching
+   * the project therefore holds for the whole replay even if a row disagrees
+   * with the id that was asked for; matching the session id would stop
+   * guarding at exactly that point, silently.
+   *
+   * **One entry, not a set.** `replaySession` sends `session_history_start`,
+   * every translated row, and `session_history_end` in a single synchronous
+   * block — no `await` separates them — so a replay cannot interleave with
+   * live traffic. A set would imply a concurrency that cannot occur.
+   *
+   * Cleared by `session_history_end` and by `ws_close`; the latter bounds a
+   * leak (a replay the server never finished) to one connection, because a
+   * stuck flag fails *unsafe* — it would make a later live `session_started`
+   * look like a replay and strand the operator's optimistic message.
+   */
+  historyReplay: { projectId: number; sessionId: string } | null;
+
   // The known list of past sessions per project (from project_opened).
   knownSessions: Record<number, SessionSummary[]>;
   // Sessions currently running on this WebSocket connection.
@@ -746,11 +774,16 @@ export type AppState = {
   permissionModeBySession: Record<string, SessionPermissionMode>;
   // Workspace settings reported by the server. `null` means we haven't asked yet.
   settings: SettingsView | null;
-  // Monotonic counter bumped on every `wrapper_error`. Pending-state effects
-  // key off it to clear stuck spinners when an async action fails — it's the
-  // only generic "an error happened" signal (wrapper_error otherwise routes
-  // into a chat session's message list, invisible to the multi-agent tab).
-  wrapperErrorSeq: number;
+  // Monotonic counter bumped on every failure envelope — `wrapper_error` and
+  // `participant_control_failed`. Pending-state effects key off it to clear
+  // stuck spinners when an async action fails; it is the only generic "an
+  // error happened" signal (a `wrapper_error` otherwise routes into a chat
+  // session's message list, invisible to the multi-agent tab).
+  //
+  // Was `wrapperErrorSeq` until `participant_control_failed` became the
+  // second source. A name that says wrapperError while counting two things
+  // is the drift this repo keeps paying for, so it was renamed with them.
+  failureSeq: number;
   // Multi-agent draft + view state.
   multiAgent: MultiAgentState;
   /** Cluster D Phase 6: app-wide auth-expired slice. See AuthExpiredState
@@ -853,11 +886,14 @@ export const initialState: AppState = {
   activeSessionByProject: {},
   pendingByProject: {},
   sessionToProject: {},
+  // Registers W08/W09: null until a `session_history_start` lands. See the
+  // AppState field's JSDoc for why this is one entry keyed by project.
+  historyReplay: null,
   knownSessions: {},
   liveSessions: {},
   permissionModeBySession: {},
   settings: null,
-  wrapperErrorSeq: 0,
+  failureSeq: 0,
   // Cluster D Phase 6: starts undefined; populated when wrapper_error
   // with kind='auth_expired' lands. Cleared on next session_started.
   authExpired: undefined,
@@ -932,6 +968,37 @@ function projectFor(state: AppState, sessionId: string): number | null {
   return pid === undefined ? null : pid;
 }
 
+/**
+ * Cluster D Phase 6: promote `auth_expired` into the top-level slice so the
+ * app-wide AuthExpiredBanner can mount. Per-session inline rendering (the
+ * chat message-list 'error' entry) and the toast (routed by the dispatcher)
+ * stay independent; this slice is the durable in-page signal.
+ *
+ * Extracted from the `wrapper_error` case when that case grew a second exit
+ * — a bus-scoped error returns early, and the banner must not be something
+ * that early return can swallow.
+ *
+ * Returns `state.authExpired` unchanged for every other kind.
+ */
+function authExpiredAfter(
+  state: AppState,
+  kind: WrapperErrorKind,
+  message: string,
+): AuthExpiredState | undefined {
+  if (kind !== 'auth_expired') return state.authExpired;
+  const now = Date.now();
+  return {
+    firstSeenMs: state.authExpired?.firstSeenMs ?? now,
+    lastSeenMs: now,
+    count: (state.authExpired?.count ?? 0) + 1,
+    lastMessage: message,
+    // Re-surface the banner on every fresh observation — the operator may
+    // have dismissed it, then attempted another message, so the dismiss
+    // should not silence the second failure.
+    dismissed: false,
+  };
+}
+
 export type Action =
   | { type: 'ws_open' }
   | { type: 'ws_close' }
@@ -959,7 +1026,7 @@ export type Action =
   | { type: 'ma_dismiss_active' }
   | { type: 'ma_clear_awaiting' }
   | { type: 'ma_clear_pending_retry' }
-  | { type: 'ma_clear_pending_mutation' }
+  | { type: 'ma_clear_pending_mutation'; mutationId: number }
   | { type: 'ma_clear_pending_question' }
   /** Cluster D Phase 4d: drop the bus auto-retry slice (the CountdownChip's
    *  onElapsed fires this — the retry has fired, banner should unmount.
@@ -1046,6 +1113,11 @@ export function reduce(state: AppState, action: Action): AppState {
         connected: false,
         liveSessions: {},
         activeRuns: [],
+        // Registers W08/W09: a replay in flight when the socket dropped will
+        // never get its `session_history_end`. Clearing here bounds the stuck
+        // flag to the connection that stranded it — see the field's JSDoc for
+        // why leaving it set is the dangerous direction.
+        historyReplay: null,
         // Cluster G Phase 4 (D6/D11): clear the in-session install
         // timestamps too. A stale 25-second-old entry would otherwise
         // briefly relight the badge on reconnect for an install that
@@ -1123,6 +1195,14 @@ export function reduce(state: AppState, action: Action): AppState {
         // New turn begins now — anchor the elapsed timer at send time so it
         // counts the full wait, including the pre-first-token gap.
         runStartedAt: Date.now(),
+        // Register W01: a new turn never inherits the previous one's partial
+        // text. The turn-end cases above are the primary fix; this is the
+        // backstop, and it guards the exact moment the staleness becomes
+        // VISIBLE — flipping status to 'running' is what lets `sessionPhase`
+        // fall through to its `streamingText.length > 0 → 'streaming'` branch
+        // and re-render the old answer. Any future turn-ending path that
+        // emits neither `result` nor `wrapper_error` is covered here too.
+        streamingText: '',
         messages: [...session.messages, { kind: 'user', id: nextId(), text: action.text }],
         // Cluster C Phase 2: operator moved on — the previous Stop's
         // marker + reason prompt should no longer hang around in the
@@ -1343,21 +1423,19 @@ export function reduce(state: AppState, action: Action): AppState {
     }
 
     case 'ma_clear_pending_mutation': {
-      // Item #5: optimistic clear on Continue click. Also sets
-      // `mutationsAcknowledged: true` locally so subsequent mutations don't
-      // re-pause the UI in the brief window before the server's
-      // `multi_agent_pending_mutation { pending: null }` echo arrives.
+      // Item #5: optimistic drop of the ONE banner the operator just released,
+      // ahead of the server's `multi_agent_pending_mutations` echo. Only that
+      // entry goes — any other worker the gate is holding stays on screen, and
+      // the gate stays armed for whatever this worker does next.
       const active = state.multiAgent.active;
-      if (!active || !active.pendingMutation) return state;
+      if (!active) return state;
+      const remaining = active.pendingMutations.filter((m) => m.id !== action.mutationId);
+      if (remaining.length === active.pendingMutations.length) return state;
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: {
-            ...active,
-            pendingMutation: null,
-            mutationsAcknowledged: true,
-          },
+          active: { ...active, pendingMutations: remaining },
         },
       };
     }
@@ -1604,9 +1682,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // and for consultant-mode orchestrator sessions. Default false if a
             // pre-execute-mode server omits it.
             executeMode: msg.executeMode ?? false,
-            mutationsAcknowledged: msg.mutationsAcknowledged,
             mutations: msg.mutations,
-            pendingMutation: msg.pendingMutation ?? null,
+            pendingMutations: msg.pendingMutations,
             // Interactive AskUserQuestion: hydrate a parked question on attach
             // (R-A) so the card reappears after a browser refresh.
             pendingQuestion: msg.pendingQuestion ?? null,
@@ -1710,9 +1787,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // client also drops the descriptor so the banner doesn't
             // linger on a stopped/crashed row.
             pendingRetry: null,
-            // Item #5: same reasoning for pending-mutation; the row's pause
-            // slot is no longer actionable once the session has ended.
-            pendingMutation: null,
+            // Item #5: same reasoning for the pause banners; a held worker is
+            // no longer releasable once the session has ended.
+            pendingMutations: [],
             // Interactive AskUserQuestion: a stopped/crashed session can't be
             // answered either — drop any parked question.
             pendingQuestion: null,
@@ -1758,17 +1835,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
-    case 'multi_agent_pending_mutation': {
-      // Item #5: pause slot set/clear. `pending: null` = operator-Continue;
-      // a populated value = worker is paused awaiting Continue. Replaces
-      // wholesale (never merge) for the same reason as pending_retry.
+    case 'multi_agent_pending_mutations': {
+      // Item #5: the set of gate-halted workers changed. The server sends the
+      // whole set, so this replaces wholesale (never merges) — same reason as
+      // pending_retry, and it makes a re-attach re-emit idempotent.
       const active = state.multiAgent.active;
       if (!active || active.sessionId !== msg.sessionId) return state;
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: { ...active, pendingMutation: msg.pending },
+          active: { ...active, pendingMutations: msg.pending },
         },
       };
     }
@@ -2061,15 +2138,25 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           ...state.sessionToProject,
           [msg.sessionId]: msg.projectId,
         },
+        // Registers W08/W09: everything until `session_history_end` is
+        // history, not news.
+        historyReplay: { projectId: msg.projectId, sessionId: msg.sessionId },
       };
     }
 
     case 'session_history_end': {
-      const session = state.sessionsByProject[msg.projectId]?.[msg.sessionId];
-      if (!session) return state;
+      // Registers W08/W09: clear the replay flag BEFORE the early return
+      // below. A history that ended with no session bucket to close out is
+      // precisely the case where leaving the flag set would be worst — the
+      // next live `session_started` for this project would be read as more
+      // history and the operator's pending message would never migrate.
+      const cleared: AppState =
+        state.historyReplay === null ? state : { ...state, historyReplay: null };
+      const session = cleared.sessionsByProject[msg.projectId]?.[msg.sessionId];
+      if (!session) return cleared;
       // After replay, session is idle unless server signals it's still running.
-      const stillRunning = state.liveSessions[msg.sessionId] === true;
-      return putSession(state, msg.projectId, msg.sessionId, {
+      const stillRunning = cleared.liveSessions[msg.sessionId] === true;
+      return putSession(cleared, msg.projectId, msg.sessionId, {
         ...session,
         status: stillRunning ? 'running' : session.status === 'running' ? 'done' : session.status,
       });
@@ -2080,11 +2167,23 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       const projectMap = state.sessionsByProject[projectId] ?? {};
       const pendingId = state.pendingByProject[projectId];
 
+      // Register W08: a persisted `system/init` row replays as a
+      // `session_started`, identical on the wire to a live one. Everything
+      // below that talks about *now* has to ask first.
+      const isReplay = state.historyReplay?.projectId === projectId;
+
       // Migrate the optimistic "pending:*" session into the real id, so the
       // user message we appended optimistically isn't lost.
+      //
+      // Register W08: never during a replay. The operator can send a first
+      // message and then click an older session of the same project while the
+      // turn spins up; that replay's `session_started` would otherwise adopt
+      // the pending session — grafting the message they just typed onto the
+      // front of an unrelated conversation and leaving the real session, when
+      // it finally starts, empty.
       let session: SessionView;
       const nextProjectMap = { ...projectMap };
-      if (pendingId && nextProjectMap[pendingId]) {
+      if (!isReplay && pendingId && nextProjectMap[pendingId]) {
         session = {
           ...nextProjectMap[pendingId],
           id: msg.sessionId,
@@ -2161,8 +2260,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             ...knownList,
           ];
 
+      // Register W08: the pending POINTER is dropped by the same condition
+      // that migrates the pending SESSION. Clearing it on a replay would
+      // strand the optimistic bucket just as thoroughly as adopting it — the
+      // session would survive in `sessionsByProject` with nothing left to
+      // rename it, so the operator's message would sit in a bucket the UI
+      // never shows.
       const pendingNext = { ...state.pendingByProject };
-      if (pendingNext[projectId] === pendingId) delete pendingNext[projectId];
+      if (!isReplay && pendingNext[projectId] === pendingId) delete pendingNext[projectId];
 
       // Cluster E Phase 2.x: if this session_started belongs to a bus
       // participant of the currently-active MultiAgentRun, also push
@@ -2212,7 +2317,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // be valid for the spawn to reach init), so any prior auth_expired
         // slice is now stale — drop it. Identity-preserving when there's
         // nothing to clear (undefined === undefined for shallow equality).
-        authExpired: undefined,
+        //
+        // Register W09: that argument is about a handshake happening *now*.
+        // A replayed init proves the credentials worked whenever this session
+        // ran, which says nothing about the ones that just expired — so
+        // opening an old session must not take the banner down.
+        authExpired: isReplay ? state.authExpired : undefined,
         multiAgent: multiAgentNext,
       };
     }
@@ -2307,7 +2417,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // produce the same final state.
       const messages = session.messages.map((mm) =>
         mm.kind === 'permission_request' && mm.requestId === msg.requestId
-          ? { ...mm, decided: msg.decision }
+          ? {
+              ...mm,
+              decided: msg.decision,
+              // Register S06: spread so an operator decision (no reason) does
+              // not clobber a drain reason already on the card, and so the
+              // field simply stays absent for the common case.
+              ...(msg.reason ? { decidedReason: msg.reason } : {}),
+            }
           : mm,
       );
       return putSession(state, projectId, msg.sessionId, { ...session, messages });
@@ -2335,6 +2452,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         status: msg.subtype === 'success' ? 'done' : 'error',
         // Turn over — stop the elapsed timer.
         runStartedAt: null,
+        // Register W01: retire the streaming buffer with the turn that owns
+        // it. `assistant_message` and `command_output` already did; `result`
+        // did not, so a turn that ended any other way (a Stop mid-stream, an
+        // error) left its partial text behind. `sessionPhase` hides that
+        // while status is done/error — then the next `user_send` flips status
+        // back to 'running' and the abandoned answer replays as if it were
+        // streaming now.
+        streamingText: '',
         messages: [
           ...session.messages,
           {
@@ -2552,18 +2677,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // state shape identical to the wire shape for the snapshot test.
       return {
         ...state,
-        activeRuns: msg.runs.map(
-          (r): ActiveRunView => ({
-            sessionId: r.sessionId,
-            ...(r.projectId !== undefined ? { projectId: r.projectId } : {}),
-            ...(r.projectName !== undefined ? { projectName: r.projectName } : {}),
-            kind: r.kind,
-            startedAt: r.startedAt,
-            elapsedMs: r.elapsedMs,
-            ...(r.activeAgentName !== undefined ? { activeAgentName: r.activeAgentName } : {}),
-            ...(r.currentActivity !== undefined ? { currentActivity: r.currentActivity } : {}),
-          }),
-        ),
+        activeRuns: msg.runs.map((r): ActiveRunView => ({
+          sessionId: r.sessionId,
+          ...(r.projectId !== undefined ? { projectId: r.projectId } : {}),
+          ...(r.projectName !== undefined ? { projectName: r.projectName } : {}),
+          kind: r.kind,
+          startedAt: r.startedAt,
+          elapsedMs: r.elapsedMs,
+          ...(r.activeAgentName !== undefined ? { activeAgentName: r.activeAgentName } : {}),
+          ...(r.currentActivity !== undefined ? { currentActivity: r.currentActivity } : {}),
+        })),
       };
 
     case 'env_scrubbed':
@@ -2798,11 +2921,85 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     }
 
     case 'wrapper_error': {
-      const projectId = msg.sessionId
-        ? (projectFor(state, msg.sessionId) ?? state.activeProjectId)
-        : state.activeProjectId;
+      // A **bus** session id is deliberately absent from `sessionToProject` /
+      // `sessionsByProject` (see the `auto_retry` case, which guards for the
+      // same thing). Without this check the fallback below would resolve to
+      // `activeProjectId`, find no existing session, and invent one flagged
+      // `status: 'error'` — a phantom crashed chat in whatever single-agent
+      // project happened to be selected. That is what a refused control verb
+      // used to do; those now ship as `participant_control_failed`, and this
+      // guard is what stops the next bus-scoped sender re-creating it.
+      //
+      // Still bump `failureSeq` — a genuine bus-side error should clear
+      // pending spinners even though it has no chat session to land in —
+      // and still promote `auth_expired`, so the app-wide banner is not
+      // something this guard can swallow. (`classifyError`'s auth path is
+      // the single-agent turn loop today, so that combination should not
+      // arise; carrying it costs one expression and removes the question.)
+      const busScoped = Boolean(
+        msg.sessionId && state.multiAgent.active?.sessionId === msg.sessionId,
+      );
+      if (busScoped) {
+        return {
+          ...state,
+          failureSeq: state.failureSeq + 1,
+          authExpired: authExpiredAfter(state, msg.kind, msg.message),
+        };
+      }
+      // Register W16 + Cebab-da6: an error with no session of its own lands in
+      // no session at all.
+      //
+      // W16 removed the `?? newPendingId()` third fallback, which minted a
+      // `pending:*` id and wrote a SessionView nothing pointed at —
+      // `activeSessionByProject`, `pendingByProject` and `knownSessions` were
+      // all left alone, so the message was unreachable and every occurrence
+      // leaked another bucket. It left the SECOND fallback in place:
+      // `?? getActiveSessionId(state, projectId)`, which folded a sessionless
+      // error onto whichever session happened to be active. That is what da6
+      // is, and it is worse than a duplicate toast — the fold flips an
+      // unrelated conversation to `status: 'error'`, appends a red inline
+      // error to its transcript, and (via the W01 line below) clears its
+      // `streamingText`, destroying the partial output of a run that did not
+      // fail.
+      //
+      // Twenty-six server call sites send a sessionless `wrapper_error`, and
+      // they are overwhelmingly refusals of an operator ACTION rather than
+      // session failures: `start_multi_agent` ("needs at least one
+      // participant"), `mcp_trust_decision` validation, `set_workspace_root`,
+      // `install_bus_integration`, `acknowledge_and_start`. Clicking Start on
+      // an empty participant list should not mark the chat you left streaming
+      // in another project as crashed.
+      //
+      // Nothing is left spinning by refusing to guess: the single-agent turn
+      // loop binds `sessionId = msg.sessionId ?? randomUUID()` and its catch
+      // sends that id, so a run that dies always says which one it was. The
+      // operator's surface for a sessionless error is the sticky "Server
+      // error" toast `notifyFromServerMsg` pushes for exactly this case —
+      // W16's own comment already said so unconditionally, while the guard it
+      // justified only covered the half where no session was active.
+      //
+      // Same shape as the bus-scoped guard above, for the same reason: still
+      // bump `failureSeq` so pending spinners clear, still promote
+      // `authExpired` so the app-wide banner isn't something this guard can
+      // swallow. An error that NAMES a session still lands in it.
+      //
+      // The guard also moved ABOVE the project resolution, which closes a
+      // second, smaller hole it used to sit under: `projectId === null`
+      // returned `state` untouched, so a sessionless error arriving before the
+      // operator had selected any project bumped nothing and promoted no
+      // `authExpired` — an expired subscription raised no app-wide banner
+      // until a project was clicked. Resolving a project is only the
+      // session-scoped path's business now.
+      const sessionId = msg.sessionId;
+      if (sessionId === undefined) {
+        return {
+          ...state,
+          failureSeq: state.failureSeq + 1,
+          authExpired: authExpiredAfter(state, msg.kind, msg.message),
+        };
+      }
+      const projectId = projectFor(state, sessionId) ?? state.activeProjectId;
       if (projectId === null) return state;
-      const sessionId = msg.sessionId ?? getActiveSessionId(state, projectId) ?? newPendingId();
       const existing = state.sessionsByProject[projectId]?.[sessionId];
       const session: SessionView = existing ?? {
         id: sessionId,
@@ -2813,32 +3010,18 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         runStartedAt: null,
         heldMessages: [],
       };
-      // Cluster D Phase 6: ALSO promote `auth_expired` into the top-level
-      // slice so the app-wide AuthExpiredBanner can mount. Per-session
-      // inline rendering (the chat message-list 'error' entry below) and
-      // the toast notification (already routed by the dispatcher) stay
-      // independent; this slice is the durable in-page signal.
-      const now = Date.now();
-      const nextAuthExpired =
-        msg.kind === 'auth_expired'
-          ? {
-              firstSeenMs: state.authExpired?.firstSeenMs ?? now,
-              lastSeenMs: now,
-              count: (state.authExpired?.count ?? 0) + 1,
-              lastMessage: msg.message,
-              // Re-surface the banner on every fresh observation — the
-              // operator may have dismissed it, then attempted another
-              // message, so the dismiss should not silence the second
-              // failure.
-              dismissed: false,
-            }
-          : state.authExpired;
+      const nextAuthExpired = authExpiredAfter(state, msg.kind, msg.message);
       return {
         ...putSession(state, projectId, sessionId, {
           ...session,
           status: 'error',
           // Turn aborted — stop the elapsed timer.
           runStartedAt: null,
+          // Register W01: and retire the streaming buffer with it. The `''`
+          // in the `existing ??` fallback above only covers a session we're
+          // inventing here; an EXISTING session spreads through `...session`
+          // and kept its partial text.
+          streamingText: '',
           messages: [
             ...session.messages,
             {
@@ -2849,9 +3032,31 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             },
           ],
         }),
-        wrapperErrorSeq: state.wrapperErrorSeq + 1,
+        failureSeq: state.failureSeq + 1,
         authExpired: nextAuthExpired,
       };
+    }
+
+    case 'participant_control_failed': {
+      // Register B21/B12/B19: a refused mute/unmute/pause/resume/kick. The
+      // server used to send these as `wrapper_error` — see the variant's
+      // note in shared/src/protocol.ts for the two-step disappearing act
+      // that produced (no toast, and a phantom errored SessionView invented
+      // under an unrelated single-agent project).
+      //
+      // Bumping `failureSeq` is the WHOLE job here, and deliberately so: it
+      // is what stops the row's pending spinner. The operator-facing text
+      // arrives as a dispatcher `notification`, which is the house channel
+      // (see notifyFromServerMsg's header). Do not add a `lastControlFailure`
+      // field unless something renders it — an unread slice is the exact
+      // shape the register keeps filing.
+      //
+      // Not attempted: reconciling the participant's control state on an
+      // `already_in_state` failure. The envelope says the flip did not
+      // happen, not what the true state is, so there is nothing to write.
+      const active = state.multiAgent.active;
+      if (!active || active.sessionId !== msg.sessionId) return state;
+      return { ...state, failureSeq: state.failureSeq + 1 };
     }
 
     case 'participant_mute_changed': {
@@ -3057,13 +3262,7 @@ export function trustChipState(trusted: boolean, mode: SessionPermissionMode): T
  * backstops the optimistic `status:'running'` set in `user_send`.
  */
 export type SessionPhase =
-  | 'idle'
-  | 'thinking'
-  | 'tool-running'
-  | 'streaming'
-  | 'awaiting-permission'
-  | 'done'
-  | 'error';
+  'idle' | 'thinking' | 'tool-running' | 'streaming' | 'awaiting-permission' | 'done' | 'error';
 
 export function sessionPhase(s: SessionView, isLive: boolean): SessionPhase {
   if (s.status === 'error') return 'error';
@@ -3136,12 +3335,13 @@ export const MA_SENTINELS: ReadonlySet<string> = new Set(['_sink', 'user', 'ceba
  * orchestrator (re-activation is free — stateless over the tail).
  *
  * Callers must additionally gate on `!run.awaitingContinue` (an R-B
- * read-only recovered run is not actually executing) and `!run.pendingMutation`
- * (the pause-on-first-mutation gate has held the worker mid-turn).
+ * read-only recovered run is not actually executing) and on an empty
+ * `run.pendingMutations` (the pause-on-dangerous gate is holding a worker
+ * mid-turn).
  */
 export function activeAgent(run: MultiAgentRun): string | null {
   if (run.status !== 'running') return null;
-  if (run.awaitingContinue || run.pendingRetry || run.pendingMutation) return null;
+  if (run.awaitingContinue || run.pendingRetry || run.pendingMutations.length > 0) return null;
   const evs = run.events;
   if (evs.length === 0) return null;
   const last = evs[evs.length - 1];

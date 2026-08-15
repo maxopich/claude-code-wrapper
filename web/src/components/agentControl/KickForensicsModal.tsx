@@ -5,10 +5,7 @@ import type {
   KickForensicsSnapshot,
 } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
-import {
-  useForensicViewerActions,
-  useForensicViewerState,
-} from './ForensicViewerContext';
+import { useForensicViewerActions, useForensicViewerState } from './ForensicViewerContext';
 
 // Cluster C Phase 4g4 (spec §5.5, §6.4): viewer for the forensic bundle
 // captured when an agent was kicked. Operator triggers via the ⋮ menu
@@ -106,10 +103,10 @@ function Body({
   if (!state.found || !state.snapshot) {
     return (
       <p className="gate-modal-help kick-forensics-status">
-        No forensic bundle captured for <code>{state.agentSlug}</code> in this session. The
-        capture may still be in flight, or the row was lost before persist. The
-        <code> agent_control.kicked</code> safety_audit row is the authoritative obligation
-        either way — its hash chain pins the kick even when the evidence pack is missing.
+        No forensic bundle captured for <code>{state.agentSlug}</code> in this session. The capture
+        may still be in flight, or the row was lost before persist. The
+        <code> agent_control.kicked</code> safety_audit row is the authoritative obligation either
+        way — its hash chain pins the kick even when the evidence pack is missing.
       </p>
     );
   }
@@ -256,9 +253,7 @@ function BusEventsSection({ events }: { events: ForensicBusEvent[] }) {
                 {new Date(ev.ts).toLocaleTimeString()}
               </span>
             </span>
-            {ev.textPreview && (
-              <p className="kick-forensics-event-text">{ev.textPreview}</p>
-            )}
+            {ev.textPreview && <p className="kick-forensics-event-text">{ev.textPreview}</p>}
           </li>
         ))}
       </ul>
@@ -271,9 +266,7 @@ function MutationsSection({ mutations }: { mutations: ForensicMutation[] }) {
     return (
       <section className="kick-forensics-section">
         <h4 className="kick-forensics-section-title">Mutations</h4>
-        <p className="kick-forensics-empty">
-          No mutations attributed to this agent.
-        </p>
+        <p className="kick-forensics-empty">No mutations attributed to this agent.</p>
       </section>
     );
   }
@@ -284,7 +277,10 @@ function MutationsSection({ mutations }: { mutations: ForensicMutation[] }) {
       </h4>
       <ul className="kick-forensics-mutation-list">
         {mutations.map((m) => (
-          <li key={m.id} className={`kick-forensics-mutation kick-forensics-mutation-${m.category}`}>
+          <li
+            key={m.id}
+            className={`kick-forensics-mutation kick-forensics-mutation-${m.category}`}
+          >
             <span className="kick-forensics-mutation-meta">
               <code>{m.toolName}</code>
               <span className="kick-forensics-mutation-category">{m.category}</span>

@@ -10,8 +10,10 @@
 -- worker to create/modify/delete files WITHIN ITS OWN PROJECT FOLDER to actually
 -- do the work. Writes outside the worker's own folder are still discouraged by
 -- the prompt and flagged post-hoc by `guardrail.ts` into the hash-chained
--- safety_audit log (workers run bypassPermissions, so this boundary is advisory
--- + detected, not hard-blocked — same posture as consultant mode).
+-- safety_audit log — advisory + detected, not hard-blocked (same posture as
+-- consultant mode). A deny seam does exist (`canUseTool` is live on every
+-- production turn), but nothing routes this classifier into it; see the
+-- coverage argument in `guardrail.ts` and migration 021.
 --
 -- Set at session start from the setup-screen checkbox (WS `start_multi_agent`
 -- field `executeMode`), persisted via `setExecuteMode`, and read back on R-B

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { classifyBashCommand, classifyToolCall } from './mutation.js';
+import {
+  BUS_SEND_TOOL,
+  COMMAND_WRAPPERS,
+  classifyBashCommand,
+  classifyToolCall,
+} from './mutation.js';
 
 describe('classifyToolCall', () => {
   describe('read-only tools', () => {
@@ -47,9 +52,22 @@ describe('classifyToolCall', () => {
       expect(classifyToolCall('BashOutput', { bash_id: 'x' }).category).toBe('read');
     });
 
+    // Keyed off the exported constant, and off the field the tool's own input
+    // schema declares. This test used to pass `'bus_send'` with `destination`
+    // — neither of which production ever produces — so it went green while
+    // every real hop fell through to `mutate` (register D06).
     it('bus_send → read (internal inter-agent only)', () => {
-      const r = classifyToolCall('bus_send', { destination: 'reviewer' });
+      const r = classifyToolCall(BUS_SEND_TOOL, { recipient: 'reviewer', kind: 'x', text: 'y' });
       expect(r.category).toBe('read');
+      expect(r.summary).toContain('reviewer');
+    });
+
+    it('the namespaced name is what the SDK actually delivers', () => {
+      expect(BUS_SEND_TOOL).toBe('mcp__cebab_bus__bus_send');
+    });
+
+    it('the bare legacy name still classifies', () => {
+      expect(classifyToolCall('bus_send', { recipient: 'reviewer' }).category).toBe('read');
     });
 
     it('AskUserQuestion → read (asks the operator; not a mutation)', () => {
@@ -113,9 +131,22 @@ describe('classifyToolCall', () => {
       expect(r.summary).toContain('(replace)');
     });
 
-    it('Agent / Task → mutate', () => {
-      expect(classifyToolCall('Agent', { description: 'lint' }).category).toBe('mutate');
-      expect(classifyToolCall('Task', { prompt: 'refactor' }).category).toBe('mutate');
+    // `Agent` is the live SDK name (`AgentInput` is in `ToolInputSchemas`;
+    // there is no `TaskInput`), `Task` the older CLI one kept as tolerance.
+    // Register D37 asserts the reverse and would have deleted `Agent`.
+    //
+    // The SUMMARY is what these assert, not just the category: the `default`
+    // branch also returns `mutate`, so a category-only test passes whether or
+    // not the case exists — it cannot tell a handled tool from an unhandled
+    // one, which is the entire question D37 raises.
+    it('Agent / Task → mutate, and are recognised rather than defaulted', () => {
+      const agent = classifyToolCall('Agent', { description: 'lint' });
+      expect(agent.category).toBe('mutate');
+      expect(agent.summary).toBe('spawn agent "lint"');
+
+      const task = classifyToolCall('Task', { prompt: 'refactor' });
+      expect(task.category).toBe('mutate');
+      expect(task.summary).toBe('spawn agent "refactor"');
     });
   });
 
@@ -394,7 +425,7 @@ describe('classifyBashCommand', () => {
  * the human-text `detail`/`matched` are spot-checked only on a few cases.
  *
  * Read verdicts intentionally carry no reason — the badge isn't rendered.
- * `--version`/`--help` (rule 1 in classifyByTokens) is a `read` escape hatch
+ * `--version`/`--help` (rule 6 in classifyByTokens) is a `read` escape hatch
  * and so has no reason either.
  */
 describe('classifyBashCommand — Phase F3 rationale (reason.rule)', () => {
@@ -731,5 +762,313 @@ describe('classifyBashCommand — Windows-native dangerous detection [security]'
   // (can't introspect, mirrors `bash script.sh`).
   it('powershell -File deploy.ps1 → mutate (script, not arbitrary inline code)', () => {
     expect(classifyBashCommand('powershell -File deploy.ps1').category).toBe('mutate');
+  });
+});
+
+/**
+ * Laundering holes from the 1 Aug 2026 issue register (D01–D04). Each of the
+ * first three let a genuinely destructive command classify BELOW `dangerous`,
+ * and the pause gate (`decidePauseForMutation`) fires only on `dangerous` — while `read` is
+ * skipped wholesale by the bus mutation tap (no row, no badge, no audit, no
+ * pause). So these are not missed warnings; they are calls the operator was
+ * never offered the chance to stop. D04 is the mirror image: a false positive
+ * on the most common redirect idiom in the shell, which trains the operator to
+ * click through the prompt the other three make fire.
+ */
+describe('classifyBashCommand — register D01–D04 laundering holes [security]', () => {
+  // D01: escalating rules matched the raw token, so an absolute or relative
+  // path missed every dangerous list and fell through to `mutate`.
+  describe('D01: a command invoked by path is matched on its basename', () => {
+    it.each([
+      '/bin/rm -rf /tmp/x',
+      '/usr/bin/sudo id',
+      '/usr/bin/git push --force origin main',
+      '/sbin/mkfs.ext4 /dev/sdb1',
+      '/bin/kill -9 1234',
+      '/usr/local/bin/bash -c "rm -rf ~"',
+      '/bin/chmod 777 /etc/passwd',
+      './rm -rf build',
+    ])('%s → dangerous', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    it('the reason reports the basename that matched', () => {
+      const r = classifyBashCommand('/bin/rm -rf /tmp/x');
+      expect(r.reason?.rule).toBe('dangerous_first_token');
+      expect(r.reason?.matched).toBe('rm');
+      // …while `detail` keeps the verbatim token the agent actually ran.
+      expect(r.reason?.detail).toContain('/bin/rm');
+    });
+
+    // The de-escalating allowlists are deliberately NOT normalised: an
+    // unrecognised absolute path stays on the conservative `mutate` default.
+    it('/bin/ls stays mutate (read-only lists are not basename-matched)', () => {
+      expect(classifyBashCommand('/bin/ls -la').category).toBe('mutate');
+    });
+  });
+
+  // D02: `env` was on the read-only allowlist and `stripEnvAssignments` only
+  // removed KEY=VAL prefixes, so the wrapper laundered anything to `read`.
+  describe('D02: the env wrapper is peeled before classification', () => {
+    it.each([
+      'env rm -rf /tmp/x',
+      'env FOO=1 rm -rf /x',
+      'env -i rm -rf /x',
+      'env -u PATH rm -rf /x',
+      'env --unset=PATH rm -rf /x',
+      'env -i FOO=1 sudo apt install foo',
+      '/usr/bin/env rm -rf /x',
+      'env env rm -rf /x',
+    ])('%s → dangerous', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    it.each(['env', 'env FOO=1', 'env -i'])('%s → read (prints the environment)', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('read');
+    });
+
+    it('an unrecognised env flag fails safe to mutate, never read', () => {
+      // `-S`/`--split-string` embeds a command the classifier doesn't parse;
+      // the scan stops without consuming the flag, so the tail is unknown.
+      expect(classifyBashCommand("env -S 'rm -rf /'").category).not.toBe('read');
+    });
+
+    it('env keeps a read-only tail read', () => {
+      expect(classifyBashCommand('env FOO=1 git status').category).toBe('read');
+    });
+  });
+
+  // D03: splitTopLevel handled only ; && || | — a multi-line Bash command (or
+  // a backgrounded one) was a single piece judged by its first token.
+  describe('D03: newline, CR and a lone & are top-level separators', () => {
+    it('a newline-separated dangerous piece is not masked by a benign first line', () => {
+      expect(classifyBashCommand('ls\nrm -rf /tmp/x').category).toBe('dangerous');
+    });
+
+    it('CRLF line endings split too', () => {
+      expect(classifyBashCommand('ls\r\nrm -rf /x').category).toBe('dangerous');
+    });
+
+    it('a backgrounding & splits', () => {
+      expect(classifyBashCommand('ls & rm -rf /tmp/x').category).toBe('dangerous');
+    });
+
+    it('the reason points at the piece that pinned the category', () => {
+      const r = classifyBashCommand('git status\nrm -rf build');
+      expect(r.reason?.rule).toBe('dangerous_first_token');
+      expect(r.reason?.matched).toBe('rm');
+    });
+
+    // Regression guards: `&` in fd-duplication / combined-redirect position is
+    // not a separator, and quoted separators still don't split.
+    it.each(['echo hi 2>&1', 'echo "a & b"', "echo 'x\ny'"])('%s → read', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('read');
+    });
+
+    it('a backslash line-continuation keeps one piece', () => {
+      expect(classifyBashCommand('echo one \\\ntwo').category).toBe('read');
+    });
+  });
+
+  // D04: any `/dev/` prefix counted as a secret-store write, so the single
+  // most common redirect in the shell pinned the pause gate at `dangerous`.
+  describe('D04: the null and std devices are not a write', () => {
+    it.each([
+      'ls > /dev/null',
+      'ls > /dev/null 2>&1',
+      'echo x > /dev/stderr',
+      'cat f >> /dev/null',
+    ])('%s → read', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('read');
+    });
+
+    it('the first token still decides — rm x > /dev/null stays dangerous', () => {
+      expect(classifyBashCommand('rm x > /dev/null').category).toBe('dangerous');
+    });
+
+    it('a later system-path redirect is not hidden behind a null device', () => {
+      // Every target is scanned, not just the first: without that, exempting
+      // /dev/null would newly launder this command to `read`.
+      const r = classifyBashCommand('echo x > /dev/null > /etc/passwd');
+      expect(r.category).toBe('dangerous');
+      expect(r.reason?.matched).toBe('/etc/passwd');
+    });
+
+    it.each(['echo x > /dev/sda', 'echo bad > /etc/hosts'])('%s → dangerous (unchanged)', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+  });
+});
+
+/**
+ * The holes D01–D04 left open (register D02b, D04b, D21), plus one no bead
+ * filed. Same stakes as the block above: `decidePauseForMutation` fires only
+ * on `dangerous`, so anything that lands below it is not a missed warning but
+ * a call the operator was never offered the chance to stop. Each of these is
+ * one token away from a command the classifier already knows is destructive.
+ */
+describe('classifyBashCommand — register D02b/D04b/D21 laundering holes [security]', () => {
+  // D21: the `--version`/`--help` escape hatch sat at rule 1, ahead of every
+  // escalating rule, so it demoted the ENTIRE dangerous list behind a
+  // two-token prefix. The bead names three commands; it was all of them.
+  describe('D21: a demotion rule no longer outranks an escalation', () => {
+    it.each([
+      'sudo --version',
+      'sudo -V',
+      'rm --help',
+      'dd --version',
+      'shutdown --help',
+      'eval --version',
+      'source --help',
+      'del --version', // the Windows list demoted the same way
+      'diskpart --help',
+    ])('%s → dangerous', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    // The hatch still has to do the job it was written for, or "fix" this by
+    // deleting it and every unlisted binary's version query becomes `mutate`.
+    it.each([
+      'node --version',
+      'git --version',
+      'docker --version',
+      'npm --version',
+      'python --version',
+      'node --help',
+    ])('%s → read, no reason (the hatch still fires)', (cmd) => {
+      const r = classifyBashCommand(cmd);
+      expect(r.category).toBe('read');
+      expect(r.reason).toBeUndefined();
+    });
+
+    // `-V` left the hatch: GNU `tar -V` is `--label`, so this is a real
+    // archive operation the hatch was calling a query.
+    it('tar -V is a label, not a version query → mutate', () => {
+      const r = classifyBashCommand('tar -V mine -xf a.tar -C /');
+      expect(r.category).toBe('mutate');
+      expect(r.reason?.rule).toBe('mutating_first_token');
+    });
+  });
+
+  // D02b: `env` was the only registered wrapper, so every other exec-wrapper
+  // laundered a dangerous payload down to `mutate` — a row is written, but the
+  // pause is never offered.
+  describe('D02b: every exec-wrapper is peeled to the command it runs', () => {
+    // One bare case per wrapper. `WRAPPERS_COVERED` is checked against the
+    // exported set below, so a thirteenth wrapper cannot arrive untested.
+    const BARE: Record<string, string> = {
+      env: 'env rm -rf /x',
+      nohup: 'nohup rm -rf /x',
+      setsid: 'setsid rm -rf /x',
+      time: 'time rm -rf /x',
+      unbuffer: 'unbuffer rm -rf /x',
+      busybox: 'busybox rm -rf /x',
+      command: 'command rm -rf /x',
+      timeout: 'timeout 5 rm -rf /x',
+      nice: 'nice rm -rf /x',
+      stdbuf: 'stdbuf -o0 rm -rf /x',
+      watch: 'watch rm -rf /x',
+      xargs: 'xargs rm -rf /x',
+    };
+
+    it.each(Object.entries(BARE))('%s wraps a dangerous command → dangerous', (_name, cmd) => {
+      const r = classifyBashCommand(cmd);
+      expect(r.category).toBe('dangerous');
+      expect(r.reason?.matched).toBe('rm');
+    });
+
+    it('every registered wrapper has a case (anti-vacuity)', () => {
+      expect(Object.keys(BARE).sort()).toEqual([...COMMAND_WRAPPERS].sort());
+    });
+
+    // Each wrapper's OWN value-taking flags. A shared flag table gets these
+    // wrong — `-i` takes no value for `env` and one for `stdbuf` — and the
+    // symptom is the flag's value being scanned as the command.
+    it.each([
+      'timeout -s KILL 5 rm -rf /x',
+      'timeout --signal=KILL 5 rm -rf /x',
+      'timeout -k 3 5 rm -rf /x',
+      'nice -n 10 rm -rf /x',
+      'nice -5 rm -rf /x',
+      'stdbuf -i 0 rm -rf /x',
+      'stdbuf -o0 -e0 rm -rf /x',
+      'xargs -n1 rm -rf /x',
+      'xargs -I{} rm -rf {}',
+      'xargs -0 -P 4 rm -rf /x',
+      'watch -n 5 rm -rf /x',
+      'env -i FOO=1 rm -rf /x',
+    ])('%s → dangerous (the wrapper flags are not the command)', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    it('wrappers nest', () => {
+      expect(classifyBashCommand('nohup timeout 5 rm -rf /x').category).toBe('dangerous');
+    });
+
+    // The peel must not manufacture danger either. `command -v` is a lookup,
+    // not an exec, so it must NOT be peeled to the `rm` that never runs.
+    it('command -v rm is a lookup, not an exec → not dangerous', () => {
+      expect(classifyBashCommand('command -v rm').category).not.toBe('dangerous');
+    });
+
+    it.each(['env ls', 'nohup ls', 'timeout 5 ls', 'xargs ls'])(
+      '%s → read (a wrapped read is still a read)',
+      (cmd) => {
+        expect(classifyBashCommand(cmd).category).toBe('read');
+      },
+    );
+  });
+
+  // Filed by nobody: `sudo` was on the dangerous list and its three siblings
+  // were not, so escalation under a different binary name reached the operator
+  // as an ordinary `mutate`.
+  describe('privilege escalation is matched by every spelling', () => {
+    it.each(['su', 'su -c "rm -rf /"', 'doas rm -rf /', 'runuser -u root rm -rf /x'])(
+      '%s → dangerous',
+      (cmd) => {
+        expect(classifyBashCommand(cmd).category).toBe('dangerous');
+      },
+    );
+  });
+
+  // D04b: the redirect scan required start-of-string or whitespace before the
+  // `>`, so an fd digit or `&` in front of it hid the target completely and
+  // the piece was judged by its first token alone.
+  describe('D04b: fd-prefixed and combined redirects are seen', () => {
+    it.each([
+      'echo x 2> /etc/passwd',
+      'echo x &> /etc/passwd',
+      'echo x 2>>~/.zshrc',
+      'echo x &>>/etc/passwd',
+      'echo x 2>/etc/hosts',
+    ])('%s → dangerous', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    it('the target is reported, not just the category', () => {
+      const r = classifyBashCommand('echo x 2> /etc/passwd');
+      expect(r.reason?.rule).toBe('redirect_system_path');
+      expect(r.reason?.matched).toBe('/etc/passwd');
+    });
+
+    it('an fd-prefixed redirect to an ordinary path is at least mutate', () => {
+      const r = classifyBashCommand('echo x 1>/tmp/f');
+      expect(r.category).toBe('mutate');
+      expect(r.reason?.matched).toBe('/tmp/f');
+    });
+
+    // fd-DUPLICATION is not a redirect target. `2>&1` was excluded before only
+    // as a side effect of the leading digit; `>&2` was not excluded at all and
+    // misfired as `redirect_path` on `&2`.
+    it.each(['echo hi 2>&1', 'ls >&2', 'ls > /dev/null 2>&1', 'ls 2>&1 >&2'])(
+      '%s → read (a duplicated fd is not a write)',
+      (cmd) => {
+        expect(classifyBashCommand(cmd).category).toBe('read');
+      },
+    );
+
+    it('a dangerous first token still wins over a duplicated fd', () => {
+      expect(classifyBashCommand('rm -rf /x 2>&1').category).toBe('dangerous');
+    });
   });
 });

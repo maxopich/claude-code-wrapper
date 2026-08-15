@@ -3,13 +3,29 @@ import { configDefaults, defineConfig } from 'vitest/config';
 /**
  * Root vitest config. Kept minimal: just enables `?raw` CSS imports so
  * tests can assert on stylesheet structure without depending on Node
- * fs from non-Node workspaces (web's tsconfig deliberately excludes
- * `@types/node`). Tests still default to the node environment;
- * individual tests can opt into jsdom via `// @vitest-environment`.
+ * fs from non-Node workspaces (`web/tsconfig.json` sets `"types": []`, so
+ * `@types/node` is not in the web program — register C12; that was
+ * described here as deliberate for months while nothing configured it, and
+ * `web/src/nodeTypeIsolation.test.ts` now fails typecheck if it stops being
+ * true). Tests still default to the node environment; individual tests can
+ * opt into jsdom via `// @vitest-environment`.
  */
 export default defineConfig({
   test: {
-    passWithNoTests: true,
+    // Register C02: `passWithNoTests: true` used to live here (and as a flag
+    // on the `test` script). It turned a discovery failure into a green
+    // build: a bad include glob or workspace path found zero test files and
+    // vitest printed "No test files found, exiting with code 0". Verified —
+    // `vitest run --dir=<nonexistent>` exited 0 before this change and exits
+    // 1 after it. Vitest's default is already fail-on-empty, so the fix is
+    // simply not to opt out.
+    //
+    // This does NOT cover the other half: `test:security` filters by test
+    // NAME (`-t '[security]'`), and a renamed tag leaves every file
+    // discovered but every test skipped — which vitest exits 0 on no matter
+    // what this flag says. `scripts/security-test-gate.mjs` is the guard for
+    // that case; see its header.
+    //
     // Discovery runs from the repo root, so without an explicit exclude
     // vitest's default include glob descends into the sibling checkouts
     // under `.claude/worktrees/**` — each a full copy of the repo (~9k
@@ -20,6 +36,14 @@ export default defineConfig({
     // stale compiled tests out (see CLAUDE.md's tsc-emit warning). eslint
     // already ignores `.claude/**` for the same worktree-shadowing reason.
     exclude: [...configDefaults.exclude, '**/dist/**', '**/build/**', '**/.claude/**'],
+    // Register Cebab-cjm: point every worker at a throwaway data directory
+    // before any test module loads, so a test that reaches getDb() without
+    // arranging anything cannot open the operator's real ~/.cebab. See the
+    // file's header for why it writes an env var instead of importing config,
+    // and for the getDb() guard that makes this an invariant rather than a
+    // default. Removing this line does not fail silently — DB-touching tests
+    // that arrange nothing will throw with a message naming this line.
+    setupFiles: ['./vitest.setup.mjs'],
     // Vitest mocks CSS imports to an empty string by default. Enabling
     // CSS processing lets the `?raw` query suffix resolve to the file's
     // literal text — needed by cssGate.test.ts to scan the stylesheet

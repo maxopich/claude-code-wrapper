@@ -20,7 +20,7 @@
  */
 import { createSdkMcpServer, tool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { classifyToolCall } from '@cebab/shared';
+import { BUS_SEND_TOOL, classifyToolCall } from '@cebab/shared';
 import type { AskUserQuestionOption, AskUserQuestionView } from '@cebab/shared/protocol';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
@@ -71,13 +71,29 @@ export const DELEGATE_ONLY_DISALLOWED: readonly string[] = [
 ];
 
 /**
+ * The single MCP tool Cebab injects, under the namespaced `cebab_bus` key.
+ *
+ * Defined in `@cebab/shared` and re-exported here, where every caller already
+ * looks for it: `classifyToolCall` has to recognise the same string this file
+ * registers, and when the two were written out separately they disagreed —
+ * the classifier matched a bare `bus_send` the SDK never sends (register D06).
+ */
+export { BUS_SEND_TOOL };
+
+/**
  * The only tools a `'delegate-only'` agent (the orchestrator) may call:
  * `AskUserQuestion` (parked for the operator) and the injected `bus_send` MCP
- * tool. Matching `bus_send` by the `__bus_send` suffix covers both the
- * `mcp__cebab_bus__bus_send` name and the deprecated `mcp__bus__bus_send` alias.
+ * tool.
+ *
+ * Matched by exact name. The previous `endsWith('__bus_send')` test dated from
+ * when Cebab registered the tool under two server keys (`cebab_bus` + the `bus`
+ * deprecation alias); with the alias gone there is exactly one legitimate name,
+ * and a suffix match would also admit `mcp__<anything>__bus_send` from an
+ * operator's own user-scope MCP config — i.e. a second, unpinned bus reachable
+ * by the one agent whose entire containment is "you may only call bus_send".
  */
 export function isDelegationAllowedTool(toolName: string): boolean {
-  return toolName === 'AskUserQuestion' || toolName.endsWith('__bus_send');
+  return toolName === 'AskUserQuestion' || toolName === BUS_SEND_TOOL;
 }
 
 /**
@@ -128,6 +144,27 @@ function toolError(text: string): ToolResult {
 }
 
 /**
+ * Hard cap on one `bus_send` body, in UTF-8 bytes.
+ *
+ * Every bus message is three things at once: a row in `multi_agent_events`, a
+ * WS frame to the browser, and — the one that matters — the *prompt* for the
+ * recipient's next turn. Nothing else bounds that third use: the sender writes
+ * it, Cebab forwards it verbatim, and the recipient pays for it in context. A
+ * worker that dumps a whole file (or loops appending to its reply) otherwise
+ * silently burns the peer's context window and the operator's quota.
+ *
+ * 128 KiB ≈ 32k tokens — far above any legitimate hand-written hop (the longest
+ * real replies observed are a few KB) and far below "a repo pasted into a
+ * message". Measured in bytes, not codepoints, because the DB row and the WS
+ * frame are what the ceiling protects.
+ *
+ * Over-limit is REJECTED, not truncated: truncation loses the tail silently and
+ * can cut a code block mid-fence, whereas the error result is readable by the
+ * model, names the actual size, and lets it resend something shorter.
+ */
+export const BUS_SEND_TEXT_MAX_BYTES = 128 * 1024;
+
+/**
  * Pure `bus_send` logic — no SDK, unit-testable in isolation.
  *
  * `source` is supplied by the caller (pinned per-agent in `makeBusToolServer`),
@@ -153,6 +190,14 @@ export function handleBusSend(
   if (typeof args.text !== 'string' || args.text.length === 0) {
     return toolError('bus_send rejected: text must be a non-empty string');
   }
+  const textBytes = Buffer.byteLength(args.text, 'utf8');
+  if (textBytes > BUS_SEND_TEXT_MAX_BYTES) {
+    return toolError(
+      `bus_send rejected: text is ${textBytes} bytes, over the ${BUS_SEND_TEXT_MAX_BYTES}-byte ` +
+        `limit for one message. Summarize, or split the work across several messages — do not ` +
+        `paste file contents you could point at by path instead.`,
+    );
+  }
   const ev: BusEvent = {
     ts: Date.now(),
     source,
@@ -174,19 +219,10 @@ export function handleBusSend(
  * cannot collide with — or worse, clobber — this identity-pinned injection
  * once `settingSources` widens to `['user', 'project', 'local']` for
  * workers/chain participants.
- *
- * `serverName` parameterizes the MCP server's metadata `name:` so the helper
- * can build TWO instances at runtime — one for the canonical `cebab_bus` key
- * and one for the deprecation-shim `bus` key (see `runOneAttempt`). Defaults
- * to `'cebab_bus'` so existing callers stay unchanged.
  */
-export function makeBusToolServer(
-  agentName: string,
-  onEvent: (ev: BusEvent) => void,
-  serverName = 'cebab_bus',
-) {
+export function makeBusToolServer(agentName: string, onEvent: (ev: BusEvent) => void) {
   return createSdkMcpServer({
-    name: serverName,
+    name: 'cebab_bus',
     version: '0.0.0',
     tools: [
       tool(
@@ -199,7 +235,13 @@ export function makeBusToolServer(
           kind: z
             .enum(BUS_KINDS)
             .describe('reply = hand off / answer a peer; final = terminal answer'),
-          text: z.string().min(1).describe('the message body'),
+          text: z
+            .string()
+            .min(1)
+            .describe(
+              `the message body (max ${BUS_SEND_TEXT_MAX_BYTES} bytes — summarize or split ` +
+                `rather than pasting large files)`,
+            ),
         },
         async (args) => handleBusSend(agentName, args, onEvent),
       ),
@@ -247,6 +289,17 @@ export type AgentSpec = {
    * unrestricted, the worker/chain posture (byte-identical to before).
    */
   toolPolicy?: 'delegate-only';
+  /**
+   * Register H04: MCP server names the operator denied for this agent's
+   * project at the TOFU gate. Read fresh from the spec on every turn, so
+   * `applyMcpDenials` can tighten a live session (mid-run `addWorker`, or a
+   * `continue_multi_agent` after a restart re-gates the participants) without
+   * re-registering the agent.
+   *
+   * Absent (the default) = no denials, and the run options are byte-identical
+   * to before this existed.
+   */
+  deniedMcpServers?: string[];
 };
 
 export type AgentRunnerDeps = {
@@ -262,12 +315,29 @@ export type AgentRunnerDeps = {
    */
   onSessionId?: (agentName: string, cliSessionId: string) => void;
   /**
+   * F7: called with one completed hop's `result.total_cost_usd` — the cost of
+   * THAT invocation, not a running total (it equals `sum(modelUsage[*].costUSD)`,
+   * which are per-invocation counters), so the receiver accumulates.
+   *
+   * chain.ts / orchestrator.ts wire this to `addAgentCost`, which is the only
+   * cost signal the bus has: a hop count treats a 2k-token routing turn and a
+   * 180k-token analysis turn identically. Optional — unit tests omit it.
+   *
+   * Fires even when the turn failed (`subtype !== 'success'`), and before the
+   * throw that normalizes that into a router-visible error: a turn that burned
+   * quota and then errored still cost money, and dropping it would make the
+   * total silently under-report exactly the runs an operator most wants to
+   * account for.
+   */
+  onTurnCost?: (agentName: string, costUsd: number) => void;
+  /**
    * Item #5: called for every classified non-`read` `tool_use` block observed
    * on an `assistant` SDKMessage, BEFORE the SDK dispatches the tool. Hooks:
    *   - persists a row into `multi_agent_mutations`,
    *   - emits a `multi_agent_mutation` ServerMsg via `sink.onMutation`,
-   *   - when `pause_on_dangerous=1` AND `mutations_acknowledged=0`, persists
-   *     a pending-mutation slot, emits `multi_agent_pending_mutation`, and
+   *   - when `pause_on_dangerous=1` and this agent has neither a live pause
+   *     nor an unspent Continue grant for this exact call, flips the row to
+   *     `pause_state='pending'`, emits `multi_agent_pending_mutations`, and
    *     throws `PausedForMutationError` to abort the turn (best-effort —
    *     see the race-window risk in the plan).
    *
@@ -433,6 +503,27 @@ export type AgentRunnerDeps = {
    * the single-agent sessionId).
    */
   sessionId?: string;
+  /**
+   * MOCK MODE ONLY — the scenario directory under `fixtures/bus/` that
+   * `runMock` replays for this session's participants. `runClaude` ignores
+   * both this and the per-turn hints derived from it, so it is forwarded
+   * unconditionally rather than behind a `config.mock` branch: one code path
+   * for both runners, and a test that flips `config.mock` needs no other
+   * change.
+   *
+   * A bus session cannot replay from a single fixture the way a single-agent
+   * turn can — each participant has to say something different, and which
+   * hop it is decides whether it hands off or finishes. `runMock` therefore
+   * resolves a file per (agent, turn); the runner supplies both halves.
+   */
+  mockScenario?: string;
+  /**
+   * MOCK MODE ONLY — `${NAME}` values for the agent's fixture text. A shipped
+   * scenario cannot name the operator's projects, so it writes
+   * `"recipient": "${NEXT}"` and the router (which owns the topology) fills
+   * in the slug. Called once per turn.
+   */
+  mockVars?: (agentName: string) => Record<string, string>;
 };
 
 /**
@@ -501,6 +592,14 @@ export class AgentRunner {
    * stuck behind this agent right now."
    */
   private readonly pendingDeliveries = new Map<string, number>();
+  /**
+   * agentName → hops taken so far. Mock-mode fixture routing only: it selects
+   * which script in the scenario the next turn replays, so a participant can
+   * hand off on its first hop and finish on its second. Counted per HOP, not
+   * per attempt — a transient-overload retry re-runs the same turn and must
+   * replay the same script.
+   */
+  private readonly turnCounts = new Map<string, number>();
 
   constructor(private readonly deps: AgentRunnerDeps) {}
 
@@ -514,6 +613,30 @@ export class AgentRunner {
 
   agentNames(): string[] {
     return [...this.specs.keys()];
+  }
+
+  /**
+   * Register H04: apply the operator's MCP denials to every registered agent
+   * rooted in `projectId`. Takes effect on that agent's NEXT turn.
+   *
+   * Exists because two spawn paths re-gate a session that is already running —
+   * `addWorker` (mid-run participant) and `continue_multi_agent` (R-B
+   * reconstruction, where a participant's `.mcp.json` may have changed across
+   * the restart). Re-`register()`ing to carry the denial would clobber the
+   * rest of a live spec, so denials are merged in place instead.
+   *
+   * Union, never replace: a server denied earlier in the session stays denied
+   * even if a later gate pass does not re-report it (a `deny_once` is scoped
+   * to the connection, and forgetting it mid-session would silently re-admit
+   * a server the operator refused).
+   */
+  applyMcpDenials(projectId: number, serverNames: readonly string[]): void {
+    if (serverNames.length === 0) return;
+    for (const [name, spec] of this.specs.entries()) {
+      if (spec.projectId !== projectId) continue;
+      const merged = new Set([...(spec.deniedMcpServers ?? []), ...serverNames]);
+      this.specs.set(name, { ...spec, deniedMcpServers: [...merged] });
+    }
   }
 
   /**
@@ -649,6 +772,25 @@ export class AgentRunner {
     const spec = this.specs.get(agentName);
     if (!spec) throw new Error(`deliverTurn: unknown agent ${JSON.stringify(agentName)}`);
 
+    // Claimed once per hop, before the retry loop, so every attempt of this
+    // turn replays the same mock script (see `turnCounts`).
+    const turnIndex = this.turnCounts.get(agentName) ?? 0;
+    this.turnCounts.set(agentName, turnIndex + 1);
+
+    // B15: same lifetime as `turnIndex`, and for the same reason. A retry
+    // re-runs THIS turn, so a `tool_use` id the tap already fired for is a
+    // repeat of a call already recorded — not a second call.
+    //
+    // Per-HOP rather than per-runner because this set is only the cheap
+    // in-memory half. Holding every id a long bus run ever saw would grow
+    // without bound, and it would still miss the cross-restart case, where a
+    // rebuilt router starts with an empty set. The durable half is migration
+    // 034's unique index on `(session_id, tool_use_id)`, which absorbs a
+    // repeat from ANY hop or process (register D20). An id reappearing on a
+    // later hop is a repeat there too — distinct tool calls carry distinct
+    // ids — so it is silently absorbed rather than recorded twice.
+    const tappedToolUseIds = new Set<string>();
+
     // Retry-with-backoff for transient API overloads ("API Error: 529",
     // "Overloaded"). The interactive CLI absorbs these internally; the SDK
     // propagates them raw to our iterator. Without this layer, Item #4's
@@ -668,7 +810,7 @@ export class AgentRunner {
     let lastErr: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        await this.runOneAttempt(agentName, promptText, spec);
+        await this.runOneAttempt(agentName, promptText, spec, turnIndex, tappedToolUseIds);
         return; // success
       } catch (err) {
         lastErr = err;
@@ -769,6 +911,14 @@ export class AgentRunner {
     agentName: string,
     promptText: string,
     spec: AgentSpec,
+    turnIndex: number,
+    /**
+     * B15: `tool_use` ids the mutation tap has already fired for during THIS
+     * hop. Owned by `runOneTurn` and shared across its retry attempts, for the
+     * same reason `turnIndex` is claimed once per hop — a retry replays the
+     * same turn, so anything it re-emits is a repeat, not a new call.
+     */
+    tappedToolUseIds: Set<string>,
   ): Promise<void> {
     const factory = this.deps.runnerFactory ?? pickRunner;
     // Read INSIDE the serialized turn (not when `deliverTurn` was called) so
@@ -790,8 +940,14 @@ export class AgentRunner {
     // built-ins stripped from the model's context entirely — the "remove from
     // view" layer complementing the authoritative default-deny in
     // `makeCanUseTool`. Works in either permission posture.
-    const toolLock =
-      spec.toolPolicy === 'delegate-only' ? { disallowedTools: [...DELEGATE_ONLY_DISALLOWED] } : {};
+    const delegateOnly = spec.toolPolicy === 'delegate-only';
+    const toolLock = delegateOnly ? { disallowedTools: [...DELEGATE_ONLY_DISALLOWED] } : {};
+
+    // H04: MCP servers this agent's operator denied. Read from `this.specs`
+    // at turn time (not captured at register time) so a denial applied
+    // mid-session takes effect on the very next hop.
+    const denied = this.specs.get(agentName)?.deniedMcpServers ?? spec.deniedMcpServers;
+    const mcpDenial = denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {};
 
     const runner = factory({
       cwd: spec.cwd,
@@ -799,22 +955,29 @@ export class AgentRunner {
       ...(prior ? { resume: prior } : {}),
       ...askGate,
       ...toolLock,
+      ...mcpDenial,
       settingSources: spec.settingSources ?? ['user'],
       mcpServers: {
+        // Sole registration. The `bus` alias that shimmed the
+        // `bus` → `cebab_bus` rename (e04769e, 2026-05-25) is gone: it only
+        // ever mattered for a CLI session resumed across that commit, and it
+        // cost more than it bought — Cebab's registration under the bare `bus`
+        // key CLOBBERED any `mcpServers.bus` a participant declares in its own
+        // `.claude/settings*.json`, which is precisely the collision the
+        // namespaced key was introduced to avoid.
         cebab_bus: makeBusToolServer(agentName, this.deps.onEvent),
-        // Deprecation shim for the `bus` → `cebab_bus` MCP-server rename
-        // (e04769e). A resumed CLI session whose JSONL history contains
-        // `mcp__bus__bus_send` calls will keep calling that name by reflex;
-        // without this alias the SDK returns "No such tool available" and the
-        // agent falls back to plain assistant text — which the bus router
-        // discards (only `bus_send` tool calls forward). Identity-pinning is
-        // preserved: each registration captures `agentName` in its own
-        // closure, so neither alias can be used to spoof a `source`. Remove
-        // after one release once no in-flight resumed sessions reference the
-        // old name.
-        bus: makeBusToolServer(agentName, this.deps.onEvent, 'bus'),
       },
       abortController: this.deps.abortController,
+      // Mock-mode fixture routing. Inert under `runClaude`, which reads only
+      // the RunOptions fields above.
+      ...(this.deps.mockScenario !== undefined
+        ? {
+            mockScenario: this.deps.mockScenario,
+            mockAgent: agentName,
+            mockTurn: turnIndex,
+            ...(this.deps.mockVars ? { mockVars: this.deps.mockVars(agentName) } : {}),
+          }
+        : {}),
     });
 
     // Cluster G Phase 3 (G1): tag the lifecycle entry with bus-run metadata
@@ -938,7 +1101,7 @@ export class AgentRunner {
         // SDKMessage represents a tool the SDK is about to dispatch.
         // Classify each; for non-`read` calls, fire `onMutation` BEFORE the
         // SDK runs the tool. The hook can throw `PausedForMutationError` to
-        // abort the turn (pause-on-first-mutation gate). The cwd-side race
+        // abort the turn (pause-on-dangerous gate). The cwd-side race
         // window — SDK may dispatch the tool before the throw lands — is
         // documented as a best-effort caveat in the plan.
         if (this.deps.onMutation) {
@@ -953,13 +1116,40 @@ export class AgentRunner {
               if (block?.type !== 'tool_use') continue;
               const toolName = typeof block.name === 'string' ? block.name : '';
               if (!toolName) continue;
+              // B10: this block says the SDK is ABOUT to dispatch — not that it
+              // will. For a `delegate-only` agent, `makeCanUseTool` denies
+              // everything outside `isDelegationAllowedTool` when the SDK asks,
+              // which is AFTER this message. Without this check the orchestrator
+              // writing a stray `Bash` gets a dangerous mutation row, and can
+              // trip the pause-on-dangerous gate and halt the session, for a
+              // command that never ran.
+              //
+              // Deliberately the SAME predicate the gate uses rather than a
+              // copy: two spellings of "what may the orchestrator call" would
+              // drift, and the copy that drifts is the one nobody is testing.
+              if (delegateOnly && !isDelegationAllowedTool(toolName)) continue;
               const cls = classifyToolCall(toolName, block.input);
               if (cls.category === 'read') continue;
               const toolUseId = typeof block.id === 'string' ? block.id : undefined;
+              // B15: a retry re-runs this turn with the same prompt and may
+              // `--resume` the failed attempt's checkpoint, so a block seen
+              // once can arrive again. Fire once per id per hop.
+              //
+              // An id-less block always fires: it cannot be recognised as a
+              // repeat, and silently dropping it would lose a real mutation.
+              // Over-recording an unidentifiable call is the safer error for a
+              // ledger the pause gate reads.
+              if (toolUseId !== undefined) {
+                if (tappedToolUseIds.has(toolUseId)) continue;
+                tappedToolUseIds.add(toolUseId);
+              }
               // Cluster F Phase D5+: classify path scope vs agent cwd. The
               // consultant-mode prompt forbids out-of-scope mutations; this
-              // surfaces violations post-hoc (workers run with
-              // bypassPermissions, so we can't deny at the SDK gate). The
+              // surfaces violations post-hoc rather than denying them. (Not
+              // because there is no gate — `makeCanUseTool` above IS live on
+              // every production turn; it allows everything for agents without
+              // `toolPolicy: 'delegate-only'`. See guardrail.ts's header for
+              // why turning that seam into enforcement is not free.) The
               // verdict rides on the hook payload — the orchestrator/chain
               // sink persists it on the mutation row and the WS broadcast
               // fan-out fires the safety_audit dispatcher. In-scope
@@ -1028,7 +1218,23 @@ export class AgentRunner {
           }
         }
 
-        const m = msg as { type?: string; session_id?: string; subtype?: string };
+        const m = msg as {
+          type?: string;
+          session_id?: string;
+          subtype?: string;
+          total_cost_usd?: number;
+        };
+        // F7: bill the hop. Deliberately NOT nested inside the session_id
+        // branch below — a result without a session id still cost money, and
+        // deliberately above the non-success throw, so a turn that burned
+        // quota and then errored is still counted.
+        if (m.type === 'result' && typeof m.total_cost_usd === 'number') {
+          try {
+            this.deps.onTurnCost?.(agentName, m.total_cost_usd);
+          } catch (err) {
+            console.error(`[runner] onTurnCost(${agentName}) failed`, err);
+          }
+        }
         if (m.type === 'result' && typeof m.session_id === 'string') {
           this.sessions.set(agentName, m.session_id);
           // Persist the checkpoint. A DB hiccup must never abort a turn —

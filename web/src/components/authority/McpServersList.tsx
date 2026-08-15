@@ -1,13 +1,21 @@
-import { useState } from 'react';
 import type { McpServerView } from '@cebab/shared/protocol';
+import { useCopyFeedback } from '../../useCopyFeedback';
 
 // Cluster B Phase 6c (UI-B13 / B15 / spec §4.2 F1): MCP servers section of
 // the AuthorityPanel.
 //
 // One card per declared MCP server. Each card answers:
 //   - WHO    — `name` + tools it exposes
-//   - WHERE  — `scope` chip (user / project / local / cebab-injected) +
-//              `originPath` (which settings.json declared it)
+//   - WHERE  — `scope` chip (user / project / local / mcp-json / claude-json /
+//              cebab-injected) + `originPath` (which file declared it).
+//              TWO of these describe servers that actually run: `mcp-json`
+//              (project-root `.mcp.json`) and `claude-json` (`~/.claude.json`).
+//              Measured against SDK 0.3.201, `mcpServers` in
+//              `.claude/settings*.json` is not loaded at any scope — so a
+//              `user`/`project`/`local` row describes a declaration the CLI
+//              ignores, while those two describe live servers. See
+//              `readClaudeJsonServers` in `server/src/repo/project_authority.ts`
+//              for the full measured table.
 //   - WHAT   — `command` + `args` from `config`
 //   - TRUST  — `trust` chip from the mcp_trust JOIN (Phase 4):
 //                trusted / pending_tofu / hash_changed / denied / unknown
@@ -52,43 +60,35 @@ const SCOPE_CHIP_CLASS: Record<McpServerView['scope'], string> = {
   user: 'mcp-scope-user',
   project: 'mcp-scope-project',
   local: 'mcp-scope-local',
+  // The project-root `.mcp.json` — the only project-scoped file the CLI
+  // actually loads MCP servers from. Styled like `project` because that is
+  // what an operator reads it as; the chip LABEL carries the distinction.
+  'mcp-json': 'mcp-scope-project',
+  // `~/.claude.json` — the CLI's own state file, and the OTHER location
+  // measured to actually load servers (both its top-level `mcpServers` and its
+  // per-project block). Styled like `user` because that is where an operator
+  // reads a home-directory declaration as coming from; the chip LABEL carries
+  // the distinction, same as `mcp-json` above.
+  'claude-json': 'mcp-scope-user',
   'cebab-injected': 'mcp-scope-cebab',
+  // Reported by the SDK but matching no settings layer Cebab read, and not a
+  // Cebab injection. Shares the muted styling of an unresolved row — it is
+  // deliberately NOT dressed as Cebab-managed, because that label carries an
+  // automatic trust grant server-side.
+  unknown: 'mcp-scope-unknown',
 };
 
 function statusDotClass(status: string): string {
   return STATUS_DOT_CLASS[status] ?? 'mcp-status-muted';
 }
 
-/**
- * Copy `text` to the clipboard. Uses the modern API when available; falls
- * back to a `document.execCommand('copy')` shim for older browsers. The
- * return value lets the caller flash a "copied" state. We intentionally
- * swallow errors — the affordance is non-critical and a hard failure would
- * just confuse the operator.
- */
-async function copyToClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall through */
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
-}
+/* U42: a private `copyToClipboard` lived here — the ORIGINAL. `web/src/
+ * clipboard.ts` says in its own header that it was "lifted from the local
+ * helper in authority/McpServersList.tsx so … any future caller share one
+ * implementation". The lift happened; the delete never did, so the file the
+ * shared helper was extracted from went on using its own copy, and the
+ * consolidation the comment described was never true. Deleted here, along
+ * with the hand-rolled copied-state pair, in favour of `useCopyFeedback`. */
 
 export function McpServersList(props: { servers: McpServerView[] }) {
   const { servers } = props;
@@ -118,14 +118,10 @@ export function McpServersList(props: { servers: McpServerView[] }) {
 
 function McpServerCard(props: { server: McpServerView }) {
   const { server } = props;
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyFeedback();
   async function onCopy() {
     if (!server.originPath) return;
-    const ok = await copyToClipboard(server.originPath);
-    if (ok) {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    }
+    await copy(server.originPath);
   }
   return (
     <li className={`mcp-server-card mcp-server-card-${server.scope}`}>

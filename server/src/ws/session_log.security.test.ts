@@ -45,7 +45,7 @@ describe('[security] buildSessionLogChunk redaction', () => {
       'worker',
       'orchestrator',
       'reply',
-      'curl -H "Authorization: Bearer abcd1234efgh5678ijklmn"',
+      'curl -H "Authorization: Bearer abcd1234efgh5678ijklmn"', // synthetic; allowlisted by literal in .gitleaks.toml
     );
     const chunk = buildSessionLogChunk({
       sessionId: 's1',

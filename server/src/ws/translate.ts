@@ -24,6 +24,27 @@ function coerceResultSubtype(raw: string): ResultSubtype {
 type AnyMsg = Record<string, unknown> & { type: string; subtype?: string };
 
 /**
+ * Register S07: normalise a user message's content to the block array the wire
+ * (and the client reducer) require.
+ *
+ * A plain-text prompt arrives as a bare string; a tool result arrives as
+ * blocks. Both are legal — `MessageParam['content']` is
+ * `string | ContentBlockParam[]` — and only the second was handled. Anything
+ * else (null from a malformed replay, an object) becomes an empty array rather
+ * than being forwarded: an empty tool-result line is a strictly better outcome
+ * than a reducer crash that takes the whole session's render with it.
+ *
+ * The `assistant` case deliberately does NOT get this treatment. Its content
+ * comes from `APIAssistantMessage`, a response type whose `content` is always
+ * blocks — normalising there would imply a shape that cannot occur.
+ */
+function normaliseUserContent(content: unknown): ContentBlock[] {
+  if (typeof content === 'string') return [{ type: 'text', text: content }];
+  if (Array.isArray(content)) return content as ContentBlock[];
+  return [];
+}
+
+/**
  * Translate one SDK message to a ServerMsg destined for the browser.
  * Returns null for messages the UI does not need to see (e.g. message_start /
  * content_block_start / message_stop), but the caller should still persist them.
@@ -190,17 +211,34 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         type: 'assistant_message',
         sessionId,
         uuid: a.uuid,
-        blocks: a.message.content,
+        // Register S16: optional-chained, matching the `user` case below —
+        // which got the same treatment under S07 and was not generalised.
+        //
+        // The SDK types make `message` required, so this cannot be undefined
+        // on the LIVE path. It can on REPLAY: `replaySession` casts each
+        // persisted row with `JSON.parse(row.raw) as SDKMessage`, and that
+        // cast checks nothing. A row written by an older build, a hand-edited
+        // fixture, or a truncated write reaches here shaped however it is
+        // shaped, and a throw inside the replay loop used to cost the operator
+        // the entire rest of the session's history.
+        blocks: a.message?.content ?? [],
       };
     }
 
     case 'user': {
-      const u = m as AnyMsg & { uuid?: string; message: { content: ContentBlock[] } };
+      const u = m as AnyMsg & { uuid?: string; message: { content: string | ContentBlock[] } };
       return {
         type: 'user_message',
         sessionId,
         uuid: u.uuid ?? '',
-        blocks: u.message.content,
+        // Register S07: the SDK declares `SDKUserMessage.message` as
+        // `MessageParam`, whose `content` is `string | ContentBlockParam[]`.
+        // This cast used to claim the array arm unconditionally and forward
+        // it, and the client's reducer does `msg.blocks.map(...)` — so a
+        // string-content user message is a TypeError that kills the render
+        // for that session. Latent rather than observed (nothing in
+        // `fixtures/` carries one), but nothing prevented it either.
+        blocks: normaliseUserContent(u.message?.content),
       };
     }
 
@@ -237,6 +275,7 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         toolName?: string;
         input?: unknown;
         decision?: 'allow' | 'deny';
+        reason?: string;
         kind?: string;
         message?: string;
       };
@@ -255,6 +294,12 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
           sessionId,
           requestId: w.requestId,
           decision: w.decision,
+          // Register S06: only the drain paths write a reason, and only rows
+          // written after S06 have one — hence the spread. An operator-made
+          // decision has none, which is exactly what its absence means.
+          ...(w.reason === 'client_disconnected' || w.reason === 'interrupted'
+            ? { reason: w.reason }
+            : {}),
         };
       }
       // Wrapper-level errors land here too; the wrapper_error replay path
@@ -275,7 +320,17 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
       // result. The command_output card already shows the operator the
       // command completed; an extra "success · $0.0000" chip below it is
       // noise. Drop result rows for synthetic (zero-turn) commands.
-      if (r.num_turns === 0) return null;
+      //
+      // Register S15: the subtype gate is load-bearing, not decoration. This
+      // used to be `if (r.num_turns === 0)`, checked before the subtype was
+      // read — and the SDK declares `num_turns` as REQUIRED on `SDKResultError`
+      // too, so a turn that failed before completing its first turn (an
+      // `error_during_execution` at zero turns) was dropped exactly like a
+      // slash command. The operator then got no envelope at all: neither a
+      // completion nor a failure, just a turn that stopped producing output.
+      // Only the success case is noise; an error at zero turns is the single
+      // most important thing to say.
+      if (r.subtype === 'success' && r.num_turns === 0) return null;
       return {
         type: 'result',
         sessionId,
