@@ -4,7 +4,7 @@
  */
 
 /**
- * Thrown by the runner's `onMutation` hook when the pause-on-first-mutation
+ * Thrown by the runner's `onMutation` hook when the pause-on-dangerous
  * gate fires. The router's `deliver()` `.catch` recognises this class and
  * does NOT take the worker-failed path: this is a controlled pause, not a
  * crash. The pause state (DB row + wire) is persisted before the throw, so
@@ -50,4 +50,39 @@ export class TurnStalledError extends Error {
 
 export function isTurnStalled(err: unknown): err is TurnStalledError {
   return err instanceof TurnStalledError;
+}
+
+/**
+ * Cebab-aqd. Thrown by a router's mutation tap when persisting a `dangerous`
+ * mutation failed while the pause-on-dangerous gate was armed.
+ *
+ * The tap used to log such a failure and `return` — and that `return` is
+ * upstream of `applyPauseGate`, so a failed INSERT silently disarmed the
+ * operator's only mechanical brake and the command ran. Failing closed means
+ * throwing, and the class matters as much as the throw: this deliberately is
+ * NOT a `PausedForMutationError`, because the routers' `deliver().catch`
+ * recognises that class and returns quietly. A pause is quiet because the row
+ * and the banner are already persisted; here neither exists, so quiet would
+ * strand the agent with nothing for the operator to act on.
+ *
+ * Falling through to `onWorkerFailed` instead reuses the recovery that already
+ * exists: a pending-retry slot, a `cebab → user kind=error` event, and the
+ * Retry / Abandon controls, with the session left `running`.
+ */
+export class MutationNotRecordedError extends Error {
+  readonly __mutationNotRecorded = true as const;
+  readonly toolName: string;
+  constructor(toolName: string, summary: string) {
+    super(
+      `halted before ${summary}: the pause-on-dangerous gate is armed but this ${toolName} call ` +
+        `could not be recorded, so it could not be put in front of you. Nothing was run.`,
+    );
+    this.name = 'MutationNotRecordedError';
+    this.toolName = toolName;
+    Object.setPrototypeOf(this, MutationNotRecordedError.prototype);
+  }
+}
+
+export function isMutationNotRecorded(err: unknown): err is MutationNotRecordedError {
+  return err instanceof MutationNotRecordedError;
 }

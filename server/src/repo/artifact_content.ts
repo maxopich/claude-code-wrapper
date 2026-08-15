@@ -18,18 +18,21 @@
  * C4 search): an artifact preview is always redacted, so there is no audit gate
  * here either.
  *
- * **Security (spec §4.4): TOCTOU-safe bounded read.** Mirrors
- * `bus/runtime.ts` `readProjectClaudeMd`: open the path EXACTLY ONCE
+ * **Security (spec §4.4): TOCTOU-safe bounded read.** Delegated to
+ * `safe_fs.readFilePrefixBounded`: open the path EXACTLY ONCE
  * (`O_RDONLY | O_NONBLOCK`), `fstat` the open fd (not the re-resolved path) to
  * reject non-regular files, and read a BOUNDED number of bytes from that SAME
  * descriptor. This closes the stat-then-read race (CodeQL js/file-system-race —
  * a malicious project can't swap the file for a symlink-to-secret between the
  * check and the read), the FIFO DoS (a pipe planted as the path can't block the
  * event loop), and the OOM a blind `readFileSync(fd)` would risk on a huge file.
+ * This file hand-rolled that shape until `Cebab-x1n.6.21`; it was the only one
+ * of the four copies that implemented it correctly, which is exactly why the
+ * other three went unnoticed.
  */
-import fs from 'node:fs';
 import path from 'node:path';
 import { redactSensitive, type ArtifactContentError } from '@cebab/shared';
+import { readFilePrefixBounded } from '../safe_fs.js';
 import { getMultiAgentMutation } from './multi_agent.js';
 
 /** 1 MB read cap (spec §4.4 / H3-4). Files larger than this preview their
@@ -152,51 +155,25 @@ export function readArtifactContent(mutationId: number): ArtifactContentOutcome 
     return fail('no_file_path');
   }
 
-  // ── TOCTOU-safe bounded read (mirrors bus/runtime.ts readProjectClaudeMd). ──
-  let fd: number;
-  try {
-    fd = fs.openSync(abs, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
-  } catch {
-    return fail('read_failed'); // ENOENT / EACCES / ELOOP / (Windows) dir
+  // ── TOCTOU-safe bounded prefix read (shared `safe_fs`). ──────────────────
+  // A preview legitimately truncates, so this is the PREFIX variant rather
+  // than the all-or-nothing `readFileBounded`: over the cap comes back as a
+  // head plus `truncated`, not a refusal.
+  const read = readFilePrefixBounded(abs, MAX_ARTIFACT_BYTES);
+  if (!read.ok) {
+    // `not_a_file` (dir / device / fifo) keeps its own error code because the
+    // UI says something different for it; everything else — missing,
+    // unreadable, a short read — is a read failure.
+    return fail(read.refusal === 'not_a_file' ? 'not_a_file' : 'read_failed');
   }
-  try {
-    const st = fs.fstatSync(fd);
-    if (!st.isFile()) return fail('not_a_file'); // dir / device / fifo
 
-    const onDisk = st.size;
-    const truncated = onDisk > MAX_ARTIFACT_BYTES;
-    const toRead = Math.min(onDisk, MAX_ARTIFACT_BYTES);
-
-    const buf = Buffer.alloc(toRead);
-    let read = 0;
-    // A single readSync may return fewer bytes than requested; loop to fill.
-    while (read < toRead) {
-      let n: number;
-      try {
-        n = fs.readSync(fd, buf, read, toRead - read, read);
-      } catch {
-        return fail('read_failed');
-      }
-      if (n === 0) break; // EOF — the file shrank between fstat and read
-      read += n;
-    }
-
-    const raw = buf.subarray(0, read).toString('utf8');
-    const { redacted, fields } = redactArtifactContent(filePath, raw);
-    return {
-      content: redacted,
-      mtime: Math.floor(st.mtimeMs),
-      size: read,
-      truncated,
-      redactedFields: fields,
-    };
-  } catch {
-    return fail('read_failed'); // fstat or other unexpected error
-  } finally {
-    try {
-      fs.closeSync(fd);
-    } catch {
-      /* fd already gone — nothing to release */
-    }
-  }
+  const raw = read.bytes.toString('utf8');
+  const { redacted, fields } = redactArtifactContent(filePath, raw);
+  return {
+    content: redacted,
+    mtime: Math.floor(read.mtimeMs),
+    size: read.size,
+    truncated: read.truncated,
+    redactedFields: fields,
+  };
 }

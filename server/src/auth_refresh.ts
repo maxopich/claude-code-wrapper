@@ -71,6 +71,10 @@ export type AuthRefreshOptions = {
   binary?: string;
   /** Override the args. Defaults to `['login']`. */
   args?: string[];
+  /** Injection seam for tests. Defaults to `process.platform`. Exists
+   *  because the win32 shell requirement below is otherwise only
+   *  observable by running on Windows, which is how it went unnoticed. */
+  platform?: NodeJS.Platform;
 };
 
 type ActiveRun = {
@@ -138,6 +142,7 @@ export function startAuthRefresh(
   const binary = opts.binary ?? 'claude';
   const args = opts.args ?? ['login'];
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const platform = opts.platform ?? process.platform;
 
   let child: ChildProcess;
   try {
@@ -148,6 +153,34 @@ export function startAuthRefresh(
       // it won't get (claude login uses browser-redirect, no stdin
       // input expected).
       stdio: ['ignore', 'pipe', 'pipe'],
+      // Windows: an npm-installed `claude` is a `.cmd` shim, and since the
+      // CVE-2024-27980 fix (Node >=18.20.2 / 20.12.2 / 21.7.3, and all
+      // 22/24) Node REFUSES to spawn a .cmd/.bat without `shell: true` —
+      // it throws a synchronous `spawn EINVAL`. The catch below turned that
+      // into `{ ok: false, reason: 'spawn_failed' }`, so the operator's
+      // Re-authenticate action degraded quietly instead of crashing, which
+      // is why it went unnoticed on a platform the README supports.
+      // `scripts/bootstrap.mjs`, `scripts/security-test-gate.mjs` and
+      // `scripts/audit-gate.mjs` all carry this already; this call site did
+      // not. `.semgrep/cebab-bus.yaml` now fails a review that adds a
+      // fourth.
+      //
+      // Those three ALSO swap the command to `npm.cmd`. This one must not:
+      // `npm` on Windows is always a .cmd shim, but `claude` may be that
+      // shim OR a native-installer binary. With `shell: true` cmd.exe
+      // resolves the bare name through PATHEXT and finds either, so the
+      // bare name is strictly more portable here than a hardcoded suffix.
+      //
+      // No injection surface on the reachable path: `ws/server.ts` calls
+      // `startAuthRefresh(callbacks)` with no opts, so binary and args are
+      // the fixed literals 'claude' and ['login']. `opts.binary`/`opts.args`
+      // are test seams.
+      //
+      // Residual, Windows only: with a shell the child is cmd.exe, so
+      // `cancelAuthRefresh`'s kill may terminate the shell and leave the
+      // CLI running. Strictly better than a spawn that cannot succeed at
+      // all; tracked separately rather than papered over here.
+      shell: platform === 'win32',
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -492,3 +492,91 @@ describe('awaitMcpTrustDecisions — [security] BE-1: audit-write failure', () =
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// Register H04: the refusal list is the gate's OUTPUT, not just bookkeeping.
+//
+// Before this, `outcome.refused` was written at four sites and read at none —
+// grep confirmed zero consumers — and `gateProjectsForSpawn` returned `void`.
+// The operator clicked Deny, Cebab wrote an audit row saying so, and the SDK
+// loaded the binary regardless. These cases pin the contract that makes the
+// decision bind: every refusal route must surface a server NAME the caller can
+// hand to the spawn.
+// ---------------------------------------------------------------------------
+describe('[security] H04 — refusals reach the caller', () => {
+  test('a persisted denial is reported, not just audited', async () => {
+    const gate = makeTrustGateState();
+    const sink = makeSink();
+    const outcome = await awaitMcpTrustDecisions({
+      projectId: 1,
+      gate,
+      send: sink.send,
+      servers: [viewDenied('evil', '/p/.mcp.json')],
+    });
+    expect(outcome.refused).toEqual([
+      { serverName: 'evil', originPath: '/p/.mcp.json', persisted: true },
+    ]);
+    // Silent: a persisted denial must not re-prompt.
+    expect(sink.sent).toHaveLength(0);
+  });
+
+  test('a per-session deny_once is reported', async () => {
+    const gate = makeTrustGateState();
+    gate.denyOnce.add(denyOnceKey(1, 'evil', '/p/.mcp.json'));
+    const outcome = await awaitMcpTrustDecisions({
+      projectId: 1,
+      gate,
+      send: makeSink().send,
+      servers: [viewPending('evil', '/p/.mcp.json')],
+    });
+    expect(outcome.refused.map((r) => r.serverName)).toEqual(['evil']);
+    expect(outcome.refused[0]!.persisted).toBe(false);
+  });
+
+  test('a denial decided DURING this gate pass is reported', async () => {
+    const gate = makeTrustGateState();
+    const sink = makeSink();
+    const p = awaitMcpTrustDecisions({
+      projectId: 1,
+      gate,
+      send: sink.send,
+      servers: [viewPending('evil', '/p/.mcp.json', '/usr/bin/evil')],
+    });
+    const env = sink.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
+    gate.pending.get(env.pendingId)!.resolve({ kind: 'deny_remember' });
+    const outcome = await p;
+    // This is the case that matters most: the operator is looking at the
+    // modal when they refuse, so this is the refusal they expect to bind.
+    expect(outcome.refused.map((r) => r.serverName)).toEqual(['evil']);
+    expect(outcome.persistedDenials).toBe(1);
+  });
+
+  test('an all-trusted project refuses nothing', async () => {
+    const outcome = await awaitMcpTrustDecisions({
+      projectId: 1,
+      gate: makeTrustGateState(),
+      send: makeSink().send,
+      servers: [viewTrusted('fine', '/p/.mcp.json'), viewCebabInjected('cebab_bus')],
+    });
+    // The empty case has to stay empty — a spurious name here would strip a
+    // legitimate server's tools from every run.
+    expect(outcome.refused).toEqual([]);
+  });
+
+  test('the audit row records that the refusal was enforced', async () => {
+    await awaitMcpTrustDecisions({
+      projectId: 7,
+      gate: makeTrustGateState(),
+      send: makeSink().send,
+      servers: [viewDenied('evil', '/p/.mcp.json')],
+    });
+    const row = getDb()
+      .prepare(`SELECT payload_json FROM safety_audit WHERE kind = 'mcp.trust_silent_refusal'`)
+      .get() as { payload_json: string } | undefined;
+    expect(row).toBeDefined();
+    const payload = JSON.parse(row!.payload_json) as { enforcement?: string };
+    // Distinguishes post-H04 rows (denial applied) from the older rows that
+    // recorded a refusal the spawn then ignored.
+    expect(payload.enforcement).toBe('denied_mcp_servers+disallowed_tools');
+  });
+});

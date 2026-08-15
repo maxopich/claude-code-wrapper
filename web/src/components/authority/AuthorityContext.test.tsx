@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
-import { act, useEffect, useRef } from 'react';
+import { act, useEffect } from 'react';
 import type { ClientMsg, ProjectAuthority, ServerMsg } from '@cebab/shared/protocol';
 import {
   AuthorityProvider,
@@ -251,5 +251,3 @@ type _AssertSlotRef = React.MutableRefObject<AuthoritySlot | null>;
 type _AssertActionsRef = React.MutableRefObject<ReturnType<typeof useAuthorityActions> | null>;
 const _assertRefs = (s: _AssertSlotRef, a: _AssertActionsRef) => [s, a];
 void _assertRefs;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _useRefUsage = () => useRef(null);

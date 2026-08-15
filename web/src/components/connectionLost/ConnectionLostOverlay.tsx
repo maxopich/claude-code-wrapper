@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ConnectionLostView } from '../../store';
+import { copyToClipboard } from '../../clipboard';
+import { INERT_EXEMPT_ATTR } from '../../useModalSurface';
 import { formatDiagnostic, type ConnectionLostReason } from './connectionLostReason';
 
 /**
@@ -14,8 +16,9 @@ import { formatDiagnostic, type ConnectionLostReason } from './connectionLostRea
  * - **Affordances.** Always: "Copy diagnostic" (timestamp + reason +
  *   url + close code, no credentials). For `server_unreachable`:
  *   "Retry" plus an auto-retry tag showing the next backoff window.
- * - **A11y.** `role="alert"`, announces on appearance, focus moves to
- *   the primary action. `prefers-reduced-motion` suppresses transition.
+ * - **A11y.** `role="alert"` on the title+body (NOT the whole card — see
+ *   U27 below), announces once on appearance, focus moves to the
+ *   primary action. `prefers-reduced-motion` suppresses transition.
  * - **Dismiss.** Operator may dismiss to expose the sidebar; the
  *   slice clears on dismissal AND on the next successful `ws_open`.
  *
@@ -61,12 +64,30 @@ export function ConnectionLostOverlay({ view, onDismiss, onRetry }: ConnectionLo
   // unmount-then-mount). Using `view?.diagnostic.ts` would be wrong
   // for `auth_token_invalid` (the same ts could re-arrive after a
   // user-initiated retry).
+  //
+  // W07: keyed on `view.reason`, NOT on the `view` object. The store's
+  // `connection_lost` case always stores a fresh literal, and the
+  // `/auth-token` non-OK branch in App.tsx dispatches unguarded (unlike the
+  // fetch-threw branch, which checks the existing slice first). So against a
+  // 502/504 — which `resolveFromAuthTokenResponse` maps to
+  // `server_unreachable` — a new object arrived on every attempt, reset the
+  // counter, and pinned the 2/4/8/15/30s ladder at 2s while the server was
+  // already struggling. Keying on the reason means a repeat of the SAME
+  // failure keeps the ladder climbing, a genuinely different failure resets
+  // it, and dismiss-then-fail resets too (the dep passes through undefined).
   const startedAtRef = useRef<number>(Date.now());
   useEffect(() => {
     if (!view) return;
     startedAtRef.current = Date.now();
     setAttempt(0);
-  }, [view]);
+    // Cebab-1uk: `[view?.reason]` is PR #322's fix (W07), not an oversight —
+    // the reducer rebuilds `view` on unrelated updates, and depending on the
+    // object restarted the retry countdown every time. The body reads `view`
+    // only as a null guard, and `undefined` ⇄ a reason string both show up in
+    // the narrowed value, so the dependency is behaviourally complete. Undoing
+    // this to satisfy the rule would reintroduce the bug #322 fixed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view?.reason]);
 
   // Esc dismisses. Bound only while the overlay is mounted so it
   // doesn't swallow Esc in unrelated views.
@@ -124,12 +145,15 @@ export function ConnectionLostOverlay({ view, onDismiss, onRetry }: ConnectionLo
   const onClickCopy = useCallback(() => {
     if (!view) return;
     const text = formatDiagnostic(view.reason as ConnectionLostReason, view.diagnostic);
-    // navigator.clipboard is async + may throw in non-secure contexts;
-    // a fallback textarea-select would be more robust but adds noise
-    // for our 127.0.0.1 deployment (always secure context). We catch
-    // and log so a copy failure doesn't break the overlay.
-    void navigator.clipboard?.writeText?.(text)?.catch((err: unknown) => {
-      console.warn('[connection-lost] clipboard copy failed', err);
+    // U42: was a raw `navigator.clipboard` call, justified by "a fallback
+    // textarea-select would be more robust but adds noise for our 127.0.0.1
+    // deployment (always secure context)". The shared helper already carries
+    // that fallback, so the noise argument no longer buys anything — and this
+    // is the copy button that matters most, since the operator reaches for it
+    // precisely when Cebab is unreachable and they need the diagnostic to go
+    // somewhere else.
+    void copyToClipboard(text).then((ok) => {
+      if (!ok) console.warn('[connection-lost] clipboard copy failed');
     });
   }, [view]);
 
@@ -146,29 +170,52 @@ export function ConnectionLostOverlay({ view, onDismiss, onRetry }: ConnectionLo
   );
 
   return (
-    <div className="connection-lost-overlay" role="presentation">
-      <div
-        ref={cardRef}
-        className="connection-lost-card"
-        role="alert"
-        aria-live="assertive"
-        aria-labelledby="connection-lost-title"
-        aria-describedby="connection-lost-body"
-      >
+    <div
+      className="connection-lost-overlay"
+      role="presentation"
+      // U28, second half: `useModalSurface` marks every sibling of an open
+      // modal `inert`, and this overlay IS a sibling (both are children of
+      // `.app`). So a modal opened while the overlay is already up left the
+      // one surface saying "the server is unreachable" not merely dimmed but
+      // non-interactive — Retry, Copy diagnostic and Dismiss all dead. This
+      // attribute is the single exemption the walk honours. The opposite
+      // order escaped it, because the inert effect has `[]` deps and this
+      // component renders null until a failure — which is exactly why the
+      // bug would read as intermittent.
+      {...{ [INERT_EXEMPT_ATTR]: '' }}
+    >
+      <div ref={cardRef} className="connection-lost-card">
         <div className="connection-lost-stripe" aria-hidden="true" />
-        <h2 id="connection-lost-title" className="connection-lost-title">
-          {copy.title}
-        </h2>
-        <p id="connection-lost-body" className="connection-lost-body">
-          {copy.body}
-        </p>
-        {copy.docsHref ? (
-          <p className="connection-lost-docs">
-            <a href={copy.docsHref} target="_blank" rel="noopener noreferrer">
-              {copy.docsLabel ?? 'Learn more'}
-            </a>
+        {/* U27: the alert is the MESSAGE, not the dialog.
+         *
+         *  `role="alert"` carries an implicit `aria-atomic="true"`, so a
+         *  region marked that way is re-read IN FULL whenever any part of it
+         *  changes. This used to wrap the whole card — including the Retry
+         *  button, whose label holds a countdown that ticks once a second. So
+         *  every tick assertively re-announced the title, the body, the docs
+         *  link and all three button labels, interrupting whatever the
+         *  operator was listening to, once a second, until they acted.
+         *
+         *  Scoped to the title + body, the region holds only what changed
+         *  when the overlay appeared, and that content is static for the
+         *  overlay's whole life — so it announces exactly once, on mount.
+         *  The countdown stays in the button label, which is where a sighted
+         *  operator reads it. */}
+        <div className="connection-lost-message" role="alert" aria-live="assertive">
+          <h2 id="connection-lost-title" className="connection-lost-title">
+            {copy.title}
+          </h2>
+          <p id="connection-lost-body" className="connection-lost-body">
+            {copy.body}
           </p>
-        ) : null}
+          {copy.docsHref ? (
+            <p className="connection-lost-docs">
+              <a href={copy.docsHref} target="_blank" rel="noopener noreferrer">
+                {copy.docsLabel ?? 'Learn more'}
+              </a>
+            </p>
+          ) : null}
+        </div>
         <div className="connection-lost-actions">
           {showRetry && onRetry ? (
             <button

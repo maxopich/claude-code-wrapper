@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ConnectionLostView } from '../../store';
+import { INERT_EXEMPT_ATTR } from '../../useModalSurface';
 import { ConnectionLostOverlay } from './ConnectionLostOverlay';
 
 // Cluster G E3 UI: ConnectionLostOverlay tests pin:
@@ -231,6 +232,103 @@ describe('ConnectionLostOverlay / auto-retry', () => {
   });
 });
 
+/**
+ * W07 — the ladder must climb across repeat failures.
+ *
+ * The reset used to key on the `view` OBJECT. `case 'connection_lost'` always
+ * stores a fresh literal, and App.tsx's `/auth-token` non-OK branch dispatches
+ * unguarded (unlike its fetch-threw branch, which checks the existing slice
+ * first). `resolveFromAuthTokenResponse` maps a 502/504 to
+ * `server_unreachable`, so a stale proxy produced a new view object on every
+ * attempt, reset the counter, and pinned the 2/4/8/15/30s ladder at 2s —
+ * hammering a server that was already struggling.
+ *
+ * Each re-render below passes a brand-new object with a fresh `ts`, which is
+ * what the reducer really hands over.
+ */
+describe('ConnectionLostOverlay / backoff across repeat failures (W07)', () => {
+  const unreachable = (ts: number) => view({ reason: 'server_unreachable', diagnostic: { ts } });
+
+  test('a repeat of the same failure advances the ladder instead of restarting it', () => {
+    const onRetry = vi.fn();
+    render({ view: unreachable(1), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(1);
+
+    // The retry failed the same way: a NEW object, same reason.
+    render({ view: unreachable(2), onDismiss: vi.fn(), onRetry });
+    // Before the fix this reset to attempt 0 and fired again at 2s.
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(2);
+  });
+
+  test('CONTROL: a genuinely different failure resets the ladder to 2s', () => {
+    const onRetry = vi.fn();
+    render({ view: unreachable(1), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    // A different reason is a different episode — and `unknown` does not
+    // auto-retry at all, so route back through unreachable to observe the
+    // window rather than its absence.
+    render({ view: view({ reason: 'unknown' }), onDismiss: vi.fn(), onRetry });
+    render({ view: unreachable(3), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(2);
+  });
+
+  test('CONTROL: dismiss-then-fail restarts at the first window', () => {
+    const onRetry = vi.fn();
+    render({ view: unreachable(1), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    // The operator dismissed; the slice clears, the dep passes through
+    // undefined, and the next failure is a fresh episode.
+    render({ view: undefined, onDismiss: vi.fn(), onRetry });
+    render({ view: unreachable(4), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(2);
+  });
+
+  test('the ladder keeps climbing: 2s, 4s, 8s across three repeat failures', () => {
+    const onRetry = vi.fn();
+    render({ view: unreachable(1), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    render({ view: unreachable(2), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(2);
+    render({ view: unreachable(3), onDismiss: vi.fn(), onRetry });
+    act(() => {
+      vi.advanceTimersByTime(7999);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(2);
+    act(() => {
+      vi.advanceTimersByTime(2);
+    });
+    expect(onRetry).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe('ConnectionLostOverlay / a11y', () => {
   test('focus moves to the primary action on mount', () => {
     render({ view: view({ reason: 'server_unreachable' }), onDismiss: vi.fn(), onRetry: vi.fn() });
@@ -248,10 +346,40 @@ describe('ConnectionLostOverlay / a11y', () => {
     expect(document.activeElement).toBe(copyBtn);
   });
 
-  test('card has role=alert and aria-live=assertive', () => {
+  // U27 moved the alert region DOWN a level: it used to be the whole card,
+  // which meant the ticking countdown in the Retry label re-announced the
+  // title, body and every button once a second (`role="alert"` implies
+  // `aria-atomic="true"`, so the region is re-read in full on any change).
+  // It is now the title + body, which are static for the overlay's life.
+  test('the message — not the card — is the assertive alert region', () => {
     render({ view: view(), onDismiss: vi.fn() });
     const card = container.querySelector('.connection-lost-card');
-    expect(card?.getAttribute('role')).toBe('alert');
-    expect(card?.getAttribute('aria-live')).toBe('assertive');
+    expect(card?.getAttribute('role')).toBeNull();
+    expect(card?.getAttribute('aria-live')).toBeNull();
+
+    const message = container.querySelector('.connection-lost-message');
+    expect(message).not.toBeNull();
+    expect(message?.getAttribute('role')).toBe('alert');
+    expect(message?.getAttribute('aria-live')).toBe('assertive');
+    // The announcement still carries the failure — scoping it must not have
+    // emptied it.
+    expect(message?.textContent).toContain('Connection to Cebab failed');
+  });
+
+  test('the actions sit outside the alert region', () => {
+    render({ view: view({ reason: 'server_unreachable' }), onRetry: vi.fn(), onDismiss: vi.fn() });
+    const message = container.querySelector('.connection-lost-message')!;
+    expect(message.querySelectorAll('button')).toHaveLength(0);
+    // ...and are still on screen, i.e. they moved out rather than vanished.
+    expect(container.querySelectorAll('.connection-lost-actions button').length).toBeGreaterThan(2);
+  });
+
+  test('the overlay is exempt from a modal focus trap (U28)', () => {
+    // `useModalSurface` inerts every sibling of an open modal, and this
+    // overlay is one. Without the exemption, opening any dialog while the
+    // connection is down kills Retry / Copy diagnostic / Dismiss outright.
+    render({ view: view(), onDismiss: vi.fn() });
+    const overlay = container.querySelector('.connection-lost-overlay');
+    expect(overlay?.hasAttribute(INERT_EXEMPT_ATTR)).toBe(true);
   });
 });

@@ -2,6 +2,14 @@
 // in authority/McpServersList.tsx so message copy buttons (and any future
 // caller) share one implementation. Returns whether the copy succeeded so the
 // caller can show success/failure feedback.
+//
+// U42: that claim was aspirational for a long time — the lift happened, the
+// original in McpServersList was never deleted, and five other sites went on
+// calling `navigator.clipboard` directly with no fallback. It is now true, and
+// `clipboardConvergence.test.ts` keeps it true: this is the only file in
+// `web/src` permitted to name `navigator.clipboard`. Callers that show a
+// "copied" affordance should reach for `useCopyFeedback` rather than this
+// directly.
 export async function copyToClipboard(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {

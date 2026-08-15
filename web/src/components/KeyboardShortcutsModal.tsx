@@ -12,8 +12,17 @@ import { useModalSurface } from '../useModalSurface';
  *
  * The modal is intentionally read-only: the spec's footer "Customize
  * bindings" link is an OQ-E3 deferral (docs link only in v1; in-app
- * editor is v1.x). The "Add a binding by editing the registry" hint
- * is shown so contributors know where to look.
+ * editor is v1.x).
+ *
+ * **Adding a shortcut: edit `shortcutRegistry.ts`** — this cheatsheet renders
+ * from there, so a new entry shows up here for free.
+ *
+ * U40: that sentence used to be the modal's rendered footer, addressed to
+ * "you" in an operator-facing dialog. Cebab ships as an app; the person
+ * reading a keyboard cheatsheet is overwhelmingly not the person who can edit
+ * a TypeScript file in the repository, and telling them to is both useless and
+ * a small lie about what they can control. The fact is true and worth keeping —
+ * it belongs here, where the reader can act on it.
  */
 
 export type KeyboardShortcutsModalProps = {
@@ -91,8 +100,7 @@ export function KeyboardShortcutsModal({ onClose }: KeyboardShortcutsModalProps)
         <section className="keyboard-shortcuts-modal-body">
           {isEmpty ? (
             <p className="keyboard-shortcuts-modal-empty">
-              No shortcuts match{' '}
-              {query.length > 0 ? <code>{query}</code> : 'your filter'}.
+              No shortcuts match {query.length > 0 ? <code>{query}</code> : 'your filter'}.
             </p>
           ) : (
             sectioned.map((s) =>
@@ -106,10 +114,7 @@ export function KeyboardShortcutsModal({ onClose }: KeyboardShortcutsModalProps)
                           {row.keyDisplay.map((k, i) => (
                             <span key={i}>
                               {i > 0 && (
-                                <span
-                                  className="keyboard-shortcuts-modal-plus"
-                                  aria-hidden="true"
-                                >
+                                <span className="keyboard-shortcuts-modal-plus" aria-hidden="true">
                                   +
                                 </span>
                               )}
@@ -128,13 +133,6 @@ export function KeyboardShortcutsModal({ onClose }: KeyboardShortcutsModalProps)
             )
           )}
         </section>
-        <footer className="keyboard-shortcuts-modal-footer">
-          <p className="hint">
-            Want to add a shortcut? Edit{' '}
-            <code>web/src/shortcutRegistry.ts</code> — the cheatsheet renders
-            from there.
-          </p>
-        </footer>
       </div>
     </div>
   );

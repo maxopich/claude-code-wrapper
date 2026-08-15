@@ -1,0 +1,370 @@
+/**
+ * [security] Register H02 + H03 — the bounded, TOCTOU-safe reader.
+ *
+ * The three hazards this closes, each asserted below:
+ *
+ *   BLOCKING   a FIFO parks the event loop until a writer appears. On a
+ *              single-threaded server that is the WHOLE server, not one
+ *              request. Asserted twice: with a real named pipe (end to end,
+ *              POSIX only) AND on the open flags (fast, everywhere). The
+ *              second is not redundant — a blocking regression freezes the
+ *              worker, and vitest's timeout is JavaScript, so it cannot fire.
+ *   UNBOUNDED  a huge file is read entirely into memory.
+ *   WRONG TYPE a directory or device is not a file and must not be read.
+ *
+ * FIFO cases are POSIX-only — `mkfifo` does not exist on Windows, and the
+ * O_NONBLOCK constant it depends on is absent there too. The size and type
+ * cases run everywhere, so windows-2022 still covers the caps.
+ */
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+
+import {
+  readFileBounded,
+  readFilePrefixBounded,
+  readTextBounded,
+  readTextPrefixBounded,
+} from './safe_fs.js';
+
+const isWindows = process.platform === 'win32';
+/** FIFO tests need mkfifo; skip the whole case on Windows rather than fake it. */
+const posixOnly = isWindows ? test.skip : test;
+
+let tmp: string;
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-safe-fs-'));
+});
+
+afterEach(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+function write(name: string, contents: string | Buffer): string {
+  const p = path.join(tmp, name);
+  fs.writeFileSync(p, contents);
+  return p;
+}
+
+describe('[security] readFileBounded — the happy path still works', () => {
+  test('reads a regular file whole', () => {
+    const p = write('ok.txt', 'hello world');
+    const r = readFileBounded(p, 1024);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.bytes.toString('utf8')).toBe('hello world');
+    expect(r.size).toBe(11);
+  });
+
+  test('reads an empty file as empty rather than refusing', () => {
+    const p = write('empty.txt', '');
+    const r = readFileBounded(p, 1024);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.size).toBe(0);
+  });
+
+  test('a file exactly at the cap is allowed', () => {
+    // Off-by-one guard: the check is `size > maxBytes`, so == must pass.
+    const p = write('exact.bin', Buffer.alloc(100, 0x41));
+    const r = readFileBounded(p, 100);
+    expect(r.ok).toBe(true);
+  });
+
+  test('readTextBounded decodes utf8', () => {
+    const p = write('utf8.txt', 'héllo — ok');
+    const r = readTextBounded(p, 1024);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.text).toBe('héllo — ok');
+  });
+
+  test('invalid utf8 becomes U+FFFD instead of throwing', () => {
+    const p = write('bad.bin', Buffer.from([0xff, 0xfe, 0x41]));
+    const r = readTextBounded(p, 1024);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.text).toContain('A');
+  });
+});
+
+describe('[security] readFileBounded — refusals', () => {
+  test('refuses a file over the cap, and does not truncate it instead', () => {
+    // The load-bearing distinction for H02: callers hash these bytes, so a
+    // silent prefix would make different files compare equal. Over-cap must
+    // be a REFUSAL, never a partial success.
+    const p = write('big.bin', Buffer.alloc(2048, 0x42));
+    const r = readFileBounded(p, 1024);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.refusal).toBe('too_large');
+  });
+
+  test('refuses a directory', () => {
+    const r = readFileBounded(tmp, 1024);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    // Windows fails at open (a dir cannot be opened O_RDONLY); POSIX opens it
+    // and fstat reports a directory. Both are refusals — that is what matters.
+    expect(['not_a_file', 'unreadable']).toContain(r.refusal);
+  });
+
+  test('refuses a path that does not exist', () => {
+    const r = readFileBounded(path.join(tmp, 'nope.txt'), 1024);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.refusal).toBe('unreadable');
+  });
+
+  posixOnly(
+    'refuses a FIFO WITHOUT hanging — the DoS this exists for',
+    () => {
+      const fifo = path.join(tmp, 'pipe');
+      execFileSync('mkfifo', [fifo]);
+
+      // No writer is ever attached. A plain fs.readFileSync here parks the
+      // event loop forever; O_NONBLOCK makes the open return immediately.
+      //
+      // CAVEAT, measured rather than assumed: if this regresses the suite
+      // HANGS, it does not fail. A blocking `openSync` freezes the event
+      // loop, and vitest's per-test timeout is itself JavaScript, so it can
+      // never fire — the earlier claim here that "vitest kills the run on its
+      // timeout" was wrong. The flags assertion below is the counterpart that
+      // reddens promptly; this case is kept because it is the only one that
+      // exercises a real named pipe end to end.
+      const started = Date.now();
+      const r = readFileBounded(fifo, 1024);
+      const elapsed = Date.now() - started;
+
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.refusal).toBe('not_a_file');
+      // Generous bound — a blocking open would sit here indefinitely, not for
+      // two seconds. This asserts "returned promptly", not a latency budget.
+      expect(elapsed).toBeLessThan(2000);
+    },
+    10_000,
+  );
+
+  posixOnly(
+    'refuses a character device without reading it',
+    () => {
+      // /dev/zero is infinite: an unbounded read never terminates and eats
+      // memory as fast as it can allocate.
+      const r = readFileBounded('/dev/zero', 1024);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.refusal).toBe('not_a_file');
+    },
+    10_000,
+  );
+});
+
+describe('[security] both readers open NON-BLOCKING', () => {
+  // The non-hanging counterpart to the FIFO cases. Those exercise a real named
+  // pipe, but a regression makes them freeze rather than fail (see the caveat
+  // above), and a frozen CI job is worse than a red one. This asserts the flag
+  // that makes the FIFO case work, against an ordinary file, so it can never
+  // block — and it runs on Windows too, where mkfifo does not exist.
+  function flagsUsedBy(read: (p: string) => unknown): number[] {
+    const p = write('flagged.txt', 'x');
+    const flags: number[] = [];
+    const realOpen = fs.openSync.bind(fs);
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation(((
+      target: fs.PathLike,
+      f: number,
+      m?: fs.Mode,
+    ) => {
+      flags.push(typeof f === 'number' ? f : 0);
+      return realOpen(target, f, m);
+    }) as typeof fs.openSync);
+    try {
+      read(p);
+    } finally {
+      spy.mockRestore();
+    }
+    return flags;
+  }
+
+  /** 0 on Windows, where the constant does not exist and the code says
+   *  `?? 0`. There is no bit to assert there, so the flag check is skipped
+   *  explicitly rather than passing vacuously against zero. */
+  const NONBLOCK = fs.constants.O_NONBLOCK ?? 0;
+
+  test('readFileBounded opens exactly once, non-blocking', () => {
+    const flags = flagsUsedBy((p) => readFileBounded(p, 1024));
+    expect(flags).toHaveLength(1);
+    if (NONBLOCK === 0) return;
+    expect(flags[0]! & NONBLOCK).toBe(NONBLOCK);
+  });
+
+  test('readFilePrefixBounded opens exactly once, non-blocking', () => {
+    const flags = flagsUsedBy((p) => readFilePrefixBounded(p, 1024));
+    expect(flags).toHaveLength(1);
+    if (NONBLOCK === 0) return;
+    expect(flags[0]! & NONBLOCK).toBe(NONBLOCK);
+  });
+});
+
+describe('[security] readFileBounded — descriptor hygiene', () => {
+  test('does not leak descriptors across many refused reads', () => {
+    // A leak here would be a slow-motion DoS of its own: every pre-spawn
+    // resolve that hits a hostile path would burn an fd until EMFILE.
+    const dir = tmp;
+    const missing = path.join(tmp, 'nope');
+    const big = write('leak-big.bin', Buffer.alloc(4096, 0x43));
+    const good = write('leak-good.txt', 'fine');
+
+    for (let i = 0; i < 200; i++) {
+      readFileBounded(dir, 1024);
+      readFileBounded(missing, 1024);
+      readFileBounded(big, 1024);
+      readFileBounded(good, 1024);
+    }
+
+    // If the finally-block close were missing, 800 opens would have exhausted
+    // the default fd limit long before here and this last read would fail.
+    const r = readFileBounded(good, 1024);
+    expect(r.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The PREFIX variant (register H11 + Cebab-x1n.6.21). Same three hazards, but
+// over-cap is a head read rather than a refusal — for the callers that
+// legitimately truncate (a file preview, a CLAUDE.md injection).
+// ---------------------------------------------------------------------------
+
+describe('[security] readFilePrefixBounded — bounded head reads', () => {
+  test('reads a whole file that fits, and does not claim truncation', () => {
+    const p = write('small.txt', 'hello world');
+    const r = readFilePrefixBounded(p, 1024);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.bytes.toString('utf8')).toBe('hello world');
+    expect(r.truncated).toBe(false);
+    expect(r.size).toBe(11);
+    expect(r.onDiskSize).toBe(11);
+  });
+
+  test('a file exactly at the cap is not truncated', () => {
+    // Off-by-one guard: the check is `size > maxBytes`, so == must come back
+    // whole and NOT flagged — a spurious "(truncated)" label is a lie too.
+    const p = write('exact.bin', Buffer.alloc(100, 0x41));
+    const r = readFilePrefixBounded(p, 100);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.truncated).toBe(false);
+    expect(r.size).toBe(100);
+  });
+
+  test('NEVER allocates past the cap, whatever the file size — the H11 assertion', () => {
+    // The defect this replaces read the file WHOLE and applied its cap to the
+    // resulting string, so memory tracked the file, not the cap. 4 MB against
+    // a 64 KiB cap: `size` is the bytes actually pulled in, so asserting it
+    // here is a direct measurement of that, not a proxy.
+    const CAP = 64 * 1024;
+    const p = write('huge.bin', Buffer.alloc(4 * 1024 * 1024, 0x44));
+    const r = readFilePrefixBounded(p, CAP);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.size).toBe(CAP);
+    expect(r.bytes.length).toBe(CAP);
+    expect(r.truncated).toBe(true);
+    // And the caller still learns the real size, so a size label stays honest.
+    expect(r.onDiskSize).toBe(4 * 1024 * 1024);
+  });
+
+  test('reports mtime, so a caller does not have to re-stat the path', () => {
+    // Re-statting by PATH after the read is the TOCTOU this module exists to
+    // avoid; carrying mtimeMs off the same descriptor is what lets
+    // `artifact_content` drop its own fstat.
+    const p = write('stamped.txt', 'x');
+    const expected = fs.statSync(p).mtimeMs;
+    const r = readFilePrefixBounded(p, 1024);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.mtimeMs).toBe(expected);
+  });
+
+  test('refuses a directory rather than reading one', () => {
+    const r = readFilePrefixBounded(tmp, 1024);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(['not_a_file', 'unreadable']).toContain(r.refusal);
+  });
+
+  test('refuses a path that does not exist', () => {
+    const r = readFilePrefixBounded(path.join(tmp, 'nope.txt'), 1024);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.refusal).toBe('unreadable');
+  });
+
+  posixOnly(
+    'refuses a FIFO WITHOUT hanging — a prefix read is not an excuse to block',
+    () => {
+      const fifo = path.join(tmp, 'prefix-pipe');
+      execFileSync('mkfifo', [fifo]);
+      const started = Date.now();
+      const r = readFilePrefixBounded(fifo, 1024);
+      const elapsed = Date.now() - started;
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.refusal).toBe('not_a_file');
+      expect(elapsed).toBeLessThan(2000);
+    },
+    10_000,
+  );
+
+  posixOnly(
+    'refuses a character device instead of reading its first cap bytes',
+    () => {
+      // /dev/zero is the case where "just read a bounded prefix" would look
+      // reasonable and still be wrong: it always succeeds, so a caller would
+      // render an endless run of NULs as a file's content.
+      const r = readFilePrefixBounded('/dev/zero', 1024);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.refusal).toBe('not_a_file');
+    },
+    10_000,
+  );
+
+  test('does not leak descriptors across many prefix reads', () => {
+    const good = write('prefix-good.txt', 'fine');
+    const big = write('prefix-big.bin', Buffer.alloc(4096, 0x45));
+    for (let i = 0; i < 200; i++) {
+      readFilePrefixBounded(tmp, 1024);
+      readFilePrefixBounded(path.join(tmp, 'nope'), 1024);
+      readFilePrefixBounded(big, 1024);
+      readFilePrefixBounded(good, 1024);
+    }
+    expect(readFilePrefixBounded(good, 1024).ok).toBe(true);
+  });
+});
+
+describe('[security] readTextPrefixBounded', () => {
+  test('decodes utf8 and carries the truncation facts through', () => {
+    const p = write('utf8-prefix.txt', 'héllo — ok');
+    const r = readTextPrefixBounded(p, 1024);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.text).toBe('héllo — ok');
+    expect(r.truncated).toBe(false);
+    expect(r.onDiskSize).toBe(Buffer.byteLength('héllo — ok', 'utf8'));
+  });
+
+  test('a byte cap that lands mid-codepoint decodes rather than throwing', () => {
+    // The cut is byte-wise on purpose (the cap's job is bounding the
+    // allocation), so a split multi-byte character must degrade to U+FFFD and
+    // not take the read down with it.
+    const p = write('split.txt', '—'.repeat(10)); // 3 bytes each
+    const r = readTextPrefixBounded(p, 4);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.truncated).toBe(true);
+    expect(r.text.startsWith('—')).toBe(true);
+  });
+});

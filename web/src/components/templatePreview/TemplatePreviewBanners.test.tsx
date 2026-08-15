@@ -71,10 +71,20 @@ describe('BypassPermissionsBanner', () => {
     expect(glyph?.getAttribute('aria-hidden')).toBe('true');
   });
 
-  test('body text names `bypassPermissions` so the user can grep for it later', () => {
+  // This test used to assert the literal string `bypassPermissions`, with the
+  // stated reason "so the user can grep for it later" — a fair goal served by
+  // a false word. Bus turns run `permissionMode: 'default'` with a live
+  // `canUseTool`; the bypass branch is test-only (`bus/guardrail.ts`). The
+  // assertion now pins what the operator actually needs: everything is
+  // auto-approved, and exactly one tool will reach them.
+  test('body text states the auto-approve posture and names the one tool that prompts', () => {
     act(() => root.render(<BypassPermissionsBanner />));
     const body = container.querySelector('.tpl-banner-body');
-    expect(body?.textContent).toMatch(/bypassPermissions/);
+    expect(body?.textContent).toMatch(/auto-approves tool calls/);
+    expect(body?.textContent).toMatch(/bypass/);
+    expect(body?.textContent).toMatch(/AskUserQuestion/);
+    // The false mechanism must not come back.
+    expect(body?.textContent).not.toMatch(/bypassPermissions/);
   });
 });
 

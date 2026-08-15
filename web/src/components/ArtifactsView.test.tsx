@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ClientMsg, MultiAgentMutationView, ServerMsg } from '@cebab/shared';
@@ -90,8 +90,7 @@ const toggle = () =>
   container.querySelector('.artifact-content-toggle') as HTMLButtonElement | null;
 const lastSearch = () =>
   sent.filter((m) => m.type === 'get_artifact_content').at(-1) as
-    | Extract<ClientMsg, { type: 'get_artifact_content' }>
-    | undefined;
+    Extract<ClientMsg, { type: 'get_artifact_content' }> | undefined;
 
 describe('ArtifactsView content disclosure (H3 UI)', () => {
   test('renders an artifact row + a collapsed content toggle, with NO fetch yet (lazy)', () => {
@@ -155,5 +154,51 @@ describe('ArtifactsView content disclosure (H3 UI)', () => {
     click(toggle()); // collapse
     click(toggle()); // re-open — status is 'loaded', so no re-fetch
     expect(sent.filter((m) => m.type === 'get_artifact_content')).toHaveLength(1);
+  });
+});
+
+// U42: "Copy path" wrote to the clipboard inside a try with an empty catch and
+// changed nothing on screen either way — a successful copy and a denied one
+// were indistinguishable. Both halves are pinned here: the write reaches the
+// shared helper's clipboard path, AND the operator is told it happened.
+describe('ArtifactsView — Copy path reports what it did', () => {
+  const copyBtn = () =>
+    Array.from(
+      container.querySelectorAll<HTMLButtonElement>('.artifacts-preview-actions button'),
+    ).find((b) => b.textContent?.trim().startsWith('Cop')) ?? null;
+
+  test('clicking Copy path writes the file path and confirms it on the button', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+
+    renderView([mut({ filePath: '/ws/plan.md' })]);
+    const btn = copyBtn();
+    expect(btn).not.toBeNull();
+    expect(btn!.textContent).toBe('Copy path');
+
+    click(btn);
+    // The write itself resolves a microtask later; flush before asserting on
+    // the state it sets.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(writeText).toHaveBeenCalledWith('/ws/plan.md');
+    expect(copyBtn()!.textContent).toBe('Copied');
+  });
+
+  test('a rejected clipboard write leaves the idle label — no false confirmation', async () => {
+    // The fallback path also fails under jsdom (execCommand is undefined), so
+    // this exercises "the copy genuinely did not happen".
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'));
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+
+    renderView([mut({ filePath: '/ws/plan.md' })]);
+    click(copyBtn());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(copyBtn()!.textContent).toBe('Copy path');
   });
 });

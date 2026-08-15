@@ -84,12 +84,18 @@ export type KickModalProps = {
   projectId: number;
   agentLabel: string;
   onClose: () => void;
+  /**
+   * Cebab-u0s: returns whether the kick actually reached the server. On
+   * `false` this modal stays open with the operator's reason intact — for a
+   * terminal action, quietly closing over a kick that never happened is the
+   * worst of the five verbs.
+   */
   onSubmit: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
 };
 
 export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModalProps) {
@@ -115,7 +121,10 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
   function handleSubmit() {
     if (!canSubmit) return;
     const trimmed = reasonText.trim();
-    onSubmit(projectId, reasonCode, trimmed.length > 0 ? trimmed : undefined, KICK_MODE);
+    // Cebab-u0s: close only once the kick has gone out — see the prop's doc.
+    if (!onSubmit(projectId, reasonCode, trimmed.length > 0 ? trimmed : undefined, KICK_MODE)) {
+      return;
+    }
     onClose();
   }
 
@@ -139,13 +148,13 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
         </header>
         <p className="gate-modal-help">
           Kick drops this participant from the routing set. The in-flight turn (if any) drains in
-          the background; further bus_send calls from this agent are dropped at the router. There
-          is no <em>unkick</em> verb — the participant is out for the rest of this session.
+          the background; further bus_send calls from this agent are dropped at the router. There is
+          no <em>unkick</em> verb — the participant is out for the rest of this session.
         </p>
         <p className="gate-modal-help">
           A multi-agent forensic bundle (recent bus events, mutations attributed to this agent) is
-          captured alongside the <code>agent_control.kicked</code> safety_audit row at the moment
-          of kick.
+          captured alongside the <code>agent_control.kicked</code> safety_audit row at the moment of
+          kick.
         </p>
         <fieldset className="kick-modal-fieldset">
           <legend className="kick-modal-legend">Reason</legend>

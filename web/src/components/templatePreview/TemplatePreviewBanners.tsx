@@ -6,10 +6,15 @@
  *  1. `<BypassPermissionsBanner />` (warning) — always-on whenever
  *     multi-agent UI is visible. Surfaces the load-bearing safety
  *     signal that today is invisible in the UI but baked into every
- *     bus run (`server/src/bus/runner.ts` sets `permissionMode:
- *     'bypassPermissions'` + `allowDangerouslySkipPermissions: true` for
- *     every participant). Mounted at the top of `.multi-agent-draft-body`
- *     AND inside the expanded preview modal's header.
+ *     bus run: `server/src/bus/runner.ts` gives each participant a
+ *     `canUseTool` that returns `allow` for every tool except
+ *     `AskUserQuestion`. (This comment used to name `permissionMode:
+ *     'bypassPermissions'`; that branch is reached only by callers which
+ *     skip the ask-gate hook, i.e. tests — see `bus/guardrail.ts`. The
+ *     effect on the operator is the same, which is why the banner stayed
+ *     correct while its stated mechanism went stale.) Mounted at the top
+ *     of `.multi-agent-draft-body` AND inside the expanded preview
+ *     modal's header.
  *
  *  2. `<CustomModeBanner />` (info, PR-1) — fires only when a stored
  *     template has `mode === 'custom'`. The custom-mode renderer is a
@@ -93,8 +98,8 @@ export function BypassPermissionsBanner() {
       title="Auto-approved tool calls"
       body={
         <>
-          Every participant in a multi-agent session auto-approves tool calls (
-          <code>bypassPermissions</code>). There is no per-tool prompt during the run.
+          Every participant in a multi-agent session auto-approves tool calls — <code>bypass</code>{' '}
+          in effect. The only prompt you will see during the run is <code>AskUserQuestion</code>.
         </>
       }
       role={firstMount ? 'alert' : 'status'}

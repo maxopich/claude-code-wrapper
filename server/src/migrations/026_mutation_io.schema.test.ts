@@ -32,10 +32,9 @@ afterEach(() => {
 describe('migration 026_mutation_io schema shape', () => {
   function cols() {
     return getDb()
-      .prepare<
-        [],
-        { name: string; type: string; notnull: number; dflt_value: string | null }
-      >(`PRAGMA table_info('multi_agent_mutations')`)
+      .prepare<[], { name: string; type: string; notnull: number; dflt_value: string | null }>(
+        `PRAGMA table_info('multi_agent_mutations')`,
+      )
       .all();
   }
 
@@ -51,14 +50,17 @@ describe('migration 026_mutation_io schema shape', () => {
     expect(c).toMatchObject({ type: 'TEXT', notnull: 0, dflt_value: null });
   });
 
-  test('migration runner is idempotent — re-applying 026 does not throw', () => {
+  // Not an idempotence test, though it used to say so (register C10): the
+  // runner SKIPS a filename already in `schema_migrations`, so the body
+  // never re-executes. No migration here survives a second apply, and none
+  // needs to — the exactly-once contract is asserted in `db.migrations.test.ts`.
+  test('the runner applies 026 exactly once — reopening skips it', () => {
     closeDb();
     expect(() => getDb()).not.toThrow();
     const sm = getDb()
-      .prepare<
-        [],
-        { n: number }
-      >(`SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '026_mutation_io.sql'`)
+      .prepare<[], { n: number }>(
+        `SELECT COUNT(*) AS n FROM schema_migrations WHERE filename = '026_mutation_io.sql'`,
+      )
       .get();
     expect(sm?.n).toBe(1);
   });

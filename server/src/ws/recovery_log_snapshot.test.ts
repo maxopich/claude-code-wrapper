@@ -5,10 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { ServerMsg } from '@cebab/shared';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
-import {
-  appendRecoveryLog,
-  updateRecoveryOutcome,
-} from '../repo/recovery_log.js';
+import { appendRecoveryLog, updateRecoveryOutcome } from '../repo/recovery_log.js';
 import { executeRecoveryLogSnapshot } from './server.js';
 
 // Cluster D Phase 8a (spec §8.5): server-side coverage for the
@@ -114,9 +111,7 @@ describe('executeRecoveryLogSnapshot — populated', () => {
     });
     // Aggregates are PRESENT only for observed classes; the snapshot
     // explicitly does NOT pad out the union with zero rows.
-    expect(
-      reply.aggregates.find((agg) => agg.failureClass === 'auth_expired'),
-    ).toBeUndefined();
+    expect(reply.aggregates.find((agg) => agg.failureClass === 'auth_expired')).toBeUndefined();
   });
 
   test('sweepReopenRate reports {rate, sweeps}', () => {

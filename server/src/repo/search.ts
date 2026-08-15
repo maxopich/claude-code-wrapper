@@ -253,6 +253,33 @@ export function searchSessions(q: SearchSessionsQuery): SearchSessionsOutcome {
   const query = q.query.trim();
   if (query.length < MIN_SEARCH_QUERY_LEN) return { results: [], truncated: false };
 
+  // Register D11: fail CLOSED on a scope that names no project. Both query
+  // builders append their project predicate only when `projectId` is a number;
+  // without this guard an absent id dropped the predicate entirely and a
+  // "this project" search returned hits from EVERY project, while
+  // `executeSearchSessions` echoed `scope: 'this_project'` back — the reply
+  // asserted a restriction that had not been applied.
+  //
+  // Reachable from the shipped UI, no hostile client required: the modal seeds
+  // `scope` from `activeProjectId` on mount but the two are independent state
+  // afterwards, so a project closing under an open modal leaves scope at
+  // `this_project` with `projectId` undefined, and the dispatch effect refires
+  // on that very change.
+  //
+  // WHY NOT DOWNGRADE TO `all_projects` AND SAY SO — the shape this module
+  // already uses for `raw`. `useSessionSearch` version-keys replies on the
+  // echoed `(query, scope)` and discards any mismatch; its header explains it
+  // omits `raw` from that key precisely so a downgraded reply isn't dropped.
+  // A downgraded SCOPE echo would hit exactly that discard, leaving the
+  // operator on a spinner that never clears. Failing closed keeps the echo
+  // truthful by construction and needs no protocol change.
+  //
+  // The builders keep their own `typeof` checks as defence-in-depth, matching
+  // the posture the bus keeps for the F2/F3 source-allowlist filters.
+  if (q.scope === 'this_project' && typeof q.projectId !== 'number') {
+    return { results: [], truncated: false };
+  }
+
   const limit = clampLimit(q.limit);
   const useRaw = q.raw === true;
   const pattern = escapeLikePattern(query);

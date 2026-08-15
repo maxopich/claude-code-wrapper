@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { redactSensitive } from '@cebab/shared';
 import type { ForensicsInput } from '../repo/controllability_forensics.js';
 
 /**
@@ -38,6 +39,36 @@ const WORKDIR_HASH_SKIP_DIRS: ReadonlySet<string> = new Set([
   '.next',
   '.cache',
 ]);
+
+/**
+ * Register D18: mask a persisted SDK envelope that is stored as a JSON
+ * STRING.
+ *
+ * `appendForensics` redacts every payload column on the way in, which is the
+ * structural guarantee — but a JSON string is opaque to that pass. The
+ * redactor's primary weapon is its KEY-NAME list (`api_key`, `password`,
+ * `authorization`, …), and a key name inside a serialised blob is just
+ * characters: only the inline value patterns can reach it. That leaves the
+ * single largest payload in the bundle covered by the weaker half of the
+ * policy.
+ *
+ * So parse first, mask the object, re-serialise. The shape on disk is
+ * unchanged (still a string), which matters because the forensic viewer and
+ * `KickForensicsSnapshot` both read it as one.
+ *
+ * Unparseable input falls back to masking the raw string — the same
+ * "degrade to the weaker check rather than to nothing" posture
+ * `ws/session_log.ts` takes with its `parsed ?? ev.raw`.
+ */
+function redactRawEventJson(raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return redactSensitive(raw).redacted as string;
+  }
+  return JSON.stringify(redactSensitive(parsed).redacted);
+}
 
 export type CapturedPromptEntry = { text: string; projectId: number };
 
@@ -99,7 +130,7 @@ export function captureSingleAgentForensics(
     ts: e.ts,
     type: e.type,
     subtype: e.subtype,
-    raw: e.raw,
+    raw: redactRawEventJson(e.raw),
   }));
 
   // Pending tool calls: filter resolve+toolInput passthrough. resolve() is a
@@ -219,13 +250,16 @@ function buildEffectivePrompt(
 //                               against the participant's project cwd.
 //   - `activePermissions`     — kept undefined for multi-agent: a
 //                               participant's permissionMode is
-//                               session-wide (`bypassPermissions` for
-//                               bus turns per CLAUDE.md), not
+//                               session-wide (`default` for bus turns,
+//                               set once in `bus/runner.ts`), not
 //                               per-participant. Surfacing it would
 //                               be redundant across the per-agent rows.
-//   - `pendingToolCalls`      — null for multi-agent: bus turns run
-//                               headless with bypassPermissions, so no
-//                               pending `canUseTool` requests exist.
+//   - `pendingToolCalls`      — null for multi-agent: bus turns DO run a
+//                               `canUseTool`, but it auto-allows every
+//                               tool except `AskUserQuestion`, so nothing
+//                               ever parks in `pendingPermissions`. The
+//                               parked questions live in the bus's own
+//                               `pending_questions` table instead.
 //
 // The action-specific metadata (kick mode, reasonCode, trigger ref for
 // auto-kick) lives in the parent safety_audit row's payload — the
@@ -394,8 +428,7 @@ export function captureMultiAgentForensics(
 }
 
 type MultiAgentEffectivePromptShape =
-  | { source: 'last-bus-inbox'; text: string; eventId: number; from: string }
-  | { source: 'none' };
+  { source: 'last-bus-inbox'; text: string; eventId: number; from: string } | { source: 'none' };
 
 function buildMultiAgentEffectivePrompt(
   agentSlug: string,

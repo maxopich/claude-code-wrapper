@@ -1,3 +1,4 @@
+import { redactSensitive } from '@cebab/shared';
 import { getDb } from '../db.js';
 import { getOperatorId } from '../notifications/operator.js';
 
@@ -54,6 +55,25 @@ export type ForensicsRow = {
 };
 
 /**
+ * Register D18: mask a payload column on its way into the table.
+ *
+ * `forensic_snapshot.ts` captured `raw` event JSON and `toolInput` verbatim
+ * and imported nothing from `redact` — the ONE surface over these bytes that
+ * did not. Every other one (session log, search, export, artifact preview)
+ * masks them. And the bundles are written on Stop and on kick: precisely when
+ * something has gone wrong and a credential is most likely in flight.
+ *
+ * The mask lives HERE, at the single write, rather than in the two capture
+ * functions — so the guarantee is "nothing enters this table unredacted"
+ * rather than "the two callers I know about remembered". `undefined` passes
+ * through unchanged so the NULL-column cases below still work.
+ */
+function redactColumn(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  return redactSensitive(value).redacted;
+}
+
+/**
  * Insert a forensic bundle row tied to a safety_audit event. The caller
  * (executeInterrupt + future mute/pause/kick handlers) has already written
  * the audit row and holds its id, so the FK link is satisfied at write
@@ -85,13 +105,24 @@ export function appendForensics(input: ForensicsInput): { id: number } {
       input.parentSessionId ?? null,
       operatorId,
       input.agentSlug ?? null,
-      JSON.stringify(input.effectivePrompt ?? null),
-      JSON.stringify(input.eventsLastN ?? []),
-      input.pendingToolCalls === undefined ? null : JSON.stringify(input.pendingToolCalls),
+      // Every payload column goes through `redactColumn` (register D18).
+      // `workdir_tree_hash`, the ids and `snapshot_failed_reason` do not:
+      // they are Cebab-generated metadata, never agent or user bytes.
+      JSON.stringify(redactColumn(input.effectivePrompt) ?? null),
+      JSON.stringify(redactColumn(input.eventsLastN) ?? []),
+      input.pendingToolCalls === undefined
+        ? null
+        : JSON.stringify(redactColumn(input.pendingToolCalls)),
       input.workdirTreeHash ?? null,
-      input.activePermissions === undefined ? null : JSON.stringify(input.activePermissions),
-      input.busInboxOutbox === undefined ? null : JSON.stringify(input.busInboxOutbox),
-      input.mutationRationale === undefined ? null : JSON.stringify(input.mutationRationale),
+      input.activePermissions === undefined
+        ? null
+        : JSON.stringify(redactColumn(input.activePermissions)),
+      input.busInboxOutbox === undefined
+        ? null
+        : JSON.stringify(redactColumn(input.busInboxOutbox)),
+      input.mutationRationale === undefined
+        ? null
+        : JSON.stringify(redactColumn(input.mutationRationale)),
       input.snapshotFailedReason ?? null,
     );
   return { id: Number(result.lastInsertRowid) };

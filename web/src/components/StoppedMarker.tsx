@@ -65,14 +65,29 @@ export function StoppedMarker({
   }
 
   return (
-    <div className="stopped-marker" role="status">
-      <div className="stopped-marker-line">
+    <div className="stopped-marker">
+      {/* U31: `role="status"` used to sit on the wrapper, so the live region
+       *  contained the marker line AND the whole reason prompt — seven
+       *  buttons, and, once "Other…" is picked, a text input and Submit.
+       *
+       *  The filed mechanism ("typing re-reads the entire prompt") is not what
+       *  happens: `role="status"` implies `aria-atomic="false"` and
+       *  `aria-relevant="additions text"`, and a controlled input's value is a
+       *  DOM property, not a text node. What DOES happen is that expanding
+       *  "Other…" INSERTS a subtree into a live region — insertions are
+       *  announced by default — and the input's `autoFocus` then lands inside
+       *  the region being announced.
+       *
+       *  Scoped to the marker line, the region holds exactly the one sentence
+       *  that is news ("Stopped by you · … · ack …"), and the prompt below is
+       *  an ordinary group. */}
+      <div className="stopped-marker-line" role="status">
         <span className="stopped-marker-glyph" aria-hidden="true">
           ■
         </span>
         <span className="stopped-marker-text">
-          Stopped by you · <time dateTime={new Date(ts).toISOString()}>{formatTime(ts)}</time> ·
-          ack {formatMs(ackLatencyMs)}
+          Stopped by you · <time dateTime={new Date(ts).toISOString()}>{formatTime(ts)}</time> · ack{' '}
+          {formatMs(ackLatencyMs)}
         </span>
       </div>
       {!reasonSubmitted && (

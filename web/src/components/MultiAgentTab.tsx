@@ -23,6 +23,8 @@ import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalSurface } from '../useModalSurface';
+import { useCopyFeedback } from '../useCopyFeedback';
+import { useConfirmGate } from '../useConfirmGate';
 import { AgentTag } from './AgentTag';
 import { AskUserQuestionCard } from './AskUserQuestionCard';
 import { ArtifactsView, groupArtifacts } from './ArtifactsView';
@@ -105,8 +107,9 @@ export function MultiAgentTab(props: {
   onStopMultiAgent: (sessionId: string) => void;
   onResumeSession: (sessionId: string) => void;
   /** Monotonic; bumps on every wrapper_error so pending spinners clear on failure. */
-  wrapperErrorSeq: number;
-  onSendUserPrompt: (sessionId: string, text: string) => void;
+  failureSeq: number;
+  /** Cebab-u0s: boolean = "it went out"; the composer clears only then. */
+  onSendUserPrompt: (sessionId: string, text: string) => boolean;
   onContinueMultiAgent: (sessionId: string) => void;
   onRetryWorker: (sessionId: string) => void;
   onAbandonSession: (sessionId: string) => void;
@@ -115,8 +118,8 @@ export function MultiAgentTab(props: {
    *  notification's Archive action. The reducer's `iteration_archived`
    *  handler drops the row from the iterations list. */
   onArchiveSession: (sessionId: string) => void;
-  /** Item #5: operator clicked Continue on the pause-on-first-mutation banner. */
-  onContinueThroughMutation: (sessionId: string) => void;
+  /** Item #5: operator clicked Continue on the pause-on-dangerous banner. */
+  onContinueThroughMutation: (sessionId: string, mutationId: number) => void;
   /** Interactive AskUserQuestion: the operator answered a parked question. */
   onAnswerQuestion: (
     sessionId: string,
@@ -128,7 +131,7 @@ export function MultiAgentTab(props: {
    *  auto-retry slice so the banner unmounts. If attempt N+1 also fails,
    *  the next `auto_retry` ServerMsg repopulates the slice. */
   onClearAutoRetry: () => void;
-  /** Item #5: setup-screen toggle for pause-on-first-mutation. */
+  /** Item #5: setup-screen toggle for pause-on-dangerous. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
   /** Setup-screen toggle for Execute mode (orchestrator only). */
   onSetDraftExecuteMode: (value: boolean) => void;
@@ -152,18 +155,22 @@ export function MultiAgentTab(props: {
    * `reasonText` field so the modal-collected free-text notes reach the
    * safety_audit payload.
    */
+  /**
+   * Cebab-u0s: each returns whether the verb reached the server, so the ⋮
+   * menu's modal can stay open — reason text and all — when it did not.
+   */
   onMuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onUnmuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onPauseParticipant: (
     sessionId: string,
     projectId: number,
@@ -171,13 +178,13 @@ export function MultiAgentTab(props: {
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
   onResumeParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   /**
    * Cluster C Phase 4g3: kick dispatch — bound to the KickModal's
    * onSubmit callback via the ⋮ menu. Mode is currently always 'drain'
@@ -189,7 +196,7 @@ export function MultiAgentTab(props: {
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
   onDismissActive: () => void;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
@@ -255,7 +262,11 @@ export function MultiAgentTab(props: {
   return <DraftView {...props} />;
 }
 
-function DraftView(props: {
+/** Exported for `MultiAgentTab.draftPicker.test.tsx`, which pins the
+ *  non-drag path into the participant list. Same reason `ActiveRunView` /
+ *  `TopRunBar` are exported — mounting the whole tab to reach one section
+ *  would test the props plumbing, not the section. Not imported by app code. */
+export function DraftView(props: {
   mode: 'chain' | 'orchestrator';
   projects: Project[];
   /**
@@ -275,7 +286,7 @@ function DraftView(props: {
   onInstallBus: (projectId: number) => void;
   onUninstallBus: (projectId: number) => void;
   onSetDraftPrompt: (text: string) => void;
-  /** Item #5: setup-screen toggle for pause-on-first-mutation. */
+  /** Item #5: setup-screen toggle for pause-on-dangerous. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
   /** Setup-screen toggle for Execute mode (orchestrator only). */
   onSetDraftExecuteMode: (value: boolean) => void;
@@ -285,7 +296,7 @@ function DraftView(props: {
   defaultHopBudget: number | null;
   onStart: () => void;
   onResumeSession: (sessionId: string) => void;
-  wrapperErrorSeq: number;
+  failureSeq: number;
   onRefreshIterations: () => void;
   onClearIterations: () => void;
   onSaveTemplate: (name: string, mode: 'chain' | 'orchestrator') => void;
@@ -306,9 +317,13 @@ function DraftView(props: {
   const participants = multiAgent.draftParticipants
     .map((id) => projects.find((p) => p.id === id))
     .filter((p): p is Project => p !== undefined);
+  // U16: this view owns two of the app's four ex-`window.confirm` gates
+  // (bus install, clear iterations) plus the one U15 adds (bus uninstall).
+  // One hook, one dialog slot, rendered at the bottom of the view.
+  const { gate, requestConfirm } = useConfirmGate();
   const [namingOpen, setNamingOpen] = useState(false);
   // In-flight signals for async WS round-trips. Cleared on success (this
-  // view unmounts when a session becomes active) or on wrapperErrorSeq
+  // view unmounts when a session becomes active) or on failureSeq
   // bumping (the attempt failed and we stayed on the draft view).
   const [pendingResumeId, setPendingResumeId] = useState<string | null>(null);
   const [startPending, setStartPending] = useState<'chain' | 'orchestrator' | null>(null);
@@ -316,7 +331,7 @@ function DraftView(props: {
   useEffect(() => {
     setPendingResumeId(null);
     setStartPending(null);
-  }, [props.wrapperErrorSeq]);
+  }, [props.failureSeq]);
   useEffect(() => {
     // Iterations list replaced (refresh / clear reply) — drop stale spinners.
     setPendingResumeId(null);
@@ -372,7 +387,7 @@ function DraftView(props: {
   return (
     <div className="multi-agent multi-agent-draft">
       <div className="multi-agent-draft-body">
-        {/* PR-1: load-bearing safety banner. Surfaces the bypassPermissions
+        {/* PR-1: load-bearing safety banner. Surfaces the auto-approve
             posture that's baked into server/src/bus/runner.ts but is
             otherwise invisible in the UI. Non-dismissible. */}
         <BypassPermissionsBanner />
@@ -443,7 +458,7 @@ function DraftView(props: {
           >
             {participants.length === 0 ? (
               <div className="drop-zone-placeholder">
-                Drag a project here to add it as a participant.
+                Drag a project here, or add one from the list below.
               </div>
             ) : (
               <ol className="participant-list">
@@ -503,26 +518,77 @@ function DraftView(props: {
                         <button
                           className="ghost-btn"
                           title="Uninstall bus integration. This is pure DB metadata — Cebab wrote nothing into the project, so nothing in it is touched; the project just stops being eligible for multi-agent sessions."
-                          onClick={() => props.onUninstallBus(p.id)}
+                          onClick={() =>
+                            /* U15: Uninstall fired directly while Install, one
+                             * slot away in the same row, opened a six-line
+                             * dialog. The register calls uninstall "the more
+                             * consequential half"; it is the opposite — install
+                             * GRANTS the capability (headless runs with every
+                             * tool call auto-approved, the project's own hooks
+                             * auto-executing on every bus hop), uninstall
+                             * revokes it. Confirming the
+                             * grant and not the revoke is the right direction.
+                             *
+                             * The real case for a gate here is narrower: two
+                             * adjacent buttons in the same slot, and pulling a
+                             * project mid-draft breaks the draft. So the copy
+                             * says the action is CHEAP — `install.ts` re-derives
+                             * the same slug deterministically, so reinstalling
+                             * restores the name. A gate that overstates
+                             * consequence teaches operators to click through the
+                             * ones that matter. */
+                            requestConfirm({
+                              title: `Uninstall bus integration for "${p.name}"?`,
+                              body: (
+                                <>
+                                  <p>
+                                    The project stops being eligible for multi-agent sessions.
+                                    Nothing inside it is touched — Cebab only clears a database
+                                    flag.
+                                  </p>
+                                  <p>
+                                    Reinstalling restores the same agent name (
+                                    <code>{p.busAgentName ?? '?'}</code>), so this is reversible in
+                                    one click.
+                                  </p>
+                                </>
+                              ),
+                              confirmLabel: 'Uninstall',
+                              onConfirm: () => props.onUninstallBus(p.id),
+                            })
+                          }
                         >
                           Uninstall
                         </button>
                       ) : (
                         <button
                           className="primary-btn"
-                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless with bypassPermissions (tool calls auto-approved — no human-in-the-loop)."
-                          onClick={() => {
-                            const ok = window.confirm(
-                              `Install bus integration for "${p.name}"?\n\n` +
-                                'This is pure DB metadata: Cebab assigns a stable\n' +
-                                'agent slug and marks the project bus-eligible.\n' +
-                                'Nothing is written into the project itself.\n\n' +
-                                "During multi-agent sessions this project's agent\n" +
-                                'runs headless with `bypassPermissions` — tool calls\n' +
-                                'are auto-approved (no human-in-the-loop).',
-                            );
-                            if (ok) props.onInstallBus(p.id);
-                          }}
+                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless: every tool call is auto-approved with no human in the loop — bypass in effect. Only AskUserQuestion is ever surfaced to you."
+                          onClick={() =>
+                            // U16: was a `window.confirm`. Same words, same
+                            // friction — an in-app dialog the theme reaches.
+                            requestConfirm({
+                              title: `Install bus integration for "${p.name}"?`,
+                              body: (
+                                <>
+                                  <p>
+                                    Pure database metadata: Cebab assigns a stable agent slug and
+                                    marks the project bus-eligible. Nothing is written into the
+                                    project itself.
+                                  </p>
+                                  <p>
+                                    During multi-agent sessions this project&apos;s agent runs
+                                    headless — every tool call is auto-approved, with no human in
+                                    the loop (<code>bypass</code> in effect). The one exception is{' '}
+                                    <code>AskUserQuestion</code>, which is surfaced to you.
+                                  </p>
+                                </>
+                              ),
+                              confirmLabel: 'Install bus',
+                              danger: true,
+                              onConfirm: () => props.onInstallBus(p.id),
+                            })
+                          }
                         >
                           Install bus
                         </button>
@@ -545,6 +611,22 @@ function DraftView(props: {
               </ol>
             )}
           </div>
+          {/* Register U03: the keyboard/touch path into the participant list.
+           *  The drop zone above was the only way to compose a run, and HTML5
+           *  drag-and-drop reaches neither. Same component the active-run view
+           *  uses, in its `draft` voice — nothing is installed or announced
+           *  here, the list is just a draft until Start. */}
+          <details className="ma-draft-add" open={participants.length === 0}>
+            <summary>Add a participant</summary>
+            <AddParticipantPicker
+              eligibleProjects={projects.filter(
+                (p) => !multiAgent.draftParticipants.includes(p.id),
+              )}
+              pendingId={null}
+              onPick={props.onAddParticipant}
+              context="draft"
+            />
+          </details>
           <div className="ma-lifecycle-inline">
             <span className="ma-lifecycle-label">Lifecycle</span>
             <div className="lifecycle-toggle" role="group" aria-label="Lifecycle">
@@ -574,11 +656,11 @@ function DraftView(props: {
               participant. Project files are untouched.
             </p>
           )}
-          {/* Item #5: pause-on-first-mutation opt-in. Off by default; the
+          {/* Item #5: pause-on-dangerous opt-in. Off by default; the
               operator opts in explicitly per session. Survives R-B once set. */}
           <label
             className="ma-pause-mutation-checkbox"
-            title="When enabled, the session pauses before the first dangerous command (rm, sudo, force-push, curl|sh, writes to system or secret paths, destructive infra/cluster/DB ops) from any worker and asks for your approval. Ordinary edits and MCP tool calls run without a prompt. Subsequent dangerous commands auto-allow once you click Continue. Survives a Cebab server restart."
+            title="When enabled, the session pauses before EVERY dangerous command (rm, sudo, force-push, curl|sh, writes to system or secret paths, destructive infra/cluster/DB ops) from any worker and asks for your approval. Each command needs its own Continue — approving one does not disarm the toggle — and workers are gated independently, so pausing one does not let another through. Ordinary edits and MCP tool calls run without a prompt. Survives a Cebab server restart."
           >
             <input
               type="checkbox"
@@ -626,22 +708,34 @@ function DraftView(props: {
 
         <section className="multi-agent-section">
           <div className="iterations-header iterations-collapsible">
-            <button
-              className="iterations-toggle"
-              onClick={() => setIterOpen((o) => !o)}
-              aria-expanded={iterOpen}
-              title="Past runs on this tab. Resume re-attaches to a still-live session; Copy path opens transcripts."
-            >
-              <span className="iterations-chevron">{iterOpen ? '▾' : '▸'}</span>
-              <h3>Iterations</h3>
-              <span className="iterations-count">
-                {tabIterations === null
-                  ? ''
-                  : tabIterations.length === 0
-                    ? 'none'
-                    : tabIterations.length}
-              </span>
-            </button>
+            {/* Register U37: the <h3> used to be INSIDE this button. Heading
+             *  navigation then landed on a control, and the button's accessible
+             *  name absorbed the caret glyph. The APG accordion shape is the
+             *  inverse — the heading wraps the button — so the heading names the
+             *  section and the button stays a plain disclosure. The caret is
+             *  aria-hidden: it is redundant with `aria-expanded` and was the
+             *  thing polluting the name. The count stays in the name, where
+             *  "Iterations 3" is worth hearing. */}
+            <h3>
+              <button
+                className="iterations-toggle"
+                onClick={() => setIterOpen((o) => !o)}
+                aria-expanded={iterOpen}
+                title="Past runs on this tab. Resume re-attaches to a still-live session; Copy path opens transcripts."
+              >
+                <span className="iterations-chevron" aria-hidden="true">
+                  {iterOpen ? '▾' : '▸'}
+                </span>
+                Iterations
+                <span className="iterations-count">
+                  {tabIterations === null
+                    ? ''
+                    : tabIterations.length === 0
+                      ? 'none'
+                      : tabIterations.length}
+                </span>
+              </button>
+            </h3>
             {iterOpen && (
               <div className="iterations-actions">
                 <button
@@ -658,20 +752,36 @@ function DraftView(props: {
                   // server preserves the running row, so a click would be a
                   // no-op, but the affordance reads as misleading.
                   disabled={clearPending || tabIterations === null || clearableCount === 0}
-                  onClick={() => {
-                    // Browser-native confirm keeps this lightweight; disk
-                    // artifacts survive, so this is destructive-but-recoverable.
-                    if (
-                      window.confirm(
-                        `Clear ${clearableCount} iteration${clearableCount === 1 ? '' : 's'} from the list?\n\n` +
-                          `Removes finished session rows (events + participants + the session itself) from the Cebab database. The active session, if any, is preserved.\n\n` +
-                          `On-disk transcripts and iteration files inside each session folder stay where they are; you can still inspect them by path.`,
-                      )
-                    ) {
-                      setClearPending(true);
-                      props.onClearIterations();
-                    }
-                  }}
+                  onClick={() =>
+                    /* U16: the old comment said "browser-native confirm keeps
+                     * this lightweight". It did the opposite — a native dialog
+                     * is the one thing here the theme cannot reach, and three
+                     * other actions in this app asked in three other ways.
+                     * Still a plain confirm: disk artifacts survive, so the
+                     * friction level is unchanged. */
+                    requestConfirm({
+                      title: `Clear ${clearableCount} iteration${clearableCount === 1 ? '' : 's'} from the list?`,
+                      body: (
+                        <>
+                          <p>
+                            Removes finished session rows — events, participants and the session
+                            itself — from the Cebab database. The active session, if any, is
+                            preserved.
+                          </p>
+                          <p>
+                            On-disk transcripts and iteration files inside each session folder stay
+                            where they are; you can still inspect them by path.
+                          </p>
+                        </>
+                      ),
+                      confirmLabel: 'Clear',
+                      danger: true,
+                      onConfirm: () => {
+                        setClearPending(true);
+                        props.onClearIterations();
+                      },
+                    })
+                  }
                   title="Remove finished iterations from the list (DB rows only). On-disk artifacts are preserved; the active session, if any, is kept."
                 >
                   {clearPending ? (
@@ -733,6 +843,9 @@ function DraftView(props: {
           }}
         />
       )}
+      {/* U15/U16: bus install, bus uninstall and clear-iterations all resolve
+       *  through this one slot. `null` when nothing is pending. */}
+      {gate}
     </div>
   );
 }
@@ -798,7 +911,7 @@ function MultiAgentComposer(props: {
  * editors). Selection is derived, not asserted, so deleting the selected
  * template self-heals to the first remaining one with no dangling id.
  */
-function TemplatesPanel(props: {
+export function TemplatesPanel(props: {
   items: MultiAgentTemplate[] | null;
   mode: 'chain' | 'orchestrator';
   projects: Project[];
@@ -821,10 +934,23 @@ function TemplatesPanel(props: {
   // (b) on each `multi_agent_ended` whose session was started from any
   // visible templateId (via the subscription below).
   const [lastRuns, setLastRuns] = useState<Map<string, TemplateLastRun | null>>(() => new Map());
+  // W10: the cached ids, readable without a `setLastRuns` updater. The
+  // `multi_agent_ended` branch below only ever needed the current KEYS; it
+  // used an updater that returned `prev` unchanged purely to get at them.
+  const lastRunsRef = useRef(lastRuns);
+  lastRunsRef.current = lastRuns;
+  const { subscribeServerMsg, onReadLastRunForTemplate } = props;
   // Listen for `last_run_for_template` replies and ENDED events that
   // should invalidate the rail. Subscribe once per panel mount.
+  //
+  // W10: this used to depend on `[props]` — a fresh object on every parent
+  // render, and the parent re-renders on every WS message, so the subscriber
+  // was torn down and re-registered constantly. Depending on the two
+  // callbacks actually used is only worth anything because App.tsx wraps them
+  // in `useCallback`; a plain `function` declaration there would churn just
+  // as badly. See `subscribeServerMsg` / `readLastRunForTemplate` in App.tsx.
   useEffect(() => {
-    return props.subscribeServerMsg((msg) => {
+    return subscribeServerMsg((msg) => {
       if (msg.type === 'last_run_for_template') {
         setLastRuns((prev) => {
           const next = new Map(prev);
@@ -839,19 +965,18 @@ function TemplatesPanel(props: {
         // correct option: refresh every cached template — the rail's
         // SELECT is a single-row lookup so this is bounded. Without this,
         // a just-finished run would show stale rail until the next mount.
-        setLastRuns((prev) => {
-          if (prev.size === 0) return prev;
-          // Defer per-key requests so React doesn't churn — we trigger
-          // refetches in the side-effect; the state map itself is
-          // untouched (the replies arrive via the same subscription).
-          for (const templateId of prev.keys()) {
-            props.onReadLastRunForTemplate(templateId);
-          }
-          return prev;
-        });
+        //
+        // Sent from here, not from inside a `setLastRuns` updater: an updater
+        // must be pure. React invokes it during render and may re-invoke it
+        // when a concurrent render is discarded, so a WS send in there is a
+        // send with no defined number of times. The state map itself is
+        // untouched — the replies arrive via this same subscription.
+        for (const templateId of lastRunsRef.current.keys()) {
+          onReadLastRunForTemplate(templateId);
+        }
       }
     });
-  }, [props]);
+  }, [subscribeServerMsg, onReadLastRunForTemplate]);
 
   if (props.items === null) {
     return <p className="iterations-empty">Loading…</p>;
@@ -982,7 +1107,7 @@ function normalizeRoles(r: Record<string, string>): Record<string, string> {
  * that would leak stale roles across selections). Switching templates
  * discards unsaved role edits, by design.
  */
-function TemplatePreview(props: {
+export function TemplatePreview(props: {
   template: MultiAgentTemplate;
   projects: Project[];
   onApply: (t: MultiAgentTemplate) => void;
@@ -1015,9 +1140,28 @@ function TemplatePreview(props: {
   const [roles, setRoles] = useState<Record<string, string>>(template.roles ?? {});
   // Re-seed when the saved value changes (our own save round-trips back
   // through the templates list, or another window edits it).
+  //
+  // W11: that is what this always meant to do, and the dependency used to be
+  // the `roles` OBJECT. `case 'templates'` replaces the whole array with
+  // freshly parsed rows, and the server sends that reply for `list_templates`,
+  // `save_template` AND `delete_template` — so deleting or saving any OTHER
+  // template handed us a new-but-identical object and wiped role text the
+  // operator was still typing. Compare the serialised value instead, via the
+  // same `normalizeRoles` + `JSON.stringify` the dirty check below uses.
+  //
+  // `seededRef` holds what we last seeded FROM, not what the operator has
+  // locally: comparing against the local edits would suppress the legitimate
+  // "another window changed it" re-seed as long as the pane was dirty.
+  const savedRolesJson = JSON.stringify(normalizeRoles(template.roles ?? {}));
+  const seededRef = useRef(savedRolesJson);
   useEffect(() => {
+    if (seededRef.current === savedRolesJson) return;
+    seededRef.current = savedRolesJson;
     setRoles(template.roles ?? {});
-  }, [template.roles]);
+    // `template.roles` is read, not depended on — the serialised value is the
+    // trigger. Switching templates still discards edits via the parent's
+    // `key={template.id}` remount, which this does not touch.
+  }, [savedRolesJson, template.roles]);
   const rolesDirty =
     JSON.stringify(normalizeRoles(roles)) !== JSON.stringify(normalizeRoles(template.roles ?? {}));
 
@@ -1164,7 +1308,7 @@ function TemplatePreview(props: {
  *     <chip>" with a color-coded chip derived from
  *     (status, hopsUsed === hopBudget) per the decision-log table U2.
  */
-function TemplateLastRunRail(props: {
+export function TemplateLastRunRail(props: {
   template: MultiAgentTemplate;
   lastRun: TemplateLastRun | null | undefined;
 }) {
@@ -1205,6 +1349,22 @@ function TemplateLastRunRail(props: {
           {agoText}
         </span>
         <span className="tpl-preview-rail-hops">· {hopsText} hops ·</span>
+        {/* F7: hops alone are a poor capacity signal — they count a 2k-token
+         *  routing turn the same as a 180k-token analysis turn. `totalCostUsd`
+         *  is ABSENT (not 0) when the run predates cost accounting, so the
+         *  rail says "cost n/a" rather than claiming the run was free. */}
+        <span
+          className="tpl-preview-rail-cost"
+          title={
+            typeof lastRun.totalCostUsd === 'number'
+              ? 'Total spend across every participant in this run.'
+              : 'This run finished before Cebab recorded multi-agent cost, so its spend is unknown (not zero).'
+          }
+        >
+          {typeof lastRun.totalCostUsd === 'number'
+            ? `$${lastRun.totalCostUsd.toFixed(4)} ·`
+            : 'cost n/a ·'}
+        </span>
         <span className={`tpl-preview-rail-chip tpl-preview-rail-chip--${label.kind}`}>
           {label.text}
         </span>
@@ -1285,10 +1445,17 @@ function TemplateNameModal(props: {
     canConfirm: canSave,
   });
   return (
-    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+    <div
+      ref={overlayRef}
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="template-name-modal-title"
+      onMouseDown={onBackdropMouseDown}
+    >
       <div className="modal modal-surface">
         <header>
-          <h2>Save as template</h2>
+          <h2 id="template-name-modal-title">Save as template</h2>
           <button className="icon-btn" onClick={props.onClose} title="Close">
             ✕
           </button>
@@ -1368,19 +1535,13 @@ function IterationRow(props: {
   onResume: (sessionId: string) => void;
 }) {
   const { item } = props;
-  const [copied, setCopied] = useState(false);
+  // U42: was a raw `navigator.clipboard.writeText` with its own copied-state
+  // pair. The shared hook adds the execCommand fallback for non-secure
+  // contexts, which the hand-rolled version lacked — there, a copy that could
+  // have worked simply didn't.
+  const { copied, copy } = useCopyFeedback();
   async function copyPath() {
-    try {
-      await navigator.clipboard.writeText(item.artifactsDir);
-      setCopied(true);
-      // Reset the "copied" affordance after a short window so a second
-      // copy feels distinct from the first.
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Clipboard API can fail under non-secure-context or denied
-      // permissions. Leave the affordance idle; operator can read the
-      // path text and copy manually.
-    }
+    await copy(item.artifactsDir);
   }
   return (
     <li className={`iteration-row iteration-status-${item.status}`}>
@@ -1455,12 +1616,18 @@ function formatDuration(ms: number): string {
   return `${hr}h`;
 }
 
-function ActiveRunView(props: {
+/** Exported for `MultiAgentTab.blockingOrder.test.tsx`, which pins the DOM
+ *  order of the blocking banners against the scrollback. Same reason
+ *  `TopRunBar` / `MultiAgentActivityBar` are exported — mounting the whole
+ *  tab to assert one subtree's ordering would test the props plumbing, not
+ *  the ordering. Not imported by app code. */
+export function ActiveRunView(props: {
   run: MultiAgentRun;
   /** The tab this view is mounted under; used only for a cross-tab notice. */
   tabMode: 'chain' | 'orchestrator';
   projects: Project[];
-  onSendUserPrompt: (sessionId: string, text: string) => void;
+  /** Cebab-u0s: boolean = "it went out"; the composer clears only then. */
+  onSendUserPrompt: (sessionId: string, text: string) => boolean;
   onContinue: (sessionId: string) => void;
   onSetLifecycle: (sessionId: string, lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (sessionId: string, projectId: number) => void;
@@ -1471,18 +1638,19 @@ function ActiveRunView(props: {
    * C4g5 added reasonText for every action — collected by MuteReason/
    * PauseReasonModal.
    */
+  /** Cebab-u0s: boolean = "it went out" — see the ActiveRunView props. */
   onMuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onUnmuteParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onPauseParticipant: (
     sessionId: string,
     projectId: number,
@@ -1490,13 +1658,13 @@ function ActiveRunView(props: {
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
   onResumeParticipant: (
     sessionId: string,
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   /** Cluster C Phase 4g3: kick dispatch — bound to KickModal's onSubmit. */
   onKickParticipant: (
     sessionId: string,
@@ -1504,7 +1672,7 @@ function ActiveRunView(props: {
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
   /** Item #4: Retry the worker named in this session's pending-retry slot.
    *  The slot is server-authoritative — no agentName/prompt args. */
   onRetryWorker: (sessionId: string) => void;
@@ -1517,9 +1685,9 @@ function ActiveRunView(props: {
    *  notification's Archive action. Server idempotency means double-
    *  clicks are benign. */
   onArchiveSession: (sessionId: string) => void;
-  /** Item #5: operator clicked Continue on the pause-on-first-mutation
+  /** Item #5: operator clicked Continue on the pause-on-dangerous
    *  banner. Stateless from the client's POV — server reads the slot. */
-  onContinueThroughMutation: (sessionId: string) => void;
+  onContinueThroughMutation: (sessionId: string, mutationId: number) => void;
   /** Interactive AskUserQuestion: the operator answered a parked question. */
   onAnswerQuestion: (
     sessionId: string,
@@ -1566,6 +1734,18 @@ function ActiveRunView(props: {
   // slot; if it's ever absent the panel falls back to rendering inline, so the
   // relocation can never break the run view.
   const [inspSlot, setInspSlot] = useState<HTMLElement | null>(null);
+  // Cebab-1uk: no dependency array, so this re-resolves the portal target
+  // after EVERY render. That is deliberate as far as it goes — the slot is
+  // rendered by a sibling that can mount and unmount, and a stale target
+  // silently breaks the relocation. It does not loop: `setInspSlot` with the
+  // same element hits React's Object.is bail-out.
+  //
+  // Left as-is rather than taking the rule's suggestion of `[]`: mounting once
+  // would drop the target whenever the inspector remounts, and proving which
+  // of the two is correct needs the sibling's lifecycle, which is not this
+  // PR's subject — tracked in Cebab-fsn. The disable records the omission; it
+  // is not an endorsement.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useLayoutEffect(() => {
     setInspSlot(document.getElementById('inspector-multi-slot'));
   });
@@ -1631,11 +1811,11 @@ function ActiveRunView(props: {
             projects={props.projects}
             canEdit={isRunning && isOrchestrator}
             // A paused run (R-B awaiting Continue, a worker-failure pending
-            // retry, or a pause-on-first-mutation gate) isn't actually
-            // executing — show no fake activity until the operator resolves the
-            // banner.
+            // retry, or a pause-on-dangerous gate holding a worker) isn't
+            // actually executing — show no fake activity until the operator
+            // resolves the banner.
             activeAgent={
-              run.awaitingContinue || run.pendingRetry || run.pendingMutation
+              run.awaitingContinue || run.pendingRetry || run.pendingMutations.length > 0
                 ? null
                 : activeAgent(run)
             }
@@ -1672,48 +1852,27 @@ function ActiveRunView(props: {
         return inspSlot ? createPortal(settingsPanel, inspSlot) : settingsPanel;
       })()}
 
-      <section className="multi-agent-section">
-        <h3>Scrollback</h3>
-        {run.events.length === 0 ? (
-          <p className="iterations-empty">
-            Waiting for the first event.{' '}
-            {isOrchestrator
-              ? "The orchestrator agent is starting up; it'll receive the roster + first prompt momentarily."
-              : 'The first participant agent is starting up.'}
-          </p>
-        ) : (
-          <>
-            {/* Cluster H D8: scrollback kind-filter chips. Client-only —
-             *  every `multi_agent_event` already carries `kind`, no backend
-             *  involvement needed. Hides chip kinds from the scrollback below
-             *  while leaving the underlying events untouched (so the spine,
-             *  exports, and Logs modal still see them all). */}
-            <MultiAgentScrollbackFilter
-              hiddenKinds={hiddenKinds}
-              counts={kindCounts}
-              onToggle={toggleHiddenKind}
-              onReset={resetHiddenKinds}
-            />
-            {visibleEvents.length === 0 ? (
-              <p className="iterations-empty">
-                All event kinds are hidden. Click a chip above or Clear to show events.
-              </p>
-            ) : (
-              <ol className="event-list">
-                {visibleEvents.map((ev) => (
-                  <EventRow
-                    key={ev.eventId}
-                    event={ev}
-                    defaultCollapsed={eventDefaultCollapsed(run, ev)}
-                    highlighted={highlightedEventId === ev.eventId}
-                  />
-                ))}
-              </ol>
-            )}
-          </>
-        )}
-      </section>
-
+      {/* ---- Banners, ABOVE the scrollback ----------------------------------
+       *
+       * Register U10. These used to render *after* the scrollback `<section>`.
+       * `.multi-agent` is `overflow-y: auto` and the event list is uncapped, so
+       * a run with a few hundred events pushed every one of these off-screen —
+       * including the pause-on-dangerous gate, which is the whole point of the
+       * toggle, and the AskUserQuestion card, which is the orchestrator's only
+       * human-in-the-loop hook. The run looked idle while it was in fact
+       * halted, waiting on a decision the operator had to scroll to find. Being
+       * last in the DOM also made them last in tab order.
+       *
+       * Their order *relative to each other* is unchanged — the per-banner
+       * comments below still describe the same posture. Only `UserPromptInput`
+       * stays below the scrollback; a composer belongs at the bottom, and it is
+       * mounted only when none of these banners is up (see the guard at the end
+       * of this component).
+       *
+       * DOM order alone fixes the operator who has just arrived. For the one
+       * already scrolled into the scrollback when a gate fires, the three
+       * decision banners also steal focus once — see the note on `stealsFocus`
+       * below. */}
       {/* Cluster D Phase 5e (UI-D17): swept-session danger-tier banner.
        * Mounted only when the iteration row is `status === 'crashed'`
        * — i.e. the operator landed here after a sweep (Phase 4 auto-
@@ -1769,9 +1928,30 @@ function ActiveRunView(props: {
        * `.multi-agent-warning-actions` classes are preserved so existing
        * CSS keeps the colour + action-row layout byte-equivalent. Tier
        * = "warn" for all three; a11y role is pinned to "status" to
-       * match the pre-migration markup (the banner-stack focus-steal
-       * contract isn't in play here — these are mounted directly, not
-       * inside a <BannerStack>). */}
+       * match the pre-migration markup.
+       *
+       * `stealsFocus` (register U10). These three are the only banners in the
+       * app that HALT the run pending an operator decision, so each moves
+       * focus to its primary action once. Three things make that safe rather
+       * than rude:
+       *
+       *   - `consumeFocusOnce` (SessionBanner) keys on the banner id in
+       *     sessionStorage, so it fires once per decision — not on re-render,
+       *     not on remount, not in the second window.
+       *   - `UserPromptInput` is mounted ONLY when none of these is up (guard
+       *     at the end of this component), so there is no in-progress typing
+       *     to interrupt. That is the whole reason the same treatment is
+       *     refused for toast notifications, which arrive unannounced.
+       *   - The ids distinguish decisions: awaiting-continue happens once per
+       *     session; mutation banners carry the mutation id; pending-retry
+       *     carries the failing event's id so a SECOND worker failure in the
+       *     same session is a new decision and re-announces (it previously
+       *     reused a consumed key and stayed silent).
+       *
+       * This is deliberately not a BannerStack concern — the steal lives in
+       * SessionBanner itself and works for directly-mounted banners. The
+       * comment that used to sit here claimed otherwise, which is why these
+       * three shipped with the cue switched off. */}
       {isOrchestrator && isRunning && run.awaitingContinue && (
         <SessionBanner
           id={`multi-agent-warning-awaiting-${run.sessionId}`}
@@ -1780,7 +1960,7 @@ function ActiveRunView(props: {
           layout="flat"
           role="status"
           ariaLive="polite"
-          stealsFocus={false}
+          stealsFocus
           body={
             <>
               <p>
@@ -1811,13 +1991,13 @@ function ActiveRunView(props: {
 
       {isRunning && run.pendingRetry && (
         <SessionBanner
-          id={`multi-agent-warning-retry-${run.sessionId}`}
+          id={`multi-agent-warning-retry-${run.sessionId}-${run.pendingRetry.errorEventId}`}
           tier="warn"
           classStem="multi-agent-warning"
           layout="flat"
           role="status"
           ariaLive="polite"
-          stealsFocus={false}
+          stealsFocus
           body={
             <>
               <p>
@@ -1857,48 +2037,53 @@ function ActiveRunView(props: {
         />
       )}
 
-      {isRunning && run.pendingMutation && (
-        <SessionBanner
-          id={`multi-agent-warning-mutation-${run.sessionId}`}
-          tier="warn"
-          classStem="multi-agent-warning"
-          layout="flat"
-          role="status"
-          ariaLive="polite"
-          stealsFocus={false}
-          body={
-            <>
-              <p>
-                <strong>
-                  <code>{run.pendingMutation.agentName}</code> is about to{' '}
-                  <span className={`mutation-summary mutation-${run.pendingMutation.category}`}>
-                    {run.pendingMutation.summary}
-                  </span>
-                  .
-                </strong>
-              </p>
-              <p>
-                You enabled "Pause before a worker runs a dangerous command" for this session. This
-                is the first dangerous command. Continue to allow this call and let subsequent
-                dangerous commands auto-allow.
-              </p>
-            </>
-          }
-          actions={[
-            {
-              label: 'Continue with this command',
-              variant: 'primary',
-              onClick: () => props.onContinueThroughMutation(run.sessionId),
-              title: 'Allow this tool call and any subsequent mutations in this session.',
-            },
-            {
-              label: 'Stop session',
-              onClick: () => props.onAbandonSession(run.sessionId),
-              title: 'End the session as Stopped. The session folder and trail are preserved.',
-            },
-          ]}
-        />
-      )}
+      {/* One banner per worker the gate is holding. The gate is per-agent
+          (migration 031), so in an orchestrator run with parallel workers
+          several can be waiting at once — each is its own decision, and
+          releasing one leaves the others held. */}
+      {isRunning &&
+        run.pendingMutations.map((pending) => (
+          <SessionBanner
+            key={pending.id}
+            id={`multi-agent-warning-mutation-${run.sessionId}-${pending.id}`}
+            tier="warn"
+            classStem="multi-agent-warning"
+            layout="flat"
+            role="status"
+            ariaLive="polite"
+            stealsFocus
+            body={
+              <>
+                <p>
+                  <strong>
+                    <code>{pending.agentName}</code> is about to{' '}
+                    <span className={`mutation-summary mutation-${pending.category}`}>
+                      {pending.summary}
+                    </span>
+                    .
+                  </strong>
+                </p>
+                <p>
+                  You enabled "Pause before a worker runs a dangerous command" for this session.
+                  Continue allows this one command; the next dangerous command pauses again.
+                </p>
+              </>
+            }
+            actions={[
+              {
+                label: 'Continue with this command',
+                variant: 'primary',
+                onClick: () => props.onContinueThroughMutation(run.sessionId, pending.id),
+                title: `Allow this one tool call from ${pending.agentName}. Later dangerous commands still pause.`,
+              },
+              {
+                label: 'Stop session',
+                onClick: () => props.onAbandonSession(run.sessionId),
+                title: 'End the session as Stopped. The session folder and trail are preserved.',
+              },
+            ]}
+          />
+        ))}
 
       {isRunning && (
         <AskUserQuestionCard
@@ -1909,11 +2094,53 @@ function ActiveRunView(props: {
         />
       )}
 
+      <section className="multi-agent-section">
+        <h3>Scrollback</h3>
+        {run.events.length === 0 ? (
+          <p className="iterations-empty">
+            Waiting for the first event.{' '}
+            {isOrchestrator
+              ? "The orchestrator agent is starting up; it'll receive the roster + first prompt momentarily."
+              : 'The first participant agent is starting up.'}
+          </p>
+        ) : (
+          <>
+            {/* Cluster H D8: scrollback kind-filter chips. Client-only —
+             *  every `multi_agent_event` already carries `kind`, no backend
+             *  involvement needed. Hides chip kinds from the scrollback below
+             *  while leaving the underlying events untouched (so the spine,
+             *  exports, and Logs modal still see them all). */}
+            <MultiAgentScrollbackFilter
+              hiddenKinds={hiddenKinds}
+              counts={kindCounts}
+              onToggle={toggleHiddenKind}
+              onReset={resetHiddenKinds}
+            />
+            {visibleEvents.length === 0 ? (
+              <p className="iterations-empty">
+                All event kinds are hidden. Click a chip above or Clear to show events.
+              </p>
+            ) : (
+              <ol className="event-list">
+                {visibleEvents.map((ev) => (
+                  <EventRow
+                    key={ev.eventId}
+                    event={ev}
+                    defaultCollapsed={eventDefaultCollapsed(run, ev)}
+                    highlighted={highlightedEventId === ev.eventId}
+                  />
+                ))}
+              </ol>
+            )}
+          </>
+        )}
+      </section>
+
       {isOrchestrator &&
         isRunning &&
         !run.awaitingContinue &&
         !run.pendingRetry &&
-        !run.pendingMutation &&
+        run.pendingMutations.length === 0 &&
         !run.pendingQuestion && (
           <UserPromptInput onSend={(text) => props.onSendUserPrompt(run.sessionId, text)} />
         )}
@@ -1923,9 +2150,11 @@ function ActiveRunView(props: {
 
 /**
  * Item #6: trust signal per bus participant, joined render-time from the
- * project's `trusted` flag. Bus workers always run with bypassPermissions, so
- * trust is not a runtime gate here — the chip exposes which projects the
- * operator has vouched for, which is otherwise invisible from this surface.
+ * project's `trusted` flag. Trust is not a runtime gate here — the bus's
+ * `canUseTool` (server/src/bus/runner.ts) never reads the project's trust
+ * flag; it allows every tool but `AskUserQuestion` for any agent that is not
+ * the orchestrator. So the chip exposes which projects the operator has
+ * vouched for, which is otherwise invisible from this surface.
  *
  * Returns null when no project matches the slug (degenerate case: the project
  * was uninstalled/deleted mid-run). Caller renders nothing in that case.
@@ -1934,9 +2163,13 @@ function ParticipantTrustChip(props: { slug: string; projects: Project[] }) {
   const project = props.projects.find((p) => p.busAgentName === props.slug);
   if (!project) return null;
   const trusted = project.trusted;
+  // One sentence, both arms — it drifted into two copies once already, and the
+  // claim it drifted into was wrong in both (register X01/X11).
+  const busNote =
+    "Bus workers auto-approve every tool call regardless of trust, so this signal is informational here — the bus gate never reads the project's trusted flag.";
   const title = trusted
-    ? `${project.name}: trusted. In a single-agent chat this project auto-allows every tool. Bus workers always run with bypassPermissions, so this trust signal is informational here — the worker's tool calls bypass the gate regardless.`
-    : `${project.name}: untrusted. In a single-agent chat this project would prompt for non-edit tools. Bus workers always run with bypassPermissions, so this trust signal is informational here — the worker's tool calls bypass the gate regardless.`;
+    ? `${project.name}: trusted. In a single-agent chat this project auto-allows every tool. ${busNote}`
+    : `${project.name}: untrusted. In a single-agent chat this project would prompt for non-edit tools. ${busNote}`;
   return (
     <span
       className={`trust-tag ${trusted ? 'trusted' : 'untrusted'}`}
@@ -1976,28 +2209,29 @@ function SessionSettingsPanel(props: {
    * the menu provides (projectId, reasonCode, reasonText, …pauseExtras)
    * at the leaf. C4g5: reasonText collected by MuteReason/PauseReasonModal.
    */
+  /** Cebab-u0s: boolean = "it went out"; forwarded straight to the menu. */
   onMuteParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onUnmuteParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   onPauseParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     timeoutMs: number,
     expiryAction: PauseExpiryAction,
-  ) => void;
+  ) => boolean;
   onResumeParticipant: (
     projectId: number,
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
-  ) => void;
+  ) => boolean;
   /**
    * Cluster C Phase 4g3: kick dispatch. The ⋮ menu opens KickModal; the
    * modal collects reasonCode + reasonText and calls back here with
@@ -2008,7 +2242,7 @@ function SessionSettingsPanel(props: {
     reasonCode: ControlReasonCode,
     reasonText: string | undefined,
     mode: KickMode,
-  ) => void;
+  ) => boolean;
   /** Drives the (collapsed-by-default) routing-trail disclosure: the
    *  spine→scrollback jump highlight lives in ActiveRunView and is passed
    *  through so the trail can stay tucked inside this panel. */
@@ -2174,6 +2408,7 @@ function SessionSettingsPanel(props: {
                   eligibleProjects={eligibleProjects}
                   pendingId={pendingAddId}
                   onPick={handleAddClick}
+                  context="live"
                 />
               )}
             </div>
@@ -2236,9 +2471,11 @@ function SessionSettingsPanel(props: {
           <>
             <dt>Pause on dangerous</dt>
             <dd>
-              {run.mutationsAcknowledged
-                ? 'On · acknowledged (subsequent dangerous commands auto-allow)'
-                : 'On · pending first dangerous command'}
+              {run.pendingMutations.length > 0
+                ? `On · holding ${run.pendingMutations.length} worker${
+                    run.pendingMutations.length === 1 ? '' : 's'
+                  }`
+                : 'On · every dangerous command needs approval'}
             </dd>
           </>
         )}
@@ -2312,16 +2549,37 @@ function SessionSettingsPanel(props: {
  * the participants list grows past the pending project (handled by the
  * parent's pending-tracking).
  */
+/**
+ * Button-per-project list for adding a participant.
+ *
+ * Two callers, two meanings, one component (register U03). In a **live**
+ * session an Add registers a new in-process agent, installs bus metadata if
+ * the project lacks it, and notifies the orchestrator — a WS round-trip, hence
+ * `pendingId`. In a **draft** it only appends to `draftParticipants` in the
+ * store; nothing is installed and nobody is notified until Start. The two
+ * differ by exactly two strings, so they share the component rather than
+ * growing a near-copy that drifts.
+ *
+ * The draft used to have no picker at all: a drop zone reading "Drag a project
+ * here" was the only way to compose a run, which meant keyboard and touch
+ * users could not compose one. Drag-and-drop still works — this is an
+ * additional path, not a replacement.
+ */
 function AddParticipantPicker(props: {
   eligibleProjects: Project[];
   pendingId: number | null;
   onPick: (projectId: number) => void;
+  /** Which of the two meanings above applies. Drives the hint + button title
+   *  only; the markup and the keyboard behaviour are identical. */
+  context: 'draft' | 'live';
 }) {
+  const isDraft = props.context === 'draft';
   if (props.eligibleProjects.length === 0) {
     return (
       <p className="settings-hint add-participant-empty">
-        No eligible projects. Every project in the workspace is already a participant in this
-        session.
+        {isDraft
+          ? 'No projects left to add. Every project in the workspace is already a participant.'
+          : 'No eligible projects. Every project in the workspace is already a participant in this session.'}
       </p>
     );
   }
@@ -2339,7 +2597,9 @@ function AddParticipantPicker(props: {
                 {installed ? (
                   <code>{p.busAgentName}</code>
                 ) : (
-                  <span className="hint">bus will be installed on add</span>
+                  <span className="hint">
+                    {isDraft ? 'no bus integration yet' : 'bus will be installed on add'}
+                  </span>
                 )}
               </span>
             </div>
@@ -2348,10 +2608,13 @@ function AddParticipantPicker(props: {
               className="ghost-btn add-participant-pick-btn"
               disabled={isPending}
               onClick={() => props.onPick(p.id)}
+              aria-label={`Add ${p.name} as a participant`}
               title={
-                installed
-                  ? `Register ${p.busAgentName} as a new in-process agent and notify the orchestrator.`
-                  : `Install bus integration for ${p.name} (DB metadata), then register its agent and notify the orchestrator.`
+                isDraft
+                  ? `Add ${p.name} to this run's participant list. Nothing is installed or started until you press Start.`
+                  : installed
+                    ? `Register ${p.busAgentName} as a new in-process agent and notify the orchestrator.`
+                    : `Install bus integration for ${p.name} (DB metadata), then register its agent and notify the orchestrator.`
               }
             >
               {isThis ? 'Adding…' : 'Add'}
@@ -2369,12 +2632,16 @@ function AddParticipantPicker(props: {
  * clear. Enter sends, Shift+Enter inserts a newline — same convention as
  * the regular chat InputBox.
  */
-function UserPromptInput(props: { onSend: (text: string) => void }) {
+/** Exported for `MultiAgentTab.userPrompt.test.tsx` (Cebab-u0s). */
+export function UserPromptInput(props: { onSend: (text: string) => boolean }) {
   const [text, setText] = useState('');
   function submit() {
     const trimmed = text.trim();
     if (!trimmed) return;
-    props.onSend(trimmed);
+    // Cebab-u0s: clear only once the prompt has gone out. On a socket that is
+    // not open the operator keeps what they wrote — the previous unconditional
+    // `setText('')` erased it along with any chance of resending.
+    if (!props.onSend(trimmed)) return;
     setText('');
   }
   return (
@@ -2428,6 +2695,7 @@ export function TopRunBar(props: {
   const isOrchestrator = run.mode === 'orchestrator';
   const isTemp = run.lifecycle === 'temp';
   const [stopPending, setStopPending] = useState(false);
+  const { gate, requestConfirm } = useConfirmGate();
 
   function handleStop() {
     if (!isTemp) {
@@ -2438,15 +2706,35 @@ export function TopRunBar(props: {
     const workerCount = isOrchestrator
       ? Math.max(0, run.participantAgentNames.length - 1)
       : run.participantAgentNames.length;
-    const ok = window.confirm(
-      `End this temp session?\n\nCebab will:\n  • Clear bus integration from ${workerCount} participant${
-        workerCount === 1 ? '' : 's'
-      } (DB flag only)\n  • Delete the session folder at ${run.sessionFolder}\n\nPersisted events in the database stay; on-disk artifacts (transcripts, iteration files) are wiped.`,
-    );
-    if (ok) {
-      setStopPending(true);
-      props.onStop(run.sessionId);
-    }
+    // U16: was a `window.confirm`. Kept a plain confirm — the friction level
+    // is unchanged, only the mechanism.
+    requestConfirm({
+      title: 'End this temp session?',
+      body: (
+        <>
+          <p>Cebab will:</p>
+          <ul>
+            <li>
+              Clear bus integration from {workerCount} participant
+              {workerCount === 1 ? '' : 's'} (database flag only)
+            </li>
+            <li>
+              Delete the session folder at <code>{run.sessionFolder}</code>
+            </li>
+          </ul>
+          <p>
+            Persisted events in the database stay; on-disk artifacts — transcripts and iteration
+            files — are wiped.
+          </p>
+        </>
+      ),
+      confirmLabel: 'End & clean up',
+      danger: true,
+      onConfirm: () => {
+        setStopPending(true);
+        props.onStop(run.sessionId);
+      },
+    });
   }
 
   // Cluster E Phase 2.x (B4-1): summarize per-participant models for the
@@ -2520,6 +2808,8 @@ export function TopRunBar(props: {
           Close
         </button>
       )}
+      {/* U16: the temp-session end gate. `null` unless pending. */}
+      {gate}
     </div>
   );
 }
@@ -2721,17 +3011,10 @@ function EventRow(props: {
   // operator already toggled keeps its state as later events arrive.
   const [collapsed, setCollapsed] = useState(props.defaultCollapsed);
   const [expanded, setExpanded] = useState(false);
-  const [copied, setCopied] = useState(false);
+  // U42: same convergence as `IterationRow` above — one clipboard path.
+  const { copied, copy } = useCopyFeedback();
   async function copyText() {
-    try {
-      await navigator.clipboard.writeText(event.text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      // Clipboard API can fail under non-secure-context or denied
-      // permissions. Leave the affordance idle; the operator can still
-      // expand the message and select the text manually.
-    }
+    await copy(event.text);
   }
   const srcId = agentIdentity(event.source);
   return (
@@ -2790,11 +3073,19 @@ function EventRow(props: {
 function EventModal(props: { event: MultiAgentEventView; onClose: () => void }) {
   const { event } = props;
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose: props.onClose });
+  const titleId = `event-modal-title-${event.eventId}`;
   return (
-    <div ref={overlayRef} className="modal-backdrop" onMouseDown={onBackdropMouseDown}>
+    <div
+      ref={overlayRef}
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      onMouseDown={onBackdropMouseDown}
+    >
       <div className="modal event-modal modal-surface">
         <header>
-          <h2>
+          <h2 id={titleId}>
             {event.source} → {event.destination} · {event.kind} · {formatTs(event.ts)}
           </h2>
           <button className="icon-btn" onClick={props.onClose} title="Close">

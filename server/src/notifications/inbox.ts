@@ -81,6 +81,37 @@ type InboxRow = {
   reason_code: string | null;
 };
 
+/**
+ * Register D10: tolerant parse for the two JSON columns. Both were parsed
+ * bare, so ONE malformed row threw out of `rowToEnvelope` → `listInbox` →
+ * `buildInboxSnapshot` — which the attach path calls unguarded. The blast
+ * radius of a single bad column was the operator's whole attach snapshot
+ * rather than one missing notification.
+ *
+ * Reachability is the same one `parseClassifierReason` already documents for
+ * `classifier_reason_json`: a row written by an older binary, or a row touched
+ * by `sqlite3` CLI edits. The shape is enforced at write time, so this is the
+ * degraded path, not the expected one.
+ *
+ * Falling back to `undefined` matches what an absent column already produces,
+ * so a malformed `details` renders exactly like a notification that never
+ * carried details — the row itself, and every other row, still ships.
+ *
+ * Deliberately local rather than a shared helper: the repo has four of these
+ * (`getSetting`, `listSettings`, `parseClassifierReason`, `parseToolIoJson`,
+ * `safeParseJson`) and each has a different result type and a different
+ * fallback — `null`, the raw string, `undefined`. One helper over five
+ * incompatible contracts would be abstraction for its own sake.
+ */
+function parseJsonColumn<T>(json: string | null): T | undefined {
+  if (!json) return undefined;
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToEnvelope(row: InboxRow): NotificationEnvelope {
   return {
     id: row.id,
@@ -90,10 +121,10 @@ function rowToEnvelope(row: InboxRow): NotificationEnvelope {
     dedupeKey: row.dedupe_key,
     title: row.title,
     message: row.message ?? undefined,
-    details: row.details_json ? JSON.parse(row.details_json) : undefined,
+    details: parseJsonColumn(row.details_json),
     sessionId: row.session_id ?? undefined,
     projectId: row.project_id ?? undefined,
-    action: row.action_json ? (JSON.parse(row.action_json) as NotificationAction) : undefined,
+    action: parseJsonColumn<NotificationAction>(row.action_json),
     sticky: row.sticky === 1,
     auditRowId: row.audit_row_id ?? undefined,
     reasonCode: row.reason_code ?? undefined,
@@ -150,21 +181,35 @@ export function listInbox(filters?: InboxFilters): NotificationEnvelope[] {
   const windowStart = Date.now() - windowMs;
 
   // Step 1: rows within the 7-day window (filter-aware).
+  //
+  // Register D13: this used to run without a LIMIT and slice afterwards, so a
+  // burst-heavy week materialised every in-window row on every attach (safety
+  // rows never coalesce, so a burst really can be tens of thousands). The
+  // LIMIT is exactly INBOX_HARD_CAP, which makes it semantically identical to
+  // the slice it replaces: the branch below only asks whether the window held
+  // AT LEAST the cap, and a LIMIT of the cap answers that the same way.
+  //
+  // The LIMIT alone would not have helped. Until migration 032 the only usable
+  // index was `notifications(acked_at) WHERE acked_at IS NULL`, whose key is
+  // constant inside its own partial index — so `ORDER BY ts DESC` needed a
+  // temp B-tree over the whole unacked set before it could return the first
+  // row. D13 and D30 are one fix; see the migration header.
   const windowWhere = whereSql ? `${whereSql} AND ts >= ?` : 'WHERE ts >= ?';
   const recentRows = db
-    .prepare<unknown[], InboxRow>(`SELECT * FROM notifications ${windowWhere} ORDER BY ts DESC`)
-    .all(...params, windowStart);
+    .prepare<unknown[], InboxRow>(
+      `SELECT * FROM notifications ${windowWhere} ORDER BY ts DESC LIMIT ?`,
+    )
+    .all(...params, windowStart, INBOX_HARD_CAP);
 
   if (recentRows.length >= INBOX_HARD_CAP) {
-    return recentRows.slice(0, INBOX_HARD_CAP).map(rowToEnvelope);
+    return recentRows.map(rowToEnvelope);
   }
 
   // Step 2: pad with older rows up to the cap.
   const allRows = db
-    .prepare<
-      unknown[],
-      InboxRow
-    >(`SELECT * FROM notifications ${whereSql} ORDER BY ts DESC LIMIT ?`)
+    .prepare<unknown[], InboxRow>(
+      `SELECT * FROM notifications ${whereSql} ORDER BY ts DESC LIMIT ?`,
+    )
     .all(...params, INBOX_HARD_CAP);
   return allRows.map(rowToEnvelope);
 }

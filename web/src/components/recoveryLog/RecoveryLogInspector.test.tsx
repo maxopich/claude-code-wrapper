@@ -133,8 +133,18 @@ describe('RecoveryLogInspector', () => {
     h.pushSnapshot({
       type: 'recovery_log_snapshot',
       aggregates: [
-        makeAggregate({ failureClass: 'rate_limit', count: 3, reachedFinalRate: 0.5, medianTimeToRecoveryMs: 800 }),
-        makeAggregate({ failureClass: 'chain_crash', count: 1, reachedFinalRate: null, medianTimeToRecoveryMs: null }),
+        makeAggregate({
+          failureClass: 'rate_limit',
+          count: 3,
+          reachedFinalRate: 0.5,
+          medianTimeToRecoveryMs: 800,
+        }),
+        makeAggregate({
+          failureClass: 'chain_crash',
+          count: 1,
+          reachedFinalRate: null,
+          medianTimeToRecoveryMs: null,
+        }),
       ],
       sweepReopenRate: null,
       authResumeChoiceRatio: null,
@@ -238,9 +248,7 @@ describe('RecoveryLogInspector', () => {
     const h = mount();
     h.pushSnapshot({
       type: 'recovery_log_snapshot',
-      aggregates: [
-        makeAggregate({ failureClass: 'rate_limit', count: 1 }),
-      ],
+      aggregates: [makeAggregate({ failureClass: 'rate_limit', count: 1 })],
       sweepReopenRate: null,
       authResumeChoiceRatio: null,
       recent: [],

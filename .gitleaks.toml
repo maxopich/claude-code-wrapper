@@ -32,12 +32,49 @@ description = "auth_token keyword adjacent to 64-hex digest (Cebab WS token shap
 regex = '''(?i)auth[_-]?token[^\n]{0,40}[0-9a-f]{64}'''
 keywords = ["auth_token", "auth-token", "authtoken"]
 
+# Every entry here must name a FILE, never a file class. Register C21: this
+# list used to carry `.*\.test\.ts$`, which exempted 161 of the repo's 256
+# test files — the single largest surface in the tree, and the one where
+# credentials actually get pasted. (`.test.tsx` and `.test.mjs` were never
+# matched, so React component tests were scanned the whole time; the gap was
+# invisible because the scan looked like it was working.)
+#
+# Removing it cost five inline allowances. A full scan without the blanket
+# exemption found exactly 5 hits across 3 files, every one an obviously
+# synthetic literal, each now marked `gitleaks:allow` at its own line with a
+# reason. Per-site allowances fail loudly when a NEW secret lands next to an
+# old one; a path pattern silently covers whatever arrives later.
 [allowlist]
 description = "Cebab project allowlist"
 paths = [
   # Canonical mock fixture — manually verified clean. Other fixture files
   # are NOT allowlisted; they go through review via the path-label gate.
+  # This is one reviewed artifact, not a class of files.
   '''fixtures/hello\.jsonl$''',
-  # Vitest fixtures often inline synthetic credentials.
-  '''.*\.test\.ts$''',
+]
+# The five literals the removed `.*\.test\.ts$` exemption had been covering.
+#
+# Allowlisted by VALUE rather than with an inline `gitleaks:allow` marker,
+# for two reasons. History is immutable: gitleaks scans commits, not just the
+# worktree, so a marker added today does nothing for the same line as it
+# exists in 338 prior commits, and the weekly full-repo scan would go red.
+# And a literal is STRICTER than a marker — edit one of these strings and the
+# regex stops matching, so the new value gets re-reviewed instead of
+# inheriting an exemption that was granted to something else.
+#
+# Each is a redaction-test input: the point of the test is that the redactor
+# eats it. Adding to this list means asserting a specific string is fake.
+regexes = [
+  # server/src/ws/session_log.security.test.ts + shared/src/redact.test.ts.
+  # These match the SECRET, which for `curl-auth-header` is the token alone —
+  # the `Bearer ` prefix is part of the Match, not the capture. The three
+  # sibling entries below happen to be whole-secret literals, so the
+  # distinction only bites here.
+  '''abcd1234efgh5678ijkl''',
+  # server/src/ws/session_log.test.ts — DEADBEEF stands in for the payload.
+  '''sk-ant-api03-DEADBEEF-payload''',
+  # shared/src/redact.test.ts — sequential digits, not a key.
+  '''sk-1234567890abcdef1234567890abcdef1234''',
+  # shared/src/redact.test.ts — truncated sample JWT, unsigned.
+  '''eyJhbGciOiJI\.eyJzdWIiOiIxMjM0\.SflKxwRJSMeKKF0kIs''',
 ]

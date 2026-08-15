@@ -120,11 +120,7 @@ export type RecoveryLogProviderProps = {
   handlerRef?: MutableRefObject<((msg: ServerMsg) => void) | null>;
 };
 
-export function RecoveryLogProvider({
-  children,
-  send,
-  handlerRef,
-}: RecoveryLogProviderProps) {
+export function RecoveryLogProvider({ children, send, handlerRef }: RecoveryLogProviderProps) {
   const [state, dispatch] = useReducer(recoveryLogReducer, initialRecoveryLogState);
 
   const handleServerMsg = useCallback((msg: ServerMsg) => {

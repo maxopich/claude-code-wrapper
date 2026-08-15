@@ -34,6 +34,7 @@ import {
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { upsertProject } from '../repo/projects.js';
 import { __resetRegistryForTesting, getPauseExpiryRegistry } from '../ws/pause_expiry.js';
+import { auditKindsInWriteOrder } from '../test_support/audit_order.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -333,6 +334,8 @@ describe('Cluster A Phase 6: session_reconstructed emit on R-B success', () => {
 function getOrchestratorHandle(sessionId: string): {
   isMuted: (n: string) => boolean;
   isKicked: (n: string) => boolean;
+  pauseAgent: (n: string) => boolean;
+  resumeAgent: (n: string) => boolean;
 } {
   const live = getLiveSession(sessionId);
   if (!live || live.mode !== 'orchestrator') {
@@ -341,6 +344,8 @@ function getOrchestratorHandle(sessionId: string): {
   return live.handle as unknown as {
     isMuted: (n: string) => boolean;
     isKicked: (n: string) => boolean;
+    pauseAgent: (n: string) => boolean;
+    resumeAgent: (n: string) => boolean;
   };
 }
 
@@ -393,6 +398,75 @@ describe('reconstructOrchestratorSession — R-B reseed (Phase 4e)', () => {
     const handle = getOrchestratorHandle(SID);
     expect(handle.isMuted('coder')).toBe(true);
     expect(handle.isKicked('reviewer')).toBe(true);
+  });
+
+  // Register B04 [security]. Mute and kick are router-set membership and were
+  // reseeded through the factory params above. A pause is an `AgentRunner`
+  // turn-queue gate — in-memory, and gone with the old process. Reconstruct
+  // rescheduled the expiry TIMER but never reinstalled the GATE, so after a
+  // restart the operator saw a paused worker with a live countdown whose next
+  // delegation would be delivered normally.
+  //
+  // `resumeAgent` is the unambiguous probe: it returns true iff a gate was
+  // actually cleared. `pauseAgent` returning false would be ambiguous (already
+  // paused vs. unknown agent).
+  describe('pause gates are reinstalled, not just their timers [security]', () => {
+    test('a paused participant has a live runner gate after reconstruction', () => {
+      seedReconstructable();
+      const coder = getDb()
+        .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+        .get()!;
+      setParticipantPause(SID, coder.id, Date.now() + 60_000, 'auto_resume');
+
+      reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+      const handle = getOrchestratorHandle(SID);
+      // True ⇒ a gate existed and was just released. Before the fix this was
+      // false: nothing was holding the worker's turns.
+      expect(handle.resumeAgent('coder')).toBe(true);
+    });
+
+    test('an unpaused participant gets no gate', () => {
+      seedReconstructable();
+      const coder = getDb()
+        .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+        .get()!;
+      setParticipantPause(SID, coder.id, Date.now() + 60_000, 'auto_resume');
+
+      reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+      const handle = getOrchestratorHandle(SID);
+      expect(handle.resumeAgent('reviewer')).toBe(false);
+    });
+
+    test('every paused participant is gated, not just the first', () => {
+      seedReconstructable();
+      const coder = getDb()
+        .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+        .get()!;
+      const reviewer = getDb()
+        .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Reviewer'")
+        .get()!;
+      setParticipantPause(SID, coder.id, Date.now() + 60_000, 'auto_resume');
+      setParticipantPause(SID, reviewer.id, Date.now() + 90_000, 'auto_kick');
+
+      reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+
+      const handle = getOrchestratorHandle(SID);
+      expect(handle.resumeAgent('coder')).toBe(true);
+      expect(handle.resumeAgent('reviewer')).toBe(true);
+    });
+
+    test('a session with no pauses reconstructs with no gates', () => {
+      seedReconstructable();
+
+      const ok = reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+      expect(ok).toBe(true);
+
+      const handle = getOrchestratorHandle(SID);
+      expect(handle.resumeAgent('coder')).toBe(false);
+      expect(handle.resumeAgent('reviewer')).toBe(false);
+    });
   });
 
   test('reschedules pause-expiry timer with reasonCode recovered from safety_audit', () => {
@@ -480,10 +554,9 @@ describe('reconstructOrchestratorSession — R-B reseed (Phase 4e)', () => {
       expect(getControlState(SID, coder.id)?.pausedUntil).toBeNull();
       // Trigger audit written.
       const trigger = getDb()
-        .prepare<
-          [],
-          { kind: string; reason_code: string; payload_json: string }
-        >("SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'")
+        .prepare<[], { kind: string; reason_code: string; payload_json: string }>(
+          "SELECT kind, reason_code, payload_json FROM safety_audit WHERE kind = 'pause.expired_without_resume'",
+        )
         .get();
       expect(trigger?.kind).toBe('pause.expired_without_resume');
       expect(trigger?.reason_code).toBe('off_task');
@@ -525,12 +598,14 @@ describe('reconstructOrchestratorSession — R-B reseed (Phase 4e)', () => {
       expect(handle.isKicked('coder')).toBe(true);
 
       // Both audits written: the trigger + the kick.
-      const kinds = getDb()
-        .prepare<[], { kind: string }>(
-          "SELECT kind FROM safety_audit WHERE kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked' ORDER BY ts ASC",
-        )
-        .all()
-        .map((r) => r.kind);
+      // Register Cebab-34l: WRITE order, not `ORDER BY ts`. This test runs
+      // under fake timers, so `Date.now()` is frozen and the two rows tie BY
+      // CONSTRUCTION — it passed only because the plan happened to return
+      // rowid order, and would have flipped silently on an index change
+      // without ever flaking first to warn anyone.
+      const kinds = auditKindsInWriteOrder(
+        "kind LIKE 'pause.%' OR kind LIKE 'agent_control.kicked'",
+      );
       expect(kinds).toEqual(['pause.expired_without_resume', 'agent_control.kicked']);
     } finally {
       vi.useRealTimers();

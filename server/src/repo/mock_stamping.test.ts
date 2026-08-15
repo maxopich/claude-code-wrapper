@@ -74,10 +74,7 @@ describe('createSession + mock stamping', () => {
     config.mock = false;
     createSession('sess-c', project.id, null);
     const rows = getDb()
-      .prepare<
-        [],
-        { id: string; mock: number }
-      >(`SELECT id, mock FROM sessions ORDER BY id`)
+      .prepare<[], { id: string; mock: number }>(`SELECT id, mock FROM sessions ORDER BY id`)
       .all();
     expect(rows).toEqual([
       { id: 'sess-a', mock: 0 },

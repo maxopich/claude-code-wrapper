@@ -84,12 +84,37 @@ export const RESULT_SUBTYPES: ReadonlySet<ResultSubtype> = new Set([
   'error_max_structured_output_retries',
 ]);
 
+/**
+ * Register S06: why a permission request was resolved without the operator.
+ *
+ * `client_disconnected` — the socket closed with the card still open.
+ * `interrupted` — the operator stopped the turn, which drains the session's
+ * pending requests along with it.
+ *
+ * Both deny. The distinction exists because the transcript is read later, and
+ * "you denied this" and "this was denied for you" are different facts about
+ * the same tool call.
+ */
+export type PermissionDecisionReason = 'client_disconnected' | 'interrupted';
+
+/**
+ * Why a turn ended badly.
+ *
+ * `aborted` is the odd one out and register S02b is why it exists: it means
+ * the turn was ENDED ON PURPOSE — the operator pressed Stop, or their browser
+ * went away mid-turn — not that anything failed. It used to classify as
+ * `process_crashed`, which meant a normal Stop left a sticky "Turn failed"
+ * inbox item with a Restart button, for a turn nobody lost — and sticky
+ * operational notifications are persisted, so it survived reload. Consumers
+ * should treat it as information, never as an error state.
+ */
 export type WrapperErrorKind =
   | 'claude_not_found'
   | 'auth_expired'
   | 'rate_limited'
   | 'process_crashed'
-  | 'parse_error';
+  | 'parse_error'
+  | 'aborted';
 
 /**
  * Cluster A Phase 3: enumerated sub-codes for router-drop safety events.
@@ -146,7 +171,58 @@ export type RouterDropReasonCode =
    * answers "did the orchestrator try to talk to the kicked worker after
    * the kick?") without re-engaging the participant.
    */
-  | 'kicked_destination';
+  | 'kicked_destination'
+  /**
+   * Register B16: `ev.destination` names nobody in the roster. Both routers
+   * reached this case through a bare `console.warn` — the event was
+   * persisted, counted against the hop budget, and then vanished, while
+   * `bus_send` had already answered the sending agent "delivered". Every
+   * sibling drop went through `dispatchRouterDrop`; this one did not, so the
+   * operator got no notification and the audit log no row.
+   *
+   * Distinct from `unknown_source`, which is an allowlist filter (F2 —
+   * somebody claiming an identity they do not have). This is a routing miss:
+   * a legitimate participant addressed a name that does not exist, which in
+   * practice means a typo or a hallucinated roster entry.
+   */
+  | 'unknown_destination'
+  /**
+   * Register B08: an agent addressed `_sink` when it was not allowed to end
+   * the run.
+   *
+   * `_sink` is the chain's terminator: the event's text is written as the
+   * iteration's `final.md` and the session tears down as **completed**. Every
+   * other destination class in `handleEvent` is source-checked; this one was
+   * not, so a MIDDLE participant addressing `_sink` published its own text as
+   * the run's answer and skipped every downstream hop. The chain router now
+   * consults the same `nextHops` map the briefings are generated from — only
+   * the participant whose next hop IS `_sink` may use it.
+   *
+   * The orchestrator emits this code too, for a different rule: `_sink` has
+   * no meaning in hub-and-spoke mode, so nobody may address it. That branch
+   * was a bare `console.warn` — the same shape B16 fixed for
+   * `unknown_destination`, and left unmapped at the time for want of a code.
+   *
+   * Not `unknown_destination`: `_sink` is a real recipient in the protocol.
+   * The sender named something that exists and was not entitled to it, which
+   * is an authorization failure rather than a typo.
+   */
+  | 'unauthorized_sink'
+  /**
+   * Register B24: `ev.source === ev.destination`.
+   *
+   * Nothing rejected a self-addressed event, so `deliver` woke the sender
+   * again with its own text — a loop bounded only by the hop budget, which a
+   * confused model can burn entirely without another agent ever running. In
+   * orchestrator mode the worker case is already covered by
+   * `worker_to_worker`; the gap this closes there is orchestrator →
+   * orchestrator.
+   *
+   * Dropped BEFORE the event is persisted, unlike `unknown_destination`. The
+   * harm here is the budget, and a message that goes nowhere should not
+   * advance the counter; the audit row is the record that it was attempted.
+   */
+  | 'self_addressed';
 
 /**
  * Cluster A Phase 6 — extended §7 vocabulary (subset that has source sites
@@ -204,10 +280,7 @@ export type AuthTransitionReasonCode =
   | 'reauth_complete';
 
 export type SessionRecoveredReasonCode =
-  | 'reconstructed'
-  | 'reconstruction_failed'
-  | 'superseded'
-  | 'swept_competing';
+  'reconstructed' | 'reconstruction_failed' | 'superseded' | 'swept_competing';
 
 export type RateLimitReasonCode = 'hit' | 'cleared';
 
@@ -227,12 +300,7 @@ export type RateLimitReasonCode = 'hit' | 'cleared';
  * agentic-reviewer recommendation in §4.2.
  */
 export type StopReasonCode =
-  | 'incorrect_output'
-  | 'runaway_loop'
-  | 'off_task'
-  | 'cost'
-  | 'done_early'
-  | 'other';
+  'incorrect_output' | 'runaway_loop' | 'off_task' | 'cost' | 'done_early' | 'other';
 
 export const STOP_REASON_CODES: ReadonlySet<StopReasonCode> = new Set([
   'incorrect_output',
@@ -326,6 +394,11 @@ export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
  * audit `reasonCode`s — they're operator-facing diagnostic codes.
  *
  *   - chain_mute_unsupported    — Mute requested in chain mode (spec §5.3)
+ *   - chain_pause_unsupported   — Pause/resume requested in chain mode.
+ *     Register B03: this used to report SUCCESS in chain mode — the DB
+ *     flipped, an expiry timer was scheduled and safety_audit recorded
+ *     `agent_control.paused`, while the chain worker kept taking turns,
+ *     because only orchestrator handles expose the pause wire.
  *   - chain_topology_broken     — Kick of a chain-middle participant
  *   - hard_kill_unsupported_v1  — Kick mode='hard' before AbortController refactor
  *   - already_in_state          — Mute on muted / pause on paused / etc.
@@ -334,9 +407,19 @@ export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
  *   - orchestrator_cannot_kick  — Kick targeted at the orchestrator row
  *   - pause_timeout_required    — `timeoutMs` missing or non-positive
  *   - pause_expiry_action_invalid — `expiryAction` not one of PAUSE_EXPIRY_ACTIONS
+ *   - invalid_request           — the control frame itself is malformed
+ *   - audit_write_failed        — the action APPLIED and the audit append threw
+ *
+ * Register B21/N04: the last two exist because nine schema-validation sites
+ * and four audit-failure sites all used to return `already_in_state`, and one
+ * of them said so in an inline comment ("misuse — fall back to a generic
+ * enum"). The three semantic groups have opposite operator responses — fix
+ * your client, retry, and *the state changed but the trail did not* — so
+ * collapsing them onto one code told the operator the wrong thing three ways.
  */
 export type ControllabilityFailureCode =
   | 'chain_mute_unsupported'
+  | 'chain_pause_unsupported'
   | 'chain_topology_broken'
   | 'hard_kill_unsupported_v1'
   | 'already_in_state'
@@ -344,10 +427,32 @@ export type ControllabilityFailureCode =
   | 'participant_already_kicked'
   | 'orchestrator_cannot_kick'
   | 'pause_timeout_required'
-  | 'pause_expiry_action_invalid';
+  | 'pause_expiry_action_invalid'
+  /**
+   * The frame did not typecheck at runtime: unknown `reasonCode`,
+   * `reasonCode: 'other'` with no `reasonText`, or an unknown kick `mode`.
+   * Nothing was read, nothing was written — the operator's own client is
+   * what needs fixing, and a retry of the same frame will fail identically.
+   */
+  | 'invalid_request'
+  /**
+   * The action **took effect** — the `multi_agent_participants` column is
+   * flipped and the router mirror is updated — and then the hash-chained
+   * `safety_audit` append threw. Reported separately from `already_in_state`
+   * because the operator's correct response is the opposite one: not "your
+   * click was a no-op" but "the state changed and the trail has a gap".
+   *
+   * Retrying the verb does NOT repair it. The DB idempotency guard
+   * (`UPDATE … WHERE muted != ?`) matches zero rows on the second attempt
+   * and returns before the audit block is reached, so the row stays applied
+   * and unaudited. `control_verbs.ts` used to carry a comment claiming the
+   * opposite; see the note there.
+   */
+  | 'audit_write_failed';
 
 export const CONTROLLABILITY_FAILURE_CODES: ReadonlySet<ControllabilityFailureCode> = new Set([
   'chain_mute_unsupported',
+  'chain_pause_unsupported',
   'chain_topology_broken',
   'hard_kill_unsupported_v1',
   'already_in_state',
@@ -356,6 +461,8 @@ export const CONTROLLABILITY_FAILURE_CODES: ReadonlySet<ControllabilityFailureCo
   'orchestrator_cannot_kick',
   'pause_timeout_required',
   'pause_expiry_action_invalid',
+  'invalid_request',
+  'audit_write_failed',
 ]);
 
 export function isControllabilityFailureCode(v: unknown): v is ControllabilityFailureCode {
@@ -451,10 +558,7 @@ export type SearchResult = {
  *                            EACCES, ELOOP, …). The preview is unavailable.
  */
 export type ArtifactContentError =
-  | 'mutation_not_found'
-  | 'no_file_path'
-  | 'not_a_file'
-  | 'read_failed';
+  'mutation_not_found' | 'no_file_path' | 'not_a_file' | 'read_failed';
 
 // ---- Browser → Server ----
 export type ClientMsg =
@@ -576,10 +680,12 @@ export type ClientMsg =
       initialPrompt: string;
       lifecycle?: MultiAgentLifecycle;
       /**
-       * Opt-in to "pause-on-first-mutation": the first non-`read` tool call
-       * from any worker (anywhere in the session) is gated by an
-       * `awaiting_continue`-style banner before the SDK dispatches the tool.
-       * Subsequent mutations auto-allow once the operator clicks Continue.
+       * Opt-in to "pause-on-dangerous": EVERY `dangerous`-classified tool call,
+       * from every worker, is gated by a banner before the SDK dispatches the
+       * tool. The gate is per-agent and re-arms — approving one command does
+       * not pre-approve the next one, and a paused worker does not suppress the
+       * gate for its peers (migration 031; before that it was one pause per
+       * session, hence the old "pause-on-first-mutation" name).
        * Default `false` (server-side resolution; absent on pre-Item-5 clients).
        * Persists in `multi_agent_sessions.pause_on_dangerous`; survives R-B.
        */
@@ -681,16 +787,20 @@ export type ClientMsg =
     }
   | {
       /**
-       * Operator clicked Continue on the pause-on-first-mutation banner.
-       * Server clears the `pending_mutation_id` slot, sets
-       * `mutations_acknowledged=1` (so subsequent mutations in this session
-       * auto-allow), clears `awaiting_continue`, and re-delivers the paused
-       * worker's last captured prompt (briefing-and-rules preserved — same
-       * bytes as PR #71's retry path). Idempotent: a second click with the
-       * slot empty is a no-op.
+       * Operator clicked Continue on one pause-on-dangerous banner.
+       * `mutationId` names which — a session can have one pause per worker, so
+       * the click has to say which worker it releases.
+       *
+       * The server moves that mutation from `pending` to `approved` and
+       * re-delivers the paused worker's last captured prompt (briefing-and-
+       * rules preserved — same bytes as PR #71's retry path). The replayed turn
+       * re-issues the same command; the `approved` row is the one-shot grant
+       * that lets it through exactly once, after which the gate is armed again.
+       * Idempotent: a second click on an already-approved row is a no-op.
        */
       type: 'continue_through_mutation';
       sessionId: string;
+      mutationId: number;
     }
   | {
       /**
@@ -1203,6 +1313,35 @@ export type ClientMsg =
     }
   | {
       /**
+       * Register H15 / W28: back out of a parked spawn gate without
+       * deciding it.
+       *
+       * All three gates park a promise the spawn is awaiting, and until
+       * this verb existed the client had nothing to send when the operator
+       * dismissed the modal — Escape, a backdrop click, and the env gate's
+       * own "Refuse & edit" button all just popped the queue head, leaving
+       * the spawn parked with no trace in the UI.
+       *
+       * **Cancel is NOT deny.** The handler routes to the same `abandon`
+       * path `ws.on('close')` uses, which REJECTS the parked promise rather
+       * than resolving it — deliberately, because `resolve` runs the
+       * decision-application path (see `server/src/gate_abandon.ts`). So the
+       * spawn does not proceed, no trust decision is recorded, and the
+       * project stays un-decided: exactly what closing a dialog means. The
+       * operator is asked again next time.
+       *
+       * `kind` selects which per-connection pending map to look in; the
+       * three states are structurally identical (`Map<string, { abandon }>`).
+       * An unknown `pendingId` is a logged no-op, matching
+       * `resolveBusTrustPending`'s stale-reply handling — a reconnect blows
+       * the map away, and a client retrying afterwards must not throw.
+       */
+      type: 'cancel_gate';
+      kind: 'mcp' | 'bus' | 'start';
+      pendingId: string;
+    }
+  | {
+      /**
        * Cluster D Phase 4 (spec §4.2, BE-D4): "Retry now" trigger for a
        * held single-agent turn that hit a rate-limit. The server
        * re-delivers the captured user message on the same SDK session
@@ -1393,6 +1532,7 @@ export type ClientMsg =
    * Topology guards (Phase 4b enforces, codes defined in
    * `ControllabilityFailureCode` above):
    *   - Mute in chain mode → `chain_mute_unsupported`
+   *   - Pause/resume in chain mode → `chain_pause_unsupported`
    *   - Kick of chain-middle participant → `chain_topology_broken`
    *   - Kick mode='hard' (v1) → `hard_kill_unsupported_v1`
    *   - Kick of orchestrator row → `orchestrator_cannot_kick`
@@ -1646,12 +1786,7 @@ export type ServerMsg =
       // the snapshot without re-spawning the SDK.
       cwd?: string;
       permissionMode?:
-        | 'default'
-        | 'acceptEdits'
-        | 'bypassPermissions'
-        | 'plan'
-        | 'dontAsk'
-        | 'auto';
+        'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
       apiKeySource?: 'user' | 'project' | 'org' | 'temporary' | 'oauth';
       claudeCodeVersion?: string;
       outputStyle?: string;
@@ -1719,6 +1854,20 @@ export type ServerMsg =
       sessionId: string;
       requestId: string;
       decision: 'allow' | 'deny';
+      /**
+       * Register S06: why this was decided, when nobody decided it.
+       *
+       * Absent means the operator answered the card — the only case that
+       * existed before. Present means Cebab resolved the request on their
+       * behalf because the request could no longer be answered: the socket
+       * closed, or the turn was interrupted. Both drain paths deny, and
+       * without this the transcript would claim the operator denied a tool
+       * call they never saw.
+       *
+       * Optional so replays of rows written before this field still render,
+       * the same reason `permission_request` carries `category?` / `summary?`.
+       */
+      reason?: PermissionDecisionReason;
     }
   | {
       type: 'permission_mode_changed';
@@ -1904,13 +2053,6 @@ export type ServerMsg =
        */
       executeMode?: boolean;
       /**
-       * True once the operator has clicked Continue on a pause-on-dangerous
-       * banner at least once during this session (or set explicitly on
-       * subsequent sessions). When true, subsequent mutations auto-allow
-       * without further pauses. Mirrors `multi_agent_sessions.mutations_acknowledged`.
-       */
-      mutationsAcknowledged: boolean;
-      /**
        * Initial batch of recorded mutations for this session, ordered by `ts`
        * ascending. Empty on fresh starts; populated on R-A re-attach and R-B
        * reconstruct so the Session-info "Mutations" disclosure and the
@@ -1919,15 +2061,15 @@ export type ServerMsg =
        */
       mutations: MultiAgentMutationView[];
       /**
-       * Populated when a worker has been paused mid-turn by the
-       * pause-on-first-mutation gate. Cleared once the operator clicks
-       * Continue. Restored from the persisted `pending_mutation_id` slot on
-       * R-A re-attach + R-B reconstruct so the banner survives reconnects
-       * and Cebab restarts. Absent on fresh starts and after a successful
-       * Continue. Co-exists with `awaitingContinue` and `pendingRetry`; the
-       * UI stacks all three banners.
+       * Every worker currently halted mid-turn by the pause-on-dangerous gate,
+       * oldest first — one entry per paused worker, since the gate is per-agent
+       * (migration 031). Empty when nothing is waiting on the operator.
+       * Rebuilt from `multi_agent_mutations.pause_state` on R-A re-attach and
+       * R-B reconstruct, so the banners survive reconnects and Cebab restarts.
+       * Co-exists with `awaitingContinue` and `pendingRetry`; the UI stacks
+       * them all.
        */
-      pendingMutation?: MultiAgentMutationView;
+      pendingMutations: MultiAgentMutationView[];
       /**
        * Populated when a bus agent's turn is parked on an AskUserQuestion the
        * operator hasn't answered yet. Survives R-A re-attach (the parked
@@ -2049,17 +2191,20 @@ export type ServerMsg =
     }
   | {
       /**
-       * Item #5: live set/clear of the pause-on-first-mutation slot. Emitted
-       * when a worker is about to mutate AND `pause_on_dangerous=1` AND
-       * `mutations_acknowledged=0` (set, with the offending mutation row),
-       * and again when the operator clicks Continue (cleared,
-       * `pending: null`). Initial value on attach travels on
-       * `multi_agent_started.pendingMutation`; this is for in-session
+       * Item #5: live update of the set of workers halted by the
+       * pause-on-dangerous gate. Emitted whenever the set changes — a worker
+       * hits a `dangerous` call with the gate armed, or the operator releases
+       * one with `continue_through_mutation`.
+       *
+       * Carries the WHOLE current set rather than a delta, so the reducer
+       * replaces wholesale and a re-attach re-emit is idempotent. `[]` means
+       * nothing is waiting. Initial value on attach travels on
+       * `multi_agent_started.pendingMutations`; this is for in-session
        * transitions.
        */
-      type: 'multi_agent_pending_mutation';
+      type: 'multi_agent_pending_mutations';
       sessionId: string;
-      pending: MultiAgentMutationView | null;
+      pending: MultiAgentMutationView[];
     }
   | {
       /**
@@ -3068,6 +3213,46 @@ export type ServerMsg =
       actor: 'operator';
       ts: number;
     }
+  /**
+   * Register B21/B12/B19: the negative counterpart of the three echoes
+   * above. A rejected control verb used to ship as
+   * `wrapper_error { kind: 'process_crashed', message: '<code>: <text>' }`,
+   * which reached nobody:
+   *
+   *   - `notifyFromServerMsg` returns early for any `wrapper_error` carrying
+   *     a `sessionId`, on the grounds that the store renders those as a
+   *     session banner; and
+   *   - the store cannot, because a **bus** session id is deliberately
+   *     absent from `sessionToProject` / `sessionsByProject` (see the
+   *     `auto_retry` case, which guards for exactly this). Its fallback
+   *     invented a `SessionView` under whatever single-agent project
+   *     happened to be selected, flagged `status: 'error'`, and told the
+   *     operator the claude process had crashed.
+   *
+   * So refusing to mute the orchestrator — a guard-rail rejection the server
+   * gets right — fabricated a phantom errored chat session in an unrelated
+   * project and showed nothing at all in the multi-agent UI.
+   *
+   * A rejected control action is not a session error: the session is healthy
+   * and still running. It gets its own envelope, and the operator-facing
+   * toast is fanned out by the dispatcher server-side rather than by a new
+   * client case (`notifyFromServerMsg`'s header: route via the dispatcher or
+   * you are probably double-toasting).
+   */
+  | {
+      type: 'participant_control_failed';
+      sessionId: string;
+      projectId: number;
+      /** Which verb was refused — drives the toast title and the row that
+       *  should stop showing a spinner. `unmute`/`resume` are distinct from
+       *  `mute`/`pause` because the operator's next move differs. */
+      verb: 'mute' | 'unmute' | 'pause' | 'resume' | 'kick';
+      failureCode: ControllabilityFailureCode;
+      /** Human-readable detail. Never the only signal — `failureCode` is
+       *  what a client should branch on. */
+      message: string;
+      ts: number;
+    }
   | {
       /**
        * Cluster I Phase C5 (UI_Findings spec §4.3): reply to
@@ -3195,11 +3380,27 @@ export type ToolView = {
 /**
  * Cluster B Phase 3 (BE-B5 / §4.2): MCP server view in the AuthorityPanel.
  *
- * `scope` attributes which `settings*.json` layer declared the server (Cebab
- * applies project > local > user precedence; see resolver §4.3). The
+ * `scope` attributes which file declared the server (Cebab applies
+ * project > local > user precedence; see resolver §4.3). The
  * `'cebab-injected'` scope is reserved for the bus_send MCP that Cebab pins
  * per-agent from `bus/runner.ts` — distinct from operator-declared MCPs so
  * the UI can mark it as "Cebab-managed, not editable here".
+ *
+ * `'mcp-json'` is the project-root `.mcp.json`, and it is the scope that
+ * matters most: measured against SDK 0.3.201, it is the ONLY project-scoped
+ * location the CLI actually loads MCP servers from. `mcpServers` written into
+ * `.claude/settings.json` is not read at any scope — user, project or local —
+ * so a `'project'`-scoped row here describes a declaration that never runs,
+ * while an `'mcp-json'` row describes one that does. It loads iff the spawn's
+ * `settingSources` includes `'project'`, which is every bus participant and
+ * every trusted single-agent project.
+ *
+ * `'unknown'` means the SDK reported the server but it matched no settings
+ * layer Cebab read and is not a Cebab injection. It exists as its own value
+ * because `'cebab-injected'` carries an automatic `trust: 'trusted'` and a
+ * skip in `awaitMcpTrustDecisions` — labelling an unattributable server that
+ * way would launder it into permanently trusted-and-never-prompted. An
+ * `'unknown'` row is shown to the operator as exactly what it is.
  *
  * `status` is the SDK's `mcp_servers[i].status` string verbatim
  * (`'connected' | 'needs-auth' | 'failed' | 'disabled' | 'unknown'` in the
@@ -3218,7 +3419,17 @@ export type ToolView = {
 export type McpServerView = {
   name: string;
   status: string;
-  scope: 'user' | 'project' | 'local' | 'cebab-injected';
+  /**
+   * WHERE the declaration was found. Two of these describe files the CLI
+   * ACTUALLY loads servers from — `'mcp-json'` (project-root `.mcp.json`) and
+   * `'claude-json'` (`~/.claude.json`, both its top-level `mcpServers` and its
+   * per-project block). `'user' | 'project' | 'local'` describe `mcpServers`
+   * keys in `.claude/settings*.json`, which are measured NOT to load at any
+   * scope — see `readMcpJsonServers`' header table in `project_authority.ts`.
+   * The distinction is the point: a settings row is a declaration the CLI
+   * ignores, the other two are live servers.
+   */
+  scope: 'user' | 'project' | 'local' | 'mcp-json' | 'claude-json' | 'cebab-injected' | 'unknown';
   originPath?: string;
   tools: string[];
   config?: {
@@ -3859,7 +4070,12 @@ export type RecoveryContextView = {
  *  - No disconnected components
  *  - No "broadcast" edge type (broadcast is policy, not topology)
  *
- * See `validateCustomTopology` in `shared/src/topology.ts` for the runtime check.
+ * `validateCustomTopology` in `shared/src/topology.ts` encodes these rules, but
+ * NOTHING CALLS IT AT RUNTIME — this comment claimed it was "the runtime check"
+ * and there is no such check (register N07). The validator is written and
+ * tested against the custom-mode editor that has not shipped; until that editor
+ * calls it, the rules above are enforced by nothing, and a `CustomLayout`
+ * arriving over the wire is accepted as-is.
  */
 export type CustomLayout = {
   kind: 'custom';
@@ -3940,6 +4156,13 @@ export type TemplateLastRun = {
   /** The hop budget that was in force for this run (post-resolution).
    *  `null` for pre-013 rows whose hop_budget column was never populated. */
   hopBudget: number | null;
+  /** F7 (migration 029): total USD across every participant's hops.
+   *
+   *  ABSENT means "not recorded", not "free" — pre-029 rows, and rows whose
+   *  hops all ran before the column existed, have no figure to report. The
+   *  server omits the field rather than sending 0 so the rail can distinguish
+   *  the two; render "cost n/a", never "$0.0000". */
+  totalCostUsd?: number;
   /** First operator-facing error text observed during the run (~200 chars).
    *  Used for the "failed · <excerpt>" line in the rail. Absent on clean
    *  runs and on pre-013 rows. */
@@ -3973,11 +4196,7 @@ export function isMultiAgentEventKind(v: unknown): v is MultiAgentEventKind {
  *                      this union rather than reusing 'other' silently.
  */
 export type RecoveryFailureClass =
-  | 'rate_limit'
-  | 'auth_expired'
-  | 'sweep'
-  | 'chain_crash'
-  | 'other';
+  'rate_limit' | 'auth_expired' | 'sweep' | 'chain_crash' | 'other';
 
 /**
  * Cluster D Phase 8a: enumerated operator_action column. Mirrors the

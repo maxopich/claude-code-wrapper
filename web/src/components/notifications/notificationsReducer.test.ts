@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import type { NotificationEnvelope } from '@cebab/shared/protocol';
 import {
+  MAX_QUEUED,
   MAX_VISIBLE,
   initialNotificationsState,
   notificationsReducer,
@@ -140,6 +141,75 @@ describe('notificationsReducer — push', () => {
     });
     expect(s.queued).toHaveLength(1);
     expect(s.queued[0]).toMatchObject({ id: 'q1', count: 2, receivedAt: 200 });
+  });
+});
+
+/**
+ * W12. The overflow queue had no cap: every push past a full, entirely
+ * non-evictable visible list appended forever. A burst of distinct-`dedupeKey`
+ * errors therefore grew an array nothing trimmed, and left the operator
+ * clearing a backlog one dismissal at a time, each promotion older than the
+ * last.
+ */
+describe('notificationsReducer — the overflow queue is bounded (W12)', () => {
+  /** MAX_VISIBLE non-evictable toasts, so every further push must queue. */
+  function saturated() {
+    let s = initialNotificationsState;
+    for (let i = 0; i < MAX_VISIBLE; i++) {
+      s = notificationsReducer(s, {
+        type: 'push',
+        n: envelope({ id: `vis${i}`, dedupeKey: `vis${i}`, severity: 'error' }),
+        now: i,
+      });
+    }
+    return s;
+  }
+
+  function queueUp(from: ReturnType<typeof saturated>, count: number) {
+    let s = from;
+    for (let i = 0; i < count; i++) {
+      s = notificationsReducer(s, {
+        type: 'push',
+        n: envelope({ id: `q${i}`, dedupeKey: `q${i}`, severity: 'error' }),
+        now: 1000 + i,
+      });
+    }
+    return s;
+  }
+
+  test('CONTROL: the setup really does saturate visible and queue the overflow', () => {
+    // Anti-vacuity. If a fixture change ever made these evictable, every
+    // assertion below would be measuring an empty queue and passing.
+    const s = queueUp(saturated(), 2);
+    expect(s.visible).toHaveLength(MAX_VISIBLE);
+    expect(s.queued.map((q) => q.id)).toEqual(['q0', 'q1']);
+  });
+
+  test('the queue stops growing at MAX_QUEUED', () => {
+    const s = queueUp(saturated(), MAX_QUEUED + 5);
+    expect(s.queued).toHaveLength(MAX_QUEUED);
+  });
+
+  test('overflow drops the OLDEST queued entry, keeping the newest', () => {
+    // Length alone would also pass on a cap that rejected the incoming push,
+    // which is the opposite policy — so assert by id at both ends.
+    const s = queueUp(saturated(), MAX_QUEUED + 3);
+    const ids = s.queued.map((q) => q.id);
+    expect(ids[0]).toBe('q3');
+    expect(ids[ids.length - 1]).toBe(`q${MAX_QUEUED + 2}`);
+    expect(ids).not.toContain('q0');
+  });
+
+  test('CONTROL: under the cap nothing is dropped and FIFO promotion is unchanged', () => {
+    let s = queueUp(saturated(), MAX_QUEUED - 1);
+    expect(s.queued.map((q) => q.id)).toEqual(
+      Array.from({ length: MAX_QUEUED - 1 }, (_, i) => `q${i}`),
+    );
+    s = notificationsReducer(s, { type: 'dismiss', id: 'vis0' });
+    // The head is still what gets promoted; the cap changed which entries
+    // exist, not the order they leave in.
+    expect(s.visible.map((v) => v.id)).toContain('q0');
+    expect(s.queued.map((q) => q.id)).not.toContain('q0');
   });
 });
 

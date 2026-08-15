@@ -2,6 +2,25 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // Register C12. Empty on purpose: with no `types` array, TypeScript
+    // auto-includes every `@types/*` package it can reach by walking up to the
+    // repo root — which is where `@types/node`, `@types/express` and
+    // `@types/better-sqlite3` are hoisted by the workspace install. Browser
+    // code could then import a Node builtin, typecheck cleanly, and fail in
+    // the browser.
+    //
+    // It did NOT do that: measured with `tsc -p web --listFiles`, the web
+    // program pulled in only react/react-dom and the markdown type packages,
+    // never `@types/node`. So the isolation held — by accident, off a
+    // resolution detail nobody chose, while `vitest.config.ts` described it as
+    // deliberate. This line makes it deliberate, and
+    // `web/src/nodeTypeIsolation.test.ts` makes it fail loudly if it stops
+    // being true.
+    //
+    // Safe to empty: `vite/client` reaches the program through the
+    // triple-slash reference in `web/src/vite-env.d.ts`, which is independent
+    // of this option.
+    "types": [],
     "jsx": "react-jsx",
     "rootDir": "src",
     "outDir": "dist",

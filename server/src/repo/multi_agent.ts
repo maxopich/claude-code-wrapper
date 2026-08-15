@@ -67,13 +67,16 @@ export type MultiAgentSessionRow = {
    *  command flag. 1 if the operator enabled the setup-screen checkbox at
    *  session start. Narrowed to boolean at the boundary. */
   pause_on_dangerous: number;
-  /** Item #5: 1 once the operator has clicked Continue on a pause-on-dangerous
-   *  banner at least once during this session. Subsequent mutations
-   *  auto-allow when this is 1. */
+  /** SUPERSEDED by migration 031 — no longer read or written. Was: 1 once the
+   *  operator had clicked Continue once, after which every later dangerous
+   *  command auto-allowed (register B07). The gate now re-arms per command and
+   *  keeps its state on `multi_agent_mutations.pause_state`. Kept only so an
+   *  old DB still shows what the previous model recorded. */
   mutations_acknowledged: number;
-  /** Item #5: soft FK to `multi_agent_mutations.id` — the mutation row that
-   *  caused the current pause. NULL when no pause active. Read by the WS
-   *  `continue_through_mutation` handler to find which agent to re-deliver. */
+  /** SUPERSEDED by migration 031 — no longer read or written. Was: a single
+   *  session-wide soft FK to the paused mutation, which is why a second
+   *  worker's dangerous command ran unapproved while the first was held
+   *  (register B06). Pauses are now per-agent, on the mutation row. */
   pending_mutation_id: number | null;
   /** PR-7 (migration 013): soft FK to the saved template id this run was
    *  started FROM. NULL for ad-hoc runs and for every pre-013 row (those
@@ -116,6 +119,13 @@ export type MultiAgentSessionRow = {
    *  default). Narrowed to boolean at the boundary. Orchestrator-mode only —
    *  chain briefings have no consultant clause to relax. */
   execute_mode: number;
+  /** Migration 029: cumulative USD across every participant's completed hops,
+   *  accumulated by `addAgentCost` and equal by construction to the sum of
+   *  this session's `multi_agent_agent_sessions.cost_usd`. 0 for pre-029 rows
+   *  and for sessions whose hops all predate the column — those are genuinely
+   *  unknown rather than free, and the UI says so rather than rendering
+   *  "$0.0000". */
+  total_cost_usd: number;
 };
 
 /**
@@ -189,6 +199,37 @@ export type MutationRecord = {
    *  the matching `tool_result` lands (same UPDATE that flips `confirmedAt`).
    *  Same cap. NULL until the result arrives / for pre-026 rows. */
   toolResult: unknown;
+  /** Migration 031: this mutation's pause-on-dangerous state. See
+   *  `MutationPauseState`. `'none'` for every mutation the gate never
+   *  touched, which is all of them when the toggle is off. */
+  pauseState: MutationPauseState;
+};
+
+/**
+ * Migration 031: where a mutation sits in the pause-on-dangerous gate.
+ *
+ * - `none` — never gated (the toggle was off, or the call wasn't `dangerous`).
+ * - `pending` — the agent's turn is halted; the operator has to decide.
+ * - `approved` — the operator clicked Continue. Resuming a pause is a REPLAY
+ *   (the gate killed the turn; Continue re-delivers the captured prompt), so
+ *   the approval has to survive as a one-shot grant or the replayed turn
+ *   re-issues the same command and pauses again forever.
+ * - `consumed` — that grant let the replayed call through. Terminal.
+ */
+export type MutationPauseState = 'none' | 'pending' | 'approved' | 'consumed';
+
+const PAUSE_STATE_TO_DB: Record<MutationPauseState, number> = {
+  none: 0,
+  pending: 1,
+  approved: 2,
+  consumed: 3,
+};
+
+const PAUSE_STATE_FROM_DB: Record<number, MutationPauseState> = {
+  0: 'none',
+  1: 'pending',
+  2: 'approved',
+  3: 'consumed',
 };
 
 export type MultiAgentMutationRow = {
@@ -215,6 +256,8 @@ export type MultiAgentMutationRow = {
   // Migration 026 — full tool input/output JSON; NULL for pre-026 rows.
   tool_input_json: string | null;
   tool_result_json: string | null;
+  // Migration 031 — 0 none | 1 pending | 2 approved | 3 consumed.
+  pause_state: number;
 };
 
 export type MultiAgentAgentSessionRow = {
@@ -224,6 +267,10 @@ export type MultiAgentAgentSessionRow = {
   /** Last completed claude CLI session id for `--resume` on reconstruction. */
   cli_session_id: string;
   updated_at: number;
+  /** Cumulative USD this agent has spent in this bus session (migration 029).
+   *  Sum of every completed hop's `result.total_cost_usd`, which the SDK
+   *  reports per invocation. 0 for pre-029 rows. */
+  cost_usd: number;
 };
 
 export type MultiAgentParticipantRow = {
@@ -504,6 +551,10 @@ function rowToMutation(row: MultiAgentMutationRow): MutationRecord {
     // malformed value) keeps the projector total.
     toolInput: parseToolIoJson(row.tool_input_json),
     toolResult: parseToolIoJson(row.tool_result_json),
+    // Migration 031 — an out-of-range value (hand-edited DB) reads as `none`,
+    // the safe direction: an unrecognised state must not look like a live
+    // approval grant.
+    pauseState: PAUSE_STATE_FROM_DB[row.pause_state] ?? 'none',
   };
 }
 
@@ -550,6 +601,7 @@ function parseClassifierReason(json: string | null): BashClassifierReason | null
  * value (a cyclic structure throws → drop it rather than fail the write).
  */
 const TOOL_IO_CAP_BYTES = 64 * 1024;
+const TOOL_IO_PREVIEW_BYTES = 8 * 1024;
 export function capToolIoJson(value: unknown): string | null {
   if (value === undefined || value === null) return null;
   let json: string | undefined;
@@ -559,12 +611,37 @@ export function capToolIoJson(value: unknown): string | null {
     return null;
   }
   if (json === undefined) return null;
-  if (json.length <= TOOL_IO_CAP_BYTES) return json;
+  // Register D32: both of these used `json.length`, which counts UTF-16 code
+  // units, against a cap named for BYTES. A CJK- or emoji-heavy tool result
+  // could be roughly three times the intended budget and still pass, and the
+  // `bytes` field then understated it by the same factor — while the whole
+  // point of the cap, per the comment above, is bounding the WS frame the log
+  // projector pages against. Frames are measured in bytes, so measure bytes.
+  const bytes = Buffer.byteLength(json, 'utf8');
+  if (bytes <= TOOL_IO_CAP_BYTES) return json;
   return JSON.stringify({
     truncated: true,
-    bytes: json.length,
-    preview: json.slice(0, 8 * 1024),
+    bytes,
+    preview: truncateJsonToBytes(json, TOOL_IO_PREVIEW_BYTES),
   });
+}
+
+/**
+ * Cut `s` to at most `maxBytes` of UTF-8 without splitting a codepoint.
+ *
+ * A bare `Buffer.from(s).subarray(0, n).toString()` would leave a partial
+ * multi-byte sequence at the boundary, which decodes to U+FFFD — a preview
+ * that ends in a replacement character reads as data corruption rather than
+ * as truncation. Fast path first: pure ASCII needs no scan.
+ */
+function truncateJsonToBytes(s: string, maxBytes: number): string {
+  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s;
+  const buf = Buffer.from(s, 'utf8');
+  let end = maxBytes;
+  // Walk back off any continuation byte (0b10xxxxxx) so `end` lands on a
+  // codepoint boundary. At most 3 steps for valid UTF-8.
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
+  return buf.subarray(0, end).toString('utf8');
 }
 
 /**
@@ -594,6 +671,20 @@ function parseToolIoJson(json: string | null): unknown {
  * can resolve `filePath` relative to the worktree root); `toolUseId` is the
  * SDK's `tool_use.id` so the matching `tool_result` can flip `confirmed_at`
  * later via `confirmMutationByToolUseId`.
+ *
+ * IDEMPOTENT ON `toolUseId` (migration 034 / register D20). Re-appending a
+ * `(sessionId, toolUseId)` pair that is already recorded is absorbed by the
+ * unique index and returns the EXISTING row rather than inserting a second
+ * one or throwing.
+ *
+ * The no-throw half is load-bearing, not politeness. Both bus call sites wrap
+ * this in `try { … } catch { log; return; }` and that `return` is upstream of
+ * `applyPauseGate` — so an append that throws is a `dangerous` mutation that
+ * runs with no operator gate. Enforcing uniqueness with a plain INSERT would
+ * have traded a duplicate row for a missed pause. Returning the canonical row
+ * instead keeps the caller's path intact: the sink re-emits (the wire reducer
+ * dedupes by `id`) and the gate still evaluates. See `Cebab-aqd` for the
+ * persist-failure route into that same hole, which this does not close.
  */
 export function appendMultiAgentMutation(
   sessionId: string,
@@ -632,7 +723,9 @@ export function appendMultiAgentMutation(
           file_path, cwd, tool_use_id,
           guardrail_violation_path, guardrail_reason,
           classifier_reason_json, tool_input_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (session_id, tool_use_id) WHERE tool_use_id IS NOT NULL
+         DO NOTHING`,
     )
     .run(
       sessionId,
@@ -649,6 +742,20 @@ export function appendMultiAgentMutation(
       extra.classifierReason ? JSON.stringify(extra.classifierReason) : null,
       capToolIoJson(extra.toolInput),
     );
+  if (info.changes === 0) {
+    // The ON CONFLICT above absorbed a repeat. `lastInsertRowid` is NOT usable
+    // here: it still holds whatever this connection inserted last, so reading
+    // by it would silently return an unrelated row. Re-read by the key that
+    // actually conflicted. `toolUseId` is necessarily non-null on this branch
+    // (the partial index cannot fire otherwise), and the row is unique by
+    // construction, so `.get()` is single-row here rather than arbitrary.
+    const existing = getDb()
+      .prepare<[string, string], MultiAgentMutationRow>(
+        'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?',
+      )
+      .get(sessionId, extra.toolUseId!)!;
+    return rowToMutation(existing);
+  }
   const row = getDb()
     .prepare<[number], MultiAgentMutationRow>('SELECT * FROM multi_agent_mutations WHERE id = ?')
     .get(Number(info.lastInsertRowid))!;
@@ -664,6 +771,20 @@ export function appendMultiAgentMutation(
  * classify as a mutation, e.g. a `Read`, or for a pre-012 mutation that has
  * no `tool_use_id`). Idempotent: re-confirming an already-confirmed row
  * leaves `confirmed_at` unchanged (UPDATE WHERE confirmed_at IS NULL).
+ *
+ * SINGLE-ROW BY CONSTRUCTION (migration 034 / register D20). `(session_id,
+ * tool_use_id)` is uniquely indexed for non-null ids, and this function only
+ * ever takes a non-null `toolUseId`, so the UPDATE can match at most one row
+ * and each read-back has at most one candidate. Before 034 it could match
+ * several: the UPDATE flipped `confirmed_at` on every duplicate and the
+ * read-backs returned an arbitrary one.
+ *
+ * The `ORDER BY id` below is therefore redundant against the current schema
+ * and deliberately kept: it makes the row this returns a stated choice rather
+ * than SQLite's, so the function still behaves predictably if the index is
+ * ever dropped. The register's other suggestion — a LIMIT on the UPDATE —
+ * was not taken: `UPDATE … LIMIT 1` has no ORDER BY clause, so it would have
+ * hidden the fan-out behind an arbitrary pick instead of removing it.
  */
 export function confirmMutationByToolUseId(
   sessionId: string,
@@ -688,18 +809,16 @@ export function confirmMutationByToolUseId(
     // confirmed. Fetch any matching row so an already-confirmed row still
     // round-trips its current state to the caller for a sanity re-emit.
     const row = getDb()
-      .prepare<
-        [string, string],
-        MultiAgentMutationRow
-      >('SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?')
+      .prepare<[string, string], MultiAgentMutationRow>(
+        'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ? ORDER BY id LIMIT 1',
+      )
       .get(sessionId, toolUseId);
     return row ? rowToMutation(row) : null;
   }
   const row = getDb()
-    .prepare<
-      [string, string],
-      MultiAgentMutationRow
-    >('SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ?')
+    .prepare<[string, string], MultiAgentMutationRow>(
+      'SELECT * FROM multi_agent_mutations WHERE session_id = ? AND tool_use_id = ? ORDER BY id LIMIT 1',
+    )
     .get(sessionId, toolUseId);
   return row ? rowToMutation(row) : null;
 }
@@ -726,10 +845,9 @@ export function setMutationPromoted(id: number, value: boolean): MutationRecord 
  */
 export function listMultiAgentMutations(sessionId: string): MutationRecord[] {
   return getDb()
-    .prepare<
-      [string],
-      MultiAgentMutationRow
-    >(`SELECT * FROM multi_agent_mutations WHERE session_id = ? ORDER BY ts ASC, id ASC`)
+    .prepare<[string], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations WHERE session_id = ? ORDER BY ts ASC, id ASC`,
+    )
     .all(sessionId)
     .map(rowToMutation);
 }
@@ -758,41 +876,94 @@ export function setExecuteMode(sessionId: string, value: boolean): void {
     .run(value ? 1 : 0, sessionId);
 }
 
-/** Flip `mutations_acknowledged`. Idempotent. Called from the WS
- *  `continue_through_mutation` handler when the operator clicks Continue. */
-export function setMutationsAcknowledged(sessionId: string, value: boolean): void {
+/**
+ * Migration 031: move a mutation through the pause states. Returns the updated
+ * record, or `null` if the row is gone (a `clear_iterations` race — treat as
+ * "nothing to move" rather than throwing).
+ */
+export function setMutationPauseState(
+  id: number,
+  state: MutationPauseState,
+): MutationRecord | null {
   getDb()
-    .prepare(`UPDATE multi_agent_sessions SET mutations_acknowledged = ? WHERE id = ?`)
-    .run(value ? 1 : 0, sessionId);
+    .prepare(`UPDATE multi_agent_mutations SET pause_state = ? WHERE id = ?`)
+    .run(PAUSE_STATE_TO_DB[state], id);
+  return getMultiAgentMutation(id);
 }
 
 /**
- * Set or clear the pending-mutation slot. Pass `null` to clear. Mirrors
- * `setPendingRetry`'s API (PR #71). The mutation row referenced by `id`
- * must already be persisted (the bus tap calls `appendMultiAgentMutation`
- * first, then this) so the soft FK always resolves.
+ * Every mutation currently halting an agent, oldest first. One row per paused
+ * agent — the gate refuses to open a second pause for an agent whose turn is
+ * already dead — so the length of this list is the number of workers waiting on
+ * the operator. Drives the banner stack and the `continue_multi_agent` refusal.
  */
-export function setPendingMutation(sessionId: string, mutationId: number | null): void {
-  getDb()
-    .prepare(`UPDATE multi_agent_sessions SET pending_mutation_id = ? WHERE id = ?`)
-    .run(mutationId, sessionId);
+export function listPendingMutations(sessionId: string): MutationRecord[] {
+  return getDb()
+    .prepare<[string], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations
+        WHERE session_id = ? AND pause_state = ${PAUSE_STATE_TO_DB.pending}
+        ORDER BY ts ASC, id ASC`,
+    )
+    .all(sessionId)
+    .map(rowToMutation);
 }
 
-/**
- * Read the pending-mutation slot, resolving the soft FK to a full
- * `MutationRecord`. Returns `null` when no pause is active OR when the
- * referenced row is missing (defensive — e.g. after a manual `clear_iterations`
- * race; treat as "no pause" rather than throwing).
- */
-export function getPendingMutation(sessionId: string): MutationRecord | null {
+/** Does this agent already have a halted turn? The gate uses it to avoid
+ *  opening a second pause for an agent that is already waiting. */
+export function hasPendingMutation(sessionId: string, agentName: string): boolean {
   const row = getDb()
-    .prepare<
-      [string],
-      { pending_mutation_id: number | null }
-    >('SELECT pending_mutation_id FROM multi_agent_sessions WHERE id = ?')
-    .get(sessionId);
-  if (!row || row.pending_mutation_id === null) return null;
-  return getMultiAgentMutation(row.pending_mutation_id);
+    .prepare<[string, string], { n: number }>(
+      `SELECT COUNT(*) AS n FROM multi_agent_mutations
+        WHERE session_id = ? AND agent_name = ? AND pause_state = ${PAUSE_STATE_TO_DB.pending}`,
+    )
+    .get(sessionId, agentName);
+  return (row?.n ?? 0) > 0;
+}
+
+/**
+ * Find an unconsumed Continue grant covering this exact call, or `null`.
+ *
+ * Keyed on (agent, tool, summary) rather than on the row id because resuming a
+ * pause REPLAYS the turn: the halted call never ran, and the fresh turn issues
+ * a brand-new tool_use that gets its own row. `summary` is a sound key —
+ * `classifyToolCall` derives it deterministically from the tool input (for
+ * Bash, the truncated command plus the description suffix).
+ *
+ * Oldest grant first, so repeated approvals of the same command are consumed in
+ * the order they were given.
+ */
+export function findUnconsumedApproval(
+  sessionId: string,
+  agentName: string,
+  toolName: string,
+  summary: string,
+): MutationRecord | null {
+  const row = getDb()
+    .prepare<[string, string, string, string], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations
+        WHERE session_id = ? AND agent_name = ? AND tool_name = ? AND summary = ?
+          AND pause_state = ${PAUSE_STATE_TO_DB.approved}
+        ORDER BY ts ASC, id ASC
+        LIMIT 1`,
+    )
+    .get(sessionId, agentName, toolName, summary);
+  return row ? rowToMutation(row) : null;
+}
+
+/**
+ * Drop every live pause + unconsumed grant for a session. Called on teardown:
+ * a stopped session's pending rows are dead data that R-B reconstruction would
+ * otherwise resurrect as banners nobody can act on. Approved-but-unconsumed
+ * grants go too — a grant outliving its session would silently pre-approve a
+ * command in a reconstructed run.
+ */
+export function clearPendingMutations(sessionId: string): void {
+  getDb()
+    .prepare(
+      `UPDATE multi_agent_mutations SET pause_state = ${PAUSE_STATE_TO_DB.none}
+        WHERE session_id = ? AND pause_state IN (${PAUSE_STATE_TO_DB.pending}, ${PAUSE_STATE_TO_DB.approved})`,
+    )
+    .run(sessionId);
 }
 
 export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefined {
@@ -808,19 +979,17 @@ export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefin
  */
 export function getActiveMultiAgentSession(): MultiAgentSessionRow | undefined {
   return getDb()
-    .prepare<
-      [],
-      MultiAgentSessionRow
-    >(`SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`)
+    .prepare<[], MultiAgentSessionRow>(
+      `SELECT * FROM multi_agent_sessions WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`,
+    )
     .get();
 }
 
 export function listMultiAgentSessions(): MultiAgentSessionRow[] {
   return getDb()
-    .prepare<
-      [],
-      MultiAgentSessionRow
-    >('SELECT * FROM multi_agent_sessions ORDER BY started_at DESC')
+    .prepare<[], MultiAgentSessionRow>(
+      'SELECT * FROM multi_agent_sessions ORDER BY started_at DESC',
+    )
     .all();
 }
 
@@ -876,10 +1045,9 @@ export function listMultiAgentSessionsWithIteration(opts?: {
  */
 export function archiveMultiAgentSession(id: string): boolean {
   const result = getDb()
-    .prepare<
-      [string],
-      unknown
-    >('UPDATE multi_agent_sessions SET archived = 1 WHERE id = ? AND archived = 0')
+    .prepare<[string], unknown>(
+      'UPDATE multi_agent_sessions SET archived = 1 WHERE id = ? AND archived = 0',
+    )
     .run(id);
   return result.changes > 0;
 }
@@ -891,10 +1059,9 @@ export function archiveMultiAgentSession(id: string): boolean {
  */
 export function unarchiveMultiAgentSession(id: string): boolean {
   const result = getDb()
-    .prepare<
-      [string],
-      unknown
-    >('UPDATE multi_agent_sessions SET archived = 0 WHERE id = ? AND archived = 1')
+    .prepare<[string], unknown>(
+      'UPDATE multi_agent_sessions SET archived = 0 WHERE id = ? AND archived = 1',
+    )
     .run(id);
   return result.changes > 0;
 }
@@ -1043,11 +1210,103 @@ export function appendMultiAgentEvent(
 
 export function listMultiAgentEvents(sessionId: string, sinceId = 0): MultiAgentEventRow[] {
   return getDb()
-    .prepare<
-      [string, number],
-      MultiAgentEventRow
-    >('SELECT * FROM multi_agent_events WHERE session_id = ? AND id > ? ORDER BY id ASC')
+    .prepare<[string, number], MultiAgentEventRow>(
+      'SELECT * FROM multi_agent_events WHERE session_id = ? AND id > ? ORDER BY id ASC',
+    )
     .all(sessionId, sinceId);
+}
+
+/**
+ * Sort key for one bus event — what the session-log projector needs to ORDER
+ * and PAGE, and nothing that costs anything to read. `source` is here because
+ * it is the projector's `agent` tiebreak, not because the caller displays it.
+ *
+ * See `listEventKeys` in `repo/events.ts` for why the projector reads keys
+ * first (register S04): converting a row runs `redactSensitive` over its
+ * payload, and doing that for the whole session to return one page is the
+ * defect.
+ */
+export type MultiAgentEventKey = {
+  id: number;
+  ts: number;
+  source: string;
+};
+
+/** Sort key for one mutation. `agent_name` is the projector's `agent`. */
+export type MultiAgentMutationKey = {
+  id: number;
+  ts: number;
+  agentName: string;
+};
+
+/**
+ * Keys for every bus event in a session. Unordered on purpose — the projector
+ * owns the comparator (see `listEventKeys`).
+ */
+export function listMultiAgentEventKeys(sessionId: string): MultiAgentEventKey[] {
+  return getDb()
+    .prepare<[string], MultiAgentEventKey>(
+      'SELECT id, ts, source FROM multi_agent_events WHERE session_id = ?',
+    )
+    .all(sessionId);
+}
+
+/**
+ * Keys for the mutations a session-log page can contain.
+ *
+ * The `confirmed_at IS NOT NULL` filter is the projector's own rule, moved
+ * into SQL where it belongs: a provisional mutation whose result never landed
+ * shows in the agent's lane as "working files", and a log line for it is
+ * noise. Filtering here rather than after the read means an unconfirmed row
+ * never reaches JS at all — and, more importantly, never counts toward
+ * `total`, which is what it did before this moved.
+ */
+export function listMultiAgentMutationKeys(sessionId: string): MultiAgentMutationKey[] {
+  return getDb()
+    .prepare<[string], { id: number; ts: number; agent_name: string }>(
+      'SELECT id, ts, agent_name FROM multi_agent_mutations WHERE session_id = ? AND confirmed_at IS NOT NULL',
+    )
+    .all(sessionId)
+    .map((r) => ({ id: r.id, ts: r.ts, agentName: r.agent_name }));
+}
+
+/** Resolve full bus-event rows for an explicit id list. See `getEventsByIds`. */
+export function getMultiAgentEventsByIds(ids: number[]): MultiAgentEventRow[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return getDb()
+    .prepare<number[], MultiAgentEventRow>(
+      `SELECT * FROM multi_agent_events WHERE id IN (${placeholders})`,
+    )
+    .all(...ids);
+}
+
+/** Resolve full mutation rows for an explicit id list. See `getEventsByIds`. */
+export function getMultiAgentMutationsByIds(ids: number[]): MutationRecord[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return getDb()
+    .prepare<number[], MultiAgentMutationRow>(
+      `SELECT * FROM multi_agent_mutations WHERE id IN (${placeholders})`,
+    )
+    .all(...ids)
+    .map(rowToMutation);
+}
+
+/**
+ * Largest event id in a session with the given `source`, or 0 if the agent has
+ * never spoken. Lets a caller that wants "everything after X last acted" use
+ * `listMultiAgentEvents`'s existing `sinceId` seam instead of loading the whole
+ * transcript and scanning backwards in JS (`Cebab-3nt`).
+ */
+export function lastEventIdFromSource(sessionId: string, source: string): number {
+  return (
+    getDb()
+      .prepare<[string, string], { max_id: number | null }>(
+        'SELECT MAX(id) AS max_id FROM multi_agent_events WHERE session_id = ? AND source = ?',
+      )
+      .get(sessionId, source)?.max_id ?? 0
+  );
 }
 
 // ---- per-agent CLI sessions (R-B reconstruction) ----
@@ -1076,14 +1335,50 @@ export function upsertAgentSession(
     .run(sessionId, agentName, cliSessionId, Date.now());
 }
 
+/**
+ * Add one completed hop's cost to both the per-agent row and the session total
+ * (migration 029). Called from `AgentRunner` via the injected `onTurnCost` dep,
+ * with the `result.total_cost_usd` of the hop that just finished — which the
+ * SDK reports per invocation, so it accumulates.
+ *
+ * Both writes happen in one transaction: the session total is by definition
+ * the sum of the per-agent rows, and a crash between the two would leave a
+ * number that disagrees with its own breakdown. The per-agent INSERT carries a
+ * placeholder `cli_session_id` only for the case where cost arrives before the
+ * checkpoint has ever been written for this agent; the normal ordering in
+ * `runOneAttempt` writes the session id first, so the UPDATE branch is what
+ * runs in practice and the placeholder never survives.
+ *
+ * A non-finite or negative delta is dropped rather than persisted — cost is
+ * monotonic, and an agent-influenced NaN reaching a SUM would poison every
+ * later read of the total.
+ */
+export function addAgentCost(sessionId: string, agentName: string, costUsd: number): void {
+  if (!Number.isFinite(costUsd) || costUsd <= 0) return;
+  const db = getDb();
+  const tx = db.transaction((sid: string, agent: string, delta: number) => {
+    db.prepare(
+      `INSERT INTO multi_agent_agent_sessions
+         (session_id, agent_name, cli_session_id, updated_at, cost_usd)
+       VALUES (?, ?, '', ?, ?)
+       ON CONFLICT (session_id, agent_name)
+       DO UPDATE SET cost_usd   = cost_usd + excluded.cost_usd,
+                     updated_at = excluded.updated_at`,
+    ).run(sid, agent, Date.now(), delta);
+    db.prepare(
+      'UPDATE multi_agent_sessions SET total_cost_usd = total_cost_usd + ? WHERE id = ?',
+    ).run(delta, sid);
+  });
+  tx(sessionId, agentName, costUsd);
+}
+
 /** Every persisted (agent_name → cli_session_id) for a session, used to
  *  seed `AgentRunner.sessions` on reconstruction. */
 export function listAgentSessions(sessionId: string): MultiAgentAgentSessionRow[] {
   return getDb()
-    .prepare<
-      [string],
-      MultiAgentAgentSessionRow
-    >('SELECT * FROM multi_agent_agent_sessions WHERE session_id = ?')
+    .prepare<[string], MultiAgentAgentSessionRow>(
+      'SELECT * FROM multi_agent_agent_sessions WHERE session_id = ?',
+    )
     .all(sessionId);
 }
 
@@ -1109,24 +1404,48 @@ export function listAgentSessions(sessionId: string): MultiAgentAgentSessionRow[
 const RECOVERY_SYNTHETIC_SOURCES: ReadonlySet<string> = new Set(['cebab', '_sink']);
 
 export function computeRecoveryContext(sessionId: string): RecoveryContextView | null {
-  const events = listMultiAgentEvents(sessionId);
-  if (events.length === 0) return null;
+  // Register D29: this used to load every event for the session into a JS
+  // array and reduce it to two aggregates. Both are now computed by SQLite, so
+  // memory is O(agents) instead of O(events) — a long orchestrator run no
+  // longer replays its whole transcript on every reconstruct and every attach.
+  //
+  // The register's suggested fix was "accept and apply a row cap". That would
+  // have been WRONG here, and the docstring above says why: "False negatives
+  // are not possible by construction". A cap keeps only the newest N rows, so
+  // an agent whose last event falls outside the window silently stops being
+  // reported as possibly interrupted — a false negative in the disclosure the
+  // operator uses to decide what to re-check. An aggregate has no such edge:
+  // it sees every row and returns one number per source.
+  //
+  // `staleSinceTs` deliberately spans ALL sources including synthetic ones —
+  // it anchors "last persisted activity" regardless of who emitted it —
+  // whereas the per-source map excludes them (they have no checkpoint row).
+  // Two different questions, so two queries rather than one clever join.
+  const db = getDb();
+  const overall = db
+    .prepare<[string], { max_ts: number | null }>(
+      'SELECT MAX(ts) AS max_ts FROM multi_agent_events WHERE session_id = ?',
+    )
+    .get(sessionId);
+  // MAX() over zero rows returns a single row holding NULL, not no rows — so
+  // the emptiness check is on the value, not on the result set.
+  if (!overall || overall.max_ts === null) return null;
+  const staleSinceTs = overall.max_ts;
+
+  const perSource = db
+    .prepare<[string], { source: string; last_ts: number }>(
+      'SELECT source, MAX(ts) AS last_ts FROM multi_agent_events WHERE session_id = ? GROUP BY source',
+    )
+    .all(sessionId);
+
   const checkpoints = listAgentSessions(sessionId);
   const checkpointBy = new Map<string, number>(
     checkpoints.map((c) => [c.agent_name, c.updated_at]),
   );
   const lastEventBy = new Map<string, number>();
-  // `staleSinceTs` is max(ts) across ALL events (including synthetic) — it
-  // anchors "last persisted activity" in the disclosure regardless of who
-  // emitted it. `listMultiAgentEvents` returns rows in id-ascending order
-  // (insertion order), which equals ts order in production but not in tests
-  // where rows can be back-dated, so we compute the max explicitly.
-  let staleSinceTs = 0;
-  for (const ev of events) {
-    if (ev.ts > staleSinceTs) staleSinceTs = ev.ts;
-    if (RECOVERY_SYNTHETIC_SOURCES.has(ev.source)) continue;
-    const prev = lastEventBy.get(ev.source);
-    if (prev === undefined || ev.ts > prev) lastEventBy.set(ev.source, ev.ts);
+  for (const row of perSource) {
+    if (RECOVERY_SYNTHETIC_SOURCES.has(row.source)) continue;
+    lastEventBy.set(row.source, row.last_ts);
   }
   const reconstructedAtTs = Date.now();
   const interruptedAgents: RecoveryAgentEntry[] = [];
@@ -1149,10 +1468,9 @@ export type ProjectBusState = {
 
 export function getProjectBusState(projectId: number): ProjectBusState {
   const row = getDb()
-    .prepare<
-      [number],
-      { bus_installed: number; bus_agent_name: string | null }
-    >('SELECT bus_installed, bus_agent_name FROM projects WHERE id = ?')
+    .prepare<[number], { bus_installed: number; bus_agent_name: string | null }>(
+      'SELECT bus_installed, bus_agent_name FROM projects WHERE id = ?',
+    )
     .get(projectId);
   if (!row) return { installed: false, agentName: null };
   return { installed: row.bus_installed === 1, agentName: row.bus_agent_name };
@@ -1172,18 +1490,16 @@ export function setProjectBusInstalled(
 export function isAgentNameTaken(agentName: string, excludingProjectId?: number): boolean {
   if (excludingProjectId === undefined) {
     const row = getDb()
-      .prepare<
-        [string],
-        { c: number }
-      >('SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ?')
+      .prepare<[string], { c: number }>(
+        'SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ?',
+      )
       .get(agentName);
     return (row?.c ?? 0) > 0;
   }
   const row = getDb()
-    .prepare<
-      [string, number],
-      { c: number }
-    >('SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ? AND id != ?')
+    .prepare<[string, number], { c: number }>(
+      'SELECT COUNT(*) AS c FROM projects WHERE bus_agent_name = ? AND id != ?',
+    )
     .get(agentName, excludingProjectId);
   return (row?.c ?? 0) > 0;
 }

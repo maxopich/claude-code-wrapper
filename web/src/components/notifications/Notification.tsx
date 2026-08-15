@@ -180,13 +180,35 @@ export function Notification({ notification, onDismiss, onAction, onMute }: Noti
   const tabIndex = action || muteAvailable ? 0 : -1;
 
   /**
-   * UX-7: danger uses alertdialog so AT treats it as modal-blocking.
-   * Other tiers stay role=alert (assertive ones — error/danger) or
-   * role=status (everything else). The host's outer aria-live regions
-   * already announce text; here the role is for the visible toast
-   * semantics, NOT for AT replay (avoid double-announcement).
+   * Assertive tiers (danger/error) are `alert`; everything else `status`.
+   *
+   * Register U34: danger used to be `alertdialog`, with a comment saying AT
+   * would treat it as modal-blocking. Nothing backed that — focus never moved
+   * into the toast, there was no `aria-modal`, and the toast host isn't even
+   * tabbable unless the notification carries an action (see `tabIndex` above).
+   * A role that promises a modal and delivers a transient strip is worse than
+   * no role: it tells a screen-reader user the app is blocked when it isn't.
+   *
+   * Fixed by dropping the claim rather than by moving focus in — a toast can
+   * arrive while the operator is mid-keystroke, so stealing focus here is the
+   * wrong trade (it is the right one for the multi-agent decision banners,
+   * which only appear when the run is halted and the composer is unmounted).
+   * Announcement is unaffected: `NotificationStack` renders sr-only
+   * polite/assertive mirrors, which is the AT replay path.
+   *
+   * ...except that it WASN'T, until `aria-live="off"` below. `alert` and
+   * `status` are not just labels — each carries an implicit `aria-live`, so
+   * giving the visible strip one of those roles made it a second live region
+   * announcing the same string the sr-only mirror already announces. The
+   * paragraph above stated the intent correctly and the code did not match it.
+   *
+   * The role stays, because it still tells someone browsing the page what the
+   * strip IS. The explicit `aria-live` overrides the role's implicit value, so
+   * the mirror remains the single announcer — and it is the better one: it is
+   * `aria-atomic="true"`, and it clears itself one rAF later so a repeated
+   * identical string re-announces instead of being swallowed as "no change".
    */
-  const role = severity === 'danger' ? 'alertdialog' : severity === 'error' ? 'alert' : 'status';
+  const role = severity === 'danger' || severity === 'error' ? 'alert' : 'status';
 
   return (
     <div
@@ -194,6 +216,7 @@ export function Notification({ notification, onDismiss, onAction, onMute }: Noti
       data-severity={severity}
       data-sticky={sticky ? 'true' : 'false'}
       role={role}
+      aria-live="off"
       tabIndex={tabIndex}
       onKeyDown={handleKeyDown}
       onMouseEnter={() => setPaused(true)}

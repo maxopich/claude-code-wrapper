@@ -1,15 +1,18 @@
 import http from 'node:http';
 import express from 'express';
 import { config } from './config.js';
-import { closeDb, getDb } from './db.js';
+import { closeDb, declareRealDataDirIntent, getDb, resolveMigrationsDir } from './db.js';
+import { runDataPermsBootCheck } from './data_perms_boot.js';
 import { closeLogger } from './runner/logger.js';
 import { closeAllQueries } from './runner/lifecycle.js';
 import { verifyChain } from './notifications/safety_audit.js';
-import { startWsServer } from './ws/server.js';
+import { runMigrationIntegrityBootCheck } from './migration_integrity.js';
+import { emit as emitNotification } from './notifications/dispatcher.js';
+import { describeChainFailure, startWsServer } from './ws/server.js';
+import { createShutdown, registerSignalHandlers } from './shutdown.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
-import { authTokenPath, getAuthToken, initAuthToken } from './auth.js';
-import { buildAllowedOrigins, isAllowedHost } from './origin.js';
-import { recordRejection } from './notifications/origin_rejections.js';
+import { authTokenPath, initAuthToken } from './auth.js';
+import { mountAuthTokenRoute } from './auth_token_route.js';
 import { mountSessionLogExport } from './session_log_export.js';
 import { getSession } from './repo/sessions.js';
 import { getMultiAgentSession } from './repo/multi_agent.js';
@@ -22,20 +25,76 @@ function main(): void {
   console.log(`[cebab] workspace default=${config.workspaceRootDefault}`);
   console.log(`[cebab] data=${config.dataDir}`);
 
+  // The server is the ONE process entitled to open the operator's real
+  // ~/.cebab. Everything else — smoke scripts, benchmarks, one-off tsx files —
+  // must point CEBAB_DATA_DIR at a scratch directory, and `getDb()` refuses
+  // otherwise. See `declareRealDataDirIntent` for the incident that made this
+  // a guard rather than a convention.
+  declareRealDataDirIntent();
   getDb();
 
-  // Cluster A Phase 1: walk the safety_audit hash chain at boot. Phase 1
-  // just logs the outcome — a broken chain in Phase 3 will additionally
-  // emit an `audit.tamper_detected` danger notification and refuse further
-  // safety emissions until acknowledged. The walk is cheap (the genesis
-  // marker anchors verification, so the chain length equals real-event
-  // count since the last migration).
+  // Register H01: bring `~/.cebab` to owner-only. `getDb()` above already
+  // created the directory and the database with the right modes, but that does
+  // nothing for an install written by an earlier build — `mkdirSync` ignores
+  // its `mode` for a directory that already exists. This is the retrofit, and
+  // it is what actually protects the database you already have.
+  //
+  // Must run after `getDb()`: the "have I already swept?" flag lives in the
+  // `settings` table. Everything — the sweep decision, the log line, and the
+  // notification when it could not finish — sits behind this one call, because
+  // `main()` is not reachable from a unit test and a sequence here could
+  // silently lose a step.
+  runDataPermsBootCheck();
+
+  // Cluster A Phase 1: walk the safety_audit hash chain at boot. The walk is
+  // cheap (the genesis marker anchors verification, so the chain length equals
+  // real-event count since the last migration).
+  //
+  // A failure now emits an `audit.tamper_detected` safety notification, not
+  // just a stderr line: `emit()` persists the row (sticky) and the operator
+  // picks it up from the inbox snapshot seeded on WS connect. There is no WS
+  // client at boot, so `send` is a no-op — persistence is what carries it.
+  //
+  // Boot deliberately CONTINUES. Refusing to start on a suspected tamper turns
+  // this fail-open into a fail-closed that bricks the whole app over a stale
+  // marker allowlist; "refuse further safety emissions until acknowledged" is
+  // still Phase 3 and still unimplemented.
   const chainResult = verifyChain();
   if (chainResult.ok) {
     console.log(`[cebab] safety_audit chain ok (${chainResult.rowsChecked} rows)`);
   } else {
-    console.error(`[cebab] safety_audit chain BROKEN at ${chainResult.brokenAt}`);
+    const where = chainResult.brokenAt ? ` at ${chainResult.brokenAt}` : '';
+    console.error(`[cebab] safety_audit chain BROKEN (${chainResult.reason})${where}`);
+    const result = emitNotification(
+      {
+        severity: 'danger',
+        class: 'safety',
+        dedupeKey: 'audit.tamper_detected',
+        title: 'Safety audit chain failed verification',
+        // H07: shared with the attach path so boot and re-verify cannot drift
+        // into describing the same condition differently.
+        message: describeChainFailure(chainResult.reason, chainResult.brokenAt),
+        reasonCode: chainResult.reason,
+        auditKind: 'audit.tamper_detected',
+        auditPayload: { reason: chainResult.reason, brokenAt: chainResult.brokenAt ?? null },
+      },
+      () => {},
+    );
+    if (!result.ok) {
+      // The audit append itself failed — the chain is unwritable as well as
+      // unverifiable. Nothing left but the log line.
+      console.error(`[cebab] could not record tamper notification: ${result.error}`);
+    }
   }
+
+  // Cebab-x1n.7.31: has an already-applied migration been edited since it was
+  // applied? The runner keys on filename alone, so without this an edited
+  // `.sql` splits installs silently — old schema here, new schema on a fresh
+  // install, identical ledgers on both. Everything (the log lines, the ONE
+  // safety notification, and the decision to carry on booting) sits behind
+  // this call for the same reason `runDataPermsBootCheck` does: `main()` is
+  // not reachable from a unit test.
+  runMigrationIntegrityBootCheck({ db: getDb(), migrationsDir: resolveMigrationsDir() });
 
   const root = resolveWorkspaceRoot();
   console.log(
@@ -49,69 +108,11 @@ function main(): void {
   initAuthToken();
   console.log(`[cebab] auth-token written to ${authTokenPath()}`);
 
-  const allowedOrigins = buildAllowedOrigins();
-
   const app = express();
   app.get('/health', (_req, res) => {
     res.json({ ok: true, mock: config.mock });
   });
-  app.get('/auth-token', (req, res) => {
-    // Same Origin+Host gate as the WS upgrade — a browser tab from
-    // another origin trying to read the token would carry a disallowed
-    // Origin. Non-browser clients (smoke tests, curl) get no Origin
-    // header and must read ~/.cebab/auth-token from disk instead.
-    const origin = String(req.headers.origin ?? '');
-    const host = String(req.headers.host ?? '');
-    if (origin && !allowedOrigins.has(origin)) {
-      console.warn(`[http] /auth-token reject: bad origin ${JSON.stringify(origin)}`);
-      // Cluster G E3 (server-side): dual-write to the diagnostic ring +
-      // disk log. The X-Cebab-Reject-Reason response header lets a
-      // debugging operator see the reason in the browser's Network tab
-      // without spelunking the server log. recordRejection is sync so
-      // the disk line lands before the 403 leaves.
-      recordRejection({
-        origin: origin || null,
-        host: host || null,
-        reason: 'origin_not_allowed',
-        channel: 'http',
-      });
-      res.setHeader('X-Cebab-Reject-Reason', 'origin_not_allowed');
-      res.status(403).end();
-      return;
-    }
-    if (!isAllowedHost(host)) {
-      console.warn(`[http] /auth-token reject: bad host ${JSON.stringify(host)}`);
-      recordRejection({
-        origin: origin || null,
-        host: host || null,
-        reason: 'host_not_allowed',
-        channel: 'http',
-      });
-      res.setHeader('X-Cebab-Reject-Reason', 'host_not_allowed');
-      res.status(403).end();
-      return;
-    }
-    // Empty Origin: a non-browser local client. Same trust model as the
-    // WS upgrade — they could read the file directly anyway if running
-    // under the operator's uid, so this branch isn't a hole.
-    if (!origin) {
-      console.warn('[http] /auth-token: serving to empty-Origin client');
-    }
-    // CORS: in dev the web origin is :5173 but the API is :4319, so a
-    // bare fetch fails the browser's same-origin check. Echo back the
-    // (already allow-listed above) Origin so the browser permits the
-    // page to read the response. No preflight is involved — the fetch
-    // sends no custom headers.
-    if (origin) {
-      // Reflective CORS is the canonical safe pattern when the value is
-      // already gated against allowedOrigins (line 46 above). Semgrep's
-      // generic rule can't see the upstream check.
-      // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
-      res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Vary', 'Origin');
-    }
-    res.type('text/plain').send(getAuthToken());
-  });
+  mountAuthTokenRoute(app);
 
   // Cluster I C2 backend: per-session JSONL download. Reads the on-disk
   // log written by runner/logger.ts, applies LogsModal redaction line by
@@ -151,29 +152,24 @@ function main(): void {
     console.log(`[cebab] listening at http://${config.host}:${config.port}`);
   });
 
-  const shutdown = (signal: string) => {
-    console.log(`[cebab] received ${signal}, shutting down`);
-    stopSessionPurgeCron();
-    closeAllQueries();
-    wss.clients.forEach((c) => c.terminate());
-    wss.close();
-    server.close(() => {
-      closeLogger();
-      closeDb();
-      console.log('[cebab] bye');
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(1), 3000).unref();
-  };
+  // Register C15: the sequence lives in `shutdown.ts` so it can be tested.
+  // It used to be a closure over these four locals inside `main()`, and
+  // `main()` runs on import — so the drain that keeps `claude` subprocesses
+  // from outliving the server (and spending quota) was unreachable from any
+  // test. The signal list, the ordering, and the re-entrancy guard are pinned
+  // in `shutdown.test.ts`.
+  const shutdown = createShutdown({
+    stopSessionPurgeCron,
+    closeAllQueries,
+    terminateClients: () => wss.clients.forEach((c) => c.terminate()),
+    closeWss: () => wss.close(),
+    closeServer: (cb) => server.close(cb),
+    closeLogger,
+    closeDb,
+    exit: (code) => process.exit(code),
+  });
 
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  // Windows: Ctrl+Break (and `taskkill` without /F) raises SIGBREAK, and
-  // SIGTERM is never delivered there. Registering SIGBREAK gives the same
-  // graceful drain (closeAllQueries → reap claude subprocesses) on Windows
-  // that SIGINT/SIGTERM give on POSIX. Harmless no-op on non-Windows
-  // (the signal is simply never emitted).
-  process.on('SIGBREAK', () => shutdown('SIGBREAK'));
+  registerSignalHandlers(shutdown);
 
   // Last-resort containment: a stray unhandled rejection or uncaught exception
   // must NOT take down the whole server. The motivating case is the multi-agent

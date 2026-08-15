@@ -23,6 +23,15 @@
  * render (they just look wrong), so the failure surface is "the editor
  * refuses to save," not "the modal crashes." Tests pin the rules.
  *
+ * SO ITS ONLY CONSUMER TODAY IS `topology.test.ts`, and that is expected until
+ * the editor lands. Register N07 read that as dead code and proposed deleting
+ * it; the code is fine, and what was actually wrong was a claim about it —
+ * `protocol.ts` called this "the runtime check", which it is not. That claim is
+ * corrected there, and `scripts/exportConsumers.test.mjs` records this verdict
+ * so the next unused-export sweep does not re-open it. If the custom-mode work
+ * is abandoned rather than deferred, delete this module WITH that decision, not
+ * because a grep found no callers.
+ *
  * **Why no `broadcast` edge kind:** broadcast is a runtime policy
  * (orchestrator decides addressees per turn from capabilities + prompt
  * content) — not a topology fact. Adding it to the schema would invite
