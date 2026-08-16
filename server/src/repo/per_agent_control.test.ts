@@ -9,8 +9,6 @@ import { upsertProject } from './projects.js';
 import {
   clearParticipantPause,
   getControlState,
-  isKickMode,
-  isPauseExpiryAction,
   listActivePauseEntries,
   listControlStates,
   listKickedAgentNames,
@@ -190,23 +188,12 @@ describe('setParticipantKicked', () => {
   });
 });
 
-describe('type guards', () => {
-  test('isPauseExpiryAction accepts only auto_resume / auto_kick', () => {
-    expect(isPauseExpiryAction('auto_resume')).toBe(true);
-    expect(isPauseExpiryAction('auto_kick')).toBe(true);
-    expect(isPauseExpiryAction('hard_stop')).toBe(false);
-    expect(isPauseExpiryAction('')).toBe(false);
-    expect(isPauseExpiryAction(undefined)).toBe(false);
-    expect(isPauseExpiryAction(null)).toBe(false);
-  });
-
-  test('isKickMode accepts only drain / hard', () => {
-    expect(isKickMode('drain')).toBe(true);
-    expect(isKickMode('hard')).toBe(true);
-    expect(isKickMode('soft')).toBe(false);
-    expect(isKickMode(undefined)).toBe(false);
-  });
-});
+// The `isPauseExpiryAction` / `isKickMode` cases that used to live here moved
+// to `shared/src/protocol.controllability.test.ts` with the guards themselves
+// (register N13). Their non-string rejection assertions — `''`, `null`,
+// `undefined` — went with them; that test previously covered only wrong-string
+// rejection for these two guards, so the move added coverage rather than
+// relocating it.
 
 // ===== Cluster C Phase 4e: reseed read helpers =====
 //

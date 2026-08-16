@@ -3843,6 +3843,13 @@ export type AgentActivityPhase = 'working' | 'stalled' | 'idle';
  * resumed; 'temp' sessions clean up their folder + uninstall bus from
  * participants on End. Default in the server is 'persistent' so an
  * absent `lifecycle` field in `start_multi_agent` resolves safely.
+ *
+ * Concretely, on the server side: 'persistent' leaves
+ * `<workspace>/.cebab-session-<id>/` and every participant's bus install
+ * in place; 'temp' removes the folder and calls `uninstallBusForProject`
+ * for each participant, so a one-off task leaves no residue. (Merged here
+ * from `repo/multi_agent.ts`, which declared a second identical copy of
+ * this type until register N13 — the wire owns it.)
  */
 export type MultiAgentLifecycle = 'persistent' | 'temp';
 
