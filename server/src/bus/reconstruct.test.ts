@@ -10,7 +10,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import {
   canReconstruct,
-  isReconstructable,
+  checkReconstructable,
   reconstructOrchestratorSession,
   RECOVERY_BANNER,
 } from './reconstruct.js';
@@ -155,11 +155,11 @@ describe('reconstructOrchestratorSession (R-B happy path)', () => {
   });
 });
 
-describe('isReconstructable guard matrix (every failure → caller marks crashed)', () => {
+describe('checkReconstructable guard matrix (every failure → caller marks crashed)', () => {
   test('chain mode is deferred', () => {
     seedReconstructable({ mode: 'chain' });
     const row = getMultiAgentSession(SID)!;
-    expect(isReconstructable(row)).toEqual({ ok: false, reason: 'not-orchestrator' });
+    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'not-orchestrator' });
     expect(reconstructOrchestratorSession(row, cbs())).toBe(false);
     expect(hasLiveSession(SID)).toBe(false);
   });
@@ -168,7 +168,7 @@ describe('isReconstructable guard matrix (every failure → caller marks crashed
     upsertProject('Coder', path.join(tmpRoot, 'coder'));
     createMultiAgentSession(SID, 'orchestrator', 'iter-1', null, 'persistent');
     const row = getMultiAgentSession(SID)!;
-    expect(isReconstructable(row).ok).toBe(false);
+    expect(checkReconstructable(row).ok).toBe(false);
     expect(canReconstruct(row)).toBe(false);
   });
 
@@ -176,7 +176,7 @@ describe('isReconstructable guard matrix (every failure → caller marks crashed
     const { sessionFolder } = seedReconstructable();
     fs.rmSync(sessionFolder, { recursive: true, force: true });
     const row = getMultiAgentSession(SID)!;
-    expect(isReconstructable(row)).toEqual({ ok: false, reason: 'folder-missing' });
+    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'folder-missing' });
   });
 
   test('pre-009 row (no persisted agent-session map)', () => {
@@ -189,7 +189,7 @@ describe('isReconstructable guard matrix (every failure → caller marks crashed
     addParticipant(SID, coder.id, 'worker', null);
     // NOTE: no upsertAgentSession — this is the migration cutover boundary.
     const row = getMultiAgentSession(SID)!;
-    expect(isReconstructable(row)).toEqual({ ok: false, reason: 'no-agent-sessions' });
+    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'no-agent-sessions' });
   });
 
   test('all participant projects deleted', () => {
@@ -200,7 +200,7 @@ describe('isReconstructable guard matrix (every failure → caller marks crashed
     upsertAgentSession(SID, 'orchestrator', 'orch-cli-1');
     // No participants rows at all.
     const row = getMultiAgentSession(SID)!;
-    expect(isReconstructable(row)).toEqual({ ok: false, reason: 'no-participants' });
+    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'no-participants' });
     expect(reconstructOrchestratorSession(row, cbs())).toBe(false);
   });
 });

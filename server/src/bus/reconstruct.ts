@@ -85,11 +85,24 @@ export type NotReconstructable =
 export type ReconstructGuard = { ok: true } | { ok: false; reason: NotReconstructable };
 
 /**
- * Cheap, synchronous predicate: can this row be brought back by R-B?
- * Used both as the early bail in `reconstructOrchestratorSession` and by
- * the Iterations UI to decide whether to show a Resume affordance.
+ * Cheap, synchronous CHECK: can this row be brought back by R-B, and if not,
+ * why? Used as the early bail in `reconstructOrchestratorSession` and by the
+ * Iterations UI to decide whether to show a Resume affordance.
+ *
+ * Register N01: this was named with an `is` prefix and documented as a
+ * "predicate" while returning a `ReconstructGuard`. That combination is a trap
+ * the compiler cannot spring — `if (<the old name>(row))` is legal TypeScript
+ * and is ALWAYS TRUE, because the failure case is a truthy object. Every call
+ * site happened to read `.ok`, so nothing was broken; the name was one
+ * distracted edit away from a silent bug.
+ *
+ * `check` prefix, not `is`, because the return type is the reason — see
+ * `canReconstruct` below for the boolean, which already existed. Of the 33
+ * exported `is*`/`has*`/`can*`/`should*` functions in this repo, this was the
+ * only one that did not return a boolean or a type predicate;
+ * `scripts/predicateReturns.test.mjs` now keeps it that way.
  */
-export function isReconstructable(row: MultiAgentSessionRow): ReconstructGuard {
+export function checkReconstructable(row: MultiAgentSessionRow): ReconstructGuard {
   if (row.mode !== 'orchestrator') return { ok: false, reason: 'not-orchestrator' };
   if (!row.session_folder) return { ok: false, reason: 'no-session-folder' };
   if (!fs.existsSync(row.session_folder)) return { ok: false, reason: 'folder-missing' };
@@ -105,7 +118,7 @@ export function isReconstructable(row: MultiAgentSessionRow): ReconstructGuard {
 
 /** Boolean convenience for call sites that don't need the reason. */
 export function canReconstruct(row: MultiAgentSessionRow): boolean {
-  return isReconstructable(row).ok;
+  return checkReconstructable(row).ok;
 }
 
 /**
@@ -155,7 +168,7 @@ export function reconstructOrchestratorSession(
     sendServerMsg?: BusSink['sendServerMsg'];
   },
 ): boolean {
-  if (!isReconstructable(row).ok) return false;
+  if (!checkReconstructable(row).ok) return false;
 
   // Idempotent / single-flight: a prior reconnect in this same post-restart
   // process may already have rebuilt it — a second browser is a plain

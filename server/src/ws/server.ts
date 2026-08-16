@@ -3500,8 +3500,12 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         emitSettings(conn);
         return;
       }
-      // Reading the resolved root is harmless; mostly here so console logs are useful.
-      void resolveWorkspaceRoot();
+      // Register N09: a discarded `void resolveWorkspaceRoot()` stood here,
+      // explained as "mostly here so console logs are useful". It logs
+      // nothing — `resolveWorkspaceRoot` reads a setting and resolves a path
+      // (`workspace.ts`) — so the statement bought a DB read per
+      // `set_workspace_root` and threw the answer away. `syncWorkspaceProjects`
+      // below resolves the root itself.
       const rows = await syncWorkspaceProjects();
       emitSettings(conn);
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
