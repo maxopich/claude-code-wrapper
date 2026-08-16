@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
-import { ModelChip, shortModelLabel, summarizeBusModel } from './ModelChip';
+import { ModelChip, shortModelLabel } from './ModelChip';
 
 // Cluster E Phase 2 (B4) — ModelChip contract:
 //   - Renders the model identifier in chip form
@@ -156,77 +156,55 @@ describe('ModelChip — tooltipExtra', () => {
   });
 });
 
-// Cluster E Phase 2.x — summarizeBusModel + 'various' rendering:
-//   - undefined map → undefined (chip falls back to "default")
-//   - empty map → undefined
-//   - all entries equal → that string
-//   - multiple distinct → 'various'
-//   - empty-string entries ignored (treated as "not reported")
-//   - ModelChip renders 'various' verbatim (no claude-* trimming)
+// Register W13 — what used to be here, and why it isn't.
+//
+// This block tested `summarizeBusModel`, which folded a bus run's
+// per-participant models into one label for the `TopRunBar` chip, plus the
+// `'various'` sentinel it returned when participants disagreed. Every case
+// passed. None could happen: the map it summarized was filled only from
+// `session_started`, and `translate()` — the sole producer of that message —
+// is called only on the single-agent turn path, never by `server/src/bus/`.
+// So the map was always `{}`, the summary always `undefined`, and the chip
+// always read `model: default`.
+//
+// Kept as a note rather than deleted outright: a green suite for a function
+// that could not fire is the useful part of the record, and the next person
+// to wire a bus model signal should know these cases existed and were right
+// about everything except whether the input arrives.
+//
+// The one behaviour worth keeping is below. `shortModelLabel` had an explicit
+// `'various'` special case, and it was redundant — the general path returns
+// any dash-free, prefix-free string unchanged. That is asserted directly now,
+// so removing the guard cannot quietly change what an unrecognised short
+// alias renders as.
 
-describe('summarizeBusModel', () => {
-  test('undefined → undefined', () => {
-    expect(summarizeBusModel(undefined)).toBeUndefined();
+describe('shortModelLabel — unrecognised short aliases pass through', () => {
+  test.each(['various', 'sonnet', 'my-local-alias', 'gpt5'])('%s renders verbatim', (alias) => {
+    expect(shortModelLabel(alias)).toBe(alias.replace(/-/, ' '));
   });
 
-  test('empty map → undefined', () => {
-    expect(summarizeBusModel({})).toBeUndefined();
+  test('the removed "various" guard was a no-op', () => {
+    // Pins the specific equivalence W13 relied on when deleting the branch:
+    // no `claude-` prefix, no trailing -YYYYMMDD, no dash to split on.
+    expect(shortModelLabel('various')).toBe('various');
   });
 
-  test('single entry → that model', () => {
-    expect(summarizeBusModel({ 1: 'claude-sonnet-4-5-20250929' })).toBe(
-      'claude-sonnet-4-5-20250929',
-    );
-  });
-
-  test('all entries identical → that model', () => {
-    expect(
-      summarizeBusModel({
-        1: 'claude-sonnet-4-5-20250929',
-        2: 'claude-sonnet-4-5-20250929',
-        3: 'claude-sonnet-4-5-20250929',
-      }),
-    ).toBe('claude-sonnet-4-5-20250929');
-  });
-
-  test('mixed entries → "various"', () => {
-    expect(
-      summarizeBusModel({
-        1: 'claude-sonnet-4-5-20250929',
-        2: 'claude-opus-4-1',
-      }),
-    ).toBe('various');
-  });
-
-  test('empty-string values ignored', () => {
-    // Only "" entries → undefined; same-model entries with stray "" → that model.
-    expect(summarizeBusModel({ 1: '' })).toBeUndefined();
-    expect(summarizeBusModel({ 1: 'claude-sonnet-4-5', 2: '' })).toBe('claude-sonnet-4-5');
-  });
-});
-
-describe('ModelChip — multi-agent "various"', () => {
-  test('renders "various" label verbatim (no claude-* trimming)', () => {
+  test('ModelChip still renders such a label verbatim', () => {
     act(() => {
       root.render(<ModelChip model="various" />);
     });
-    const chip = container.querySelector('.model-chip');
-    expect(chip?.textContent).toContain('various');
-    // No "claude-" or date suffix would survive trimming anyway, but
-    // this asserts the literal sentinel survives the shortModelLabel path.
+    expect(container.querySelector('.model-chip')?.textContent).toContain('various');
   });
 
-  test('tooltip carries the literal "various" + tooltipExtra explanation', () => {
+  test('tooltipExtra still reaches the title attribute', () => {
+    // W13 removed this prop's only production caller (the TopRunBar chip's
+    // "participants reported different models" tooltip). The prop stays, so
+    // its behaviour stays asserted.
     act(() => {
-      root.render(
-        <ModelChip
-          model="various"
-          tooltipExtra="Participants reported different models — open Authority to inspect per-agent."
-        />,
-      );
+      root.render(<ModelChip model="various" tooltipExtra="Extra context here." />);
     });
     const title = container.querySelector('.model-chip')?.getAttribute('title');
     expect(title).toContain('various');
-    expect(title).toContain('Authority');
+    expect(title).toContain('Extra context here.');
   });
 });

@@ -55,7 +55,6 @@ function buildRun(overrides: Partial<MultiAgentRun> = {}): MultiAgentRun {
     recoveryContext: null,
     routerDrops: [],
     participantControls: {},
-    modelsByProject: {},
     ...overrides,
   };
 }
@@ -126,6 +125,31 @@ describe('TopRunBar — MockBadge mount predicate', () => {
     const run = buildRun({ mode: 'chain', mock: true });
     act(() => root.render(<TopRunBar run={run} {...stubProps} />));
     expect(container.querySelector('.mock-badge')).not.toBeNull();
+  });
+
+  // Register W13: TopRunBar must NOT mount a ModelChip.
+  //
+  // It did, from #160 until W13, and it could only ever read "model:
+  // default" — the map it summarized was filled from `session_started`,
+  // which `translate()` emits only on the single-agent path, so no bus run
+  // ever produced one. Worse, the chip's tooltip told the operator the value
+  // was "not yet reported (waiting on session_started)", i.e. to wait for a
+  // message that cannot arrive.
+  //
+  // Asserting an ABSENCE, so each case pairs it with a positive control in
+  // the SAME render. Without one, this passes just as happily on a TopRunBar
+  // that throws, renders nothing, or was deleted outright — which is the
+  // failure mode an absence assertion is most prone to.
+  test.each([
+    ['orchestrator', undefined],
+    ['orchestrator', true],
+    ['chain', undefined],
+  ] as const)('%s run (mock=%s) renders no ModelChip', (mode, mock) => {
+    const run = buildRun(mock === undefined ? { mode } : { mode, mock });
+    act(() => root.render(<TopRunBar run={run} {...stubProps} />));
+    // Positive control: the bar really did render.
+    expect(container.querySelector('.run-status')).not.toBeNull();
+    expect(container.querySelector('.model-chip')).toBeNull();
   });
 });
 

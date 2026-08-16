@@ -153,7 +153,6 @@ function run(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
     recoveryContext: null,
     routerDrops: [],
     participantControls: {},
-    modelsByProject: {},
     ...over,
   };
 }
