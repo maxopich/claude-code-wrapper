@@ -9,7 +9,11 @@
  * Project-level bus state (`bus_installed`, `bus_agent_name`) also lives here
  * to keep all multi-agent-runtime concerns in one repo module.
  */
-import type { RecoveryAgentEntry, RecoveryContextView } from '@cebab/shared/protocol';
+import type {
+  MultiAgentLifecycle,
+  RecoveryAgentEntry,
+  RecoveryContextView,
+} from '@cebab/shared/protocol';
 import type { BashClassifierReason } from '@cebab/shared';
 import { config } from '../config.js';
 import { getDb } from '../db.js';
@@ -20,17 +24,20 @@ export type ParticipantRole = 'orchestrator' | 'worker';
 export type EventKind = 'intro' | 'prompt' | 'reply' | 'final' | 'error';
 
 /**
- * Lifecycle mode for a multi-agent session.
+ * Lifecycle mode for a multi-agent session — a WIRE type: six
+ * `start_multi_agent` / session-view message shapes carry it.
  *
- *   - 'persistent' (default): the session folder under
- *     `<workspace>/.cebab-session-<id>/` survives End so the operator
- *     can resume later. Bus installs on participants stay in place.
- *   - 'temp': on End, the session folder is `rm -rf`'d AND bus
- *     installs are removed from each participant via
- *     `uninstallBusForProject`. Lets the operator run a one-off
- *     multi-agent task without leaving residue.
+ * Re-exported rather than declared, so the server and the wire cannot
+ * hold different opinions about what values exist. This module declared
+ * its own identical copy until register N13; because the two were
+ * structurally equal, every consumer typechecked against the local one
+ * and nothing imported shared's — adding a third arm to the wire union
+ * would have compiled cleanly here while being unrepresentable.
+ *
+ * A re-export cannot drift, which is why `scripts/sharedIsOneHome.test.mjs`
+ * forbids re-*declaration* and permits this.
  */
-export type MultiAgentLifecycle = 'persistent' | 'temp';
+export type { MultiAgentLifecycle };
 
 export type MultiAgentSessionRow = {
   id: string;

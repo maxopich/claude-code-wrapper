@@ -77,6 +77,48 @@ describe('KickMode + PauseExpiryAction', () => {
     expect(actions.length).toBe(PAUSE_EXPIRY_ACTIONS.size);
     expect(isPauseExpiryAction('escalate')).toBe(false);
   });
+
+  // Register N13: `server/src/repo/per_agent_control.ts` declared a second copy
+  // of both guards, and its test covered non-string inputs where this one only
+  // covered wrong strings. The duplicate declarations are gone; these cases came
+  // here with them, so the move did not cost coverage.
+  //
+  // They matter because the guards run on whatever SQLite hands back —
+  // `rowToControlState` narrows a nullable TEXT column with them, so `null` is
+  // the ordinary input, not an edge case.
+  //
+  // HONEST LIMIT, measured: these five pin the CONTRACT, they do not trap the
+  // current code. Deleting `typeof v === 'string' &&` from either guard leaves
+  // them all green, because `Set.has(undefined)` is already false — the typeof
+  // prefix is belt-and-braces over a Set. Revert-checked; stated rather than
+  // implied, so nobody reads this block as protection it does not give.
+  const NON_MEMBERS: [label: string, value: unknown][] = [
+    ['empty string', ''],
+    ['null', null],
+    ['undefined', undefined],
+    ['number', 42],
+    ['object', {}],
+  ];
+  test.each(NON_MEMBERS)('both guards reject %s', (_label, v) => {
+    expect(isKickMode(v)).toBe(false);
+    expect(isPauseExpiryAction(v)).toBe(false);
+  });
+
+  // This one DOES trap an implementation, which is why it is separate.
+  //
+  // A frozen `Set` is immune to inherited keys; the obvious-looking
+  // refactor to an object literal (`return !!KICK_MODE_MAP[v]`) is not —
+  // `({ drain: 1 })['constructor']` is the Object constructor, i.e. truthy, so
+  // that version would accept `'constructor'` as a kick mode. These are real
+  // strings arriving from the wire and from a TEXT column, so the input is
+  // reachable. Revert-checked against exactly that rewrite.
+  test.each(['constructor', 'toString', 'hasOwnProperty', '__proto__'])(
+    'neither guard accepts the inherited key %s',
+    (key) => {
+      expect(isKickMode(key)).toBe(false);
+      expect(isPauseExpiryAction(key)).toBe(false);
+    },
+  );
 });
 
 describe('ControllabilityFailureCode', () => {

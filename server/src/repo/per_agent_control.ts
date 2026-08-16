@@ -1,3 +1,9 @@
+import {
+  isKickMode,
+  isPauseExpiryAction,
+  type KickMode,
+  type PauseExpiryAction,
+} from '@cebab/shared/protocol';
 import { getDb } from '../db.js';
 
 /**
@@ -34,6 +40,15 @@ import { getDb } from '../db.js';
  * All three are orthogonal — the operator can pause then kick, or mute
  * then pause, etc. Resume clears `paused_until` + `pause_expiry_action`
  * but leaves muted/kicked untouched (the verbs unbundle).
+ *
+ * `KickMode` / `PauseExpiryAction` and their guards come from
+ * `@cebab/shared/protocol` — they are wire types, and this module is the
+ * DB-read side of the same feature the wire side already validates with
+ * them. Register N13: this file used to declare its own copies, whose sets
+ * were typed `ReadonlySet<string>` rather than `ReadonlySet<KickMode>`. The
+ * two copies never diverged, but only one of them could catch a typo at
+ * compile time, and it was not this one. `scripts/sharedIsOneHome.test.mjs`
+ * now fails if any name declared in `shared/src` is declared here again.
  */
 
 export type ControlState = {
@@ -45,20 +60,6 @@ export type ControlState = {
   kickedAt: number | null;
   kickedMode: KickMode | null;
 };
-
-export type PauseExpiryAction = 'auto_resume' | 'auto_kick';
-export type KickMode = 'drain' | 'hard';
-
-const PAUSE_EXPIRY_ACTIONS: ReadonlySet<string> = new Set(['auto_resume', 'auto_kick']);
-const KICK_MODES: ReadonlySet<string> = new Set(['drain', 'hard']);
-
-export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
-  return typeof v === 'string' && PAUSE_EXPIRY_ACTIONS.has(v);
-}
-
-export function isKickMode(v: unknown): v is KickMode {
-  return typeof v === 'string' && KICK_MODES.has(v);
-}
 
 type ControlRow = {
   session_id: string;
