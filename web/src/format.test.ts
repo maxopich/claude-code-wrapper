@@ -1,11 +1,105 @@
 import { describe, expect, test } from 'vitest';
 import type { ContentBlock } from '@cebab/shared/protocol';
-import { formatElapsed, formatResultDuration, messageCopyText } from './format';
+import {
+  formatElapsed,
+  formatResultDuration,
+  messageCopyText,
+  timeAgo,
+  timeAgoCompact,
+} from './format';
 import type { MessageView } from './store';
 
 // Cluster H B5 — pins both formatters' contracts. `formatElapsed` is the
 // live `M:SS` ticker for the thinking indicator; `formatResultDuration` is
 // the past-tense per-turn footer formatter with three bands.
+
+/**
+ * Register N14. `timeAgo` / `timeAgoCompact` replaced SEVEN implementations
+ * across six files. Every case below is a rule one of those seven broke — the
+ * point is not coverage for its own sake but that each of the three axes they
+ * disagreed on (rounding, sub-minute, clock skew) now has exactly one answer,
+ * pinned.
+ *
+ * `NOW` is a fixed instant and every call passes it. These functions default
+ * `now` to `Date.now()`, and a test that let them do so would be pinning the
+ * wall clock: the 59s→60s boundary cases would flake by a millisecond.
+ */
+const NOW = 1_700_000_000_000;
+const SEC = 1_000;
+const MIN = 60 * SEC;
+const HOUR = 60 * MIN;
+const DAY = 24 * HOUR;
+
+describe('timeAgo / timeAgoCompact (register N14)', () => {
+  test('THE defect: 90 seconds is 1m, not 2m', () => {
+    // The case that proves the whole finding. Three of the seven rounded, so
+    // 90s elapsed rendered as `1m` in the sidebar and `2m ago` in the
+    // multi-agent tab — at the same moment, about the same timestamp. Floor is
+    // the answer because rounding OVERSTATES elapsed time.
+    expect(timeAgo(NOW - 90 * SEC, NOW)).toBe('1m ago');
+    expect(timeAgoCompact(NOW - 90 * SEC, NOW)).toBe('1m');
+  });
+
+  test('floors within every band, never rounds up', () => {
+    // Each offset is deliberately NOT a whole unit — a fixture on a band
+    // boundary makes floor and round agree, and the revert-check caught
+    // exactly that: with only whole-second offsets, swapping the seconds
+    // `Math.floor` for `Math.round` reddened nothing. The fractional-second
+    // case below is the one that separates them.
+    expect(timeAgo(NOW - 1_500, NOW)).toBe('1s ago'); // not "2s ago"
+    expect(timeAgo(NOW - 59_900, NOW)).toBe('59s ago'); // not "1m ago"
+    expect(timeAgo(NOW - 31 * SEC, NOW)).toBe('31s ago');
+    expect(timeAgo(NOW - 59 * MIN - 59 * SEC, NOW)).toBe('59m ago');
+    expect(timeAgo(NOW - 23 * HOUR - 59 * MIN, NOW)).toBe('23h ago');
+    expect(timeAgoCompact(NOW - 1_500, NOW)).toBe('1s');
+  });
+
+  test('band boundaries land on the larger unit exactly at the threshold', () => {
+    expect(timeAgo(NOW - 60 * SEC, NOW)).toBe('1m ago');
+    expect(timeAgo(NOW - 60 * MIN, NOW)).toBe('1h ago');
+    expect(timeAgo(NOW - 24 * HOUR, NOW)).toBe('1d ago');
+    expect(timeAgo(NOW - 400 * DAY, NOW)).toBe('400d ago'); // no year band, by design
+  });
+
+  test('keeps a seconds band rather than collapsing to "just now"', () => {
+    // Two of the seven said "just now" under a minute. Collapsing them all
+    // would discard information on the auth banner, where how stale the
+    // session is IS the message.
+    expect(timeAgo(NOW - 3 * SEC, NOW)).toBe('3s ago');
+    expect(timeAgo(NOW, NOW)).toBe('0s ago');
+  });
+
+  test('clamps clock skew instead of rendering a negative age', () => {
+    // Three of the seven leaked `-5s` / `-0m ago` when a timestamp arrived
+    // from a server running ahead. `format.ts` already states this rule twice
+    // for its duration formatters; it now holds here too.
+    expect(timeAgo(NOW + 10 * SEC, NOW)).toBe('0s ago');
+    expect(timeAgoCompact(NOW + 10 * SEC, NOW)).toBe('0s');
+  });
+
+  test('clamps non-finite inputs rather than rendering NaN', () => {
+    expect(timeAgo(Number.NaN, NOW)).toBe('0s ago');
+    expect(timeAgoCompact(Number.NaN, NOW)).toBe('0s');
+    expect(timeAgo(NOW - MIN, Number.NaN)).toBe('0s ago');
+  });
+
+  test('the two exports differ ONLY by suffix, at the same instant', () => {
+    // The compact/prose split is the one contextual difference that survived.
+    // If the two ever disagree on magnitude, they have stopped sharing a core
+    // and the duplication is back.
+    for (const ago of [0, 45 * SEC, 90 * SEC, 5 * HOUR, 3 * DAY]) {
+      expect(timeAgo(NOW - ago, NOW)).toBe(`${timeAgoCompact(NOW - ago, NOW)} ago`);
+    }
+  });
+
+  test('honours an injected now instead of the wall clock', () => {
+    // `buildAuthExpiredBannerItem` threads its own `now` for testability, and
+    // that has to keep working — otherwise its four banner assertions start
+    // measuring real time.
+    expect(timeAgo(NOW - 5 * MIN, NOW)).toBe('5m ago');
+    expect(timeAgo(NOW - 5 * MIN, NOW + HOUR)).toBe('1h ago');
+  });
+});
 
 describe('formatElapsed', () => {
   test('renders 0:00 for zero / sub-second', () => {

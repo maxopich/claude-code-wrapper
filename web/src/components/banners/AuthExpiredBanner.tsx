@@ -38,6 +38,7 @@
 // BannerStack — and it makes unit tests Provider-free.
 
 import React from 'react';
+import { timeAgo } from '../../format.js';
 import type { AuthExpiredState } from '../../store.js';
 import type { BannerStackItem } from './BannerStack.js';
 
@@ -76,28 +77,20 @@ export function authExpiredBannerTitle(): string {
   return 'Claude subscription credentials expired';
 }
 
-/**
- * Format the lastSeenMs as a coarse, human-readable relative time.
- * Same algorithm as MultiAgentTab.tsx's formatRelativeTime — duplicated
- * here so the banner remains self-contained (no cross-file UI util
- * import) and the factory stays pure.
- */
-function formatRelativeMs(diffMs: number): string {
-  if (diffMs < 0) return 'just now';
-  const sec = Math.round(diffMs / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const days = Math.round(hr / 24);
-  return `${days}d ago`;
-}
-
 export function buildAuthExpiredBannerItem(args: BuildAuthExpiredBannerItemArgs): BannerStackItem {
   const { state, callbacks, arrivedAt, reauthInFlight } = args;
   const now = args.now ?? Date.now;
-  const relTime = formatRelativeMs(now() - state.lastSeenMs);
+  // N14. A local `formatRelativeMs` lived here, and its comment gave two
+  // reasons for the duplication: keep the banner self-contained (no cross-file
+  // UI util import), and keep the factory pure. The second is the real one, and
+  // `timeAgo` satisfies it — `now` is a parameter, so passing `now()` in leaves
+  // this factory exactly as pure as it was. The first does not survive contact:
+  // `format.ts` is a pure formatter module, not UI, and this file already
+  // imports two others. Meanwhile the comment's own opening line — "same
+  // algorithm as MultiAgentTab.tsx's formatRelativeTime" — was the finding: it
+  // was the same algorithm, until MultiAgentTab grew a SECOND one that
+  // disagreed with both.
+  const relTime = timeAgo(state.lastSeenMs, now());
   // Pluralize honestly — "1 turn" vs "3 turns" — so the message reads
   // naturally for both first observation and a repeating fail.
   const countLabel = state.count === 1 ? 'a turn' : `${state.count} turns`;

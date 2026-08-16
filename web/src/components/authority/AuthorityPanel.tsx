@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { timeAgo } from '../../format';
 import { readStored, writeStored } from '../../prefs';
 import { useAuthorityActions, useAuthoritySlot, type AuthoritySlot } from './AuthorityContext';
 import { AuthoritySection } from './AuthoritySection';
@@ -175,9 +176,11 @@ function renderStatus(slot: AuthoritySlot): string {
   if (slot.status === 'idle') return 'loading…';
   if (slot.status === 'requesting') return `requesting (${slot.mode})…`;
   if (slot.status === 'cache-miss') return 'no snapshot — click Refresh';
-  // ready
-  const ageSec = Math.max(0, Math.round((Date.now() - slot.receivedAt) / 1000));
-  return `${slot.lastFetchedMode} · ${ageSec}s ago`;
+  // ready. N14: this built its own `${ageSec}s ago` inline rather than in a
+  // named function, which is why it was the seventh site nobody had counted —
+  // and why the gate keying on the rendered LITERAL rather than on function
+  // names is the one that can see it.
+  return `${slot.lastFetchedMode} · ${timeAgo(slot.receivedAt)}`;
 }
 
 function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {

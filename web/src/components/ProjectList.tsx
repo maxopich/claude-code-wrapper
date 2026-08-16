@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Project, SessionSummary } from '@cebab/shared/protocol';
+import { timeAgoCompact } from '../format';
 import { ClaudeMark } from './ClaudeMark';
 import { MockBadge } from './MockBadge';
 import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
@@ -473,7 +474,7 @@ function SessionRow(props: {
       title={
         editing || props.selectMode
           ? undefined
-          : `${s.id}\n${formatRelative(s.lastEventAt)} • $${s.totalCostUsd.toFixed(4)}\nDouble-click name to rename`
+          : `${s.id}\n${timeAgoCompact(s.lastEventAt)} • $${s.totalCostUsd.toFixed(4)}\nDouble-click name to rename`
       }
       // Register U01: mouse convenience only — `.session-name` below is the
       // real control. The row previously carried `aria-selected` here, which
@@ -586,7 +587,7 @@ function SessionRow(props: {
           ⤓
         </button>
       )}
-      {!editing && <span className="session-meta">{formatRelative(s.lastEventAt)}</span>}
+      {!editing && <span className="session-meta">{timeAgoCompact(s.lastEventAt)}</span>}
       {/* Cluster G Phase 2b (UI-A3): per-row MOCK chip when this
        *  session was created under MOCK runtime mode. Stays visible
        *  AFTER the operator restarts Cebab in live mode — the row is
@@ -598,16 +599,4 @@ function SessionRow(props: {
       {!editing && s.mock === true && <MockBadge variant="history" />}
     </li>
   );
-}
-
-function formatRelative(ts: number): string {
-  const diffMs = Date.now() - ts;
-  const sec = Math.floor(diffMs / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h`;
-  const day = Math.floor(hr / 24);
-  return `${day}d`;
 }

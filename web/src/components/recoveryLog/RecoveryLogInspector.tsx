@@ -5,6 +5,7 @@ import type {
   RecoveryOperatorAction,
   RecoveryOutcomeStatus,
 } from '@cebab/shared/protocol';
+import { timeAgo } from '../../format';
 import { useRecoveryLogActions, useRecoveryLogState } from './RecoveryLogContext';
 
 /**
@@ -233,7 +234,7 @@ function RecoveryLogRecentSection({ rows }: { rows: RecoveryLogEntry[] }) {
                 {OPERATOR_ACTION_LABEL[row.operatorAction]}
               </span>
               <span className="recovery-log-recent-row-ts" title={new Date(row.ts).toISOString()}>
-                {formatRelativeMs(row.ts)}
+                {timeAgo(row.ts)}
               </span>
             </div>
             <div className="recovery-log-recent-row-meta">
@@ -276,12 +277,4 @@ function formatDurationMs(ms: number): string {
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
   if (ms < 3_600_000) return `${Math.round(ms / 60_000)} min`;
   return `${(ms / 3_600_000).toFixed(1)} h`;
-}
-
-function formatRelativeMs(ts: number): string {
-  const delta = Date.now() - ts;
-  if (delta < 60_000) return 'just now';
-  if (delta < 3_600_000) return `${Math.round(delta / 60_000)}m ago`;
-  if (delta < 86_400_000) return `${Math.round(delta / 3_600_000)}h ago`;
-  return `${Math.round(delta / 86_400_000)}d ago`;
 }
