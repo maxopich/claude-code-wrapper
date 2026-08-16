@@ -6,6 +6,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import type { ClientMsg, SearchResult, SearchScope, ServerMsg } from '@cebab/shared';
+import { timeAgoCompact } from '../format';
 import { useModalSurface } from '../useModalSurface';
 import { nextIndex } from '../listNavigation';
 import { MIN_SEARCH_QUERY_LEN, useSessionSearch } from '../useSessionSearch';
@@ -321,7 +322,7 @@ export function SessionSearchModal(props: SessionSearchModalProps) {
                       redacted
                     </span>
                   ) : null}
-                  <span className="session-search-result-time">{formatRelative(r.ts)}</span>
+                  <span className="session-search-result-time">{timeAgoCompact(r.ts)}</span>
                 </span>
               </li>
             ))}
@@ -372,15 +373,4 @@ function highlightSnippet(snippet: string, query: string): React.ReactNode {
   if (from < snippet.length)
     parts.push(<Fragment key={`t${from}`}>{snippet.slice(from)}</Fragment>);
   return parts;
-}
-
-/** Compact relative time — mirrors ProjectList's `formatRelative` style. */
-function formatRelative(ts: number): string {
-  const sec = Math.floor((Date.now() - ts) / 1000);
-  if (sec < 60) return `${Math.max(0, sec)}s`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h`;
-  return `${Math.floor(hr / 24)}d`;
 }

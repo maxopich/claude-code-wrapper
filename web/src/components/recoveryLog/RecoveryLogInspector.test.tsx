@@ -59,7 +59,13 @@ function makeAggregate(overrides: Partial<RecoveryClassAggregate> = {}): Recover
 function makeEntry(overrides: Partial<RecoveryLogEntry> = {}): RecoveryLogEntry {
   return {
     id: 1,
-    ts: Date.now() - 30_000, // 30s ago → "just now" formatting
+    // Register N14: this comment used to read `30s ago → "just now"
+    // formatting`, describing this pane's local formatter — which had no
+    // seconds band while four of the other six did. Nothing asserted it, so
+    // the divergence lived in a comment only. It now renders `30s ago` through
+    // the shared `timeAgo`, and the recent-rows test below asserts that rather
+    // than leaving the claim to a comment again.
+    ts: Date.now() - 30_000,
     sessionId: 'abcdef1234',
     parentSessionId: null,
     operatorId: 'local-user',
@@ -239,6 +245,12 @@ describe('RecoveryLogInspector', () => {
     expect(text).toContain('session abcdef12'); // 8-char truncation
     expect(text).toContain('time-to-recovery 1.5 s');
     expect(text).toContain('reached final');
+    // N14: the row timestamp renders through the shared `timeAgo`, which keeps
+    // a seconds band. Before, this pane collapsed anything under a minute to
+    // "just now" while the multi-agent tab showed `30s ago` for the same
+    // instant. `ts` is 30s back, so floor and round agree — this pins the
+    // seconds band, not the rounding rule (`format.test.ts` pins that).
+    expect(text).toContain('30s ago');
     // Process-level row.
     expect(text).toContain('process-level');
     expect(text).toContain('abort');

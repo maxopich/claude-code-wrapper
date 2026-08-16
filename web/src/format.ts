@@ -2,6 +2,69 @@ import type { ContentBlock } from '@cebab/shared/protocol';
 import type { MessageView } from './store';
 
 /**
+ * Relative time ("how long ago"), the ONLY implementation — register N14.
+ *
+ * There were SEVEN. `ProjectList` and `SessionSearchModal` each had a
+ * `formatRelative`; `MultiAgentTab` had `formatAgo` AND `formatRelativeTime`
+ * 182 lines apart, disagreeing with each other; `AuthExpiredBanner` and
+ * `RecoveryLogInspector` each had a `formatRelativeMs`; and `AuthorityPanel`
+ * built one inline. They disagreed on every axis that exists here:
+ *
+ *   - ROUNDING. Three floored, three rounded. So 90 seconds after an event the
+ *     sidebar said `1m` while the multi-agent tab said `2m ago`, at the same
+ *     moment, about the same timestamp. That is the defect; the rest is tidying.
+ *   - SUB-MINUTE. Three said `45s`, two said `just now`, one had no seconds
+ *     band at all.
+ *   - CLOCK SKEW. Three leaked negatives (`-5s`, `-0m ago`), three clamped.
+ *
+ * THE RULES, and why each is the one it is:
+ *
+ *   - FLOOR, never round. Rounding OVERSTATES elapsed time — 31 seconds is not
+ *     "1m ago" — and `formatElapsed` below already floors, so this is the
+ *     house convention rather than a new opinion.
+ *   - CLAMP negatives (and non-finite) to zero. Stated twice already in this
+ *     file: a clock skew must not render `-1:-3`.
+ *   - KEEP the seconds band. Collapsing it to "just now" would DISCARD
+ *     information on the auth banner, where how stale the session is *is* the
+ *     message.
+ *
+ * `now` is injectable rather than closed over `Date.now()` so callers can pin
+ * it — `buildAuthExpiredBannerItem` already threads its own `now` for exactly
+ * this reason, and that is worth keeping over module-level mocking.
+ *
+ * The compact/prose split below is the one difference that was legitimately
+ * contextual: a dense sidebar row wants `3m`, a banner sentence wants `3m ago`.
+ * Two exports over one core, not two bodies.
+ */
+function timeAgoParts(ts: number, now: number): { value: number; unit: string } {
+  const safeNow = Number.isFinite(now) ? now : 0;
+  const diffMs = Number.isFinite(ts) ? Math.max(0, safeNow - ts) : 0;
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return { value: sec, unit: 's' };
+  const min = Math.floor(sec / 60);
+  if (min < 60) return { value: min, unit: 'm' };
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return { value: hr, unit: 'h' };
+  return { value: Math.floor(hr / 24), unit: 'd' };
+}
+
+/** Past-tense relative time for prose contexts: `45s ago` … `2d ago`. */
+export function timeAgo(ts: number, now: number = Date.now()): string {
+  const { value, unit } = timeAgoParts(ts, now);
+  return `${value}${unit} ago`;
+}
+
+/**
+ * Bare relative time for dense contexts (sidebar rows, search results): `45s`
+ * … `2d`. Same instant renders the same magnitude as `timeAgo` — only the
+ * suffix differs, which is the whole point of sharing the core.
+ */
+export function timeAgoCompact(ts: number, now: number = Date.now()): string {
+  const { value, unit } = timeAgoParts(ts, now);
+  return `${value}${unit}`;
+}
+
+/**
  * Format an elapsed duration as a live `M:SS` (or `H:MM:SS`) counter for the
  * thinking indicator's timer. Distinct from MultiAgentTab's coarse, past-tense
  * `formatDuration` ("47s"/"2m") — this ticks once a second and never rounds.

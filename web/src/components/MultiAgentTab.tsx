@@ -17,7 +17,7 @@ import type {
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
 import { activeAgent, eventDefaultCollapsed } from '../store';
 import { agentIdentity } from '../agentIdentity';
-import { formatElapsed } from '../format';
+import { formatElapsed, timeAgo } from '../format';
 import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
 import { Markdown } from './Markdown';
@@ -1336,7 +1336,7 @@ export function TemplateLastRunRail(props: {
     lastRun.hopsUsed === null
       ? `?/${lastRun.hopBudget ?? '?'}`
       : `${lastRun.hopsUsed}/${lastRun.hopBudget ?? '?'}`;
-  const agoText = formatAgo(lastRun.startedAt);
+  const agoText = timeAgo(lastRun.startedAt);
   return (
     <>
       {budgetBadge}
@@ -1408,19 +1408,6 @@ export function deriveLastRunLabel(run: TemplateLastRun): {
     return { kind: 'at-cap', text: 'at cap' };
   }
   return { kind: 'ok', text: 'ok' };
-}
-
-/** Coarse "time ago" string (m / h / d). Mirrors the existing iteration
- *  browser's approach — no library, ASCII units, never lies about precision. */
-function formatAgo(ts: number): string {
-  const diff = Math.max(0, Date.now() - ts);
-  const min = Math.floor(diff / 60_000);
-  if (min < 1) return 'just now';
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const days = Math.floor(hr / 24);
-  return `${days}d ago`;
 }
 
 /** Single-line truncate for the inline error excerpt: kill internal
@@ -1552,7 +1539,7 @@ function IterationRow(props: {
           {item.status}
         </span>
         <span className="iteration-when">
-          {formatRelativeTime(item.startedAt)}
+          {timeAgo(item.startedAt)}
           {item.endedAt !== null && ` · ${formatDuration(item.endedAt - item.startedAt)}`}
         </span>
       </div>
@@ -1592,18 +1579,6 @@ function IterationRow(props: {
       </div>
     </li>
   );
-}
-
-function formatRelativeTime(ts: number): string {
-  const diffMs = Date.now() - ts;
-  const sec = Math.round(diffMs / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.round(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.round(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const days = Math.round(hr / 24);
-  return `${days}d ago`;
 }
 
 function formatDuration(ms: number): string {
