@@ -32,7 +32,6 @@ import { useArtifactContentBridge } from './ArtifactContentContext';
 import { WorkingFiles } from './WorkingFiles';
 import { LogsButton } from './sessionLog';
 import { HopBudgetInput } from './HopBudgetInput';
-import { ModelChip, summarizeBusModel } from './ModelChip';
 import { RouterDropsCounter } from './authority/RouterDropsCounter';
 import { ParticipantControlsCounter } from './agentControl/ParticipantControlsCounter';
 import { ParticipantStatePills } from './agentControl/ParticipantStatePills';
@@ -2712,13 +2711,18 @@ export function TopRunBar(props: {
     });
   }
 
-  // Cluster E Phase 2.x (B4-1): summarize per-participant models for the
-  // ModelChip. The reducer aggregates each session_started.model into
-  // run.modelsByProject keyed by participant projectId; the helper
-  // returns the common model if all entries match, 'various' if mixed,
-  // or undefined if no participants have inited yet (chip falls back
-  // to "default").
-  const busModel = summarizeBusModel(run.modelsByProject);
+  // Register W13: a ModelChip used to sit in this bar, summarizing
+  // `run.modelsByProject`. It could not work — nothing on the bus produces
+  // the `session_started` that map was filled from, so it rendered
+  // `model: default` for every run since #160, and its "open Authority to
+  // inspect per-agent" tooltip pointed at a panel whose own model field
+  // comes from the same single-agent-only cache.
+  //
+  // #159 wrote down what the multi-agent chip needs — "extend the protocol
+  // + reducer + mount" — and #160 shipped the reducer and the mount without
+  // the protocol. Unmounted until the bus carries a model signal (filed
+  // separately); the chip itself is unchanged and still correct in the
+  // single-agent ChatHeader, where `session_started` really does arrive.
   return (
     <div className="main-top-bar-right">
       <span className="main-top-bar-title">
@@ -2728,21 +2732,16 @@ export function TopRunBar(props: {
           {run.status}
         </span>
       </span>
-      <ModelChip
-        model={busModel}
-        tooltipExtra={
-          busModel === 'various'
-            ? 'Participants reported different models — open Authority to inspect per-agent.'
-            : undefined
-        }
-      />
-      {/* Cluster G Phase 2c (UI-A3): per-run MOCK chip — sits beside the
-       *  ModelChip because both qualify "what's running" (which model, and
-       *  whether responses are real). Strict `=== true` so pre-G2c servers
-       *  and live sessions both render nothing. Stays visible across R-A
-       *  re-attach and R-B reconstruct: the row's `mock` column is locked
-       *  at session creation, so a bus session created in mock keeps the
-       *  badge even after the operator restarts Cebab in live mode. */}
+      {/* Cluster G Phase 2c (UI-A3): per-run MOCK chip — qualifies "what's
+       *  running" (whether responses are real). It was placed beside a
+       *  ModelChip that answered the other half of that question, "which
+       *  model"; register W13 removed that chip because on a bus run it
+       *  could only ever answer "default". Strict `=== true` so pre-G2c
+       *  servers and live sessions both render nothing. Stays visible
+       *  across R-A re-attach and R-B reconstruct: the row's `mock` column
+       *  is locked at session creation, so a bus session created in mock
+       *  keeps the badge even after the operator restarts Cebab in live
+       *  mode. */}
       {run.mock === true && <MockBadge variant="inline" />}
       <LogsButton
         sessionId={run.sessionId}

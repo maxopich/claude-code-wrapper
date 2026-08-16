@@ -27,10 +27,20 @@
  * them next to `session_started.model`. Today's wire only carries the
  * bare model id string.
  *
- * **Multi-agent**: NOT mounted here yet. Per spec B4-1 the chip should
- * also live in `TopRunBar`, but `multi_agent_started` doesn't currently
- * forward an orchestrator-level model field — a separate slice (E2.x)
- * will extend the protocol + reducer + mount.
+ * **Multi-agent**: not mounted, and that is the correct state — but it
+ * took a detour. This slice (#159) recorded what a `TopRunBar` chip needs:
+ * "a separate slice (E2.x) will extend the **protocol** + reducer + mount",
+ * because nothing on the wire forwards a bus participant's model. E2.x
+ * (#160) then shipped the reducer and the mount and skipped the protocol,
+ * wiring the chip to `session_started` — which `translate()` produces only
+ * for single-agent turns, so the bus never emits one. The chip therefore
+ * read `model: default` on every multi-agent run for its whole life, under
+ * a tooltip telling the operator to wait for a message that could not
+ * arrive. Register W13 unmounted it and removed the aggregation.
+ *
+ * The original sentence stands: a bus chip needs a model signal on the
+ * wire FIRST. Filed separately; the seam is `bus/runner.ts`'s per-agent
+ * `onMessage`, which already sees the SDK `init` that carries the model.
  *
  * **Anomaly surface (B4-5)**: warn icon + tooltip when the resolved
  * model differs from the operator-selected model. Today Cebab does NOT
@@ -49,7 +59,15 @@ export type ModelChipProps = {
    * chip renders a warn icon + tooltip.
    */
   selectedModel?: string;
-  /** Optional extra context for the hover tooltip (provider, version date). */
+  /**
+   * Optional extra context for the hover tooltip (provider, version date).
+   *
+   * Register W13 note for whoever runs the next dead-code sweep: this prop's
+   * only production caller was the `TopRunBar` chip's "participants reported
+   * different models" tooltip, removed with that mount. It is exercised by
+   * tests and kept for the documented purpose above — caller-less is not the
+   * same as unused, and `selectedModel` below is caller-less by design too.
+   */
   tooltipExtra?: string;
 };
 
@@ -62,13 +80,15 @@ export type ModelChipProps = {
  * Anything else (already-short alias, unknown shape) passes through
  * verbatim so the operator sees what the SDK actually reports.
  *
- * Cluster E Phase 2.x: the literal sentinel `'various'` is the
- * multi-agent summary value for "participants disagree" and renders
- * verbatim — bypasses the claude-* trimming so it stays readable.
+ * There used to be an explicit `if (model === 'various') return 'various'`
+ * here, guarding the multi-agent summary sentinel against the `claude-*`
+ * trimming. Register W13 removed it with the summary that produced it — and
+ * it was a no-op regardless: `'various'` has no `claude-` prefix, no dated
+ * suffix and no dash, so every branch below already returns it unchanged.
+ * The test pins that passthrough, so the guarantee survives the guard.
  */
 export function shortModelLabel(model: string | undefined): string {
   if (!model || model.length === 0) return 'default';
-  if (model === 'various') return 'various';
   // Drop `claude-` prefix if present.
   const stripped = model.startsWith('claude-') ? model.slice('claude-'.length) : model;
   // Drop trailing `-YYYYMMDD` (8 digits).
@@ -80,29 +100,6 @@ export function shortModelLabel(model: string | undefined): string {
   const firstDash = withoutDate.indexOf('-');
   if (firstDash === -1) return withoutDate;
   return `${withoutDate.slice(0, firstDash)} ${withoutDate.slice(firstDash + 1)}`;
-}
-
-/**
- * Cluster E Phase 2.x — summarize a multi-agent run's per-participant
- * models for the TopRunBar ModelChip.
- *
- * Returns:
- *   - the common model string if every entry matches (and at least one is present)
- *   - the literal `'various'` if multiple distinct values are present
- *   - `undefined` if the map is empty (no session_started has landed yet)
- *
- * The map keys (project ids) are irrelevant to the summary — only the
- * set of values matters.
- */
-export function summarizeBusModel(
-  modelsByProject: Record<number, string> | undefined,
-): string | undefined {
-  if (!modelsByProject) return undefined;
-  const values = Object.values(modelsByProject).filter((v) => v.length > 0);
-  if (values.length === 0) return undefined;
-  const distinct = new Set(values);
-  if (distinct.size === 1) return values[0];
-  return 'various';
 }
 
 export function ModelChip({ model, selectedModel, tooltipExtra }: ModelChipProps) {

@@ -110,7 +110,6 @@ function buildRun(overrides: Partial<MultiAgentRun> = {}): MultiAgentRun {
     recoveryContext: null,
     routerDrops: [],
     participantControls: {},
-    modelsByProject: {},
     ...overrides,
   } as MultiAgentRun;
 }
