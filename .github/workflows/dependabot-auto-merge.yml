@@ -25,14 +25,27 @@ name: Dependabot auto-merge
 
 on: pull_request_target # zizmor: ignore[dangerous-triggers]
 
-permissions:
-  contents: write
-  pull-requests: write
+# Deny by default at the top; the one job grants its own writes below.
+#
+# The writes used to live here, which OpenSSF Scorecard flagged (high,
+# TokenPermissionsID). With one job the practical exposure was nil — that job
+# needs exactly these two scopes. The reason to move them anyway is the
+# combination above: `pull_request_target` runs with repo-write even for fork
+# PRs, and a top-level grant is inherited by every job in the file. A second
+# job added later would silently get write on a fork-triggered workflow, and
+# whoever adds it would have no reason to look here.
+permissions: {}
 
 jobs:
   auto-merge:
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
+    # `contents: write` enables auto-merge; `pull-requests: write` covers the
+    # `gh api .../pulls/N/files` read and the merge-enable. Same two scopes
+    # this job already ran with — moved, not widened.
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - name: Fetch dependabot metadata
         id: meta
