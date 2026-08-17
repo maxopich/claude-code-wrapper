@@ -53,6 +53,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
+import { stripComments } from './lib/strip_comments.mjs';
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Read a repo file as text with CRLF normalised away.
@@ -83,7 +85,15 @@ const PREDICATE_NAME = /export function ((?:is|has|can|should)[A-Z][A-Za-z0-9]*)
  * rather than silently vanishing. Both failure modes are wrong; this avoids
  * needing to know which.
  */
-function predicateSignatures(src) {
+function predicateSignatures(rawSrc) {
+  // Prose first (Cebab-6sr). `PREDICATE_NAME` has no column anchor, so a doc
+  // comment writing out the shape this rule forbids — which is exactly how you
+  // would explain the rule next to the code it governs — was read as a
+  // declaration. Measured when this was added: zero comments in the corpus were
+  // being miscounted, so nothing was broken; what it cost was the explanation
+  // nobody could write. Stripping happens HERE rather than in `collectSources`
+  // so the fixtures below exercise the same path the scan does.
+  const src = stripComments(rawSrc);
   const out = [];
   for (const m of src.matchAll(PREDICATE_NAME)) {
     // Start on the `(` the name pattern consumed, so the walk below opens at
@@ -170,6 +180,35 @@ describe('the predicate-return checker catches what it is for', () => {
   test('a non-exported predicate is out of scope, deliberately', () => {
     // Stated as a test so the limit is a decision rather than an oversight.
     expect(violations({ 'a.ts': 'function isThing(x: unknown): Thing | null {' })).toEqual([]);
+  });
+
+  test('a doc comment writing out the forbidden shape is not a declaration', () => {
+    // Cebab-6sr. This is the paragraph an author would write to explain the
+    // rule beside the code it governs, and before the strip it made the gate
+    // red — which taught the next author to write nothing.
+    const src = [
+      '/**',
+      ' * The shape this rule forbids looks like',
+      ' *     export function isReconstructable(row: Row): ReconstructGuard {',
+      ' * because `if (…)` on an object is always true.',
+      ' */',
+      '// Same again as a line comment: export function isThing(x): Guard {',
+    ].join('\n');
+    expect(violations({ 'a.ts': src })).toEqual([]);
+  });
+
+  test('a real declaration BELOW that comment is still flagged', () => {
+    // The positive control. Without it, "strip the whole file" passes the case
+    // above, and the scan would then measure nothing at all.
+    const src = [
+      '/**',
+      ' *     export function isCommented(x): Guard {',
+      ' */',
+      'export function isReal(x: unknown): Guard {',
+    ].join('\n');
+    expect(violations({ 'a.ts': src })).toEqual([
+      { file: 'a.ts', name: 'isReal', returns: 'Guard' },
+    ]);
   });
 
   test('a name that merely starts with those letters is not a predicate', () => {

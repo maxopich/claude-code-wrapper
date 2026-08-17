@@ -67,6 +67,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
+import { stripComments } from './lib/strip_comments.mjs';
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Read a repo file as text with CRLF normalised away.
@@ -109,7 +111,14 @@ const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 /** `Map<name, file[]>` for one content map. */
 function declarations(sources) {
   const out = new Map();
-  for (const [file, src] of Object.entries(sources)) {
+  for (const [file, rawSrc] of Object.entries(sources)) {
+    // Prose first (Cebab-6sr). `DECL`'s `^` anchor makes an indented sample in
+    // a comment safe, but a code block written flush-left inside a `/** … */` —
+    // and any commented-out declaration — matched. This gate was measured
+    // counting one such line before the strip: it was a false positive in the
+    // OTHER direction (a real declaration hidden behind a phantom block
+    // comment, Cebab-1px), which is how the stripper's own bug surfaced.
+    const src = stripComments(rawSrc);
     for (const m of src.matchAll(DECL)) {
       if (!out.has(m[1])) out.set(m[1], []);
       out.get(m[1]).push(file);
@@ -244,6 +253,40 @@ describe('the one-home checker catches what it is for', () => {
       'fn',
       'ln',
       'vn',
+    ]);
+  });
+
+  test('a flush-left code sample inside a comment is not a declaration', () => {
+    // Cebab-6sr. `^` alone is not enough: a JSDoc code block written flush-left
+    // — and a commented-out declaration — both sit at column 0. This is the
+    // paragraph someone would write in `per_agent_control.ts` to explain WHY
+    // the local copies went away, and before the strip it re-created the very
+    // violation it was describing.
+    const prose = {
+      'a.ts': [
+        '/**',
+        ' * These used to be declared here and now come from shared:',
+        "export type KickMode = 'drain' | 'hard';",
+        ' */',
+        "// export const KICK_MODES = new Set(['drain']);",
+      ].join('\n'),
+    };
+    expect(reDeclared(SHARED_BEFORE, prose)).toEqual([]);
+  });
+
+  test('a real declaration in the same file is still flagged', () => {
+    // Positive control for the case above: without it, stripping everything
+    // would pass, and every scan below would then measure an empty corpus.
+    const mixed = {
+      'a.ts': [
+        '/**',
+        "export type KickMode = 'commented';",
+        ' */',
+        "export type MultiAgentLifecycle = 'persistent' | 'temp';",
+      ].join('\n'),
+    };
+    expect(reDeclared(SHARED_BEFORE, mixed)).toEqual([
+      { name: 'MultiAgentLifecycle', shared: 'shared/src/protocol.ts', at: 'a.ts' },
     ]);
   });
 

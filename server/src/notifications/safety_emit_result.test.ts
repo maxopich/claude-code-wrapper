@@ -3,6 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
+import { strippedLines } from '../test_support/strip_comments.js';
+
 /**
  * Register S10: a safety-class `emit()` must not have its result thrown away.
  *
@@ -33,6 +35,22 @@ import { describe, expect, test } from 'vitest';
  *     further **fails** this test rather than skipping the call — see
  *     `unclassified` below. That is the anti-vacuity rule, and it is the
  *     reason this file can be trusted at all.
+ *
+ * COMMENTS ARE STRIPPED FIRST (Cebab-6sr). Until 2026-08-17 this scanned raw
+ * lines, so a doc comment NAMING `emitNotification(` while explaining the rule
+ * was counted as an unclassifiable call site and failed the gate. It happened
+ * for real: a JSDoc block in `migration_integrity.ts` explaining why its emit
+ * is inline was reported as `migration_integrity.ts:156`, and the fix at the
+ * time was to reword the prose. That is backwards — it taught the next author
+ * not to write about the rule near the code the rule governs, which is the
+ * opposite of what this repo does everywhere else. Zero real comments were
+ * miscounted when this was fixed; the cost was the prose that never got
+ * written.
+ *
+ * The scan takes a CONTENT MAP rather than reading files itself, so the two
+ * fixture cases below can feed it text directly. Without that seam the second
+ * half of the rule — that a genuinely unclassifiable call still FAILS — could
+ * only be asserted by trusting the tree, and "strip everything" would pass.
  */
 
 const SERVER_SRC = fileURLToPath(new URL('../', import.meta.url));
@@ -62,13 +80,23 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-function scan(): CallSite[] {
-  const sites: CallSite[] = [];
+/** Read every scanned file once, keyed by the path this gate reports. */
+function readServerSources(): Record<string, string> {
+  const out: Record<string, string> = {};
   for (const file of sourceFiles(SERVER_SRC)) {
+    out[path.relative(SERVER_SRC, file)] = fs.readFileSync(file, 'utf8');
+  }
+  return out;
+}
+
+function scan(sources: Record<string, string>): CallSite[] {
+  const sites: CallSite[] = [];
+  for (const [file, source] of Object.entries(sources)) {
     // Split on \r?\n: without a .gitattributes these files are checked out
     // CRLF on Windows CI, and a lookup carrying an embedded \n finds nothing
-    // there and nowhere else.
-    const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+    // there and nowhere else. Stripping happens after the split so the line
+    // INDEX still matches the file a reader opens.
+    const lines = strippedLines(source.split(/\r?\n/).join('\n'));
     lines.forEach((line, i) => {
       if (!line.includes('emitNotification(')) return;
       // The dispatcher's own re-export/alias lines are not call sites.
@@ -108,14 +136,64 @@ function scan(): CallSite[] {
             after.includes(`${bound}.id`));
         handling = read ? bound : null;
       }
-      sites.push({ file: path.relative(SERVER_SRC, file), line: i + 1, cls, handling });
+      sites.push({ file, line: i + 1, cls, handling });
     });
   }
   return sites;
 }
 
+describe('[security] the scanner reads code, not the prose about it', () => {
+  // Cebab-6sr. Both halves are required and they fail for opposite reasons: the
+  // first would pass if the scanner strips nothing, the second if it strips
+  // everything. Only a scanner that removes comments and keeps code passes both.
+
+  test('a doc comment naming the dispatcher call is not a call site', () => {
+    // Verbatim shape of the block that failed this gate for real, in
+    // `migration_integrity.ts`. It has no `class:` field, so before the fix it
+    // surfaced as an unclassifiable call and the gate went red on prose.
+    const prose = [
+      '/**',
+      ' * The audit row is written by an inline emitNotification( call rather',
+      ' * than an injected one, because the boot walk has no dispatcher yet.',
+      ' */',
+      'const x = 1;',
+      '// A trailing note: emitNotification( is also named here.',
+    ].join('\n');
+    expect(scan({ 'probe.ts': prose })).toEqual([]);
+  });
+
+  test('a real unclassifiable call in the same file still fails', () => {
+    // The positive control. Same prose, plus one genuine call with no `class:`
+    // within the window — which must still be reported, at the line a reader
+    // would open the file to. Without this case, deleting the whole file's
+    // contents would be a passing "fix".
+    const mixed = [
+      '/**',
+      ' * Prose naming emitNotification( that must be ignored.',
+      ' */',
+      'await emitNotification({ event: "x" });',
+    ].join('\n');
+    expect(scan({ 'probe.ts': mixed })).toEqual([
+      { file: 'probe.ts', line: 4, cls: null, handling: null },
+    ]);
+  });
+
+  test('classification and handling still work on stripped source', () => {
+    // Proves the strip did not eat the `class:` field or the binding — the two
+    // things every assertion below is derived from.
+    const src = [
+      '// a note about safety emits',
+      "const res = await emitNotification({ class: 'safety' });",
+      'if (!res.ok) throw new Error("audit_write_failed");',
+    ].join('\n');
+    expect(scan({ 'probe.ts': src })).toEqual([
+      { file: 'probe.ts', line: 2, cls: 'safety', handling: 'res' },
+    ]);
+  });
+});
+
 describe('[security] every safety-class notification hands its result somewhere', () => {
-  const sites = scan();
+  const sites = scan(readServerSources());
 
   test('the scan actually found the call sites (anti-vacuity floor)', () => {
     // If the extraction breaks — renamed alias, moved directory, a glob that
