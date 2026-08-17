@@ -702,11 +702,36 @@ function classifyBashPiece(piece: string): Verdict {
   // not excluded at all — it captured `&2` as a target and misfired as
   // `redirect_path`. Now both are skipped by the same explicit rule.
   //
-  // Still not caught, deliberately: `cmd>file` with no space. Dropping the
-  // leading `(?:^|\s)` anchor would make `grep "a>b" f` report a redirect, so
-  // the anchor stays and the gap is named rather than papered over.
-  const targets = [...stripped.matchAll(/(?:^|\s)(?:\d|&)?>>?\s*(?!&)(\S+)/g)]
-    .map((m) => m[1] ?? '')
+  // The leading `(?:^|\s)` anchor is GONE (register D04c, Cebab-x1n.1.30). It
+  // existed only to stop `grep "a>b" f` reporting a redirect to `b"`, and it
+  // paid for that with a hole: `echo x>/etc/passwd` and `cat f>>~/.zshrc` have
+  // neither start-of-string nor whitespace before the `>`, so no target was
+  // extracted and both were judged by their first token alone — `read`, for a
+  // write to /etc/passwd.
+  //
+  // `maskQuoted` does that job properly, so the anchor is not needed: the scan
+  // runs on a mask where quoted and escaped characters are blanked, and the
+  // captures are sliced out of the ORIGINAL at the same offsets (the mask is
+  // the same length, which is the point of it).
+  //
+  // Removing the anchor makes this MORE faithful to bash, not less. Bash's
+  // lexer treats an unquoted `>` as a metacharacter wherever it appears, so
+  // `echo a->b` really does redirect to `b` — flagging it is correct.
+  //
+  // The captured target is UNQUOTED before anything looks at it (Cebab-3bl).
+  // `echo x > "/etc/passwd"` used to compare `"/etc/passwd"`, quotes included,
+  // against the sensitive-path list — which matches nothing — and came out
+  // `mutate`. Quoting a path is what anyone does the moment it might contain a
+  // space, so that was an ordinary bypass, not an exotic one.
+  const masked = maskQuoted(stripped);
+  const targets = [...masked.matchAll(/(?:\d|&)?>>?\s*(?!&)(\S+)/g)]
+    .map((m) => {
+      const group = m[1];
+      if (group === undefined) return '';
+      // Offsets are valid against `stripped` because the mask preserves length.
+      const start = m.index + m[0].length - group.length;
+      return unquote(stripped.slice(start, start + group.length));
+    })
     .filter(Boolean);
   // The null / std devices consume their input and write nothing, so they are
   // not a redirect at all as far as the operator is concerned. Dropping them
@@ -1124,7 +1149,67 @@ type WrapperSpec = {
    * shape; anything else stops the scan, which is the fail-safe direction.
    */
   positional?: (token: string) => boolean;
+  /**
+   * Flags whose value IS the command, rather than something to skip past
+   * (`script -c 'rm -rf /x' log`). The value is usually quoted, which is why
+   * the peel tokenises quote-aware — a whitespace split turns `'rm -rf /x'`
+   * into three tokens and lands the scan on `-rf`.
+   *
+   * Distinct from `value` on purpose: one says "skip this and its argument",
+   * the other says "the argument is the thing you were looking for".
+   */
+  commandInValue?: ReadonlySet<string>;
 };
+
+/**
+ * `strace` and `ltrace` take the same shape for the flags that matter here, so
+ * these two constants are shared BY THOSE TWO ONLY — not promoted to a general
+ * table, which is the mistake the header below warns about.
+ */
+const STRACE_NO_VALUE: ReadonlySet<string> = new Set([
+  '-f',
+  '--follow-forks',
+  '-ff',
+  '-c',
+  '--summary-only',
+  '-C',
+  '--summary',
+  '-t',
+  '-tt',
+  '-ttt',
+  '-T',
+  '--syscall-times',
+  '-y',
+  '--decode-fds',
+  '-i',
+  '--instruction-pointer',
+  '-q',
+  '-qq',
+  '-r',
+  '--relative-timestamps',
+  '-v',
+  '--no-abbrev',
+  '-d',
+  '--debug',
+]);
+const STRACE_VALUE: ReadonlySet<string> = new Set([
+  '-o',
+  '--output',
+  '-e',
+  '--trace',
+  '-p',
+  '--attach',
+  '-s',
+  '--string-limit',
+  '-E',
+  '--env',
+  '-u',
+  '--user',
+  '-a',
+  '--columns',
+  '-S',
+  '--sort-by',
+]);
 
 /**
  * Per-wrapper flag tables. A SHARED table would be wrong, not merely untidy:
@@ -1146,6 +1231,100 @@ const WRAPPER_SPECS: ReadonlyMap<string, WrapperSpec> = new Map<string, WrapperS
   ],
   ['nohup', {}],
   ['setsid', { noValue: new Set(['-f', '--fork', '-w', '--wait', '-c', '--ctty']) }],
+  // Cebab-x1n.1.29. These seven were named in D02b and left out because each
+  // needs its own argument shape; until now all seven laundered a dangerous
+  // payload down to `mutate` — a row is written, but the pause is never
+  // offered. None of the names appeared anywhere in this file before, so
+  // adding them is purely additive.
+  //
+  // Flag tables here are deliberately MODEST rather than exhaustive. An
+  // unrecognised token stops the peel, which is the fail-safe direction; a
+  // guessed flag that really takes a value does the opposite, by feeding its
+  // value to the scan as the command. Only flags confirmed from the util-linux
+  // and strace man pages are listed.
+  [
+    'flock',
+    {
+      noValue: new Set([
+        '-s',
+        '--shared',
+        '-x',
+        '--exclusive',
+        '-u',
+        '--unlock',
+        '-n',
+        '--nonblock',
+        '--nb',
+        '-o',
+        '--close',
+        '-v',
+        '--verbose',
+      ]),
+      value: new Set(['-w', '--wait', '--timeout', '-E', '--conflict-exit-code']),
+      // The lock target: a path, or a file descriptor number with `-c`-less
+      // usage. Anything that is not obviously one stops the scan.
+      positional: isLockTarget,
+    },
+  ],
+  [
+    'taskset',
+    {
+      noValue: new Set(['-a', '--all-tasks']),
+      // `-c LIST` gives the affinity as a list, so the mask positional is
+      // absent in that form. `-p` takes a PID and no command follows, so the
+      // peel stopping there is correct.
+      value: new Set(['-c', '--cpu-list', '-p', '--pid']),
+      positional: isCpuMaskToken,
+    },
+  ],
+  [
+    'chrt',
+    {
+      noValue: new Set([
+        '-f',
+        '--fifo',
+        '-r',
+        '--rr',
+        '-o',
+        '--other',
+        '-b',
+        '--batch',
+        '-i',
+        '--idle',
+        '-a',
+        '--all-tasks',
+        '-R',
+        '--reset-on-fork',
+        '-m',
+        '--max',
+        '-v',
+        '--verbose',
+      ]),
+      value: new Set(['-p', '--pid']),
+      // The scheduling priority, always an integer.
+      positional: isDigitsToken,
+    },
+  ],
+  [
+    'ionice',
+    {
+      noValue: new Set(['-t', '--ignore']),
+      value: new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid']),
+    },
+  ],
+  ['strace', { noValue: STRACE_NO_VALUE, value: STRACE_VALUE }],
+  ['ltrace', { noValue: STRACE_NO_VALUE, value: STRACE_VALUE }],
+  [
+    'script',
+    {
+      noValue: new Set(['-a', '--append', '-f', '--flush', '-q', '--quiet', '-e', '--return']),
+      value: new Set(['-t', '--timing', '-T', '--log-timing', '-I', '--log-in', '-O', '--log-out']),
+      // `script -c '<cmd>' logfile` — the command is the flag's value, not a
+      // token to skip. This is the one of the seven that needed a mechanism
+      // rather than a table entry.
+      commandInValue: new Set(['-c', '--command']),
+    },
+  ],
   ['time', { noValue: new Set(['-p', '--portability', '-v', '--verbose']) }],
   ['unbuffer', { noValue: new Set(['-p']) }],
   ['busybox', {}],
@@ -1247,14 +1426,34 @@ export const COMMAND_WRAPPERS: ReadonlySet<string> = new Set(WRAPPER_SPECS.keys(
 function stripCommandWrappers(command: string): string {
   let rest = command;
   for (let depth = 0; depth < 4; depth += 1) {
-    const tokens = rest.split(/\s+/);
+    // Quote-aware (Cebab-x1n.1.29): a plain `/\s+/` split turns
+    // `script -c 'rm -rf /x' log` into six tokens and lands the scan on `-rf`.
+    const tokens = splitQuotedTokens(rest);
     const spec = WRAPPER_SPECS.get(basename(tokens[0] ?? ''));
     if (!spec) return rest;
     const value = spec.value ?? EMPTY_FLAGS;
     const noValue = spec.noValue ?? EMPTY_FLAGS;
+    const commandInValue = spec.commandInValue ?? EMPTY_FLAGS;
     let i = 1;
+    let inlineCommand: string | null = null;
     while (i < tokens.length) {
       const t = tokens[i] ?? '';
+      if (commandInValue.has(t)) {
+        // The value IS the command. Unquote it and restart the peel there, so
+        // `script -c 'timeout 5 rm -rf /x' log` still peels the inner wrapper.
+        const inner = tokens[i + 1];
+        if (inner === undefined) break;
+        inlineCommand = unquote(inner);
+        break;
+      }
+      // `--command=rm -rf /x`: the value is glued behind an `=`, so the whole
+      // rest of the token is the command. Checked before the generic
+      // `--flag=value` skip below, which would otherwise swallow it.
+      const eq = t.indexOf('=');
+      if (eq > 0 && commandInValue.has(t.slice(0, eq))) {
+        inlineCommand = unquote(t.slice(eq + 1));
+        break;
+      }
       if (value.has(t)) {
         i += 2;
         continue;
@@ -1273,6 +1472,11 @@ function stripCommandWrappers(command: string): string {
         continue;
       }
       break;
+    }
+    if (inlineCommand !== null) {
+      if (!inlineCommand.trim()) return rest;
+      rest = inlineCommand.trim();
+      continue;
     }
     // At most one positional before the command (`timeout 5 rm -rf x`), and
     // only when it has the shape the wrapper expects.
@@ -1309,6 +1513,43 @@ function isDigits(s: string): boolean {
   return true;
 }
 
+/** `chrt`'s PRIORITY positional — always a plain integer. */
+function isDigitsToken(token: string): boolean {
+  return isDigits(token);
+}
+
+/**
+ * `flock`'s lock target: a path, or a file-descriptor number.
+ *
+ * Deliberately narrow. Accepting "any token that is not a flag" would let
+ * `flock rm -rf /x` consume `rm` as the lock file and then classify `-rf` — the
+ * exact false-negative this wrapper was added to close. A lock target in
+ * practice is an absolute or relative path or an fd number; anything else stops
+ * the peel, which is the fail-safe direction.
+ */
+function isLockTarget(token: string): boolean {
+  if (isDigits(token)) return true;
+  if (token.startsWith('-')) return false;
+  return token.includes('/') || token.includes('.');
+}
+
+/**
+ * `taskset`'s CPU MASK positional: a hex mask (`0x1`, `3`) — the list form
+ * arrives via `-c` instead, so it is not handled here.
+ *
+ * Hand-rolled rather than a regex with an optional group, for the same
+ * `security/detect-unsafe-regex` reason `isDurationToken` records.
+ */
+function isCpuMaskToken(token: string): boolean {
+  const body = token.startsWith('0x') || token.startsWith('0X') ? token.slice(2) : token;
+  if (!body) return false;
+  for (const ch of body) {
+    const hex = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+    if (!hex) return false;
+  }
+  return true;
+}
+
 /**
  * `-o0` for a wrapper whose `-o` takes a value: the value is glued to the
  * flag, so nothing FOLLOWING it should be consumed. Only short flags glue.
@@ -1334,6 +1575,106 @@ function stripEnvAssignments(piece: string): string {
     rest = rest.slice(m[0].length);
   }
   return rest.trim();
+}
+
+/**
+ * A copy of `s` in which everything the shell would treat as LITERAL TEXT is
+ * blanked out: the contents of single- and double-quoted runs, and any
+ * backslash-escaped character. The result is the SAME LENGTH as the input, so a
+ * regex matched against the mask can slice its captures out of the original.
+ *
+ * This is the capability two register findings were both blocked on
+ * (Cebab-x1n.1.29, Cebab-x1n.1.30): the scans could not tell a shell operator
+ * from a `>` sitting inside an argument, so one of them carried a leading
+ * whitespace anchor as a proxy — which then missed the glued `echo x>/etc/passwd`
+ * entirely — and the other could not reach a command inside `script -c '…'`.
+ *
+ * WHITESPACE INSIDE QUOTES IS BLANKED TOO, which is what makes the mask usable
+ * for tokenising as well as for finding operators: `'rm -rf /x'` is ONE token
+ * to the shell, and a `\S+` or a whitespace split reading the mask now agrees.
+ * That is what lets `script -c '<cmd>'` reach its command, and it is why
+ * `> "my file"` captures the whole target instead of stopping at `"my`.
+ *
+ * Same state machine as `splitTopLevel` below, and it is a separate function on
+ * purpose: that one returns pieces, this one returns a positional mask, and
+ * folding them together would give the caller neither cleanly.
+ */
+function maskQuoted(s: string): string {
+  let out = '';
+  let inSingle = false;
+  let inDouble = false;
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i] ?? '';
+    if (ch === '\\' && i + 1 < s.length) {
+      // The escape and the character it protects are both literal: `\>` is a
+      // greater-than sign, not a redirect. Masking an escaped SPACE as well is
+      // correct rather than sloppy — `> my\ file` is one token to the shell,
+      // and the mask is what `\S+` reads.
+      out += 'xx';
+      i += 2;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (inSingle || inDouble) {
+      out += 'x';
+      i += 1;
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Strip ONE layer of matching surrounding quotes.
+ *
+ * Cebab-3bl: without this a quoted redirect target keeps its quotes, so
+ * `echo x > "/etc/passwd"` was compared as `"/etc/passwd"` — which matches no
+ * sensitive path — and classified `mutate`. Quoting a path is what anyone does
+ * the moment it might contain a space, so that was an ordinary bypass rather
+ * than an exotic one.
+ */
+function unquote(token: string): string {
+  const first = token[0];
+  const last = token[token.length - 1];
+  if (token.length >= 2 && (first === "'" || first === '"') && last === first) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+/**
+ * Split on whitespace the SHELL would split on — quoted runs stay whole.
+ *
+ * Reads the mask and slices the original, so `script -c 'rm -rf /x' log` yields
+ * four tokens rather than six. `stripCommandWrappers` needs this to reach a
+ * command that lives inside a flag's quoted value (Cebab-x1n.1.29).
+ */
+function splitQuotedTokens(s: string): string[] {
+  const masked = maskQuoted(s);
+  const out: string[] = [];
+  let i = 0;
+  while (i < masked.length) {
+    while (i < masked.length && /\s/.test(masked[i] ?? '')) i += 1;
+    if (i >= masked.length) break;
+    const start = i;
+    while (i < masked.length && !/\s/.test(masked[i] ?? '')) i += 1;
+    out.push(s.slice(start, i));
+  }
+  return out;
 }
 
 /**

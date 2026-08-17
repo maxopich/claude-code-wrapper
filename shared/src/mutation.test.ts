@@ -969,6 +969,16 @@ describe('classifyBashCommand — register D02b/D04b/D21 laundering holes [secur
       stdbuf: 'stdbuf -o0 rm -rf /x',
       watch: 'watch rm -rf /x',
       xargs: 'xargs rm -rf /x',
+      // Cebab-x1n.1.29: the seven D02b named and deferred. Every one of these
+      // classified `mutate` before — a mutation row written, the pause never
+      // offered.
+      flock: 'flock /tmp/l rm -rf /x',
+      taskset: 'taskset 0x1 rm -rf /x',
+      chrt: 'chrt 99 rm -rf /x',
+      ionice: 'ionice rm -rf /x',
+      strace: 'strace rm -rf /x',
+      ltrace: 'ltrace rm -rf /x',
+      script: "script -c 'rm -rf /x' /tmp/t",
     };
 
     it.each(Object.entries(BARE))('%s wraps a dangerous command → dangerous', (_name, cmd) => {
@@ -997,8 +1007,32 @@ describe('classifyBashCommand — register D02b/D04b/D21 laundering holes [secur
       'xargs -0 -P 4 rm -rf /x',
       'watch -n 5 rm -rf /x',
       'env -i FOO=1 rm -rf /x',
+      // Cebab-x1n.1.29. Each of the seven with its OWN argument shape — the
+      // reason they were deferred rather than added to a shared table.
+      'flock -n /tmp/l rm -rf /x',
+      'flock -w 5 /tmp/l rm -rf /x',
+      'flock 9 rm -rf /x',
+      'taskset -c 0-3 rm -rf /x',
+      'taskset -a 0x1 rm -rf /x',
+      'chrt -f 99 rm -rf /x',
+      'ionice -c 2 -n 0 rm -rf /x',
+      'strace -o /tmp/o rm -rf /x',
+      'strace -f -e trace=write rm -rf /x',
+      'ltrace -e write rm -rf /x',
+      "script -q -c 'rm -rf /x' /tmp/t",
+      "script --command='rm -rf /x' /tmp/t",
     ])('%s → dangerous (the wrapper flags are not the command)', (cmd) => {
       expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    // `script -c` is the only one of the seven whose command lives inside a
+    // QUOTED value, so a whitespace split lands the scan on `-rf`. It peels
+    // through to the inner wrapper too, which is what proves the value is
+    // re-entered rather than merely unwrapped once.
+    it('script -c peels into a nested wrapper', () => {
+      expect(classifyBashCommand("script -c 'timeout 5 rm -rf /x' /tmp/t").category).toBe(
+        'dangerous',
+      );
     });
 
     it('wrappers nest', () => {
@@ -1011,12 +1045,36 @@ describe('classifyBashCommand — register D02b/D04b/D21 laundering holes [secur
       expect(classifyBashCommand('command -v rm').category).not.toBe('dangerous');
     });
 
-    it.each(['env ls', 'nohup ls', 'timeout 5 ls', 'xargs ls'])(
-      '%s → read (a wrapped read is still a read)',
-      (cmd) => {
-        expect(classifyBashCommand(cmd).category).toBe('read');
-      },
-    );
+    it.each([
+      'env ls',
+      'nohup ls',
+      'timeout 5 ls',
+      'xargs ls',
+      // The seven, wrapping something harmless. Without these the fix could be
+      // "call everything these wrappers touch dangerous", which is the failure
+      // mode this bead warned about: a false dangerous verdict trains the
+      // operator to click through the prompt the real ones need.
+      'flock /tmp/l ls',
+      'taskset 0x1 ls',
+      'chrt 99 ls',
+      'ionice -c 2 ls',
+      'strace -o /tmp/o ls',
+      'ltrace ls',
+      "script -c 'ls' /tmp/t",
+    ])('%s → read (a wrapped read is still a read)', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('read');
+    });
+
+    // The peel must not eat a POSITIONAL that is really the command. `flock`
+    // takes a lock target before the command, so a predicate that accepted
+    // "any non-flag token" would consume `rm` and then classify `-rf`.
+    it.each([
+      ['flock rm -rf /x', 'lock target'],
+      ['taskset rm -rf /x', 'CPU mask'],
+      ['chrt rm -rf /x', 'priority'],
+    ])('%s: the command is not eaten as the %s positional', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
   });
 
   // Filed by nobody: `sudo` was on the dangerous list and its three siblings
@@ -1029,6 +1087,64 @@ describe('classifyBashCommand — register D02b/D04b/D21 laundering holes [secur
         expect(classifyBashCommand(cmd).category).toBe('dangerous');
       },
     );
+  });
+
+  // D04c (Cebab-x1n.1.30 + Cebab-3bl): what the D04b anchor still hid. The
+  // scan required start-of-string or whitespace before the `>`, so the GLUED
+  // form escaped entirely; and the captured target kept its quotes, so a
+  // QUOTED path matched nothing in the sensitive list. Both wrote wherever
+  // they liked and classified below `dangerous`, which is the one verdict
+  // that offers the operator a pause.
+  //
+  // The anchor is gone because `maskQuoted` now does its job properly. Every
+  // case below is paired with a must-NOT-flag control, because the whole risk
+  // of removing an anchor is widening the net.
+  describe('D04c: glued and quoted redirects are seen', () => {
+    it.each([
+      'echo x>/etc/passwd',
+      'cat f>>~/.zshrc',
+      'echo x>"/etc/passwd"',
+      "echo x > '/etc/passwd'",
+      'echo x > "/etc/passwd"',
+      'echo x>~/.ssh/authorized_keys',
+    ])('%s → dangerous', (cmd) => {
+      expect(classifyBashCommand(cmd).category).toBe('dangerous');
+    });
+
+    it('a quoted target is compared without its quotes', () => {
+      // Cebab-3bl. Before, `matched` was `"/etc/passwd"` — quotes included —
+      // so the sensitive-path comparison could never hit.
+      const r = classifyBashCommand('echo x > "/etc/passwd"');
+      expect(r.reason?.rule).toBe('redirect_system_path');
+      expect(r.reason?.matched).toBe('/etc/passwd');
+    });
+
+    it('a quoted target containing a space is captured whole', () => {
+      // `\\S+` used to stop at the space and report `"my`. Not a category
+      // change, but the detail string is what the operator reads.
+      const r = classifyBashCommand('echo x > "my file"');
+      expect(r.category).toBe('mutate');
+      expect(r.reason?.matched).toBe('my file');
+    });
+
+    // THE CONTROLS. These are why the anchor existed; the mask is what
+    // replaces it. If any of them starts reporting a redirect, dropping the
+    // anchor was the wrong call and this is where that shows.
+    it.each(['grep "a>b" f', 'echo "1>2"', "grep 'x>y' f", 'grep -e "a>b" f', 'echo a\\>b'])(
+      '%s → read (a quoted or escaped > is not an operator)',
+      (cmd) => {
+        expect(classifyBashCommand(cmd).category).toBe('read');
+      },
+    );
+
+    // Bash's lexer treats an UNQUOTED `>` as a metacharacter wherever it
+    // appears, so this really does redirect to `b`. Flagging it is correct,
+    // and pinning it says the behaviour was chosen rather than tolerated.
+    it('an unquoted > with no space really is a redirect', () => {
+      const r = classifyBashCommand('echo a->b');
+      expect(r.category).toBe('mutate');
+      expect(r.reason?.matched).toBe('b');
+    });
   });
 
   // D04b: the redirect scan required start-of-string or whitespace before the
