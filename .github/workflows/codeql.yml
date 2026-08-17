@@ -12,6 +12,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Deny by default at the top; every job grants only what it needs. Without
+# this block the jobs inherit the repository's default token scope, which is
+# what OpenSSF Scorecard's TokenPermissionsID flagged here (high). The
+# `analyze` job below already declares its minimal set, so this changes
+# nothing about what runs — it stops a job added later from inheriting more.
+permissions: {}
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})

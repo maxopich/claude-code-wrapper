@@ -42,9 +42,18 @@ jobs:
           persist-credentials: false
 
       - name: Install actionlint
+        # The script is fetched by COMMIT SHA, not by tag: `v1.7.12` is
+        # mutable and can be repointed at other content, which is what
+        # OpenSSF Scorecard's PinnedDependenciesID flagged on this line. Every
+        # `uses:` in this repo is already SHA-pinned; this was the one
+        # network fetch that was not.
+        #
+        # Residual, stated rather than implied: this pins the installer
+        # script, not the release binary the script then downloads for
+        # 1.7.12. Bump both together.
         run: |
           bash <(curl --proto '=https' --tlsv1.2 -sSf \
-            https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+            https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) 1.7.12 # v1.7.12
 
       - name: Run actionlint
         run: ./actionlint -color
