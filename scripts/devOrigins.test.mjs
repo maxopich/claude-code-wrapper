@@ -39,6 +39,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
+
+// Strips `//` and block comments so this file's own explanations — and
+// origin.ts's, which names :5173 several times in prose — cannot trip a scan
+// or launder a violation past one. The local copy this replaced resolved `/*`
+// before `//`, so a glob in a line comment opened a block that never closed
+// (Cebab-1px); `scripts/stripCommentsConformance.test.mjs` now pins all three
+// copies to the same behaviour.
+import { stripComments } from './lib/strip_comments.mjs';
 import { DEV_WEB_ORIGINS, DEV_WEB_PORT, withDeclaredWebOrigins } from './dev-origins.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -49,13 +57,6 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
  *  runner only (`project_crlf_breaks_css_parsing_tests`). */
 function read(rel) {
   return fs.readFileSync(path.join(repoRoot, rel), 'utf8').replace(/\r\n/g, '\n');
-}
-
-/** Strip `//` and block comments so this file's own explanations — and
- *  origin.ts's, which names :5173 several times in prose — cannot trip a
- *  scan or launder a violation past one. */
-function stripComments(src) {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
 }
 
 /** Every literal port in a URL: a colon followed by digits. Deliberately not

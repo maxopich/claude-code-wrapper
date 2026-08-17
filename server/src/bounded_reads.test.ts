@@ -19,7 +19,10 @@
  * measuring nothing:
  *
  *   - comment lines are stripped BEFORE the scan, so the paragraph you are
- *     reading cannot count itself as a violation;
+ *     reading cannot count itself as a violation. That step moved to
+ *     `test_support/strip_comments.ts` in Cebab-1px, when the copy that used to
+ *     live here turned out to read a `/*` inside a `//` comment as a block
+ *     opener — latent in `server/src`, but it erased a whole file in `web/`;
  *   - a stale allowlist entry FAILS. An entry that no longer matches any site
  *     is an exemption nobody is using, and leaving it there is how a list
  *     stops describing the code.
@@ -27,6 +30,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, test } from 'vitest';
+
+import { strippedLines } from './test_support/strip_comments.js';
 
 const SERVER_SRC = path.join(import.meta.dirname, '.');
 
@@ -62,40 +67,6 @@ const ALLOWED: ReadonlyMap<string, string> = new Map([
   ['ws_smoke.ts', "dev smoke script reading Cebab's own auth-token file"],
 ]);
 
-/**
- * Blank out comments while preserving line numbering.
- *
- * This is the step two previous source-derived gates in this repo skipped, and
- * both then counted their own explanatory comments as matches. `://` is
- * excluded so a URL in a string is not mistaken for a line comment.
- */
-function stripComments(source: string): string[] {
-  let inBlock = false;
-  return source.split('\n').map((raw) => {
-    let line = raw;
-    if (inBlock) {
-      const end = line.indexOf('*/');
-      if (end === -1) return '';
-      line = line.slice(end + 2);
-      inBlock = false;
-    }
-    for (;;) {
-      const start = line.indexOf('/*');
-      if (start === -1) break;
-      const end = line.indexOf('*/', start + 2);
-      if (end === -1) {
-        line = line.slice(0, start);
-        inBlock = true;
-        break;
-      }
-      line = line.slice(0, start) + line.slice(end + 2);
-    }
-    const lc = line.search(/(^|[^:])\/\//);
-    if (lc !== -1) line = line.slice(0, line.indexOf('//', lc));
-    return line;
-  });
-}
-
 type Site = { file: string; line: number; call: string };
 
 function listSourceFiles(dir: string, rel = ''): string[] {
@@ -117,7 +88,7 @@ function listSourceFiles(dir: string, rel = ''): string[] {
 function findReadSites(): Site[] {
   const sites: Site[] = [];
   for (const file of listSourceFiles(SERVER_SRC)) {
-    const lines = stripComments(fs.readFileSync(path.join(SERVER_SRC, file), 'utf8'));
+    const lines = strippedLines(fs.readFileSync(path.join(SERVER_SRC, file), 'utf8'));
     lines.forEach((line, i) => {
       for (const call of READ_CALLS) {
         if (line.includes(call)) sites.push({ file, line: i + 1, call });
