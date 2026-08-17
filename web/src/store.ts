@@ -2235,8 +2235,31 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
       nextProjectMap[msg.sessionId] = session;
 
+      // Cebab-f9x: `isReplay` gates this too. A persisted `system/init` row
+      // replays as a `session_started`, so without the guard a session that ran
+      // days ago was synthesized with `createdAt`/`lastEventAt` of NOW and a
+      // cost of zero — and the sidebar orders and labels by exactly those, so
+      // an old session jumped to the top looking brand new and free.
+      //
+      // Reachable: `session_history_start` creates the `sessionsByProject`
+      // bucket but never touches `knownSessions`, so a replay of a session the
+      // list has not loaded lands here. The path that gets there is the
+      // RunsBadge jump (`App.tsx`'s `onJumpToRun` → `selectSession`), which
+      // switches project and selects a session in one action.
+      //
+      // Skipping is only correct because `selectSession` now also asks for the
+      // project's real session list when it has not been loaded — otherwise
+      // this would trade a false row for a missing one. For a project the
+      // operator never opened, `knownSessions[projectId]` is `undefined`, so
+      // what rendered before this guard was a ONE-ROW sidebar implying the
+      // project held exactly one session, created just now.
+      //
+      // Not every `Date.now()` in this case is the same bug: `runStartedAt`
+      // above is fine, because `session_history_start` pre-creates the bucket
+      // and a replayed `session_started` therefore takes the `else if` branch
+      // and never reaches it. Measured, not assumed.
       const knownList = state.knownSessions[projectId] ?? [];
-      const alreadyKnown = knownList.some((s) => s.id === msg.sessionId);
+      const alreadyKnown = isReplay || knownList.some((s) => s.id === msg.sessionId);
       const knownNext = alreadyKnown
         ? knownList
         : [
@@ -3205,6 +3228,46 @@ export function activeSession(state: AppState): SessionView | null {
 
 export function isSessionPending(sessionId: string): boolean {
   return sessionId.startsWith(PENDING_PREFIX);
+}
+
+/**
+ * Cebab-f9x: the requests a session selection has to make, given what state
+ * already holds. `App.tsx`'s `selectSession` is a thin dispatcher over this.
+ *
+ * Two independent things can be missing and they are easy to conflate:
+ *
+ *   - the CONVERSATION (`sessionsByProject[pid][sid]`) → `load_session`
+ *   - the project's session LIST (`knownSessions[pid]`) → `open_project`
+ *
+ * `load_session` hydrates the first and says nothing about the second, which is
+ * the gap this exists to close. `select_session` sets `activeProjectId`, so the
+ * sidebar switches to the jumped-to project immediately — and for a project the
+ * operator never opened, its list is `undefined`. That used to be papered over
+ * by `session_started` synthesizing a summary stamped `Date.now()`: one row,
+ * claiming the project held exactly one session, created just now. The reducer
+ * no longer invents it, so the list has to be asked for.
+ *
+ * Returned rather than sent so the four combinations are assertable. The
+ * fourth — hydrated conversation, absent list — is the one a naive `if
+ * (!alreadyHydrated) { … }` misses, because it hangs the list request off the
+ * wrong condition.
+ */
+export function sessionSelectionRequests(
+  state: AppState,
+  projectId: number,
+  sessionId: string,
+): Array<
+  | { type: 'load_session'; projectId: number; sessionId: string }
+  | { type: 'open_project'; projectId: number }
+> {
+  const out: ReturnType<typeof sessionSelectionRequests> = [];
+  if (!state.sessionsByProject[projectId]?.[sessionId]) {
+    out.push({ type: 'load_session', projectId, sessionId });
+  }
+  if (state.knownSessions[projectId] === undefined) {
+    out.push({ type: 'open_project', projectId });
+  }
+  return out;
 }
 
 /**

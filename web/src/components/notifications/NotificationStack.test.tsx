@@ -181,6 +181,129 @@ describe('NotificationStack — sr-only live regions (UI-10)', () => {
   });
 });
 
+/**
+ * Cebab-mbu. The mirror is cleared one rAF after it is written, so that a later
+ * notification rendering to the SAME string is a real DOM change and therefore
+ * a fresh announcement. The effect's cleanup used to cancel that frame — and
+ * its deps (`state.visible`, `state.queued`) change on every push, dismissal
+ * and auto-dismiss, so any of those arriving inside one frame cancelled the
+ * clear. The mirror then kept the old string, the next identical text was a
+ * no-op `setState`, React bailed out, and nothing was announced.
+ *
+ * The sequence below is the smallest deterministic reproduction: write, let
+ * something else re-run the effect, flush the frame, write the same text again.
+ * Real `requestAnimationFrame` is replaced by a queue these tests drain by
+ * hand — jsdom has one, but a test that waits for a real frame would be timing-
+ * dependent, and the whole defect is about what happens between two frames.
+ */
+describe('NotificationStack — identical text re-announces (Cebab-mbu)', () => {
+  let pending: Map<number, FrameRequestCallback>;
+  let nextFrameId: number;
+  let cancelledIds: number[];
+
+  beforeEach(() => {
+    pending = new Map();
+    nextFrameId = 1;
+    cancelledIds = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextFrameId++;
+      pending.set(id, cb);
+      return id;
+    });
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      cancelledIds.push(id);
+      pending.delete(id);
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Run every queued frame callback, as the browser would at the next paint. */
+  function flushFrames() {
+    const due = [...pending.values()];
+    pending.clear();
+    act(() => {
+      for (const cb of due) cb(0);
+    });
+  }
+
+  test('a second notification with the same text announces again', () => {
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+
+    act(() => {
+      actions.push?.(env({ id: 'first', title: 'Saved' }));
+    });
+    expect(regions().polite, 'the first push announces').toBe('Saved');
+
+    // Anything that re-runs the effect before the frame lands. An error push
+    // touches only the assertive region, so a polite region that changes here
+    // would mean something other than this bug.
+    act(() => {
+      actions.push?.(env({ id: 'noise', severity: 'error', title: 'Unrelated' }));
+    });
+
+    flushFrames();
+    // THE ASSERTION. Pre-fix the cleanup cancelled the clear when the effect
+    // re-ran above, so the mirror still read 'Saved' here.
+    expect(regions().polite, 'the mirror is cleared once the frame lands').toBe('');
+
+    act(() => {
+      actions.push?.(env({ id: 'second', title: 'Saved' }));
+    });
+    // '' -> 'Saved' is a real DOM change, which is what an aria-live region
+    // announces. Pre-fix this was 'Saved' -> 'Saved': React bails out, the DOM
+    // never changes, and a screen reader says nothing.
+    expect(regions().polite, 'the identical text is announced a second time').toBe('Saved');
+  });
+
+  test('CONTROL: a DIFFERENT string announces whether or not the mirror was cleared', () => {
+    // Without this, a component that never clears — or one that clears
+    // everything on every render — could satisfy the test above by accident.
+    // This case must pass against both the fix and the bug.
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      actions.push?.(env({ id: 'a', title: 'Saved' }));
+    });
+    act(() => {
+      actions.push?.(env({ id: 'b', title: 'Something else' }));
+    });
+    expect(regions().polite).toBe('Something else');
+  });
+
+  test('CONTROL: a pending frame is still cancelled on unmount', () => {
+    // The cleanup moved, it was not deleted. If it had simply been dropped this
+    // passes only by accident of `pending` being empty, so assert the id that
+    // was outstanding is the id that got cancelled.
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      actions.push?.(env({ id: 'x', title: 'Saved' }));
+    });
+    const outstanding = [...pending.keys()];
+    expect(outstanding, 'a clear frame is genuinely pending').toHaveLength(1);
+
+    act(() => {
+      root.unmount();
+    });
+    expect(cancelledIds).toEqual(outstanding);
+
+    // The shared afterEach unmounts again; re-create so it has a live root.
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+});
+
 describe('NotificationStack — onAck wiring (BE-6 client side)', () => {
   test('dismissing a sticky notification invokes onAck with the envelope id', () => {
     const actions: { push?: (n: NotificationEnvelope) => void; dismiss?: (id: string) => void } =

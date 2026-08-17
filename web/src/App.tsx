@@ -16,7 +16,13 @@ import type {
 } from '@cebab/shared/protocol';
 import { SHELL } from './breakpoints';
 import { connectWs, type WsHandle } from './ws';
-import { activeSession, initialState, isSessionPending, reduce } from './store';
+import {
+  activeSession,
+  initialState,
+  isSessionPending,
+  reduce,
+  sessionSelectionRequests,
+} from './store';
 import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
 import { ProjectList } from './components/ProjectList';
 import { ChatView } from './components/ChatView';
@@ -928,10 +934,15 @@ function AppShell({
   }
 
   function selectSession(projectId: number, sessionId: string) {
-    const alreadyHydrated = !!state.sessionsByProject[projectId]?.[sessionId];
     dispatch({ type: 'select_session', projectId, sessionId });
-    if (!alreadyHydrated) {
-      wsRef.current?.send({ type: 'load_session', projectId, sessionId });
+    // Cebab-f9x: which requests this needs is derived in `store.ts` so the four
+    // combinations of (conversation present?, session list present?) are
+    // assertable — `App.tsx` has no test harness, and the case that matters is
+    // the one a naive `if (!alreadyHydrated)` misses. See
+    // `sessionSelectionRequests` for why the list request cannot hang off the
+    // hydration check.
+    for (const req of sessionSelectionRequests(state, projectId, sessionId)) {
+      wsRef.current?.send(req);
     }
   }
 

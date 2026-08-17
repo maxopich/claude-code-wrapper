@@ -61,6 +61,11 @@ export function NotificationStack({ onAction }: NotificationStackProps) {
   const [assertiveText, setAssertiveText] = useState('');
   const announcedIds = useRef<Set<string>>(new Set());
 
+  // Cebab-mbu: the clear-frames live in a ref, and are cancelled on UNMOUNT
+  // only — see the effect below and the one after it. Each callback removes its
+  // own id, so this does not grow across a long session.
+  const clearFrames = useRef<Set<number>>(new Set());
+
   useEffect(() => {
     const idsThisRender = new Set<string>();
     let polite: string | null = null;
@@ -91,20 +96,48 @@ export function NotificationStack({ onAction }: NotificationStackProps) {
     // region — and because the loop above had already added its id to
     // `announcedIds`, it was marked announced and no later render retried it.
     // The urgent tier was the one silently dropped, which is backwards.
-    const frames: number[] = [];
+    //
+    // Cebab-mbu: the frames are NOT cancelled when this effect re-runs. Its
+    // deps change on every push, and the cleanup that used to sit here fired
+    // then — so under any push stream faster than one animation frame the
+    // clear never happened. The mirror kept the previous string, and the next
+    // notification rendering to the SAME text was a no-op `setState`: React
+    // bailed out, the DOM did not change, and a screen reader announced
+    // nothing. Two distinct notifications with identical text is the exact case
+    // the rAF above exists for, so the cleanup was cancelling the mechanism it
+    // sat beside.
+    //
+    // Same disease as `NotificationsContext.tsx:55-71` one layer down: a
+    // cleanup that is correct for UNMOUNT, running on every re-render. Unmount
+    // is handled by the `[]`-deps effect below; letting a stale frame clear a
+    // string that is about to be overwritten is harmless, because the write
+    // above happens in the same commit as the next announcement.
+    const schedule = (clear: () => void) => {
+      const id = requestAnimationFrame(() => {
+        clearFrames.current.delete(id);
+        clear();
+      });
+      clearFrames.current.add(id);
+    };
     if (polite !== null) {
       setPoliteText(polite);
-      frames.push(requestAnimationFrame(() => setPoliteText('')));
+      schedule(() => setPoliteText(''));
     }
     if (assertive !== null) {
       setAssertiveText(assertive);
-      frames.push(requestAnimationFrame(() => setAssertiveText('')));
+      schedule(() => setAssertiveText(''));
     }
-    if (frames.length === 0) return;
-    return () => {
-      for (const frame of frames) cancelAnimationFrame(frame);
-    };
   }, [state.visible, state.queued]);
+
+  // Unmount only. `[]` deps are load-bearing: this is the cleanup the effect
+  // above used to carry, and moving it here is the whole of Cebab-mbu.
+  useEffect(() => {
+    const pending = clearFrames.current;
+    return () => {
+      for (const frame of pending) cancelAnimationFrame(frame);
+      pending.clear();
+    };
+  }, []);
 
   return (
     <div

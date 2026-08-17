@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest';
-import { initialState, isSessionPending, reduce, type AppState } from './store';
+import {
+  initialState,
+  isSessionPending,
+  reduce,
+  sessionSelectionRequests,
+  type AppState,
+} from './store';
 
 /**
  * Register W08: a replayed `session_started` must not be mistaken for a live
@@ -186,5 +192,142 @@ describe('store / the replay flag never gets stuck', () => {
     expect(pendingId(s)).toBeUndefined();
     expect(s.sessionsByProject[PID]?.[pending]).toBeUndefined();
     expect(userTexts(s, PID, 'new-1')).toEqual([DRAFT]);
+  });
+});
+
+/**
+ * Cebab-f9x: a replayed `session_started` must not stamp the session list with
+ * `Date.now()`.
+ *
+ * Same root cause as W08 above, at the one site in that reducer case which was
+ * never wired to `isReplay`. The sidebar orders and labels by `createdAt` /
+ * `lastEventAt` and shows `totalCostUsd`, so a session that ran days ago was
+ * synthesized as brand new and free, sorted to the top.
+ *
+ * The reachable path is the RunsBadge jump: it switches project and selects a
+ * session in one action, so a replay can arrive for a project whose list was
+ * never loaded. `session_history_start` creates the `sessionsByProject` bucket
+ * but deliberately does not touch `knownSessions`, which is what leaves this
+ * branch live during a replay — asserted below rather than argued, because it
+ * is the premise the whole fix rests on.
+ */
+describe('knownSessions is not stamped from a replay (Cebab-f9x)', () => {
+  const summaries = (s: AppState, projectId = PID) => s.knownSessions[projectId] ?? [];
+
+  test('the premise: session_history_start does not populate knownSessions', () => {
+    // If this ever stops being true the guard below becomes unreachable and
+    // its test would pass while measuring nothing.
+    const s = reduce(open(), historyStart('old-1'));
+    expect(s.sessionsByProject[PID]?.['old-1']).toBeDefined();
+    expect(s.knownSessions[PID]).toBeUndefined();
+  });
+
+  test('a replayed session_started adds no synthesized summary', () => {
+    let s = open();
+    s = reduce(s, historyStart('old-1'));
+    s = reduce(s, started('old-1'));
+    expect(summaries(s)).toEqual([]);
+  });
+
+  test('CONTROL: a live session_started still adds one', () => {
+    // Without this, "never synthesize" passes the case above and the sidebar
+    // silently stops gaining sessions — a worse bug than the one being fixed.
+    let s = open();
+    s = reduce(s, started('live-1'));
+    expect(summaries(s).map((x) => x.id)).toEqual(['live-1']);
+  });
+
+  test('CONTROL: the guard is the replay flag, not the message', () => {
+    // The same `started('old-1')` that was ignored during the replay is
+    // honoured once `session_history_end` retires the flag. Pins that the fix
+    // keys on replay state rather than on anything about the session id.
+    let s = open();
+    s = reduce(s, historyStart('old-1'));
+    s = reduce(s, historyEnd('old-1'));
+    s = reduce(s, started('old-1'));
+    expect(summaries(s).map((x) => x.id)).toEqual(['old-1']);
+  });
+
+  test('a real summary already in the list is left alone by a replay', () => {
+    // The pre-existing `alreadyKnown` short-circuit, kept honest: a replay must
+    // neither invent a row nor overwrite the timestamps of a real one.
+    const real = {
+      id: 'old-1',
+      title: 'yesterday',
+      createdAt: 111,
+      lastEventAt: 222,
+      totalCostUsd: 0.5,
+    };
+    let s: AppState = { ...open(), knownSessions: { [PID]: [real] } };
+    s = reduce(s, historyStart('old-1'));
+    s = reduce(s, started('old-1'));
+    expect(summaries(s)).toEqual([real]);
+  });
+
+  test('a replay in one project does not shield another project’s live start', () => {
+    // `isReplay` keys on the project, matching the W08 guard above. A replay of
+    // project 1 must not suppress a genuine new session in project 2.
+    let s = open();
+    s = reduce(s, historyStart('old-1'));
+    s = reduce(s, started('live-2', OTHER_PID));
+    expect(summaries(s, OTHER_PID).map((x) => x.id)).toEqual(['live-2']);
+  });
+});
+
+/**
+ * Cebab-f9x, the other half. Skipping the synthesis is only correct if the real
+ * session list gets asked for; otherwise the fix trades a false sidebar row for
+ * a missing one.
+ *
+ * `App.tsx` has no test harness, so the decision lives in `store.ts` and this
+ * pins all four combinations. The fourth is the point: a hydrated conversation
+ * in a project whose list was never loaded still needs `open_project`, which is
+ * exactly what a `if (!alreadyHydrated) { … }` shape gets wrong.
+ */
+describe('sessionSelectionRequests (Cebab-f9x)', () => {
+  const withList = (s: AppState, projectId = PID): AppState => ({
+    ...s,
+    knownSessions: { ...s.knownSessions, [projectId]: [] },
+  });
+
+  test('nothing loaded: asks for both the conversation and the list', () => {
+    expect(sessionSelectionRequests(open(), PID, 'sess-1')).toEqual([
+      { type: 'load_session', projectId: PID, sessionId: 'sess-1' },
+      { type: 'open_project', projectId: PID },
+    ]);
+  });
+
+  test('list loaded, conversation not: asks only for the conversation', () => {
+    expect(sessionSelectionRequests(withList(open()), PID, 'sess-1')).toEqual([
+      { type: 'load_session', projectId: PID, sessionId: 'sess-1' },
+    ]);
+  });
+
+  test('both loaded: asks for nothing', () => {
+    let s = withList(open());
+    s = reduce(s, started('sess-1'));
+    expect(sessionSelectionRequests(s, PID, 'sess-1')).toEqual([]);
+  });
+
+  test('conversation loaded, list absent: still asks for the list', () => {
+    // THE CASE THAT MATTERS. Hanging the list request off the hydration check
+    // — the obvious shape — returns [] here, and the sidebar stays empty for a
+    // project the operator has been switched into.
+    let s = open();
+    s = reduce(s, historyStart('sess-1'));
+    expect(s.sessionsByProject[PID]?.['sess-1']).toBeDefined();
+    expect(s.knownSessions[PID]).toBeUndefined();
+    expect(sessionSelectionRequests(s, PID, 'sess-1')).toEqual([
+      { type: 'open_project', projectId: PID },
+    ]);
+  });
+
+  test('an empty list is loaded, not absent', () => {
+    // `[]` is a real answer from the server ("this project has no sessions").
+    // A truthiness check would re-request it forever.
+    expect(sessionSelectionRequests(withList(open()), PID, 'sess-1')).not.toContainEqual({
+      type: 'open_project',
+      projectId: PID,
+    });
   });
 });
