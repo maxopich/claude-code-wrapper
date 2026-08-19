@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ModelCatalogueEntry, Project, SessionSummary } from '@cebab/shared/protocol';
+import type {
+  ModelCatalogueEntry,
+  Project,
+  SessionPermissionMode,
+  SessionSummary,
+} from '@cebab/shared/protocol';
 import { timeAgoCompact } from '../format';
 import { ClaudeMark } from './ClaudeMark';
 import { MockBadge } from './MockBadge';
@@ -28,6 +33,8 @@ export function ProjectList(props: {
   modelRefreshingFor: number | null;
   onSetProjectModel: (projectId: number, model: string | null) => void;
   onRefreshModelCatalogue: (projectId: number) => void;
+  /** Cebab-ws0.4: the per-project starting permission mode, same threading. */
+  onSetProjectStartPermissionMode: (projectId: number, mode: SessionPermissionMode | null) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
   /**
    * Cluster I C2 UI: trigger a per-session JSONL download. Returns a
@@ -278,6 +285,12 @@ export function ProjectList(props: {
             refreshing: props.modelRefreshingFor === preflightForProject,
             onChange: (m) => props.onSetProjectModel(preflightForProject, m),
             onRefresh: () => props.onRefreshModelCatalogue(preflightForProject),
+          }}
+          startMode={{
+            value:
+              props.projects.find((p) => p.id === preflightForProject)?.startPermissionMode ?? null,
+            trusted: props.projects.find((p) => p.id === preflightForProject)?.trusted ?? false,
+            onChange: (m) => props.onSetProjectStartPermissionMode(preflightForProject, m),
           }}
         />
       )}

@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react';
 import { useModalSurface } from '../../useModalSurface';
-import type { ModelCatalogueEntry } from '@cebab/shared/protocol';
+import type { ModelCatalogueEntry, SessionPermissionMode } from '@cebab/shared/protocol';
 import { AuthorityPanel } from './AuthorityPanel';
 import { ModelPicker } from '../ModelPicker';
+import { PermissionModePicker } from '../PermissionModePicker';
 
 // Cluster B Phase 6e (UI-B3 / spec §6.2): "review authority before you
 // start" modal.
@@ -48,9 +49,22 @@ export type PreflightModelSlot = {
   capturedAt: number | null;
 };
 
+/**
+ * Cebab-ws0.4: the starting-permission-mode slot. Same optionality and the
+ * same single-project restriction as the model slot above — and for a sharper
+ * reason here, since the options' MEANING depends on the project's Trust flag,
+ * so one control genuinely cannot speak for several projects at once.
+ */
+export type PreflightStartModeSlot = {
+  value: SessionPermissionMode | null;
+  trusted: boolean;
+  onChange: (mode: SessionPermissionMode | null) => void;
+};
+
 export type AuthorityPreflightModalProps = {
   projectIds: number[];
   model?: PreflightModelSlot;
+  startMode?: PreflightStartModeSlot;
   /** Optional: hook fired when the operator clicks [Start session]. When
    *  omitted, the [Start session] button hides — modal is review-only. */
   onStart?: () => void;
@@ -58,7 +72,7 @@ export type AuthorityPreflightModalProps = {
 };
 
 export function AuthorityPreflightModal(props: AuthorityPreflightModalProps) {
-  const { projectIds, onStart, onClose, model } = props;
+  const { projectIds, onStart, onClose, model, startMode } = props;
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
   const startBtnRef = useRef<HTMLButtonElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -121,6 +135,16 @@ export function AuthorityPreflightModal(props: AuthorityPreflightModalProps) {
               onRefresh={model.onRefresh}
               refreshing={model.refreshing}
               capturedAt={model.capturedAt}
+            />
+          </section>
+        )}
+        {startMode && !isAggregate && (
+          <section className="authority-preflight-model" data-testid="preflight-start-mode">
+            <h4 className="authority-preflight-model-title">Starting permission mode</h4>
+            <PermissionModePicker
+              value={startMode.value}
+              trusted={startMode.trusted}
+              onChange={startMode.onChange}
             />
           </section>
         )}

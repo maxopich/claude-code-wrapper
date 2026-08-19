@@ -71,6 +71,18 @@ type Table = {
 };
 
 const permissionMode = { kind: 'string', is: isSessionPermissionMode } as const;
+/**
+ * Cebab-ws0.4: the same union, plus `null` for "clear the choice".
+ *
+ * Composed from the shared guard rather than restating its members — the rule
+ * this file's header sets out. `null` is the only addition, and it has to be
+ * here: a spec of plain `permissionMode` would reject the clear, leaving the
+ * operator able to set a starting mode and never able to unset one.
+ */
+const permissionModeOrNull = {
+  kind: 'string|null',
+  is: (v: unknown) => v === null || isSessionPermissionMode(v),
+} as const;
 const controlReason = { kind: 'string', is: isControlReasonCode } as const;
 const stopReason = { kind: 'string', is: isStopReasonCode } as const;
 const expiryAction = { kind: 'string', is: isPauseExpiryAction } as const;
@@ -95,6 +107,7 @@ const SHAPES: Table = {
   },
   set_trusted: { projectId: 'number', trusted: 'boolean' },
   set_project_model: { projectId: 'number', model: 'string|null' },
+  set_project_start_permission_mode: { projectId: 'number', mode: permissionModeOrNull },
   get_model_catalogue: { projectId: 'number?', refresh: 'boolean?' },
   load_session: { projectId: 'number', sessionId: 'string' },
   get_settings: {},

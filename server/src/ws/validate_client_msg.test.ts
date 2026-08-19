@@ -35,6 +35,7 @@ const SAMPLES: ClientMsg[] = [
   { type: 'permission_decision', sessionId: 's', requestId: 'r', decision: 'allow' },
   { type: 'set_trusted', projectId: 1, trusted: false },
   { type: 'set_project_model', projectId: 1, model: null },
+  { type: 'set_project_start_permission_mode', projectId: 1, mode: null },
   { type: 'get_model_catalogue' },
   { type: 'load_session', projectId: 1, sessionId: 's' },
   { type: 'get_settings' },
@@ -205,6 +206,34 @@ describe('rejects malformed frames', () => {
     ['an unknown type', { type: 'drop_database' }],
   ])('%s', (_label, frame) => {
     expect(validateClientMsg(frame).ok).toBe(false);
+  });
+
+  test('a starting permission mode must be one of the two, or null', () => {
+    // Both directions. Too NARROW (plain `permissionMode`, rejecting null)
+    // would leave the operator able to set a starting mode and never unset
+    // one; too WIDE (plain `'string|null'`, no guard) would let
+    // `bypassPermissions` — a real SDK mode Cebab deliberately never exposes —
+    // through the wire and into a spawn's seed.
+    const ok = (mode: unknown) =>
+      overTheWire({ type: 'set_project_start_permission_mode', projectId: 1, mode }).ok;
+    expect(ok(null)).toBe(true);
+    expect(ok('default')).toBe(true);
+    expect(ok('acceptEdits')).toBe(true);
+
+    expect(ok('bypassPermissions')).toBe(false);
+    expect(ok('plan')).toBe(false);
+    expect(ok('dontAsk')).toBe(false);
+    expect(ok('')).toBe(false);
+    expect(ok(1)).toBe(false);
+
+    const bad = overTheWire({
+      type: 'set_project_start_permission_mode',
+      projectId: 1,
+      mode: 'plan',
+    });
+    expect(bad.ok ? '' : bad.reason).toContain('set_project_start_permission_mode.mode');
+    // A missing projectId must not write to project `undefined`.
+    expect(overTheWire({ type: 'set_project_start_permission_mode', mode: null }).ok).toBe(false);
   });
 
   test('a model choice must be a string or null, and null must survive', () => {

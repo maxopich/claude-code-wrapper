@@ -40,6 +40,40 @@ function pickRunnerBlock(): string {
   return end === -1 ? '' : src.slice(start, end);
 }
 
+describe('[security] single-agent seed reads the project starting mode', () => {
+  // Cebab-ws0.4, same reasoning as the model scan below: `seedPermissionMode`
+  // is exercised directly by its own unit tests, but nothing proves
+  // `runOneTurn` PASSES the project's column to it. Drop that third argument
+  // and every seed test stays green while the setting silently stops applying
+  // to any real session.
+  function seedCall(): string {
+    const src = strippedLines(fs.readFileSync(SERVER_TS, 'utf8')).join('\n');
+    // `= seedPermissionMode(`, not `seedPermissionMode(` — the bare form
+    // matches the function DEFINITION first, and scanning that would assert
+    // the signature rather than the call. The control below is what caught it.
+    const start = src.indexOf('= seedPermissionMode(');
+    if (start === -1) return '';
+    const end = src.indexOf(');', start);
+    return end === -1 ? '' : src.slice(start, end);
+  }
+
+  test('control: the seed call site is found and is the real one', () => {
+    const call = seedCall();
+    expect(call.length).toBeGreaterThan(40);
+    expect(call).toContain('msg.sessionId');
+    expect(call).toContain('trusted');
+  });
+
+  test('it passes the project starting mode through the read-side guard', () => {
+    // `resolveStartPermissionMode(...)`, not `project.start_permission_mode`
+    // raw — the column is unconstrained TEXT, and the guard is what stops a
+    // hand-edited `bypassPermissions` reaching the spawn.
+    const call = seedCall();
+    expect(call).toContain('resolveStartPermissionMode(');
+    expect(call).toContain('project.start_permission_mode');
+  });
+});
+
 describe('[security] single-agent spawn threads the project model', () => {
   test('control: the pickRunner call is found and is the real one', () => {
     const block = pickRunnerBlock();

@@ -49,3 +49,50 @@ describe('seedPermissionMode', () => {
     expect(seedPermissionMode('no-such-session', false)).toBe('default');
   });
 });
+
+describe('seedPermissionMode — the project starting mode (Cebab-ws0.4)', () => {
+  withTempDataDir('seed-project-start-mode');
+
+  test('a fresh session uses the project default over the trust-derived value', () => {
+    // Both directions, because the point of the setting is that it overrides
+    // Trust either way — an untrusted project can start auto-allowing edits,
+    // and a trusted one can start asking.
+    expect(seedPermissionMode(undefined, false, 'acceptEdits')).toBe('acceptEdits');
+    expect(seedPermissionMode(undefined, true, 'default')).toBe('default');
+  });
+
+  test('no project default falls through to the trust-derived value, unchanged', () => {
+    // The "nothing changes for a project nobody configured" guarantee.
+    expect(seedPermissionMode(undefined, true, undefined)).toBe('acceptEdits');
+    expect(seedPermissionMode(undefined, false, undefined)).toBe('default');
+  });
+
+  test('a RESUMED session ignores the project default entirely', () => {
+    // The row that matters most, and the one an "obviously better" ordering
+    // gets wrong: promoting the project default above the stored mode would
+    // silently re-point every in-progress conversation the operator had
+    // already steered, on their next message, with nothing saying so.
+    const project = upsertProject('start-mode-proj', '/tmp/start-mode-proj');
+    createSession('resumed-1', project.id);
+    setSessionPermissionMode('resumed-1', 'default');
+    expect(seedPermissionMode('resumed-1', true, 'acceptEdits')).toBe('default');
+
+    createSession('resumed-2', project.id);
+    setSessionPermissionMode('resumed-2', 'acceptEdits');
+    expect(seedPermissionMode('resumed-2', false, 'default')).toBe('acceptEdits');
+  });
+
+  test('a resumed session with NO stored mode does take the project default', () => {
+    // The boundary of the rule above: "resumed" is not what wins — a stored
+    // decision is. A session row that never recorded one has nothing to
+    // protect, so the project default applies.
+    const project = upsertProject('start-mode-proj-2', '/tmp/start-mode-proj-2');
+    createSession('resumed-3', project.id);
+    expect(seedPermissionMode('resumed-3', false, 'acceptEdits')).toBe('acceptEdits');
+  });
+
+  test('the argument is optional — existing two-argument callers are unaffected', () => {
+    expect(seedPermissionMode(undefined, true)).toBe('acceptEdits');
+    expect(seedPermissionMode(undefined, false)).toBe('default');
+  });
+});

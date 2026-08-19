@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { isSessionPermissionMode, type SessionPermissionMode } from '@cebab/shared/protocol';
 import { getDb } from '../db.js';
 
 export type ProjectRow = {
@@ -30,6 +31,17 @@ export type ProjectRow = {
    * rather than substituting a default string.
    */
   model: string | null;
+  /**
+   * Cebab-ws0.4: the permission mode this project's NEW sessions start in.
+   * NULL = no choice, so the mode is derived from Trust exactly as it was
+   * before this column existed.
+   *
+   * Typed `string | null` rather than `SessionPermissionMode | null` on
+   * purpose: this is the raw column, and the DB has no CHECK constraint. The
+   * narrowing happens at the read site (`resolveStartPermissionMode`), so a
+   * hand-edited row is filtered rather than trusted into a spawn.
+   */
+  start_permission_mode: string | null;
 };
 
 /**
@@ -187,6 +199,42 @@ export function resolveModel(projectModel: string | null | undefined): string | 
  */
 export function setProjectModel(id: number, model: string | null): void {
   getDb().prepare('UPDATE projects SET model = ? WHERE id = ?').run(model, id);
+}
+
+/**
+ * Cebab-ws0.4. `null` clears the choice, restoring "derive from Trust".
+ *
+ * Callers are expected to have validated; this deliberately does not re-check,
+ * because the guard that matters is on the READ (`resolveStartPermissionMode`).
+ * A write-side check would protect the DB from Cebab, which is not the threat —
+ * the threat is a value in the DB reaching a spawn unfiltered.
+ */
+export function setProjectStartPermissionMode(
+  id: number,
+  mode: SessionPermissionMode | null,
+): void {
+  getDb().prepare('UPDATE projects SET start_permission_mode = ? WHERE id = ?').run(mode, id);
+}
+
+/**
+ * The starting mode a project asks for, or `undefined` for "derive from Trust".
+ *
+ * `undefined` — not a placeholder string — is what lets `seedPermissionMode`
+ * fall through to its existing trust-derived branch untouched, which is the
+ * "nothing changes for a project nobody configured" guarantee.
+ *
+ * FILTERS RATHER THAN TRUSTS. `projects.start_permission_mode` is plain TEXT
+ * with no CHECK constraint (matching 004's column), so the value could be
+ * anything a hand-edited database contains. `isSessionPermissionMode` is what
+ * stops `'bypassPermissions'` — a real SDK mode Cebab deliberately never
+ * exposes — from reaching a spawn through this path. An unrecognised value is
+ * treated as no choice, not as an error: refusing to start a session because a
+ * preference column is malformed would turn a cosmetic problem into an outage.
+ */
+export function resolveStartPermissionMode(
+  raw: string | null | undefined,
+): SessionPermissionMode | undefined {
+  return isSessionPermissionMode(raw) ? raw : undefined;
 }
 
 export function setProjectTrusted(id: number, trusted: boolean): void {
