@@ -7,14 +7,22 @@
  * remains on disk is just the artifact/transcript tree and the
  * Cebab-generated orchestrator workspace.
  *
- *   1. **Per-session state** under `<workspaceRoot>/.cebab-session-<id>/`,
- *      computed via `computeSessionPaths`:
+ *   1. **Per-session state** under `<dataDir>/sessions/<id>/`, computed via
+ *      `computeSessionPaths`:
  *      ```
- *      <workspaceRoot>/.cebab-session-<sessionId>/
+ *      <dataDir>/sessions/<sessionId>/
  *        orchestrator/                              # empty Cebab-owned cwd
  *        iterations/NNN/<agent>/{prompt.md, reply.md, transcript.log,
  *                                final.md}
  *      ```
+ *      This used to live at `<workspaceRoot>/.cebab-session-<id>/`, dot-prefixed
+ *      so Finder hid it and `syncWorkspaceProjects` skipped it. Both were
+ *      mitigations for squatting in a directory that belongs to the operator,
+ *      and neither stopped the folders showing up in `ls -a`, in repo-wide
+ *      tooling, or in every backup of their projects tree (Cebab-ws0.8). They
+ *      are Cebab's state, so they now live in Cebab's data dir, where the same
+ *      0700 + gitignore policy that covers the database and the logs covers
+ *      them too.
  *
  *   2. **Legacy global iteration root** under `~/.cebab/bus/` — only the
  *      `iterations/` subtree (`busIterationDir`) and the legacy
@@ -105,19 +113,34 @@ export type SessionPaths = {
 };
 
 /**
- * Compute the SessionPaths bundle for a given session id + workspace root.
- * The workspace root is the operator-configured directory under which
- * their agent projects (and now their multi-agent session folders) live.
+ * Root for every session folder Cebab creates: `<dataDir>/sessions/`.
  *
- * Naming: dot-prefixed (`.cebab-session-<id>`) so it's hidden from Finder
- * by default and skipped by `syncWorkspaceProjects` when scanning for
- * project subdirectories.
+ * Reads `config.dataDir` on EVERY call and never captures it at module init —
+ * the property is deliberately mutable so per-test isolation can redirect it
+ * (`config.ts` says so), and a captured value would write to whatever directory
+ * happened to be configured at import time.
  *
- * No filesystem I/O — pure path math. Callers create the directories
- * with `mkdirSync({ recursive: true })` as needed.
+ * Not to be confused with `orchestratorWorkspaceDir()` = `<dataDir>/orchestrator`
+ * below, which is the legacy SHARED scratch dir. The per-session
+ * `<folder>/orchestrator` is a different thing that happens to share a name.
  */
-export function computeSessionPaths(sessionId: string, workspaceRoot: string): SessionPaths {
-  const folder = path.join(workspaceRoot, `.cebab-session-${sessionId}`);
+export function sessionsRoot(): string {
+  return path.join(config.dataDir, 'sessions');
+}
+
+/**
+ * Rebuild a SessionPaths from a `session_folder` absolute path.
+ *
+ * The DB row's `session_folder` is the source of truth on resume — NOT a
+ * recomputed root, which could have moved since the session started. That is
+ * what makes ws0.8's cutover safe: rows written before the move keep resolving
+ * to the folder their artifacts are actually in, forever.
+ *
+ * Also the single definition of the sub-layout: `computeSessionPaths` composes
+ * with this rather than repeating it, so the writer and the resume-time reader
+ * cannot drift apart.
+ */
+export function sessionPathsFromFolder(folder: string): SessionPaths {
   return {
     folder,
     orchestratorWorkspace: path.join(folder, 'orchestrator'),
@@ -129,20 +152,27 @@ export function computeSessionPaths(sessionId: string, workspaceRoot: string): S
 }
 
 /**
- * Rebuild a SessionPaths from a previously-persisted `session_folder`
- * absolute path. Used by resume — the DB row's `session_folder` is the
- * source of truth, not a re-computed workspaceRoot (which could have
- * changed since the session started).
+ * Compute the SessionPaths bundle for a session id.
+ *
+ * Takes no workspace root — the location is Cebab's data dir, and it stopped
+ * being any of the workspace's business in Cebab-ws0.8. The parameter was
+ * deleted rather than kept-and-ignored on purpose: ~20 call sites would have
+ * gone on passing a workspace root, and an argument that no longer influences
+ * the result is a claim in executable position that it does. Deleting it also
+ * made the compiler enumerate every call site instead of leaving that to grep.
+ *
+ * EXISTING FOLDERS ARE NOT MIGRATED, DELIBERATELY. `<folder>/orchestrator` is a
+ * live agent cwd (`orchestrator.ts` registers it as one, and `runner.ts` passes
+ * `resume:` alongside it), and the CLI keys its transcript store on the ABSOLUTE
+ * cwd. Relocating an existing folder would orphan that lineage — the session
+ * would survive and lose its history. Old rows keep their stored absolute
+ * `session_folder` and resolve through `sessionPathsFromFolder` forever.
+ *
+ * No filesystem I/O — pure path math. Callers create the directories with
+ * `secureMkdir` as needed.
  */
-export function sessionPathsFromFolder(folder: string): SessionPaths {
-  return {
-    folder,
-    orchestratorWorkspace: path.join(folder, 'orchestrator'),
-    iterationDir: (iterationId: string, agentName?: string) =>
-      agentName
-        ? path.join(folder, 'iterations', iterationId, agentName)
-        : path.join(folder, 'iterations', iterationId),
-  };
+export function computeSessionPaths(sessionId: string): SessionPaths {
+  return sessionPathsFromFolder(path.join(sessionsRoot(), sessionId));
 }
 
 /**

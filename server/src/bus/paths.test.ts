@@ -8,10 +8,12 @@ import {
   isValidAgentName,
   isValidBusRecipient,
   sessionPathsFromFolder,
+  sessionsRoot,
 } from './paths.js';
 
-// The SessionPaths helpers are pure path math and don't read config.dataDir;
-// the tmp override below just keeps every test on a stable isolated root.
+// Since Cebab-ws0.8 `computeSessionPaths` DOES read `config.dataDir` — it is
+// the root it joins under — so the tmp override below is load-bearing here,
+// not just tidiness. `sessionPathsFromFolder` stays pure.
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -28,17 +30,39 @@ afterEach(() => {
 });
 
 describe('computeSessionPaths', () => {
-  test('folder is `<workspace>/.cebab-session-<id>` (dot-prefixed hidden)', () => {
-    const workspace = '/Users/test/agents';
-    const paths = computeSessionPaths('abc-123', workspace);
-    // Expected built with path.join so the separator matches the host OS
-    // (computeSessionPaths uses path.join — backslashes on Windows CI).
-    expect(paths.folder).toBe(path.join(workspace, '.cebab-session-abc-123'));
+  // A1. Cebab-ws0.8: the folder is Cebab's, so it lives in Cebab's data dir.
+  test('folder is `<dataDir>/sessions/<id>`', () => {
+    const paths = computeSessionPaths('abc-123');
+    // Built with path.join so the separator matches the host OS — backslashes
+    // on the Windows CI leg.
+    expect(paths.folder).toBe(path.join(config.dataDir, 'sessions', 'abc-123'));
+    expect(sessionsRoot()).toBe(path.join(config.dataDir, 'sessions'));
+  });
+
+  // A1-neg. The assertion above is also satisfied by `<workspace>/sessions/<id>`
+  // whenever a test happens to point both roots at the same tmp tree. THIS is
+  // the one that says "not in the operator's workspace", which is the whole
+  // point of the bead.
+  test('the folder is NOT under the workspace root', () => {
+    const workspace = path.join(tmpRoot, 'agents');
+    const folder = computeSessionPaths('abc-123').folder;
+    const rel = path.relative(workspace, folder);
+    // Escapes the workspace: either absolute, or climbing out of it.
+    expect(rel === '' || (!path.isAbsolute(rel) && !rel.startsWith('..'))).toBe(false);
+  });
+
+  test('reads config.dataDir at CALL time, not at import time', () => {
+    // The property is deliberately mutable for test isolation. A module-init
+    // capture would keep writing to whatever dir was configured on import —
+    // and would pass every other test in this file.
+    const before = computeSessionPaths('s1').folder;
+    config.dataDir = path.join(tmpRoot, 'moved');
+    expect(computeSessionPaths('s1').folder).not.toBe(before);
   });
 
   test('all sub-paths nest correctly under folder', () => {
-    const paths = computeSessionPaths('s1', '/w');
-    const base = path.join('/w', '.cebab-session-s1');
+    const paths = computeSessionPaths('s1');
+    const base = path.join(config.dataDir, 'sessions', 's1');
     expect(paths.orchestratorWorkspace).toBe(path.join(base, 'orchestrator'));
     expect(paths.iterationDir('001')).toBe(path.join(base, 'iterations', '001'));
     expect(paths.iterationDir('001', 'reviewer')).toBe(
@@ -47,28 +71,50 @@ describe('computeSessionPaths', () => {
   });
 
   test('does no filesystem IO — purely path math', () => {
-    // computeSessionPaths should be safe to call with a non-existent
-    // workspace; the returned paths are just strings until something
-    // actually writes through them. Confirms no implicit mkdir.
-    const paths = computeSessionPaths('s1', '/definitely-does-not-exist');
+    // The returned paths are just strings until something writes through them.
+    // Confirms no implicit mkdir.
+    config.dataDir = path.join(tmpRoot, 'definitely-does-not-exist');
+    const paths = computeSessionPaths('s1');
     expect(fs.existsSync(paths.folder)).toBe(false);
   });
 });
 
 describe('sessionPathsFromFolder', () => {
-  test('rebuilds the same paths object given just the folder', () => {
-    const workspace = '/Users/test/agents';
-    // Build the folder via path.join too, so the inverse-relationship
-    // assertion holds on Windows (sessionPathsFromFolder stores `folder`
-    // verbatim; computeSessionPaths path.joins it).
-    const folder = path.join(workspace, '.cebab-session-xyz');
-    const fromFolder = sessionPathsFromFolder(folder);
-    const fromCompute = computeSessionPaths('xyz', workspace);
-    // The two should produce identical paths — sessionPathsFromFolder is
-    // the resume-time inverse of computeSessionPaths.
-    expect(fromFolder.folder).toBe(fromCompute.folder);
-    expect(fromFolder.orchestratorWorkspace).toBe(fromCompute.orchestratorWorkspace);
-    expect(fromFolder.iterationDir('1', 'r')).toBe(fromCompute.iterationDir('1', 'r'));
+  /**
+   * A2. This replaces the old "the two functions agree" test, which asserted
+   * `sessionPathsFromFolder(f)` equals `computeSessionPaths(id)`. Cebab-ws0.8
+   * composes the second from the first, so that assertion can no longer fail —
+   * it would be a gate that passes because it measures nothing.
+   *
+   * The invariant's weight moves HERE: a folder persisted before the move must
+   * keep resolving to where its artifacts actually are, with `config.dataDir`
+   * pointing somewhere else entirely. That is what makes the cutover safe, and
+   * it is what reddens if anyone ever "simplifies" this function to recompute
+   * from the data dir — the mistake that would orphan every pre-move session.
+   */
+  test('a legacy workspace folder resolves to its ORIGINAL location', () => {
+    const legacy = path.join(tmpRoot, 'agents', '.cebab-session-xyz');
+    config.dataDir = path.join(tmpRoot, 'somewhere-else');
+
+    const paths = sessionPathsFromFolder(legacy);
+    expect(paths.folder).toBe(legacy);
+    expect(paths.orchestratorWorkspace).toBe(path.join(legacy, 'orchestrator'));
+    expect(paths.iterationDir('1', 'r')).toBe(path.join(legacy, 'iterations', '1', 'r'));
+
+    // And nothing it returns has been dragged under the current data dir.
+    for (const p of [paths.folder, paths.orchestratorWorkspace, paths.iterationDir('1')]) {
+      expect(p.startsWith(config.dataDir)).toBe(false);
+    }
+  });
+
+  test('is the layout definition computeSessionPaths composes with', () => {
+    // Not a tautology dressed as an invariant: this pins that a NEW session's
+    // sub-layout is byte-identical to what resume rebuilds for it, which is the
+    // agreement R-B depends on.
+    const fromCompute = computeSessionPaths('xyz');
+    const rebuilt = sessionPathsFromFolder(fromCompute.folder);
+    expect(rebuilt.orchestratorWorkspace).toBe(fromCompute.orchestratorWorkspace);
+    expect(rebuilt.iterationDir('1', 'r')).toBe(fromCompute.iterationDir('1', 'r'));
   });
 });
 

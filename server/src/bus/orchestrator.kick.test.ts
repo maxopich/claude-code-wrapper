@@ -58,7 +58,7 @@ function buildRouter(
   const lifecycle = opts.lifecycle ?? 'persistent';
   const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
   const iterationId = '001';
-  const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+  const paths = computeSessionPaths(sessionId);
   createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle);
   const onEvent = vi.fn();
   const onEnded = vi.fn();

@@ -63,7 +63,7 @@ function makeRouter(): {
 } {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-  const paths = computeSessionPaths(SESSION_ID, workspace);
+  const paths = computeSessionPaths(SESSION_ID);
   const captured: Captured = { notifications: [], drops: [] };
   const router = createOrchestratorRouter({
     sessionId: SESSION_ID,

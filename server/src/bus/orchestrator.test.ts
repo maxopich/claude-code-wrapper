@@ -83,7 +83,7 @@ function buildRouter(
   const lifecycle = opts.lifecycle ?? 'persistent';
   const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
   const iterationId = '001';
-  const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+  const paths = computeSessionPaths(sessionId);
   // appendMultiAgentEvent has a foreign-key constraint on multi_agent_sessions;
   // seed the row before any handleEvent / forwardCebabEvent call.
   createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, lifecycle);
@@ -268,7 +268,7 @@ describe('createOrchestratorRouter — hop-budget enforcement', () => {
   function buildBudgetRouter(hopBudget: number, initialHopsCount?: number) {
     const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
     const iterationId = '001';
-    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    const paths = computeSessionPaths(sessionId);
     createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, 'persistent');
     const onEvent = vi.fn();
     const onEnded = vi.fn();
@@ -387,7 +387,7 @@ describe('createOrchestratorRouter — hop-budget enforcement', () => {
   // through the same catch a disk error would take.
   function buildUnpersistableRouter(hopBudget: number) {
     const sessionId = 'orch-session-that-was-never-created';
-    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    const paths = computeSessionPaths(sessionId);
     const onEnded = vi.fn();
     const deliver = vi.fn();
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -494,7 +494,7 @@ describe('createOrchestratorRouter — onWorkerFailed (Item #4)', () => {
   function buildFailRouter() {
     const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
     const iterationId = '001';
-    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    const paths = computeSessionPaths(sessionId);
     createMultiAgentSession(sessionId, 'orchestrator', iterationId, paths.folder, 'persistent');
     const onEvent = vi.fn();
     const onEnded = vi.fn();
@@ -561,7 +561,7 @@ describe('createOrchestratorRouter — onWorkerFailed (Item #4)', () => {
     // budget=2: one hop + one failure + one more hop should still allow
     // the second hop's deliver. A buggy increment would refuse it.
     const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
-    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    const paths = computeSessionPaths(sessionId);
     createMultiAgentSession(sessionId, 'orchestrator', '001', paths.folder, 'persistent');
     const deliver = vi.fn();
     const onEnded = vi.fn();
@@ -597,7 +597,7 @@ describe('createOrchestratorRouter — onWorkerFailed (Item #4)', () => {
 describe('createOrchestratorRouter — onTurnSucceeded ("success clears")', () => {
   function buildRouter() {
     const sessionId = `s-${Math.random().toString(36).slice(2, 10)}`;
-    const paths = computeSessionPaths(sessionId, path.join(tmpRoot, 'workspace'));
+    const paths = computeSessionPaths(sessionId);
     createMultiAgentSession(sessionId, 'orchestrator', '001', paths.folder, 'persistent');
     const onPendingRetry = vi.fn();
     const router = createOrchestratorRouter({

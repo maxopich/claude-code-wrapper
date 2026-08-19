@@ -104,7 +104,7 @@ import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js'
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import { DEFAULT_HOP_BUDGET } from './orchestrator.js';
 import { uninstallBusForProject } from './install.js';
-import { computeSessionPaths, type SessionPaths } from './paths.js';
+import { computeSessionPaths, sessionsRoot, type SessionPaths } from './paths.js';
 import { secureMkdir } from '../data_perms.js';
 import {
   getLiveSession,
@@ -1040,14 +1040,29 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   // this fallback only applies when the caller didn't specify.
   const hopBudget = opts.hopBudget ?? DEFAULT_HOP_BUDGET;
 
-  const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
+  const paths = computeSessionPaths(sessionId);
   // H01: the session folder holds every hop's prompt/reply and the transcript
-  // log, so it is created owner-only. The mode on this one directory is the
-  // whole protection — everything below inherits the traversal gate, so the
-  // per-file writes underneath deliberately stay at the ambient mode.
-  // Existing session folders are NOT retrofitted: they live under the
-  // operator's workspace root, and silently re-permissioning directories in
-  // their tree could break a deliberately shared setup.
+  // log, so it is created owner-only. Everything below inherits the traversal
+  // gate, so the per-file writes underneath deliberately stay at the ambient
+  // mode.
+  //
+  // The "we do not retrofit existing folders" reservation that used to sit here
+  // is gone with ws0.8, and so is its reason: it applied because the folders
+  // lived in the operator's workspace, where silently re-permissioning
+  // directories could break a deliberately shared setup. Under the data dir
+  // there is no such claim to respect — 0700 is the house rule for everything
+  // Cebab owns, and `hardenDataDir` sweeps this tree like any other.
+  //
+  // The parent matters and is easy to leave out: `secureMkdir` on the leaf
+  // chmods only the leaf, so a `sessions/` that already exists loose leaves a
+  // 0700 folder under a 0755 parent — which is not private, because the parent
+  // gates traversal. Recursive mkdir sets the mode only on directories it
+  // actually creates.
+  //
+  // Since Cebab-ws0.8 this whole tree lives under the data dir, so it is also
+  // swept by `hardenDataDir` and covered by the data dir's `.gitignore` — the
+  // same policy as the database and the logs, rather than a special case.
+  secureMkdir(sessionsRoot());
   secureMkdir(paths.folder);
 
   const iterationId = nextIterationId(paths);

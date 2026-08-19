@@ -53,7 +53,7 @@ afterEach(() => {
 function makeRouter() {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-  const paths = computeSessionPaths(SESSION_ID, workspace);
+  const paths = computeSessionPaths(SESSION_ID);
   const onEvent = vi.fn();
   const onEnded = vi.fn();
   const router = createChainRouter({
@@ -250,7 +250,7 @@ describe('[security] a relayed bus message is delivered as inert, fenced data', 
     // The chain router archives each hop as the sender's `reply.md`.
     const coderReplyMd = fs.readFileSync(
       path.join(
-        computeSessionPaths(handle.sessionId, workspace).iterationDir(handle.iterationId, 'coder'),
+        computeSessionPaths(handle.sessionId).iterationDir(handle.iterationId, 'coder'),
         'reply.md',
       ),
       'utf8',

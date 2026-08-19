@@ -69,7 +69,12 @@ import {
   releasePauseForMutation,
   shouldHaltUnrecordedMutation,
 } from './pause_gate.js';
-import { computeSessionPaths, orchestratorWorkspaceDir, type SessionPaths } from './paths.js';
+import {
+  computeSessionPaths,
+  orchestratorWorkspaceDir,
+  sessionsRoot,
+  type SessionPaths,
+} from './paths.js';
 import { secureMkdir } from '../data_perms.js';
 import { installBusForProject, uninstallBusForProject } from './install.js';
 import {
@@ -2040,6 +2045,10 @@ export async function startOrchestratorSession(
   if (opts.workers.length < 1) {
     throw new Error('orchestrator mode requires at least one worker participant');
   }
+  // Precondition on the operator's workspace. Since ws0.8 the session folder
+  // is NOT under it any more, so this no longer guards where Cebab writes — it
+  // guards the participants, whose cwds are their project directories under
+  // this root. A missing workspace means every one of those is missing too.
   if (!fs.existsSync(opts.workspaceRoot)) {
     throw new Error(`workspaceRoot does not exist: ${opts.workspaceRoot}`);
   }
@@ -2048,10 +2057,19 @@ export async function startOrchestratorSession(
   const lifecycle: MultiAgentLifecycle = opts.lifecycle ?? 'persistent';
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...opts.workers.map((w) => w.agentName)];
 
-  const paths = computeSessionPaths(sessionId, opts.workspaceRoot);
-  // H01: owner-only. See the matching comment in `chain.ts` — the mode on this
-  // one directory gates everything written beneath it, and pre-existing
-  // session folders in the operator's workspace are left alone.
+  const paths = computeSessionPaths(sessionId);
+  // H01: owner-only, on the session folder AND on the `sessions/` parent.
+  //
+  // The parent matters and is easy to leave out: `secureMkdir` on the leaf
+  // chmods only the leaf, so a `sessions/` that already exists loose leaves a
+  // 0700 folder under a 0755 parent — which is not private, because the parent
+  // gates traversal. Recursive mkdir sets the mode only on directories it
+  // actually creates.
+  //
+  // Since Cebab-ws0.8 this whole tree lives under the data dir, so it is also
+  // swept by `hardenDataDir` and covered by the data dir's `.gitignore` — the
+  // same policy as the database and the logs, rather than a special case.
+  secureMkdir(sessionsRoot());
   secureMkdir(paths.folder);
   ensureOrchestratorWorkspace(paths.orchestratorWorkspace);
 

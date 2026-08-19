@@ -62,7 +62,7 @@ afterEach(() => {
 function setup() {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-  const paths = computeSessionPaths(SESSION_ID, workspace);
+  const paths = computeSessionPaths(SESSION_ID);
   const onEvent = vi.fn();
   const onEnded = vi.fn();
   const deliver = vi.fn();
@@ -249,7 +249,7 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
   ) {
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     return wireOrchestratorSession({
       sessionId: SESSION_ID,
       iterationId: 'iter-1',
@@ -522,7 +522,7 @@ describe('wireOrchestratorSession — agent_activity liveness wiring', () => {
     };
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     const onActivity = vi.fn();
 
     const { deliver } = wireOrchestratorSession({
@@ -569,7 +569,7 @@ describe('wireOrchestratorSession — agent_activity liveness wiring', () => {
     };
     const workspace = path.join(tmpRoot, 'workspace-cost');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
 
     function costFactory() {
       return (): Runner => {
@@ -642,7 +642,7 @@ describe('wireOrchestratorSession — delegation-only guardrail', () => {
   test('[security] a blocked orchestrator tool attempt denies + audits + notifies', async () => {
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
 
     const captured: Array<{ cwd: string; canUseTool?: Gate }> = [];
     const notifications: NotificationEnvelope[] = [];

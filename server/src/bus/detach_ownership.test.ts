@@ -50,7 +50,7 @@ afterEach(() => {
 function paths() {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-  const p = computeSessionPaths(SESSION_ID, workspace);
+  const p = computeSessionPaths(SESSION_ID);
   fs.mkdirSync(p.iterationDir('iter-1'), { recursive: true });
   return p;
 }
