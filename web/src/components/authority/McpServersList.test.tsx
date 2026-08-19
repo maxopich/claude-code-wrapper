@@ -48,12 +48,41 @@ function mk(over: Partial<McpServerView> = {}): McpServerView {
 }
 
 describe('McpServersList — rendering', () => {
-  test('empty state shows the explicit copy', () => {
+  // REWRITTEN, not deleted (Cebab-ys9). This case used to assert the string
+  // 'No MCP servers declared' — which made it a test DEFENDING the defect:
+  // the list renders empty for two unrelated reasons and that sentence is only
+  // true for one of them. On an untrusted project the scans never open
+  // `.mcp.json`, so a project that declares a server got told it had none, in
+  // precisely the situation where the operator was trying to find out why its
+  // tools were missing. Both directions are pinned below so neither branch can
+  // drift back into asserting the other's meaning.
+  test('empty because the scans were not allowed to look says so, and points at Trust', () => {
+    act(() => {
+      root.render(<McpServersList servers={[]} projectScopeRead={false} />);
+    });
+    expect(container.querySelector('.mcp-servers-empty')).not.toBeNull();
+    expect(container.textContent).toContain('.mcp.json');
+    expect(container.textContent).toContain('Trust');
+    // The claim it must NOT make: that the project has none.
+    expect(container.textContent).not.toContain('No MCP servers');
+  });
+
+  test('empty after actually reading the declarations may say none were found', () => {
+    act(() => {
+      root.render(<McpServersList servers={[]} projectScopeRead />);
+    });
+    expect(container.querySelector('.mcp-servers-empty')).not.toBeNull();
+    expect(container.textContent).toContain('No MCP servers found');
+    // And must NOT send the operator to a Trust toggle that would change
+    // nothing — the files were already read.
+    expect(container.textContent).not.toContain('Turn Trust on');
+  });
+
+  test('defaults to the read interpretation, so existing callers are unchanged', () => {
     act(() => {
       root.render(<McpServersList servers={[]} />);
     });
-    expect(container.querySelector('.mcp-servers-empty')).not.toBeNull();
-    expect(container.textContent).toContain('No MCP servers declared');
+    expect(container.textContent).toContain('No MCP servers found');
   });
 
   test('renders one card per server alphabetically; cebab-injected to bottom', () => {

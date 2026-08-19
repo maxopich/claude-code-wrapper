@@ -43,6 +43,7 @@ function mkAuthority(over: Partial<ProjectAuthority> = {}): ProjectAuthority {
     projectId: 1,
     capturedAt: Date.now(),
     fromProbe: false,
+    sdkSnapshot: true,
     model: 'claude-sonnet-4-5',
     apiKeySource: 'none',
     permissionMode: 'default',
@@ -428,6 +429,67 @@ describe('AuthorityPanel — ready state', () => {
       container.querySelectorAll<HTMLDetailsElement>('details.authority-section'),
     );
     expect(sections.every((s) => s.open === false)).toBe(true);
+  });
+});
+
+/**
+ * Cebab-ys9: an empty section has two meanings and the panel used to render
+ * only one of them.
+ *
+ * Every SDK-derived section (tools, skills, slash commands, sub-agents) is
+ * empty by construction until something has looked — no probe, and no turn on
+ * this connection. Saying "no tools resolved" there states a measurement that
+ * never happened. Separately, the MCP section's scans do not open the
+ * project's own `.mcp.json` unless the resolve included the project scope, so
+ * "none declared" is a claim about a file nobody read — and an operator whose
+ * MCP tools are missing is exactly the person reading that line.
+ */
+describe('AuthorityPanel — empty is not the same as unmeasured', () => {
+  function sublabelFor(title: string): string {
+    const summaries = [...container.querySelectorAll('.authority-section-summary')];
+    const summary = summaries.find(
+      (h) => h.querySelector('.authority-section-title')?.textContent === title,
+    );
+    // A missing section would silently return '' and make every `not.toContain`
+    // below pass while measuring nothing, so fail loudly instead.
+    if (!summary) throw new Error(`no authority section titled ${title}`);
+    return summary.querySelector('.authority-section-sublabel')?.textContent ?? '';
+  }
+
+  function renderWith(over: Partial<ProjectAuthority>): void {
+    const { handlerRef } = mountPanel({ mode: 'preflight', noAutoRequest: true });
+    act(() => {
+      handlerRef.current?.({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority(over),
+      });
+    });
+  }
+
+  test('with no SDK snapshot the SDK-derived sections say so', () => {
+    renderWith({ sdkSnapshot: false, tools: [], skills: [], slashCommands: [], agents: [] });
+    for (const title of ['Tools', 'Skills', 'Slash commands', 'Sub-agents']) {
+      expect(sublabelFor(title)).toContain('not measured yet');
+    }
+  });
+
+  test('with a snapshot the same sections report the measurement', () => {
+    renderWith({ sdkSnapshot: true, tools: [], skills: [], slashCommands: [], agents: [] });
+    expect(sublabelFor('Tools')).toContain('no tools resolved');
+    expect(sublabelFor('Tools')).not.toContain('not measured yet');
+    expect(sublabelFor('Skills')).toContain('none enumerated');
+  });
+
+  test('MCP: without the project scope the panel does not claim none are declared', () => {
+    renderWith({ settingSourcesUsed: ['user'], mcpServers: [] });
+    expect(sublabelFor('MCP servers')).toContain('project scope not read');
+    expect(sublabelFor('MCP servers')).not.toContain('none declared');
+  });
+
+  test('MCP: with the project scope read, none-declared is a claim it can make', () => {
+    renderWith({ settingSourcesUsed: ['user', 'project', 'local'], mcpServers: [] });
+    expect(sublabelFor('MCP servers')).toContain('none declared');
   });
 });
 

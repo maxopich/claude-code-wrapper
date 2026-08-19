@@ -500,16 +500,49 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
     expect(srv.scope).toBe('cebab-injected');
   });
 
-  test('probe mode falls through to cache in Phase 3 (Phase 3b lands SDK spawn)', () => {
-    // No throw, no spawn — just returns the cache merge with an info log.
+  // REWRITTEN, not deleted (Cebab-ys9). This case asserted
+  // `fromProbe === false` under `mode: 'probe'` with the comment "not yet a
+  // real probe" — so it PINNED the stub, and would have gone red on the fix
+  // rather than on a regression. Probe mode now really spawns; the spawn just
+  // lives in the caller (ws `get_project_authority`), which writes the init
+  // payload into the same cache a turn fills and then calls this resolver
+  // unchanged. What the resolver owes is exactly what is asserted below: stay
+  // file-read-only, and report the mode it was asked for honestly.
+  test('probe mode reports itself as a probe and still merges the supplied snapshot', () => {
     const out = resolveProjectAuthority({
       projectId,
       mode: 'probe',
       latestSessionStarted: { tools: ['Read'] },
     });
     expect(out).not.toBeNull();
-    expect(out!.fromProbe).toBe(false); // not yet a real probe
+    expect(out!.fromProbe).toBe(true);
     expect(out!.tools.map((t) => t.name)).toEqual(['Read']);
+  });
+
+  test('cache mode is not laundered into looking like a probe', () => {
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { tools: ['Read'] },
+    });
+    expect(out!.fromProbe).toBe(false);
+  });
+
+  test('sdkSnapshot distinguishes measured-empty from never-measured', () => {
+    // The whole reason the field exists: with no snapshot every SDK-derived
+    // section is empty because nothing looked, and the panel used to render
+    // that identically to "this project has none".
+    const withSnap = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { tools: [] },
+    });
+    expect(withSnap!.sdkSnapshot).toBe(true);
+    expect(withSnap!.tools).toEqual([]);
+
+    const without = resolveProjectAuthority({ projectId, mode: 'cache' });
+    expect(without!.sdkSnapshot).toBe(false);
+    expect(without!.tools).toEqual([]);
   });
 
   test('cached single-value fields (model, cwd, permissionMode, apiKeySource) pass through verbatim', () => {

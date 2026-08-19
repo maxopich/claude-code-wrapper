@@ -212,6 +212,16 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
     );
   }
   const { authority } = slot;
+  // Cebab-ys9: an empty section has two possible meanings and the panel used
+  // to render only one of them. `unmeasured` is "nothing has looked yet" — no
+  // probe and no turn on this connection, so every SDK-derived section is
+  // empty by construction. `projectScopeRead` is whether the file scans were
+  // even allowed to open the project's own declarations. Saying "none
+  // declared" in either case asserts something the resolve never established.
+  const unmeasured = !authority.sdkSnapshot;
+  const projectScopeRead = authority.settingSourcesUsed.includes('project');
+  const sdkEmpty = (measured: string) => (unmeasured ? 'not measured yet' : measured);
+
   return (
     <div className="authority-panel-body">
       <AuthoritySection title="Model & identity" defaultOpen={defaultOpenForSection('model', mode)}>
@@ -220,7 +230,7 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       <AuthoritySection
         title="Tools"
         count={authority.tools.length}
-        sublabel={authority.tools.length === 0 ? 'no tools resolved' : undefined}
+        sublabel={authority.tools.length === 0 ? sdkEmpty('no tools resolved') : undefined}
         defaultOpen={defaultOpenForSection('tools', mode)}
       >
         <ToolsList
@@ -233,10 +243,16 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       <AuthoritySection
         title="MCP servers"
         count={authority.mcpServers.length}
-        sublabel={authority.mcpServers.length === 0 ? 'none declared' : undefined}
+        sublabel={
+          authority.mcpServers.length === 0
+            ? projectScopeRead
+              ? 'none declared'
+              : 'project scope not read'
+            : undefined
+        }
         defaultOpen={false}
       >
-        <McpServersList servers={authority.mcpServers} />
+        <McpServersList servers={authority.mcpServers} projectScopeRead={projectScopeRead} />
       </AuthoritySection>
       <AuthoritySection
         title="Allow / deny rules"
@@ -290,7 +306,7 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       <AuthoritySection
         title="Slash commands"
         count={authority.slashCommands.length}
-        sublabel={authority.slashCommands.length === 0 ? 'none enumerated' : undefined}
+        sublabel={authority.slashCommands.length === 0 ? sdkEmpty('none enumerated') : undefined}
         defaultOpen={false}
       >
         <SlashCommandsList commands={authority.slashCommands} />
@@ -298,7 +314,7 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       <AuthoritySection
         title="Skills"
         count={authority.skills.length}
-        sublabel={authority.skills.length === 0 ? 'none enumerated' : undefined}
+        sublabel={authority.skills.length === 0 ? sdkEmpty('none enumerated') : undefined}
         defaultOpen={false}
       >
         <SkillsList skills={authority.skills} />
@@ -306,7 +322,7 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       <AuthoritySection
         title="Sub-agents"
         count={authority.agents.length}
-        sublabel={authority.agents.length === 0 ? 'none declared' : undefined}
+        sublabel={authority.agents.length === 0 ? sdkEmpty('none declared') : undefined}
         defaultOpen={false}
       >
         <SubAgentsList agents={authority.agents} />

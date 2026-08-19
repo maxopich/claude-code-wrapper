@@ -3519,8 +3519,16 @@ export type EnvInjection = {
  *      `.claude/settings*.json`.
  *
  * `capturedAt` is the wall-clock ts of the snapshot; `fromProbe: false`
- * means the cached `session_started` was used as-is (cache mode or Phase 3
- * fall-through), `true` means Phase 3b spawned a fresh probe.
+ * means the cached `session_started` was used as-is, `true` means this
+ * resolve ran a fresh SDK probe.
+ *
+ * `sdkSnapshot` says whether ANY init payload backed half 1 — from a probe or
+ * from a turn earlier on this connection. It exists because empty and
+ * unmeasured are different facts that used to render identically: with no
+ * snapshot, `tools`, `skills`, `slashCommands`, `agents`, `plugins` and every
+ * per-server `status` are empty because nothing has looked, not because the
+ * project has none. A panel that cannot tell those apart ends up asserting the
+ * second when it only knows the first (Cebab-ys9).
  *
  * `settingSourcesUsed` reflects the SDK's actual `settingSources` for the
  * cached session — trusted projects see `['user', 'project', 'local']`,
@@ -3532,6 +3540,7 @@ export type ProjectAuthority = {
   projectId: number;
   capturedAt: number;
   fromProbe: boolean;
+  sdkSnapshot: boolean;
   model?: string;
   apiKeySource?: string;
   permissionMode?: string;

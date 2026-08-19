@@ -90,13 +90,27 @@ function statusDotClass(status: string): string {
  * consolidation the comment described was never true. Deleted here, along
  * with the hand-rolled copied-state pair, in favour of `useCopyFeedback`. */
 
-export function McpServersList(props: { servers: McpServerView[] }) {
-  const { servers } = props;
+export function McpServersList(props: { servers: McpServerView[]; projectScopeRead?: boolean }) {
+  const { servers, projectScopeRead = true } = props;
   if (servers.length === 0) {
+    // Cebab-ys9: this used to read "No MCP servers declared in this project."
+    // — a claim about the PROJECT from a scan that, on an untrusted project,
+    // never opened the file that would declare them. A project-scoped
+    // `.mcp.json` is exactly where an operator puts one, so the sentence was
+    // most wrong in the case they were most likely to be reading it in.
+    if (!projectScopeRead) {
+      return (
+        <div className="mcp-servers-empty">
+          Not checked: this project&apos;s own files were not read, so a server declared in its
+          .mcp.json would not appear here — and would not load for its sessions either. Turn Trust
+          on in the sidebar to load them.
+        </div>
+      );
+    }
     return (
       <div className="mcp-servers-empty">
-        No MCP servers declared in this project. (Cebab&apos;s in-process bus_send injects only
-        inside multi-agent runs and won&apos;t appear here.)
+        No MCP servers found in this project&apos;s declarations. (Cebab&apos;s in-process bus_send
+        injects only inside multi-agent runs and won&apos;t appear here.)
       </div>
     );
   }

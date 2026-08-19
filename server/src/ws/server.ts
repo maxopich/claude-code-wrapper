@@ -58,8 +58,10 @@ import { validateClientMsg } from './validate_client_msg.js';
 import {
   BUS_SETTING_SCOPES,
   resolveProjectAuthority,
+  trustDerivedScopes,
   type SettingScope,
 } from '../repo/project_authority.js';
+import { probeSessionStarted } from '../runner/probe.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import {
   abandonPendingMcpGates,
@@ -3772,8 +3774,31 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // project that has never started a session in this WS connection
       // still returns useful data (just with empty effective tools/agents).
       //
-      // Probe mode falls through to cache in Phase 3 (with an info log);
-      // Phase 3b will spawn `maxTurns: 0` SDK runs here.
+      // Probe mode spawns a real SDK run and reads its `system/init`, which is
+      // the ONLY source of the tool list, skills, slash commands, sub-agents
+      // and the per-MCP-server STATUS. Without it those sections are empty
+      // until some turn happens to populate the per-connection cache, and a
+      // declared MCP server that loaded and FAILED is indistinguishable from
+      // one that was never declared (Cebab-ys9). The probe result is written
+      // through the same `cacheSessionStartedIfNeeded` path a real turn uses,
+      // so the resolver below needs no probe-specific branch.
+      //
+      // A probe that returns nothing leaves the cache untouched: the operator
+      // gets the file-scan half plus whatever was already known, which is
+      // strictly better than replacing it with blanks.
+      if (msg.mode === 'probe') {
+        const project = getProject(msg.projectId);
+        if (project) {
+          const started = await probeSessionStarted({
+            cwd: project.path,
+            projectId: msg.projectId,
+            // The probe must resolve against the scopes the SPAWN would use,
+            // or it would report a surface the operator's turns never get.
+            settingSources: trustDerivedScopes(project.trusted === 1),
+          });
+          if (started) cacheSessionStartedIfNeeded(conn, started);
+        }
+      }
       const cached = conn.authorityCache.get(msg.projectId);
       const authority = resolveProjectAuthority({
         projectId: msg.projectId,
