@@ -95,7 +95,26 @@ const SENSITIVE_BASENAME_STEMS: readonly string[] = [
   'token',
   'secret',
   'secrets',
+
+  // ---- register of0 ----
+  // Project-scoped MCP declarations. `mcpServers[*].env` is the documented home
+  // for a server's credentials, so the whole file is secret once anything is
+  // declared there. Reported case: a Read of a project `.mcp.json` shipped a live
+  // client id and client secret into an exported session log AND onto the Logs
+  // surface, while `redactedFields` truthfully reported that something else had
+  // been masked — which is what made the output look inspected.
+  '.mcp.json',
+  // The CLI's user-scope config. CLAUDE.md: its top-level `mcpServers` blocks
+  // carry `env`, and Trust does not scope them — TOFU is the only brake.
+  '.claude.json',
 ];
+
+// A stem rather than an exact basename for both: the stem matcher anchors at the
+// START of the basename, so it also covers the `.bak` / `.backup` forms the CLI
+// itself writes, at identical blast radius on every audit negative (`mcp.json`,
+// `docs/mcp.json.md`, `my.mcp.json.bak` all stay unmasked — verified). Bare
+// `mcp.json` / `claude.json` are deliberately NOT matched: the CLI's files are
+// dotfiles, and an undotted one in a repo is a schema or a doc.
 
 /**
  * Register H16: extensions that mark the whole file as key material, matched
@@ -117,7 +136,26 @@ const SENSITIVE_BASENAME_EXTENSIONS: readonly string[] = [
 ];
 
 /** Special compound paths — exact match against the tail of the path. */
-const SENSITIVE_TAILS: readonly string[] = ['/.git/config'];
+const SENSITIVE_TAILS: readonly string[] = [
+  '/.git/config',
+  // Register of0. Both halves of the settings pair, deliberately.
+  //
+  // `settings.local.json` is the obvious one: gitignored, per-machine, never
+  // reviewed — exactly where an operator parks a real key in an `env:` block.
+  // `settings.json` is the judgement call, and it went the same way: CLAUDE.md's
+  // env-precedence caveat documents that a project's `settings.json` can define
+  // `env: { ANTHROPIC_API_KEY }` and silently reroute billing, which is a
+  // credential by any reading. The cost is that a Read of it shows `<redacted>`
+  // in the Logs surface; the operator can still open the file, and the Authority
+  // panel is a separate code path that keeps rendering hooks/permissions/MCP
+  // structurally. Header rule applies: false negatives leak credentials.
+  //
+  // Tails rather than basenames because `settings.json` alone is far too generic
+  // — the `/.claude/` prefix is what makes this narrow (`web/settings.json` and
+  // `.vscode/settings.json` stay untouched).
+  '/.claude/settings.json',
+  '/.claude/settings.local.json',
+];
 
 /** Field names whose value contains a filesystem path. When matched, we test
  *  the value against `SENSITIVE_PATH_PATTERNS` to decide whether to mask the
@@ -139,6 +177,23 @@ const SIBLING_VALUE_FIELDS: ReadonlySet<string> = new Set([
   'new_string',
   'old_string',
   'data',
+
+  // Register of0. `ws/session_log.ts`'s `mutationToLogRow` projects a row shaped
+  // `{toolName, category, filePath, cwd, promoted, confirmedAt, toolInput,
+  // toolResult}`. `filePath` IS a PATH_FIELD_NAME, so the sibling rule already
+  // fired on that row — and then found nothing to mask, because these two names
+  // were not in this set.
+  //
+  // Measured: a confirmed mutation on `.env` shipped its whole captured tool
+  // input and output through the Logs projector, for a file that has been on the
+  // path list since Phase H. The comment at that call site asserted the
+  // opposite. This is the list the comment was describing.
+  //
+  // Wholesale masking (the branch below) is right for both: `parseToolIoJson`
+  // yields an object, a bare string, or `capToolIoJson`'s
+  // `{truncated, bytes, preview}` wrapper, and one token covers all three.
+  'toolInput',
+  'toolResult',
 ]);
 
 /**
@@ -228,9 +283,27 @@ function pathLooksSensitive(value: string): boolean {
 
   const basename = basenameOf(norm);
   if (SENSITIVE_BASENAMES.has(basename)) return true;
+  // Register of0: the stem comparison was blind to a LEADING dot, so
+  // `~/.claude/.credentials.json` — which README names as where Cebab's own OAuth
+  // credentials live — did not match the `credentials` stem, while
+  // `~/.aws/credentials` did. The bug is in the matcher, not the list: every stem
+  // here has a dotfile form, and adding `.credentials` as a one-off would leave
+  // the same blindness in place for the other six.
+  //
+  // BOTH forms are tested, not just the stripped one. Comparing only the stripped
+  // basename would break `.env`, which strips to `env` and equals no stem.
+  //
+  // Blast radius is enumerable: exactly the dotted forms of the stems above
+  // (`.credentials*`, `.token*`, `.secret*`, `.secrets*`, `.id_rsa*`,
+  // `.id_ed25519*`), each itself credential-bearing. Because the match anchors at
+  // the start of the basename it does not reach `.envelope.json`,
+  // `.tokenizer.json` or `.secretary.md` — all three are pinned as negatives.
+  const stemForms = basename.startsWith('.') ? [basename, basename.slice(1)] : [basename];
   for (const stem of SENSITIVE_BASENAME_STEMS) {
-    if (basename === stem) return true;
-    if (basename.startsWith(`${stem}.`)) return true;
+    for (const form of stemForms) {
+      if (form === stem) return true;
+      if (form.startsWith(`${stem}.`)) return true;
+    }
   }
   // H16: `norm` is already lowercased, so this is case-insensitive — which
   // matters on Windows, where `SERVER.PEM` is the same file.
@@ -250,6 +323,94 @@ function valueContainsSensitivePattern(value: string): boolean {
 }
 
 /**
+ * Body fields of a `tool_result` block (register of0).
+ *
+ * Deliberately narrower than SIBLING_VALUE_FIELDS: `tool_use_id`, `type` and
+ * `is_error` stay visible because they answer "which call was this, and did it
+ * fail" and carry no file body.
+ */
+const TOOL_RESULT_BODY_FIELDS: ReadonlySet<string> = new Set(['content', 'text']);
+
+/**
+ * Is this object an Anthropic `tool_result` content block?
+ *
+ * BOTH discriminators are required, so an unrelated blob that merely carries
+ * `type: 'tool_result'` cannot trip the rule. A structural check rather than a
+ * key-name guess: this block shape is API-stable, unlike the envelope around it
+ * (which differs between the export, the WS projector and the search scanner).
+ */
+function isToolResultBlock(obj: Record<string, unknown>): boolean {
+  return obj.type === 'tool_result' && 'tool_use_id' in obj;
+}
+
+/**
+ * Register of0, the second half. Does ANY object in this payload declare a
+ * sensitive file path?
+ *
+ * WHY THIS EXISTS. A `Read` of a sensitive file puts the body in the payload
+ * TWICE:
+ *
+ *   payload.tool_use_result.file = { filePath, content, numLines, ... }
+ *       -> path and content are SIBLINGS, so `collectSensitiveSiblings` reaches
+ *          this copy the moment the path is on the list.
+ *   payload.message.content[i]   = { tool_use_id, type: 'tool_result', content }
+ *       -> the same body, with NO path field on that object, so the sibling
+ *          rule structurally cannot reach it.
+ *
+ * Measured on the transcript that reported this: adding the path to the list
+ * masked copy 1 and exported copy 2 verbatim — while `fields` truthfully named
+ * the mask it had applied. A leak with a correct-looking attestation beside it.
+ *
+ * Correlating the assistant event's `tool_use.id` with this event's
+ * `tool_use_id` is not available: this function is pure and sees one payload at
+ * a time. But WITHIN this payload the path IS present, just in a sibling
+ * subtree. This pass finds it there.
+ *
+ * Depth-bounded to MAX_DEPTH so it never sees more than `walk` does — a path
+ * below the cut sits inside a subtree `walk` masks wholesale anyway. Short-
+ * circuits on the first hit.
+ */
+function payloadDeclaresSensitivePath(value: unknown, depth: number): boolean {
+  if (depth > MAX_DEPTH) return false;
+  if (value === null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      if (payloadDeclaresSensitivePath(v, depth + 1)) return true;
+    }
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (PATH_FIELD_NAMES.has(key) && typeof v === 'string' && pathLooksSensitive(v)) return true;
+  }
+  for (const v of Object.values(obj)) {
+    if (payloadDeclaresSensitivePath(v, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * Per-call state for `walk`. A parameter, never a module global, so the function
+ * stays pure and reentrant.
+ *
+ * The pre-pass answer is computed LAZILY and memoized: it is only needed once a
+ * `tool_result` block is actually encountered, and the overwhelming majority of
+ * payloads have none (every text-only turn, every stream event, every row the
+ * export streams for a conversation without tool calls). Eager evaluation would
+ * put a second full traversal on every line of every exported transcript to
+ * answer a question most of them never ask.
+ */
+type WalkScope = { readonly root: unknown; cached: boolean | undefined };
+
+function scopeHasSensitivePath(scope: WalkScope): boolean {
+  if (scope.cached === undefined) {
+    scope.cached = payloadDeclaresSensitivePath(scope.root, 0);
+  }
+  return scope.cached;
+}
+
+/**
  * Walk `payload` and return a deep-cloned copy with sensitive values masked.
  * Records the dot-paths that were masked in the returned `fields` array.
  *
@@ -259,11 +420,18 @@ function valueContainsSensitivePattern(value: string): boolean {
  */
 export function redactSensitive(payload: unknown): RedactResult {
   const fields: string[] = [];
-  const redacted = walk(payload, '', 0, fields);
+  const scope: WalkScope = { root: payload, cached: undefined };
+  const redacted = walk(payload, '', 0, fields, scope);
   return { redacted, fields };
 }
 
-function walk(value: unknown, path: string, depth: number, fields: string[]): unknown {
+function walk(
+  value: unknown,
+  path: string,
+  depth: number,
+  fields: string[],
+  scope: WalkScope,
+): unknown {
   if (depth > MAX_DEPTH) {
     // Register D24: this used to `return value` — the CALLER'S OWN object,
     // by reference, unmasked, and unreported. Three promises broken at once:
@@ -305,12 +473,28 @@ function walk(value: unknown, path: string, depth: number, fields: string[]): un
   if (typeof value !== 'object') return value;
 
   if (Array.isArray(value)) {
-    return value.map((v, i) => walk(v, `${path}[${i}]`, depth + 1, fields));
+    return value.map((v, i) => walk(v, `${path}[${i}]`, depth + 1, fields, scope));
   }
 
   // Object — first scan keys to decide what to mask wholesale.
   const obj = value as Record<string, unknown>;
   const sensitiveSiblings = collectSensitiveSiblings(obj);
+  // Shape test FIRST so the payload-wide pre-pass stays lazy: a payload with no
+  // tool_result block never pays for it.
+  //
+  // Scoped to RESULTS, never args. An assistant event carries no file body — only
+  // the path, which this redactor deliberately keeps readable everywhere else —
+  // so widening this to `tool_use` would be pure signal loss. Measured: an
+  // assistant payload with two parallel tool_use blocks, one on a sensitive file
+  // and one not, comes back byte-identical.
+  //
+  // Over-masking bound, stated honestly: the realistic worst case is one user
+  // event carrying two tool_result blocks where only one is sensitive, in which
+  // case the benign body is masked too. The transcript this was measured on had
+  // exactly one tool_result block in each such payload (n=3 — a small sample,
+  // said out loud rather than dressed up as a guarantee), and even in that case
+  // filePath, tool_use_id, the tool name and `fields` all stay readable.
+  const maskToolResultBody = isToolResultBlock(obj) && scopeHasSensitivePath(scope);
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(obj)) {
     const childPath = path ? `${path}.${key}` : key;
@@ -335,13 +519,22 @@ function walk(value: unknown, path: string, depth: number, fields: string[]): un
       continue;
     }
 
+    if (maskToolResultBody && TOOL_RESULT_BODY_FIELDS.has(key)) {
+      fields.push(childPath);
+      // Wholesale, per the D05 precedent above: a tool_result `content` is a
+      // string OR an array of blocks, and recursing would leak whatever sits
+      // past MAX_DEPTH while still reporting the field as masked.
+      out[key] = REDACTED_TOKEN;
+      continue;
+    }
+
     if (sensitiveSiblings.has(key)) {
       fields.push(childPath);
       out[key] = REDACTED_TOKEN;
       continue;
     }
 
-    out[key] = walk(raw, childPath, depth + 1, fields);
+    out[key] = walk(raw, childPath, depth + 1, fields, scope);
   }
   return out;
 }

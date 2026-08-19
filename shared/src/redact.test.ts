@@ -479,3 +479,234 @@ describe('redactSensitive — credential shapes [security]', () => {
     expect(out.content).toBe('cert body');
   });
 });
+
+/**
+ * [security] Register of0 — the files THIS REPO documents as credential-bearing.
+ *
+ * The class of bug: the docs knew and the list did not. CLAUDE.md's
+ * env-precedence caveat, its MCP section, and README's "local data" section each
+ * name a file that holds credentials; none of them was on the path list, so a
+ * `Read` of one shipped its body to the Logs surface and into every export.
+ *
+ * The audit table below IS the record the acceptance criteria asked for: every
+ * documented file is either a positive here, or a named negative carrying the
+ * reason it is not covered.
+ */
+describe('[security] Cebab-documented credential files (of0)', () => {
+  /** Does a sensitive path on this object mask its sibling body? */
+  const masksBody = (filePath: string): boolean =>
+    (redactSensitive({ filePath, content: 'BODY' }).redacted as Record<string, unknown>).content ===
+    '<redacted>';
+
+  it.each([
+    // The reported case, in all three forms an operator can produce.
+    ['.mcp.json — relative, as a project-root read reports it', '.mcp.json'],
+    ['.mcp.json — absolute', '/home/u/proj/.mcp.json'],
+    ['.mcp.json — Windows, the operator platform', 'C:\\proj\\.mcp.json'],
+    ['a .mcp.json backup', '.mcp.json.bak'],
+    // CLAUDE.md: top-level `mcpServers` blocks carry `env`, and Trust does not
+    // scope them.
+    ['~/.claude.json', '/home/u/.claude.json'],
+    ['the CLI backup of it', '/home/u/.claude.json.backup'],
+    // README names this as where the OAuth credentials live. Uncovered until
+    // of0 because the stem matcher could not see past the leading dot.
+    ['~/.claude/.credentials.json', '/home/u/.claude/.credentials.json'],
+    // Both halves of the settings pair — see the SENSITIVE_TAILS comment.
+    ['.claude/settings.json', '.claude/settings.json'],
+    ['.claude/settings.local.json', '.claude/settings.local.json'],
+    ['the user-scope settings file', '/home/u/.claude/settings.json'],
+  ])('masks the body of %s', (_label, filePath) => {
+    expect(masksBody(filePath)).toBe(true);
+  });
+
+  // Regression controls. These passed BEFORE of0 and must still pass: the
+  // matcher change touches every stem, so a fix that widened coverage by
+  // breaking `.env` would otherwise look like a clean win.
+  it.each([
+    '.env',
+    '.env.local',
+    '/home/u/.aws/credentials',
+    '/home/u/.ssh/id_rsa',
+    '/srv/certs/server.pem',
+    '/home/u/.npmrc',
+    '/home/u/proj/.git/config',
+  ])('still masks %s (pre-of0 coverage, unchanged)', (filePath) => {
+    expect(masksBody(filePath)).toBe(true);
+  });
+
+  // Negatives. Without these the list could widen to "any dotfile" and every
+  // positive above would still pass.
+  it.each([
+    ['an ordinary manifest', 'package.json'],
+    ['a compiler config', 'tsconfig.json'],
+    ['prose', 'README.md'],
+    ['source that merely mentions mcp', 'server/src/mcp_scope_smoke.ts'],
+    ['documentation ABOUT the file', 'docs/mcp.json.md'],
+    ['an undotted file whose name ends in the stem', 'my.mcp.json.bak'],
+    ['a directory that contains the stem', 'not-a-.mcp.json-file/index.ts'],
+    ['the undotted CLI-config name', 'mcp.json'],
+    ['likewise', 'claude.json'],
+    ['settings.json OUTSIDE .claude/', 'web/settings.json'],
+    ['an editor settings file', '.vscode/settings.json'],
+    // The dotted-stem fix anchors at the START of the basename. These three are
+    // what stops it from becoming "any dotfile containing a scary word".
+    ['a dotfile that merely starts like .env', '.envelope.json'],
+    ['a dotfile that merely starts like token', '.tokenizer.json'],
+    ['a dotfile that merely starts like secret', '.secretary.md'],
+  ])('does NOT mask %s', (_label, filePath) => {
+    expect(masksBody(filePath)).toBe(false);
+  });
+
+  it('masks the dotfile AND the undotted form of the same stem', () => {
+    // The two directions of the leading-dot fix, in one test so they cannot
+    // drift: `~/.aws/credentials` was always covered, `.credentials.json` was
+    // not, and both are the same secret.
+    expect(masksBody('/home/u/.aws/credentials')).toBe(true);
+    expect(masksBody('/home/u/.claude/.credentials.json')).toBe(true);
+    expect(masksBody('/home/u/.token')).toBe(true);
+    // ...while `.env` — which strips to `env`, equal to no stem — still works.
+    // This is the case that reddens if someone implements the fix as a REPLACE
+    // of the basename rather than an additional form to test.
+    expect(masksBody('/home/u/proj/.env')).toBe(true);
+  });
+
+  it('keeps the path itself readable — it is what names WHICH file leaked', () => {
+    const out = redactSensitive({ filePath: '/home/u/proj/.mcp.json', content: 'BODY' })
+      .redacted as Record<string, unknown>;
+    expect(out.content).toBe('<redacted>');
+    expect(out.filePath).toBe('/home/u/proj/.mcp.json');
+  });
+});
+
+/**
+ * [security] Register of0 — the SECOND copy of a sensitive file body.
+ *
+ * A `Read` puts the body in the payload twice. `tool_use_result.file` carries
+ * `{filePath, content}` as siblings; `message.content[i]` carries a
+ * `tool_result` block whose `content` is the same body with no path field on it.
+ * Putting the path on the list masks copy 1 and ships copy 2 — with `fields`
+ * truthfully naming the mask it did apply, which is what made the leaked export
+ * look inspected.
+ *
+ * The payload shape below is taken verbatim from the transcript that reported
+ * this, minus the real credential.
+ */
+describe('[security] the second copy of a sensitive file body (of0)', () => {
+  // Assembled at RUNTIME. gitleaks scans text, and the `.*\.test\.ts$` blanket
+  // exemption was removed — a split literal cannot match its ruleset, so the
+  // secret scan keeps full strength instead of growing a by-value exemption for
+  // a string that is synthetic by construction.
+  //
+  // 40 alphanumerics with NO vendor prefix, matching the reported value's shape
+  // on purpose: it matches no SENSITIVE_VALUE_PATTERN, so only the path rule can
+  // catch it. If an inline pattern ever started matching this, these tests would
+  // pass for the wrong reason.
+  const FILLER = 'A1b2C3d4E5f6G7h8J9k0';
+  const SECRET = FILLER + FILLER;
+
+  const MCP_BODY = JSON.stringify(
+    { mcpServers: { 'project-server': { command: 'npx', env: { CLIENT_SECRET: SECRET } } } },
+    null,
+    2,
+  );
+
+  /** The shape a Read produces, as captured from a real session. */
+  const readOf = (filePath: string) => ({
+    type: 'user',
+    session_id: 'sid-1',
+    message: {
+      role: 'user',
+      content: [{ tool_use_id: 'tu_1', type: 'tool_result', content: MCP_BODY }],
+    },
+    tool_use_result: {
+      type: 'text',
+      file: { filePath, content: MCP_BODY, numLines: 5, startLine: 1, totalLines: 5 },
+    },
+  });
+
+  it('masks BOTH copies and names both in fields', () => {
+    const { redacted, fields } = redactSensitive(readOf('/proj/.mcp.json'));
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+    expect(fields).toContain('tool_use_result.file.content');
+    expect(fields).toContain('message.content[0].content');
+  });
+
+  it('leaves the block metadata readable — which call it was, and whether it failed', () => {
+    const { redacted } = redactSensitive(readOf('/proj/.mcp.json'));
+    const block = (redacted as { message: { content: Record<string, unknown>[] } }).message
+      .content[0]!;
+    expect(block.tool_use_id).toBe('tu_1');
+    expect(block.type).toBe('tool_result');
+  });
+
+  // THE critical negative. Without it the rule could silently become
+  // unconditional — masking every tool_result body in every session — and every
+  // positive above would still pass.
+  it('does NOT touch a tool_result body when no sensitive path is declared', () => {
+    const benign = readOf('/proj/README.md');
+    const { redacted, fields } = redactSensitive(benign);
+    expect(JSON.stringify(redacted)).toContain(SECRET);
+    // `session_id` is still masked here by the key rule, which is exactly the
+    // false-reassurance shape this whole register is about: `fields` being
+    // non-empty never meant the body was inspected. Assert the two body paths
+    // specifically.
+    expect(fields).not.toContain('message.content[0].content');
+    expect(fields).not.toContain('tool_use_result.file.content');
+  });
+
+  // Pins the results-only scoping. An assistant event carries no file body, only
+  // the path — masking its args would be pure signal loss.
+  it('does NOT mask tool_use args, even when one names a sensitive file', () => {
+    const assistant = {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tu_a', name: 'Read', input: { file_path: '/proj/.mcp.json' } },
+          { type: 'tool_use', id: 'tu_b', name: 'Read', input: { file_path: '/proj/src/foo.ts' } },
+        ],
+      },
+    };
+    const { redacted, fields } = redactSensitive(assistant);
+    expect(redacted).toEqual(assistant);
+    expect(fields).toEqual([]);
+  });
+
+  // The mechanism must not assume a root shape or a fixed depth: this function is
+  // called with the bare SDK envelope (export), `{type, subtype, seq, payload}`
+  // (WS projector), and other wrappers besides.
+  it('reaches the second copy however deeply the caller nests the payload', () => {
+    const wrapped = { type: 'user', subtype: null, seq: 7, payload: readOf('/proj/.mcp.json') };
+    const { redacted, fields } = redactSensitive(wrapped);
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+    expect(fields).toContain('payload.message.content[0].content');
+
+    const deeper = { a: { b: { c: readOf('/proj/.mcp.json') } } };
+    expect(JSON.stringify(redactSensitive(deeper).redacted)).not.toContain(SECRET);
+  });
+
+  it('masks a tool_result content array wholesale, not just a string body', () => {
+    const arrayForm = {
+      tool_use_result: { file: { filePath: '/proj/.mcp.json', content: MCP_BODY } },
+      message: {
+        content: [
+          { tool_use_id: 'tu_1', type: 'tool_result', content: [{ type: 'text', text: MCP_BODY }] },
+        ],
+      },
+    };
+    expect(JSON.stringify(redactSensitive(arrayForm).redacted)).not.toContain(SECRET);
+  });
+
+  it('ignores a lookalike that carries only one of the two discriminators', () => {
+    // `type: 'tool_result'` with no `tool_use_id` is not a content block, and a
+    // payload-wide rule keyed on the string alone would mask unrelated prose.
+    const lookalike = {
+      tool_use_result: { file: { filePath: '/proj/.mcp.json', content: 'x' } },
+      note: { type: 'tool_result', content: 'a description of what tool_result means' },
+    };
+    const { redacted } = redactSensitive(lookalike) as { redacted: Record<string, never> };
+    expect((redacted.note as unknown as Record<string, unknown>).content).toBe(
+      'a description of what tool_result means',
+    );
+  });
+});

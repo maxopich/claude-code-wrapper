@@ -760,3 +760,100 @@ describe('multiAgentMutationToLogRow — tail converter parity', () => {
     expect(fromTail).toEqual(fromChunk);
   });
 });
+
+/**
+ * [security] Register of0 — the Logs surface must not ship a credential file's
+ * body.
+ *
+ * These two live here, and not only in `shared/src/redact.test.ts`, because each
+ * pins something the pure unit test structurally cannot:
+ *
+ *   1. The single-agent projector hands `redactSensitive` a WRAPPER root,
+ *      `{type, subtype, seq, payload}` — not the bare SDK envelope the export
+ *      passes. The `payload.`-prefixed dot-paths asserted below are the proof
+ *      that the mechanism does not assume a root shape or a fixed depth.
+ *   2. `mutationToLogRow` builds its own row shape, and its `toolInput` /
+ *      `toolResult` fields reach the operator through a dedicated "Tool output"
+ *      block in `LogRowDetail`.
+ */
+describe('[security] a credential file does not reach the Logs surface (of0)', () => {
+  // Assembled at runtime — see the note in shared/src/redact.test.ts. 40
+  // alphanumerics, no vendor prefix, so no inline value pattern can match it and
+  // these tests cannot pass for the wrong reason.
+  const FILLER = 'A1b2C3d4E5f6G7h8J9k0';
+  const SECRET = FILLER + FILLER;
+  const MCP_BODY = JSON.stringify({
+    mcpServers: { 'project-server': { env: { CLIENT_SECRET: SECRET } } },
+  });
+
+  test('a Read of a project .mcp.json masks BOTH copies of the body', () => {
+    const project = upsertProject('p', '/tmp/p');
+    createSession('of0-read', project.id);
+    // Verbatim shape from the transcript that reported this: the body appears
+    // once under `tool_use_result.file` (path as a sibling) and once as the
+    // tool_result block's `content` (no path on that object).
+    insertEvent(
+      'of0-read',
+      nextSeq('of0-read'),
+      'user',
+      null,
+      JSON.stringify({
+        message: {
+          content: [{ tool_use_id: 'tu_1', type: 'tool_result', content: MCP_BODY }],
+        },
+        tool_use_result: {
+          file: { filePath: '/tmp/p/.mcp.json', content: MCP_BODY, numLines: 3 },
+        },
+      }),
+    );
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: 'of0-read',
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    const row = chunk.rows[0]!;
+    expect(JSON.stringify(row.raw)).not.toContain(SECRET);
+    // The wrapper prefix is the assertion that earns this test its place.
+    expect(row.redactedFields).toContain('payload.tool_use_result.file.content');
+    expect(row.redactedFields).toContain('payload.message.content[0].content');
+  });
+
+  test('a mutation on a credential file masks its captured tool input and output', () => {
+    createMultiAgentSession('of0-mut', 'orchestrator');
+    appendMultiAgentMutation('of0-mut', 'worker', 'Edit', 'mutate', 'edit config', {
+      filePath: '/p/.env',
+      cwd: '/p',
+      toolUseId: 'tu-sec',
+      toolInput: { file_path: '/p/.env', new_string: `CLIENT_SECRET=${SECRET}` },
+    });
+    confirmMutationByToolUseId('of0-mut', 'tu-sec', `wrote CLIENT_SECRET=${SECRET}`);
+    const m = listMultiAgentMutations('of0-mut')[0]!;
+
+    const log = multiAgentMutationToLogRow(m, false)!;
+    expect(JSON.stringify(log.raw)).not.toContain(SECRET);
+    expect(log.redactedFields).toContain('toolInput');
+    expect(log.redactedFields).toContain('toolResult');
+    // The path stays readable — it is what names WHICH file was touched.
+    expect((log.raw as Record<string, unknown>).filePath).toBe('/p/.env');
+  });
+
+  // Negative for the test above: an ordinary source file must round-trip intact,
+  // or the two new sibling fields would simply mask every mutation's I/O.
+  test('a mutation on an ordinary file keeps its tool input and output readable', () => {
+    createMultiAgentSession('of0-benign', 'orchestrator');
+    appendMultiAgentMutation('of0-benign', 'worker', 'Edit', 'mutate', 'edit source', {
+      filePath: '/p/src/foo.ts',
+      cwd: '/p',
+      toolUseId: 'tu-ok',
+      toolInput: { file_path: '/p/src/foo.ts', new_string: 'export const x = 1;' },
+    });
+    confirmMutationByToolUseId('of0-benign', 'tu-ok', 'applied 1 edit');
+    const m = listMultiAgentMutations('of0-benign')[0]!;
+
+    const log = multiAgentMutationToLogRow(m, false)!;
+    expect(log.redactedFields).toBeUndefined();
+    expect((log.raw as Record<string, unknown>).toolResult).toBe('applied 1 edit');
+  });
+});
