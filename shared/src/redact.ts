@@ -177,6 +177,23 @@ const SIBLING_VALUE_FIELDS: ReadonlySet<string> = new Set([
   'new_string',
   'old_string',
   'data',
+
+  // Register of0. `ws/session_log.ts`'s `mutationToLogRow` projects a row shaped
+  // `{toolName, category, filePath, cwd, promoted, confirmedAt, toolInput,
+  // toolResult}`. `filePath` IS a PATH_FIELD_NAME, so the sibling rule already
+  // fired on that row — and then found nothing to mask, because these two names
+  // were not in this set.
+  //
+  // Measured: a confirmed mutation on `.env` shipped its whole captured tool
+  // input and output through the Logs projector, for a file that has been on the
+  // path list since Phase H. The comment at that call site asserted the
+  // opposite. This is the list the comment was describing.
+  //
+  // Wholesale masking (the branch below) is right for both: `parseToolIoJson`
+  // yields an object, a bare string, or `capToolIoJson`'s
+  // `{truncated, bytes, preview}` wrapper, and one token covers all three.
+  'toolInput',
+  'toolResult',
 ]);
 
 /**

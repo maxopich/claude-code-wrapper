@@ -819,4 +819,41 @@ describe('[security] a credential file does not reach the Logs surface (of0)', (
     expect(row.redactedFields).toContain('payload.tool_use_result.file.content');
     expect(row.redactedFields).toContain('payload.message.content[0].content');
   });
+
+  test('a mutation on a credential file masks its captured tool input and output', () => {
+    createMultiAgentSession('of0-mut', 'orchestrator');
+    appendMultiAgentMutation('of0-mut', 'worker', 'Edit', 'mutate', 'edit config', {
+      filePath: '/p/.env',
+      cwd: '/p',
+      toolUseId: 'tu-sec',
+      toolInput: { file_path: '/p/.env', new_string: `CLIENT_SECRET=${SECRET}` },
+    });
+    confirmMutationByToolUseId('of0-mut', 'tu-sec', `wrote CLIENT_SECRET=${SECRET}`);
+    const m = listMultiAgentMutations('of0-mut')[0]!;
+
+    const log = multiAgentMutationToLogRow(m, false)!;
+    expect(JSON.stringify(log.raw)).not.toContain(SECRET);
+    expect(log.redactedFields).toContain('toolInput');
+    expect(log.redactedFields).toContain('toolResult');
+    // The path stays readable — it is what names WHICH file was touched.
+    expect((log.raw as Record<string, unknown>).filePath).toBe('/p/.env');
+  });
+
+  // Negative for the test above: an ordinary source file must round-trip intact,
+  // or the two new sibling fields would simply mask every mutation's I/O.
+  test('a mutation on an ordinary file keeps its tool input and output readable', () => {
+    createMultiAgentSession('of0-benign', 'orchestrator');
+    appendMultiAgentMutation('of0-benign', 'worker', 'Edit', 'mutate', 'edit source', {
+      filePath: '/p/src/foo.ts',
+      cwd: '/p',
+      toolUseId: 'tu-ok',
+      toolInput: { file_path: '/p/src/foo.ts', new_string: 'export const x = 1;' },
+    });
+    confirmMutationByToolUseId('of0-benign', 'tu-ok', 'applied 1 edit');
+    const m = listMultiAgentMutations('of0-benign')[0]!;
+
+    const log = multiAgentMutationToLogRow(m, false)!;
+    expect(log.redactedFields).toBeUndefined();
+    expect((log.raw as Record<string, unknown>).toolResult).toBe('applied 1 edit');
+  });
 });

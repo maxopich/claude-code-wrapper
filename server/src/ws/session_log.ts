@@ -240,8 +240,16 @@ function mutationToLogRow(m: MutationRecord, revealSensitive: boolean): LogRow {
     promoted: m.promoted,
     confirmedAt: m.confirmedAt,
     // Migration 026: full tool input/output (null until captured / for pre-026
-    // rows). Routed through the same redactSensitive pass below, so secrets in
-    // the args/output are masked and listed in redactedFields.
+    // rows). Routed through the same redactSensitive pass below.
+    //
+    // That pass did NOT mask these two until register of0, and this comment said
+    // it did. `filePath` above is a PATH_FIELD_NAME, so the sibling rule fired on
+    // this row all along — but `toolInput`/`toolResult` were absent from
+    // SIBLING_VALUE_FIELDS, so it masked nothing and `redactedFields` came back
+    // empty. Measured on a mutation touching `.env`, a path listed since Phase H:
+    // the whole captured input and output reached the operator, and this comment
+    // is why nobody looked. Both names are in that set now; the guarantee below
+    // is the set's, not this row's.
     toolInput: m.toolInput,
     toolResult: m.toolResult,
   };
