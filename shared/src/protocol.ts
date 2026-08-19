@@ -53,6 +53,20 @@ export type Project = {
    * omit it.
    */
   model: string | null;
+  /**
+   * Cebab-ws0.4: the permission mode this project's NEW sessions start in, or
+   * `null` for "derive from Trust" — which is what every project did before
+   * this existed.
+   *
+   * A THIRD INPUT, not a replacement. The mode a turn actually runs under is
+   * resolved as: a resumed session's own stored mode > this > the trust-derived
+   * value. The middle term is the only new one; a conversation the operator
+   * already steered is never re-pointed by a project-level default.
+   *
+   * Required rather than optional so the compiler enumerates every place a
+   * Project is constructed instead of letting fixtures quietly omit it.
+   */
+  startPermissionMode: SessionPermissionMode | null;
 };
 
 /**
@@ -671,6 +685,26 @@ export type ClientMsg =
       type: 'set_project_model';
       projectId: number;
       model: string | null;
+    }
+  | {
+      /**
+       * Set (or clear) the permission mode a project's NEW sessions start in
+       * (Cebab-ws0.4). `mode: null` clears the choice, restoring "derive from
+       * Trust".
+       *
+       * AUDITED, unlike `set_project_model`. A model choice cannot widen
+       * privilege; this one sets the initial permission posture, which is the
+       * first of the two reasons `set_trusted`'s own [security] comment gives
+       * for auditing a trust flip. The server appends the hash-chained row
+       * BEFORE the write and refuses the write if the append fails.
+       *
+       * Takes effect on the next session START. A session already running —
+       * and a resumed one — keeps the mode it has; the in-session pill is what
+       * changes those.
+       */
+      type: 'set_project_start_permission_mode';
+      projectId: number;
+      mode: SessionPermissionMode | null;
     }
   | {
       /**

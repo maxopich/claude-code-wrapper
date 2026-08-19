@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { AuthorityProvider } from './AuthorityContext';
-import { AuthorityPreflightModal, type PreflightModelSlot } from './AuthorityPreflightModal';
+import {
+  AuthorityPreflightModal,
+  type PreflightModelSlot,
+  type PreflightStartModeSlot,
+} from './AuthorityPreflightModal';
 
 // Cluster B Phase 6e — UI-B3: AuthorityPreflightModal contract.
 //
@@ -41,6 +45,7 @@ function mountModal(props: {
   onStart?: () => void;
   onClose?: () => void;
   model?: PreflightModelSlot;
+  startMode?: PreflightStartModeSlot;
 }) {
   const onClose = props.onClose ?? (() => {});
   act(() => {
@@ -51,6 +56,7 @@ function mountModal(props: {
           onStart={props.onStart}
           onClose={onClose}
           model={props.model}
+          startMode={props.startMode}
         />
       </AuthorityProvider>,
     );
@@ -184,5 +190,45 @@ describe('AuthorityPreflightModal — model slot (Cebab-ws0.3)', () => {
       container.querySelector<HTMLElement>('[data-testid="model-option-sonnet"]')!.click();
     });
     expect(onChange).toHaveBeenCalledWith('sonnet');
+  });
+});
+
+describe('AuthorityPreflightModal — starting permission mode (Cebab-ws0.4)', () => {
+  const SLOT: PreflightStartModeSlot = { value: null, trusted: false, onChange: () => {} };
+
+  test('no slot means no picker — the multi-agent call sites stay unchanged', () => {
+    mountModal({ projectIds: [1] });
+    expect(container.querySelector('[data-testid="preflight-start-mode"]')).toBe(null);
+  });
+
+  test('a single-project preflight renders it', () => {
+    mountModal({ projectIds: [1], startMode: SLOT });
+    expect(container.querySelector('[data-testid="preflight-start-mode"]')).not.toBe(null);
+  });
+
+  test('an AGGREGATE preflight renders no picker even when a slot is passed', () => {
+    // Sharper here than for the model slot: the options' MEANING depends on
+    // the project's Trust flag, so one control cannot speak for several.
+    mountModal({ projectIds: [1, 2], startMode: SLOT });
+    expect(container.querySelector('[data-testid="preflight-start-mode"]')).toBe(null);
+  });
+
+  test('the slot decides the labels — trusted and untrusted differ', () => {
+    mountModal({ projectIds: [1], startMode: { ...SLOT, trusted: true } });
+    const trustedText = container.textContent ?? '';
+    mountModal({ projectIds: [1], startMode: { ...SLOT, trusted: false } });
+    const untrustedText = container.textContent ?? '';
+    expect(trustedText).not.toBe(untrustedText);
+    expect(trustedText).toContain('Auto-allow every tool');
+    expect(untrustedText).toContain('Auto-allow file edits');
+  });
+
+  test('choosing a mode reaches the slot handler', () => {
+    const onChange = vi.fn();
+    mountModal({ projectIds: [1], startMode: { ...SLOT, onChange } });
+    act(() => {
+      container.querySelector<HTMLElement>('[data-testid="start-mode-option-default"]')!.click();
+    });
+    expect(onChange).toHaveBeenCalledWith('default');
   });
 });

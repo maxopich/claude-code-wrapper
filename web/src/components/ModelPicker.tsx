@@ -1,6 +1,5 @@
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ModelCatalogueEntry } from '@cebab/shared/protocol';
-import { nextIndex } from '../listNavigation';
+import { CardRadioGroup } from './CardRadioGroup';
 
 /**
  * Choose the model a project's runs ask for (Cebab-ws0.3).
@@ -75,51 +74,22 @@ export function modelPickerRows(entries: ModelCatalogueEntry[]): Row[] {
 
 export function ModelPicker(props: ModelPickerProps) {
   const rows = modelPickerRows(props.entries);
-  const currentIdx = Math.max(
-    0,
-    rows.findIndex((r) => r.value === props.value),
-  );
-
-  function onKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
-    if (props.disabled) return;
-    const target = nextIndex({
-      key: e.key,
-      current: currentIdx,
-      count: rows.length,
-      wrap: true,
-      orientation: 'both',
-    });
-    if (target === null) return;
-    e.preventDefault();
-    props.onChange(rows[target]!.value);
-    e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[target]?.focus();
-  }
 
   return (
     <div className="model-picker">
-      <div
-        className="model-picker-options"
-        role="radiogroup"
-        aria-label="Model"
-        onKeyDown={onKeyDown}
-      >
-        {rows.map((r, i) => (
-          <button
-            key={r.key}
-            type="button"
-            role="radio"
-            aria-checked={i === currentIdx}
-            tabIndex={i === currentIdx ? 0 : -1}
-            disabled={props.disabled}
-            className={`model-picker-option${i === currentIdx ? ' active' : ''}`}
-            onClick={() => props.onChange(r.value)}
-            data-testid={`model-option-${r.key}`}
-          >
-            <span className="model-picker-name">{r.label}</span>
-            {r.description && <span className="model-picker-desc">{r.description}</span>}
-          </button>
-        ))}
-      </div>
+      <CardRadioGroup
+        options={rows.map((r) => ({
+          key: r.key,
+          value: r.value,
+          label: r.label,
+          description: r.description,
+        }))}
+        value={props.value}
+        onChange={props.onChange}
+        ariaLabel="Model"
+        testIdPrefix="model-option"
+        {...(props.disabled !== undefined ? { disabled: props.disabled } : {})}
+      />
       <div className="model-picker-footer">
         {/* An empty catalogue says so rather than rendering a lone Default row
          *  with no explanation for why nothing else is offered. */}

@@ -1036,6 +1036,13 @@ function AppShell({
     wsRef.current?.send({ type: 'get_model_catalogue', projectId, refresh: true });
   }
 
+  // Cebab-ws0.4. Audited server-side, so no optimistic update: the write can be
+  // refused (a broken audit chain) and a local guess that disagreed would show
+  // the operator a choice that never landed.
+  function setProjectStartPermissionMode(projectId: number, mode: SessionPermissionMode | null) {
+    wsRef.current?.send({ type: 'set_project_start_permission_mode', projectId, mode });
+  }
+
   function toggleTrust(projectId: number, trusted: boolean) {
     wsRef.current?.send({ type: 'set_trusted', projectId, trusted });
   }
@@ -2340,6 +2347,7 @@ function AppShell({
             modelRefreshingFor={modelRefreshingFor}
             onSetProjectModel={setProjectModel}
             onRefreshModelCatalogue={refreshModelCatalogue}
+            onSetProjectStartPermissionMode={setProjectStartPermissionMode}
             onRenameSession={renameSession}
             onDownloadSession={downloadSession}
             onBulkSessionOp={bulkSessionOp}

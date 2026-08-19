@@ -9,6 +9,7 @@ import {
   listProjectPaths,
   listProjects,
   markProjectsMissingByPaths,
+  resolveStartPermissionMode,
   upsertProject,
   type ProjectRow,
 } from './repo/projects.js';
@@ -197,6 +198,7 @@ export function rowToProject(row: ProjectRow) {
     busInstalled: row.bus_installed === 1,
     busAgentName: row.bus_agent_name,
     model: row.model,
+    startPermissionMode: resolveStartPermissionMode(row.start_permission_mode) ?? null,
   };
 }
 

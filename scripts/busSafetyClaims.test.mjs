@@ -347,6 +347,25 @@ const POSTURE_ALLOWLIST = new Map([
   ['web/src/components/MultiAgentTab.busGates.test.tsx', 'asserts its absence'],
   ['.npmrc', 'carries the canonical corrected wording'],
   ['CLAUDE.md', 'names the branch to say it is test-only, not the chain path'],
+  // Cebab-ws0.4 — all five name the mode to say Cebab NEVER exposes it. They
+  // are single-agent permission narrowing, not claims about how the bus runs.
+  [
+    'server/src/repo/projects.ts',
+    'the read-side guard: names the wider SDK modes it filters out of a single-agent seed',
+  ],
+  [
+    'server/src/migrations/036_project_start_permission_mode.sql',
+    'explains why the column has no CHECK and is filtered at the read site instead',
+  ],
+  [
+    'server/src/migrations/036_project_start_permission_mode.schema.test.ts',
+    'asserts a hand-edited row carrying it is rejected',
+  ],
+  ['server/src/ws/validate_client_msg.test.ts', 'asserts the wire rejects it'],
+  [
+    'server/src/ws/single_agent_model_wiring.test.ts',
+    'names it as the value the read-side guard exists to stop',
+  ],
   [SELF, 'this gate'],
 ]);
 

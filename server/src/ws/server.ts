@@ -15,10 +15,12 @@ import { config } from '../config.js';
 import {
   getProject,
   projectModelSpec,
+  resolveStartPermissionMode,
   setProjectModel,
   setProjectTrusted,
   touchProject,
 } from '../repo/projects.js';
+import { applyProjectStartPermissionMode } from '../project_start_mode.js';
 import { observeProjectHooks } from '../repo/hook_trust.js';
 import {
   createSession,
@@ -3344,11 +3346,20 @@ function normalizeSessionTitle(raw: string | null): string | null {
 export function seedPermissionMode(
   resumeSessionId: string | undefined,
   trusted: boolean,
+  projectStartMode?: SessionPermissionMode | undefined,
 ): SessionPermissionMode {
+  // ORDER IS THE DESIGN (Cebab-ws0.4). A resumed session's own stored mode
+  // wins over the project default, always. The alternative reads as more
+  // "correct" — the project setting is newer, so surely it should apply — and
+  // is the one destructive option here: it would silently re-point every
+  // in-progress conversation the operator had already steered, on their next
+  // message, with no event anywhere saying so. The project setting is a
+  // STARTING mode; a session that has started is past it.
   if (resumeSessionId) {
     const stored = getSessionPermissionMode(resumeSessionId);
     if (stored) return stored;
   }
+  if (projectStartMode) return projectStartMode;
   return trusted ? 'acceptEdits' : 'default';
 }
 
@@ -3800,6 +3811,28 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       setProjectModel(msg.projectId, chosen);
       const rows = await syncWorkspaceProjects();
       send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      return;
+    }
+    case 'set_project_start_permission_mode': {
+      // Cebab-ws0.4. The audit-then-write half lives in
+      // `project_start_mode.ts` so its ordering can be tested with a throwing
+      // append — see that module's header for why it is not inline here.
+      const startMode = applyProjectStartPermissionMode(msg.projectId, msg.mode, (m) =>
+        send(conn.ws, m),
+      );
+      if (!startMode.ok) {
+        console.error('[ws] set_project_start_permission_mode failed', startMode.error);
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message:
+            `set_project_start_permission_mode: could not record the authority change ` +
+            `(${startMode.error}); starting mode unchanged.`,
+        });
+        return;
+      }
+      const afterStartMode = await syncWorkspaceProjects();
+      send(conn.ws, { type: 'projects', projects: afterStartMode.map(rowToProject) });
       return;
     }
     case 'get_model_catalogue': {
@@ -5918,7 +5951,11 @@ async function runOneTurn(
   // Initial mode preserves the user's last in-session preference (persisted on
   // `sessions.permission_mode`) across turns. Falls back to the trust-derived
   // default for fresh sessions. Trust still drives `settingSources` either way.
-  const permissionMode = seedPermissionMode(msg.sessionId, trusted);
+  const permissionMode = seedPermissionMode(
+    msg.sessionId,
+    trusted,
+    resolveStartPermissionMode(project.start_permission_mode),
+  );
   const settingSources = trusted ? (['user', 'project', 'local'] as const) : (['user'] as const);
 
   const canUseTool = async (

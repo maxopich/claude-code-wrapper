@@ -142,14 +142,24 @@ describe('[a11y] a composite role comes with a keyboard model', () => {
   });
 });
 
-describe('[a11y] the five widgets are all still here', () => {
+describe('[a11y] every composite widget is still here', () => {
   // Not a substitute for the discovery above — a belt on top of it. If a
   // component is renamed or its role is dropped, that is a decision someone
   // should make on purpose, not something that quietly shrinks this gate's
   // coverage to nothing while it keeps reporting green.
+  //
+  // It shrank anyway. `ModelPicker.tsx` shipped a `radiogroup` in Cebab-ws0.3
+  // and was never added here, and NOTHING failed — the belt only checked that
+  // listed files still declare their role, never that declared roles are
+  // listed. So a new composite widget could arrive unlisted forever, which is
+  // the exact "quietly shrinks" failure this comment warned about, reached
+  // from the direction the list could not see. The completeness test below
+  // closes it, and the list is now generated-from-reality rather than
+  // maintained-by-memory: adding a widget makes it fail until it is named.
   const EXPECTED: Array<[string, string]> = [
     ['./components/agentControl/ParticipantControlMenu.tsx', 'menu'],
     ['./components/ArtifactsView.tsx', 'grid'],
+    ['./components/CardRadioGroup.tsx', 'radiogroup'],
     ['./components/SessionSearchModal.tsx', 'combobox'],
     ['./components/SessionSearchModal.tsx', 'listbox'],
     ['./components/SlashCommandPalette.tsx', 'listbox'],
@@ -159,5 +169,14 @@ describe('[a11y] the five widgets are all still here', () => {
   test.each(EXPECTED)('%s still declares role="%s"', (file, role) => {
     expect(SOURCES[file], `source not found: ${file}`).toBeDefined();
     expect(declaredRoles(SOURCES[file]!)).toContain(role);
+  });
+
+  test('every discovered composite role is named in the list', () => {
+    // The missing half. Sorted-array equality rather than a subset check, so
+    // a STALE entry — a file that no longer declares the role — fails too;
+    // an exemption nobody is using is how a list stops describing the code.
+    const discovered = DECLARING.flatMap((f) => f.roles.map((r) => `${f.file} ${r}`)).sort();
+    const listed = EXPECTED.map(([file, role]) => `${file} ${role}`).sort();
+    expect(discovered).toEqual(listed);
   });
 });

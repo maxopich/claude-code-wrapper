@@ -1,0 +1,28 @@
+-- Cebab-ws0.4: the permission mode a project's NEW sessions start in.
+--
+-- WHY THIS EXISTS. Permission mode was derived and never chosen:
+-- seedPermissionMode returned `trusted ? 'acceptEdits' : 'default'` for a fresh
+-- session, and the in-session pill only moved once a turn was already running.
+-- So the operator could not decide how the FIRST turn behaves - the one most
+-- likely to do something they wanted to watch.
+--
+-- WHY NULLABLE WITH NO DEFAULT, and why that is the entire safety argument.
+-- NULL means "no choice - derive from Trust", which is exactly what every
+-- project did before this column existed. A DEFAULT of any kind would change
+-- the starting posture of every existing row on upgrade; for 'default' that
+-- would mean every project on the machine suddenly raising a permission card
+-- on its first tool call, and for 'acceptEdits' it would mean every UNTRUSTED
+-- project silently auto-allowing file edits. Neither is a migration's decision
+-- to make.
+--
+-- NO BACKFILL for the same reason. 024_bus_trust_decision backfilled because an
+-- installed bus genuinely implied a past trust decision. There is no past
+-- start-mode decision to recover here, and inventing one would be a claim about
+-- intent nobody stated.
+--
+-- The value is one of SessionPermissionMode ('default' | 'acceptEdits') -
+-- deliberately two of the SDK's six. There is no CHECK constraint, matching
+-- 004_session_permission_mode.sql; validity is enforced in TypeScript at the
+-- READ site (resolveStartPermissionMode filters through isSessionPermissionMode),
+-- so a hand-edited row cannot inject 'bypassPermissions' into a spawn.
+ALTER TABLE projects ADD COLUMN start_permission_mode TEXT;
