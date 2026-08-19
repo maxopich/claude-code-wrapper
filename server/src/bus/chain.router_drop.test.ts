@@ -68,7 +68,7 @@ function makeRouter(agentNames: string[] = AGENTS): {
 } {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-  const paths = computeSessionPaths(SESSION_ID, workspace);
+  const paths = computeSessionPaths(SESSION_ID);
   fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
   const captured: Captured = { notifications: [], drops: [], retries: [] };
   const onEnded = vi.fn();
@@ -464,7 +464,7 @@ describe('[Cebab-wsq] a dropped chain event parks the run instead of wedging it'
     // run being torn down as `stopped`.
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
     const onEnded = vi.fn();
     const deliver = vi.fn();

@@ -1,13 +1,16 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { config } from './config.js';
+import { initAuthToken } from './auth.js';
 import { closeDb, getDb } from './db.js';
 import {
   DIR_MODE,
   FILE_MODE,
+  ensureDataDir,
   hardenDataDir,
   newFileMode,
   precreateDbFile,
@@ -384,5 +387,98 @@ describe('[security] failure is survivable', () => {
     const result = hardenDataDir();
     expect(result.dirsChanged).toBe(0);
     expect(result.filesChanged).toBe(0);
+  });
+});
+
+// [security] Cebab-ws0.8 — the data dir must be invisible to git.
+//
+// `config.dataDir` reads `CEBAB_DATA_DIR` with NO validation, so
+// `CEBAB_DATA_DIR=./data` inside a checkout drops the database, its WAL/SHM
+// sidecars, the logs and every per-session folder into a git repo as
+// untracked-but-unignored noise. That placement is a legitimate dev workflow,
+// so it is not refused — it is made harmless.
+describe('[security] ensureDataDir gitignores Cebab state (ws0.8)', () => {
+  const gitignorePath = (): string => path.join(config.dataDir, '.gitignore');
+
+  test('creates the data dir and a .gitignore that ignores everything', () => {
+    ensureDataDir();
+    expect(fs.existsSync(config.dataDir)).toBe(true);
+    const body = fs.readFileSync(gitignorePath(), 'utf8');
+    // A bare `*`, and specifically NOT the `* + !.gitignore` idiom — see the
+    // DATA_DIR_GITIGNORE comment. Asserted as an absence, because the idiom is
+    // exactly what a well-meaning future edit would reach for.
+    expect(body).toContain('*\n');
+    expect(body).not.toContain('!.gitignore');
+    if (POSIX) expect(mode(gitignorePath())).toBe(FILE_MODE);
+  });
+
+  test('is idempotent — a second call rewrites nothing', () => {
+    ensureDataDir();
+    const before = fs.statSync(gitignorePath());
+    const body = fs.readFileSync(gitignorePath(), 'utf8');
+    ensureDataDir();
+    expect(fs.readFileSync(gitignorePath(), 'utf8')).toBe(body);
+    expect(fs.statSync(gitignorePath()).mtimeMs).toBe(before.mtimeMs);
+  });
+
+  // The negative that makes `flag: 'wx'` load-bearing rather than incidental.
+  // A file we did not write is not ours to rewrite: it is the operator's
+  // explicit statement of intent and it wins over ours.
+  test('does NOT clobber a .gitignore the operator already wrote', () => {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    const theirs = '# mine\n!keep-this\n';
+    fs.writeFileSync(gitignorePath(), theirs);
+    ensureDataDir();
+    expect(fs.readFileSync(gitignorePath(), 'utf8')).toBe(theirs);
+  });
+
+  test('a write failure is a diagnostic, not a boot failure', () => {
+    // The data dir works perfectly well ungitignored — this is hygiene, not a
+    // control, so it must never be able to stop the server starting.
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {
+      throw Object.assign(new Error('nope'), { code: 'EACCES' });
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => ensureDataDir()).not.toThrow();
+    expect(errSpy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  // BEHAVIOURAL. The three cases above pin the file's content and lifecycle;
+  // only this one pins the thing the operator actually asked for. It is what
+  // reddens if someone "improves" DATA_DIR_GITIGNORE to `* + !.gitignore` —
+  // every content assertion above could be rewritten to match that change,
+  // but git's own answer cannot.
+  //
+  // Deliberately not skipped when git is absent: a conditional skip is a gate
+  // that goes vacuously green, and this repo is a git repo.
+  test('git reports nothing in a data dir placed inside a checkout', () => {
+    const repo = path.join(tmpRoot, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    const git = (args: string[]): string =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+    git(['init', '-q']);
+    config.dataDir = path.join(repo, 'data');
+    ensureDataDir();
+    fs.writeFileSync(path.join(config.dataDir, 'cebab.sqlite'), 'x');
+
+    expect(git(['status', '--porcelain']).trim()).toBe('');
+
+    // Negative control: without the file, the same state IS reported. Without
+    // this, a bug that made the data dir empty would pass the assertion above.
+    fs.rmSync(path.join(config.dataDir, '.gitignore'));
+    expect(git(['status', '--porcelain']).trim()).not.toBe('');
+  });
+
+  test('both boot entry points create it independently', () => {
+    // Either can be first depending on boot order, so neither may depend on
+    // the other having run.
+    getDb();
+    expect(fs.existsSync(gitignorePath())).toBe(true);
+
+    closeDb();
+    config.dataDir = path.join(tmpRoot, 'auth-only');
+    initAuthToken();
+    expect(fs.existsSync(gitignorePath())).toBe(true);
   });
 });

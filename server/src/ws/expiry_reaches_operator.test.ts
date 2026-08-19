@@ -93,7 +93,7 @@ function registerRealRouterSession(): {
   rebindTo: (into: ServerMsg[]) => void;
   detach: () => void;
 } {
-  const paths = computeSessionPaths(SESSION_ID, path.join(tmpRoot, 'workspace'));
+  const paths = computeSessionPaths(SESSION_ID);
   const sinkA: ServerMsg[] = [];
   const mkSink = (into: ServerMsg[]): BusSink => ({
     onEvent: () => {},

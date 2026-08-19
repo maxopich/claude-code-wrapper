@@ -34,12 +34,11 @@ withTempDataDir('cebab-teardown-finalize-');
 
 function chainRouter(sessionId: string, onFinalize: (r: MultiAgentEndedReason) => void) {
   createMultiAgentSession(sessionId, 'chain', 'iter-1');
-  const ws = path.join(fileURLToPath(new URL('.', import.meta.url)), 'unused-workspace');
   return createChainRouter({
     sessionId,
     iterationId: 'iter-1',
     agentNames: ['alpha', 'beta'],
-    paths: computeSessionPaths(sessionId, ws),
+    paths: computeSessionPaths(sessionId),
     onEvent: vi.fn(),
     onEnded: vi.fn(),
     onFinalize,
@@ -49,12 +48,11 @@ function chainRouter(sessionId: string, onFinalize: (r: MultiAgentEndedReason) =
 
 function orchestratorRouter(sessionId: string, onFinalize: (r: MultiAgentEndedReason) => void) {
   createMultiAgentSession(sessionId, 'orchestrator', 'iter-1');
-  const ws = path.join(fileURLToPath(new URL('.', import.meta.url)), 'unused-workspace');
   return createOrchestratorRouter({
     sessionId,
     iterationId: 'iter-1',
     workerNames: ['alpha'],
-    paths: computeSessionPaths(sessionId, ws),
+    paths: computeSessionPaths(sessionId),
     lifecycle: 'temp',
     onEvent: vi.fn(),
     onEnded: vi.fn(),

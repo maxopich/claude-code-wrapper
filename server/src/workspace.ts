@@ -3,6 +3,7 @@ import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config, resolvePath } from './config.js';
+import { ensureDataDir } from './data_perms.js';
 import { getSetting, setSetting } from './repo/settings.js';
 import {
   listProjectPaths,
@@ -45,6 +46,31 @@ function canonical(p: string): string {
   } catch {
     return p;
   }
+}
+
+/**
+ * Is `child` strictly inside `parent`? Both must already be canonical.
+ *
+ * `path.relative`, never `startsWith` — this is the whole reason the helper
+ * exists. `~/.cebabX` shares a string prefix with `~/.cebab` and is not inside
+ * it; appending a separator fixes that one case and still gets trailing slashes
+ * and mixed `/` vs `\` wrong on Windows, which `relative` normalises.
+ *
+ * The escape predicate names `path.sep` explicitly rather than testing
+ * `startsWith('..')`, because a bare prefix test also rejects a legitimately
+ * named `..foo` directory.
+ *
+ * Strict: a path is not inside itself (`rel === ''`). Callers that also want to
+ * refuse the parent itself compare for equality separately, so the two
+ * conditions stay legible at the call site.
+ *
+ * Exported for its own tests — the Windows behaviour is asserted by driving
+ * `path.win32` directly, which is the only way to cover it from a POSIX runner.
+ */
+export function isInside(parent: string, child: string, impl: typeof path = path): boolean {
+  const rel = impl.relative(parent, child);
+  if (rel === '' || rel === '..' || rel.startsWith(`..${impl.sep}`)) return false;
+  return !impl.isAbsolute(rel);
 }
 
 /**
@@ -95,6 +121,23 @@ export function setWorkspaceRoot(input: string): string {
       `refusing your home directory as a workspace: ${resolved} — every folder in it would become an agent project. Use a subdirectory such as ~/agents.`,
     );
   }
+  // Cebab-ws0.8. `~/.cebab` holds the database, the logs, the bus dirs and —
+  // since this change — every per-session folder. Pointing the workspace at it
+  // would make Cebab scan its own state for the operator's projects.
+  //
+  // `ensureDataDir()` first, and the ordering is load-bearing: `canonical()`
+  // falls back to its input when realpath fails. For the two refusals above
+  // that fallback only makes the comparison stricter, but for a CONTAINMENT
+  // check it makes it looser — an unresolved `/tmp/x/.cebab` compared against a
+  // resolved `/private/tmp/x/.cebab/sessions` reads as "not inside" and would
+  // be waved through. Making the directory exist removes that gap.
+  ensureDataDir();
+  const dataReal = canonical(config.dataDir);
+  if (real === dataReal || isInside(dataReal, real)) {
+    throw new Error(
+      `refusing Cebab's own data directory as a workspace: ${resolved} — ${dataReal} holds the database, the logs and your session folders, so Cebab would scan its own state for your projects and every one of those would become an agent project. Point the workspace at where your projects live, such as ~/agents.`,
+    );
+  }
 
   setSetting(SETTING_KEY, resolved);
   return resolved;
@@ -107,10 +150,24 @@ export function setWorkspaceRoot(input: string): string {
  */
 export async function syncWorkspaceProjects(): Promise<ProjectRow[]> {
   const root = resolveWorkspaceRoot();
+  // Cebab-ws0.8: the sidebar shows the operator's agents and nothing of Cebab's.
+  // `setWorkspaceRoot` refuses the data dir outright, but it cannot catch a data
+  // dir NESTED in the workspace under a non-dot name (`CEBAB_DATA_DIR=~/agents/
+  // cebab-data`): the data dir is fixed at process start and the workspace can be
+  // re-pointed at any time afterwards, so the refusal can be sequenced around.
+  // The dot filter below misses it too, by construction. This is the check that
+  // cannot be.
+  const dataReal = canonical(config.dataDir);
   let entries: string[];
   try {
     const dirents = await fsp.readdir(root, { withFileTypes: true });
-    entries = dirents.filter((d) => d.isDirectory() && !d.name.startsWith('.')).map((d) => d.name);
+    entries = dirents
+      .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
+      .filter((d) => {
+        const full = canonical(path.join(root, d.name));
+        return full !== dataReal && !isInside(dataReal, full);
+      })
+      .map((d) => d.name);
   } catch {
     // Root doesn't exist yet — nothing to scan, but don't crash either.
     return listProjects();

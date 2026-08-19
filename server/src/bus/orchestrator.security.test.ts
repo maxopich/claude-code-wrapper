@@ -69,7 +69,7 @@ afterEach(() => {
 function makeRouter() {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-  const paths = computeSessionPaths(SESSION_ID, workspace);
+  const paths = computeSessionPaths(SESSION_ID);
   const onEvent = vi.fn();
   const onEnded = vi.fn();
   const router = createOrchestratorRouter({
@@ -209,7 +209,7 @@ describe('[security] a hostile worker CLAUDE.md is injected as inert, fenced tex
   test('breakout + spoofed bus_send in a worker CLAUDE.md never becomes a routed/forged event', async () => {
     const workspace = path.join(tmpRoot, 'ws');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     const captured: string[] = [];
     const runnerFactory = (opts: { prompt: string }): Runner => {
       captured.push(opts.prompt);
@@ -283,7 +283,7 @@ describe('[security] the orchestrator receives worker text as inert, fenced data
   } {
     const workspace = path.join(tmpRoot, 'ws-relay');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     const prompts: Array<{ cwd: string; prompt: string }> = [];
     const runnerFactory = (opts: { cwd: string; prompt: string }): Runner => {
       prompts.push({ cwd: opts.cwd, prompt: opts.prompt });
@@ -430,7 +430,7 @@ describe('[security] a dangerous call that cannot be recorded is halted, not run
   async function runWithBrokenLedger(pauseOnDangerous: boolean) {
     const workspace = path.join(tmpRoot, `ws-${String(pauseOnDangerous)}`);
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     const dispatched: string[] = [];
     const onPendingRetry = vi.fn();
     // Arm the gate on the ROW, not just the handle. `wireOrchestratorSession`

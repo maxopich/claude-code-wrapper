@@ -105,6 +105,59 @@ export function newFileMode(): number | undefined {
   return modesApply() ? FILE_MODE : undefined;
 }
 
+/**
+ * The ignore file Cebab drops into its own data dir (Cebab-ws0.8).
+ *
+ * `*` and nothing else — deliberately NOT the `* + !.gitignore` idiom. That
+ * idiom exists to keep a directory IN a repo (a committed `logs/.gitignore` so
+ * an empty dir survives a clone). This is the opposite case: everything under
+ * the data dir is machine-local state that must never be committed anywhere.
+ * Un-ignoring this file would make git report the directory as containing one
+ * untracked entry — which is precisely the noise the file exists to remove.
+ * With a bare `*`, git finds every entry ignored and omits the directory from
+ * `status` entirely.
+ */
+const DATA_DIR_GITIGNORE =
+  '# Created by Cebab. Everything here is machine-local state:\n' +
+  '# the database, the logs, the bus dirs and the per-session folders.\n' +
+  '*\n';
+
+/**
+ * Create the data dir with the right mode AND make it invisible to git.
+ *
+ * WHY THE GITIGNORE (Cebab-ws0.8). `config.dataDir` reads `CEBAB_DATA_DIR` with
+ * no validation of any kind, so `CEBAB_DATA_DIR=./data` inside a checkout drops
+ * the SQLite file, its WAL/SHM sidecars, the logs and — since ws0.8 — every
+ * per-session folder into a git repo as untracked-but-unignored noise. Refusing
+ * that placement would mean refusing to boot for a legitimate dev workflow, so
+ * the proportionate answer is to make it harmless rather than to make it an
+ * error.
+ *
+ * `flag: 'wx'` is load-bearing: create-or-nothing, atomically. There is no
+ * read-then-write window to lose a race in, and an operator who already put
+ * their OWN `.gitignore` here keeps it byte-for-byte — a file we did not write
+ * is not ours to rewrite. Residual, accepted and stated: if their file does not
+ * ignore everything, Cebab's state stays visible to git. That file is their
+ * explicit statement of intent and it wins over ours.
+ *
+ * A write failure is a diagnostic, never a boot failure — the data dir works
+ * perfectly well ungitignored, and this is hygiene rather than a control.
+ *
+ * Idempotent and cheap (one failed `open(O_EXCL)` on the common path), so any
+ * code about to use the data dir can just call it.
+ */
+export function ensureDataDir(): void {
+  secureMkdir(config.dataDir);
+  const gitignore = path.join(config.dataDir, '.gitignore');
+  try {
+    fs.writeFileSync(gitignore, DATA_DIR_GITIGNORE, { flag: 'wx', mode: newFileMode() });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      console.error(`[data_perms] could not write ${gitignore}`, err);
+    }
+  }
+}
+
 /** Tighten one existing file to 0600. Missing files and chmod failures are
  *  both silent — callers use this opportunistically. */
 export function secureFile(file: string): void {
@@ -149,9 +202,12 @@ export function precreateDbFile(dbPath: string): void {
  * later is covered without anyone remembering to update a list here. Today
  * that walk finds: `cebab.sqlite` and its `-wal`/`-shm` sidecars, `auth-token`,
  * the H14 chain-tip mirror, `logs/` with the per-session JSONL transcripts and
- * `origin_rejections.log`, and `bus/` — a leftover from the pre-SDK
- * architecture that still holds agent comm files on installs predating the
- * rewrite.
+ * `origin_rejections.log`, `bus/` — a leftover from the pre-SDK architecture
+ * that still holds agent comm files on installs predating the rewrite — and,
+ * since Cebab-ws0.8, `sessions/` with one subtree per multi-agent session.
+ * That last one is why the walk beats a name list twice over: `sessions/` was
+ * covered the day it appeared, and its contents are transcripts and iteration
+ * artifacts, which are exactly what H01 is about.
  */
 function dataDirEntries(): { dirs: string[]; files: string[] } {
   const dirs: string[] = [config.dataDir];

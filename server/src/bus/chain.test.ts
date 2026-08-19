@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createChainRouter, resumeChainSession, startChainSession } from './chain.js';
-import { computeSessionPaths } from './paths.js';
+import { computeSessionPaths, sessionsRoot } from './paths.js';
 import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import {
   getLiveSession,
@@ -56,7 +56,7 @@ afterEach(() => {
 function setup() {
   const workspace = path.join(tmpRoot, 'workspace');
   fs.mkdirSync(workspace, { recursive: true });
-  const paths = computeSessionPaths(SESSION_ID, workspace);
+  const paths = computeSessionPaths(SESSION_ID);
   fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
   const onEvent = vi.fn();
   const onEnded = vi.fn();
@@ -241,7 +241,7 @@ describe('createChainRouter — hop-budget enforcement', () => {
   function setupBudget(hopBudget: number) {
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
     const onEvent = vi.fn();
     const onEnded = vi.fn();
@@ -353,7 +353,7 @@ describe('createChainRouter — hop-budget enforcement', () => {
     function setupUnpersistable(hopBudget: number) {
       const workspace = path.join(tmpRoot, 'workspace');
       fs.mkdirSync(workspace, { recursive: true });
-      const paths = computeSessionPaths('session-that-was-never-created', workspace);
+      const paths = computeSessionPaths('session-that-was-never-created');
       const onEnded = vi.fn();
       const deliver = vi.fn();
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -424,7 +424,7 @@ describe('createChainRouter — onWorkerFailed (Item #4)', () => {
   function setupFail() {
     const workspace = path.join(tmpRoot, 'workspace');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
     const onEvent = vi.fn();
     const onEnded = vi.fn();
@@ -506,7 +506,7 @@ describe('createChainRouter — onWorkerFailed (Item #4)', () => {
     // a failure: budget=3 should still allow 2 more normal hops after.
     const workspace = path.join(tmpRoot, 'workspace2');
     fs.mkdirSync(workspace, { recursive: true });
-    const paths = computeSessionPaths(SESSION_ID, workspace);
+    const paths = computeSessionPaths(SESSION_ID);
     fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
     const onEnded = vi.fn();
     const deliver = vi.fn();
@@ -810,16 +810,29 @@ describe('startChainSession — project CLAUDE.md injection', () => {
 
 // [security] Register H01 — bus session folders used the ambient umask.
 //
-// `<workspaceRoot>/.cebab-session-<id>/` accumulates every hop's prompt.md and
-// reply.md plus the transcript log — the same conversation content the
-// `~/.cebab` transcripts hold. The mode on this ONE directory is the whole
-// protection: everything written beneath it inherits the traversal gate, so
+// `<dataDir>/sessions/<id>/` accumulates every hop's prompt.md and reply.md plus
+// the transcript log — the same conversation content the `~/.cebab` transcripts
+// hold. Everything written beneath the folder inherits its traversal gate, so
 // the per-file writes underneath deliberately stay at the ambient mode.
 //
-// Scope note: only folders Cebab CREATES are tightened. Pre-existing session
-// folders are left alone — they live in the operator's workspace root, and
-// silently re-permissioning directories in their tree could break a
-// deliberately shared setup. Windows-gated as auth.test.ts:32 is.
+// WHAT CEBAB-WS0.8 CHANGED ABOUT THIS TEST, AND WHY THE SCOPE NOTE IS GONE.
+// This block used to carry a reservation: "only folders Cebab CREATES are
+// tightened; pre-existing ones are left alone, because they live in the
+// operator's workspace root and silently re-permissioning directories in their
+// tree could break a deliberately shared setup." That reasoning was sound and
+// its premise is now false — the folders live under `~/.cebab`, which is
+// Cebab's own, where 0700 is the house rule for the database, the logs and the
+// bus dirs alike, and `hardenDataDir` sweeps the tree unconditionally.
+//
+// So what this test is FOR has changed with it. It used to prove Cebab tightened
+// a directory it was a guest in. It now proves a newly-introduced subtree did
+// not escape the policy covering the rest of the data dir — which is why the
+// `sessions/` PARENT is asserted below and was not before. A 0700 leaf under a
+// 0755 parent is not private, and the parent is the directory this change
+// introduced. A rewritten rationale that left the assertions alone would be a
+// rationale nobody had to check.
+//
+// Windows-gated as auth.test.ts:32 is.
 describe('[security] chain session folder permissions', () => {
   function nullRunnerFactory() {
     return (): Runner => {
@@ -852,8 +865,53 @@ describe('[security] chain session folder permissions', () => {
     });
     await new Promise((r) => setImmediate(r));
 
-    const folder = computeSessionPaths(handle.sessionId, workspace).folder;
+    const folder = computeSessionPaths(handle.sessionId).folder;
     expect(fs.statSync(folder).mode & 0o777).toBe(0o700);
+    // A4: the parent too. Reddens if the `secureMkdir(sessionsRoot())` call is
+    // dropped and `sessions/` happens to already exist at the ambient umask.
+    expect(fs.statSync(sessionsRoot()).mode & 0o777).toBe(0o700);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  /**
+   * A3, and the only test here that measures the thing the operator asked for.
+   *
+   * Every other assertion in this file's ws0.8 set is on the pure path function
+   * — they prove the arithmetic. This one runs a real chain session against a
+   * real temp workspace and then LOOKS at the workspace. That distinction
+   * matters: a stray `mkdirSync` anywhere in the start path would leave the
+   * path math perfect and the operator's folder still littered, which is
+   * exactly the bug being fixed.
+   *
+   * Not Windows-gated — it asserts on directory entries, not on modes.
+   */
+  test('a real session start writes NOTHING into the operator workspace', async () => {
+    const workspace = path.join(tmpRoot, 'ws-clean');
+    fs.mkdirSync(workspace, { recursive: true });
+    const mk = (name: string): ResolvedAgent => {
+      const dir = path.join(tmpRoot, `clean-${name}`);
+      fs.mkdirSync(dir, { recursive: true });
+      const proj = upsertProject(name, dir);
+      return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+    };
+
+    const handle = await startChainSession({
+      participants: [mk('c1'), mk('c2')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: nullRunnerFactory(),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    // Nothing at all — not a dot-folder, not anything else.
+    expect(fs.readdirSync(workspace)).toEqual([]);
+    // ...and the session really did get created somewhere, so the assertion
+    // above cannot pass merely because the run failed to start.
+    expect(fs.readdirSync(sessionsRoot())).toEqual([handle.sessionId]);
+    expect(fs.existsSync(computeSessionPaths(handle.sessionId).folder)).toBe(true);
 
     unregisterLiveSession(handle.sessionId);
   });

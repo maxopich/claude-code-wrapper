@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { config } from './config.js';
-import { precreateDbFile, secureMkdir } from './data_perms.js';
+import { ensureDataDir, precreateDbFile } from './data_perms.js';
 import { hashMigrationSql } from './migration_integrity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -145,7 +145,12 @@ export function getDb(): Database.Database {
   // opens an already-tight file. The pre-create must happen BEFORE the WAL
   // pragma below — SQLite derives the `-wal`/`-shm` permissions from the main
   // database file, so this one call covers all three.
-  secureMkdir(config.dataDir);
+  //
+  // `ensureDataDir` rather than a bare `secureMkdir` since Cebab-ws0.8: it also
+  // drops the `.gitignore` that keeps the data dir out of `git status` when
+  // `CEBAB_DATA_DIR` points inside a checkout. Idempotent, and this is one of
+  // the two paths that reliably runs before anything else writes there.
+  ensureDataDir();
   precreateDbFile(config.dbPath);
   const db = new Database(config.dbPath);
   db.pragma('journal_mode = WAL');

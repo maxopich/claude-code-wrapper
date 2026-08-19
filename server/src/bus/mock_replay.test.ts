@@ -118,7 +118,7 @@ describe('MOCK=1 chain replay', () => {
     expect(getMultiAgentSession(handle.sessionId)!.status).toBe('completed');
 
     // The terminal hop wrote the run's answer.
-    const paths = computeSessionPaths(handle.sessionId, ws);
+    const paths = computeSessionPaths(handle.sessionId);
     const finalMd = fs.readFileSync(
       path.join(paths.iterationDir(handle.iterationId), 'final.md'),
       'utf8',

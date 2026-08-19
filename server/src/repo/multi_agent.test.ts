@@ -8,24 +8,27 @@ import { upsertProject } from './projects.js';
 import {
   addParticipant,
   appendMultiAgentEvent,
+  appendMultiAgentMutation,
+  archiveMultiAgentSession,
+  capToolIoJson,
   clearFinishedMultiAgentSessions,
   computeRecoveryContext,
+  confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
   getLastRunForTemplate,
+  getMultiAgentSession,
   listMultiAgentEvents,
+  listMultiAgentMutations,
   listMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
-  archiveMultiAgentSession,
-  unarchiveMultiAgentSession,
   listParticipants,
   listResolvedParticipants,
+  reactivateMultiAgentSession,
   recordSessionTeardown,
+  setMultiAgentSessionLifecycle,
   setProjectBusInstalled,
-  appendMultiAgentMutation,
-  confirmMutationByToolUseId,
-  listMultiAgentMutations,
-  capToolIoJson,
+  unarchiveMultiAgentSession,
 } from './multi_agent.js';
 
 // Isolation scaffolding: each test gets its own ~/.cebab dir so DB writes
@@ -89,6 +92,45 @@ describe('createMultiAgentSession + session_folder + lifecycle (migration 007)',
     const s3 = rows.find((r) => r.id === 's3');
     expect(s3?.lifecycle).toBe('temp');
     expect(s3?.session_folder).toBe('/somewhere');
+  });
+
+  /**
+   * A5 (Cebab-ws0.8). `session_folder` is WRITE-ONCE, at INSERT, and this is
+   * the invariant the whole ws0.8 cutover rests on: because the stored path is
+   * absolute and never rewritten, moving where NEW folders are created leaves
+   * every existing row resolving to the folder its artifacts are actually in.
+   *
+   * It had no test. The property held only because no `UPDATE ... SET
+   * session_folder` had been written yet — which is not a guarantee, it is an
+   * absence. This makes it one: any future statement that rewrites the column
+   * turns a silent orphaning of pre-move sessions into a red test.
+   *
+   * The legacy workspace-shaped path is deliberate. This row is what a session
+   * created BEFORE the move looks like, and it must survive untouched.
+   */
+  test('session_folder is write-once — no lifecycle transition rewrites it', () => {
+    const legacy = path.join('/Users/test/workspace', '.cebab-session-abcd1234');
+    createMultiAgentSession('s4', 'orchestrator', '001', legacy, 'persistent');
+
+    const unchanged = (label: string): void => {
+      expect(getMultiAgentSession('s4')?.session_folder, label).toBe(legacy);
+    };
+    unchanged('after insert');
+
+    endMultiAgentSession('s4', 'completed');
+    unchanged('after end');
+
+    reactivateMultiAgentSession('s4');
+    unchanged('after reactivate');
+
+    setMultiAgentSessionLifecycle('s4', 'temp');
+    unchanged('after lifecycle change');
+
+    archiveMultiAgentSession('s4');
+    unchanged('after archive');
+
+    unarchiveMultiAgentSession('s4');
+    unchanged('after unarchive');
   });
 });
 

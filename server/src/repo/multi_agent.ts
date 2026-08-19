@@ -48,10 +48,14 @@ export type MultiAgentSessionRow = {
   /** Iteration directory id (e.g. `'042'`) for sessions started post-006.
    *  NULL for pre-006 rows that predate the column. */
   iteration_id: string | null;
-  /** Absolute path to the per-session folder
-   *  (`<workspace>/.cebab-session-<id>/`). NULL for pre-007 sessions that
-   *  predate per-session folders — those used the global `~/.cebab/bus/`
-   *  layout and resume falls back accordingly. */
+  /** Absolute path to the per-session folder (`<dataDir>/sessions/<id>/`).
+   *  NULL for pre-007 sessions that predate per-session folders — those used
+   *  the global `~/.cebab/bus/` layout and resume falls back accordingly.
+   *
+   *  WRITE-ONCE, at INSERT. Nothing updates this column, and the ws0.8 cutover
+   *  depends on that: rows written while folders still lived at
+   *  `<workspace>/.cebab-session-<id>/` keep resolving to the directory their
+   *  artifacts are actually in. Pinned by a test in `multi_agent.test.ts`. */
   session_folder: string | null;
   /** 'persistent' or 'temp' — see `MultiAgentLifecycle`. Defaults
    *  to 'persistent' at the SQL layer for pre-007 rows. */

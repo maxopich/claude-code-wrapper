@@ -9,7 +9,14 @@ import { appendForensics } from './controllability_forensics.js';
 import { appendRecoveryLog } from './recovery_log.js';
 import { _resetCoalesceState, emit } from '../notifications/dispatcher.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
-import { bumpSession, createSession, getSession, hardDeleteSession } from './sessions.js';
+import {
+  bumpSession,
+  createSession,
+  getSession,
+  hardDeleteSession,
+  listSessionsForProject,
+} from './sessions.js';
+import { createMultiAgentSession } from './multi_agent.js';
 
 /**
  * Register C06: `sessions.ts` had twelve exported functions and no test file,
@@ -256,5 +263,48 @@ describe('[security] hardDeleteSession — what a purge removes, and what it mus
     expect(threw).toBe(true);
     expect(getSession('purge-me')).toBeDefined();
     expect(countFor('notifications', 'purge-me')).toBe(1);
+  });
+});
+
+/**
+ * Cebab-ws0.8 — the sidebar's per-agent session list is NOT the multi-agent
+ * session folders, and must keep rendering exactly as it does today.
+ *
+ * WHY THIS TEST EXISTS, since it looks like it is testing nothing. Two things
+ * in this codebase are both called "sessions" and they are unrelated:
+ *
+ *   - the `sessions` table, listed under each agent in the sidebar via
+ *     `project_opened` -> `listSessionsForProject`. Single-agent chats. These
+ *     have never had an on-disk folder of their own.
+ *   - `multi_agent_sessions.session_folder`, the bus's per-session artifact
+ *     tree, which ws0.8 relocated from the operator's workspace into the data
+ *     dir.
+ *
+ * Moving the second must not perturb the first, and the operator asked for that
+ * guarantee by name. The insurance is not against ws0.8 — it is against a later
+ * refactor that notices two lists with the same word in their names and
+ * "unifies" them. Below, every multi-agent row points at a path that does not
+ * exist; the sidebar list must not notice.
+ */
+describe('the sidebar session list is independent of bus session folders (ws0.8)', () => {
+  test('listSessionsForProject is byte-identical with bus folders pointing nowhere', () => {
+    const project = upsertProject('Agent', path.join(os.tmpdir(), 'agent-proj'));
+    createSession('chat-1', project.id);
+    createSession('chat-2', project.id);
+    bumpSession('chat-2');
+
+    const before = JSON.stringify(listSessionsForProject(project.id));
+
+    // Bus rows whose folders are nowhere on disk — one legacy workspace-shaped
+    // path, one data-dir-shaped, neither existing.
+    createMultiAgentSession('bus-old', 'chain', '001', '/gone/.cebab-session-bus-old');
+    createMultiAgentSession('bus-new', 'orchestrator', '001', '/gone/sessions/bus-new');
+
+    expect(JSON.stringify(listSessionsForProject(project.id))).toBe(before);
+    expect(
+      listSessionsForProject(project.id)
+        .map((s) => s.id)
+        .sort(),
+    ).toEqual(['chat-1', 'chat-2']);
   });
 });
