@@ -78,6 +78,8 @@ const SAMPLES: ClientMsg[] = [
   { type: 'cancel_auth_refresh', runId: 'r' },
   { type: 'get_recovery_log_snapshot' },
   { type: 'get_storage_stats' },
+  { type: 'get_stray_session_folders' },
+  { type: 'delete_stray_session_folders', names: ['.cebab-session-abc'] },
   { type: 'get_kick_forensics', sessionId: 's', agentSlug: 'a' },
   { type: 'stop_reason', sessionId: 's', interruptAckId: 'i', reasonCode: 'off_task' },
   { type: 'mute_participant', sessionId: 's', projectId: 1, reasonCode: 'off_task' },

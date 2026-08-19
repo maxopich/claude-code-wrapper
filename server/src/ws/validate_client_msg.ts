@@ -180,6 +180,8 @@ const SHAPES: Table = {
   cancel_auth_refresh: { runId: 'string' },
   get_recovery_log_snapshot: { recentLimit: 'number?' },
   get_storage_stats: {},
+  get_stray_session_folders: {},
+  delete_stray_session_folders: { names: 'string[]' },
   get_kick_forensics: { sessionId: 'string', agentSlug: 'string' },
   stop_reason: {
     sessionId: 'string',

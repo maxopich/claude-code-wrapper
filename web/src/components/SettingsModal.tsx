@@ -2,6 +2,8 @@ import { useCallback, useRef, useState, type KeyboardEvent as ReactKeyboardEvent
 import type { SettingsView } from '../store';
 import { useModalSurface } from '../useModalSurface';
 import { useStorageStats } from '../useStorageStats';
+import { isDeletable, useStraySessionFolders } from '../useStraySessionFolders';
+import { useConfirmGate } from '../useConfirmGate';
 import { nextIndex } from '../listNavigation';
 import { THEME_META, type Theme } from '../theme';
 import type { ClientMsg, ServerMsg } from '@cebab/shared';
@@ -53,6 +55,54 @@ export function SettingsModal(props: {
     send: props.send,
     subscribeServerMsg: props.subscribeServerMsg,
   });
+  // Cebab-ws0.13: leftover session folders. NOT fetched on open — see the hook.
+  const stray = useStraySessionFolders({
+    send: props.send,
+    subscribeServerMsg: props.subscribeServerMsg,
+  });
+  const { gate, requestConfirm } = useConfirmGate();
+  const [selectedStray, setSelectedStray] = useState<ReadonlySet<string>>(new Set());
+  const strayFolders = stray.scan?.folders ?? [];
+  const chosenStray = strayFolders.filter((f) => isDeletable(f) && selectedStray.has(f.name));
+
+  const toggleStray = (name: string): void => {
+    setSelectedStray((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const confirmStrayDelete = (): void => {
+    const names = chosenStray.map((f) => f.name);
+    const bytes = chosenStray.reduce((sum, f) => sum + f.sizeBytes, 0);
+    requestConfirm({
+      title: `Delete ${names.length} leftover session folder${names.length === 1 ? '' : 's'}?`,
+      danger: true,
+      requireTyped: 'delete',
+      confirmLabel: 'Delete permanently',
+      body: (
+        <>
+          <p>
+            This permanently removes {formatBytes(bytes)} of transcripts and iteration artifacts
+            from <code>{stray.scan?.workspaceRoot}</code>. It cannot be undone.
+          </p>
+          <ul>
+            {names.map((n) => (
+              <li key={n}>
+                <code>{n}</code>
+              </li>
+            ))}
+          </ul>
+        </>
+      ),
+      onConfirm: () => {
+        stray.requestDelete(names);
+        setSelectedStray(new Set());
+      },
+    });
+  };
   const [value, setValue] = useState(
     props.settings.workspaceRoot ?? props.settings.defaultWorkspaceRoot,
   );
@@ -386,7 +436,84 @@ export function SettingsModal(props: {
           ) : (
             <p className="hint">{storageLoading ? 'Loading…' : 'Storage stats unavailable.'}</p>
           )}
+          <div className="settings-stray" data-testid="stray-folders">
+            <p className="hint">
+              Multi-agent sessions used to write their artifacts next to your projects. They now
+              live in Cebab&rsquo;s own folder, but anything from before that change is still in
+              your workspace.
+            </p>
+            <button
+              className="ghost-btn"
+              onClick={stray.requestScan}
+              disabled={stray.scanning}
+              data-testid="stray-scan-btn"
+            >
+              {stray.scanning ? 'Scanning…' : 'Scan for leftover session folders'}
+            </button>
+            {stray.scan !== null && !stray.scanning && (
+              <>
+                {strayFolders.length === 0 ? (
+                  <p className="hint" data-testid="stray-empty">
+                    Nothing left over — your workspace is clean.
+                  </p>
+                ) : (
+                  <>
+                    <ul className="settings-stray-list">
+                      {strayFolders.map((f) => {
+                        const deletable = isDeletable(f);
+                        return (
+                          <li key={f.name}>
+                            <label>
+                              <input
+                                type="checkbox"
+                                checked={selectedStray.has(f.name)}
+                                disabled={!deletable}
+                                onChange={() => toggleStray(f.name)}
+                              />
+                              <code>{f.name}</code> <span>{formatBytes(f.sizeBytes)}</span>
+                            </label>
+                            {!deletable && (
+                              <span className="hint">
+                                {f.running
+                                  ? 'running right now'
+                                  : `still belongs to a ${f.sessionStatus} session — archive it from the Iterations list instead`}
+                              </span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {stray.scan.truncated && (
+                      <p className="hint" data-testid="stray-truncated">
+                        The scan hit its limit, so these sizes are minimums and there may be more.
+                      </p>
+                    )}
+                    <button
+                      className="bulk-action-btn danger"
+                      disabled={chosenStray.length === 0}
+                      onClick={confirmStrayDelete}
+                      data-testid="stray-delete-btn"
+                    >
+                      Delete {chosenStray.length} selected
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+            {stray.lastDelete !== null && (
+              <p className="hint" data-testid="stray-delete-result">
+                Deleted {stray.lastDelete.deleted.length}, freed{' '}
+                {formatBytes(stray.lastDelete.freedBytes)}.
+                {stray.lastDelete.failed.length > 0
+                  ? ` ${stray.lastDelete.failed.length} kept: ${stray.lastDelete.failed
+                      .map((f) => `${f.name} (${f.message})`)
+                      .join('; ')}`
+                  : ''}
+              </p>
+            )}
+          </div>
         </section>
+        {gate}
         <footer>
           <button className="ghost-btn" onClick={cancel}>
             Cancel

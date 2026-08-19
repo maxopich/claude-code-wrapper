@@ -38,6 +38,30 @@ export type Project = {
   busAgentName: string | null;
 };
 
+/**
+ * One leftover session folder under the workspace root (Cebab-ws0.13).
+ *
+ * `sessionStatus` non-null means a `multi_agent_sessions` row still points at
+ * this folder, so it is shown for its disk cost but is NOT deletable here —
+ * `archive_session { removeArtifacts: true }` is the path that removes a
+ * referenced session's artifacts, because it also flips the row.
+ *
+ * `running` is decided by what is actually in flight, not by the row's status
+ * and not by the stored path — either can be stale, and neither can be trusted
+ * to answer "would deleting this pull the floor out from under a live run".
+ */
+export type StraySessionFolder = {
+  /** Bare directory name. Never a path — see `delete_stray_session_folders`. */
+  name: string;
+  sizeBytes: number;
+  sessionStatus: string | null;
+  running: boolean;
+};
+
+/** Why one folder in a delete request was refused (Cebab-ws0.13). */
+export type StrayDeleteRefusal =
+  'bad_name' | 'symlink' | 'unresolvable' | 'outside_root' | 'running' | 'referenced' | 'rm_failed';
+
 export type SessionSummary = {
   id: string;
   title: string | null;
@@ -1451,6 +1475,34 @@ export type ClientMsg =
        * gain optional fields later without a breaking change.
        */
       type: 'get_storage_stats';
+    }
+  | {
+      /**
+       * Cebab-ws0.13: list the session folders left in the workspace by
+       * sessions that ran before Cebab-ws0.8 moved them into the data dir.
+       *
+       * Deliberately NOT folded into `get_storage_stats`, which is param-free
+       * and fires on every Settings open: this walks an arbitrary workspace
+       * recursively to total each folder's size, which is unbounded work paid
+       * by every operator including the majority with no leftovers at all —
+       * and it cannot honour that message's documented "always succeeds".
+       * The UI asks for it behind an explicit button instead.
+       */
+      type: 'get_stray_session_folders';
+    }
+  | {
+      /**
+       * Cebab-ws0.13: permanently delete leftover session folders.
+       *
+       * NAMES, never paths. The server re-derives the workspace root itself,
+       * so no operator-supplied path reaches the filesystem — the containment
+       * check then only has to answer "is this a real, non-symlink, direct
+       * child". Folders still referenced by a session row, and any session
+       * currently running, are refused server-side regardless of what the UI
+       * offered.
+       */
+      type: 'delete_stray_session_folders';
+      names: string[];
     }
   | {
       /**
@@ -3089,6 +3141,26 @@ export type ServerMsg =
         lastRunAt: number | null;
         lastCount: number | null;
       };
+    }
+  | {
+      /** Cebab-ws0.13: reply to `get_stray_session_folders`. */
+      type: 'stray_session_folders';
+      /** Echoed so the UI can name the directory it is offering to clean. */
+      workspaceRoot: string;
+      folders: StraySessionFolder[];
+      /**
+       * The walk hit its entry/depth cap, so `sizeBytes` totals are floors
+       * rather than exact. Reported rather than swallowed — a silent cap reads
+       * as "this is everything" when it is not.
+       */
+      truncated: boolean;
+    }
+  | {
+      /** Cebab-ws0.13: reply to `delete_stray_session_folders`. */
+      type: 'stray_session_folders_deleted';
+      deleted: string[];
+      failed: { name: string; reason: StrayDeleteRefusal; message: string }[];
+      freedBytes: number;
     }
   | {
       /**

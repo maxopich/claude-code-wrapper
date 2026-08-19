@@ -139,6 +139,10 @@ import { executeBulkSessionOp } from '../bulk_session_op.js';
 import { executeSearchSessions } from '../search_sessions.js';
 import { executeGetArtifactContent } from '../get_artifact_content.js';
 import { executeStorageStats } from '../storage_stats.js';
+import {
+  executeDeleteStraySessionFolders,
+  executeScanStraySessionFolders,
+} from '../stray_session_folders.js';
 import { maybeDispatchGuardrailViolation } from '../notifications/guardrail_violation.js';
 import { buildInboxSnapshot, clearDismissedInbox } from '../notifications/inbox.js';
 import {
@@ -5400,6 +5404,23 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // executor lives in storage_stats.ts (testable without the WS scaffold),
       // same posture as executeSearchSessions / executeRecoveryLogSnapshot.
       executeStorageStats({ send: (m) => send(conn.ws, m) });
+      return;
+    }
+    case 'get_stray_session_folders': {
+      // Cebab-ws0.13: leftover session folders under the workspace, from before
+      // ws0.8 moved them into the data dir. Deliberately its own message rather
+      // than part of `get_storage_stats` — this walks an arbitrary workspace
+      // recursively, so it is asked for behind a button, not on every Settings
+      // open. Executor lives in its own module, same posture as
+      // executeStorageStats / executeBulkSessionOp.
+      void executeScanStraySessionFolders({ send: (m) => send(conn.ws, m) });
+      return;
+    }
+    case 'delete_stray_session_folders': {
+      // Names, never paths — the executor re-derives the workspace root itself.
+      // Every guard (running, referenced, containment) is re-applied there
+      // regardless of what the UI offered.
+      void executeDeleteStraySessionFolders(msg.names, { send: (m) => send(conn.ws, m) });
       return;
     }
     case 'get_kick_forensics': {
