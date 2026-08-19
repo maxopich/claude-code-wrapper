@@ -306,6 +306,94 @@ function valueContainsSensitivePattern(value: string): boolean {
 }
 
 /**
+ * Body fields of a `tool_result` block (register of0).
+ *
+ * Deliberately narrower than SIBLING_VALUE_FIELDS: `tool_use_id`, `type` and
+ * `is_error` stay visible because they answer "which call was this, and did it
+ * fail" and carry no file body.
+ */
+const TOOL_RESULT_BODY_FIELDS: ReadonlySet<string> = new Set(['content', 'text']);
+
+/**
+ * Is this object an Anthropic `tool_result` content block?
+ *
+ * BOTH discriminators are required, so an unrelated blob that merely carries
+ * `type: 'tool_result'` cannot trip the rule. A structural check rather than a
+ * key-name guess: this block shape is API-stable, unlike the envelope around it
+ * (which differs between the export, the WS projector and the search scanner).
+ */
+function isToolResultBlock(obj: Record<string, unknown>): boolean {
+  return obj.type === 'tool_result' && 'tool_use_id' in obj;
+}
+
+/**
+ * Register of0, the second half. Does ANY object in this payload declare a
+ * sensitive file path?
+ *
+ * WHY THIS EXISTS. A `Read` of a sensitive file puts the body in the payload
+ * TWICE:
+ *
+ *   payload.tool_use_result.file = { filePath, content, numLines, ... }
+ *       -> path and content are SIBLINGS, so `collectSensitiveSiblings` reaches
+ *          this copy the moment the path is on the list.
+ *   payload.message.content[i]   = { tool_use_id, type: 'tool_result', content }
+ *       -> the same body, with NO path field on that object, so the sibling
+ *          rule structurally cannot reach it.
+ *
+ * Measured on the transcript that reported this: adding the path to the list
+ * masked copy 1 and exported copy 2 verbatim — while `fields` truthfully named
+ * the mask it had applied. A leak with a correct-looking attestation beside it.
+ *
+ * Correlating the assistant event's `tool_use.id` with this event's
+ * `tool_use_id` is not available: this function is pure and sees one payload at
+ * a time. But WITHIN this payload the path IS present, just in a sibling
+ * subtree. This pass finds it there.
+ *
+ * Depth-bounded to MAX_DEPTH so it never sees more than `walk` does — a path
+ * below the cut sits inside a subtree `walk` masks wholesale anyway. Short-
+ * circuits on the first hit.
+ */
+function payloadDeclaresSensitivePath(value: unknown, depth: number): boolean {
+  if (depth > MAX_DEPTH) return false;
+  if (value === null || typeof value !== 'object') return false;
+  if (Array.isArray(value)) {
+    for (const v of value) {
+      if (payloadDeclaresSensitivePath(v, depth + 1)) return true;
+    }
+    return false;
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    const v = obj[key];
+    if (PATH_FIELD_NAMES.has(key) && typeof v === 'string' && pathLooksSensitive(v)) return true;
+  }
+  for (const v of Object.values(obj)) {
+    if (payloadDeclaresSensitivePath(v, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * Per-call state for `walk`. A parameter, never a module global, so the function
+ * stays pure and reentrant.
+ *
+ * The pre-pass answer is computed LAZILY and memoized: it is only needed once a
+ * `tool_result` block is actually encountered, and the overwhelming majority of
+ * payloads have none (every text-only turn, every stream event, every row the
+ * export streams for a conversation without tool calls). Eager evaluation would
+ * put a second full traversal on every line of every exported transcript to
+ * answer a question most of them never ask.
+ */
+type WalkScope = { readonly root: unknown; cached: boolean | undefined };
+
+function scopeHasSensitivePath(scope: WalkScope): boolean {
+  if (scope.cached === undefined) {
+    scope.cached = payloadDeclaresSensitivePath(scope.root, 0);
+  }
+  return scope.cached;
+}
+
+/**
  * Walk `payload` and return a deep-cloned copy with sensitive values masked.
  * Records the dot-paths that were masked in the returned `fields` array.
  *
@@ -315,11 +403,18 @@ function valueContainsSensitivePattern(value: string): boolean {
  */
 export function redactSensitive(payload: unknown): RedactResult {
   const fields: string[] = [];
-  const redacted = walk(payload, '', 0, fields);
+  const scope: WalkScope = { root: payload, cached: undefined };
+  const redacted = walk(payload, '', 0, fields, scope);
   return { redacted, fields };
 }
 
-function walk(value: unknown, path: string, depth: number, fields: string[]): unknown {
+function walk(
+  value: unknown,
+  path: string,
+  depth: number,
+  fields: string[],
+  scope: WalkScope,
+): unknown {
   if (depth > MAX_DEPTH) {
     // Register D24: this used to `return value` — the CALLER'S OWN object,
     // by reference, unmasked, and unreported. Three promises broken at once:
@@ -361,12 +456,28 @@ function walk(value: unknown, path: string, depth: number, fields: string[]): un
   if (typeof value !== 'object') return value;
 
   if (Array.isArray(value)) {
-    return value.map((v, i) => walk(v, `${path}[${i}]`, depth + 1, fields));
+    return value.map((v, i) => walk(v, `${path}[${i}]`, depth + 1, fields, scope));
   }
 
   // Object — first scan keys to decide what to mask wholesale.
   const obj = value as Record<string, unknown>;
   const sensitiveSiblings = collectSensitiveSiblings(obj);
+  // Shape test FIRST so the payload-wide pre-pass stays lazy: a payload with no
+  // tool_result block never pays for it.
+  //
+  // Scoped to RESULTS, never args. An assistant event carries no file body — only
+  // the path, which this redactor deliberately keeps readable everywhere else —
+  // so widening this to `tool_use` would be pure signal loss. Measured: an
+  // assistant payload with two parallel tool_use blocks, one on a sensitive file
+  // and one not, comes back byte-identical.
+  //
+  // Over-masking bound, stated honestly: the realistic worst case is one user
+  // event carrying two tool_result blocks where only one is sensitive, in which
+  // case the benign body is masked too. The transcript this was measured on had
+  // exactly one tool_result block in each such payload (n=3 — a small sample,
+  // said out loud rather than dressed up as a guarantee), and even in that case
+  // filePath, tool_use_id, the tool name and `fields` all stay readable.
+  const maskToolResultBody = isToolResultBlock(obj) && scopeHasSensitivePath(scope);
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(obj)) {
     const childPath = path ? `${path}.${key}` : key;
@@ -391,13 +502,22 @@ function walk(value: unknown, path: string, depth: number, fields: string[]): un
       continue;
     }
 
+    if (maskToolResultBody && TOOL_RESULT_BODY_FIELDS.has(key)) {
+      fields.push(childPath);
+      // Wholesale, per the D05 precedent above: a tool_result `content` is a
+      // string OR an array of blocks, and recursing would leak whatever sits
+      // past MAX_DEPTH while still reporting the field as masked.
+      out[key] = REDACTED_TOKEN;
+      continue;
+    }
+
     if (sensitiveSiblings.has(key)) {
       fields.push(childPath);
       out[key] = REDACTED_TOKEN;
       continue;
     }
 
-    out[key] = walk(raw, childPath, depth + 1, fields);
+    out[key] = walk(raw, childPath, depth + 1, fields, scope);
   }
   return out;
 }

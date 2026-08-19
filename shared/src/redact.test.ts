@@ -577,3 +577,136 @@ describe('[security] Cebab-documented credential files (of0)', () => {
     expect(out.filePath).toBe('/home/u/proj/.mcp.json');
   });
 });
+
+/**
+ * [security] Register of0 — the SECOND copy of a sensitive file body.
+ *
+ * A `Read` puts the body in the payload twice. `tool_use_result.file` carries
+ * `{filePath, content}` as siblings; `message.content[i]` carries a
+ * `tool_result` block whose `content` is the same body with no path field on it.
+ * Putting the path on the list masks copy 1 and ships copy 2 — with `fields`
+ * truthfully naming the mask it did apply, which is what made the leaked export
+ * look inspected.
+ *
+ * The payload shape below is taken verbatim from the transcript that reported
+ * this, minus the real credential.
+ */
+describe('[security] the second copy of a sensitive file body (of0)', () => {
+  // Assembled at RUNTIME. gitleaks scans text, and the `.*\.test\.ts$` blanket
+  // exemption was removed — a split literal cannot match its ruleset, so the
+  // secret scan keeps full strength instead of growing a by-value exemption for
+  // a string that is synthetic by construction.
+  //
+  // 40 alphanumerics with NO vendor prefix, matching the reported value's shape
+  // on purpose: it matches no SENSITIVE_VALUE_PATTERN, so only the path rule can
+  // catch it. If an inline pattern ever started matching this, these tests would
+  // pass for the wrong reason.
+  const FILLER = 'A1b2C3d4E5f6G7h8J9k0';
+  const SECRET = FILLER + FILLER;
+
+  const MCP_BODY = JSON.stringify(
+    { mcpServers: { 'project-server': { command: 'npx', env: { CLIENT_SECRET: SECRET } } } },
+    null,
+    2,
+  );
+
+  /** The shape a Read produces, as captured from a real session. */
+  const readOf = (filePath: string) => ({
+    type: 'user',
+    session_id: 'sid-1',
+    message: {
+      role: 'user',
+      content: [{ tool_use_id: 'tu_1', type: 'tool_result', content: MCP_BODY }],
+    },
+    tool_use_result: {
+      type: 'text',
+      file: { filePath, content: MCP_BODY, numLines: 5, startLine: 1, totalLines: 5 },
+    },
+  });
+
+  it('masks BOTH copies and names both in fields', () => {
+    const { redacted, fields } = redactSensitive(readOf('/proj/.mcp.json'));
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+    expect(fields).toContain('tool_use_result.file.content');
+    expect(fields).toContain('message.content[0].content');
+  });
+
+  it('leaves the block metadata readable — which call it was, and whether it failed', () => {
+    const { redacted } = redactSensitive(readOf('/proj/.mcp.json'));
+    const block = (redacted as { message: { content: Record<string, unknown>[] } }).message
+      .content[0]!;
+    expect(block.tool_use_id).toBe('tu_1');
+    expect(block.type).toBe('tool_result');
+  });
+
+  // THE critical negative. Without it the rule could silently become
+  // unconditional — masking every tool_result body in every session — and every
+  // positive above would still pass.
+  it('does NOT touch a tool_result body when no sensitive path is declared', () => {
+    const benign = readOf('/proj/README.md');
+    const { redacted, fields } = redactSensitive(benign);
+    expect(JSON.stringify(redacted)).toContain(SECRET);
+    // `session_id` is still masked here by the key rule, which is exactly the
+    // false-reassurance shape this whole register is about: `fields` being
+    // non-empty never meant the body was inspected. Assert the two body paths
+    // specifically.
+    expect(fields).not.toContain('message.content[0].content');
+    expect(fields).not.toContain('tool_use_result.file.content');
+  });
+
+  // Pins the results-only scoping. An assistant event carries no file body, only
+  // the path — masking its args would be pure signal loss.
+  it('does NOT mask tool_use args, even when one names a sensitive file', () => {
+    const assistant = {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'tool_use', id: 'tu_a', name: 'Read', input: { file_path: '/proj/.mcp.json' } },
+          { type: 'tool_use', id: 'tu_b', name: 'Read', input: { file_path: '/proj/src/foo.ts' } },
+        ],
+      },
+    };
+    const { redacted, fields } = redactSensitive(assistant);
+    expect(redacted).toEqual(assistant);
+    expect(fields).toEqual([]);
+  });
+
+  // The mechanism must not assume a root shape or a fixed depth: this function is
+  // called with the bare SDK envelope (export), `{type, subtype, seq, payload}`
+  // (WS projector), and other wrappers besides.
+  it('reaches the second copy however deeply the caller nests the payload', () => {
+    const wrapped = { type: 'user', subtype: null, seq: 7, payload: readOf('/proj/.mcp.json') };
+    const { redacted, fields } = redactSensitive(wrapped);
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+    expect(fields).toContain('payload.message.content[0].content');
+
+    const deeper = { a: { b: { c: readOf('/proj/.mcp.json') } } };
+    expect(JSON.stringify(redactSensitive(deeper).redacted)).not.toContain(SECRET);
+  });
+
+  it('masks a tool_result content array wholesale, not just a string body', () => {
+    const arrayForm = {
+      tool_use_result: { file: { filePath: '/proj/.mcp.json', content: MCP_BODY } },
+      message: {
+        content: [
+          { tool_use_id: 'tu_1', type: 'tool_result', content: [{ type: 'text', text: MCP_BODY }] },
+        ],
+      },
+    };
+    expect(JSON.stringify(redactSensitive(arrayForm).redacted)).not.toContain(SECRET);
+  });
+
+  it('ignores a lookalike that carries only one of the two discriminators', () => {
+    // `type: 'tool_result'` with no `tool_use_id` is not a content block, and a
+    // payload-wide rule keyed on the string alone would mask unrelated prose.
+    const lookalike = {
+      tool_use_result: { file: { filePath: '/proj/.mcp.json', content: 'x' } },
+      note: { type: 'tool_result', content: 'a description of what tool_result means' },
+    };
+    const { redacted } = redactSensitive(lookalike) as { redacted: Record<string, never> };
+    expect((redacted.note as unknown as Record<string, unknown>).content).toBe(
+      'a description of what tool_result means',
+    );
+  });
+});

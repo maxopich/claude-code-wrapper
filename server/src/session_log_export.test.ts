@@ -89,6 +89,56 @@ describe('redactJsonlLine', () => {
     expect(redactJsonlLine('')).toBe('');
   });
 
+  /**
+   * [security] Register of0 — the acceptance criterion, stated in the bytes that
+   * actually leave the machine.
+   *
+   * A downloaded session log shipped live third-party API credentials in
+   * plaintext. Redaction had RUN on that file — `redactedFields` named
+   * `session_id` — which is what made the output look inspected. The body of a
+   * project-scoped MCP declaration was simply on no sensitive-path list, and a
+   * `Read` puts that body in the line TWICE, only one copy of which has the path
+   * as a sibling.
+   *
+   * This test lives here rather than only in `shared/src/redact.test.ts` because
+   * only this site exercises the parse -> redact -> re-serialize round trip that
+   * produces the exported line.
+   */
+  describe('[security] a credential file does not leave the machine (of0)', () => {
+    // Assembled at runtime: gitleaks scans text, and this repo removed its
+    // blanket `.test.ts` exemption. 40 alphanumerics with no vendor prefix — the
+    // shape of the value that actually leaked — so no inline pattern can match
+    // it and this test cannot pass for the wrong reason.
+    const FILLER = 'A1b2C3d4E5f6G7h8J9k0';
+    const SECRET = FILLER + FILLER;
+    const MCP_BODY = JSON.stringify({
+      mcpServers: { 'project-server': { env: { CLIENT_SECRET: SECRET } } },
+    });
+    const readOf = (filePath: string): string =>
+      JSON.stringify({
+        type: 'user',
+        message: { content: [{ tool_use_id: 'tu_1', type: 'tool_result', content: MCP_BODY }] },
+        tool_use_result: { file: { filePath, content: MCP_BODY, numLines: 3 } },
+      });
+
+    test('a Read of a project .mcp.json exports no part of its body', () => {
+      const out = redactJsonlLine(readOf('/proj/.mcp.json'));
+      expect(out).not.toContain(SECRET);
+      const parsed = JSON.parse(out);
+      // Still a valid JSONL line, and the path survives — it is what tells the
+      // operator WHICH file was read.
+      expect(parsed.tool_use_result.file.filePath).toBe('/proj/.mcp.json');
+      expect(parsed.tool_use_result.file.content).toBe('<redacted>');
+      expect(parsed.message.content[0].content).toBe('<redacted>');
+    });
+
+    test('an ordinary file round-trips with its body intact', () => {
+      const out = redactJsonlLine(readOf('/proj/README.md'));
+      expect(out).toContain(SECRET);
+      expect(JSON.parse(out).message.content[0].content).toBe(MCP_BODY);
+    });
+  });
+
   test('preserves non-JSON lines verbatim (hand-edited or torn writes)', () => {
     const garbage = 'this is not json at all';
     expect(redactJsonlLine(garbage)).toBe(garbage);
