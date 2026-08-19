@@ -43,8 +43,23 @@
  * every failure — missing, unreadable, wrong type, too big, short read —
  * comes back as a typed refusal the caller can map onto its own "no data"
  * path.
+ *
+ * WHY A DESTROY CHECK ALSO LIVES HERE (Cebab-ws0.13). `resolveSessionFolderInside`
+ * at the bottom is not a read. It is here because it is the same discipline
+ * seen from the other side: the check and the use must land on ONE resolution,
+ * not on a name that can be re-pointed in between. Reads solve that by holding
+ * a descriptor; a delete cannot, so it resolves once and hands the caller the
+ * resolved path to act on. Putting it in a module of its own would re-open
+ * exactly the mistake the paragraph above narrates — a security-critical path
+ * shape written somewhere else, vouched for by a comment nobody re-checks.
+ *
+ * Note the asymmetry in what guards them: `bounded_reads.test.ts` polices every
+ * `openSync`/`readFileSync`/`createReadStream` under `server/src`, but nothing
+ * polices `rm`/`rmSync`. That gap is filed (Cebab-pop) rather than bolted onto
+ * the reads gate, whose value is narrating one hazard well.
  */
 import fs from 'node:fs';
+import path from 'node:path';
 
 /** Why a read was refused. `ok` reads carry the bytes instead. */
 export type SafeReadRefusal =
@@ -236,4 +251,130 @@ function readCore(
       /* fd already gone — nothing to release */
     }
   }
+}
+
+/** Why a containment check refused. There is no partial success. */
+export type ContainRefusal =
+  /** Not the literal `.cebab-session-<safe-id>` shape, or not a directory. */
+  | 'bad_name'
+  /** The entry is a symlink. We never follow one into a delete. */
+  | 'symlink'
+  /** The entry or the root vanished, or could not be resolved. */
+  | 'unresolvable'
+  /** Resolved outside the root. */
+  | 'outside_root';
+
+export type ContainResult = { ok: true; path: string } | { ok: false; refusal: ContainRefusal };
+
+/**
+ * The one directory-name shape this helper will resolve.
+ *
+ * The id alphabet matches `session_log_export.ts`'s `SAFE_SID_RE` and exists
+ * for the same reason: `..`, `/`, `\`, a drive letter and NUL are all outside
+ * it, so a traversal cannot be SPELLED, let alone resolved.
+ */
+const SESSION_FOLDER_NAME_RE = /^\.cebab-session-[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Resolve `name` inside `root` for a caller that is about to DELETE the result.
+ *
+ * Takes a bare entry NAME, never a path — the server re-derives the root from
+ * its own configuration, so no operator-supplied path reaches the filesystem.
+ * That single decision removes most of what this function would otherwise have
+ * to defend against; the four gates below are what remains.
+ *
+ *   1. NAME SHAPE. See `SESSION_FOLDER_NAME_RE`. This is what makes gates 3-4
+ *      a second line of defence rather than the only one.
+ *   2. LSTAT, NOT STAT. A symlink named `.cebab-session-x` pointing at `~` is
+ *      shaped like a session folder and `stat`s like a directory — `lstat` is
+ *      the only call that tells them apart. Cebab never created one, so there
+ *      is no legitimate case being refused here.
+ *   3. REALPATH BOTH SIDES. The root can itself be a symlink (`/tmp` is, on
+ *      macOS). Comparing a resolved child against an unresolved root compares
+ *      two different namespaces, which means nothing.
+ *   4. `path.relative`, NOT `startsWith`. `<root>X/.cebab-session-y` shares a
+ *      string prefix with `<root>` and is not inside it. `relative` also
+ *      normalises separators and Windows drive-letter casing. The escape test
+ *      names `path.sep` explicitly, because a bare `startsWith('..')` would
+ *      also reject a legitimately named `..foo`.
+ *
+ * Never throws, like everything else in this module.
+ */
+export function resolveSessionFolderInside(root: string, name: string): ContainResult {
+  if (typeof name !== 'string' || !SESSION_FOLDER_NAME_RE.test(name)) {
+    return { ok: false, refusal: 'bad_name' };
+  }
+  const candidate = path.join(root, name);
+
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(candidate);
+  } catch {
+    return { ok: false, refusal: 'unresolvable' };
+  }
+  if (st.isSymbolicLink()) return { ok: false, refusal: 'symlink' };
+  if (!st.isDirectory()) return { ok: false, refusal: 'bad_name' };
+
+  let realRoot: string;
+  let realChild: string;
+  try {
+    realRoot = fs.realpathSync(root);
+    realChild = fs.realpathSync(candidate);
+  } catch {
+    return { ok: false, refusal: 'unresolvable' };
+  }
+
+  if (!isDirectChildOf(realRoot, realChild, name)) {
+    return { ok: false, refusal: 'outside_root' };
+  }
+  return { ok: true, path: realChild };
+}
+
+/**
+ * Is `child` the entry `name`, directly inside `parent`? Both paths must
+ * already be resolved.
+ *
+ * ONE COMPARISON DOES ALL THE WORK, and that is deliberate. This was first
+ * written the defence-in-depth way — reject `rel === ''`, reject `..`, reject
+ * `..<sep>`, reject an absolute `rel`, THEN compare against the name. A
+ * revert-check killed it: replacing `path.relative` with the `startsWith` this
+ * repo keeps warning about reddened NOTHING, because the final comparison
+ * already caught every input the earlier guards claimed to. Guards that no
+ * input can distinguish are not depth, they are unfalsifiable code sitting in a
+ * security path — and their presence had made a test look like it was covering
+ * the prefix trap when the name check was doing the catching.
+ *
+ * Why `rel === name` is sufficient on its own: if the relative path from
+ * `parent` to `child` is exactly a single entry name, then `child` IS
+ * `parent`/`name` renormalised. An escape produces a `..` segment, a different
+ * drive produces an absolute `rel`, and the parent itself produces `''` — none
+ * of which can equal a single entry name.
+ *
+ * That sufficiency is what makes the guard below load-bearing rather than
+ * decorative: it holds only while `name` really is a single entry. With
+ * `name = 'a/b'` a grandchild would compare equal, and with `name = '..'` the
+ * parent's parent would. Both are rejected here, and both have tests.
+ *
+ * Case-folded under win32 semantics, where realpath restores the on-disk casing
+ * so a differently-cased spelling is still the same entry. The condition tests
+ * the IMPLEMENTATION rather than `process.platform`: on Windows
+ * `path === path.win32`, so the default argument folds there, and a test on any
+ * host reaches the branch by passing `path.win32`. Keying off the platform
+ * would put this branch beyond the reach of the only tests that can cover it.
+ *
+ * Exported for its own tests. Every input that exercises the comparison is
+ * rejected by `resolveSessionFolderInside`'s name gate before it could get
+ * here, so testing only through that function would measure the regex and call
+ * it containment.
+ */
+export function isDirectChildOf(
+  parent: string,
+  child: string,
+  name: string,
+  impl: typeof path = path,
+): boolean {
+  if (name === '' || name === '.' || name === '..') return false;
+  if (name.includes('/') || name.includes('\\')) return false;
+  const rel = impl.relative(parent, child);
+  return impl === path.win32 ? rel.toLowerCase() === name.toLowerCase() : rel === name;
 }

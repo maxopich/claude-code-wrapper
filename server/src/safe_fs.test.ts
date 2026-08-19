@@ -23,10 +23,12 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import {
+  isDirectChildOf,
   readFileBounded,
   readFilePrefixBounded,
   readTextBounded,
   readTextPrefixBounded,
+  resolveSessionFolderInside,
 } from './safe_fs.js';
 
 const isWindows = process.platform === 'win32';
@@ -366,5 +368,181 @@ describe('[security] readTextPrefixBounded', () => {
     if (!r.ok) return;
     expect(r.truncated).toBe(true);
     expect(r.text.startsWith('—')).toBe(true);
+  });
+});
+
+/**
+ * [security] Cebab-ws0.13 — resolve-before-destroy.
+ *
+ * The caller deletes whatever this returns, so a wrong `ok: true` is an
+ * arbitrary `rm -rf`. The name gate does most of the work (a traversal cannot
+ * be spelled), which is exactly why the containment arithmetic is ALSO tested
+ * directly, below: routed through this function, every prefix-trap input is
+ * rejected by the regex before the containment logic runs, so a test that only
+ * went through here would prove nothing about it.
+ */
+describe('[security] resolveSessionFolderInside (ws0.13)', () => {
+  const legacyName = (id: string): string => `.cebab-session-${id}`;
+
+  test('resolves a real session folder to its realpath', () => {
+    const name = legacyName('abc-123');
+    fs.mkdirSync(path.join(tmp, name));
+    const r = resolveSessionFolderInside(tmp, name);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // realpath, not the joined string — on macOS `/var` is a symlink to
+    // `/private/var`, so these differ and the caller must act on the resolved
+    // one.
+    expect(r.path).toBe(fs.realpathSync(path.join(tmp, name)));
+  });
+
+  test.each([
+    ['a traversal', '../../etc'],
+    ['an absolute path', path.join(path.sep, 'etc')],
+    ['the bare prefix with no id', '.cebab-session-'],
+    ['an unrelated directory name', 'notasession'],
+    ['a name with a separator inside it', `.cebab-session-a${path.sep}b`],
+    ['a project directory that merely starts similarly', '.cebab-sessions-old'],
+    ['the empty string', ''],
+  ])('refuses %s as bad_name', (_label, name) => {
+    fs.mkdirSync(path.join(tmp, 'decoy'), { recursive: true });
+    const r = resolveSessionFolderInside(tmp, name);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.refusal).toBe('bad_name');
+  });
+
+  test('refuses a regular FILE with a session-folder name', () => {
+    const name = legacyName('file');
+    fs.writeFileSync(path.join(tmp, name), 'x');
+    const r = resolveSessionFolderInside(tmp, name);
+    expect(r).toEqual({ ok: false, refusal: 'bad_name' });
+  });
+
+  test('refuses a name that does not exist', () => {
+    expect(resolveSessionFolderInside(tmp, legacyName('ghost'))).toEqual({
+      ok: false,
+      refusal: 'unresolvable',
+    });
+  });
+
+  // Unprivileged symlink creation fails on Windows; the skip is named so it is
+  // visible in the report rather than silently absent.
+  posixOnly('refuses a SYMLINK shaped like a session folder, and its target survives', () => {
+    const outside = path.join(tmp, 'precious');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'keep.txt'), 'do not delete me');
+
+    const link = path.join(tmp, 'root', legacyName('evil'));
+    fs.mkdirSync(path.join(tmp, 'root'));
+    fs.symlinkSync(outside, link, 'dir');
+
+    const r = resolveSessionFolderInside(path.join(tmp, 'root'), legacyName('evil'));
+    expect(r).toEqual({ ok: false, refusal: 'symlink' });
+
+    // The point of the refusal: had it resolved, the caller would have deleted
+    // the link's TARGET. `lstat` is the only gate that distinguishes this from
+    // a real directory.
+    expect(fs.existsSync(path.join(outside, 'keep.txt'))).toBe(true);
+  });
+
+  posixOnly('resolves through a symlinked ROOT rather than calling it an escape', () => {
+    // The realpath-both-sides gate. A root that is itself a link is ordinary —
+    // `/tmp` is one on macOS — and comparing a resolved child against an
+    // unresolved root would reject every entry under it.
+    const real = path.join(tmp, 'real-root');
+    fs.mkdirSync(path.join(real, legacyName('ok')), { recursive: true });
+    const linkedRoot = path.join(tmp, 'linked-root');
+    fs.symlinkSync(real, linkedRoot, 'dir');
+
+    expect(resolveSessionFolderInside(linkedRoot, legacyName('ok')).ok).toBe(true);
+  });
+});
+
+/**
+ * The containment arithmetic, driven directly.
+ *
+ * Every input here is unreachable through `resolveSessionFolderInside` — the
+ * name gate rejects these spellings first. That is the point: a containment
+ * test the regex already caught measures the regex, not the containment, which
+ * is the vacuous-gate failure mode this repo keeps finding.
+ *
+ * Both platform flavours, because a developer on macOS would otherwise never
+ * execute the win32 branch, and it is the branch with the case-folding in it.
+ */
+describe('[security] isDirectChildOf — the containment arithmetic (ws0.13)', () => {
+  for (const [label, impl, root, name] of [
+    ['posix', path.posix, '/home/u/agents', '.cebab-session-x'],
+    ['win32', path.win32, 'C:\\Users\\u\\agents', '.cebab-session-x'],
+  ] as const) {
+    describe(label, () => {
+      const child = impl.join(root, name);
+
+      test('a direct child is accepted', () => {
+        expect(isDirectChildOf(root, child, name, impl)).toBe(true);
+      });
+
+      test('a prefix-sharing sibling root is rejected', () => {
+        // `<root>X/.cebab-session-x` starts with `<root>` as a string and is not
+        // inside it. NOTE what actually catches this: the `rel === name`
+        // comparison, not a dedicated escape check — a revert-check proved a
+        // `startsWith` implementation still passes this case, which is why the
+        // escape checks that used to sit here were removed rather than kept as
+        // untestable depth.
+        expect(isDirectChildOf(root, impl.join(`${root}X`, name), name, impl)).toBe(false);
+      });
+
+      test('a GRANDCHILD is rejected — direct children only', () => {
+        expect(isDirectChildOf(root, impl.join(root, 'nested', name), name, impl)).toBe(false);
+      });
+
+      test('the root itself is rejected', () => {
+        expect(isDirectChildOf(root, root, name, impl)).toBe(false);
+      });
+
+      test('a resolved path that escaped the root is rejected', () => {
+        expect(isDirectChildOf(root, impl.join(root, '..', 'elsewhere', name), name, impl)).toBe(
+          false,
+        );
+      });
+
+      test('a child whose NAME differs from the one asked for is rejected', () => {
+        // Guards the case where realpath resolved to a different entry than the
+        // caller named.
+        expect(isDirectChildOf(root, impl.join(root, '.cebab-session-other'), name, impl)).toBe(
+          false,
+        );
+      });
+    });
+  }
+
+  test('win32 folds case, posix does not', () => {
+    // On Windows realpath restores the on-disk casing, so a differently-cased
+    // name is still the same entry. On POSIX it is a different entry, and
+    // folding there would accept a directory the caller did not name.
+    const upper = '.CEBAB-SESSION-X';
+    const lower = '.cebab-session-x';
+    expect(isDirectChildOf('C:\\r', path.win32.join('C:\\r', upper), lower, path.win32)).toBe(true);
+    expect(isDirectChildOf('/r', path.posix.join('/r', upper), lower, path.posix)).toBe(false);
+  });
+
+  test('a directory literally named `..foo` is a valid child, not an escape', () => {
+    expect(isDirectChildOf('/r', '/r/..foo', '..foo', path.posix)).toBe(true);
+  });
+
+  /**
+   * The guard that makes `rel === name` sufficient. Both of these compare EQUAL
+   * to their `name` and are not what the caller meant, so without the
+   * single-entry check the one comparison this function rests on would accept
+   * them.
+   */
+  test.each([
+    ['a name containing a separator would match a GRANDCHILD', 'a/b', '/r/a/b'],
+    ['a backslash name, for the Windows spelling', 'a\\b', '/r/a\\b'],
+    ['`..` would match the PARENT of the root', '..', '/'],
+    ['`.` would match the root itself', '.', '/r'],
+    ['the empty name', '', '/r'],
+  ])('rejects %s', (_label, name, child) => {
+    expect(isDirectChildOf('/r', child, name, path.posix)).toBe(false);
   });
 });
