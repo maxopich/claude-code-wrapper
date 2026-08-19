@@ -1568,9 +1568,20 @@ describe('store / pause-on-dangerous + mutations', () => {
 });
 
 describe('store / trustChipState (Item #6)', () => {
-  test('trusted=true → trusted-all regardless of mode', () => {
-    expect(trustChipState(true, 'default')).toBe('trusted-all');
+  // REWRITTEN, not deleted (Cebab-ws0.14). Two tests here asserted
+  // `trustChipState(true, 'default') === 'trusted-all'` — one of them titled
+  // "trusted=true → trusted-all regardless of mode". They were accurate
+  // mirrors of `shouldAutoAllow` as it stood: trust short-circuited the mode,
+  // so both trusted cases really were one state. The server function changed,
+  // so the mirror changed with it. Keeping the old expectations would have
+  // made the chip claim "auto-allow ALL" while every tool raised a card.
+  test('trusted + acceptEdits → trusted-all', () => {
     expect(trustChipState(true, 'acceptEdits')).toBe('trusted-all');
+  });
+  test('trusted + default → trusted-ask, NOT trusted-all', () => {
+    // The row that moved. Named explicitly so a future edit that re-collapses
+    // the two trusted states has to argue with this test rather than a table.
+    expect(trustChipState(true, 'default')).toBe('trusted-ask');
   });
   test('trusted=false + acceptEdits → untrusted-edits', () => {
     expect(trustChipState(false, 'acceptEdits')).toBe('untrusted-edits');
@@ -1579,18 +1590,27 @@ describe('store / trustChipState (Item #6)', () => {
     expect(trustChipState(false, 'default')).toBe('untrusted-ask');
   });
   test('mirrors shouldAutoAllow truth table on the boundary cases', () => {
-    // Operator-visible projection of permission.ts:26-33:
-    //   trusted always auto-allows EVERYTHING → 'trusted-all'.
-    //   untrusted + acceptEdits auto-allows ONLY file-edit tools → 'untrusted-edits'.
-    //   untrusted + default auto-allows NOTHING → 'untrusted-ask'.
+    // Operator-visible projection of `server/src/ws/permission.ts`:
+    //   mode 'default' auto-allows NOTHING, on either project kind → *-ask.
+    //   trusted + acceptEdits auto-allows EVERYTHING       → 'trusted-all'.
+    //   untrusted + acceptEdits auto-allows ONLY file edits → 'untrusted-edits'.
+    // Trusted and untrusted stay distinct even when both ask, because the
+    // trust half also reports what LOADS, which the mode never affected.
     const cases = [
-      [true, 'default' as const, 'trusted-all'],
       [true, 'acceptEdits' as const, 'trusted-all'],
+      [true, 'default' as const, 'trusted-ask'],
       [false, 'acceptEdits' as const, 'untrusted-edits'],
       [false, 'default' as const, 'untrusted-ask'],
     ] as const;
     for (const [trusted, mode, expected] of cases) {
       expect(trustChipState(trusted, mode)).toBe(expected);
+    }
+  });
+  test('[security] no input produces an auto-allow chip while the mode is ask', () => {
+    // The property the two rows above are instances of, stated so it survives
+    // a table edit: 'default' can never render as an auto-allow state.
+    for (const trusted of [true, false]) {
+      expect(trustChipState(trusted, 'default')).toMatch(/-ask$/);
     }
   });
 });

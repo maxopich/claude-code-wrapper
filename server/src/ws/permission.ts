@@ -14,20 +14,39 @@ export const FILE_EDIT_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'N
 /**
  * Decide whether a tool call should auto-allow without a permission card.
  *
- * - Trusted projects auto-allow everything (the project's Trust toggle is the
- *   user's blanket "I vouch for this directory" gate).
- * - Untrusted + `'acceptEdits'` auto-allows file-edit tools only.
- * - Untrusted + `'default'` always asks.
+ *   mode `'default'`               → always asks, trusted or not.
+ *   trusted + `'acceptEdits'`      → auto-allows everything.
+ *   untrusted + `'acceptEdits'`    → auto-allows file-edit tools only.
  *
  * The SDK's built-in `acceptEdits` handling does NOT run when a `canUseTool`
  * callback is provided — the SDK delegates all gating to the callback. So this
- * helper is the only place auto-allow lives for non-trusted projects.
+ * function is the ONLY place auto-allow lives for single-agent runs, and
+ * `Options.permissionMode` gates nothing by itself.
+ *
+ * WHY `'default'` IS CHECKED FIRST (Cebab-ws0.14). This used to open with
+ * `if (trusted) return true`, so Trust short-circuited the mode entirely and a
+ * trusted project auto-allowed everything no matter what the operator chose.
+ * That was a deliberate design — Trust as a blanket "I vouch for this
+ * directory" gate — and it had one consequence nobody had looked at: the
+ * permissions pill is disabled only while a session is not live, never by
+ * trust. So on a live trusted session the operator could press `ask`, watch the
+ * pill move, watch the server persist and echo `default` — and every tool
+ * still auto-allowed. The control moved and changed nothing.
+ *
+ * Trust now means "auto-allow everything **by default**" rather than "and you
+ * may not ask me to stop". Nothing changes for anyone who leaves the pill
+ * alone, because `seedPermissionMode` still seeds `acceptEdits` for a fresh
+ * trusted session — the row that moved is only reachable by explicitly asking
+ * for it. And it moves in the direction that adds permission cards, so it
+ * cannot widen privilege; that is what made it safe to change rather than
+ * merely disabling the control and calling the affordance honest.
  */
 export function shouldAutoAllow(
   trusted: boolean,
   mode: SessionPermissionMode,
   toolName: string,
 ): boolean {
+  if (mode === 'default') return false;
   if (trusted) return true;
-  return mode === 'acceptEdits' && FILE_EDIT_TOOLS.has(toolName);
+  return FILE_EDIT_TOOLS.has(toolName);
 }
