@@ -644,7 +644,15 @@ pre {
 }
 .app[data-nav-pinned='false']:not([data-tier='narrow'])
   .sidebar:not(:hover):not(:focus-within)
-  :is(h1, .sidebar-header-controls, .session-list, .project-name, .trust, .workspace-btn-label) {
+  :is(
+    h1,
+    .sidebar-header-controls,
+    .session-list,
+    .project-name,
+    .project-scan-line,
+    .trust,
+    .workspace-btn-label
+  ) {
   opacity: 0;
   pointer-events: none;
 }
@@ -1206,6 +1214,11 @@ pre {
 }
 .project-header {
   display: flex;
+  /* Cebab-ws0.6: wraps so `.project-scan-line` can be a full-width second row
+   * inside this element rather than a sibling below it — the hover and active
+   * backgrounds then cover both lines. The first row's children all shrink or
+   * are fixed-width, so nothing else wraps in practice. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
@@ -1295,6 +1308,51 @@ pre {
   background: var(--ok);
   box-shadow: 0 0 8px var(--ok);
   animation: pulse 1.6s ease-in-out infinite;
+}
+/* ── Project scan line (Cebab-ws0.6) ───────────────────────────────────────
+ * A second line inside `.project-header`, carrying what the project declares
+ * on disk. The header wraps and this is a full-width flex item, so the hover
+ * and active backgrounds cover both lines instead of stopping above this one.
+ * Non-interactive text: no focus styles, nothing in tab order. */
+.project-scan-line {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  /* Align under the project name, past the live dot and the Claude mark. */
+  padding-left: 20px;
+}
+.project-scan-chip {
+  font-size: var(--t-xs);
+  line-height: 1.4;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+  background: var(--bg-3);
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+.project-scan-chip.is-muted {
+  border-color: transparent;
+  background: transparent;
+  color: var(--fg-3);
+}
+/* Warning and error variants signal three ways — background, border and the
+ * glyph in the markup — so neither depends on colour alone. */
+.project-scan-chip.is-warn {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn-ink);
+}
+.project-scan-chip.is-err {
+  border-color: var(--err);
+  background: var(--err-soft);
+  color: var(--err-ink);
+}
+.project-scan-glyph {
+  font-size: 0.9em;
 }
 .trust {
   background: var(--bg-3);

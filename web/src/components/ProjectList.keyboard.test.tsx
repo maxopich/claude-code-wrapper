@@ -90,6 +90,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Spies 
   act(() => {
     root.render(
       <ProjectList
+        projectScans={{}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}
@@ -188,6 +189,7 @@ describe('[a11y] session rows are operable from the keyboard', () => {
     act(() => {
       root.render(
         <ProjectList
+          projectScans={{}}
           projects={[project()]}
           activeProjectId={PID}
           activeSessionByProject={{ [PID]: 'sess-aaaaaaa1' }}

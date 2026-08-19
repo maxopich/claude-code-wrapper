@@ -151,7 +151,7 @@ describe('InboxProvider bridge', () => {
     act(() => {
       // Type-correct ServerMsg of the wrong variant — must not crash + must
       // not change state.
-      handlerRef.current!({ type: 'projects', projects: [] });
+      handlerRef.current!({ type: 'projects', projects: [], scans: [] });
     });
 
     expect(holder.state?.loaded).toBe(false);

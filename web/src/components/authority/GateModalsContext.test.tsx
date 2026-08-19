@@ -284,7 +284,7 @@ describe('GateModalsProvider — handlerRef bridge', () => {
       );
     });
     act(() => {
-      handlerRef.current!({ type: 'projects', projects: [] });
+      handlerRef.current!({ type: 'projects', projects: [], scans: [] });
     });
     expect(stateRef.current?.queue).toHaveLength(0);
   });

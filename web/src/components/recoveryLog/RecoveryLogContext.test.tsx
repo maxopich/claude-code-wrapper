@@ -176,7 +176,7 @@ describe('RecoveryLogProvider bridge', () => {
     act(() => {
       // Type-correct ServerMsg of the wrong variant — must not crash
       // + must not flip loaded.
-      handlerRef.current!({ type: 'projects', projects: [] });
+      handlerRef.current!({ type: 'projects', projects: [], scans: [] });
     });
 
     expect(holder.state?.loaded).toBe(false);

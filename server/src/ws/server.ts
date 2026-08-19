@@ -19,7 +19,9 @@ import {
   setProjectModel,
   setProjectTrusted,
   touchProject,
+  type ProjectRow,
 } from '../repo/projects.js';
+import { scanProjects } from '../repo/project_scan.js';
 import { applyProjectStartPermissionMode } from '../project_start_mode.js';
 import { observeProjectHooks } from '../repo/hook_trust.js';
 import {
@@ -2203,6 +2205,24 @@ function send(ws: WebSocket, msg: ServerMsg): void {
 }
 
 /**
+ * The ONLY place the `projects` message is built (Cebab-ws0.6).
+ *
+ * There were eight sites constructing it by hand, and the file scan that now
+ * rides along is derived from `trusted` — so a site that re-emits the list
+ * after a trust toggle without a fresh scan would ship a summary that is
+ * quietly wrong rather than merely stale. Funnelling them through one function
+ * makes that impossible to get wrong by omission; `projects_emit_site.test.ts`
+ * makes it impossible to get wrong by addition.
+ *
+ * `scanProjects` is synchronous and file-read-only. It spawns nothing — that
+ * is the whole point of the file-scan tier, and the reason this can sit on a
+ * path that runs on every app start and every trust toggle.
+ */
+function sendProjects(conn: Conn, rows: ProjectRow[]): void {
+  send(conn.ws, { type: 'projects', projects: rows.map(rowToProject), scans: scanProjects(rows) });
+}
+
+/**
  * Cluster B Phase 3 (BE-B3): update the per-Conn authority cache when a
  * `session_started` envelope is about to be sent. Latest snapshot per
  * project wins (the AuthorityPanel is project-scoped). Replay also hits
@@ -3517,7 +3537,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
   switch (msg.type) {
     case 'list_projects': {
       const rows = await syncWorkspaceProjects();
-      send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      sendProjects(conn, rows);
       return;
     }
     case 'get_settings': {
@@ -3541,7 +3561,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // below resolves the root itself.
       const rows = await syncWorkspaceProjects();
       emitSettings(conn);
-      send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      sendProjects(conn, rows);
       return;
     }
     case 'set_default_hop_budget': {
@@ -3644,7 +3664,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       }
       setProjectTrusted(msg.projectId, msg.trusted);
       const rows = await syncWorkspaceProjects();
-      send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      sendProjects(conn, rows);
       return;
     }
     case 'permission_decision': {
@@ -3810,7 +3830,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         typeof msg.model === 'string' && msg.model.trim().length > 0 ? msg.model.trim() : null;
       setProjectModel(msg.projectId, chosen);
       const rows = await syncWorkspaceProjects();
-      send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      sendProjects(conn, rows);
       return;
     }
     case 'set_project_start_permission_mode': {
@@ -3832,7 +3852,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         return;
       }
       const afterStartMode = await syncWorkspaceProjects();
-      send(conn.ws, { type: 'projects', projects: afterStartMode.map(rowToProject) });
+      sendProjects(conn, afterStartMode);
       return;
     }
     case 'get_model_catalogue': {
@@ -4567,7 +4587,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         // `busInstalled` flag picks up the change in one place. Cheap on this
         // single-user app; the project list is bounded by workspace size.
         const rows = await syncWorkspaceProjects();
-        send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+        sendProjects(conn, rows);
       } catch (err) {
         const message =
           err instanceof InstallError
@@ -4589,7 +4609,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
           agentName: null,
         });
         const rows = await syncWorkspaceProjects();
-        send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+        sendProjects(conn, rows);
       } catch (err) {
         const message =
           err instanceof InstallError
@@ -5375,7 +5395,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
             agentName: result.agentName,
           });
           const rows = await syncWorkspaceProjects();
-          send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+          sendProjects(conn, rows);
           // Cluster A Phase 4 (D6/D11): split out of the
           // `multi_agent_participant_added` echo so the auto-install side
           // effect is observable as a typed event + an info-tier dock

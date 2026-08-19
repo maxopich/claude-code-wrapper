@@ -72,6 +72,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Handle
   act(() => {
     root.render(
       <ProjectList
+        projectScans={{}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}

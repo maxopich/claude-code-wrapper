@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type {
   ModelCatalogueEntry,
   Project,
+  ProjectScan,
   SessionPermissionMode,
   SessionSummary,
 } from '@cebab/shared/protocol';
@@ -9,9 +10,16 @@ import { timeAgoCompact } from '../format';
 import { ClaudeMark } from './ClaudeMark';
 import { MockBadge } from './MockBadge';
 import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
+import { ProjectScanLine } from './ProjectScanLine';
 
 export function ProjectList(props: {
   projects: Project[];
+  /**
+   * Cebab-ws0.6: what each project declares on disk, keyed by project id. A
+   * project with no entry renders no strip — absent is not the same as
+   * "declares nothing", which is itself a rendered answer.
+   */
+  projectScans: Record<number, ProjectScan>;
   activeProjectId: number | null;
   activeSessionByProject: Record<number, string | undefined>;
   knownSessions: Record<number, SessionSummary[]>;
@@ -191,6 +199,13 @@ export function ProjectList(props: {
                 >
                   {p.trusted ? 'trusted' : 'asks'}
                 </button>
+                {/* Cebab-ws0.6: what this agent declares on disk, read without
+                 *  running anything. Inside the header rather than beside it so
+                 *  the hover and active backgrounds cover both lines; the header
+                 *  wraps, and this is a full-width flex item. Non-interactive,
+                 *  so it adds nothing to tab order and leaves the register U01
+                 *  constraint on this element untouched. */}
+                <ProjectScanLine scan={props.projectScans[p.id]} />
               </div>
               {expanded && (
                 <ul className="session-list">

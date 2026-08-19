@@ -2335,6 +2335,7 @@ function AppShell({
           </header>
           <ProjectList
             projects={state.projects}
+            projectScans={state.projectScans}
             activeProjectId={state.activeProjectId}
             activeSessionByProject={state.activeSessionByProject}
             knownSessions={state.knownSessions}

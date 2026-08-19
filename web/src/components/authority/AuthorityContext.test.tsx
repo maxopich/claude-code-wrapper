@@ -182,7 +182,7 @@ describe('AuthorityProvider — handlerRef bridge', () => {
       );
     });
     act(() => {
-      handlerRef.current!({ type: 'projects', projects: [] });
+      handlerRef.current!({ type: 'projects', projects: [], scans: [] });
     });
     expect(slotRef.current?.status).toBe('idle');
   });
