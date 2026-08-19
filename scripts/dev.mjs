@@ -14,26 +14,28 @@
  * reads the same file via `envDir: '..'`.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEV_WEB_PORT, withDeclaredWebOrigins } from './dev-origins.mjs';
+import { resolveDevBins } from './dev-bins.mjs';
 
-const require = createRequire(import.meta.url);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 let tsxCli;
 let viteBin;
 try {
-  tsxCli = require.resolve('tsx/cli'); // node_modules/tsx/dist/cli.mjs
-  // vite's package `exports` block a direct `vite/bin/vite.js` resolve, so
-  // go via its package.json + the `bin` field instead.
-  const vitePkgPath = require.resolve('vite/package.json');
-  const viteBinRel = JSON.parse(fs.readFileSync(vitePkgPath, 'utf8')).bin.vite;
-  viteBin = path.join(path.dirname(vitePkgPath), viteBinRel);
-} catch {
-  console.error('[dev] dependencies missing — run `npm run bootstrap` first.');
+  // Resolved from the workspace that DECLARES each binary, not from this
+  // file's directory — `dev-bins.mjs` carries the why (Cebab-rlo).
+  ({ tsxCli, viteBin } = resolveDevBins(root));
+} catch (err) {
+  // Say what actually went wrong. This used to report every failure as
+  // "dependencies missing — run `npm run bootstrap` first", which was a
+  // guess, and for the whole of Cebab-rlo it was the wrong guess: bootstrap
+  // succeeded, `tsx` was installed, and the operator was sent round the loop
+  // again with nothing new to go on. Node's own message names the module and
+  // the require stack, so it points at the anchor that missed.
+  console.error(`[dev] could not locate the dev tools: ${err.message}`);
+  console.error('[dev] if this is a fresh clone, run `npm run bootstrap` first.');
   process.exit(1);
 }
 
