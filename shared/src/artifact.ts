@@ -167,6 +167,20 @@ function isExcluded(rel: string): boolean {
   if (filename.endsWith('.lock')) return true;
   // Glob-style: .cebab-session-* matches any directory segment starting with
   // the literal prefix (`.cebab-session-`).
+  //
+  // Cebab-ws0.8 moved per-session folders to `<dataDir>/sessions/<id>/`, so this
+  // rule now covers only sessions started BEFORE that change. New folders are
+  // caught by two other entries rather than by this one: everything with content
+  // sits under an `iterations` segment, and the default data dir contributes a
+  // `.cebab` segment. Both are already in EXCLUDE_DIRS.
+  //
+  // The residual, measured and NOT closed here: with a custom `CEBAB_DATA_DIR`
+  // that contains no `.cebab` segment, `<dataDir>/sessions/<id>/orchestrator/
+  // PLAN.md` would no longer be excluded. Narrow — the orchestrator runs
+  // `toolPolicy: 'delegate-only'` and Cebab writes nothing into that directory —
+  // but real. Closing it means widening the rules above, and this file's header
+  // says they are locked and not to be widened without operator sign-off, so it
+  // is filed rather than fixed in passing.
   if (segs.some((s) => s.startsWith('.cebab-session-'))) return true;
   return segs.some((s) => EXCLUDE_DIRS.has(s));
 }

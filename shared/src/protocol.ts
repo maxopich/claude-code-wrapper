@@ -849,7 +849,8 @@ export type ClientMsg =
        * operator can't accidentally orphan a live run by clicking Clear.
        *
        * Disk artifacts under the per-session folders
-       * (`<workspace>/.cebab-session-<id>/`) are intentionally left behind:
+       * (`<dataDir>/sessions/<id>/`; `<workspace>/.cebab-session-<id>/` for
+       * sessions started before Cebab-ws0.8) are intentionally left behind:
        * they're useful for post-mortem inspection (transcripts, iteration
        * files) and recreating them is not Cebab's job. The operator can
        * `rm -rf` those by hand if they want a full wipe.
@@ -3854,7 +3855,7 @@ export type AgentActivityPhase = 'working' | 'stalled' | 'idle';
  * absent `lifecycle` field in `start_multi_agent` resolves safely.
  *
  * Concretely, on the server side: 'persistent' leaves
- * `<workspace>/.cebab-session-<id>/` and every participant's bus install
+ * `<dataDir>/sessions/<id>/` and every participant's bus install
  * in place; 'temp' removes the folder and calls `uninstallBusForProject`
  * for each participant, so a one-off task leaves no residue. (Merged here
  * from `repo/multi_agent.ts`, which declared a second identical copy of

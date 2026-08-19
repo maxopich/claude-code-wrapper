@@ -179,4 +179,10 @@ and the security-critical paths to be aware of.
 
 - SQLite: `~/.cebab/cebab.sqlite`
 - Per-session JSONL transcripts (debug + mock fixtures): `~/.cebab/logs/<session-id>.jsonl`
+- Multi-agent session artifacts (per-hop prompts/replies, transcripts, iteration
+  files): `~/.cebab/sessions/<session-id>/`. These lived in your workspace as
+  `.cebab-session-<id>/` until they were moved here; folders created before that
+  stay where they were written, because each session records its own absolute
+  path. Cebab drops a `.gitignore` in `~/.cebab` so none of this shows up in
+  `git status` if you point `CEBAB_DATA_DIR` inside a checkout.
 - Original Claude session transcripts (used by `--resume`): `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
