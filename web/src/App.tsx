@@ -482,6 +482,8 @@ function AppShell({
    */
   const msgSubscribersRef = useRef<Set<(msg: ServerMsg) => void>>(new Set());
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Cebab-ws0.3: which project has a catalogue refresh spawn in flight, or null.
+  const [modelRefreshingFor, setModelRefreshingFor] = useState<number | null>(null);
   // Cluster E Phase 4 (H1): keyboard shortcuts cheatsheet. `?` opens
   // from outside an input; Cmd/Ctrl+/ opens from anywhere (including
   // inside a composer/input). Esc closes.
@@ -769,6 +771,11 @@ function AppShell({
         },
         onMessage: (msg) => {
           dispatch({ type: 'server', msg });
+          // Cebab-ws0.3: the refresh spawn is done, whatever it found. Cleared
+          // on ANY catalogue reply, including an empty one — a probe that came
+          // back with nothing has still finished, and leaving the button
+          // disabled would strand the operator with no way to retry.
+          if (msg.type === 'model_catalogue') setModelRefreshingFor(null);
           // Cluster A Phase 2: route the wire envelope (and any narrowly
           // typed fallbacks like sessionless wrapper_error) into the dock.
           // Wrapped in try/catch so a dispatch-table bug can't break WS
@@ -1011,6 +1018,22 @@ function AppShell({
 
   function newSession(projectId: number) {
     dispatch({ type: 'new_session', projectId });
+  }
+
+  // Cebab-ws0.3. No optimistic update, matching `toggleTrust` right below: the
+  // server answers with a full `projects` re-emit, and a local guess that
+  // disagreed with a rejected write would be worse than a frame of latency.
+  function setProjectModel(projectId: number, model: string | null) {
+    wsRef.current?.send({ type: 'set_project_model', projectId, model });
+  }
+
+  // A refresh SPAWNS the CLI (no model turn, but a real process), so the
+  // in-flight project id is held locally to disable the button and label it.
+  // Cleared on the reply rather than optimistically — the spawn is the slow
+  // part, and clearing early would let a second click fan out into two.
+  function refreshModelCatalogue(projectId: number) {
+    setModelRefreshingFor(projectId);
+    wsRef.current?.send({ type: 'get_model_catalogue', projectId, refresh: true });
   }
 
   function toggleTrust(projectId: number, trusted: boolean) {
@@ -2313,6 +2336,10 @@ function AppShell({
             onSelectSession={selectSession}
             onNewSession={newSession}
             onToggleTrust={toggleTrust}
+            modelCatalogue={state.modelCatalogue}
+            modelRefreshingFor={modelRefreshingFor}
+            onSetProjectModel={setProjectModel}
+            onRefreshModelCatalogue={refreshModelCatalogue}
             onRenameSession={renameSession}
             onDownloadSession={downloadSession}
             onBulkSessionOp={bulkSessionOp}

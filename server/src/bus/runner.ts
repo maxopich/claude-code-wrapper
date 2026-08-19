@@ -290,6 +290,24 @@ export type AgentSpec = {
    */
   toolPolicy?: 'delegate-only';
   /**
+   * Cebab-ws0.3: the model this agent's turns ask for, read from its project's
+   * `projects.model`. Absent (the default) = no model key on the options
+   * object, i.e. byte-identical to before this existed.
+   *
+   * The ORCHESTRATOR has no project of its own — its cwd is the Cebab-owned
+   * session folder — so it has no model here and runs on the CLI default. That
+   * is correct rather than an oversight: routing is not the work, and the
+   * operator's model choice belongs to the project doing the work.
+   *
+   * KNOWN GAP, stated so the next reader does not have to discover it: the bus
+   * emits no `session_started`, so nothing on the wire reports which model a
+   * participant ACTUALLY ran on (Register W13). A participant therefore changes
+   * model here with no surface confirming it. Cebab-ut7 tracks putting that
+   * signal on the wire; until it lands, this setting is write-only from the
+   * operator's point of view.
+   */
+  model?: string;
+  /**
    * Register H04: MCP server names the operator denied for this agent's
    * project at the TOFU gate. Read fresh from the spec on every turn, so
    * `applyMcpDenials` can tighten a live session (mid-run `addWorker`, or a
@@ -956,6 +974,7 @@ export class AgentRunner {
       ...askGate,
       ...toolLock,
       ...mcpDenial,
+      ...(spec.model ? { model: spec.model } : {}),
       settingSources: spec.settingSources ?? ['user'],
       mcpServers: {
         // Sole registration. The `bus` alias that shimmed the

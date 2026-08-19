@@ -65,6 +65,7 @@ function project(overrides: Partial<Project> = {}): Project {
     hasClaudeMd: true,
     busInstalled: false,
     busAgentName: null,
+    model: null,
     ...overrides,
   };
 }
@@ -97,6 +98,10 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Spies 
         onSelectSession={spies.onSelectSession}
         onNewSession={spies.onNewSession}
         onToggleTrust={() => {}}
+        modelCatalogue={null}
+        modelRefreshingFor={null}
+        onSetProjectModel={() => {}}
+        onRefreshModelCatalogue={() => {}}
         onRenameSession={() => {}}
         onDownloadSession={() => Promise.resolve()}
         onBulkSessionOp={() => {}}
@@ -190,6 +195,10 @@ describe('[a11y] session rows are operable from the keyboard', () => {
           onSelectSession={() => {}}
           onNewSession={() => {}}
           onToggleTrust={() => {}}
+          modelCatalogue={null}
+          modelRefreshingFor={null}
+          onSetProjectModel={() => {}}
+          onRefreshModelCatalogue={() => {}}
           onRenameSession={() => {}}
           onDownloadSession={() => Promise.resolve()}
           onBulkSessionOp={() => {}}

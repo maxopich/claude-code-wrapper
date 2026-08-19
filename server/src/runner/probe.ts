@@ -27,6 +27,14 @@
  *
  * Goes through `pickRunner`, so mock mode replays a fixture's init exactly as
  * every other Cebab spawn does.
+ *
+ * SIDE EFFECT, deliberate (Cebab-ws0.3): while the CLI is up and before the
+ * abort, this also refreshes the account-wide model catalogue. The list rides
+ * the initialize handshake, so it is already in hand — asking for it here costs
+ * a measured ~0ms and no extra spawn, and it is the only moment Cebab holds a
+ * live CLI without having paid for a model turn. `refreshModelCatalogue` cannot
+ * throw and cannot extend this probe past its own budget; a failure there
+ * leaves the previous catalogue alone and this function's contract unchanged.
  */
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ServerMsg } from '@cebab/shared/protocol';
@@ -34,6 +42,7 @@ import { pickRunner, type Runner } from './index.js';
 import { registerQuery } from './lifecycle.js';
 import type { SettingSource } from './claude.js';
 import { translate } from '../ws/translate.js';
+import { refreshModelCatalogue } from './model_catalogue.js';
 
 /**
  * A probe that has not produced an init by now is not going to. Generous
@@ -91,6 +100,8 @@ export async function probeSessionStarted(opts: {
     for await (const msg of runner as AsyncIterable<SDKMessage>) {
       const m = msg as unknown as { type?: string; subtype?: string };
       if (m.type !== 'system' || m.subtype !== 'init') continue;
+      // Before the abort, while the control channel is still up.
+      await refreshModelCatalogue(runner);
       return translate(msg, opts.projectId);
     }
     return null;

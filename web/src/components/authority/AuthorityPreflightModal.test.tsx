@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { AuthorityProvider } from './AuthorityContext';
-import { AuthorityPreflightModal } from './AuthorityPreflightModal';
+import { AuthorityPreflightModal, type PreflightModelSlot } from './AuthorityPreflightModal';
 
 // Cluster B Phase 6e — UI-B3: AuthorityPreflightModal contract.
 //
@@ -36,7 +36,12 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function mountModal(props: { projectIds: number[]; onStart?: () => void; onClose?: () => void }) {
+function mountModal(props: {
+  projectIds: number[];
+  onStart?: () => void;
+  onClose?: () => void;
+  model?: PreflightModelSlot;
+}) {
   const onClose = props.onClose ?? (() => {});
   act(() => {
     root.render(
@@ -45,11 +50,21 @@ function mountModal(props: { projectIds: number[]; onStart?: () => void; onClose
           projectIds={props.projectIds}
           onStart={props.onStart}
           onClose={onClose}
+          model={props.model}
         />
       </AuthorityProvider>,
     );
   });
 }
+
+const MODEL_SLOT: PreflightModelSlot = {
+  entries: [{ value: 'sonnet', displayName: 'Sonnet', description: 'Faster' }],
+  value: null,
+  onChange: () => {},
+  onRefresh: () => {},
+  refreshing: false,
+  capturedAt: 1,
+};
 
 describe('AuthorityPreflightModal — render', () => {
   test('single-project title reads "Authority preview"', () => {
@@ -140,5 +155,34 @@ describe('AuthorityPreflightModal — Close', () => {
       close.click();
     });
     expect(closed).toBe(1);
+  });
+});
+
+describe('AuthorityPreflightModal — model slot (Cebab-ws0.3)', () => {
+  test('no slot means no picker — the three multi-agent call sites are unchanged', () => {
+    mountModal({ projectIds: [1] });
+    expect(container.querySelector('[data-testid="preflight-model"]')).toBe(null);
+  });
+
+  test('a single-project preflight renders the picker', () => {
+    mountModal({ projectIds: [1], model: MODEL_SLOT });
+    expect(container.querySelector('[data-testid="preflight-model"]')).not.toBe(null);
+    expect(container.querySelectorAll('[role="radio"]').length).toBe(2); // Default + Sonnet
+  });
+
+  test('an AGGREGATE preflight renders no picker even when a slot is passed', () => {
+    // One picker cannot speak for several projects, and showing the first
+    // project's model while reviewing three would be worse than showing none.
+    mountModal({ projectIds: [1, 2], model: MODEL_SLOT });
+    expect(container.querySelector('[data-testid="preflight-model"]')).toBe(null);
+  });
+
+  test('choosing a model reaches the slot handler', () => {
+    const onChange = vi.fn();
+    mountModal({ projectIds: [1], model: { ...MODEL_SLOT, onChange } });
+    act(() => {
+      container.querySelector<HTMLElement>('[data-testid="model-option-sonnet"]')!.click();
+    });
+    expect(onChange).toHaveBeenCalledWith('sonnet');
   });
 });

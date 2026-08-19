@@ -81,6 +81,7 @@ function mkProject(id: number, name: string): Project {
     hasClaudeMd: true,
     busInstalled: true,
     busAgentName: name.toLowerCase(),
+    model: null,
   };
 }
 

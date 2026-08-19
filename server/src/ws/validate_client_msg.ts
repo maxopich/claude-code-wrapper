@@ -94,6 +94,8 @@ const SHAPES: Table = {
     message: 'string?',
   },
   set_trusted: { projectId: 'number', trusted: 'boolean' },
+  set_project_model: { projectId: 'number', model: 'string|null' },
+  get_model_catalogue: { projectId: 'number?', refresh: 'boolean?' },
   load_session: { projectId: 'number', sessionId: 'string' },
   get_settings: {},
   set_workspace_root: { path: 'string' },

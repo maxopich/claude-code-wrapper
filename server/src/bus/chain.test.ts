@@ -22,7 +22,7 @@ import {
   listMultiAgentEvents,
   setPendingRetry,
 } from '../repo/multi_agent.js';
-import { upsertProject } from '../repo/projects.js';
+import { setProjectModel, upsertProject } from '../repo/projects.js';
 import type { BusEvent } from './runner.js';
 import type { Runner } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -987,5 +987,64 @@ describe('startChainSession — a resolving turn reaches the router', () => {
 
     await handle.stop('stopped');
     unregisterLiveSession(handle.sessionId);
+  });
+});
+
+describe('startChainSession — per-project model (Cebab-ws0.3)', () => {
+  // WIRING, not arithmetic. `projectModelSpec` is unit-tested next door and
+  // `bus/runner.ts` is asserted against a captured factory — but nothing there
+  // proves the chain's `runner.register` call actually PASSES the spec. Delete
+  // that one spread and every unit test above still passes while no bus
+  // participant ever honours a model again. This is the test that reddens.
+  function captureOpts(captured: { model?: string }[]) {
+    return (opts: { model?: string }): Runner => {
+      captured.push(opts);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function participantWithModel(name: string, model: string | null): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    if (model !== null) setProjectModel(proj.id, model);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  async function startWith(model: string | null) {
+    const workspace = path.join(tmpRoot, `ws-${model ?? 'none'}`);
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: { model?: string }[] = [];
+    await startChainSession({
+      participants: [
+        participantWithModel(`p-${model ?? 'none'}`, model),
+        participantWithModel(`q-${model ?? 'none'}`, null),
+      ],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: captureOpts(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+    return captured;
+  }
+
+  test("a participant's project model reaches its spawn options", async () => {
+    const captured = await startWith('sonnet');
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.model).toBe('sonnet');
+  });
+
+  test('a participant with no project model spawns with NO model key', async () => {
+    const captured = await startWith(null);
+    expect(captured).toHaveLength(1);
+    // The byte-identical guarantee, measured through the real start path
+    // rather than against a hand-built AgentSpec.
+    expect('model' in captured[0]!).toBe(false);
   });
 });

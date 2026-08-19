@@ -28,6 +28,7 @@
  * `bus_send` in, `deliver()` out — see chain.ts for the symmetric story).
  */
 import crypto from 'node:crypto';
+import { projectModelSpec } from '../repo/projects.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -1703,6 +1704,9 @@ export function wireOrchestratorSession(p: {
       // Cluster G Phase 3 (G1): see chain.ts mirror — per-participant
       // project for the active-runs registry snapshot.
       projectId: w.projectId,
+      // Cebab-ws0.3: the operator's model choice for THIS participant's project.
+      // Spread from one helper so all three register sites are byte-identical.
+      ...projectModelSpec(w.projectId),
       ...(denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {}),
     });
   }
@@ -1884,6 +1888,9 @@ export function wireOrchestratorSession(p: {
       // initial-workers loop so mid-run added workers also appear in the
       // active-runs snapshot with the right project.
       projectId,
+      // Cebab-ws0.3: the operator's model choice for THIS participant's project.
+      // Spread from one helper so all three register sites are byte-identical.
+      ...projectModelSpec(projectId),
       // H04: this function registers and then `deliver`s in the same breath,
       // so the caller's gate result has to arrive HERE — applying it after
       // the call would land one turn too late.

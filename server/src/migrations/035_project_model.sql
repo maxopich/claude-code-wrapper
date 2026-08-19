@@ -1,0 +1,25 @@
+-- Cebab-ws0.3: which model a project's runs ask for.
+--
+-- WHY A COLUMN ON `projects` RATHER THAN A SIBLING TABLE. This is one nullable
+-- scalar per project with no history and no per-row metadata, read on every
+-- spawn and written by a single UI control. `bus_trust_decision` (024) and
+-- `bus_agent_name` (005) took the same shape for the same reasons, and both
+-- ride the existing `SELECT *` reads in repo/projects.ts at zero cost.
+--
+-- WHY NULLABLE WITH NO DEFAULT, and why that is the whole safety argument.
+-- NULL means "the operator has not chosen", and Cebab then omits `Options.model`
+-- from the SDK call ENTIRELY — not sets it to some default string. That is what
+-- makes every project that predates this migration, and every project nobody
+-- configures, spawn byte-identically to before model selection existed. A
+-- DEFAULT here of any kind would change the behaviour of every existing row on
+-- upgrade, which is precisely what must not happen.
+--
+-- NO BACKFILL for the same reason. 024 backfilled because an installed bus
+-- genuinely implied a past trust decision; there is no past model decision to
+-- recover here, and inventing one would be a claim about intent nobody stated.
+--
+-- The stored value is whatever the CLI called the model (`Query.supportedModels`
+-- returns aliases like `sonnet` and bracketed variants like `opus[1m]` side by
+-- side). Cebab does not parse, normalise or validate it against a list — a list
+-- it hardcoded would be the thing that goes stale.
+ALTER TABLE projects ADD COLUMN model TEXT;

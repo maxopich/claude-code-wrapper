@@ -34,6 +34,7 @@ function mkProject(id: number, name: string, path = `/tmp/${name}`): Project {
     hasClaudeMd: false,
     busInstalled: true,
     busAgentName: name.toLowerCase(),
+    model: null,
   };
 }
 

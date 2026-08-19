@@ -19,6 +19,18 @@ export type RunOptions = {
   maxTurns?: number;
   /** Which scopes of settings.json the SDK should layer. Default: ['user']. */
   settingSources?: SettingSource[];
+  /**
+   * Model to run this turn on — an id or an alias, passed through verbatim to
+   * the SDK's `Options.model`.
+   *
+   * ABSENT IS NOT THE SAME AS 'default'. Omitting this leaves the key off the
+   * options object entirely, which is what makes an operator who has chosen
+   * nothing byte-identical to Cebab before model selection existed. The CLI's
+   * own catalogue does contain a row whose value is the literal string
+   * `'default'`; resolving that row to `undefined` (not to that string) is the
+   * caller's job — see `resolveModel` in `ws/server.ts`.
+   */
+  model?: string;
   /** In-process MCP servers (e.g. the multi-agent `bus_send` tool). */
   mcpServers?: Options['mcpServers'];
   /**
@@ -141,7 +153,21 @@ export function mcpDenialOptions(names: readonly string[] | undefined): {
   };
 }
 
-export function runClaude(opts: RunOptions): Query {
+/**
+ * Assemble the SDK options object for a run. Split out of `runClaude` so it can
+ * be asserted directly: `query()` is never mocked anywhere in this repo, so
+ * until this existed NOTHING covered the assembly below — not the `??`
+ * defaults, not the conditional assignments, not the `disallowedTools` union.
+ * Same reasoning as `mcpDenialOptions` above and `resolveMaxTurns` in the WS
+ * layer: the shape a spawn depends on gets pinned by a test, not by a comment.
+ *
+ * The two idioms here are load-bearing and deliberately different. Keys in the
+ * literal are ALWAYS present (some with `??` defaults); keys assigned below it
+ * are absent unless the caller asked for them. Moving a field from the second
+ * group to the first would send `undefined` where the SDK currently sees
+ * nothing at all.
+ */
+export function buildSdkOptions(opts: RunOptions): Options {
   const options: Options = {
     cwd: opts.cwd,
     env: subscriptionOnlyEnv(process.env),
@@ -167,6 +193,13 @@ export function runClaude(opts: RunOptions): Query {
   if (allDisallowed.length > 0) options.disallowedTools = allDisallowed;
   if (denial.settings) options.settings = denial.settings;
   if (opts.allowDangerouslySkipPermissions) options.allowDangerouslySkipPermissions = true;
+  // Truthiness, not `!== undefined`: an empty string is not a model, and the
+  // key must stay ABSENT rather than become `undefined` when nothing is chosen.
+  if (opts.model) options.model = opts.model;
 
-  return query({ prompt: opts.prompt, options });
+  return options;
+}
+
+export function runClaude(opts: RunOptions): Query {
+  return query({ prompt: opts.prompt, options: buildSdkOptions(opts) });
 }

@@ -46,6 +46,7 @@
  * participant scores as interrupted.
  */
 import fs from 'node:fs';
+import { projectModelSpec } from '../repo/projects.js';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import {
@@ -1406,6 +1407,9 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       // lifecycle registry's per-hop snapshot can name it for the
       // active-runs sidebar dropdown.
       projectId: p.projectId,
+      // Cebab-ws0.3: the operator's model choice for THIS participant's project.
+      // Spread from one helper so all three register sites are byte-identical.
+      ...projectModelSpec(p.projectId),
       ...(denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {}),
     });
   }

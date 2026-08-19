@@ -47,6 +47,7 @@ function project(overrides: Partial<Project> = {}): Project {
     hasClaudeMd: true,
     busInstalled: false,
     busAgentName: null,
+    model: null,
     ...overrides,
   };
 }
@@ -79,6 +80,10 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Handle
         onSelectSession={() => {}}
         onNewSession={() => {}}
         onToggleTrust={() => {}}
+        modelCatalogue={null}
+        modelRefreshingFor={null}
+        onSetProjectModel={() => {}}
+        onRefreshModelCatalogue={() => {}}
         onRenameSession={() => {}}
         onDownloadSession={() => Promise.resolve()}
         onBulkSessionOp={handlers.onBulkSessionOp}

@@ -21,6 +21,7 @@ function mkProjects(n: number): Project[] {
     hasClaudeMd: true,
     busInstalled: false,
     busAgentName: null,
+    model: null,
   }));
 }
 
