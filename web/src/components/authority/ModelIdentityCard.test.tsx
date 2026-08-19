@@ -41,6 +41,7 @@ function mkAuthority(overrides: Partial<ProjectAuthority> = {}): ProjectAuthorit
     projectId: 1,
     capturedAt: Date.now(),
     fromProbe: false,
+    sdkSnapshot: true,
     model: 'claude-sonnet-4-5',
     apiKeySource: 'none',
     permissionMode: 'default',

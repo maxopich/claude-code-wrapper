@@ -24,16 +24,19 @@ const VARIANT: Record<TrustChipState, 'ok' | 'warn'> = {
 const TOOLTIP: Record<TrustChipState, string> = {
   'trusted-all':
     'Trusted project: every tool call auto-allows (Bash, Edit, Write, dangerous shell — all). ' +
-    'The project also loads its own .claude/settings.json + CLAUDE.md (settingSources: user+project+local). ' +
+    'The project also loads its own .claude/settings.json, .mcp.json and CLAUDE.md ' +
+    '(settingSources: user+project+local), so its MCP servers start. ' +
     'To change: toggle Trust off in the sidebar.',
   'untrusted-edits':
     'Untrusted project + auto-edits mode: file edits auto-allow (Edit, Write, NotebookEdit). ' +
-    'Bash and other tools still ask. Project-scope settings.json + CLAUDE.md are NOT loaded ' +
-    '(settingSources: user only). To change scope: toggle the permissions pill, or Trust in the sidebar.',
+    'Bash and other tools still ask. Project-scope settings.json, .mcp.json and CLAUDE.md are ' +
+    'NOT loaded (settingSources: user only), so this project\u2019s own MCP servers do not start. ' +
+    'Trust in the sidebar is what changes that \u2014 the permissions pill changes what asks, not what loads.',
   'untrusted-ask':
     'Untrusted project + ask mode: every tool call shows a permission card. ' +
-    'Project-scope settings.json + CLAUDE.md are NOT loaded (settingSources: user only). ' +
-    'To change: toggle the permissions pill to auto-edits, or Trust on in the sidebar.',
+    'Project-scope settings.json, .mcp.json and CLAUDE.md are NOT loaded ' +
+    '(settingSources: user only), so this project\u2019s own MCP servers do not start. ' +
+    'Trust in the sidebar is what changes that \u2014 the permissions pill changes what asks, not what loads.',
 };
 
 // Cluster B Phase 6e (UI-B6): chip now wraps the label + a "See full

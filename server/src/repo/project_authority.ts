@@ -848,10 +848,12 @@ function bumpDenied(t: ToolUsageTally, name: string): void {
  * case). The settings-declared data (MCP servers, env injections, hooks,
  * allow/deny rules) is still useful pre-flight.
  *
- * Probe mode (`mode === 'probe'`) is Phase 3b — for now it falls through
- * to cache behavior with an info log so reviewers can verify the path is
- * wired without spawning the SDK. The protocol type already accepts both
- * modes so Phase 3b is a pure server-side change.
+ * Probe mode (`mode === 'probe'`) is handled by the CALLER, not here: the WS
+ * `get_project_authority` handler runs `probeSessionStarted` and writes the
+ * result into the same per-connection cache a real turn fills, then calls this
+ * resolver unchanged. This function stays synchronous and file-read-only, and
+ * `mode` is carried on the input only so the envelope can report which kind of
+ * resolve produced it.
  */
 export type ResolverInput = {
   projectId: number;
@@ -883,14 +885,6 @@ export type ResolverInput = {
 export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority | null {
   const project = getProject(input.projectId);
   if (!project) return null;
-
-  if (input.mode === 'probe') {
-    // Phase 3b will spawn a `maxTurns: 0` SDK run here. Until then, fall
-    // through to cache behavior so the wire round-trip works end-to-end.
-    console.log(
-      `[project_authority] probe mode requested for project ${input.projectId}; falling through to cache (Phase 3b lands SDK spawn)`,
-    );
-  }
 
   const trusted = project.trusted === 1;
   const scopes = input.settingSources ?? trustDerivedScopes(trusted);
@@ -1001,7 +995,11 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   const out: ProjectAuthority = {
     projectId: input.projectId,
     capturedAt: Date.now(),
-    fromProbe: false,
+    fromProbe: input.mode === 'probe',
+    // Empty and unmeasured are different facts. Without this the panel had to
+    // guess from `model === undefined`, and guessed wrong in the direction
+    // that asserts the project has nothing.
+    sdkSnapshot: input.latestSessionStarted !== undefined,
     settingSourcesUsed,
     tools,
     mcpServers: declaredMcp,
