@@ -10,9 +10,13 @@ import { DANGEROUS_ARM_MS } from './PermissionCards';
 /**
  * Register U09 — the single-agent approval card.
  *
- * The card is the untrusted-project path: `shouldAutoAllow` returns true for
- * every call in a Trusted project, so when this renders at all, a human is
- * genuinely the last thing between the model and the tool. It shipped with
+ * The card is the ask-mode path. It used to be described here as "the
+ * untrusted-project path", on the grounds that `shouldAutoAllow` returned true
+ * for every call in a Trusted project — true when written, and no longer
+ * (Cebab-ws0.14): a trusted project in `default` mode now raises these cards
+ * too. Either way the point stands and is what this file pins: when this
+ * renders at all, a human is genuinely the last thing between the model and
+ * the tool. It shipped with
  * `<button>Allow</button>` / `<button>Deny</button>` — no classes, no object in
  * the accessible name, and the affirmative one painted green by `:first-child`.
  * Allowing `Bash("rm -rf …")` cost the same single click as allowing a `Read`.

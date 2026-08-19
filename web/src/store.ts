@@ -3310,20 +3310,33 @@ export function sessionSelectionRequests(
 /**
  * Item #6: derive the chat-header chip's effective auto-allow scope from the
  * trust toggle and the session's permission mode. Mirrors the server-side
- * `shouldAutoAllow` decision (server/src/ws/permission.ts:26-33), but viewed
- * from the operator's vantage: WHAT auto-allows under the current pair of
- * gates, not whether a given tool call does.
+ * `shouldAutoAllow` decision (`server/src/ws/permission.ts`), but viewed from
+ * the operator's vantage: WHAT auto-allows under the current pair of gates,
+ * not whether a given tool call does.
  *
- *   trusted=true                       → 'trusted-all'     (auto-allow ALL)
+ *   trusted=true,  mode='acceptEdits'  → 'trusted-all'     (auto-allow ALL)
+ *   trusted=true,  mode='default'      → 'trusted-ask'     (ask every tool)
  *   trusted=false, mode='acceptEdits'  → 'untrusted-edits' (auto-allow Edit/Write/NotebookEdit)
  *   trusted=false, mode='default'      → 'untrusted-ask'   (ask every tool)
+ *
+ * `'trusted-ask'` is new (Cebab-ws0.14). It exists because `shouldAutoAllow`
+ * stopped short-circuiting on trust: `'default'` now asks on every project.
+ * Before that, this function was RIGHT to collapse both trusted cases into
+ * one — the mode genuinely made no difference — which is exactly why the
+ * mirror has to move whenever the original does. A chip that kept saying
+ * "auto-allow ALL" while every tool raised a card would be the same class of
+ * defect the pill itself just was.
+ *
+ * Note the pairing: trusted and untrusted are distinct states even when both
+ * ask, because the trust half of the chip is also reporting what LOADS
+ * (project settings, .mcp.json, CLAUDE.md), which the permission mode has
+ * never affected.
  */
-export type TrustChipState = 'trusted-all' | 'untrusted-edits' | 'untrusted-ask';
+export type TrustChipState = 'trusted-all' | 'trusted-ask' | 'untrusted-edits' | 'untrusted-ask';
 
 export function trustChipState(trusted: boolean, mode: SessionPermissionMode): TrustChipState {
-  if (trusted) return 'trusted-all';
-  if (mode === 'acceptEdits') return 'untrusted-edits';
-  return 'untrusted-ask';
+  if (mode === 'default') return trusted ? 'trusted-ask' : 'untrusted-ask';
+  return trusted ? 'trusted-all' : 'untrusted-edits';
 }
 
 /**

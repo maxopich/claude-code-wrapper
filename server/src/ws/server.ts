@@ -3331,8 +3331,17 @@ function normalizeSessionTitle(raw: string | null): string | null {
   return collapsed.slice(0, MAX_SESSION_TITLE_LEN);
 }
 
-/** Pick the permission mode for a (possibly resuming) turn. */
-function seedPermissionMode(
+/**
+ * Pick the permission mode for a (possibly resuming) turn.
+ *
+ * Exported for tests (Cebab-ws0.14). The "nothing changes for anyone who
+ * leaves the pill alone" guarantee that made it safe to let `'default'` bind
+ * on trusted projects is entirely this function's doing — a fresh trusted
+ * session still seeds `acceptEdits`, so the row that moved in
+ * `shouldAutoAllow` is only reachable by explicitly asking for it. That claim
+ * is load-bearing, so it gets a test rather than a sentence.
+ */
+export function seedPermissionMode(
   resumeSessionId: string | undefined,
   trusted: boolean,
 ): SessionPermissionMode {

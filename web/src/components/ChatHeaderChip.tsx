@@ -5,6 +5,7 @@ import { AuthorityPreflightModal } from './authority/AuthorityPreflightModal';
 
 const LABEL: Record<TrustChipState, string> = {
   'trusted-all': 'Trusted · auto-allow ALL',
+  'trusted-ask': 'Trusted · ask every tool',
   'untrusted-edits': 'Untrusted · auto-allow edits',
   'untrusted-ask': 'Untrusted · ask every tool',
 };
@@ -14,6 +15,11 @@ const VARIANT: Record<TrustChipState, 'ok' | 'warn'> = {
   // dangerous tools (Bash, rm) too, so the chip is a "you said yes to all of
   // this" reminder, NOT a victory lap.
   'trusted-all': 'warn',
+  // Trusted but asking: ok-green. Nothing auto-allows, so there is no "you
+  // said yes to all of this" to remind anyone of — the amber above is about
+  // the auto-allow, not about trust as such. What trust still does here is
+  // LOAD the project's own files, and the tooltip says so.
+  'trusted-ask': 'ok',
   // Both untrusted states use ok-green — the difference vs untrusted-ask is
   // carried in the trailing scope phrase, not color. Untrusted is the safer
   // baseline either way.
@@ -27,6 +33,12 @@ const TOOLTIP: Record<TrustChipState, string> = {
     'The project also loads its own .claude/settings.json, .mcp.json and CLAUDE.md ' +
     '(settingSources: user+project+local), so its MCP servers start. ' +
     'To change: toggle Trust off in the sidebar.',
+  'trusted-ask':
+    'Trusted project + ask mode: every tool call shows a permission card, including file edits. ' +
+    'Trust still loads the project\u2019s own .claude/settings.json, .mcp.json and CLAUDE.md ' +
+    '(settingSources: user+project+local), so its MCP servers start \u2014 the permissions pill ' +
+    'changes what asks, not what loads. Switch the pill to auto-edits to let tool calls run ' +
+    'without a card.',
   'untrusted-edits':
     'Untrusted project + auto-edits mode: file edits auto-allow (Edit, Write, NotebookEdit). ' +
     'Bash and other tools still ask. Project-scope settings.json, .mcp.json and CLAUDE.md are ' +
