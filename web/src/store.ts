@@ -2843,6 +2843,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // Reducer no-op keeps the discriminated union exhaustive.
       return state;
 
+    case 'stray_session_folders':
+    case 'stray_session_folders_deleted':
+      // Cebab-ws0.13: the leftover-session-folder scan and its delete result.
+      // Same modal-local posture as `storage_stats` above — Settings owns both
+      // via `useStraySessionFolders` + the `subscribeServerMsg` side-channel,
+      // and neither belongs in the main tree for a surface that is only mounted
+      // while Settings is open. Reducer no-op keeps the union exhaustive.
+      return state;
+
     case 'bulk_session_op_result': {
       // Cluster I Phase C5 UI: the server has archived or soft-deleted the
       // `succeededSessionIds`. Drop them from every per-project cache so the

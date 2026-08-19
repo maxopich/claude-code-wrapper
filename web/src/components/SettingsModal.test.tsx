@@ -5,7 +5,7 @@ import { act } from 'react';
 import type { SettingsView } from '../store';
 import { SettingsModal } from './SettingsModal';
 import type { Theme } from '../theme';
-import type { ClientMsg, ServerMsg } from '@cebab/shared';
+import type { ClientMsg, ServerMsg, StraySessionFolder } from '@cebab/shared';
 
 // Cluster E Phase 3 (A4) — SettingsModal contract additions:
 //   - Inline "(default fallback)" tag renders ONLY when workspaceRoot is
@@ -236,15 +236,24 @@ describe('SettingsModal — defaultMaxTurns', () => {
 // useStorageStats). We drive it by capturing the subscribe callback and
 // feeding a canned reply.
 describe('SettingsModal — Storage section', () => {
-  let storageCb: ((m: ServerMsg) => void) | null = null;
+  // A SET, not a single slot. The real `subscribeServerMsg` fans out to every
+  // subscriber, and the Storage section now has two consumers — the stats hook
+  // and the leftover-folders hook (Cebab-ws0.13). With one slot the second
+  // mount silently displaced the first, so every assertion here failed while
+  // the component was fine. A fake that models the contract loosely fails on
+  // legitimate changes and, worse, could pass on illegitimate ones.
+  let subscribers: ((m: ServerMsg) => void)[] = [];
+  const feedAll = (m: ServerMsg): void => {
+    for (const cb of [...subscribers]) cb(m);
+  };
 
   function renderWithStorage(over: Partial<SettingsView> = {}) {
-    storageCb = null;
+    subscribers = [];
     render(settings({ workspaceRoot: '/already/set', ...over }), vi.fn(), vi.fn(), {
       subscribeServerMsg: (cb) => {
-        storageCb = cb;
+        subscribers.push(cb);
         return () => {
-          storageCb = null;
+          subscribers = subscribers.filter((c) => c !== cb);
         };
       },
     });
@@ -266,7 +275,7 @@ describe('SettingsModal — Storage section', () => {
       autoReclaim: { enabled: false, idleDays: null, lastRunAt: null, lastCount: null },
       ...over,
     };
-    act(() => storageCb?.(msg));
+    act(() => feedAll(msg));
   }
 
   function storageText(): string {
@@ -569,5 +578,178 @@ describe('SettingsModal — theme is restored on cancel (U14)', () => {
     const h = mount('daylight');
     act(() => footerCancel()!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(h.onThemeChange).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Cebab-ws0.13 — the leftover-session-folder panel.
+ *
+ * The delete button is destructive and irreversible, so the assertions that
+ * earn their place are the ones about what CANNOT be selected and what the
+ * confirm gate demands — not that a list renders.
+ */
+describe('SettingsModal — leftover session folders (ws0.13)', () => {
+  let subscribers: ((m: ServerMsg) => void)[] = [];
+  let sent: ClientMsg[] = [];
+
+  const feedAll = (m: ServerMsg): void => {
+    for (const cb of [...subscribers]) cb(m);
+  };
+
+  function renderPanel() {
+    subscribers = [];
+    sent = [];
+    render(settings({ workspaceRoot: '/w' }), vi.fn(), vi.fn(), {
+      send: (m: ClientMsg) => sent.push(m),
+      subscribeServerMsg: (cb) => {
+        subscribers.push(cb);
+        return () => {
+          subscribers = subscribers.filter((c) => c !== cb);
+        };
+      },
+    });
+  }
+
+  function feedScan(folders: StraySessionFolder[], truncated = false) {
+    act(() =>
+      feedAll({
+        type: 'stray_session_folders',
+        workspaceRoot: '/w',
+        folders,
+        truncated,
+      }),
+    );
+  }
+
+  const folder = (over: Partial<StraySessionFolder> = {}): StraySessionFolder => ({
+    name: '.cebab-session-orphan',
+    sizeBytes: 2048,
+    sessionStatus: null,
+    running: false,
+    ...over,
+  });
+
+  const click = (testid: string): void => {
+    act(() => {
+      document.querySelector<HTMLButtonElement>(`[data-testid="${testid}"]`)!.click();
+    });
+  };
+  const panelText = (): string =>
+    document.querySelector('[data-testid="stray-folders"]')?.textContent ?? '';
+
+  test('does NOT scan on open — the walk is opt-in', () => {
+    renderPanel();
+    // The whole reason this is a separate message from `get_storage_stats`:
+    // most operators have no leftovers and should not pay for a workspace walk
+    // every time they open Settings.
+    expect(sent.some((m) => m.type === 'get_stray_session_folders')).toBe(false);
+    expect(sent.some((m) => m.type === 'get_storage_stats')).toBe(true);
+  });
+
+  test('the scan button asks, and an empty result says so plainly', () => {
+    renderPanel();
+    click('stray-scan-btn');
+    expect(sent.filter((m) => m.type === 'get_stray_session_folders')).toHaveLength(1);
+    feedScan([]);
+    expect(document.querySelector('[data-testid="stray-empty"]')).not.toBeNull();
+  });
+
+  test('a referenced folder is listed but cannot be selected', () => {
+    renderPanel();
+    click('stray-scan-btn');
+    feedScan([folder({ name: '.cebab-session-kept', sessionStatus: 'completed' })]);
+
+    const box = document.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(box.disabled).toBe(true);
+    expect(panelText()).toContain('archive it from the Iterations list instead');
+    // Nothing selectable ⇒ nothing to delete.
+    expect(
+      document.querySelector<HTMLButtonElement>('[data-testid="stray-delete-btn"]')!.disabled,
+    ).toBe(true);
+  });
+
+  test('a RUNNING folder cannot be selected either, and says why', () => {
+    renderPanel();
+    click('stray-scan-btn');
+    feedScan([folder({ name: '.cebab-session-live', running: true })]);
+    expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(true);
+    expect(panelText()).toContain('running right now');
+  });
+
+  test('a running folder stays unselectable even with no session row', () => {
+    // The two reasons are independent: `sessionStatus: null` alone must not be
+    // read as "safe to delete".
+    renderPanel();
+    click('stray-scan-btn');
+    feedScan([folder({ running: true, sessionStatus: null })]);
+    expect(document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(true);
+  });
+
+  test('deleting goes through a typed confirm gate, and sends NAMES only', () => {
+    renderPanel();
+    click('stray-scan-btn');
+    feedScan([folder()]);
+
+    act(() => {
+      document.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();
+    });
+    click('stray-delete-btn');
+
+    // Nothing is sent until the gate is satisfied.
+    expect(sent.some((m) => m.type === 'delete_stray_session_folders')).toBe(false);
+    const gate = document.body.textContent ?? '';
+    expect(gate).toContain('cannot be undone');
+    expect(gate).toContain('.cebab-session-orphan');
+
+    // Setting `.value` directly does not notify a React controlled input —
+    // the native setter is what makes onChange fire. Same helper shape as
+    // `ConfirmGateModal.test.tsx`.
+    const input = document.querySelector<HTMLInputElement>('.gate-modal-input-ack')!;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!;
+    setter.call(input, 'delete');
+    act(() => {
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('.gate-modal-btn')].find(
+      (b) => b.textContent?.trim() === 'Delete permanently',
+    )!;
+    expect(confirm.disabled).toBe(false);
+    act(() => confirm.click());
+
+    const msg = sent.find((m) => m.type === 'delete_stray_session_folders');
+    expect(msg).toEqual({
+      type: 'delete_stray_session_folders',
+      names: ['.cebab-session-orphan'],
+    });
+  });
+
+  test('a truncated scan says its sizes are minimums', () => {
+    renderPanel();
+    click('stray-scan-btn');
+    feedScan([folder()], true);
+    expect(document.querySelector('[data-testid="stray-truncated"]')).not.toBeNull();
+  });
+
+  test('the result line reports what was KEPT, not just what went', () => {
+    renderPanel();
+    click('stray-scan-btn');
+    feedScan([folder()]);
+    act(() =>
+      feedAll({
+        type: 'stray_session_folders_deleted',
+        deleted: ['.cebab-session-a'],
+        failed: [{ name: '.cebab-session-b', reason: 'running', message: 'is running' }],
+        freedBytes: 4096,
+      }),
+    );
+    const text = document.querySelector('[data-testid="stray-delete-result"]')!.textContent ?? '';
+    expect(text).toContain('Deleted 1');
+    // A refusal the operator does not see is a refusal they will retry forever.
+    expect(text).toContain('1 kept');
+    expect(text).toContain('.cebab-session-b');
   });
 });
