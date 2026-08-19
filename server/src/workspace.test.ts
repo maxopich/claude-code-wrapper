@@ -12,7 +12,13 @@ import path from 'node:path';
 import { beforeEach, describe, expect, test } from 'vitest';
 import { findProjectByPath, listProjects, upsertProject } from './repo/projects.js';
 import { withTempDataDir } from './test_support/temp_data_dir.js';
-import { resolveWorkspaceRoot, setWorkspaceRoot, syncWorkspaceProjects } from './workspace.js';
+import { config } from './config.js';
+import {
+  isInside,
+  resolveWorkspaceRoot,
+  setWorkspaceRoot,
+  syncWorkspaceProjects,
+} from './workspace.js';
 
 withTempDataDir('cebab-workspace-');
 
@@ -171,5 +177,133 @@ describe('syncWorkspaceProjects survives a colliding basename', () => {
 
     // Control: the fix must not append a suffix to every project.
     expect(findProjectByPath(path.join(newRoot, 'Solo'))!.name).toBe('Solo');
+  });
+});
+
+/**
+ * Cebab-ws0.8 — "on the side panel, the user should see only the workspace."
+ *
+ * Since ws0.8 the data dir also holds `sessions/`, one subtree per multi-agent
+ * session. Pointing the workspace at `~/.cebab` was accepted BEFORE this change
+ * too — it would have turned `logs`, `bus` and `orchestrator` into agent
+ * projects, each one a cwd a session could be pointed at. The move makes that
+ * pre-existing hole sharper, so it gets closed here.
+ */
+describe('the data dir may not become the workspace (ws0.8)', () => {
+  test('the data dir itself is refused, and the message says why', () => {
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    expect(() => setWorkspaceRoot(config.dataDir)).toThrow(/data directory/i);
+  });
+
+  test('a directory inside the data dir is refused', () => {
+    const inside = path.join(config.dataDir, 'sessions');
+    fs.mkdirSync(inside, { recursive: true });
+    expect(() => setWorkspaceRoot(inside)).toThrow(/data directory/i);
+  });
+
+  /**
+   * THE negative. A `startsWith` implementation passes every other case in this
+   * describe, and would refuse a perfectly ordinary sibling directory whose name
+   * merely begins with the data dir's — leaving an operator unable to use their
+   * own folder with an error blaming Cebab's.
+   */
+  test('a SIBLING whose name merely starts the same is accepted', () => {
+    const sibling = `${config.dataDir}-projects`;
+    fs.mkdirSync(sibling, { recursive: true });
+    expect(() => setWorkspaceRoot(sibling)).not.toThrow();
+  });
+
+  test('control: an ordinary directory is still accepted', () => {
+    // Green before AND after. Labelled so it is not mistaken for coverage.
+    const ordinary = path.join(scratch, 'agents-ok');
+    fs.mkdirSync(ordinary, { recursive: true });
+    expect(() => setWorkspaceRoot(ordinary)).not.toThrow();
+  });
+
+  test('a non-dot data dir nested in the workspace is not scanned as a project', async () => {
+    // The case `setWorkspaceRoot` cannot catch: the data dir is fixed at process
+    // start, so the workspace can be re-pointed to swallow it afterwards. The
+    // dot filter misses it too, because the name has no dot.
+    const root = path.join(scratch, 'ws-nested');
+    fs.mkdirSync(path.join(root, 'RealAgent'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'cebab-data', 'sessions'), { recursive: true });
+    config.dataDir = path.join(root, 'cebab-data');
+    setWorkspaceRoot(root);
+
+    await syncWorkspaceProjects();
+    const names = listProjects().map((p) => p.name);
+    expect(names).toContain('RealAgent');
+    expect(names).not.toContain('cebab-data');
+  });
+
+  test('a sibling non-dot directory IS still scanned', async () => {
+    // Pairs with the case above: without this, a filter that dropped every
+    // non-dot directory would pass it.
+    const root = path.join(scratch, 'ws-sibling');
+    fs.mkdirSync(path.join(root, 'cebab-data-notes'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'cebab-data'), { recursive: true });
+    config.dataDir = path.join(root, 'cebab-data');
+    setWorkspaceRoot(root);
+
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.name)).toContain('cebab-data-notes');
+  });
+});
+
+/**
+ * `isInside` on BOTH platform flavours.
+ *
+ * The operator runs Windows and CI runs Linux and Windows, but a developer
+ * running these on macOS would otherwise never exercise the win32 branch at
+ * all. Driving `path.win32` explicitly is what makes the Windows behaviour
+ * testable from any host — the alternative is a guard whose Windows semantics
+ * are only ever checked by the one CI leg that happens to run there.
+ */
+describe('isInside — the containment predicate (ws0.8)', () => {
+  for (const [label, impl, root, inside, sibling, outside] of [
+    [
+      'posix',
+      path.posix,
+      '/home/u/.cebab',
+      '/home/u/.cebab/sessions/a',
+      '/home/u/.cebabX',
+      '/home/u/agents',
+    ],
+    [
+      'win32',
+      path.win32,
+      'C:\\Users\\u\\.cebab',
+      'C:\\Users\\u\\.cebab\\sessions\\a',
+      'C:\\Users\\u\\.cebabX',
+      'C:\\Users\\u\\agents',
+    ],
+  ] as const) {
+    describe(label, () => {
+      test('a real child is inside', () => {
+        expect(isInside(root, inside, impl)).toBe(true);
+      });
+
+      test('a prefix-sharing SIBLING is not inside — the startsWith trap', () => {
+        expect(isInside(root, sibling, impl)).toBe(false);
+      });
+
+      test('an unrelated path is not inside', () => {
+        expect(isInside(root, outside, impl)).toBe(false);
+      });
+
+      test('a path is not inside itself', () => {
+        expect(isInside(root, root, impl)).toBe(false);
+      });
+
+      test('the parent is not inside its own child', () => {
+        expect(isInside(inside, root, impl)).toBe(false);
+      });
+    });
+  }
+
+  test('a directory literally named `..foo` is inside, not an escape', () => {
+    // A bare `rel.startsWith('..')` rejects this. Naming `path.sep` in the
+    // predicate is what keeps it legal.
+    expect(isInside(path.posix.join('/a'), path.posix.join('/a', '..foo'), path.posix)).toBe(true);
   });
 });

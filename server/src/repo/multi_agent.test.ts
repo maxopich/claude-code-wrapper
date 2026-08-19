@@ -117,7 +117,7 @@ describe('createMultiAgentSession + session_folder + lifecycle (migration 007)',
     };
     unchanged('after insert');
 
-    endMultiAgentSession('s4', 'done');
+    endMultiAgentSession('s4', 'completed');
     unchanged('after end');
 
     reactivateMultiAgentSession('s4');
