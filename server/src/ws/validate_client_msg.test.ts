@@ -34,6 +34,8 @@ const SAMPLES: ClientMsg[] = [
   { type: 'interrupt', sessionId: 's' },
   { type: 'permission_decision', sessionId: 's', requestId: 'r', decision: 'allow' },
   { type: 'set_trusted', projectId: 1, trusted: false },
+  { type: 'set_project_model', projectId: 1, model: null },
+  { type: 'get_model_catalogue' },
   { type: 'load_session', projectId: 1, sessionId: 's' },
   { type: 'get_settings' },
   { type: 'set_workspace_root', path: '/tmp/agents' },
@@ -203,6 +205,34 @@ describe('rejects malformed frames', () => {
     ['an unknown type', { type: 'drop_database' }],
   ])('%s', (_label, frame) => {
     expect(validateClientMsg(frame).ok).toBe(false);
+  });
+
+  test('a model choice must be a string or null, and null must survive', () => {
+    // `null` is the CLEAR operation, and it is the one a loose spec breaks:
+    // widening the kind to plain 'string' would reject it, leaving the
+    // operator able to set a model and never able to unset one. Both
+    // directions are asserted because too-narrow and too-wide are different
+    // bugs and each passes the other's test.
+    expect(overTheWire({ type: 'set_project_model', projectId: 1, model: null }).ok).toBe(true);
+    expect(overTheWire({ type: 'set_project_model', projectId: 1, model: 'sonnet' }).ok).toBe(true);
+
+    const bad = overTheWire({ type: 'set_project_model', projectId: 1, model: 42 });
+    expect(bad.ok).toBe(false);
+    expect(bad.ok ? '' : bad.reason).toContain('set_project_model.model');
+    expect(overTheWire({ type: 'set_project_model', projectId: 1, model: { v: 'x' } }).ok).toBe(
+      false,
+    );
+    // A missing projectId cannot be allowed to write to project `undefined`.
+    expect(overTheWire({ type: 'set_project_model', model: 'sonnet' }).ok).toBe(false);
+  });
+
+  test('get_model_catalogue accepts the bare form and rejects a mistyped refresh', () => {
+    // Both fields optional: a plain cache read needs neither. `refresh` is what
+    // decides whether this SPAWNS a CLI, so a truthy string must not reach it.
+    expect(overTheWire({ type: 'get_model_catalogue' }).ok).toBe(true);
+    expect(overTheWire({ type: 'get_model_catalogue', projectId: 3, refresh: true }).ok).toBe(true);
+    expect(overTheWire({ type: 'get_model_catalogue', refresh: 'true' }).ok).toBe(false);
+    expect(overTheWire({ type: 'get_model_catalogue', projectId: '3' }).ok).toBe(false);
   });
 
   test('[security] a truthy string does not become a trust decision', () => {

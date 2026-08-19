@@ -37,6 +37,7 @@ function seedSession(): AppState {
           hasClaudeMd: false,
           busInstalled: false,
           busAgentName: null,
+          model: null,
         },
       ],
     },

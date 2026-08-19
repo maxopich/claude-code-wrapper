@@ -196,6 +196,7 @@ export function rowToProject(row: ProjectRow) {
     hasClaudeMd: hasClaudeMdAt(row.path),
     busInstalled: row.bus_installed === 1,
     busAgentName: row.bus_agent_name,
+    model: row.model,
   };
 }
 

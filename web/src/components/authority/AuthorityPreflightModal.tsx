@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { useModalSurface } from '../../useModalSurface';
+import type { ModelCatalogueEntry } from '@cebab/shared/protocol';
 import { AuthorityPanel } from './AuthorityPanel';
+import { ModelPicker } from '../ModelPicker';
 
 // Cluster B Phase 6e (UI-B3 / spec §6.2): "review authority before you
 // start" modal.
@@ -28,8 +30,27 @@ import { AuthorityPanel } from './AuthorityPanel';
 // DraftView composer button), clicking [Start session] invokes it after
 // dismissing the modal — the parent owns the actual start logic.
 
+/**
+ * Cebab-ws0.3: the model-picker slot. Optional, so the three multi-agent call
+ * sites keep opening a review-only modal unchanged.
+ *
+ * Only meaningful for a SINGLE project — an aggregate preflight reviews several
+ * at once, and one picker cannot speak for all of them. The modal renders this
+ * only when `projectIds.length === 1`; an aggregate view showing one project's
+ * model would be worse than showing none.
+ */
+export type PreflightModelSlot = {
+  entries: ModelCatalogueEntry[];
+  value: string | null;
+  onChange: (model: string | null) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
+  capturedAt: number | null;
+};
+
 export type AuthorityPreflightModalProps = {
   projectIds: number[];
+  model?: PreflightModelSlot;
   /** Optional: hook fired when the operator clicks [Start session]. When
    *  omitted, the [Start session] button hides — modal is review-only. */
   onStart?: () => void;
@@ -37,7 +58,7 @@ export type AuthorityPreflightModalProps = {
 };
 
 export function AuthorityPreflightModal(props: AuthorityPreflightModalProps) {
-  const { projectIds, onStart, onClose } = props;
+  const { projectIds, onStart, onClose, model } = props;
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
   const startBtnRef = useRef<HTMLButtonElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -86,6 +107,23 @@ export function AuthorityPreflightModal(props: AuthorityPreflightModalProps) {
             ? 'Resolved authority for each participant project — the SDK will load these settings layers when each agent spawns. Review per-project before starting the run.'
             : 'Resolved authority for this project — the SDK will load these settings layers when the session spawns. Review before starting.'}
         </p>
+        {model && !isAggregate && (
+          <section className="authority-preflight-model" data-testid="preflight-model">
+            <h4 className="authority-preflight-model-title">Model</h4>
+            <p className="gate-modal-help">
+              Which model this project&apos;s sessions ask for. Applies to the next turn; a run
+              already in flight keeps the model it started on.
+            </p>
+            <ModelPicker
+              entries={model.entries}
+              value={model.value}
+              onChange={model.onChange}
+              onRefresh={model.onRefresh}
+              refreshing={model.refreshing}
+              capturedAt={model.capturedAt}
+            />
+          </section>
+        )}
         <div className="authority-preflight-panels">
           {projectIds.map((id) => (
             <AuthorityPanel key={id} projectId={id} mode="preflight" />

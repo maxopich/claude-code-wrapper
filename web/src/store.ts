@@ -18,6 +18,7 @@ import type {
   SessionPermissionMode,
   SessionSummary,
   WrapperErrorKind,
+  ModelCatalogueEntry,
 } from '@cebab/shared/protocol';
 import type { MutationCategory, PermissionDecisionReason } from '@cebab/shared';
 
@@ -721,6 +722,19 @@ export type ConnectionLostView = {
 export type AppState = {
   connected: boolean;
   projects: Project[];
+  /**
+   * The model list a picker renders (Cebab-ws0.3). `null` until the server has
+   * answered at all — which a picker must distinguish from an EMPTY answer:
+   * "not asked yet" hides the list, "asked and there is nothing" says so.
+   *
+   * Account-wide, so it sits at the top level rather than per project. Which
+   * model a given project prefers lives on `Project.model`.
+   */
+  modelCatalogue: {
+    entries: ModelCatalogueEntry[];
+    capturedAt: number | null;
+    source: 'cache' | 'probe' | 'unavailable';
+  } | null;
   activeProjectId: number | null;
 
   // Loaded session views, keyed by [projectId][sessionId]. Multiple sessions
@@ -882,6 +896,7 @@ export type SettingsView = {
 export const initialState: AppState = {
   connected: false,
   projects: [],
+  modelCatalogue: null,
   activeProjectId: null,
   sessionsByProject: {},
   activeSessionByProject: {},
@@ -1620,6 +1635,19 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
     }
 
+    case 'model_catalogue':
+      // Whole-slot replace. The server always sends a complete answer (an
+      // empty `entries` with source 'unavailable' is a complete answer), so
+      // merging would only preserve rows a fresh probe has just told us are
+      // gone.
+      return {
+        ...state,
+        modelCatalogue: {
+          entries: msg.entries,
+          capturedAt: msg.capturedAt,
+          source: msg.source,
+        },
+      };
     case 'bus_integration_changed': {
       // Defensive in-place update — the server also sends a refreshed
       // `projects` payload right after, but applying the targeted change

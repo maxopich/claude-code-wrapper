@@ -1,4 +1,4 @@
-import type { PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { ModelInfo, PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { config } from '../config.js';
 import { runClaude, type RunOptions } from './claude.js';
 import { runMock, type MockOptions } from './mock.js';
@@ -25,6 +25,19 @@ export type Runner = AsyncIterable<SDKMessage> & {
   close?: () => void;
   interrupt?: () => Promise<unknown>;
   setPermissionMode?: (mode: PermissionMode) => Promise<void>;
+  /**
+   * The CLI's own list of models this account may run (Cebab-ws0.3). Optional
+   * for the same reason the two above are: the live runner IS the SDK `Query`
+   * and already implements it, the mock does not, and every caller must cope
+   * with a runner that cannot answer.
+   *
+   * Measured before being relied on: unlike `setModel` and `setPermissionMode`,
+   * this is NOT streaming-input-only, so it works in Cebab's one-subprocess-
+   * per-message mode. It also resolves in ~0ms, because the list arrives with
+   * the initialize handshake rather than costing a round trip — which is what
+   * makes asking for it during the authority probe free.
+   */
+  supportedModels?: () => Promise<ModelInfo[]>;
 };
 
 /** Picks live SDK vs fixture replay based on MOCK env var. */

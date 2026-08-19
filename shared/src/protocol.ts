@@ -36,6 +36,44 @@ export type Project = {
    * messages and bus events. Null when `busInstalled` is false.
    */
   busAgentName: string | null;
+  /**
+   * The model this project's runs ask for, or `null` for "let the CLI decide"
+   * (Cebab-ws0.3). Stored in `projects.model`; a value here is passed to the
+   * SDK verbatim as `Options.model`.
+   *
+   * NULL IS NOT A MODEL NAMED "default". Null means Cebab omits the option
+   * key entirely, which is what keeps a project nobody has configured
+   * byte-identical to Cebab before this existed. The CLI's own catalogue does
+   * offer a row whose value is the literal string `'default'`; the picker
+   * renders that row and stores `null` for it, so choosing "Default" and
+   * never choosing at all are the same spawn.
+   *
+   * Required rather than optional on purpose: it makes the compiler enumerate
+   * every place a Project is constructed instead of letting fixtures silently
+   * omit it.
+   */
+  model: string | null;
+};
+
+/**
+ * One row of the CLI's own model list (Cebab-ws0.3), narrowed to what Cebab
+ * renders. Produced by `Query.supportedModels()`; see
+ * `server/src/runner/model_catalogue.ts` for why it is fetched rather than
+ * hardcoded, and why the SDK's effort/fast-mode flags are deliberately dropped.
+ */
+export type ModelCatalogueEntry = {
+  /** Passed to the SDK verbatim. May be an alias (`sonnet`) or a full id. */
+  value: string;
+  /** Human label from the CLI, e.g. "Default (recommended)". */
+  displayName: string;
+  /** One-line capability blurb from the CLI. May be empty. */
+  description: string;
+  /**
+   * The wire id an alias row resolves to. The SDK documents this as the way a
+   * host matches a persisted explicit id back to the alias row covering it —
+   * which is exactly what a per-project default needs when the picker reopens.
+   */
+  resolvedModel?: string;
 };
 
 /**
@@ -620,6 +658,35 @@ export type ClientMsg =
       message?: string;
     }
   | { type: 'set_trusted'; projectId: number; trusted: boolean }
+  | {
+      /**
+       * Set (or clear) a project's preferred model (Cebab-ws0.3).
+       * `model: null` clears the choice, restoring "whatever the CLI picks".
+       *
+       * Not an authority change — a model choice cannot widen privilege and
+       * does not touch `settingSources` — so this follows the silent
+       * `set_default_max_turns` shape rather than the audited `set_trusted`
+       * one. Takes effect on the next turn; in-flight turns keep their model.
+       */
+      type: 'set_project_model';
+      projectId: number;
+      model: string | null;
+    }
+  | {
+      /**
+       * Ask for the model catalogue (Cebab-ws0.3). Without `refresh`, answers
+       * from the cache and costs nothing. With `refresh: true` and a
+       * `projectId`, spawns the authority probe for that project, which
+       * repopulates the cache as a side effect — a process spawn and no model
+       * turn.
+       *
+       * `projectId` is optional because a cache read needs no project; a
+       * refresh without one cannot spawn and is answered from cache instead.
+       */
+      type: 'get_model_catalogue';
+      projectId?: number;
+      refresh?: boolean;
+    }
   | { type: 'load_session'; projectId: number; sessionId: string }
   | { type: 'get_settings' }
   | { type: 'set_workspace_root'; path: string }
@@ -1774,6 +1841,26 @@ export type ClientMsg =
 // ---- Server → Browser ----
 export type ServerMsg =
   | { type: 'projects'; projects: Project[] }
+  | {
+      /**
+       * The model list a picker should render (Cebab-ws0.3).
+       *
+       * `entries` may be empty and that is a legitimate answer, not an error:
+       * no probe has run yet, or this CLI cannot report one. A picker renders
+       * "Default" regardless, so an empty catalogue costs discoverability, not
+       * the ability to choose.
+       *
+       * `source` is what the operator is looking at, so a refresh that failed
+       * can say so instead of silently showing stale rows:
+       *   'cache'       — served from the last capture; `capturedAt` says when.
+       *   'probe'       — a fresh spawn answered just now.
+       *   'unavailable' — nothing captured, ever. `entries` is empty.
+       */
+      type: 'model_catalogue';
+      entries: ModelCatalogueEntry[];
+      capturedAt: number | null;
+      source: 'cache' | 'probe' | 'unavailable';
+    }
   | {
       type: 'project_opened';
       projectId: number;

@@ -24,6 +24,12 @@ export type ProjectRow = {
    * aren't re-prompted for a bus that has been running for them.
    */
   bus_trust_decision: BusTrustDecision | null;
+  /**
+   * Cebab-ws0.3: the model this project's runs ask for, verbatim as the CLI
+   * names it. NULL = no choice, and Cebab then omits `Options.model` entirely
+   * rather than substituting a default string.
+   */
+  model: string | null;
 };
 
 /**
@@ -146,6 +152,43 @@ export function listProjectPaths(): string[] {
     .map((r) => r.path);
 }
 
+/**
+ * Cebab-ws0.3: which model a turn should ask for, or `undefined` for "don't ask".
+ *
+ * `undefined` — not a string — is the whole point. It is what makes `runClaude`
+ * leave `Options.model` off the options object, which is what makes a project
+ * nobody has configured spawn exactly as it did before this feature existed.
+ * Returning a placeholder like `'default'` here would look equivalent and would
+ * instead send the CLI a model id on every single turn.
+ *
+ * The catalogue's own "Default (recommended)" row also carries the literal
+ * value `'default'`; the UI stores `null` when the operator picks it, so that
+ * row and "never chose" converge here rather than diverging at the SDK.
+ *
+ * Deliberately NOT validated against the cached catalogue. That cache is one
+ * CLI's answer at one moment; rejecting a value missing from it would break a
+ * working project the moment it went stale, and the SDK is the authority on
+ * whether a model exists.
+ */
+export function resolveModel(projectModel: string | null | undefined): string | undefined {
+  if (typeof projectModel !== 'string') return undefined;
+  const trimmed = projectModel.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * Cebab-ws0.3. `null` clears the choice, which restores "whatever the CLI
+ * picks" — not a model literally named `default`.
+ *
+ * No validation against the catalogue on purpose. The catalogue is a cache of
+ * what one CLI reported at one moment; rejecting a value it does not currently
+ * list would break a project the moment the cache went stale, and the SDK is
+ * the authority on whether a model id is real.
+ */
+export function setProjectModel(id: number, model: string | null): void {
+  getDb().prepare('UPDATE projects SET model = ? WHERE id = ?').run(model, id);
+}
+
 export function setProjectTrusted(id: number, trusted: boolean): void {
   getDb()
     .prepare('UPDATE projects SET trusted = ? WHERE id = ?')
@@ -182,4 +225,19 @@ export function getProjectBusTrust(id: number): BusTrustDecision | null {
  */
 export function setProjectBusTrust(id: number, decision: BusTrustDecision | null): void {
   getDb().prepare('UPDATE projects SET bus_trust_decision = ? WHERE id = ?').run(decision, id);
+}
+
+/**
+ * The `AgentSpec` fragment carrying a bus participant's model (Cebab-ws0.3).
+ *
+ * Returns a SPREADABLE OBJECT rather than a `string | undefined`, so all three
+ * `runner.register` sites — chain participants, the orchestrator's initial
+ * workers, and a worker added mid-run — spread one identical expression. Three
+ * hand-written `...(x ? {model: x} : {})` copies is three chances to write
+ * `model: x` instead, and that mistake sends `undefined` to the SDK on every
+ * bus turn while looking correct at each site.
+ */
+export function projectModelSpec(projectId: number): { model?: string } {
+  const model = resolveModel(getProject(projectId)?.model);
+  return model !== undefined ? { model } : {};
 }

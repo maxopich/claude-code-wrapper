@@ -25,7 +25,7 @@ import {
   listParticipants,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
-import { upsertProject } from '../repo/projects.js';
+import { setProjectModel, upsertProject } from '../repo/projects.js';
 import { verifyChain } from '../notifications/safety_audit.js';
 import type { BusEvent } from './runner.js';
 import type { Runner } from '../runner/index.js';
@@ -706,5 +706,69 @@ describe('wireOrchestratorSession — delegation-only guardrail', () => {
     ).toBe(true);
 
     unregisterLiveSession(SESSION_ID);
+  });
+});
+
+describe('wireOrchestratorSession — per-project model (Cebab-ws0.3)', () => {
+  // The orchestrator mirror of the chain wiring test. Same reason for
+  // existing: `projectModelSpec` is unit-tested and `bus/runner.ts` is
+  // asserted against a captured factory, but neither proves this file's
+  // `runner.register` actually passes the spec through. Deleting that spread
+  // leaves every other test green.
+  //
+  // The orchestrator's OWN spec is asserted here too, and it is the more
+  // interesting half: it has no project, so it must carry no model. A wiring
+  // that reached for "the session's model" rather than "this agent's project's
+  // model" would put a worker's choice on the router.
+  function captureModels(captured: Array<{ cwd: string; model?: string }>) {
+    return (opts: { cwd: string; model?: string }): Runner => {
+      captured.push(opts);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function workerWithModel(name: string, model: string | null): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    if (model !== null) setProjectModel(proj.id, model);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  async function wireAndDeliver(model: string | null) {
+    const workspace = path.join(tmpRoot, `ws-orch-${model ?? 'none'}`);
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: Array<{ cwd: string; model?: string }> = [];
+    const worker = workerWithModel(`w-${model ?? 'none'}`, model);
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-model',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers: [worker],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: captureModels(captured),
+    });
+    deliver(worker.agentName, 'go');
+    await new Promise((r) => setImmediate(r));
+    return { captured, worker };
+  }
+
+  test("a worker's project model reaches its spawn options", async () => {
+    const { captured, worker } = await wireAndDeliver('haiku');
+    const workerCall = captured.find((c) => c.cwd === worker.cwd);
+    expect(workerCall?.model).toBe('haiku');
+  });
+
+  test('a worker whose project has no model spawns with NO model key', async () => {
+    const { captured, worker } = await wireAndDeliver(null);
+    const workerCall = captured.find((c) => c.cwd === worker.cwd);
+    expect(workerCall).toBeDefined();
+    expect('model' in workerCall!).toBe(false);
   });
 });

@@ -12,7 +12,13 @@ import {
   type SessionPermissionMode,
 } from '@cebab/shared';
 import { config } from '../config.js';
-import { getProject, setProjectTrusted, touchProject } from '../repo/projects.js';
+import {
+  getProject,
+  projectModelSpec,
+  setProjectModel,
+  setProjectTrusted,
+  touchProject,
+} from '../repo/projects.js';
 import { observeProjectHooks } from '../repo/hook_trust.js';
 import {
   createSession,
@@ -62,6 +68,7 @@ import {
   type SettingScope,
 } from '../repo/project_authority.js';
 import { probeSessionStarted } from '../runner/probe.js';
+import { readModelCatalogue } from '../runner/model_catalogue.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import {
   abandonPendingMcpGates,
@@ -3770,6 +3777,51 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       });
       return;
     }
+    case 'set_project_model': {
+      // Cebab-ws0.3. Silent, like `set_default_max_turns` and unlike
+      // `set_trusted`: choosing a model cannot widen privilege and does not
+      // touch `settingSources`, so it is a preference rather than an authority
+      // change and earns no safety-audit row.
+      //
+      // Empty string is normalised to null here as well as in `resolveModel`.
+      // Two places, because this one stops the meaningless row reaching the DB
+      // and being shown back to the operator as a choice they did not make.
+      const chosen =
+        typeof msg.model === 'string' && msg.model.trim().length > 0 ? msg.model.trim() : null;
+      setProjectModel(msg.projectId, chosen);
+      const rows = await syncWorkspaceProjects();
+      send(conn.ws, { type: 'projects', projects: rows.map(rowToProject) });
+      return;
+    }
+    case 'get_model_catalogue': {
+      // A refresh is a real spawn, so it is opt-in and needs a project to spawn
+      // in. Without `refresh` this is a cache read and costs nothing, which is
+      // why opening a picker does not fan out into probes.
+      if (msg.refresh === true && typeof msg.projectId === 'number') {
+        const project = getProject(msg.projectId);
+        if (project) {
+          // Same call the authority Refresh makes; it repopulates the catalogue
+          // as a documented side effect. Its result is ignored here on purpose
+          // — we want the cache write, and the authority snapshot belongs to
+          // whoever asked for it.
+          await probeSessionStarted({
+            cwd: project.path,
+            projectId: msg.projectId,
+            settingSources: trustDerivedScopes(project.trusted === 1),
+          });
+        }
+      }
+      const cached = readModelCatalogue();
+      send(conn.ws, {
+        type: 'model_catalogue',
+        entries: cached?.entries ?? [],
+        capturedAt: cached ? cached.capturedAt : null,
+        // 'probe' only when a spawn actually produced something. A refresh that
+        // came back empty must not claim it measured anything.
+        source: cached ? (msg.refresh === true ? 'probe' : 'cache') : 'unavailable',
+      });
+      return;
+    }
     case 'get_project_authority': {
       // Cluster B Phase 3 (BE-B3 / BE-B4): resolve and ship the authority
       // snapshot. Cache lookup first; the resolver merges in the file-read
@@ -5967,6 +6019,12 @@ async function runOneTurn(
     // default. Re-read on every send so a SettingsModal change between
     // turns takes effect immediately.
     maxTurns: effectiveMaxTurns,
+    // Cebab-ws0.3: the project's chosen model. Same helper the three bus
+    // register sites use, and for the same reason — it returns a spreadable
+    // object rather than a `string | undefined`, so no call site can write
+    // `model: x` and send `undefined` to the SDK while looking correct.
+    // Re-read per turn, so a change between messages applies to the next one.
+    ...projectModelSpec(project.id),
   });
   // Cluster G Phase 3 (G1): tag the lifecycle entry with run metadata so
   // the dispatcher's `active_runs` snapshot can show this turn in the

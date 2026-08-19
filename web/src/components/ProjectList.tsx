@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { Project, SessionSummary } from '@cebab/shared/protocol';
+import type { ModelCatalogueEntry, Project, SessionSummary } from '@cebab/shared/protocol';
 import { timeAgoCompact } from '../format';
 import { ClaudeMark } from './ClaudeMark';
 import { MockBadge } from './MockBadge';
@@ -15,6 +15,19 @@ export function ProjectList(props: {
   onSelectSession: (projectId: number, sessionId: string) => void;
   onNewSession: (projectId: number) => void;
   onToggleTrust: (id: number, trusted: boolean) => void;
+  /**
+   * Cebab-ws0.3: the model catalogue and the per-project choice, threaded to
+   * the preflight modal opened from this list's ⓘ. Same shape as
+   * `onToggleTrust` — the list owns no state; App dispatches and the server's
+   * `projects` re-emit is what moves the UI.
+   *
+   * `modelCatalogue` is null until the server has answered at all, which the
+   * picker renders differently from an answer that was empty.
+   */
+  modelCatalogue: { entries: ModelCatalogueEntry[]; capturedAt: number | null } | null;
+  modelRefreshingFor: number | null;
+  onSetProjectModel: (projectId: number, model: string | null) => void;
+  onRefreshModelCatalogue: (projectId: number) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
   /**
    * Cluster I C2 UI: trigger a per-session JSONL download. Returns a
@@ -258,6 +271,14 @@ export function ProjectList(props: {
         <AuthorityPreflightModal
           projectIds={[preflightForProject]}
           onClose={() => setPreflightForProject(null)}
+          model={{
+            entries: props.modelCatalogue?.entries ?? [],
+            capturedAt: props.modelCatalogue?.capturedAt ?? null,
+            value: props.projects.find((p) => p.id === preflightForProject)?.model ?? null,
+            refreshing: props.modelRefreshingFor === preflightForProject,
+            onChange: (m) => props.onSetProjectModel(preflightForProject, m),
+            onRefresh: () => props.onRefreshModelCatalogue(preflightForProject),
+          }}
         />
       )}
     </>
