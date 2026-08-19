@@ -479,3 +479,101 @@ describe('redactSensitive — credential shapes [security]', () => {
     expect(out.content).toBe('cert body');
   });
 });
+
+/**
+ * [security] Register of0 — the files THIS REPO documents as credential-bearing.
+ *
+ * The class of bug: the docs knew and the list did not. CLAUDE.md's
+ * env-precedence caveat, its MCP section, and README's "local data" section each
+ * name a file that holds credentials; none of them was on the path list, so a
+ * `Read` of one shipped its body to the Logs surface and into every export.
+ *
+ * The audit table below IS the record the acceptance criteria asked for: every
+ * documented file is either a positive here, or a named negative carrying the
+ * reason it is not covered.
+ */
+describe('[security] Cebab-documented credential files (of0)', () => {
+  /** Does a sensitive path on this object mask its sibling body? */
+  const masksBody = (filePath: string): boolean =>
+    (redactSensitive({ filePath, content: 'BODY' }).redacted as Record<string, unknown>).content ===
+    '<redacted>';
+
+  it.each([
+    // The reported case, in all three forms an operator can produce.
+    ['.mcp.json — relative, as a project-root read reports it', '.mcp.json'],
+    ['.mcp.json — absolute', '/home/u/proj/.mcp.json'],
+    ['.mcp.json — Windows, the operator platform', 'C:\\proj\\.mcp.json'],
+    ['a .mcp.json backup', '.mcp.json.bak'],
+    // CLAUDE.md: top-level `mcpServers` blocks carry `env`, and Trust does not
+    // scope them.
+    ['~/.claude.json', '/home/u/.claude.json'],
+    ['the CLI backup of it', '/home/u/.claude.json.backup'],
+    // README names this as where the OAuth credentials live. Uncovered until
+    // of0 because the stem matcher could not see past the leading dot.
+    ['~/.claude/.credentials.json', '/home/u/.claude/.credentials.json'],
+    // Both halves of the settings pair — see the SENSITIVE_TAILS comment.
+    ['.claude/settings.json', '.claude/settings.json'],
+    ['.claude/settings.local.json', '.claude/settings.local.json'],
+    ['the user-scope settings file', '/home/u/.claude/settings.json'],
+  ])('masks the body of %s', (_label, filePath) => {
+    expect(masksBody(filePath)).toBe(true);
+  });
+
+  // Regression controls. These passed BEFORE of0 and must still pass: the
+  // matcher change touches every stem, so a fix that widened coverage by
+  // breaking `.env` would otherwise look like a clean win.
+  it.each([
+    '.env',
+    '.env.local',
+    '/home/u/.aws/credentials',
+    '/home/u/.ssh/id_rsa',
+    '/srv/certs/server.pem',
+    '/home/u/.npmrc',
+    '/home/u/proj/.git/config',
+  ])('still masks %s (pre-of0 coverage, unchanged)', (filePath) => {
+    expect(masksBody(filePath)).toBe(true);
+  });
+
+  // Negatives. Without these the list could widen to "any dotfile" and every
+  // positive above would still pass.
+  it.each([
+    ['an ordinary manifest', 'package.json'],
+    ['a compiler config', 'tsconfig.json'],
+    ['prose', 'README.md'],
+    ['source that merely mentions mcp', 'server/src/mcp_scope_smoke.ts'],
+    ['documentation ABOUT the file', 'docs/mcp.json.md'],
+    ['an undotted file whose name ends in the stem', 'my.mcp.json.bak'],
+    ['a directory that contains the stem', 'not-a-.mcp.json-file/index.ts'],
+    ['the undotted CLI-config name', 'mcp.json'],
+    ['likewise', 'claude.json'],
+    ['settings.json OUTSIDE .claude/', 'web/settings.json'],
+    ['an editor settings file', '.vscode/settings.json'],
+    // The dotted-stem fix anchors at the START of the basename. These three are
+    // what stops it from becoming "any dotfile containing a scary word".
+    ['a dotfile that merely starts like .env', '.envelope.json'],
+    ['a dotfile that merely starts like token', '.tokenizer.json'],
+    ['a dotfile that merely starts like secret', '.secretary.md'],
+  ])('does NOT mask %s', (_label, filePath) => {
+    expect(masksBody(filePath)).toBe(false);
+  });
+
+  it('masks the dotfile AND the undotted form of the same stem', () => {
+    // The two directions of the leading-dot fix, in one test so they cannot
+    // drift: `~/.aws/credentials` was always covered, `.credentials.json` was
+    // not, and both are the same secret.
+    expect(masksBody('/home/u/.aws/credentials')).toBe(true);
+    expect(masksBody('/home/u/.claude/.credentials.json')).toBe(true);
+    expect(masksBody('/home/u/.token')).toBe(true);
+    // ...while `.env` — which strips to `env`, equal to no stem — still works.
+    // This is the case that reddens if someone implements the fix as a REPLACE
+    // of the basename rather than an additional form to test.
+    expect(masksBody('/home/u/proj/.env')).toBe(true);
+  });
+
+  it('keeps the path itself readable — it is what names WHICH file leaked', () => {
+    const out = redactSensitive({ filePath: '/home/u/proj/.mcp.json', content: 'BODY' })
+      .redacted as Record<string, unknown>;
+    expect(out.content).toBe('<redacted>');
+    expect(out.filePath).toBe('/home/u/proj/.mcp.json');
+  });
+});

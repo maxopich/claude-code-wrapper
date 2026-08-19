@@ -95,7 +95,26 @@ const SENSITIVE_BASENAME_STEMS: readonly string[] = [
   'token',
   'secret',
   'secrets',
+
+  // ---- register of0 ----
+  // Project-scoped MCP declarations. `mcpServers[*].env` is the documented home
+  // for a server's credentials, so the whole file is secret once anything is
+  // declared there. Reported case: a Read of a project `.mcp.json` shipped a live
+  // client id and client secret into an exported session log AND onto the Logs
+  // surface, while `redactedFields` truthfully reported that something else had
+  // been masked — which is what made the output look inspected.
+  '.mcp.json',
+  // The CLI's user-scope config. CLAUDE.md: its top-level `mcpServers` blocks
+  // carry `env`, and Trust does not scope them — TOFU is the only brake.
+  '.claude.json',
 ];
+
+// A stem rather than an exact basename for both: the stem matcher anchors at the
+// START of the basename, so it also covers the `.bak` / `.backup` forms the CLI
+// itself writes, at identical blast radius on every audit negative (`mcp.json`,
+// `docs/mcp.json.md`, `my.mcp.json.bak` all stay unmasked — verified). Bare
+// `mcp.json` / `claude.json` are deliberately NOT matched: the CLI's files are
+// dotfiles, and an undotted one in a repo is a schema or a doc.
 
 /**
  * Register H16: extensions that mark the whole file as key material, matched
@@ -117,7 +136,26 @@ const SENSITIVE_BASENAME_EXTENSIONS: readonly string[] = [
 ];
 
 /** Special compound paths — exact match against the tail of the path. */
-const SENSITIVE_TAILS: readonly string[] = ['/.git/config'];
+const SENSITIVE_TAILS: readonly string[] = [
+  '/.git/config',
+  // Register of0. Both halves of the settings pair, deliberately.
+  //
+  // `settings.local.json` is the obvious one: gitignored, per-machine, never
+  // reviewed — exactly where an operator parks a real key in an `env:` block.
+  // `settings.json` is the judgement call, and it went the same way: CLAUDE.md's
+  // env-precedence caveat documents that a project's `settings.json` can define
+  // `env: { ANTHROPIC_API_KEY }` and silently reroute billing, which is a
+  // credential by any reading. The cost is that a Read of it shows `<redacted>`
+  // in the Logs surface; the operator can still open the file, and the Authority
+  // panel is a separate code path that keeps rendering hooks/permissions/MCP
+  // structurally. Header rule applies: false negatives leak credentials.
+  //
+  // Tails rather than basenames because `settings.json` alone is far too generic
+  // — the `/.claude/` prefix is what makes this narrow (`web/settings.json` and
+  // `.vscode/settings.json` stay untouched).
+  '/.claude/settings.json',
+  '/.claude/settings.local.json',
+];
 
 /** Field names whose value contains a filesystem path. When matched, we test
  *  the value against `SENSITIVE_PATH_PATTERNS` to decide whether to mask the
@@ -228,9 +266,27 @@ function pathLooksSensitive(value: string): boolean {
 
   const basename = basenameOf(norm);
   if (SENSITIVE_BASENAMES.has(basename)) return true;
+  // Register of0: the stem comparison was blind to a LEADING dot, so
+  // `~/.claude/.credentials.json` — which README names as where Cebab's own OAuth
+  // credentials live — did not match the `credentials` stem, while
+  // `~/.aws/credentials` did. The bug is in the matcher, not the list: every stem
+  // here has a dotfile form, and adding `.credentials` as a one-off would leave
+  // the same blindness in place for the other six.
+  //
+  // BOTH forms are tested, not just the stripped one. Comparing only the stripped
+  // basename would break `.env`, which strips to `env` and equals no stem.
+  //
+  // Blast radius is enumerable: exactly the dotted forms of the stems above
+  // (`.credentials*`, `.token*`, `.secret*`, `.secrets*`, `.id_rsa*`,
+  // `.id_ed25519*`), each itself credential-bearing. Because the match anchors at
+  // the start of the basename it does not reach `.envelope.json`,
+  // `.tokenizer.json` or `.secretary.md` — all three are pinned as negatives.
+  const stemForms = basename.startsWith('.') ? [basename, basename.slice(1)] : [basename];
   for (const stem of SENSITIVE_BASENAME_STEMS) {
-    if (basename === stem) return true;
-    if (basename.startsWith(`${stem}.`)) return true;
+    for (const form of stemForms) {
+      if (form === stem) return true;
+      if (form.startsWith(`${stem}.`)) return true;
+    }
   }
   // H16: `norm` is already lowercased, so this is case-insensitive — which
   // matters on Windows, where `SERVER.PEM` is the same file.
