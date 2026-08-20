@@ -321,13 +321,28 @@ describe('[security] a managed agent cannot be committed (Cebab-ws0.11)', () => 
   });
 
   test('the managed tree is NOT a git repository of its own', async () => {
-    // The assertion the `.git` exclusion buys. With `.git` copied this returns
-    // the managed tree itself — a repository carrying the original's remotes,
-    // outside the reach of the ignore file two levels up.
-    const { repo, managed } = await copiedInsideARepo();
-    const top = git(managed, ['rev-parse', '--show-toplevel']).trim();
-    expect(fs.realpathSync(top)).toBe(fs.realpathSync(repo));
+    // The assertion the `.git` exclusion buys. With `.git` copied, git run from
+    // inside the copy sees a repository carrying the original's remotes, and
+    // one that sits outside the reach of the ignore file two levels up.
+    //
+    // `--show-prefix`, not `--show-toplevel`. It reports where we are RELATIVE
+    // to the top of the enclosing worktree: empty at the top, non-empty in a
+    // subdirectory. So it states the claim directly — "this is inside some
+    // repo, not the top of one" — with no path to normalise. The first version
+    // compared `--show-toplevel` against the repo path and went red on Windows
+    // only, where `os.tmpdir()` hands back the 8.3 short name (`RUNNER~1`) and
+    // git returns the long one; `realpathSync` does not reconcile those, and
+    // the trap is already documented two files over.
+    const { managed } = await copiedInsideARepo();
+    expect(git(managed, ['rev-parse', '--show-prefix']).trim()).not.toBe('');
     expect(fs.existsSync(path.join(managed, '.git'))).toBe(false);
+  });
+
+  test('control: the enclosing repo IS at the top of itself', async () => {
+    // Anti-vacuity for the assertion above — if `--show-prefix` returned
+    // something non-empty everywhere, it would pass without meaning anything.
+    const { repo } = await copiedInsideARepo();
+    expect(git(repo, ['rev-parse', '--show-prefix']).trim()).toBe('');
   });
 
   test('the copy carries no trace of the original remote', async () => {
