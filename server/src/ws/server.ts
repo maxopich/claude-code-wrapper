@@ -73,6 +73,7 @@ import {
   type SettingScope,
 } from '../repo/project_authority.js';
 import { probeSessionStarted } from '../runner/probe.js';
+import { createProbeScheduler, type ProbeScheduler } from '../runner/probe_schedule.js';
 import { readModelCatalogue } from '../runner/model_catalogue.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import {
@@ -2051,6 +2052,17 @@ type Conn = {
   /** Cluster B Phase 3: per-project authority cache; see CachedSessionStarted. */
   authorityCache: Map<number, CachedSessionStarted>;
   /**
+   * Cebab-ws0.7: this connection's settle timer for probe-on-selection.
+   *
+   * Per-connection because the snapshot it fills is — `authorityCache` above
+   * is this socket's, so a probe another tab ran does not populate this one's
+   * panel and must not be deduped against. The concurrency cap it respects is
+   * the opposite: process-global, because processes on this machine are what
+   * several tabs share. Cancelled in `ws.on('close')` alongside the other
+   * per-connection timers.
+   */
+  probeScheduler: ProbeScheduler;
+  /**
    * Cluster B Phase 4b: TOFU spawn-gate state. Holds parked `pendingId`
    * promises (one per emitted `mcp_auto_install_pending`) and the per-session
    * deny_once set. Drained by `abandonPendingMcpGates` in `ws.on('close')`.
@@ -2426,6 +2438,70 @@ export function reportHookObservations(
   }
 }
 
+/**
+ * Spawn a probe for `projectId` and fold whatever it returns into this
+ * connection's authority cache. Resolves to whether a snapshot actually
+ * landed.
+ *
+ * Extracted from the `get_project_authority` handler so the probe-on-selection
+ * scheduler runs the identical thing — including `trustDerivedScopes`, which
+ * is the part that must not be reimplemented: a probe resolved against scopes
+ * the SPAWN would not use reports a surface the operator's turns never get.
+ *
+ * A probe that returns nothing leaves the cache untouched. `probeSessionStarted`
+ * turns every failure — timeout, a CLI that died on startup, a runner that
+ * could not be constructed at all — into a null result rather than a throw, and
+ * unregisters from the lifecycle in its own `finally`, so there is nothing to
+ * clean up here and nothing for a caller to catch.
+ */
+async function runAuthorityProbe(conn: Conn, projectId: number): Promise<boolean> {
+  const project = getProject(projectId);
+  if (!project) return false;
+  const started = await probeSessionStarted({
+    cwd: project.path,
+    projectId,
+    settingSources: trustDerivedScopes(project.trusted === 1),
+  });
+  if (!started) return false;
+  cacheSessionStartedIfNeeded(conn, started);
+  return true;
+}
+
+/**
+ * Resolve a project's authority and put it on the wire. The ONE place a
+ * `project_authority` envelope is built.
+ *
+ * Two callers reach it — the `get_project_authority` handler and the
+ * probe-on-selection scheduler, which pushes unsolicited — and the same
+ * argument `sendProjects` was extracted on in `Cebab-ws0.6` applies: two
+ * hand-built emits of one message drift. The field most likely to drift is the
+ * one saying how the snapshot was produced, so the probe and the label it
+ * implies are decided together, here, rather than by each caller.
+ *
+ * `mode` is what the CALLER WANTS; what ships is what HAPPENED. Asking for a
+ * probe does not mean one was obtained — it can time out, or its CLI can die
+ * on startup — and in that case this falls back to the cached snapshot and
+ * says so. That distinction reaches the client as `authority.fromProbe`, whose
+ * own doc has always claimed `true` means "this resolve ran a fresh SDK
+ * probe"; the code set it from the requested mode, so the claim was false
+ * exactly when it mattered. Nothing read the field until ws0.7, which is why
+ * it survived.
+ */
+export async function respondWithProjectAuthority(
+  conn: Conn,
+  projectId: number,
+  mode: 'cache' | 'probe',
+): Promise<void> {
+  const probed = mode === 'probe' ? await runAuthorityProbe(conn, projectId) : false;
+  const cached = conn.authorityCache.get(projectId);
+  const authority = resolveProjectAuthority({
+    projectId,
+    mode: probed ? 'probe' : 'cache',
+    ...(cached !== undefined && { latestSessionStarted: cached }),
+  });
+  send(conn.ws, { type: 'project_authority', projectId, authority });
+}
+
 function cacheSessionStartedIfNeeded(conn: Conn, out: ServerMsg): void {
   if (out.type !== 'session_started') return;
   const snapshot: CachedSessionStarted = { capturedAt: Date.now() };
@@ -2552,6 +2628,15 @@ function onConnection(ws: WebSocket): void {
     multiAgentSinkEpoch: 0,
     multiAgentStartClaim: null,
     authorityCache: new Map(),
+    probeScheduler: createProbeScheduler({
+      hasSnapshot: (projectId) => conn.authorityCache.has(projectId),
+      // Identical to what the Refresh button does, which is the point: a
+      // probe the operator did not ask for must not resolve differently from
+      // one they did. A probe that fails still pushes — the snapshot then
+      // carries the file-scan half and reports itself as cache-derived, which
+      // is more than the panel had before and is labelled honestly.
+      runProbe: (projectId) => respondWithProjectAuthority(conn, projectId, 'probe'),
+    }),
     trustGate: makeTrustGateState(),
     busTrustGate: makeBusTrustGateState(),
     startGate: makeStartGateState(),
@@ -2688,8 +2773,10 @@ function onConnection(ws: WebSocket): void {
     }
     // Register S17: `parsed` was asserted as `ClientMsg` here and handed
     // straight to the switch below, so every handler indexed fields nothing
-    // had checked. `handleClientMsg` has exactly one call site — this one —
-    // so validating here covers the whole verb surface.
+    // had checked. `handleClientMsg` has exactly one PRODUCTION call
+    // site — this one; it is exported so a test can drive a single verb
+    // without a socket, which does not reach this validation and does not
+    // need to — so validating here covers the whole verb surface.
     //
     // A rejected frame is DROPPED with a log line and no wire reply, matching
     // the JSON-parse failure three lines above. The browser app compiles
@@ -2753,6 +2840,13 @@ function onConnection(ws: WebSocket): void {
       clearTimeout(debounceTimer);
       debounceTimer = null;
     }
+    // Cebab-ws0.7: same obligation as the two timers above. A settle timer
+    // that fires after its window is gone would spawn a process for a
+    // selection nobody is looking at any more — the defect `handlePauseExpiry`
+    // documents, reached from a different direction. A probe already RUNNING
+    // is deliberately left alone: it is registered with the runner lifecycle,
+    // which is what stops it outliving the server.
+    conn.probeScheduler.cancel();
     // Multi-agent: detach but DON'T tear down. The bus session keeps
     // running in-process (AgentRunner + router live in the session
     // registry); the DB row stays 'running'. A future WS connect (browser
@@ -3534,7 +3628,7 @@ function sendControlFailure(
   );
 }
 
-async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
+export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
   switch (msg.type) {
     case 'list_projects': {
       const rows = await syncWorkspaceProjects();
@@ -3612,6 +3706,15 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         sessions,
         runningSessionIds,
       });
+      // Cebab-ws0.7: the operator landed on this project. `open_project` is
+      // what `selectProject` sends on every sidebar click, so this is the
+      // selection signal — no new verb, and no client-side timing to get
+      // wrong. The scheduler decides whether it is worth a process: it waits
+      // for the selection to settle, skips a project this connection already
+      // holds a snapshot for, and respects a process-wide cap. Fire and
+      // forget — a probe must never delay the session list the operator
+      // clicked for.
+      conn.probeScheduler.onProjectSelected(project.id);
       return;
     }
     case 'load_session': {
@@ -3920,30 +4023,7 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       // A probe that returns nothing leaves the cache untouched: the operator
       // gets the file-scan half plus whatever was already known, which is
       // strictly better than replacing it with blanks.
-      if (msg.mode === 'probe') {
-        const project = getProject(msg.projectId);
-        if (project) {
-          const started = await probeSessionStarted({
-            cwd: project.path,
-            projectId: msg.projectId,
-            // The probe must resolve against the scopes the SPAWN would use,
-            // or it would report a surface the operator's turns never get.
-            settingSources: trustDerivedScopes(project.trusted === 1),
-          });
-          if (started) cacheSessionStartedIfNeeded(conn, started);
-        }
-      }
-      const cached = conn.authorityCache.get(msg.projectId);
-      const authority = resolveProjectAuthority({
-        projectId: msg.projectId,
-        mode: msg.mode,
-        ...(cached !== undefined && { latestSessionStarted: cached }),
-      });
-      send(conn.ws, {
-        type: 'project_authority',
-        projectId: msg.projectId,
-        authority,
-      });
+      await respondWithProjectAuthority(conn, msg.projectId, msg.mode);
       return;
     }
     case 'mcp_trust_decision': {

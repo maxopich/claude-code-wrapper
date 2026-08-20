@@ -73,18 +73,28 @@ function reducer(state: State, action: Action): State {
       return { byProject: { ...state.byProject, [action.projectId]: next } };
     }
     case 'receive': {
-      const prev = state.byProject[action.projectId];
-      const lastMode: 'cache' | 'probe' =
-        prev && prev.status === 'requesting'
-          ? prev.mode
-          : prev && prev.status === 'ready'
-            ? prev.lastFetchedMode
-            : 'cache';
+      // Cebab-ws0.7: the snapshot says how it was produced; we no longer infer
+      // it from our own pending request. The inference was wrong in two
+      // directions and both mislabelled a live reading as a stale one.
+      //
+      // It could not see an UNSOLICITED snapshot at all — the server now
+      // pushes one when a probe runs because the operator selected the
+      // project, and with no matching request in flight that fell through to
+      // 'cache'. And even for a requested one it was already wrong: the
+      // 'request' case above returns an already-'ready' slot untouched, so
+      // there was no recorded mode to read and this fell back to the PREVIOUS
+      // one — pressing Refresh on a populated panel never flipped the label to
+      // 'probe'.
+      //
+      // `fromProbe` has been on the wire since the field was introduced, doing
+      // nothing; the server now sets it from what it OBSERVED rather than from
+      // what was asked for, so a probe that failed and fell back to the cache
+      // reports 'cache'. Reading it here is the whole fix.
       const slot: AuthoritySlot = action.authority
         ? {
             status: 'ready',
             authority: action.authority,
-            lastFetchedMode: lastMode,
+            lastFetchedMode: action.authority.fromProbe ? 'probe' : 'cache',
             receivedAt: action.now,
           }
         : { status: 'cache-miss', receivedAt: action.now };
