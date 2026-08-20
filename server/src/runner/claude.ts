@@ -31,6 +31,26 @@ export type RunOptions = {
    * caller's job — see `resolveModel` in `ws/server.ts`.
    */
   model?: string;
+  /**
+   * Text Cebab contributes to this turn's SYSTEM prompt (Cebab-ws0.15).
+   *
+   * NARROW ON PURPOSE. The SDK's `Options.systemPrompt` also accepts a
+   * `string[]` and a `{ type: 'preset', preset: 'claude_code', append }`
+   * object; this accepts a plain string only, because the preset arm is not a
+   * variation on what Cebab does — it would swap every run onto Claude Code's
+   * full system prompt, a change no caller should be able to make by passing a
+   * differently-shaped value to an options field.
+   *
+   * WHY WRITING HERE IS ADDITIVE RATHER THAN DESTRUCTIVE. Cebab sets no system
+   * prompt anywhere, and an omitted `systemPrompt` is not "use the CLI's
+   * default" — the SDK normalizes it to the empty string, an explicit
+   * override. So every Cebab turn today runs with NO system prompt, and text
+   * put here fills a blank instead of replacing the agent's instructions.
+   * That is measured, not inferred: `src/system_prompt_smoke.ts` re-runs the
+   * measurement against the live CLI, and it is the one claim that has to hold
+   * for this field to be safe.
+   */
+  systemPrompt?: string;
   /** In-process MCP servers (e.g. the multi-agent `bus_send` tool). */
   mcpServers?: Options['mcpServers'];
   /**
@@ -196,6 +216,10 @@ export function buildSdkOptions(opts: RunOptions): Options {
   // Truthiness, not `!== undefined`: an empty string is not a model, and the
   // key must stay ABSENT rather than become `undefined` when nothing is chosen.
   if (opts.model) options.model = opts.model;
+  // Same truthiness idiom, same reason: a turn with nothing to say must leave
+  // the key ABSENT, not present-and-empty. `''` is not a note, and sending it
+  // would mean every healthy spawn newly carries a system-prompt override.
+  if (opts.systemPrompt) options.systemPrompt = opts.systemPrompt;
 
   return options;
 }

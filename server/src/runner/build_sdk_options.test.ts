@@ -45,6 +45,39 @@ describe('buildSdkOptions — model', () => {
   });
 });
 
+describe('buildSdkOptions — systemPrompt (Cebab-ws0.15)', () => {
+  test('a run with nothing to say has NO systemPrompt key at all', () => {
+    // This is the assertion the whole feature rests on. Cebab ships no system
+    // prompt today, and the SDK turns an OMITTED one into an explicit empty
+    // override — measured in `src/system_prompt_smoke.ts`. So "absent" here is
+    // not tidiness: it is the difference between every healthy project
+    // spawning as it always has and every healthy project newly carrying an
+    // override. `systemPrompt: opts.systemPrompt` in the always-present
+    // literal above reddens here.
+    expect('systemPrompt' in buildSdkOptions(MINIMAL)).toBe(false);
+  });
+
+  test('a note is passed through verbatim', () => {
+    const note = "MCP server status, from Cebab's most recent session start...";
+    expect(buildSdkOptions({ ...MINIMAL, systemPrompt: note }).systemPrompt).toBe(note);
+  });
+
+  test('an empty note is treated as nothing to say', () => {
+    // Truthiness, matching `model` directly above it. `!== undefined` would
+    // send an empty-string override on any turn whose builder returned ''.
+    expect('systemPrompt' in buildSdkOptions({ ...MINIMAL, systemPrompt: '' })).toBe(false);
+  });
+
+  test('it never becomes the preset object, whatever a caller passes', () => {
+    // `RunOptions.systemPrompt` is a plain string on purpose: the SDK's preset
+    // arm would swap the run onto Claude Code's entire system prompt, which is
+    // a posture change and not a variation on this feature. Widening the field
+    // to `Options['systemPrompt']` reddens here.
+    const o = buildSdkOptions({ ...MINIMAL, systemPrompt: 'a note' });
+    expect(typeof o.systemPrompt).toBe('string');
+  });
+});
+
 describe('buildSdkOptions — the pre-existing assembly (control)', () => {
   // These pass before this PR as well as after. They are here deliberately: the
   // extraction of `buildSdkOptions` out of `runClaude` had to be behaviour-

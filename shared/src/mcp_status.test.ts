@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { notConnected } from './mcpStatus';
+import { notConnected } from './mcp_status.js';
 
 /**
  * Cebab-ws0.2. The rule under test is "not connected", not "on a list of bad

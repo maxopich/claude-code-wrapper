@@ -35,13 +35,30 @@
 export type McpServerStatus = { name: string; status: string };
 
 /**
+ * Whether one server's tools are on the session's list.
+ *
+ * The single-server arm exists because there are three readers of this rule,
+ * not two, and the third asks about one server rather than a list: the
+ * authority resolver's per-TOOL view (`toolViewFor` in
+ * `server/src/repo/project_authority.ts`) marks an `mcp__x__y` tool
+ * unavailable when server `x` is unhealthy. It had written the comparison out
+ * by hand, with its own comment restating the same reasoning — an independent
+ * second definition, predating both `Cebab-ws0.2` and `Cebab-ws0.15`, that
+ * would have kept its own counsel the next time this rule moved.
+ */
+
+/**
  * Every server whose status is not exactly `'connected'`, in the order the SDK
  * reported them. Empty means every loaded server is carrying its tools — or
  * that none were loaded, which reads the same from the session's point of view.
  */
+export function isConnected(server: McpServerStatus): boolean {
+  return server.status === 'connected';
+}
+
 export function notConnected(
   servers: readonly McpServerStatus[] | undefined,
 ): readonly McpServerStatus[] {
   if (servers === undefined) return [];
-  return servers.filter((s) => s.status !== 'connected');
+  return servers.filter((s) => !isConnected(s));
 }
