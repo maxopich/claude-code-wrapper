@@ -33,6 +33,15 @@ import { getProject, registerManagedProject } from './repo/projects.js';
 /** Progress messages are throttled to this, so a fast copy cannot flood the socket. */
 const PROGRESS_INTERVAL_MS = 400;
 
+/** Same cap, for the credential-file list — see `truncateSkips`. */
+function truncatePaths(paths: string[]): { paths: string[]; truncated: number } {
+  if (paths.length <= MANAGED_COPY_SKIP_LIMIT) return { paths, truncated: 0 };
+  return {
+    paths: paths.slice(0, MANAGED_COPY_SKIP_LIMIT),
+    truncated: paths.length - MANAGED_COPY_SKIP_LIMIT,
+  };
+}
+
 function truncateSkips(skips: ManagedCopySkip[]): {
   skips: ManagedCopySkip[];
   skipsTruncated: number;
@@ -60,6 +69,7 @@ export async function preflightManagedCopy(
   }
   const survey = await surveyTree(project.path, caps);
   const { skips, skipsTruncated } = truncateSkips(survey.skips);
+  const credentials = truncatePaths(survey.credentialFiles);
   send({
     type: 'managed_copy_preflight',
     projectId,
@@ -72,6 +82,8 @@ export async function preflightManagedCopy(
       largest: survey.largest,
       skips,
       skipsTruncated,
+      credentialFiles: credentials.paths,
+      credentialFilesTruncated: credentials.truncated,
       overCap: survey.overCap,
       maxBytes: caps.maxBytes,
       maxFiles: caps.maxFiles,

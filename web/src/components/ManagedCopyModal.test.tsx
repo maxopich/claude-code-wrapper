@@ -38,6 +38,8 @@ function state(overrides: Partial<ManagedCopyState> = {}): ManagedCopyState {
       largest: [{ name: 'node_modules', bytes: 1024 * 1024 * 11 }],
       skips: [],
       skipsTruncated: 0,
+      credentialFiles: [],
+      credentialFilesTruncated: 0,
       overCap: false,
       maxBytes: 5 * 1024 * 1024 * 1024,
       maxFiles: 300_000,
@@ -133,7 +135,13 @@ describe('ManagedCopyModal — skips are named, not counted away', () => {
   });
 
   test('every skip reason has operator-facing wording', () => {
-    for (const reason of ['symlink_escapes', 'not_regular', 'symlink_unsupported'] as const) {
+    for (const reason of [
+      'symlink_escapes',
+      'not_regular',
+      'symlink_unsupported',
+      'excluded_vcs',
+      'permissions_unenforced',
+    ] as const) {
       expect(skipLabel(reason).length).toBeGreaterThan(10);
     }
   });
@@ -205,5 +213,78 @@ describe('formatSize', () => {
     expect(formatSize(1024 * 1024 * 1024 * 3.5)).toBe('3.5 GB');
     // Past ten units the decimal is noise.
     expect(formatSize(1024 * 1024 * 250)).toBe('250 MB');
+  });
+});
+
+describe('ManagedCopyModal — live credentials (Cebab-ws0.11)', () => {
+  test('names the credential-bearing files it found', () => {
+    render(
+      state({
+        preflight: { ...state().preflight!, credentialFiles: ['.mcp.json', 'app/.env'] },
+      }),
+    );
+    const box = container.querySelector('[data-testid="managed-copy-credentials"]');
+    expect(box?.textContent).toContain('.mcp.json');
+    expect(box?.textContent).toContain('app/.env');
+  });
+
+  test('says what will happen to them, in words the operator can act on', () => {
+    render({
+      ...state({
+        preflight: { ...state().preflight!, credentialFiles: ['.mcp.json'] },
+      }),
+    });
+    const box = container.querySelector('[data-testid="managed-copy-credentials"]');
+    expect(box?.textContent).toContain('live credentials');
+    expect(box?.textContent).toContain('only your account can open');
+    // The reassurance that matters and is true: Cebab classified by NAME.
+    expect(box?.textContent).toContain('never reads what is in them');
+  });
+
+  test('a truncated list keeps the count', () => {
+    render(
+      state({
+        preflight: {
+          ...state().preflight!,
+          credentialFiles: ['.env'],
+          credentialFilesTruncated: 42,
+        },
+      }),
+    );
+    expect(
+      container.querySelector('[data-testid="managed-copy-credentials"]')?.textContent,
+    ).toContain('42');
+  });
+
+  test('control: a project with no credential files renders no such section', () => {
+    render(state());
+    expect(container.querySelector('[data-testid="managed-copy-credentials"]')).toBeNull();
+  });
+
+  test('.git is explained as a choice, not as a failure', () => {
+    // It sits in the same list as the symlink skips, so the wording is the
+    // only thing separating "we chose not to" from "we could not".
+    render(
+      state({
+        preflight: { ...state().preflight!, skips: [{ rel: '.git', reason: 'excluded_vcs' }] },
+      }),
+    );
+    const skips = container.querySelector('[data-testid="managed-copy-skips"]');
+    expect(skips?.textContent).toContain('.git');
+    expect(skips?.textContent).toContain('cannot push to the original');
+  });
+
+  test('a file that could not be tightened is reported', () => {
+    render(
+      state({
+        preflight: {
+          ...state().preflight!,
+          skips: [{ rel: '.env', reason: 'permissions_unenforced' }],
+        },
+      }),
+    );
+    expect(container.querySelector('[data-testid="managed-copy-skips"]')?.textContent).toContain(
+      'permissions could not be tightened',
+    );
   });
 });

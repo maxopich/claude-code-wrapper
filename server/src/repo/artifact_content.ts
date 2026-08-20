@@ -31,7 +31,7 @@
  * other three went unnoticed.
  */
 import path from 'node:path';
-import { redactSensitive, type ArtifactContentError } from '@cebab/shared';
+import { pathLooksSensitive, redactSensitive, type ArtifactContentError } from '@cebab/shared';
 import { readFilePrefixBounded } from '../safe_fs.js';
 import { getMultiAgentMutation } from './multi_agent.js';
 
@@ -72,10 +72,11 @@ export type ArtifactContentOutcome = {
  *   1. **Whole-file** — if the file's OWN path is sensitive (`.env`,
  *      `credentials`, `id_rsa`, anything under `~/.aws|.ssh|.gnupg|.kube`,
  *      `.git/config`, …), every byte is a secret, so mask the entire body. We
- *      don't duplicate `redact.ts`'s path list — we PROBE it:
- *      `redactSensitive({ file_path, content })` masks the `content` sibling
- *      iff the path is sensitive (the same sibling-masking rule the log view
- *      relies on).
+ *      don't duplicate `redact.ts`'s path list — we ASK it, via
+ *      `pathLooksSensitive`. That predicate used to be private, so this call
+ *      site probed it instead: redact a sentinel and see whether the sibling
+ *      came back masked. `Cebab-ws0.11` exported it for a second caller, which
+ *      makes the probe unnecessary here too.
  *   2. **Per-line** — otherwise mask only the individual lines that carry an
  *      obvious inline credential (AWS key, `sk-…`, JWT, bearer / authorization
  *      header — `redactSensitive`'s value patterns). Masking line-by-line keeps
@@ -91,12 +92,7 @@ export function redactArtifactContent(
 ): { redacted: string; fields: string[] } {
   // Tier 1 — sensitive PATH ⇒ the whole body is a secret.
   if (filePath !== null && filePath.length > 0) {
-    // `PROBE` is innocuous (never matches an inline value pattern), so the
-    // only way the sibling comes back changed is the path-sensitivity rule.
-    const PROBE = 'x';
-    const probe = redactSensitive({ file_path: filePath, content: PROBE });
-    const sibling = (probe.redacted as { content?: unknown }).content;
-    if (sibling !== PROBE) {
+    if (pathLooksSensitive(filePath)) {
       return { redacted: REDACTED_TOKEN, fields: ['content'] };
     }
   }

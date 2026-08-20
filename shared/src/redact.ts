@@ -262,7 +262,24 @@ export function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEY_PATTERNS.some((re) => re.test(key));
 }
 
-function pathLooksSensitive(value: string): boolean {
+/**
+ * Does this PATH name a file whose whole body should be treated as a secret?
+ *
+ * `.env`, `credentials`, `id_rsa`, anything under `~/.aws|.ssh|.gnupg|.kube`,
+ * `.git/config`, `.mcp.json`, `.claude.json`, `.claude/settings*.json` — see
+ * the lists above, which `Cebab-of0` extended after an exported session log
+ * shipped a live API key out of a project `.mcp.json`.
+ *
+ * EXPORTED (Cebab-ws0.11) so callers can ask the question directly. Two of
+ * them exist: the managed-agent copy engine, which writes credential-bearing
+ * files at a tighter mode and names them in the copy preflight, and
+ * `repo/artifact_content.ts`, which used to PROBE this predicate by redacting
+ * a sentinel and checking whether the sibling came back masked — a workaround
+ * that existed only because this was private.
+ *
+ * Path-only: nothing here reads a file, and no value is inspected.
+ */
+export function pathLooksSensitive(value: string): boolean {
   // Normalize: forward slashes only, lowercase for case-insensitive checks.
   // Use string ops rather than regex so the safe-regex linter can't flag
   // polynomial-backtracking false positives — the prior PR #78 refactored

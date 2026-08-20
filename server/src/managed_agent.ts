@@ -27,9 +27,29 @@
  * never descended (which is also the loop guard — a link to an ancestor cannot
  * spin the walk).
  *
- * ASYNC, NOT `cpSync`. The operator chose to copy everything, `.git` and
- * `node_modules` included, so a gigabyte is the ordinary case rather than the
- * exotic one. A synchronous copy of that parks the event loop for minutes:
+ * WHY THE COPIED CREDENTIALS ARE NOT ENCRYPTED (Cebab-ws0.11). A managed agent
+ * carries whatever its source carried — an API key in `.mcp.json`, a token in
+ * `.env`, a deploy key. Encrypting them at rest here would be theatre: Cebab is
+ * a single-user localhost app that has to hand those values to a subprocess on
+ * demand, so the key would have to live on the same disk as the ciphertext and
+ * be readable by the same account. That stops a casual grep and nothing else,
+ * while adding a key-management surface that can go wrong in ways plaintext
+ * cannot. What actually earns its keep is cheaper and checkable:
+ *
+ *   - the tree is 0700 and credential-bearing files are 0600, so no other
+ *     account on the machine can reach them;
+ *   - names, never values — nothing here opens a file to decide anything, and
+ *     the preflight reports paths only;
+ *   - `.git` is excluded, so the copy is not a repository and the data dir's
+ *     `.gitignore` covers it: the secrets cannot be committed from it.
+ *
+ * The threat this does NOT address, stated rather than implied: anything
+ * running as the operator's own account can read the copy, exactly as it can
+ * read the original. Encryption would not have changed that either.
+ *
+ * ASYNC, NOT `cpSync`. The operator chose to copy everything — `node_modules`
+ * included, `.git` since excluded (see `EXCLUDED_NAMES`) — so a gigabyte is the
+ * ordinary case rather than the exotic one. A synchronous copy of that parks the event loop for minutes:
  * no heartbeat, no WebSocket, an app that looks crashed.
  */
 
@@ -37,7 +57,8 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 import { config } from './config.js';
-import { DIR_MODE, secureMkdir } from './data_perms.js';
+import { DIR_MODE, FILE_MODE, ensureDataDir, secureMkdir } from './data_perms.js';
+import { pathLooksSensitive } from '@cebab/shared';
 import { canonical, isInside } from './path_containment.js';
 import { slugifyAgentName } from './bus/paths.js';
 
@@ -82,7 +103,32 @@ export type WalkEntry =
   | { kind: 'dir'; abs: string; rel: string }
   | { kind: 'file'; abs: string; rel: string; size: number; mode: number }
   | { kind: 'symlink'; abs: string; rel: string; target: string; escapes: boolean }
+  | { kind: 'excluded'; abs: string; rel: string }
   | { kind: 'other'; abs: string; rel: string };
+
+/**
+ * Names never copied into a managed agent, matched at ANY depth (Cebab-ws0.11).
+ *
+ * `.git`, and the reason is what the operator asked for: they never want to
+ * push from a copy. Leaving it in gives the managed agent the source's remotes,
+ * so an agent running there can commit and push straight into the operator's
+ * real repository.
+ *
+ * It also restores a guarantee the copy had quietly broken. `gitignore(5)`
+ * consults parent ignore files only up to the top of the working tree — so once
+ * `<dataDir>/agents/<slug>/.git` exists, that directory IS a working tree and
+ * `<dataDir>/.gitignore` (a bare `*`, written by `ensureDataDir`) never reaches
+ * inside it. Without `.git`, the managed tree is an ordinary directory again and
+ * the data dir's ignore covers it, which is what makes "a managed agent's
+ * secrets can never be committed" a property rather than a hope.
+ *
+ * Matched by NAME and irrespective of kind. `.git` is a regular FILE in a git
+ * worktree or a submodule, holding a `gitdir:` pointer to a directory somewhere
+ * else entirely — copying that would hand the managed agent a live reference to
+ * the original's git directory, which is worse than copying the directory. Any
+ * depth, because submodules and vendored checkouts have their own.
+ */
+const EXCLUDED_NAMES: ReadonlySet<string> = new Set(['.git']);
 
 /**
  * Depth-first walk of `root`, yielding one entry per filesystem object.
@@ -115,6 +161,13 @@ export async function* walkTree(
     for (const d of dirents) {
       const abs = path.join(dirAbs, d.name);
       const rel = dirRel === '' ? d.name : `${dirRel}/${d.name}`;
+      // Before every other branch, and before the symlink check: a `.git` that
+      // is itself a symlink is still a `.git`, and nothing about it should be
+      // reproduced.
+      if (EXCLUDED_NAMES.has(d.name)) {
+        yield { kind: 'excluded', abs, rel };
+        continue;
+      }
       if (d.isSymbolicLink()) {
         let target: string;
         try {
@@ -168,8 +221,24 @@ export async function* walkTree(
 
 // ---- the preflight ----
 
-/** Why an entry will not be copied. Reported, never silent. */
-export type SkipReason = 'symlink_escapes' | 'not_regular' | 'symlink_unsupported';
+/**
+ * Why an entry will not be copied. Reported, never silent.
+ *
+ * `excluded_vcs` is deliberately its OWN reason rather than another skip
+ * (Cebab-ws0.11). "We chose not to copy this" and "we wanted to and could not"
+ * are different facts, and folding them together would have the copy dialog
+ * explain `.git` to the operator as a link out of the project.
+ *
+ * `permissions_unenforced` likewise: a file that arrived but could not be
+ * tightened is copied, so calling it a skip would be wrong — but staying silent
+ * about it is worse, which is what the code did before this bead.
+ */
+export type SkipReason =
+  | 'symlink_escapes'
+  | 'not_regular'
+  | 'symlink_unsupported'
+  | 'excluded_vcs'
+  | 'permissions_unenforced';
 
 export type Skip = { rel: string; reason: SkipReason };
 
@@ -179,6 +248,17 @@ export type TreeSurvey = {
   dirs: number;
   symlinks: number;
   skips: Skip[];
+  /**
+   * Relative paths of files whose NAME says they carry credentials — `.env`,
+   * `.mcp.json`, `id_rsa`, `.claude/settings.local.json` and the rest of
+   * `pathLooksSensitive`'s list (Cebab-ws0.11).
+   *
+   * PATHS ONLY. Nothing here opens a file, so no value can leave with it; the
+   * predicate is name-based by construction. These are what the copy is about
+   * to duplicate into a second location, which is the thing worth seeing before
+   * clicking Copy.
+   */
+  credentialFiles: string[];
   /** Top-level children by size, largest first — where the weight actually is. */
   largest: { name: string; bytes: number }[];
   /**
@@ -221,6 +301,7 @@ export async function surveyTree(source: string, caps: Caps = DEFAULT_CAPS): Pro
     dirs: 0,
     symlinks: 0,
     skips: [],
+    credentialFiles: [],
     largest: [],
     overCap: false,
   };
@@ -241,9 +322,15 @@ export async function surveyTree(source: string, caps: Caps = DEFAULT_CAPS): Pro
         if (entry.escapes) survey.skips.push({ rel: entry.rel, reason: 'symlink_escapes' });
         else survey.symlinks += 1;
         break;
+      case 'excluded':
+        survey.skips.push({ rel: entry.rel, reason: 'excluded_vcs' });
+        break;
       case 'other':
         survey.skips.push({ rel: entry.rel, reason: 'not_regular' });
         break;
+    }
+    if (entry.kind === 'file' && pathLooksSensitive(entry.rel)) {
+      survey.credentialFiles.push(entry.rel);
     }
     if (survey.bytes > caps.maxBytes || survey.files > caps.maxFiles) {
       survey.overCap = true;
@@ -301,6 +388,27 @@ function modesApply(): boolean {
 }
 
 /**
+ * `mkdir` with the right mode, made umask-proof — the async twin of
+ * `secureMkdir` (Cebab-ws0.11).
+ *
+ * `mkdir(mode)` applies the process umask, and a bare `mkdir(0o700)` was
+ * relying on no sane umask having owner bits set. That happens to hold, and
+ * "happens to hold" is not what the tree mode should rest on: it is the thing
+ * that keeps other accounts out of a managed agent's credentials, and every
+ * per-file mode below is only defence in depth behind it.
+ */
+async function secureMkdirAsync(dir: string): Promise<void> {
+  await fsp.mkdir(dir, { recursive: true, mode: DIR_MODE });
+  if (!modesApply()) return;
+  try {
+    await fsp.chmod(dir, DIR_MODE);
+  } catch {
+    // Best-effort, exactly as `secureMkdir` is; `hardenDataDir` reports what is
+    // still loose on the next boot.
+  }
+}
+
+/**
  * Claim a fresh directory under the managed root for `projectName`.
  *
  * Non-recursive `mkdir` in a loop is the race-free way to do this: it throws
@@ -313,13 +421,23 @@ function modesApply(): boolean {
  * decision), so `slug-2` is what the ordinary repeat looks like.
  */
 export async function claimManagedDir(projectName: string): Promise<string> {
+  // Cebab-ws0.11: the data dir's bare-`*` `.gitignore` is what makes a managed
+  // agent uncommittable, and this module now depends on it. Creating it here
+  // rather than inheriting it from whichever boot path happened to run first
+  // keeps the guarantee local to the code that relies on it. Idempotent and
+  // cheap — one failed `open(O_EXCL)` on the common path.
+  ensureDataDir();
   const root = managedAgentsRoot();
   secureMkdir(root);
   const base = slugifyAgentName(projectName) || 'agent';
   for (let n = 1; n <= 200; n++) {
     const candidate = path.join(root, n === 1 ? base : `${base}-${n}`);
     try {
+      // Non-recursive on purpose: it throws EEXIST for a taken name, which is
+      // what makes the claim race-free. The chmod after is what makes the mode
+      // umask-proof.
       await fsp.mkdir(candidate, { mode: DIR_MODE });
+      if (modesApply()) await fsp.chmod(candidate, DIR_MODE).catch(() => {});
       return candidate;
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException)?.code !== 'EEXIST') throw err;
@@ -354,23 +472,45 @@ export async function copyTree(
     const dest = path.join(target, ...entry.rel.split('/'));
     switch (entry.kind) {
       case 'dir':
-        await fsp.mkdir(dest, { recursive: true, mode: DIR_MODE });
+        await secureMkdirAsync(dest);
         result.dirs += 1;
         break;
       case 'file': {
         await fsp.copyFile(entry.abs, dest);
         if (modesApply()) {
-          // Owner bits only. Preserves the executable bit so a project's
-          // scripts still run, and cannot GRANT group or other access that the
-          // source did not have — a copy into Cebab's own data dir must never
-          // widen who can read an agent's credentials.
-          await fsp.chmod(dest, entry.mode & 0o700).catch(() => {});
+          // Two modes, and the difference is the point (Cebab-ws0.11).
+          //
+          // An ordinary file keeps its OWNER bits: the executable bit survives
+          // so a project's scripts still run, and group/other are stripped so
+          // the copy can never GRANT access the source did not have.
+          //
+          // A file whose NAME says it carries credentials gets exactly
+          // `FILE_MODE`. That also strips a stray exec bit off a `.env`, which
+          // `& 0o700` would have kept.
+          //
+          // What actually carries the security here is the 0700 TREE — no other
+          // account can traverse in regardless of what a file inside is set to.
+          // These modes are defence in depth, and worth having for exactly that
+          // reason: the tree's mode is one chmod away from being wrong.
+          const wanted = pathLooksSensitive(entry.rel) ? FILE_MODE : entry.mode & 0o700;
+          try {
+            await fsp.chmod(dest, wanted);
+          } catch {
+            // Previously swallowed with no record anywhere, so a copy that left
+            // group/other bits on a credential file still returned ok with an
+            // empty skip list. The file IS copied — this is not a skip in the
+            // "did not arrive" sense — but silence about it is the worse error.
+            result.skips.push({ rel: entry.rel, reason: 'permissions_unenforced' });
+          }
         }
         result.files += 1;
         result.bytes += entry.size;
         onProgress?.({ files: result.files, bytes: result.bytes });
         break;
       }
+      case 'excluded':
+        result.skips.push({ rel: entry.rel, reason: 'excluded_vcs' });
+        break;
       case 'symlink':
         if (entry.escapes) {
           result.skips.push({ rel: entry.rel, reason: 'symlink_escapes' });
