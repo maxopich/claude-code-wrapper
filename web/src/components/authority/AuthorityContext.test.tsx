@@ -170,6 +170,107 @@ describe('AuthorityProvider — handlerRef bridge', () => {
     expect(slotRef.current?.status).toBe('cache-miss');
   });
 
+  // ---- Cebab-ws0.7: the freshness label comes from the snapshot ----
+  //
+  // `lastFetchedMode` is what the panel header renders as `probe · 12s ago`.
+  // It used to be inferred from the provider's own pending request, which
+  // could not see an unsolicited push and was already wrong for a Refresh on a
+  // populated panel. These three pin the fix from both directions.
+
+  test('an UNSOLICITED probe snapshot is labelled probe, with no request in flight', () => {
+    // The probe-on-selection push. Under the old inference this had no
+    // matching request and fell through to 'cache', so a live reading was
+    // presented as a stale one in the panel whose whole subject is what is
+    // actually true.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const slotRef = { current: null as AuthoritySlot | null };
+    const actionsRef = { current: null as ReturnType<typeof useAuthorityActions> | null };
+    act(() => {
+      root.render(
+        <AuthorityProvider send={() => {}} handlerRef={handlerRef}>
+          <Probe projectId={11} slotRef={slotRef} actionsRef={actionsRef} />
+        </AuthorityProvider>,
+      );
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 11,
+        authority: mkAuthority({ projectId: 11, fromProbe: true }),
+      });
+    });
+    if (slotRef.current?.status !== 'ready') throw new Error('expected ready');
+    expect(slotRef.current.lastFetchedMode).toBe('probe');
+  });
+
+  test('Refresh on an already-ready panel flips the label to probe', () => {
+    // The pre-existing bug. The 'request' case returns an already-'ready' slot
+    // untouched — deliberately, so the panel keeps rendering data instead of
+    // flashing empty — which left no recorded mode, so 'receive' fell back to
+    // the PREVIOUS one and the header kept saying 'cache' after every Refresh.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const slotRef = { current: null as AuthoritySlot | null };
+    const actionsRef = { current: null as ReturnType<typeof useAuthorityActions> | null };
+    act(() => {
+      root.render(
+        <AuthorityProvider send={() => {}} handlerRef={handlerRef}>
+          <Probe projectId={12} slotRef={slotRef} actionsRef={actionsRef} />
+        </AuthorityProvider>,
+      );
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 12,
+        authority: mkAuthority({ projectId: 12, fromProbe: false }),
+      });
+    });
+    if (slotRef.current?.status !== 'ready') throw new Error('expected ready');
+    expect(slotRef.current.lastFetchedMode).toBe('cache');
+
+    act(() => {
+      actionsRef.current!.request(12, 'probe');
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 12,
+        authority: mkAuthority({ projectId: 12, fromProbe: true }),
+      });
+    });
+    if (slotRef.current?.status !== 'ready') throw new Error('expected ready');
+    expect(slotRef.current.lastFetchedMode).toBe('probe');
+  });
+
+  test('CONTROL: a cache snapshot answering a probe request is labelled cache', () => {
+    // The other direction, and the reason the label is taken from the snapshot
+    // rather than from the request: asking for a probe does not mean one
+    // happened. A probe that timed out falls back to the cached snapshot, and
+    // the server reports that by leaving `fromProbe` false.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const slotRef = { current: null as AuthoritySlot | null };
+    const actionsRef = { current: null as ReturnType<typeof useAuthorityActions> | null };
+    act(() => {
+      root.render(
+        <AuthorityProvider send={() => {}} handlerRef={handlerRef}>
+          <Probe projectId={13} slotRef={slotRef} actionsRef={actionsRef} />
+        </AuthorityProvider>,
+      );
+    });
+    act(() => {
+      actionsRef.current!.request(13, 'probe');
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 13,
+        authority: mkAuthority({ projectId: 13, fromProbe: false }),
+      });
+    });
+    if (slotRef.current?.status !== 'ready') throw new Error('expected ready');
+    expect(slotRef.current.lastFetchedMode).toBe('cache');
+  });
+
   test('non-project_authority ServerMsgs are silently ignored', () => {
     const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
     const slotRef = { current: null as AuthoritySlot | null };

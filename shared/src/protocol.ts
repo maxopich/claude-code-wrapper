@@ -3806,6 +3806,14 @@ export type EnvInjection = {
  * means the cached `session_started` was used as-is, `true` means this
  * resolve ran a fresh SDK probe.
  *
+ * Cebab-ws0.7: that sentence is now true. It was set from the REQUESTED mode,
+ * so a probe that timed out or whose CLI died on startup fell back to the
+ * cached snapshot and shipped it labelled live — harmless only for as long as
+ * nothing read the field, which was the case for its whole existence. The
+ * authority panel's freshness label now reads it (`probe · 12s ago`), and the
+ * server sets it from what it OBSERVED. Anything producing this envelope owes
+ * the same: report the probe you got, not the one you asked for.
+ *
  * `sdkSnapshot` says whether ANY init payload backed half 1 — from a probe or
  * from a turn earlier on this connection. It exists because empty and
  * unmeasured are different facts that used to render identically: with no
