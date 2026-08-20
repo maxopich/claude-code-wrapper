@@ -49,6 +49,7 @@ function project(overrides: Partial<Project> = {}): Project {
     busAgentName: null,
     model: null,
     startPermissionMode: null,
+    managed: null,
     ...overrides,
   };
 }
@@ -73,6 +74,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Handle
     root.render(
       <ProjectList
         projectScans={{}}
+        onCopyToManaged={() => {}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}
@@ -121,8 +123,11 @@ function actionBar(): HTMLElement | null {
   return container.querySelector('.bulk-action-bar');
 }
 function sessionRows(): HTMLElement[] {
-  // Exclude the "new chat" row (which carries .new).
-  return Array.from(container.querySelectorAll('.session-row:not(.new)'));
+  // POSITIVE selector. This used to be `.session-row:not(.new)` — a list of
+  // what a session row is not, which went silently wrong the moment
+  // Cebab-ws0.9 added a second non-session row wearing the same shape: seven
+  // assertions here started addressing the copy-into-Cebab row by index.
+  return Array.from(container.querySelectorAll('.session-row[data-session-id]'));
 }
 function actionButton(label: string): HTMLButtonElement | null {
   return (Array.from(container.querySelectorAll('.bulk-action-btn')).find((b) =>

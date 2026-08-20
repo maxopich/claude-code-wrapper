@@ -3,6 +3,8 @@ import { promises as fsp } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config, resolvePath } from './config.js';
+import { isManagedProjectPath } from './managed_agent.js';
+import { canonical, isInside } from './path_containment.js';
 import { ensureDataDir } from './data_perms.js';
 import { getSetting, setSetting } from './repo/settings.js';
 import {
@@ -13,6 +15,14 @@ import {
   upsertProject,
   type ProjectRow,
 } from './repo/projects.js';
+
+/**
+ * Re-exported so every existing caller and test keeps importing containment
+ * from here; the definitions moved to `path_containment.js` when
+ * `managed_agent.ts` needed them too and importing them back would have made a
+ * cycle.
+ */
+export { isInside } from './path_containment.js';
 
 const SETTING_KEY = 'workspace_root';
 
@@ -31,47 +41,6 @@ export function workspaceRootValid(): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Canonical form of a path that is known to exist: symlinks followed, and on
- * a case-insensitive filesystem the on-disk casing restored. Both matter for
- * the two refusals below — `/tmp` is a symlink to `/private/tmp` on macOS, and
- * `/users/me` and `/Users/me` are the same directory there. Falls back to the
- * input when realpath fails (a race between the stat and this call), which
- * only makes the comparison stricter about matching, never looser.
- */
-function canonical(p: string): string {
-  try {
-    return fs.realpathSync(p);
-  } catch {
-    return p;
-  }
-}
-
-/**
- * Is `child` strictly inside `parent`? Both must already be canonical.
- *
- * `path.relative`, never `startsWith` — this is the whole reason the helper
- * exists. `~/.cebabX` shares a string prefix with `~/.cebab` and is not inside
- * it; appending a separator fixes that one case and still gets trailing slashes
- * and mixed `/` vs `\` wrong on Windows, which `relative` normalises.
- *
- * The escape predicate names `path.sep` explicitly rather than testing
- * `startsWith('..')`, because a bare prefix test also rejects a legitimately
- * named `..foo` directory.
- *
- * Strict: a path is not inside itself (`rel === ''`). Callers that also want to
- * refuse the parent itself compare for equality separately, so the two
- * conditions stay legible at the call site.
- *
- * Exported for its own tests — the Windows behaviour is asserted by driving
- * `path.win32` directly, which is the only way to cover it from a POSIX runner.
- */
-export function isInside(parent: string, child: string, impl: typeof path = path): boolean {
-  const rel = impl.relative(parent, child);
-  if (rel === '' || rel === '..' || rel.startsWith(`..${impl.sep}`)) return false;
-  return !impl.isAbsolute(rel);
 }
 
 /**
@@ -180,6 +149,20 @@ export async function syncWorkspaceProjects(): Promise<ProjectRow[]> {
     upsertProject(name, full);
     seen.add(full);
   }
+  // Cebab-ws0.9: a MANAGED agent lives in Cebab's data dir, so its path is never
+  // in the scan above and the sweep below would soft-delete it on the very next
+  // `list_projects` — which fires on every sidebar refresh. Silently, and for
+  // every managed agent at once.
+  //
+  // The fix is not "skip managed rows". A managed agent whose directory the
+  // operator deleted by hand SHOULD go missing, exactly as a workspace project
+  // does; the sweep is right about it, it just has no scan to learn it from. So
+  // each managed row answers for itself, and the two directions are separately
+  // tested because getting either wrong looks like the feature working.
+  for (const p of listProjectPaths()) {
+    if (!isManagedProjectPath(p)) continue;
+    if (fs.existsSync(p)) seen.add(p);
+  }
   // Mark any DB rows whose directory has vanished.
   const missing = listProjectPaths().filter((p) => !seen.has(p));
   markProjectsMissingByPaths(missing);
@@ -199,7 +182,22 @@ export function rowToProject(row: ProjectRow) {
     busAgentName: row.bus_agent_name,
     model: row.model,
     startPermissionMode: resolveStartPermissionMode(row.start_permission_mode) ?? null,
+    managed: managedProvenance(row),
   };
+}
+
+/**
+ * The provenance half of a managed agent, or null (Cebab-ws0.9).
+ *
+ * Gated on the STRUCTURAL predicate rather than on the columns, so a row that
+ * carries a hand-written `managed_source_path` while sitting in the operator's
+ * workspace does not get a badge claiming Cebab copied it. The columns are then
+ * read for what the path cannot say.
+ */
+function managedProvenance(row: ProjectRow): { sourcePath: string; copiedAt: number } | null {
+  if (!isManagedProjectPath(row.path)) return null;
+  if (row.managed_source_path === null || row.managed_copied_at === null) return null;
+  return { sourcePath: row.managed_source_path, copiedAt: row.managed_copied_at };
 }
 
 /**

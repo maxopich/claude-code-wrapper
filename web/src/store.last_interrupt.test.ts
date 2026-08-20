@@ -40,6 +40,7 @@ function seedSession(): AppState {
           busAgentName: null,
           model: null,
           startPermissionMode: null,
+          managed: null,
         },
       ],
     },

@@ -1309,6 +1309,68 @@ pre {
   box-shadow: 0 0 8px var(--ok);
   animation: pulse 1.6s ease-in-out infinite;
 }
+/* ── Managed copy modal (Cebab-ws0.9) ─────────────────────────────────────── */
+.managed-copy-modal {
+  max-width: 34rem;
+}
+.managed-copy-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-2);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+}
+.managed-copy-size {
+  margin: 0;
+  font-size: var(--t-sm);
+  color: var(--fg-1);
+}
+.managed-copy-largest,
+.managed-copy-skips ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.managed-copy-largest li,
+.managed-copy-skips li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-1);
+}
+.managed-copy-largest-name,
+.managed-copy-skip-path {
+  overflow-wrap: anywhere;
+}
+.managed-copy-largest-size,
+.managed-copy-skip-reason {
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.managed-copy-skip-reason {
+  white-space: normal;
+  text-align: right;
+}
+.managed-copy-error {
+  color: var(--err-ink);
+}
+.managed-copy-done {
+  color: var(--ok-ink);
+}
+.managed-copy-measuring,
+.managed-copy-progress {
+  color: var(--fg-2);
+}
+.session-row-managed-copy .session-name {
+  color: var(--fg-2);
+}
+
 /* ── Project scan line (Cebab-ws0.6) ───────────────────────────────────────
  * A second line inside `.project-header`, carrying what the project declares
  * on disk. The header wraps and this is a full-width flex item, so the hover
@@ -1333,6 +1395,16 @@ pre {
   background: var(--bg-3);
   color: var(--fg-2);
   white-space: nowrap;
+}
+/* Cebab-ws0.9: a project Cebab copied into its own space. Informational, not a
+ * warning — an accent tint rather than a semantic fill. */
+.project-scan-chip.is-managed {
+  border-color: var(--accent);
+  /* There is no `--accent-soft`, and adding one would oblige all four gammas to
+   * declare it for a single rule. `color-mix` on the accent is the idiom this
+   * stylesheet already uses for accent tints (see `.project-header.active`). */
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-ink);
 }
 .project-scan-chip.is-muted {
   border-color: transparent;

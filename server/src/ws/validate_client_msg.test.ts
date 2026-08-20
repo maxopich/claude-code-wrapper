@@ -36,6 +36,8 @@ const SAMPLES: ClientMsg[] = [
   { type: 'set_trusted', projectId: 1, trusted: false },
   { type: 'set_project_model', projectId: 1, model: null },
   { type: 'set_project_start_permission_mode', projectId: 1, mode: null },
+  { type: 'preflight_managed_copy', projectId: 1 },
+  { type: 'copy_project_to_managed', projectId: 1 },
   { type: 'get_model_catalogue' },
   { type: 'load_session', projectId: 1, sessionId: 's' },
   { type: 'get_settings' },

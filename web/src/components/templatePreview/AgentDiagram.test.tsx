@@ -59,6 +59,7 @@ function mkProject(id: number, name: string): Project {
     busAgentName: name.toLowerCase(),
     model: null,
     startPermissionMode: null,
+    managed: null,
   };
 }
 

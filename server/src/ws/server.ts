@@ -23,6 +23,7 @@ import {
 } from '../repo/projects.js';
 import { scanProjects } from '../repo/project_scan.js';
 import { applyProjectStartPermissionMode } from '../project_start_mode.js';
+import { preflightManagedCopy, runManagedCopy } from '../managed_copy.js';
 import { observeProjectHooks } from '../repo/hook_trust.js';
 import {
   createSession,
@@ -3833,6 +3834,21 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
       sendProjects(conn, rows);
       return;
     }
+    case 'preflight_managed_copy': {
+      // Read-only: measures the tree and answers. Awaited rather than
+      // fire-and-forget so a survey that throws surfaces through the same
+      // handler-level catch as everything else.
+      await preflightManagedCopy(msg.projectId, (m) => send(conn.ws, m));
+      return;
+    }
+    case 'copy_project_to_managed': {
+      const outcome = await runManagedCopy(msg.projectId, (m) => send(conn.ws, m));
+      // Re-emit the list so the new managed agent appears in the sidebar
+      // without the operator refreshing — and, because `Cebab-ws0.6`'s file
+      // scan rides along, with its declarations already read.
+      if (outcome.registered) sendProjects(conn, await syncWorkspaceProjects());
+      return;
+    }
     case 'set_project_start_permission_mode': {
       // Cebab-ws0.4. The audit-then-write half lives in
       // `project_start_mode.ts` so its ordering can be tested with a throwing
@@ -4801,10 +4817,13 @@ async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void> {
         send(conn.ws, msg);
       };
 
-      // Per-session folders live under the workspace root, so it must be
-      // a valid existing directory. The Settings modal validates on save,
-      // but a workspace that was deleted between then and now would slip
-      // through — bail with a useful error.
+      // Cebab-ws0.8 moved per-session folders into the data dir, so this guard
+      // is no longer about them, and the sentence that used to be here said it
+      // was. It is about the PARTICIPANTS' cwds, which are workspace
+      // subdirectories and must exist before a spawn; `bus/orchestrator.ts`
+      // states that reason correctly and this copy was missed when the folders
+      // moved. The Settings modal validates on save, but a workspace deleted
+      // between then and now would slip through — bail with a useful error.
       if (!workspaceRootValid()) {
         send(conn.ws, {
           type: 'wrapper_error',
