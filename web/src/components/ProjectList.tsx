@@ -43,6 +43,8 @@ export function ProjectList(props: {
   onRefreshModelCatalogue: (projectId: number) => void;
   /** Cebab-ws0.4: the per-project starting permission mode, same threading. */
   onSetProjectStartPermissionMode: (projectId: number, mode: SessionPermissionMode | null) => void;
+  /** Cebab-ws0.9: open the managed-copy modal for this project. */
+  onCopyToManaged: (projectId: number) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
   /**
    * Cluster I C2 UI: trigger a per-session JSONL download. Returns a
@@ -205,7 +207,7 @@ export function ProjectList(props: {
                  *  wraps, and this is a full-width flex item. Non-interactive,
                  *  so it adds nothing to tab order and leaves the register U01
                  *  constraint on this element untouched. */}
-                <ProjectScanLine scan={props.projectScans[p.id]} />
+                <ProjectScanLine scan={props.projectScans[p.id]} managed={p.managed} />
               </div>
               {expanded && (
                 <ul className="session-list">
@@ -266,6 +268,30 @@ export function ProjectList(props: {
                         title="Inspect resolved authority (tools, MCP servers, env, hooks) before starting a session"
                       >
                         ⓘ
+                      </button>
+                    </li>
+                  )}
+                  {/* Cebab-ws0.9: copy this agent into Cebab-managed space. Its
+                   *  own row rather than a fourth control in the header, which
+                   *  is already carrying the live dot, the Claude mark, the
+                   *  name, Select… and the trust pill. A managed agent does not
+                   *  offer it — copying a copy is legal but is not a thing to
+                   *  put in front of anybody. */}
+                  {!p.managed && !inSelectMode && (
+                    <li className="session-row session-row-managed-copy">
+                      <span className="session-marker" aria-hidden="true">
+                        ⧉
+                      </span>
+                      <button
+                        type="button"
+                        className="session-name"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onCopyToManaged(p.id);
+                        }}
+                        title={`Make an independent copy of ${p.name} inside Cebab and run it from there. The original is not touched.`}
+                      >
+                        copy into Cebab
                       </button>
                     </li>
                   )}
@@ -520,6 +546,12 @@ function SessionRow(props: {
       className={`session-row ${props.active ? 'active' : ''} ${editing ? 'editing' : ''} ${
         props.selectMode ? 'selecting' : ''
       } ${props.selectMode && props.selected ? 'selected' : ''}`}
+      // `.session-row` is a row SHAPE, worn by things that are not sessions —
+      // the new-chat row and, since Cebab-ws0.9, the copy-into-Cebab row. This
+      // marks the ones that really are, so callers can select them positively
+      // instead of by listing everything they are not; the latter is a list
+      // that silently goes wrong every time a row is added.
+      data-session-id={s.id}
       title={
         editing || props.selectMode
           ? undefined

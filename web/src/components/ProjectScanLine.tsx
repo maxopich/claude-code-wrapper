@@ -27,6 +27,15 @@ import type { ProjectScan } from '@cebab/shared/protocol';
 export type ProjectScanLineProps = {
   /** Absent when no scan arrived for this project — renders nothing at all. */
   scan?: ProjectScan;
+  /**
+   * Cebab-ws0.9: provenance when this project is a copy Cebab made, else null.
+   *
+   * It belongs on this strip rather than in the header because the strip is
+   * already "the facts about this project", and because a second copy of one
+   * source makes a second managed agent — so telling two of them apart at a
+   * glance is what keeps that model legible.
+   */
+  managed?: { sourcePath: string; copiedAt: number } | null;
 };
 
 /** Total declarations found on disk, across all three kinds. */
@@ -44,25 +53,39 @@ export function notLoadedTotal(scan: ProjectScan): number {
   );
 }
 
+/** The last path segment — enough to recognise the source without a wall of path. */
+export function shortSourceName(sourcePath: string): string {
+  const parts = sourcePath.split(/[\\/]/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1] : sourcePath;
+}
+
 function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
-export function ProjectScanLine({ scan }: ProjectScanLineProps) {
-  if (!scan) return null;
+export function ProjectScanLine({ scan, managed }: ProjectScanLineProps) {
+  if (!scan && !managed) return null;
 
-  const declared = declaredTotal(scan);
-  const notLoaded = notLoadedTotal(scan);
-  const mcpNames = scan.mcpServers.map((s) => s.name).join(', ');
+  const declared = scan ? declaredTotal(scan) : 0;
+  const notLoaded = scan ? notLoadedTotal(scan) : 0;
+  const mcpNames = scan ? scan.mcpServers.map((s) => s.name).join(', ') : '';
 
   return (
     <div className="project-scan-line">
-      {scan.mcpServers.length > 0 && (
+      {managed && (
+        <span
+          className="project-scan-chip is-managed"
+          title={`Copied into Cebab from ${managed.sourcePath} on ${new Date(managed.copiedAt).toLocaleString()}. The original is untouched and there is no link between them.`}
+        >
+          copy of {shortSourceName(managed.sourcePath)}
+        </span>
+      )}
+      {scan && scan.mcpServers.length > 0 && (
         <span className="project-scan-chip" title={`Declared MCP servers: ${mcpNames}`}>
           {plural(scan.mcpServers.length, 'MCP server', 'MCP servers')}
         </span>
       )}
-      {scan.hooks.declared > 0 && (
+      {scan && scan.hooks.declared > 0 && (
         <span
           className={`project-scan-chip${scan.hooks.hasLocalScope ? ' is-warn' : ''}`}
           title={
@@ -74,7 +97,7 @@ export function ProjectScanLine({ scan }: ProjectScanLineProps) {
           {plural(scan.hooks.declared, 'hook', 'hooks')}
         </span>
       )}
-      {scan.envInjections.declared > 0 && (
+      {scan && scan.envInjections.declared > 0 && (
         <span
           className="project-scan-chip"
           title="Environment variables this project’s settings files inject into a session. Names only — Cebab never reads the values."
@@ -97,7 +120,7 @@ export function ProjectScanLine({ scan }: ProjectScanLineProps) {
           {notLoaded} not loaded
         </span>
       )}
-      {declared === 0 && !scan.degraded && (
+      {scan && declared === 0 && !scan.degraded && (
         <span
           className="project-scan-chip is-muted"
           title="Cebab read this project’s settings files and found no MCP servers, hooks or environment overrides. This is a measured answer, not a missing one."
@@ -105,7 +128,7 @@ export function ProjectScanLine({ scan }: ProjectScanLineProps) {
           declares nothing
         </span>
       )}
-      {scan.degraded && (
+      {scan && scan.degraded && (
         <span
           className="project-scan-chip is-err"
           title="At least one settings file exists but could not be read or parsed, so part of this summary is missing. The counts shown are whatever did read."

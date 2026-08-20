@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, test } from 'vitest';
 import { findProjectByPath, listProjects, upsertProject } from './repo/projects.js';
+import { getDb } from './db.js';
 import { withTempDataDir } from './test_support/temp_data_dir.js';
 import { config } from './config.js';
 import {
@@ -305,5 +306,109 @@ describe('isInside — the containment predicate (ws0.8)', () => {
     // A bare `rel.startsWith('..')` rejects this. Naming `path.sep` in the
     // predicate is what keeps it legal.
     expect(isInside(path.posix.join('/a'), path.posix.join('/a', '..foo'), path.posix)).toBe(true);
+  });
+});
+
+describe('managed agents survive the missing-sweep (ws0.9)', () => {
+  /**
+   * The way this feature ships broken. `syncWorkspaceProjects` soft-deletes any
+   * row whose path the workspace scan did not see, and a managed agent's path
+   * — inside Cebab's data dir — is never in that scan. Without the exemption
+   * every managed agent is marked missing on the very next `list_projects`,
+   * which fires on every sidebar refresh. Silently, and for all of them at once.
+   *
+   * Both directions are tested because each failure looks like the feature
+   * working: forget the exemption and managed agents vanish; write it as a
+   * blanket "skip managed rows" and a managed agent whose directory the
+   * operator deleted lingers forever as a project pointing at nothing.
+   */
+  function managedProject(name: string): { id: number; dir: string } {
+    const dir = path.join(config.dataDir, 'agents', name);
+    fs.mkdirSync(dir, { recursive: true });
+    const row = upsertProject(name, dir);
+    getDb()
+      .prepare('UPDATE projects SET managed_source_path = ?, managed_copied_at = 1 WHERE id = ?')
+      .run('/somewhere', row.id);
+    return { id: row.id, dir };
+  }
+
+  beforeEach(() => {
+    const wsRoot = path.join(scratch, 'agents');
+    fs.mkdirSync(wsRoot, { recursive: true });
+    setWorkspaceRoot(wsRoot);
+  });
+
+  test('a managed agent is NOT marked missing by a workspace scan', async () => {
+    const managed = managedProject('kept');
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).toContain(managed.id);
+  });
+
+  test('it survives repeated scans, not just the first', async () => {
+    // The sweep runs on every sidebar refresh; a one-shot exemption would pass
+    // the case above and fail the operator on their second click.
+    const managed = managedProject('persistent');
+    for (let i = 0; i < 3; i++) await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).toContain(managed.id);
+  });
+
+  test('a managed agent whose directory was deleted by hand IS marked missing', async () => {
+    const managed = managedProject('deleted');
+    fs.rmSync(managed.dir, { recursive: true, force: true });
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).not.toContain(managed.id);
+  });
+
+  test('[security] a hand-edited provenance column buys a workspace project no exemption', async () => {
+    // The row is OUTSIDE the workspace root and its directory still EXISTS —
+    // the ordinary state of a project left behind when the operator repoints
+    // the workspace. The sweep must reach it.
+    //
+    // Both halves matter. Deleting the directory instead would let this pass
+    // even if the exemption were keyed on the column, because the existence
+    // check would sweep it anyway; that version of this test was written first
+    // and did not redden when the predicate was mutated to read the column.
+    const stale = path.join(scratch, 'elsewhere', 'left-behind');
+    fs.mkdirSync(stale, { recursive: true });
+    const row = upsertProject('left-behind', stale);
+    getDb()
+      .prepare('UPDATE projects SET managed_source_path = ?, managed_copied_at = 1 WHERE id = ?')
+      .run('/pretend', row.id);
+
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).not.toContain(row.id);
+  });
+
+  test('a real managed agent in the same position is NOT swept', async () => {
+    // The positive control for the case above, and the pair that pins WHICH
+    // question the exemption asks. Both rows sit outside the workspace scan
+    // with a live directory and a populated provenance column; the only thing
+    // separating them is where the directory is.
+    const managed = managedProject('genuine');
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).toContain(managed.id);
+  });
+
+  test('control: an ordinary workspace project still goes missing when deleted', async () => {
+    // Anti-vacuity for the two negatives above — an exemption wide enough to
+    // cover everything would make them pass by never sweeping at all.
+    const dir = path.join(scratch, 'agents', 'ordinary');
+    fs.mkdirSync(dir, { recursive: true });
+    await syncWorkspaceProjects();
+    const row = findProjectByPath(dir)!;
+    expect(listProjects().map((p) => p.id)).toContain(row.id);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).not.toContain(row.id);
+  });
+
+  test('a managed agent appears exactly once, not also as a workspace project', async () => {
+    // The bead's "not double-listed" criterion. Today the data dir sits outside
+    // the workspace so the scan cannot reach it, and what this really pins is
+    // that the exemption adds the row back once rather than twice.
+    managedProject('inner');
+    await syncWorkspaceProjects();
+    expect(listProjects().filter((p) => p.name === 'inner')).toHaveLength(1);
   });
 });

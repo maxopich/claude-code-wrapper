@@ -67,6 +67,22 @@ export type Project = {
    * Project is constructed instead of letting fixtures quietly omit it.
    */
   startPermissionMode: SessionPermissionMode | null;
+  /**
+   * Cebab-ws0.9: where this managed agent was copied from, or `null` for an
+   * ordinary workspace project.
+   *
+   * A managed agent is a full, independent snapshot of a workspace project
+   * living under Cebab's own data dir. Present here as PROVENANCE only — the
+   * server decides "is this managed?" from where the directory sits, not from
+   * whether this field is set, so a row cannot be edited into claiming Cebab
+   * copied it. With a second copy producing a second managed agent rather than
+   * replacing the first, this is also the only thing that tells two copies of
+   * one source apart.
+   *
+   * Required rather than optional so the compiler enumerates every place a
+   * Project is constructed instead of letting fixtures quietly omit it.
+   */
+  managed: { sourcePath: string; copiedAt: number } | null;
 };
 
 /**
@@ -724,6 +740,32 @@ export type ClientMsg =
   | { type: 'load_session'; projectId: number; sessionId: string }
   | { type: 'get_settings' }
   | { type: 'set_workspace_root'; path: string }
+  | {
+      /**
+       * Cebab-ws0.9: measure what copying this project into Cebab-managed
+       * space would write, WITHOUT writing anything. Answered by
+       * `managed_copy_preflight`.
+       *
+       * Separate from the copy itself on purpose. The operator chose to copy
+       * everything — `.git` and `node_modules` included — so a gigabyte is the
+       * ordinary case, and a number seen before the act is the difference
+       * between a considered click and a surprise.
+       */
+      type: 'preflight_managed_copy';
+      projectId: number;
+    }
+  | {
+      /**
+       * Cebab-ws0.9: copy this project into `<dataDir>/agents/<slug>/` and
+       * register the copy as its own project. Emits `managed_copy_progress`
+       * while it runs and `managed_copy_result` at the end.
+       *
+       * A second copy of the same project produces a SECOND managed agent with
+       * a disambiguated name; nothing is ever overwritten or destroyed.
+       */
+      type: 'copy_project_to_managed';
+      projectId: number;
+    }
   | {
       /**
        * Persist a new default hop budget (cap on `multi_agent_events` rows
@@ -1874,6 +1916,41 @@ export type ClientMsg =
 
 // ---- Server → Browser ----
 export type ServerMsg =
+  | {
+      /** Cebab-ws0.9: answer to `preflight_managed_copy`. `null` when the
+       *  project has gone away between the ask and the answer. */
+      type: 'managed_copy_preflight';
+      projectId: number;
+      preflight: ManagedCopyPreflight | null;
+    }
+  | {
+      /** Cebab-ws0.9: throttled progress during a copy. The totals come from
+       *  the preflight, so a bar is possible rather than a bare spinner. */
+      type: 'managed_copy_progress';
+      projectId: number;
+      files: number;
+      bytes: number;
+      totalFiles: number;
+      totalBytes: number;
+    }
+  | {
+      /** Cebab-ws0.9: the copy finished, one way or the other. */
+      type: 'managed_copy_result';
+      projectId: number;
+      result:
+        | {
+            ok: true;
+            /** The new project row's id — the managed agent itself. */
+            managedProjectId: number;
+            name: string;
+            files: number;
+            bytes: number;
+            symlinks: number;
+            skips: ManagedCopySkip[];
+            skipsTruncated: number;
+          }
+        | { ok: false; error: string };
+    }
   | {
       type: 'projects';
       projects: Project[];
@@ -3814,6 +3891,52 @@ export type ScannedMcpServer = {
  * read plus a sha256 of each server's binary, per project, per listing — see
  * `repo/project_scan.ts` for the measurement and the follow-up.
  */
+/** Why an entry was not copied into a managed agent (Cebab-ws0.9). */
+export type ManagedCopySkipReason =
+  /**
+   * A symlink that would not point inside the COPY — either it resolves
+   * outside the source tree, or it is absolute, which after copying still
+   * names the source. Recreating either would hand the managed agent a live
+   * path back out of the space Cebab owns.
+   */
+  | 'symlink_escapes'
+  /** A FIFO, socket or device. Copying one is meaningless or blocks forever. */
+  | 'not_regular'
+  /** A symlink Cebab could not recreate — creating one is privileged on Windows. */
+  | 'symlink_unsupported';
+
+export type ManagedCopySkip = { rel: string; reason: ManagedCopySkipReason };
+
+/** How many skips travel on the wire before the list is truncated. */
+export const MANAGED_COPY_SKIP_LIMIT = 50;
+
+/**
+ * What copying a project into managed space WOULD write (Cebab-ws0.9).
+ *
+ * Measured by the same traversal the copy uses, so the number the operator
+ * approves is the number they get.
+ */
+export type ManagedCopyPreflight = {
+  projectId: number;
+  bytes: number;
+  files: number;
+  dirs: number;
+  symlinks: number;
+  /** Top-level children by size, largest first — where the weight actually is. */
+  largest: { name: string; bytes: number }[];
+  /** Named rather than silently dropped. Truncated to MANAGED_COPY_SKIP_LIMIT. */
+  skips: ManagedCopySkip[];
+  skipsTruncated: number;
+  /**
+   * True when the survey stopped at a cap, making `bytes` and `files` lower
+   * bounds. The UI must say so rather than render a number that is quietly
+   * wrong, and the copy is refused in this state.
+   */
+  overCap: boolean;
+  maxBytes: number;
+  maxFiles: number;
+};
+
 export type ProjectScan = {
   projectId: number;
   scannedAt: number;

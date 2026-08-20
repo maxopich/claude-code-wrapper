@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { ProjectScan } from '@cebab/shared/protocol';
-import { ProjectScanLine, declaredTotal, notLoadedTotal } from './ProjectScanLine';
+import { ProjectScanLine, declaredTotal, notLoadedTotal, shortSourceName } from './ProjectScanLine';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,7 +41,10 @@ function scan(overrides: Partial<ProjectScan> = {}): ProjectScan {
   };
 }
 
-function render(props: { scan?: ProjectScan }): void {
+function render(props: {
+  scan?: ProjectScan;
+  managed?: { sourcePath: string; copiedAt: number } | null;
+}): void {
   act(() => {
     root.render(<ProjectScanLine {...props} />);
   });
@@ -194,5 +197,61 @@ describe('ProjectScanLine — counting helpers', () => {
       }),
     });
     expect(chips()[0].getAttribute('title')).toBe('Declared MCP servers: alpha, beta');
+  });
+});
+
+describe('ProjectScanLine — managed provenance (Cebab-ws0.9)', () => {
+  const copiedAt = new Date('2026-08-20T10:00:00Z').getTime();
+
+  test('a managed agent names what it is a copy of', () => {
+    render({ scan: scan(), managed: { sourcePath: '/Users/me/agents/Cebab', copiedAt } });
+    const chip = chips().find((c) => c.className.includes('is-managed'));
+    expect(chip?.textContent).toContain('copy of Cebab');
+  });
+
+  test('the tooltip carries the full source path and the date', () => {
+    // The chip has room for a name; the tooltip is where the operator settles
+    // which of two copies of the same source this one is.
+    render({ scan: scan(), managed: { sourcePath: '/Users/me/agents/Cebab', copiedAt } });
+    const chip = chips().find((c) => c.className.includes('is-managed'));
+    expect(chip?.getAttribute('title')).toContain('/Users/me/agents/Cebab');
+    expect(chip?.getAttribute('title')).toContain('original is untouched');
+  });
+
+  test('control: an ordinary workspace project gets no managed chip', () => {
+    render({ scan: scan(), managed: null });
+    expect(chips().some((c) => c.className.includes('is-managed'))).toBe(false);
+  });
+
+  test('a managed agent with no scan yet still renders its chip', () => {
+    // The two facts arrive independently — provenance is on the project row,
+    // the scan on a sibling message. Neither should suppress the other.
+    render({ scan: undefined, managed: { sourcePath: '/a/b/Thing', copiedAt } });
+    expect(text()).toEqual(['copy of Thing']);
+  });
+
+  test('neither fact present renders nothing at all', () => {
+    render({ scan: undefined, managed: null });
+    expect(container.querySelector('.project-scan-line')).toBeNull();
+  });
+
+  test('the chip sits alongside the declaration facts, not instead of them', () => {
+    render({
+      scan: scan({ mcpServers: [{ name: 'a', loads: false }] }),
+      managed: { sourcePath: '/a/b/Thing', copiedAt },
+    });
+    expect(text()).toEqual(['copy of Thing', '1 MCP server', '\u26a0 1 not loaded']);
+  });
+});
+
+describe('shortSourceName', () => {
+  test('takes the last segment of either separator', () => {
+    expect(shortSourceName('/Users/me/agents/Cebab')).toBe('Cebab');
+    expect(shortSourceName('C:\\Users\\me\\agents\\Cebab')).toBe('Cebab');
+    expect(shortSourceName('/Users/me/agents/Cebab/')).toBe('Cebab');
+  });
+
+  test('a path with no separators is returned as it is', () => {
+    expect(shortSourceName('Cebab')).toBe('Cebab');
   });
 });

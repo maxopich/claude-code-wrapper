@@ -23,6 +23,7 @@ function mkProjects(n: number): Project[] {
     busAgentName: null,
     model: null,
     startPermissionMode: null,
+    managed: null,
   }));
 }
 

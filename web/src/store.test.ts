@@ -331,6 +331,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
           {
             id: 2,
@@ -343,6 +344,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -382,6 +384,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
           {
             id: 12,
@@ -394,6 +397,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -425,6 +429,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -455,6 +460,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
           {
             id: 2,
@@ -467,6 +473,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
           {
             id: 3,
@@ -479,6 +486,7 @@ describe('store / projects refresh (workspace switch)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -508,6 +516,7 @@ describe('store / projects refresh (workspace switch)', () => {
       busAgentName: null,
       model: null,
       startPermissionMode: null,
+      managed: null,
     };
     const scanFor = (projectId: number, loads: boolean) => ({
       projectId,
@@ -597,6 +606,7 @@ describe('store / multi-agent reducer (PR 2)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
           {
             id: 2,
@@ -609,6 +619,7 @@ describe('store / multi-agent reducer (PR 2)', () => {
             busAgentName: 'beta',
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
           {
             id: 3,
@@ -621,6 +632,7 @@ describe('store / multi-agent reducer (PR 2)', () => {
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -706,6 +718,7 @@ describe('store / multi-agent reducer (PR 2)', () => {
             busAgentName: 'beta',
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -879,6 +892,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
             busAgentName: 'orchestrator',
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
           {
             id: 20,
@@ -891,6 +905,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
             busAgentName: 'worker-a',
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -975,6 +990,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
           },
         ],
       },
@@ -2574,6 +2590,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
             lastUsedAt: null,
             hasClaudeMd: false,
           },
@@ -2616,6 +2633,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
             lastUsedAt: null,
             hasClaudeMd: false,
           },
@@ -2663,6 +2681,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
             lastUsedAt: null,
             hasClaudeMd: false,
           },
@@ -2710,6 +2729,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
             busAgentName: null,
             model: null,
             startPermissionMode: null,
+            managed: null,
             lastUsedAt: null,
             hasClaudeMd: false,
           },
@@ -3225,5 +3245,131 @@ describe('store / W01 — the streaming buffer retires with its turn', () => {
     // Guard against over-correcting into "never streams".
     const s = streamPartial();
     expect(sessionPhase(activeSession(s)!, true)).toBe('streaming');
+  });
+});
+
+describe('store / managed copy (Cebab-ws0.9)', () => {
+  const preflight = (projectId: number, bytes: number) => ({
+    projectId,
+    bytes,
+    files: 3,
+    dirs: 1,
+    symlinks: 0,
+    largest: [],
+    skips: [],
+    skipsTruncated: 0,
+    overCap: false,
+    maxBytes: 1024,
+    maxFiles: 10,
+  });
+
+  test('opening starts in "measuring" with no size', () => {
+    // Not `ready` with a zero size — the modal must be able to tell "still
+    // looking" from "this project is empty".
+    const s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    expect(s.managedCopy).toEqual({
+      projectId: 4,
+      status: 'measuring',
+      preflight: null,
+      progress: null,
+      result: null,
+    });
+  });
+
+  test('the preflight answer moves it to ready', () => {
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'managed_copy_preflight', projectId: 4, preflight: preflight(4, 99) },
+    });
+    expect(s.managedCopy?.status).toBe('ready');
+    expect(s.managedCopy?.preflight?.bytes).toBe(99);
+  });
+
+  test('an answer for a DIFFERENT project is ignored', () => {
+    // The operator can close one modal and open another faster than a survey of
+    // a large tree completes. A late answer must not repaint the new modal with
+    // the old project's size.
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, { type: 'managed_copy_close' });
+    s = reduce(s, { type: 'managed_copy_open', projectId: 5 });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'managed_copy_preflight', projectId: 4, preflight: preflight(4, 99) },
+    });
+    expect(s.managedCopy?.projectId).toBe(5);
+    expect(s.managedCopy?.status).toBe('measuring');
+    expect(s.managedCopy?.preflight).toBe(null);
+  });
+
+  test('a late answer with no modal open is dropped rather than reopening one', () => {
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, { type: 'managed_copy_close' });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'managed_copy_preflight', projectId: 4, preflight: preflight(4, 99) },
+    });
+    expect(s.managedCopy).toBe(null);
+  });
+
+  test('progress then result walk the status forward', () => {
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'managed_copy_preflight', projectId: 4, preflight: preflight(4, 99) },
+    });
+    s = reduce(s, { type: 'managed_copy_started' });
+    expect(s.managedCopy?.status).toBe('copying');
+
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'managed_copy_progress',
+        projectId: 4,
+        files: 2,
+        bytes: 20,
+        totalFiles: 3,
+        totalBytes: 99,
+      },
+    });
+    expect(s.managedCopy?.progress).toEqual({
+      files: 2,
+      bytes: 20,
+      totalFiles: 3,
+      totalBytes: 99,
+    });
+
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'managed_copy_result',
+        projectId: 4,
+        result: {
+          ok: true,
+          managedProjectId: 9,
+          name: 'Copy',
+          files: 3,
+          bytes: 99,
+          symlinks: 0,
+          skips: [],
+          skipsTruncated: 0,
+        },
+      },
+    });
+    expect(s.managedCopy?.status).toBe('done');
+    expect(s.managedCopy?.result).toMatchObject({ ok: true, managedProjectId: 9 });
+  });
+
+  test('a failure is kept, not swallowed into a closed modal', () => {
+    // Closing on error would leave the operator with a click that appeared to
+    // do nothing.
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, { type: 'managed_copy_started' });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'managed_copy_result', projectId: 4, result: { ok: false, error: 'nope' } },
+    });
+    expect(s.managedCopy?.status).toBe('done');
+    expect(s.managedCopy?.result).toEqual({ ok: false, error: 'nope' });
   });
 });

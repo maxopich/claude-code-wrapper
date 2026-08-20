@@ -1,0 +1,29 @@
+-- Cebab-ws0.9: provenance for an agent Cebab copied into its own data dir.
+--
+-- WHAT A MANAGED AGENT IS. A full, independent recursive snapshot of a
+-- workspace project at `<dataDir>/agents/<slug>/`, registered as an ordinary
+-- projects row so Trust, the authority resolve, sessions and the bus all work
+-- on it unchanged. The original is never touched and there is no live link.
+--
+-- THESE COLUMNS ARE PROVENANCE, NOT THE FLAG. "Is this project managed?" is
+-- answered STRUCTURALLY - by whether `projects.path` is inside the managed
+-- agents root - and never by reading these. The distinction is load-bearing
+-- rather than stylistic: `syncWorkspaceProjects` soft-deletes any row whose
+-- path the workspace scan did not see, and a managed row is never in that scan,
+-- so managed rows need an exemption. If the exemption were keyed on a column,
+-- a hand-edited `managed_source_path` on an ordinary workspace project would
+-- buy it permanent immunity from the missing-sweep, and clearing the column on
+-- a real managed agent would get it swept while its directory sits there. A
+-- path cannot be edited into lying about where it is.
+--
+-- So what these carry is what the path cannot say: WHICH project this was
+-- copied from, and WHEN. With a second copy producing a second managed agent
+-- rather than replacing the first (operator decision), that is also the only
+-- thing that tells two copies of the same source apart.
+--
+-- WHY NULLABLE WITH NO DEFAULT AND NO BACKFILL. NULL is what every existing
+-- row is and must stay: no project on any machine today was copied by Cebab,
+-- and there is no past copy event to recover. A DEFAULT here would be a claim
+-- about history that never happened.
+ALTER TABLE projects ADD COLUMN managed_source_path TEXT;
+ALTER TABLE projects ADD COLUMN managed_copied_at INTEGER;

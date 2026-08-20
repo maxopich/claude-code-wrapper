@@ -108,6 +108,11 @@ const SHAPES: Table = {
   set_trusted: { projectId: 'number', trusted: 'boolean' },
   set_project_model: { projectId: 'number', model: 'string|null' },
   set_project_start_permission_mode: { projectId: 'number', mode: permissionModeOrNull },
+  // Cebab-ws0.9. Both carry a project ID and nothing else: the managed
+  // directory name is derived server-side from the project row, so no
+  // caller-supplied path or name ever reaches the filesystem.
+  preflight_managed_copy: { projectId: 'number' },
+  copy_project_to_managed: { projectId: 'number' },
   get_model_catalogue: { projectId: 'number?', refresh: 'boolean?' },
   load_session: { projectId: 'number', sessionId: 'string' },
   get_settings: {},

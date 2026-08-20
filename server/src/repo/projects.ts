@@ -42,6 +42,21 @@ export type ProjectRow = {
    * hand-edited row is filtered rather than trusted into a spawn.
    */
   start_permission_mode: string | null;
+  /**
+   * Cebab-ws0.9: the project this one was copied FROM, for a managed agent.
+   * NULL for every ordinary workspace project.
+   *
+   * PROVENANCE, NOT THE FLAG. "Is this managed?" is answered by
+   * `isManagedProjectPath(row.path)` — structurally, from where the directory
+   * sits — and never from this column. The missing-sweep exemption depends on
+   * that answer, and a column can be hand-edited into granting one project
+   * permanent immunity or stripping it from another. What this carries is what
+   * the path cannot say: which project it came from, and (with `managed_copied_at`)
+   * which of several copies of the same source this is.
+   */
+  managed_source_path: string | null;
+  /** Epoch millis of the copy. NULL for every ordinary workspace project. */
+  managed_copied_at: number | null;
 };
 
 /**
@@ -235,6 +250,28 @@ export function resolveStartPermissionMode(
   raw: string | null | undefined,
 ): SessionPermissionMode | undefined {
   return isSessionPermissionMode(raw) ? raw : undefined;
+}
+
+/**
+ * Register a completed managed copy (Cebab-ws0.9).
+ *
+ * `upsertProject` first, so a managed agent is an ORDINARY project row in every
+ * respect — it inherits the name disambiguation, the path-uniqueness lookup and
+ * the missing/unmissing behaviour that every other project has. Only then is
+ * the provenance attached. Nothing downstream needs to know a project is
+ * managed to work on it, which is the property the whole bead rests on.
+ */
+export function registerManagedProject(
+  name: string,
+  projectPath: string,
+  sourcePath: string,
+  copiedAt: number,
+): ProjectRow {
+  const row = upsertProject(name, projectPath);
+  getDb()
+    .prepare('UPDATE projects SET managed_source_path = ?, managed_copied_at = ? WHERE id = ?')
+    .run(sourcePath, copiedAt, row.id);
+  return getProject(row.id)!;
 }
 
 export function setProjectTrusted(id: number, trusted: boolean): void {

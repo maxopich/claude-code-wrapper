@@ -11,6 +11,7 @@ import type {
   MultiAgentTemplate,
   PauseExpiryAction,
   PendingRetryDescriptor,
+  ManagedCopyPreflight,
   Project,
   ProjectScan,
   RecoveryContextView,
@@ -735,6 +736,20 @@ export type AppState = {
    */
   projectScans: Record<number, ProjectScan>;
   /**
+   * Cebab-ws0.9: the one managed-copy the operator has open, or null.
+   *
+   * One slot, not a map: the copy is driven from a modal and only one can be
+   * open. `status` is what the modal renders — a copy that is still measuring
+   * must not show a size, and one that is running must not show a Copy button.
+   */
+  managedCopy: {
+    projectId: number;
+    status: 'measuring' | 'ready' | 'copying' | 'done';
+    preflight: ManagedCopyPreflight | null;
+    progress: { files: number; bytes: number; totalFiles: number; totalBytes: number } | null;
+    result: Extract<ServerMsg, { type: 'managed_copy_result' }>['result'] | null;
+  } | null;
+  /**
    * The model list a picker renders (Cebab-ws0.3). `null` until the server has
    * answered at all — which a picker must distinguish from an EMPTY answer:
    * "not asked yet" hides the list, "asked and there is nothing" says so.
@@ -909,6 +924,7 @@ export const initialState: AppState = {
   connected: false,
   projects: [],
   projectScans: {},
+  managedCopy: null,
   modelCatalogue: null,
   activeProjectId: null,
   sessionsByProject: {},
@@ -1033,6 +1049,12 @@ export type Action =
   | { type: 'ws_close' }
   | { type: 'server'; msg: ServerMsg }
   | { type: 'select_project'; projectId: number }
+  /** Cebab-ws0.9: open the managed-copy modal and start measuring. */
+  | { type: 'managed_copy_open'; projectId: number }
+  /** Cebab-ws0.9: the operator confirmed; the copy is now running. */
+  | { type: 'managed_copy_started' }
+  /** Cebab-ws0.9: close the modal, whatever state it was in. */
+  | { type: 'managed_copy_close' }
   | { type: 'select_session'; projectId: number; sessionId: string }
   | { type: 'new_session'; projectId: number }
   | { type: 'user_send'; text: string }
@@ -1171,6 +1193,30 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case 'select_project':
       return { ...state, activeProjectId: action.projectId };
+
+    // ---- Cebab-ws0.9: managed copy ----------------------------------------
+    case 'managed_copy_open':
+      // `status: 'measuring'` with a null preflight, deliberately. The modal
+      // opens on the click rather than on the server's answer, and until that
+      // answer lands it must show that it is still looking — not an empty size,
+      // which reads as "this project is empty".
+      return {
+        ...state,
+        managedCopy: {
+          projectId: action.projectId,
+          status: 'measuring',
+          preflight: null,
+          progress: null,
+          result: null,
+        },
+      };
+
+    case 'managed_copy_started':
+      if (!state.managedCopy) return state;
+      return { ...state, managedCopy: { ...state.managedCopy, status: 'copying' } };
+
+    case 'managed_copy_close':
+      return { ...state, managedCopy: null };
 
     case 'select_session':
       return {
@@ -1607,6 +1653,40 @@ export function reduce(state: AppState, action: Action): AppState {
 
 function reduceServer(state: AppState, msg: ServerMsg): AppState {
   switch (msg.type) {
+    case 'managed_copy_preflight':
+      // Ignore an answer for a project the operator is no longer looking at:
+      // they can close and reopen on another project faster than a survey of a
+      // large tree completes, and a late answer must not repaint the new modal
+      // with the old project's size.
+      if (!state.managedCopy || state.managedCopy.projectId !== msg.projectId) return state;
+      return {
+        ...state,
+        managedCopy: { ...state.managedCopy, status: 'ready', preflight: msg.preflight },
+      };
+
+    case 'managed_copy_progress':
+      if (!state.managedCopy || state.managedCopy.projectId !== msg.projectId) return state;
+      return {
+        ...state,
+        managedCopy: {
+          ...state.managedCopy,
+          status: 'copying',
+          progress: {
+            files: msg.files,
+            bytes: msg.bytes,
+            totalFiles: msg.totalFiles,
+            totalBytes: msg.totalBytes,
+          },
+        },
+      };
+
+    case 'managed_copy_result':
+      if (!state.managedCopy || state.managedCopy.projectId !== msg.projectId) return state;
+      return {
+        ...state,
+        managedCopy: { ...state.managedCopy, status: 'done', result: msg.result },
+      };
+
     case 'projects': {
       // Prune any drafted multi-agent participants that vanished from the
       // refreshed list. Without this, a workspace switch would leave dangling

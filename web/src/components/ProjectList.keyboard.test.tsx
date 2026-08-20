@@ -67,6 +67,7 @@ function project(overrides: Partial<Project> = {}): Project {
     busAgentName: null,
     model: null,
     startPermissionMode: null,
+    managed: null,
     ...overrides,
   };
 }
@@ -91,6 +92,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Spies 
     root.render(
       <ProjectList
         projectScans={{}}
+        onCopyToManaged={() => {}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}
@@ -178,7 +180,7 @@ describe('[a11y] session rows are operable from the keyboard', () => {
 
   test('a session row opens from its button', () => {
     const spies = render({ expanded: true, sessions: [summary('sess-aaaaaaa1')] });
-    const btn = only('.session-row:not(.new) .session-name');
+    const btn = only('.session-row[data-session-id] .session-name');
     expectKeyboardOperable(btn);
     expect(btn.getAttribute('aria-label')).toBe('Open session sess-aaa');
     activate(btn);
@@ -190,6 +192,7 @@ describe('[a11y] session rows are operable from the keyboard', () => {
       root.render(
         <ProjectList
           projectScans={{}}
+          onCopyToManaged={() => {}}
           projects={[project()]}
           activeProjectId={PID}
           activeSessionByProject={{ [PID]: 'sess-aaaaaaa1' }}
@@ -211,7 +214,9 @@ describe('[a11y] session rows are operable from the keyboard', () => {
         />,
       );
     });
-    expect(only('.session-row:not(.new) .session-name').getAttribute('aria-current')).toBe('true');
+    expect(only('.session-row[data-session-id] .session-name').getAttribute('aria-current')).toBe(
+      'true',
+    );
   });
 });
 
@@ -223,11 +228,13 @@ describe('[a11y] select mode uses a valid toggle state', () => {
   test('the row button becomes a toggle and reports pressed state', () => {
     render({ expanded: true, sessions: [summary('sess-aaaaaaa1')] });
     enterSelectMode();
-    const btn = only('.session-row:not(.new) .session-name');
+    const btn = only('.session-row[data-session-id] .session-name');
     expectKeyboardOperable(btn);
     expect(btn.getAttribute('aria-pressed')).toBe('false');
     activate(btn);
-    expect(only('.session-row:not(.new) .session-name').getAttribute('aria-pressed')).toBe('true');
+    expect(only('.session-row[data-session-id] .session-name').getAttribute('aria-pressed')).toBe(
+      'true',
+    );
   });
 
   test('no list item carries aria-selected', () => {
@@ -237,7 +244,7 @@ describe('[a11y] select mode uses a valid toggle state', () => {
     // `aria-pressed` now.
     render({ expanded: true, sessions: [summary('sess-aaaaaaa1')] });
     enterSelectMode();
-    activate(only('.session-row:not(.new) .session-name'));
+    activate(only('.session-row[data-session-id] .session-name'));
     expect(container.querySelectorAll('[aria-selected]')).toHaveLength(0);
   });
 
@@ -246,7 +253,9 @@ describe('[a11y] select mode uses a valid toggle state', () => {
     // must keep working for mouse users.
     render({ expanded: true, sessions: [summary('sess-aaaaaaa1')] });
     enterSelectMode();
-    activate(only('.session-row:not(.new)'));
-    expect(only('.session-row:not(.new) .session-name').getAttribute('aria-pressed')).toBe('true');
+    activate(only('.session-row[data-session-id]'));
+    expect(only('.session-row[data-session-id] .session-name').getAttribute('aria-pressed')).toBe(
+      'true',
+    );
   });
 });

@@ -56,6 +56,7 @@ function project(id: number, name: string, over: Partial<Project> = {}): Project
     busAgentName: null,
     model: null,
     startPermissionMode: null,
+    managed: null,
     ...over,
   };
 }

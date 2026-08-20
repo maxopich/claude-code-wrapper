@@ -25,6 +25,7 @@ import {
 } from './store';
 import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
 import { ProjectList } from './components/ProjectList';
+import { ManagedCopyModal } from './components/ManagedCopyModal';
 import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
@@ -1041,6 +1042,24 @@ function AppShell({
   // the operator a choice that never landed.
   function setProjectStartPermissionMode(projectId: number, mode: SessionPermissionMode | null) {
     wsRef.current?.send({ type: 'set_project_start_permission_mode', projectId, mode });
+  }
+
+  /**
+   * Cebab-ws0.9: open the managed-copy modal and ask the server to measure.
+   *
+   * Two steps on the wire, not one. The modal opens immediately on the click so
+   * the operator sees something happened, and the size arrives when the survey
+   * of a possibly-enormous tree finishes — which can take a moment and must not
+   * be the thing the click waits on.
+   */
+  function openManagedCopy(projectId: number) {
+    dispatch({ type: 'managed_copy_open', projectId });
+    wsRef.current?.send({ type: 'preflight_managed_copy', projectId });
+  }
+
+  function confirmManagedCopy(projectId: number) {
+    dispatch({ type: 'managed_copy_started' });
+    wsRef.current?.send({ type: 'copy_project_to_managed', projectId });
   }
 
   function toggleTrust(projectId: number, trusted: boolean) {
@@ -2349,6 +2368,7 @@ function AppShell({
             onSetProjectModel={setProjectModel}
             onRefreshModelCatalogue={refreshModelCatalogue}
             onSetProjectStartPermissionMode={setProjectStartPermissionMode}
+            onCopyToManaged={openManagedCopy}
             onRenameSession={renameSession}
             onDownloadSession={downloadSession}
             onBulkSessionOp={bulkSessionOp}
@@ -2743,6 +2763,17 @@ function AppShell({
         />
       )}
       {shortcutsOpen && <KeyboardShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+      {state.managedCopy && (
+        <ManagedCopyModal
+          projectName={
+            state.projects.find((p) => p.id === state.managedCopy!.projectId)?.name ??
+            'this project'
+          }
+          state={state.managedCopy}
+          onConfirm={() => confirmManagedCopy(state.managedCopy!.projectId)}
+          onClose={() => dispatch({ type: 'managed_copy_close' })}
+        />
+      )}
       {searchOpen && (
         <SessionSearchModal
           onClose={() => setSearchOpen(false)}
