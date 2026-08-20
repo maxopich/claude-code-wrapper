@@ -318,6 +318,7 @@ describe('store / projects refresh (workspace switch)', () => {
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 1,
@@ -368,6 +369,7 @@ describe('store / projects refresh (workspace switch)', () => {
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 11,
@@ -410,6 +412,7 @@ describe('store / projects refresh (workspace switch)', () => {
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 11,
@@ -439,6 +442,7 @@ describe('store / projects refresh (workspace switch)', () => {
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 1,
@@ -485,6 +489,90 @@ describe('store / projects refresh (workspace switch)', () => {
     // The trust flag flipped server-side; verify it reflects.
     expect(s.projects.find((p) => p.id === 1)!.trusted).toBe(true);
   });
+
+  /**
+   * Cebab-ws0.6. The scan is DERIVED from the project's Trust flag, so a scan
+   * that survives a `projects` re-emit does not read as stale — it reads as a
+   * contradiction of the trust pill sitting beside it. Wholesale replacement
+   * is the only shape that cannot produce that.
+   */
+  test('projectScans is replaced wholesale, never merged', () => {
+    const project = {
+      id: 1,
+      name: 'Cebab',
+      path: '/ws/Cebab',
+      trusted: false,
+      lastUsedAt: null,
+      hasClaudeMd: true,
+      busInstalled: false,
+      busAgentName: null,
+      model: null,
+      startPermissionMode: null,
+    };
+    const scanFor = (projectId: number, loads: boolean) => ({
+      projectId,
+      scannedAt: 1,
+      scopesLoaded: (loads ? ['user', 'project', 'local'] : ['user']) as (
+        'user' | 'project' | 'local'
+      )[],
+      mcpServers: [{ name: 'reporter', loads }],
+      hooks: { declared: 0, loaded: 0, hasLocalScope: false },
+      envInjections: { declared: 0, loaded: 0 },
+      degraded: false,
+    });
+
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [project, { ...project, id: 2, name: 'other', path: '/ws/other' }],
+        scans: [scanFor(1, false), scanFor(2, false)],
+      },
+    });
+    expect(Object.keys(s.projectScans).sort()).toEqual(['1', '2']);
+    expect(s.projectScans[1].mcpServers[0].loads).toBe(false);
+
+    // Trust flipped on project 1; project 2 is gone from the workspace.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [{ ...project, trusted: true }],
+        scans: [scanFor(1, true)],
+      },
+    });
+    // The old scan for 2 must not survive, and 1's must be the new one.
+    expect(Object.keys(s.projectScans)).toEqual(['1']);
+    expect(s.projectScans[1].mcpServers[0].loads).toBe(true);
+  });
+
+  test('a projects message with no scans clears them rather than keeping the old ones', () => {
+    // The direction a merge would get wrong: an empty `scans` is an answer
+    // ("nothing was scanned"), not an absence of one.
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'projects',
+        projects: [],
+        scans: [
+          {
+            projectId: 9,
+            scannedAt: 1,
+            scopesLoaded: ['user'],
+            mcpServers: [],
+            hooks: { declared: 0, loaded: 0, hasLocalScope: false },
+            envInjections: { declared: 0, loaded: 0 },
+            degraded: false,
+          },
+        ],
+      },
+    });
+    expect(Object.keys(s.projectScans)).toEqual(['9']);
+    s = reduce(s, { type: 'server', msg: { type: 'projects', projects: [], scans: [] } });
+    expect(s.projectScans).toEqual({});
+  });
 });
 
 describe('store / multi-agent reducer (PR 2)', () => {
@@ -496,6 +584,7 @@ describe('store / multi-agent reducer (PR 2)', () => {
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 1,
@@ -604,6 +693,7 @@ describe('store / multi-agent reducer (PR 2)', () => {
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 2,
@@ -776,6 +866,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 10,
@@ -871,6 +962,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 10,
@@ -2471,6 +2563,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 1,
@@ -2512,6 +2605,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 1,
@@ -2558,6 +2652,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 1,
@@ -2604,6 +2699,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
       type: 'server',
       msg: {
         type: 'projects',
+        scans: [],
         projects: [
           {
             id: 1,

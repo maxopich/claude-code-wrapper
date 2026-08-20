@@ -56,9 +56,20 @@ import { getDb } from '../db.js';
 // (= declared provenance), and merges them into a single
 // `ProjectAuthority` envelope that the AuthorityPanel (Phase 6+) renders.
 //
-// The "probe" mode of `get_project_authority` (spawn a maxTurns:0 SDK run
-// for a fresh effective snapshot) lands in Phase 3b; this module
-// intentionally does not import the SDK to keep its surface area small.
+// The "probe" mode of `get_project_authority` spawns a real (maxTurns:0) SDK
+// run for a fresh effective snapshot; that lives in `runner/probe.ts`. NOTHING
+// HERE SPAWNS, and that is the invariant to preserve.
+//
+// This comment used to state the mechanism as "intentionally does not import
+// the SDK to keep its surface area small". The conclusion held; the mechanism
+// stopped being true. Line 12 imports two name constants from
+// `runner/claude.ts`, which imports `query` from the SDK, so the SDK is in
+// this module's transitive graph and has been for a while. The constraint that
+// actually holds — and the one `repo/project_scan.ts` leans on when it runs
+// this file's readers for EVERY project on the listing path — is that no
+// function in here calls `query` / `runClaude` / `pickRunner`, and every export
+// is synchronous. A synchronous function cannot await a spawn, which is a
+// stronger guarantee than an import list anyway.
 
 // ---- settings.json shape ----
 //
@@ -104,13 +115,27 @@ type ClaudeJson = {
  *  same set as `runner/claude.ts`'s `SettingSource`. */
 export type SettingScope = 'user' | 'project' | 'local';
 
-type SettingsLayer = {
+export type SettingsLayer = {
   scope: SettingScope;
   scopePath: string;
   data: RawSettings | null;
 };
 
-const USER_SCOPE_PATH = path.join(os.homedir(), '.claude', 'settings.json');
+/**
+ * `~/.claude/settings.json`, resolved at CALL time.
+ *
+ * This was a module-level const, and that made it the one reader in this file
+ * a HOME redirect could not reach: `os.homedir()` runs once at import, before
+ * any test can point it somewhere empty. `readClaudeJsonServers` beside it has
+ * always resolved at call time and has a test pinning that. The asymmetry cost
+ * nothing in production — homedir does not change under a running server — and
+ * everything in a test, where a frozen path means the user-scope layer quietly
+ * reads the DEVELOPER'S real settings and any count assertion becomes a
+ * property of whose machine ran it.
+ */
+function userScopePath(): string {
+  return path.join(os.homedir(), '.claude', 'settings.json');
+}
 
 /**
  * MCP server names Cebab itself injects. Only these may carry
@@ -283,6 +308,36 @@ export function readMcpJsonServers(
  * Returns `[]` for absent / unreadable / malformed, matching
  * `readSettingsFile`'s "no rules from this scope" posture.
  */
+/**
+ * True iff `<projectPath>/.mcp.json` exists but could not be read or parsed.
+ *
+ * `readMcpJsonServers` above returns `[]` for absent, refused, malformed AND
+ * valid-but-declaring-nothing alike — the right collapse for a resolver, which
+ * wants "no servers from this file" either way. A per-project SUMMARY cannot
+ * afford it: rendering "declares nothing" for a project whose `.mcp.json` is a
+ * directory, a FIFO or invalid JSON asserts the opposite of what is true.
+ *
+ * Lives here rather than in the caller so it shares this module's cap and
+ * filename constants; a copy next to the summary would drift from the reader
+ * it is meant to describe. Only worth calling when the reader already returned
+ * nothing, which is when the ambiguity exists.
+ */
+export function mcpJsonIsUnreadable(projectPath: string): boolean {
+  const p = path.join(projectPath, MCP_JSON_FILENAME);
+  const read = readTextBounded(p, MAX_MCP_JSON_BYTES);
+  if (!read.ok) {
+    // `unreadable` covers "absent" and "permission denied" both; only the
+    // latter is a degradation, and existence is what separates them.
+    return read.refusal !== 'unreadable' || fs.existsSync(p);
+  }
+  try {
+    JSON.parse(read.text);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 export function readClaudeJsonServers(
   projectPath: string,
   scopes: readonly SettingScope[],
@@ -367,15 +422,23 @@ export function readClaudeJsonServers(
  * `settingSourcesUsed` on the resolved authority reflects whatever was
  * passed, so the AuthorityPanel never claims a layer that wasn't applied.
  */
-function loadSettingsLayers(projectPath: string, scopes: readonly SettingScope[]): SettingsLayer[] {
+/**
+ * Read the `settings.json` layers for an explicit scope set. Exported for
+ * `repo/project_scan.ts`, which needs the same layers this resolver builds but
+ * none of the expensive work that follows them (Cebab-ws0.6) — sharing the
+ * reader rather than re-implementing it is the point: a second copy would
+ * inherit this one's refusal and parse semantics only until one of them
+ * changed.
+ */
+export function loadSettingsLayers(
+  projectPath: string,
+  scopes: readonly SettingScope[],
+): SettingsLayer[] {
   const layers: SettingsLayer[] = [];
   for (const scope of scopes) {
     if (scope === 'user') {
-      layers.push({
-        scope: 'user',
-        scopePath: USER_SCOPE_PATH,
-        data: readSettingsFile(USER_SCOPE_PATH),
-      });
+      const userPath = userScopePath();
+      layers.push({ scope: 'user', scopePath: userPath, data: readSettingsFile(userPath) });
       continue;
     }
     const scopePath = path.join(
@@ -1033,5 +1096,5 @@ export const _testing = {
   readSettingsFile,
   readMcpJsonServers,
   readClaudeJsonServers,
-  USER_SCOPE_PATH,
+  userScopePath,
 };

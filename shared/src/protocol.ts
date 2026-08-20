@@ -1874,7 +1874,20 @@ export type ClientMsg =
 
 // ---- Server → Browser ----
 export type ServerMsg =
-  | { type: 'projects'; projects: Project[] }
+  | {
+      type: 'projects';
+      projects: Project[];
+      /**
+       * The file-scan summary for each project in `projects`, same order not
+       * guaranteed — match on `projectId` (Cebab-ws0.6).
+       *
+       * REQUIRED, not optional, so the compiler enumerates every site that
+       * builds this message. There are eight, and the scan is derived from
+       * `trusted`, so a site that re-emits the list after a trust toggle
+       * without a fresh scan would ship a summary that is quietly wrong.
+       */
+      scans: ProjectScan[];
+    }
   | {
       /**
        * The model list a picker should render (Cebab-ws0.3).
@@ -3748,6 +3761,88 @@ export type ProjectAuthority = {
   plugins: { name: string; path: string }[];
   hooks: HookView[];
   detectedEnvInjections: EnvInjection[];
+};
+
+/**
+ * A count of things declared on disk, split by whether they actually load.
+ *
+ * The split is the whole point (Cebab-ws0.6). `declared` counts every
+ * declaration found in any scope; `loaded` counts only the subset in a scope
+ * this project's next run would read. When they differ, something is sitting
+ * on disk that Trust is keeping out — a fact that was previously unobservable
+ * from anywhere in Cebab, and the one the epic was reported for.
+ */
+export type ScannedTally = {
+  /** Declared on disk across every scope, whether or not it would load. */
+  declared: number;
+  /** The subset that this project's current scope set actually loads. */
+  loaded: number;
+};
+
+/** One MCP server declaration found by the file scan. */
+export type ScannedMcpServer = {
+  name: string;
+  /**
+   * True iff the file declaring this server is in a scope the project
+   * currently loads. A `false` here must never be rendered as if the server
+   * were active — it is declared and inert.
+   */
+  loads: boolean;
+  /** Absolute path of the file that declares it, when the reader knows one. */
+  originPath?: string;
+};
+
+/**
+ * Cebab-ws0.6 — what a project declares on disk, read for EVERY project on the
+ * project-listing path, with no `claude` spawn of any kind.
+ *
+ * This is the cheap tier of a two-tier split. The expensive tier is a real
+ * probe (`runner/probe.ts`), which costs one process spawn per project and so
+ * cannot run for every project at app start; that is the sibling bead. Nothing
+ * here needs a session to have run, which is exactly the gap it fills: before
+ * this, the sidebar knew a project's name, path, Trust flag and whether a
+ * `CLAUDE.md` existed, and everything else required opening the preflight one
+ * project at a time.
+ *
+ * DERIVED, NEVER STORED. It rides alongside `Project` on the `projects`
+ * message rather than on `Project` itself, because `Project` mirrors a stored
+ * row and this is a fresh read off disk. It is recomputed on every emit of
+ * that message — necessarily so: the scan is derived from `trusted`, so a
+ * trust toggle changes it.
+ *
+ * DELIBERATELY NOT HERE: MCP TOFU trust state. Resolving it costs a bounded
+ * read plus a sha256 of each server's binary, per project, per listing — see
+ * `repo/project_scan.ts` for the measurement and the follow-up.
+ */
+export type ProjectScan = {
+  projectId: number;
+  scannedAt: number;
+  /**
+   * The setting scopes this project's next single-agent run would load,
+   * derived from Trust: `['user']` when untrusted, all three when trusted.
+   * This is what explains a `loads: false` above rather than leaving the
+   * operator to guess.
+   */
+  scopesLoaded: ('user' | 'project' | 'local')[];
+  /** Every MCP server declared in any scope, each marked with whether it loads. */
+  mcpServers: ScannedMcpServer[];
+  hooks: ScannedTally & {
+    /**
+     * True iff at least one declared hook comes from `settings.local.json` —
+     * the scope that is neither committed nor reviewed, and the one the
+     * authority panel already escalates.
+     */
+    hasLocalScope: boolean;
+  };
+  /** Env-var injections declared by settings files. NAMES only ever leave here, never values. */
+  envInjections: ScannedTally;
+  /**
+   * True iff at least one settings file was present but could not be read or
+   * parsed. The scan still returns whatever it did read; this says "part of
+   * this answer is missing" rather than letting an empty result claim the
+   * project declares nothing.
+   */
+  degraded: boolean;
 };
 
 /**

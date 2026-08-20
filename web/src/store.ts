@@ -12,6 +12,7 @@ import type {
   PauseExpiryAction,
   PendingRetryDescriptor,
   Project,
+  ProjectScan,
   RecoveryContextView,
   RouterDropReasonCode,
   ServerMsg,
@@ -723,6 +724,17 @@ export type AppState = {
   connected: boolean;
   projects: Project[];
   /**
+   * What each project declares on disk, keyed by project id (Cebab-ws0.6).
+   *
+   * Replaced wholesale together with `projects`, never merged. The scan is
+   * derived from the project's Trust flag, so a scan that outlived the list it
+   * described would not read as stale — it would read as a contradiction of
+   * the trust pill sitting beside it. A missing key means "no scan arrived for
+   * this project", which the sidebar renders as nothing rather than as
+   * "declares nothing".
+   */
+  projectScans: Record<number, ProjectScan>;
+  /**
    * The model list a picker renders (Cebab-ws0.3). `null` until the server has
    * answered at all — which a picker must distinguish from an EMPTY answer:
    * "not asked yet" hides the list, "asked and there is nothing" says so.
@@ -896,6 +908,7 @@ export type SettingsView = {
 export const initialState: AppState = {
   connected: false,
   projects: [],
+  projectScans: {},
   modelCatalogue: null,
   activeProjectId: null,
   sessionsByProject: {},
@@ -1614,12 +1627,17 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // and the user feels like "the list didn't refresh".
       const activeStillPresent =
         state.activeProjectId !== null && msg.projects.some((p) => p.id === state.activeProjectId);
+      // Wholesale, on both branches — see `projectScans` on AppState for why a
+      // surviving scan is worse than an absent one.
+      const projectScans: Record<number, ProjectScan> = {};
+      for (const scan of msg.scans) projectScans[scan.projectId] = scan;
       if (activeStillPresent) {
-        return { ...state, projects: msg.projects, multiAgent: nextMultiAgent };
+        return { ...state, projects: msg.projects, projectScans, multiAgent: nextMultiAgent };
       }
       return {
         ...state,
         projects: msg.projects,
+        projectScans,
         activeProjectId: null,
         // The session-related state below is keyed by project id; without a
         // valid active project, none of it can render meaningfully. Clear it

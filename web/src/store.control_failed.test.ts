@@ -30,6 +30,7 @@ function seedBusRun(): AppState {
     type: 'server',
     msg: {
       type: 'projects',
+      scans: [],
       projects: [
         {
           id: 1,
