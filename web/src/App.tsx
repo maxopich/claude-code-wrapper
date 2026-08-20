@@ -22,6 +22,7 @@ import {
   isSessionPending,
   reduce,
   sessionSelectionRequests,
+  showsNewChatPreview,
 } from './store';
 import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
 import { ProjectList } from './components/ProjectList';
@@ -66,6 +67,7 @@ import {
   buildRateLimitBannerItem,
   type BannerStackItem,
 } from './components/banners';
+import { NewChatPreview } from './components/NewChatPreview';
 import { ReopenProvider, useReopenActions } from './components/reopen';
 import { AuthRefreshProvider, useAuthRefreshActions } from './components/authRefresh';
 import { RecoveryLogButton, RecoveryLogProvider } from './components/recoveryLog';
@@ -1240,6 +1242,15 @@ function AppShell({
     ? (state.permissionModeBySession[session.id] ?? 'default')
     : 'default';
   const sessionIsLive = session ? state.liveSessions[session.id] === true : false;
+  // Cebab-ws0.5: the project a new-chat preview would describe, or undefined.
+  // Looked up rather than assumed present — `activeProjectId` can name a row
+  // the last `projects` re-emit dropped (a project that went missing from the
+  // workspace scan), and rendering a preview headed by a project that is gone
+  // would be worse than falling through to the empty chat area.
+  const newChatProject =
+    state.activeProjectId !== null
+      ? state.projects.find((p) => p.id === state.activeProjectId)
+      : undefined;
   // Item #6: trust chip joins live `project.trusted` with `permissionMode`. The
   // active project is the project whose session is currently rendering — pulled
   // from `state.projects` because the SessionView only carries `projectId`.
@@ -2663,20 +2674,47 @@ function AppShell({
                     })()}
                   />
                 )}
-                <ChatView
-                  session={session}
-                  isLive={sessionIsLive}
-                  onPermissionDecide={decidePermission}
-                  onSubmitStopReason={submitStopReason}
-                  onSkipStopReason={skipStopReason}
-                  /* Cluster F Phase A1b (UI-A1): max-turns result card
-                   * affordances — extend the cap or end the session. The
-                   * extensionsUsed counter drives the soft-cap warning
-                   * tooltip when >= EXTENSION_SOFT_CAP (3). */
-                  extensionsUsed={session ? (extensionsUsedBySession[session.id] ?? 0) : 0}
-                  onExtendMaxTurns={extendMaxTurns}
-                  onEndMaxTurnsSession={endMaxTurnsSession}
-                />
+                {/* Cebab-ws0.5: a new chat opens onto the agent's authority
+                 *  rather than onto blank space. Which of the two shows is
+                 *  `showsNewChatPreview`, in store.ts — the rule decides what
+                 *  the operator sees and this file has no test of its own, so
+                 *  what is left here is a ternary over a tested predicate.
+                 *  The composer below is untouched either way: typing starts
+                 *  the session, and the preview gives way to scrollback. */}
+                {showsNewChatPreview(state) && newChatProject ? (
+                  <NewChatPreview
+                    projectId={newChatProject.id}
+                    projectName={newChatProject.name}
+                    model={{
+                      entries: state.modelCatalogue?.entries ?? [],
+                      capturedAt: state.modelCatalogue?.capturedAt ?? null,
+                      value: newChatProject.model ?? null,
+                      refreshing: modelRefreshingFor === newChatProject.id,
+                      onChange: (m) => setProjectModel(newChatProject.id, m),
+                      onRefresh: () => refreshModelCatalogue(newChatProject.id),
+                    }}
+                    startMode={{
+                      value: newChatProject.startPermissionMode ?? null,
+                      trusted: newChatProject.trusted,
+                      onChange: (m) => setProjectStartPermissionMode(newChatProject.id, m),
+                    }}
+                  />
+                ) : (
+                  <ChatView
+                    session={session}
+                    isLive={sessionIsLive}
+                    onPermissionDecide={decidePermission}
+                    onSubmitStopReason={submitStopReason}
+                    onSkipStopReason={skipStopReason}
+                    /* Cluster F Phase A1b (UI-A1): max-turns result card
+                     * affordances — extend the cap or end the session. The
+                     * extensionsUsed counter drives the soft-cap warning
+                     * tooltip when >= EXTENSION_SOFT_CAP (3). */
+                    extensionsUsed={session ? (extensionsUsedBySession[session.id] ?? 0) : 0}
+                    onExtendMaxTurns={extendMaxTurns}
+                    onEndMaxTurnsSession={endMaxTurnsSession}
+                  />
+                )}
                 <InputBox
                   /* Cluster C Phase 1: structural disable only (no
                    * project, workspace bad). `running` no longer hard-

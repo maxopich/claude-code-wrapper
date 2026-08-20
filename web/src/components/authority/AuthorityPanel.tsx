@@ -1,7 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { timeAgo } from '../../format';
 import { readStored, writeStored } from '../../prefs';
-import { useAuthorityActions, useAuthoritySlot, type AuthoritySlot } from './AuthorityContext';
+import {
+  initialRequestFor,
+  useAuthorityActions,
+  useAuthoritySlot,
+  type AuthoritySlot,
+} from './AuthorityContext';
 import { AuthoritySection } from './AuthoritySection';
 import { ModelIdentityCard } from './ModelIdentityCard';
 import { ToolsList, type UsageToggle } from './ToolsList';
@@ -69,6 +74,17 @@ export type AuthorityPanelProps = {
    * modal and post-run review leave it off, so their DOM is unchanged.
    */
   collapsible?: boolean;
+  /**
+   * Cebab-ws0.5: an operator is about to act on what this panel says, so a
+   * snapshot nobody measured is not good enough — probe if there is not
+   * already a live one. The new-chat preview and the preflight modal pass it;
+   * the in-session disclosure does not, because by then a real turn has filled
+   * the cache from the same source a probe would.
+   *
+   * `initialRequestFor` owns the decision, including the "already asked" case
+   * that keeps this from becoming a spawn per render.
+   */
+  wantLive?: boolean;
 };
 
 function headerForMode(mode: AuthorityPanelMode): string {
@@ -105,7 +121,7 @@ function toolsModeForPanel(mode: AuthorityPanelMode): {
 }
 
 export function AuthorityPanel(props: AuthorityPanelProps) {
-  const { projectId, mode, noAutoRequest = false, collapsible = false } = props;
+  const { projectId, mode, noAutoRequest = false, collapsible = false, wantLive = false } = props;
   const slot = useAuthoritySlot(projectId);
   const { request } = useAuthorityActions();
 
@@ -120,14 +136,31 @@ export function AuthorityPanel(props: AuthorityPanelProps) {
     if (collapsible) writeStored('cebab.authorityCollapsed', String(collapsed));
   }, [collapsible, collapsed]);
 
-  // Auto-fire cache request on mount for any panel that hasn't loaded yet.
-  // The reducer dedupes — if a previous mount already requested, it stays
-  // in 'requesting' and this call is a no-op on the server (a re-request is
-  // cheap; the WS handler returns the cached snapshot synchronously).
+  // Auto-fire the right request on mount for any panel that hasn't loaded
+  // what it needs. `initialRequestFor` owns which — including returning null
+  // for anything already in flight, which is what stops this effect from
+  // re-firing as the slot changes underneath it.
+  //
+  // The dependency list reads the whole slot rather than `slot.status`,
+  // because a `ready` slot's ANSWER now changes without its status doing so:
+  // `refreshing` is set and cleared on a slot that stays `ready` throughout.
+  //
+  // The ref is what makes it AT MOST ONE per project per mount, and it is not
+  // belt-and-braces. A probe can come back cache-derived — that is exactly what
+  // a failed probe looks like since `Cebab-ws0.7` made the label honest — and
+  // the slot then satisfies `initialRequestFor` all over again. Policy alone
+  // would retry, and a surface that retries a failing probe every time its
+  // answer lands is a spawn loop with extra steps. Refresh remains for the
+  // operator who wants another go.
+  const autoRequestedFor = useRef<number | null>(null);
   useEffect(() => {
     if (noAutoRequest) return;
-    if (slot.status === 'idle') request(projectId, 'cache');
-  }, [projectId, slot.status, request, noAutoRequest]);
+    if (autoRequestedFor.current === projectId) return;
+    const want = initialRequestFor(slot, wantLive);
+    if (want === null) return;
+    autoRequestedFor.current = projectId;
+    request(projectId, want);
+  }, [projectId, slot, request, noAutoRequest, wantLive]);
 
   const bodyId = `authority-body-${projectId}`;
 
@@ -176,6 +209,13 @@ function renderStatus(slot: AuthoritySlot): string {
   if (slot.status === 'idle') return 'loading…';
   if (slot.status === 'requesting') return `requesting (${slot.mode})…`;
   if (slot.status === 'cache-miss') return 'no snapshot — click Refresh';
+  // Cebab-ws0.5: a re-read over populated data used to be invisible — the age
+  // below kept ticking on the old snapshot with nothing saying a newer one was
+  // on its way. The age stays, because it is still the age of what is on
+  // screen.
+  if (slot.refreshing !== undefined) {
+    return `${slot.lastFetchedMode} · ${timeAgo(slot.receivedAt)} · refreshing…`;
+  }
   // ready. N14: this built its own `${ageSec}s ago` inline rather than in a
   // named function, which is why it was the seventh site nobody had counted —
   // and why the gate keying on the rendered LITERAL rather than on function

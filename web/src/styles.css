@@ -1811,6 +1811,44 @@ pre {
   color: var(--fg-3);
 }
 
+/* Cebab-ws0.5: the new-chat authority preview. Shares `.chat` so it inherits
+ * the reading-column gutters, the scroll and the background — this IS the chat
+ * area, showing what there is to show before a conversation exists.
+ *
+ * It deliberately does NOT get `.chat.empty`'s centring: that rule exists for a
+ * single line of text, and centring a panel taller than the viewport puts its
+ * top off-screen. */
+.new-chat-preview {
+  align-items: stretch;
+  justify-content: flex-start;
+}
+.new-chat-preview-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.new-chat-preview-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.new-chat-preview-help {
+  margin: 0;
+  color: var(--fg-3);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+/* The panel stack caps its height and scrolls itself inside the modal, where
+ * the surrounding chrome is fixed. Inline that would be a second scrollbar
+ * inside one that already scrolls, so the cap is lifted here and `.chat`'s own
+ * overflow does the work. */
+.new-chat-preview .authority-preflight-panels {
+  max-height: none;
+  overflow-y: visible;
+  padding: 0;
+}
+
 /* Avatar + author/body layout (ported from cebab-redesign.html). The
  * result/error/system kinds keep a thin semantic left rail; user &
  * assistant drop it — the avatar carries identity. */

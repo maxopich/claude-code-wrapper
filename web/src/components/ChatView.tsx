@@ -83,6 +83,11 @@ export function ChatView(props: {
   }, [sessionId]);
 
   if (!props.session) {
+    // Cebab-ws0.5: this sentence used to render for BOTH sessionless cases,
+    // and it was wrong in the commoner one — a selected project with no
+    // conversation yet had a project selected. That case is now
+    // `NewChatPreview`, mounted in its place; this stays for the case it
+    // describes correctly, which is nothing selected at all.
     return (
       <div className="chat empty">
         <div>Select a project to start a conversation.</div>

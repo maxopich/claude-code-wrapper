@@ -45,6 +45,22 @@ export type AuthoritySlot =
       // ("Cached from last session" vs "Live probe N seconds ago").
       lastFetchedMode: 'cache' | 'probe';
       receivedAt: number;
+      /**
+       * Cebab-ws0.5: a re-read is in flight over this already-populated slot,
+       * and which kind. Absent means nothing is pending.
+       *
+       * This is load-bearing rather than decorative. A `ready` slot keeps its
+       * data through a re-request (see `request` below), so from the outside a
+       * refresh is invisible — and a mount effect asking "does this slot still
+       * need a live read?" would get the same YES on every render and issue a
+       * probe per frame, each one a process spawn. `initialRequestFor` reads
+       * this to answer "already asked".
+       *
+       * It also finally supplies what the `request` case has claimed since it
+       * was written: that the panel can "keep rendering stale data with a
+       * spinner overlay". There was no flag to render a spinner from.
+       */
+      refreshing?: 'cache' | 'probe';
     }
   | { status: 'cache-miss'; receivedAt: number };
 
@@ -68,7 +84,11 @@ function reducer(state: State, action: Action): State {
       // flashing empty.
       const next: AuthoritySlot =
         prev && prev.status === 'ready'
-          ? prev // keep the ready data; status flag is in the panel header
+          ? // Keep the ready DATA, and record that a re-read is in flight.
+            // Returning `prev` unchanged — which is what this did — makes the
+            // request unobservable, so nothing downstream can tell "already
+            // asked" from "never asked".
+            { ...prev, refreshing: action.mode }
           : { status: 'requesting', mode: action.mode, since: action.now };
       return { byProject: { ...state.byProject, [action.projectId]: next } };
     }
@@ -107,6 +127,42 @@ function reducer(state: State, action: Action): State {
       return { byProject: rest };
     }
   }
+}
+
+/**
+ * Cebab-ws0.5: what, if anything, a freshly-mounted authority surface should
+ * ask for.
+ *
+ * `wantLive` is the caller saying "an operator is about to act on this, so a
+ * snapshot nobody measured is not good enough" — the new-chat preview and the
+ * preflight modal pass it; the in-session disclosure does not.
+ *
+ * The rule is "probe only when there is no live snapshot yet", and the reason
+ * is cost: since `Cebab-ws0.7` a probe already runs when the operator selects a
+ * project, so a surface that re-probed on open would spawn a second process
+ * moments after the first for information that has not changed. Refresh is
+ * still there for a deliberate re-read.
+ *
+ * `null` for anything in flight, and that includes `refreshing` on a `ready`
+ * slot — without it this returns the same answer on every render and turns a
+ * mount effect into a spawn loop.
+ */
+export function initialRequestFor(
+  slot: AuthoritySlot,
+  wantLive: boolean,
+): 'cache' | 'probe' | null {
+  if (slot.status === 'requesting') return null;
+  if (slot.status === 'ready') {
+    if (slot.refreshing !== undefined) return null;
+    // A live reading in hand is the one case that needs nothing, whoever asks.
+    if (slot.lastFetchedMode === 'probe') return null;
+    return wantLive ? 'probe' : null;
+  }
+  // `idle` has never been asked; `cache-miss` was answered with nothing, and a
+  // caller that wants live has a reason to try again where a passive one does
+  // not (its cheap read already came back empty).
+  if (wantLive) return 'probe';
+  return slot.status === 'idle' ? 'cache' : null;
 }
 
 // ---- contexts ----
