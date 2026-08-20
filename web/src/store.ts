@@ -23,6 +23,7 @@ import type {
   ModelCatalogueEntry,
 } from '@cebab/shared/protocol';
 import type { MutationCategory, PermissionDecisionReason } from '@cebab/shared';
+import { notConnected, type McpServerStatus } from './mcpStatus.js';
 
 export type MessageView =
   | { kind: 'user'; id: string; text: string }
@@ -231,6 +232,23 @@ export type SessionView = {
    * undefined/false both render nothing.
    */
   mock?: boolean;
+  /**
+   * Cebab-ws0.2: the session's MCP servers that did NOT report `connected` at
+   * startup, from `session_started.mcpServers`. Absence means no banner —
+   * either every loaded server is carrying its tools, or this session has not
+   * reported on the question yet.
+   *
+   * Present iff non-empty, which is why the reducer DELETES rather than
+   * spread-omits: a resumed session whose servers now connect must clear the
+   * banner its previous start raised, and an omitted key would leave the stale
+   * one standing.
+   *
+   * Live inits only. A replayed `system/init` is identical on the wire to a
+   * live one (Register W08), and a status measured days ago is not a claim
+   * about now — which is the whole value of the banner. Replaying a session
+   * therefore leaves no slice at all; the next live init re-establishes it.
+   */
+  mcpStatus?: readonly McpServerStatus[];
 };
 
 /** Max number of messages the held-queue accepts before refusing new ones.
@@ -2359,6 +2377,40 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // if a later session_started for the same id omits the field).
         ...(msg.mock !== undefined ? { mock: msg.mock } : {}),
       };
+
+      // Cebab-ws0.2: which MCP servers this session started with that are not
+      // carrying tools. `notConnected` owns the rule; see its header for why it
+      // is "not connected" rather than a list of known-bad statuses.
+      //
+      // Three cases, and each is a separate decision:
+      //   - `mcpServers` absent (older payload): leave whatever is there. We
+      //     did not measure, so we say nothing either way.
+      //   - present with unhealthy entries: stamp them.
+      //   - present and all healthy: DELETE. This is the case a spread-omit
+      //     gets wrong — a resumed session whose servers now connect would keep
+      //     the banner its previous start raised, and the operator would be
+      //     told a problem persists that the resume just fixed.
+      //
+      // Register W08: `isReplay` gates the whole thing. A persisted
+      // `system/init` replays as a `session_started` indistinguishable from a
+      // live one, and a status measured days ago is not a claim about now.
+      //
+      // Note what that means end-to-end, because it is not "the old value
+      // survives": `session_history_start` has already rebuilt the session
+      // bucket, so the slice is gone before this runs and the guard declines to
+      // refill it. After a replay Cebab says nothing about this session's
+      // servers in either direction, which is the honest answer, and the next
+      // live init says it again if it is still true.
+      if (!isReplay && msg.mcpServers !== undefined) {
+        const unhealthy = notConnected(msg.mcpServers);
+        if (unhealthy.length > 0) session = { ...session, mcpStatus: unhealthy };
+        else if (session.mcpStatus !== undefined) {
+          const cleared = { ...session };
+          delete cleared.mcpStatus;
+          session = cleared;
+        }
+      }
+
       nextProjectMap[msg.sessionId] = session;
 
       // Cebab-f9x: `isReplay` gates this too. A persisted `system/init` row
