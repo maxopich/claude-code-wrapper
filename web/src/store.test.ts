@@ -3258,6 +3258,8 @@ describe('store / managed copy (Cebab-ws0.9)', () => {
     largest: [],
     skips: [],
     skipsTruncated: 0,
+    credentialFiles: [],
+    credentialFilesTruncated: 0,
     overCap: false,
     maxBytes: 1024,
     maxFiles: 10,

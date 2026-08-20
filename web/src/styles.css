@@ -1328,6 +1328,7 @@ pre {
   color: var(--fg-1);
 }
 .managed-copy-largest,
+.managed-copy-credentials ul,
 .managed-copy-skips ul {
   margin: 0;
   padding: 0;
@@ -1339,6 +1340,7 @@ pre {
   color: var(--fg-2);
 }
 .managed-copy-largest li,
+.managed-copy-credentials li,
 .managed-copy-skips li {
   display: flex;
   justify-content: space-between;
@@ -1356,6 +1358,21 @@ pre {
 .managed-copy-skip-reason {
   white-space: normal;
   text-align: right;
+}
+/* Cebab-ws0.11: live credentials about to be duplicated. Signals three ways —
+ * border, tint and the glyph in the markup — so it never depends on colour. */
+.managed-copy-credentials {
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+  padding: var(--s-1) var(--s-2);
+}
+.managed-copy-credentials-lead {
+  margin: 0 0 var(--s-1);
+  color: var(--warn-ink);
+}
+.managed-copy-glyph {
+  font-size: 0.9em;
 }
 .managed-copy-error {
   color: var(--err-ink);

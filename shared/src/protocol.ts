@@ -3903,7 +3903,24 @@ export type ManagedCopySkipReason =
   /** A FIFO, socket or device. Copying one is meaningless or blocks forever. */
   | 'not_regular'
   /** A symlink Cebab could not recreate — creating one is privileged on Windows. */
-  | 'symlink_unsupported';
+  | 'symlink_unsupported'
+  /**
+   * Cebab-ws0.11: version-control data (`.git`), deliberately not copied.
+   *
+   * Its own reason rather than another skip, because "we chose not to" and "we
+   * wanted to and could not" are different facts. Leaving `.git` in gives the
+   * managed agent the source's remotes — an agent there could push into the
+   * operator's real repository — and makes the managed tree its own git working
+   * tree, which is what stops the data dir's `.gitignore` from reaching inside.
+   */
+  | 'excluded_vcs'
+  /**
+   * Cebab-ws0.11: the file was copied, but its permissions could not be
+   * tightened. Not a skip in the "did not arrive" sense; reported because the
+   * alternative is a copy that quietly left a credential file group-readable
+   * and returned success.
+   */
+  | 'permissions_unenforced';
 
 export type ManagedCopySkip = { rel: string; reason: ManagedCopySkipReason };
 
@@ -3927,6 +3944,19 @@ export type ManagedCopyPreflight = {
   /** Named rather than silently dropped. Truncated to MANAGED_COPY_SKIP_LIMIT. */
   skips: ManagedCopySkip[];
   skipsTruncated: number;
+  /**
+   * Cebab-ws0.11: relative paths of files whose NAME says they carry live
+   * credentials — `.env`, `.mcp.json`, `id_rsa`, `.claude/settings.local.json`
+   * and the rest of the redactor's path list.
+   *
+   * PATHS ONLY, never contents. The predicate is name-based and opens nothing,
+   * so no value can travel with this — the same BE-B12 invariant the authority
+   * panel's `envKeys` follows. What it buys the operator is seeing exactly
+   * which live secrets a copy is about to duplicate, in the dialog where they
+   * are deciding. Truncated like `skips`; the count survives the truncation.
+   */
+  credentialFiles: string[];
+  credentialFilesTruncated: number;
   /**
    * True when the survey stopped at a cap, making `bytes` and `files` lower
    * bounds. The UI must say so rather than render a number that is quietly

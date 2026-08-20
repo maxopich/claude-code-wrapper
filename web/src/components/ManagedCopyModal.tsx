@@ -65,6 +65,10 @@ export function skipLabel(reason: ManagedCopySkip['reason']): string {
       return 'not a regular file (pipe, socket or device)';
     case 'symlink_unsupported':
       return 'link could not be recreated on this system';
+    case 'excluded_vcs':
+      return 'version control data — left out, so the copy cannot push to the original';
+    case 'permissions_unenforced':
+      return 'copied, but its permissions could not be tightened';
   }
 }
 
@@ -142,6 +146,29 @@ export function ManagedCopyModal({
                   </li>
                 ))}
               </ul>
+            )}
+            {preflight.credentialFiles.length > 0 && (
+              <div className="managed-copy-credentials" data-testid="managed-copy-credentials">
+                <p className="gate-modal-help managed-copy-credentials-lead">
+                  <span className="managed-copy-glyph" aria-hidden="true">
+                    ⚠
+                  </span>{' '}
+                  These files look like they hold live credentials. They are copied as they are, in
+                  a folder only your account can open. Cebab never reads what is in them.
+                </p>
+                <ul>
+                  {preflight.credentialFiles.map((rel) => (
+                    <li key={rel}>
+                      <span className="managed-copy-skip-path">{rel}</span>
+                    </li>
+                  ))}
+                </ul>
+                {preflight.credentialFilesTruncated > 0 && (
+                  <p className="gate-modal-help">
+                    …and {preflight.credentialFilesTruncated.toLocaleString('en')} more
+                  </p>
+                )}
+              </div>
             )}
             {preflight.skips.length > 0 && (
               <div className="managed-copy-skips" data-testid="managed-copy-skips">

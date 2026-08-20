@@ -5,10 +5,12 @@
 // row must land before any file content does, and a failed append must leave
 // nothing behind: no tree, no project row, and no empty directory squatting on
 // a name that a later copy would then have to disambiguate around.
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import type { ServerMsg } from '@cebab/shared/protocol';
+import { config } from './config.js';
 import { getDb } from './db.js';
 import { managedAgentsRoot } from './managed_agent.js';
 import { preflightManagedCopy, runManagedCopy } from './managed_copy.js';
@@ -247,5 +249,115 @@ describe('runManagedCopy', () => {
       expect(m.totalFiles).toBe(4);
       expect(m.files).toBeLessThanOrEqual(m.totalFiles);
     }
+  });
+});
+
+describe('[security] a managed agent cannot be committed (Cebab-ws0.11)', () => {
+  const tmp = withTempDataDir('managed-uncommittable');
+
+  /**
+   * The bead's bullet, as a property rather than a hope.
+   *
+   * Two separate mechanisms, and both are needed. The data dir's bare-`*`
+   * `.gitignore` keeps an OUTER repository from staging anything under it. The
+   * `.git` exclusion keeps the managed tree from being a repository of its own
+   * — `gitignore(5)` consults parent ignore files only up to the top of the
+   * working tree, so a copied `.git` puts a boundary between the managed agent
+   * and the ignore file that was covering it, and git run from inside the copy
+   * sees a repo with the ORIGINAL'S remotes.
+   *
+   * The second assertion is the one the exclusion buys; the first would pass
+   * with `.git` copied, which is exactly why it is not the only one here.
+   */
+  function git(cwd: string, args: string[]): string {
+    return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  }
+
+  async function copiedInsideARepo(): Promise<{ repo: string; managed: string }> {
+    const repo = tmp.root();
+    git(repo, ['init', '-q']);
+    const src = path.join(repo, 'source');
+    write(path.join(src, 'CLAUDE.md'), '# agent\n');
+    // Assembled at runtime — see the sibling suite for why a literal would
+    // weaken the repo's own secret scan.
+    const filler = 'A1b2C3d4E5f6G7h8J9k0';
+    write(path.join(src, '.mcp.json'), JSON.stringify({ k: filler + filler }));
+    write(
+      path.join(src, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@example.com:me/x.git\n',
+    );
+    write(path.join(src, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+
+    const id = upsertProject('source', src).id;
+    const sent: ServerMsg[] = [];
+    const outcome = await runManagedCopy(id, (m) => sent.push(m));
+    expect(outcome.registered).toBe(true);
+    const result = sent.find((m) => m.type === 'managed_copy_result');
+    if (!result || result.type !== 'managed_copy_result' || !result.result.ok) {
+      throw new Error('copy did not succeed');
+    }
+    const ok = result.result;
+    const managed = listProjects().find((p) => p.id === ok.managedProjectId)!.path;
+    return { repo, managed };
+  }
+
+  test('git add -A in the surrounding checkout stages nothing from the copy', async () => {
+    const { repo } = await copiedInsideARepo();
+    git(repo, ['add', '-A']);
+    const staged = git(repo, ['diff', '--cached', '--name-only']);
+    expect(staged).not.toContain('.cebab');
+    // Positive control: the SOURCE project is inside the same repo and does
+    // get staged, so this is not passing because `git add` did nothing.
+    expect(staged).toContain('source/CLAUDE.md');
+  });
+
+  test('negative control: without the data-dir gitignore, the copy IS staged', async () => {
+    // Without this, a bug that made the managed tree empty would pass the
+    // assertion above for the wrong reason.
+    const { repo } = await copiedInsideARepo();
+    fs.rmSync(path.join(config.dataDir, '.gitignore'));
+    git(repo, ['add', '-A']);
+    expect(git(repo, ['diff', '--cached', '--name-only'])).toContain('.cebab');
+  });
+
+  test('the managed tree is NOT a git repository of its own', async () => {
+    // The assertion the `.git` exclusion buys. With `.git` copied, git run from
+    // inside the copy sees a repository carrying the original's remotes, and
+    // one that sits outside the reach of the ignore file two levels up.
+    //
+    // `--show-prefix`, not `--show-toplevel`. It reports where we are RELATIVE
+    // to the top of the enclosing worktree: empty at the top, non-empty in a
+    // subdirectory. So it states the claim directly — "this is inside some
+    // repo, not the top of one" — with no path to normalise. The first version
+    // compared `--show-toplevel` against the repo path and went red on Windows
+    // only, where `os.tmpdir()` hands back the 8.3 short name (`RUNNER~1`) and
+    // git returns the long one; `realpathSync` does not reconcile those, and
+    // the trap is already documented two files over.
+    const { managed } = await copiedInsideARepo();
+    expect(git(managed, ['rev-parse', '--show-prefix']).trim()).not.toBe('');
+    expect(fs.existsSync(path.join(managed, '.git'))).toBe(false);
+  });
+
+  test('control: the enclosing repo IS at the top of itself', async () => {
+    // Anti-vacuity for the assertion above — if `--show-prefix` returned
+    // something non-empty everywhere, it would pass without meaning anything.
+    const { repo } = await copiedInsideARepo();
+    expect(git(repo, ['rev-parse', '--show-prefix']).trim()).toBe('');
+  });
+
+  test('the copy carries no trace of the original remote', async () => {
+    const { managed } = await copiedInsideARepo();
+    // Belt for the assertion above: `.git/config` is where the push URL lives,
+    // and it is on the redactor's credential-path list for that reason.
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, d.name);
+        if (d.isDirectory()) walk(p);
+        else if (d.isFile()) files.push(fs.readFileSync(p, 'utf8'));
+      }
+    };
+    walk(managed);
+    expect(files.join('\n')).not.toContain('git@example.com');
   });
 });
