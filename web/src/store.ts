@@ -996,6 +996,28 @@ function getActiveSessionId(state: AppState, projectId: number): string | undefi
   return state.activeSessionByProject[projectId];
 }
 
+/**
+ * Cebab-ws0.5: does the chat area show the new-chat authority preview rather
+ * than a conversation?
+ *
+ * True for a project the operator has selected that has no active session —
+ * which is the state a new chat begins in, and it is reached two ways that look
+ * nothing alike: clicking `new chat` (which only drops the active session id;
+ * the spawn happens on the first message), and simply SELECTING a project,
+ * since `select_project` sets `activeProjectId` and nothing else. The second is
+ * the common one, which is why the preview cannot hang off the `new chat`
+ * button.
+ *
+ * A predicate rather than a condition inline in `App.tsx`: this decides which
+ * of two things the operator sees, and `App.tsx` has no test file. The JSX
+ * there is a ternary over this.
+ */
+export function showsNewChatPreview(state: AppState): boolean {
+  const projectId = state.activeProjectId;
+  if (projectId === null) return false;
+  return getActiveSessionId(state, projectId) === undefined;
+}
+
 function putSession(
   state: AppState,
   projectId: number,

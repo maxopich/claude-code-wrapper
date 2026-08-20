@@ -112,6 +112,20 @@ function stage(el: HTMLElement, opts: { scrollTop: number; scrollHeight: number 
 const AT_BOTTOM = { scrollTop: 2400, scrollHeight: 3000 };
 const SCROLLED_UP = { scrollTop: 400, scrollHeight: 3000 };
 
+describe('ChatView — the sessionless empty state (Cebab-ws0.5)', () => {
+  test('with no session it still tells the operator to select a project', () => {
+    // This sentence used to render for BOTH sessionless cases and was wrong in
+    // the commoner one — a selected project with no conversation had a project
+    // selected. That case moved to `NewChatPreview`; this one is what the
+    // sentence actually describes, and deleting it rather than narrowing it
+    // would leave nothing at all on a fresh launch.
+    act(() => {
+      root.render(<ChatView session={null} isLive={false} onPermissionDecide={() => {}} />);
+    });
+    expect(container.textContent).toContain('Select a project to start a conversation');
+  });
+});
+
 describe('ChatView auto-scroll (W14)', () => {
   test('a streamed delta scrolls to the bottom when the operator is already there', () => {
     const session = mkSession();

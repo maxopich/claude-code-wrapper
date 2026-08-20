@@ -170,6 +170,75 @@ describe('AuthorityProvider — handlerRef bridge', () => {
     expect(slotRef.current?.status).toBe('cache-miss');
   });
 
+  // ---- Cebab-ws0.5: a re-read over populated data is observable ----
+
+  test('request over a ready slot keeps the data AND records the refresh', () => {
+    // The `request` case deliberately preserves a `ready` slot so the panel
+    // does not flash empty during a refresh. Returning it UNCHANGED, which is
+    // what it did, also made the request invisible: nothing downstream could
+    // tell "asked a moment ago" from "never asked", and a second panel for the
+    // same project would ask again.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const slotRef = { current: null as AuthoritySlot | null };
+    const actionsRef = { current: null as ReturnType<typeof useAuthorityActions> | null };
+    act(() => {
+      root.render(
+        <AuthorityProvider send={() => {}} handlerRef={handlerRef}>
+          <Probe projectId={21} slotRef={slotRef} actionsRef={actionsRef} />
+        </AuthorityProvider>,
+      );
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 21,
+        authority: mkAuthority({ projectId: 21, model: 'sonnet', fromProbe: false }),
+      });
+    });
+    act(() => {
+      actionsRef.current!.request(21, 'probe');
+    });
+    if (slotRef.current?.status !== 'ready') throw new Error('expected ready');
+    // Both halves: the data survived, and the refresh is visible.
+    expect(slotRef.current.authority.model).toBe('sonnet');
+    expect(slotRef.current.refreshing).toBe('probe');
+  });
+
+  test('the answer clears the refresh flag', () => {
+    // Otherwise the panel says "refreshing…" forever and every later mount
+    // treats the slot as already-asked.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const slotRef = { current: null as AuthoritySlot | null };
+    const actionsRef = { current: null as ReturnType<typeof useAuthorityActions> | null };
+    act(() => {
+      root.render(
+        <AuthorityProvider send={() => {}} handlerRef={handlerRef}>
+          <Probe projectId={22} slotRef={slotRef} actionsRef={actionsRef} />
+        </AuthorityProvider>,
+      );
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 22,
+        authority: mkAuthority({ projectId: 22, fromProbe: false }),
+      });
+    });
+    act(() => {
+      actionsRef.current!.request(22, 'probe');
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 22,
+        authority: mkAuthority({ projectId: 22, fromProbe: true }),
+      });
+    });
+    if (slotRef.current?.status !== 'ready') throw new Error('expected ready');
+    expect(slotRef.current.refreshing).toBeUndefined();
+    expect(slotRef.current.lastFetchedMode).toBe('probe');
+  });
+
   // ---- Cebab-ws0.7: the freshness label comes from the snapshot ----
   //
   // `lastFetchedMode` is what the panel header renders as `probe · 12s ago`.

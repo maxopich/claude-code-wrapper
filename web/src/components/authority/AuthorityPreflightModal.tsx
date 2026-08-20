@@ -1,9 +1,10 @@
 import { useEffect, useRef } from 'react';
 import { useModalSurface } from '../../useModalSurface';
-import type { ModelCatalogueEntry, SessionPermissionMode } from '@cebab/shared/protocol';
-import { AuthorityPanel } from './AuthorityPanel';
-import { ModelPicker } from '../ModelPicker';
-import { PermissionModePicker } from '../PermissionModePicker';
+import {
+  AuthorityPreflightBody,
+  type PreflightModelSlot,
+  type PreflightStartModeSlot,
+} from './AuthorityPreflightBody';
 
 // Cluster B Phase 6e (UI-B3 / spec §6.2): "review authority before you
 // start" modal.
@@ -31,35 +32,11 @@ import { PermissionModePicker } from '../PermissionModePicker';
 // DraftView composer button), clicking [Start session] invokes it after
 // dismissing the modal — the parent owns the actual start logic.
 
-/**
- * Cebab-ws0.3: the model-picker slot. Optional, so the three multi-agent call
- * sites keep opening a review-only modal unchanged.
- *
- * Only meaningful for a SINGLE project — an aggregate preflight reviews several
- * at once, and one picker cannot speak for all of them. The modal renders this
- * only when `projectIds.length === 1`; an aggregate view showing one project's
- * model would be worse than showing none.
- */
-export type PreflightModelSlot = {
-  entries: ModelCatalogueEntry[];
-  value: string | null;
-  onChange: (model: string | null) => void;
-  onRefresh: () => void;
-  refreshing: boolean;
-  capturedAt: number | null;
-};
-
-/**
- * Cebab-ws0.4: the starting-permission-mode slot. Same optionality and the
- * same single-project restriction as the model slot above — and for a sharper
- * reason here, since the options' MEANING depends on the project's Trust flag,
- * so one control genuinely cannot speak for several projects at once.
- */
-export type PreflightStartModeSlot = {
-  value: SessionPermissionMode | null;
-  trusted: boolean;
-  onChange: (mode: SessionPermissionMode | null) => void;
-};
+// Cebab-ws0.5: the two picker slots and the panel stack moved to
+// `AuthorityPreflightBody`, which the empty-chat preview renders too. Re-
+// exported here because three multi-agent call sites and `ProjectList` import
+// the types from this module.
+export type { PreflightModelSlot, PreflightStartModeSlot };
 
 export type AuthorityPreflightModalProps = {
   projectIds: number[];
@@ -121,38 +98,11 @@ export function AuthorityPreflightModal(props: AuthorityPreflightModalProps) {
             ? 'Resolved authority for each participant project — the SDK will load these settings layers when each agent spawns. Review per-project before starting the run.'
             : 'Resolved authority for this project — the SDK will load these settings layers when the session spawns. Review before starting.'}
         </p>
-        {model && !isAggregate && (
-          <section className="authority-preflight-model" data-testid="preflight-model">
-            <h4 className="authority-preflight-model-title">Model</h4>
-            <p className="gate-modal-help">
-              Which model this project&apos;s sessions ask for. Applies to the next turn; a run
-              already in flight keeps the model it started on.
-            </p>
-            <ModelPicker
-              entries={model.entries}
-              value={model.value}
-              onChange={model.onChange}
-              onRefresh={model.onRefresh}
-              refreshing={model.refreshing}
-              capturedAt={model.capturedAt}
-            />
-          </section>
-        )}
-        {startMode && !isAggregate && (
-          <section className="authority-preflight-model" data-testid="preflight-start-mode">
-            <h4 className="authority-preflight-model-title">Starting permission mode</h4>
-            <PermissionModePicker
-              value={startMode.value}
-              trusted={startMode.trusted}
-              onChange={startMode.onChange}
-            />
-          </section>
-        )}
-        <div className="authority-preflight-panels">
-          {projectIds.map((id) => (
-            <AuthorityPanel key={id} projectId={id} mode="preflight" />
-          ))}
-        </div>
+        <AuthorityPreflightBody
+          projectIds={projectIds}
+          {...(model !== undefined && { model })}
+          {...(startMode !== undefined && { startMode })}
+        />
         <div className="gate-modal-buttons">
           <button
             type="button"

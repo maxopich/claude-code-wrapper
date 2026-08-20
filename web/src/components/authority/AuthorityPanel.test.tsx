@@ -76,6 +76,7 @@ function mountPanel(props: {
   projectId?: number;
   noAutoRequest?: boolean;
   collapsible?: boolean;
+  wantLive?: boolean;
 }) {
   const sent: ClientMsg[] = [];
   const send = props.send ?? ((m) => sent.push(m));
@@ -90,6 +91,7 @@ function mountPanel(props: {
           mode={props.mode}
           noAutoRequest={props.noAutoRequest}
           collapsible={props.collapsible}
+          wantLive={props.wantLive}
         />
       </AuthorityProvider>,
     );
@@ -136,6 +138,99 @@ describe('AuthorityPanel — auto request on mount', () => {
       refresh.click();
     });
     expect(sent).toEqual([{ type: 'get_project_authority', projectId: 3, mode: 'probe' }]);
+  });
+});
+
+describe('AuthorityPanel — wantLive (Cebab-ws0.5)', () => {
+  test('an untouched slot is probed, not read from cache', () => {
+    // A preview is read before the operator acts, so it may not open on a
+    // snapshot nobody measured. The prop not being read reddens here.
+    const { sent } = mountPanel({ mode: 'preflight', projectId: 5, wantLive: true });
+    expect(sent).toEqual([{ type: 'get_project_authority', projectId: 5, mode: 'probe' }]);
+  });
+
+  test('a snapshot that came from a probe is left alone', () => {
+    // Since Cebab-ws0.7 a probe already runs when the project is selected, so
+    // re-probing on open spends a second process on the same answer.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const { sent } = mountPanel({
+      mode: 'preflight',
+      projectId: 5,
+      noAutoRequest: true,
+      handlerRef,
+    });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 5,
+        authority: mkAuthority({ projectId: 5, fromProbe: true }),
+      });
+    });
+    expect(sent).toEqual([]);
+  });
+
+  test('a probe that comes back cache-derived is not retried forever', () => {
+    // The spawn loop, seen from the panel — and the case a purely policy-based
+    // guard gets wrong. A failed probe reports itself as cache-derived (that is
+    // what Cebab-ws0.7 made the label mean), so the slot satisfies "needs a
+    // live read" all over again the instant the answer lands. Auto-requesting
+    // on policy alone reddens here with a second, third, fourth request.
+    //
+    // NOT mounted with noAutoRequest: this has to exercise the effect that is
+    // under test.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    const { sent } = mountPanel({ mode: 'preflight', projectId: 5, wantLive: true, handlerRef });
+    expect(sent.filter((m) => m.type === 'get_project_authority')).toHaveLength(1);
+
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 5,
+        authority: mkAuthority({ projectId: 5, fromProbe: false }),
+      });
+    });
+    // And again, the way a second unrelated reply would re-render the tree.
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 5,
+        authority: mkAuthority({ projectId: 5, fromProbe: false }),
+      });
+    });
+    expect(sent.filter((m) => m.type === 'get_project_authority')).toHaveLength(1);
+  });
+
+  test('the status line says a refresh is in flight, and keeps the age of what is on screen', () => {
+    // The panel keeps rendering the old snapshot during a refresh, which is
+    // the right call — flashing empty is worse. But with nothing saying so,
+    // the age ticked on stale data and looked like the current answer.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'in-session', projectId: 9, noAutoRequest: true, handlerRef });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 9,
+        authority: mkAuthority({ projectId: 9, fromProbe: false }),
+      });
+    });
+    const status = () => container.querySelector('.authority-panel-status')?.textContent ?? '';
+    expect(status()).toContain('cache');
+    expect(status()).not.toContain('refreshing');
+
+    const refresh = container.querySelector('.authority-panel-refresh') as HTMLButtonElement;
+    act(() => {
+      refresh.click();
+    });
+    expect(status()).toContain('refreshing');
+    // The age is still the age of the snapshot being shown, not blanked.
+    expect(status()).toContain('cache');
+  });
+
+  test('CONTROL: without wantLive an idle panel still asks for cache', () => {
+    // The in-session disclosure must not start spawning processes because a
+    // sibling surface wanted to.
+    const { sent } = mountPanel({ mode: 'in-session', projectId: 7 });
+    expect(sent).toEqual([{ type: 'get_project_authority', projectId: 7, mode: 'cache' }]);
   });
 });
 
