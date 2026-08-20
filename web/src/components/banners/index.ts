@@ -49,3 +49,10 @@ export type {
   BuildAuthExpiredBannerItemArgs,
   AuthExpiredBannerCallbacks,
 } from './AuthExpiredBanner.js';
+
+// Cebab-ws0.2: the warn-tier banner naming the session's MCP servers that
+// loaded but never reported as connected. Composed by App.tsx from the
+// session's `mcpStatus` slice; no callbacks, because there is no action Cebab
+// could honestly offer.
+export { buildMcpStatusBannerItem, mcpStatusBannerTitle } from './McpStatusBanner.js';
+export type { BuildMcpStatusBannerItemArgs } from './McpStatusBanner.js';

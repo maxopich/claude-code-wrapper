@@ -62,6 +62,7 @@ import {
   BannerStack,
   SessionBanner,
   buildAuthExpiredBannerItem,
+  buildMcpStatusBannerItem,
   buildRateLimitBannerItem,
   type BannerStackItem,
 } from './components/banners';
@@ -2619,30 +2620,45 @@ function AppShell({
                  *  out of the chat column into the inspector's chat variant
                  *  (rendered below, near <Inspector>). Keeping it out of the
                  *  scrollback is the whole point of the right rail. */}
-                {/* Cluster D Phase 4c (B2): rate-limit banner. Mounted via
-                 *  <BannerStack> so when later phases add the auth-expired
-                 *  + swept-session banners they slot into the same priority-
-                 *  sorted region. The factory returns null-equivalent (no
-                 *  item) when the session has no rateLimit slice, so the
-                 *  stack stays empty and BannerStack renders null itself
-                 *  (no DOM cost). */}
-                {session && session.rateLimit && (
+                {/* The per-session banner zone. <BannerStack> owns priority
+                 *  sort and the max-3 cap, and renders null on an empty array
+                 *  — so the mount condition is just "there is a session" and
+                 *  each banner is gated by its own slice below.
+                 *
+                 *  Cebab-ws0.2 changed it from `session && session.rateLimit`.
+                 *  That guard duplicated what BannerStack already does, and
+                 *  growing it into `(session.rateLimit || session.mcpStatus ||
+                 *  …)` would have put a predicate that decides whether an
+                 *  operator sees a warning into the one file with no test of
+                 *  its own. Every `if` here reads one slice; the slices and
+                 *  the factories are what carry the tests. */}
+                {session && (
                   <BannerStack
                     banners={(() => {
                       const items: BannerStackItem[] = [];
-                      items.push(
-                        buildRateLimitBannerItem({
-                          sessionId: session.id,
-                          state: session.rateLimit,
-                          heldMessages: session.heldMessages,
-                          callbacks: {
-                            onManualRetry: () => triggerRateLimitRetry(session.id, false),
-                            onAutoRetry: () => triggerRateLimitRetry(session.id, true),
-                            onPauseToggle: (paused) => setRateLimitPaused(session.id, paused),
-                            onDropHeld: (i) => dropHeldMessage(session.id, i),
-                          },
-                        }),
-                      );
+                      if (session.rateLimit) {
+                        items.push(
+                          buildRateLimitBannerItem({
+                            sessionId: session.id,
+                            state: session.rateLimit,
+                            heldMessages: session.heldMessages,
+                            callbacks: {
+                              onManualRetry: () => triggerRateLimitRetry(session.id, false),
+                              onAutoRetry: () => triggerRateLimitRetry(session.id, true),
+                              onPauseToggle: (paused) => setRateLimitPaused(session.id, paused),
+                              onDropHeld: (i) => dropHeldMessage(session.id, i),
+                            },
+                          }),
+                        );
+                      }
+                      if (session.mcpStatus) {
+                        items.push(
+                          buildMcpStatusBannerItem({
+                            sessionId: session.id,
+                            servers: session.mcpStatus,
+                          }),
+                        );
+                      }
                       return items;
                     })()}
                   />
