@@ -78,11 +78,15 @@ describe('writeFileAtomicBounded', () => {
 
       const r = writeFileAtomicBounded(target, Buffer.from('{"new":true}'), OPTS);
       expect(r.ok).toBe(true);
+      // Reads first, THEN the link check — a stat followed by a read of the
+      // same path is `js/file-system-race`, and the assertion order here is
+      // arbitrary while the rule's is not.
       // The pointed-at file is untouched...
       expect(fs.readFileSync(secret, 'utf8')).toBe('PRIVATE');
-      // ...and the target is now a real file, not a link.
-      expect(fs.lstatSync(target).isSymbolicLink()).toBe(false);
+      // ...and the target holds the new bytes...
       expect(fs.readFileSync(target, 'utf8')).toBe('{"new":true}');
+      // ...as a real file rather than the link that was standing there.
+      expect(fs.lstatSync(target).isSymbolicLink()).toBe(false);
     },
   );
 

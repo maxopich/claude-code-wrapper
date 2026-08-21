@@ -41,6 +41,21 @@ function auditRows(): AuditRow[] {
 
 const sink = (): void => {};
 
+/**
+ * The concurrency token, taken the way a real caller takes it.
+ *
+ * These tests used `fs.statSync(p).mtimeMs`, which is both a stat-then-read
+ * race in test code (CodeQL `js/file-system-race`) and a less faithful
+ * fixture: the UI never stats anything — it hands back the `mtimeMs` from the
+ * read it started editing from. Going through `readManagedFile` exercises that
+ * round trip instead of reimplementing half of it.
+ */
+function tokenFor(projectId: number, kind: string): number {
+  const r = readManagedFile(projectId, kind);
+  if (!r.ok) throw new Error(`could not read ${kind}: ${r.refusal}`);
+  return r.read.mtimeMs;
+}
+
 /** A real managed agent: a directory under `managedAgentsRoot()` plus its row.
  *  Managed-ness is decided by WHERE the path is, so nothing here sets a column. */
 function makeManagedProject(name: string): { id: number; dir: string } {
@@ -193,7 +208,7 @@ describe('writing', () => {
     const { id, dir } = makeManagedProject('agent-badjson');
     const p = path.join(dir, '.mcp.json');
     fs.writeFileSync(p, '{"ok":true}');
-    const base = fs.statSync(p).mtimeMs;
+    const base = tokenFor(id, 'mcp');
     const w = writeManagedFile(id, 'mcp', '{"broken":', base, sink);
     expect(w.ok).toBe(false);
     expect(!w.ok && w.refusal).toBe('invalid_json');
@@ -214,7 +229,7 @@ describe('writing', () => {
     const { id, dir } = makeManagedProject('agent-stale');
     const p = path.join(dir, 'CLAUDE.md');
     fs.writeFileSync(p, 'v1');
-    const staleToken = fs.statSync(p).mtimeMs;
+    const staleToken = tokenFor(id, 'claude_md');
     // Somebody else writes in between. `utimesSync` rather than a sleep: the
     // point is that the mtime MOVED, and waiting for a real clock tick makes
     // the test slow and flaky on coarse filesystems.
@@ -230,7 +245,7 @@ describe('writing', () => {
     const { id, dir } = makeManagedProject('agent-toobig');
     const p = path.join(dir, 'CLAUDE.md');
     fs.writeFileSync(p, 'small');
-    const base = fs.statSync(p).mtimeMs;
+    const base = tokenFor(id, 'claude_md');
     const w = writeManagedFile(id, 'claude_md', 'z'.repeat(MAX_MANAGED_FILE_BYTES + 1), base, sink);
     expect(!w.ok && w.refusal).toBe('too_large');
     expect(fs.readFileSync(p, 'utf8')).toBe('small');
@@ -316,7 +331,7 @@ describe('[security] file modes and the audit row', () => {
     const { id, dir } = makeManagedProject('agent-auditfail');
     const p = path.join(dir, '.mcp.json');
     fs.writeFileSync(p, '{"before":true}');
-    const base = fs.statSync(p).mtimeMs;
+    const base = tokenFor(id, 'mcp');
 
     const spy = vi.spyOn(safetyAudit, 'appendSafetyAudit').mockImplementation(() => {
       throw new Error('audit chain broken');
