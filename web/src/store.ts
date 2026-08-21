@@ -23,7 +23,7 @@ import type {
   ModelCatalogueEntry,
 } from '@cebab/shared/protocol';
 import type { MutationCategory, PermissionDecisionReason } from '@cebab/shared';
-import { notConnected, type McpServerStatus } from './mcpStatus.js';
+import { notConnected, type McpServerStatus } from '@cebab/shared';
 
 export type MessageView =
   | { kind: 'user'; id: string; text: string }

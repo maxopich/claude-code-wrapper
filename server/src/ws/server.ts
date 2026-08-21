@@ -37,6 +37,7 @@ import { listEvents, listEventsTail } from '../repo/events.js';
 import { persistMessage } from '../runner/orchestrator.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
+import { mcpStatusNoteSpec } from '../runner/mcp_status_note.js';
 import { onInFlightChange, registerQuery, snapshotInFlight } from '../runner/lifecycle.js';
 import { buildActiveRunsMsg } from '../notifications/active_runs.js';
 import { getSetting, setSetting } from '../repo/settings.js';
@@ -6190,6 +6191,22 @@ async function runOneTurn(
     // `model: x` and send `undefined` to the SDK while looking correct.
     // Re-read per turn, so a change between messages applies to the next one.
     ...projectModelSpec(project.id),
+    // Cebab-ws0.15: if Cebab's last look at this project found an MCP server
+    // that loaded and never connected, say so in the system prompt. Same
+    // spreadable-object idiom as the line above, and for the same reason.
+    //
+    // The facts come from `authorityCache` — filled by the selection probe
+    // (Cebab-ws0.7) before the first message, and by every previous turn's
+    // `system/init` after that — so this costs no extra spawn and needs
+    // nothing this turn has not already got. Recomputed per turn rather than
+    // pinned at session creation: a resumed turn's system prompt does bind
+    // (measured, `system_prompt_smoke.ts`), so a server that comes up between
+    // messages stops being mentioned on the next one.
+    //
+    // A connection whose probe has not landed yet has no entry at all, and
+    // that must spawn exactly as Cebab did before this existed — hence
+    // `?.mcpServers` rather than a default.
+    ...mcpStatusNoteSpec(conn.authorityCache.get(project.id)?.mcpServers),
   });
   // Cluster G Phase 3 (G1): tag the lifecycle entry with run metadata so
   // the dispatcher's `active_runs` snapshot can show this turn in the

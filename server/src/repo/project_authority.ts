@@ -8,7 +8,7 @@ import type {
   ProjectAuthority,
   ToolView,
 } from '@cebab/shared/protocol';
-import { isSensitiveKey } from '@cebab/shared';
+import { isConnected, isSensitiveKey } from '@cebab/shared';
 import { SCRUBBED_ENV_POSTURES, SCRUBBED_ENV_VAR_NAMES } from '../runner/claude.js';
 import { readTextBounded } from '../safe_fs.js';
 
@@ -536,7 +536,9 @@ export function resolveToolAuthority(
       mcpServer = toolName.slice(5, sepIdx);
       const owner = options?.mcpServers?.find((s) => s.name === mcpServer);
       // Conservative: anything other than "connected" treated as unavailable.
-      if (owner && owner.status !== 'connected') {
+      // The predicate is shared (`Cebab-ws0.15`) so this view, the operator's
+      // banner and the model's note cannot drift apart about one session.
+      if (owner && !isConnected(owner)) {
         mcpUnavailable = true;
       }
     }

@@ -29,7 +29,7 @@
 // onto "failed".
 
 import React from 'react';
-import type { McpServerStatus } from '../../mcpStatus.js';
+import type { McpServerStatus } from '@cebab/shared';
 import type { BannerStackItem } from './BannerStack.js';
 
 export type BuildMcpStatusBannerItemArgs = {
