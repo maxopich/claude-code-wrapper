@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
   ClientMsg,
   ControlReasonCode,
+  ManagedFileKind,
   KickMode,
   MultiAgentLifecycle,
   MultiAgentTemplate,
@@ -27,6 +28,7 @@ import {
 import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
 import { ProjectList } from './components/ProjectList';
 import { ManagedCopyModal } from './components/ManagedCopyModal';
+import { ManagedFileEditor } from './components/ManagedFileEditor';
 import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
 import { ModeToggle } from './components/ModeToggle';
@@ -79,7 +81,7 @@ import {
   resolveFromAuthTokenResponse,
   resolveFromCloseInfo,
 } from './components/connectionLost';
-import { HELD_MESSAGES_CAP } from './store';
+import { canSaveManagedEdit, HELD_MESSAGES_CAP, managedEditorMode } from './store';
 import type { ActiveRunView } from './store';
 import { downloadSessionLog, isDownloadError } from './exports';
 import { readStored, writeStored } from './prefs';
@@ -1058,6 +1060,40 @@ function AppShell({
   function openManagedCopy(projectId: number) {
     dispatch({ type: 'managed_copy_open', projectId });
     wsRef.current?.send({ type: 'preflight_managed_copy', projectId });
+  }
+
+  /**
+   * Cebab-ws0.10: open the config editor and ask for the first file.
+   *
+   * The read is issued here rather than inside the modal so the modal stays a
+   * render of state — the same split `openManagedCopy` above uses, and the
+   * reason its late-answer guard can live in the reducer.
+   */
+  function openManagedEdit(projectId: number, projectName: string) {
+    dispatch({ type: 'managed_edit_open', projectId, projectName, kind: 'settings' });
+    wsRef.current?.send({ type: 'read_managed_file', projectId, kind: 'settings' });
+  }
+
+  function switchManagedEditKind(kind: ManagedFileKind) {
+    const edit = state.managedEdit;
+    if (!edit) return;
+    dispatch({ type: 'managed_edit_kind', kind });
+    wsRef.current?.send({ type: 'read_managed_file', projectId: edit.projectId, kind });
+  }
+
+  function saveManagedEdit() {
+    const edit = state.managedEdit;
+    if (!edit || edit.draft === null) return;
+    dispatch({ type: 'managed_edit_saving' });
+    wsRef.current?.send({
+      type: 'write_managed_file',
+      projectId: edit.projectId,
+      kind: edit.kind,
+      content: edit.draft,
+      // The token from the read the operator started from. The server refuses
+      // rather than overwriting if the file moved underneath.
+      baseMtimeMs: edit.mtimeMs,
+    });
   }
 
   function confirmManagedCopy(projectId: number) {
@@ -2381,6 +2417,7 @@ function AppShell({
             onRefreshModelCatalogue={refreshModelCatalogue}
             onSetProjectStartPermissionMode={setProjectStartPermissionMode}
             onCopyToManaged={openManagedCopy}
+            onEditManagedConfig={openManagedEdit}
             onRenameSession={renameSession}
             onDownloadSession={downloadSession}
             onBulkSessionOp={bulkSessionOp}
@@ -2817,6 +2854,23 @@ function AppShell({
         />
       )}
       {shortcutsOpen && <KeyboardShortcutsModal onClose={() => setShortcutsOpen(false)} />}
+      {state.managedEdit && (
+        <ManagedFileEditor
+          projectName={state.managedEdit.projectName}
+          kind={state.managedEdit.kind}
+          relPath={state.managedEdit.relPath}
+          sensitive={state.managedEdit.sensitive}
+          view={managedEditorMode(state.managedEdit)}
+          canSave={canSaveManagedEdit(state.managedEdit)}
+          saving={state.managedEdit.status === 'saving'}
+          savedAt={state.managedEdit.savedAt}
+          saveRefusal={state.managedEdit.draft === null ? null : state.managedEdit.refusal}
+          onKind={switchManagedEditKind}
+          onDraft={(text) => dispatch({ type: 'managed_edit_draft', text })}
+          onSave={saveManagedEdit}
+          onClose={() => dispatch({ type: 'managed_edit_close' })}
+        />
+      )}
       {state.managedCopy && (
         <ManagedCopyModal
           projectName={

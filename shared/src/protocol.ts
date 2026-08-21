@@ -83,6 +83,21 @@ export type Project = {
    * Project is constructed instead of letting fixtures quietly omit it.
    */
   managed: { sourcePath: string; copiedAt: number } | null;
+  /**
+   * Cebab-ws0.10: does this project's directory sit inside Cebab's own agents
+   * root? The structural answer, and the one the UI must gate on.
+   *
+   * SEPARATE FROM `managed` ABOVE, and the distinction bites. `managed` is
+   * non-null only when the path predicate holds AND the provenance columns are
+   * populated, so a genuinely managed agent whose columns are missing reads as
+   * `null` there — while the server, which gates on `isManagedProjectPath`
+   * alone, would happily accept a write to it. Gating an affordance on
+   * provenance therefore hides it from projects that would work and, on the
+   * copy row's inverse test, offers "copy into Cebab" for an agent already
+   * inside it. This field is the same question the server asks, asked the same
+   * way.
+   */
+  isManaged: boolean;
 };
 
 /**
@@ -566,6 +581,42 @@ export function isControllabilityFailureCode(v: unknown): v is ControllabilityFa
 /** Per-session permission mode the wrapper exposes to the UI. */
 export type SessionPermissionMode = 'default' | 'acceptEdits';
 
+/**
+ * Cebab-ws0.10: which of a managed agent's config files an edit refers to.
+ *
+ * A CLOSED SET rather than a path, and that is the whole containment story for
+ * this feature. The server maps each to a fixed relative path
+ * (`MANAGED_EDITABLE` in `server/src/managed_file.ts`); the wire never carries
+ * one, so there is no traversal input to validate and no sanitiser to get
+ * wrong. Adding a fourth kind is a deliberate edit in two places rather than a
+ * client sending a longer string.
+ */
+export type ManagedFileKind = 'settings' | 'mcp' | 'claude_md';
+
+export const MANAGED_FILE_KIND_SET: ReadonlySet<ManagedFileKind> = new Set([
+  'settings',
+  'mcp',
+  'claude_md',
+]);
+
+export function isManagedFileKind(v: unknown): v is ManagedFileKind {
+  return typeof v === 'string' && MANAGED_FILE_KIND_SET.has(v as ManagedFileKind);
+}
+
+/** Why the server refused a managed-file read or write. Rendered by the editor
+ *  rather than mapped to a generic error: "too large to edit here" and "that is
+ *  not valid JSON" are different things for the operator to do next. */
+export type ManagedFileRefusal =
+  | 'unknown_project'
+  | 'not_managed'
+  | 'unknown_kind'
+  | 'too_large'
+  | 'unreadable'
+  | 'invalid_json'
+  | 'stale'
+  | 'write_failed'
+  | 'audit_failed';
+
 export const SESSION_PERMISSION_MODES: ReadonlySet<SessionPermissionMode> = new Set([
   'default',
   'acceptEdits',
@@ -765,6 +816,37 @@ export type ClientMsg =
        */
       type: 'copy_project_to_managed';
       projectId: number;
+    }
+  | {
+      /**
+       * Cebab-ws0.10: read one of a MANAGED agent's own config files.
+       *
+       * `kind` is a closed set, never a path. That is the containment: the
+       * operator cannot ask for `../../.ssh/id_rsa` because there is no field
+       * in which to name it, which is a stronger property than sanitising a
+       * path would be. An unmanaged project is refused outright — Cebab writes
+       * only inside the tree it created.
+       */
+      type: 'read_managed_file';
+      projectId: number;
+      kind: ManagedFileKind;
+    }
+  | {
+      /**
+       * Cebab-ws0.10: replace (or create) one of a managed agent's config
+       * files. Audited before the bytes land, and refused outright if the
+       * audit append fails.
+       *
+       * `baseMtimeMs` is the token from the `managed_file` the operator started
+       * editing from — `0` for a file that did not exist. A file whose mtime
+       * has moved since is refused rather than overwritten, so a concurrent
+       * edit is reported instead of being silently discarded.
+       */
+      type: 'write_managed_file';
+      projectId: number;
+      kind: ManagedFileKind;
+      content: string;
+      baseMtimeMs: number;
     }
   | {
       /**
@@ -1950,6 +2032,57 @@ export type ServerMsg =
             skipsTruncated: number;
           }
         | { ok: false; error: string };
+    }
+  | {
+      /**
+       * Cebab-ws0.10: the contents of one managed config file, or why not.
+       *
+       * `exists: false` with empty `content` is a SUCCESS, not a refusal — an
+       * agent with no `.mcp.json` yet opens blank and saving creates it. The
+       * refusals are the cases where showing an editor would be a lie:
+       * `too_large` in particular, because an editor opened on a truncated
+       * file would lose the tail on the next save.
+       */
+      type: 'managed_file';
+      projectId: number;
+      kind: ManagedFileKind;
+      result:
+        | {
+            ok: true;
+            /** Project-relative, for display — the operator sees which file. */
+            relPath: string;
+            content: string;
+            exists: boolean;
+            /** Hand back on write as the concurrency token. `0` when absent. */
+            mtimeMs: number;
+            /** True for the kinds `pathLooksSensitive` names, so the editor can
+             *  say the bytes on screen are live credentials rather than
+             *  inferring it from the filename itself. */
+            sensitive: boolean;
+          }
+        | { ok: false; refusal: ManagedFileRefusal };
+    }
+  | {
+      /** Cebab-ws0.10: the outcome of a `write_managed_file`. */
+      type: 'managed_file_written';
+      projectId: number;
+      kind: ManagedFileKind;
+      result:
+        | {
+            ok: true;
+            /** The new concurrency token, so a second save in the same sitting
+             *  is not refused as stale. */
+            mtimeMs: number;
+            /** The file did not exist before this write. */
+            created: boolean;
+          }
+        | {
+            ok: false;
+            refusal: ManagedFileRefusal;
+            /** The JSON parser's own message for `invalid_json`, or the audit
+             *  error. Never file content. */
+            detail?: string;
+          };
     }
   | {
       type: 'projects';

@@ -164,6 +164,7 @@ describe('[a11y] every composite widget is still here', () => {
     ['./components/SessionSearchModal.tsx', 'listbox'],
     ['./components/SlashCommandPalette.tsx', 'listbox'],
     ['./components/SettingsModal.tsx', 'radiogroup'],
+    ['./components/ManagedFileEditor.tsx', 'tablist'],
   ];
 
   test.each(EXPECTED)('%s still declares role="%s"', (file, role) => {

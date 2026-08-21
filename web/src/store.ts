@@ -12,6 +12,8 @@ import type {
   PauseExpiryAction,
   PendingRetryDescriptor,
   ManagedCopyPreflight,
+  ManagedFileKind,
+  ManagedFileRefusal,
   Project,
   ProjectScan,
   RecoveryContextView,
@@ -768,6 +770,36 @@ export type AppState = {
     result: Extract<ServerMsg, { type: 'managed_copy_result' }>['result'] | null;
   } | null;
   /**
+   * Cebab-ws0.10: the managed-agent config file the operator has open, or null.
+   *
+   * One slot for the same reason `managedCopy` above has one — it is driven
+   * from a modal. `status` is what the editor renders, and the three unhappy
+   * states are held apart on purpose: a file that is still loading, one the
+   * server refused, and one that is absent-and-will-be-created all look like an
+   * empty textarea if they are collapsed together, and only one of them is
+   * safe to type into.
+   */
+  managedEdit: {
+    projectId: number;
+    projectName: string;
+    kind: ManagedFileKind;
+    status: 'loading' | 'ready' | 'saving';
+    /** The bytes as loaded, plus the operator's edits. `null` while loading. */
+    draft: string | null;
+    /** What was loaded, so the editor knows whether there is anything to save. */
+    loaded: string | null;
+    relPath: string | null;
+    exists: boolean;
+    sensitive: boolean;
+    /** Optimistic-concurrency token from the read; `0` for an absent file. */
+    mtimeMs: number;
+    /** A refusal to render instead of an editor, or alongside a failed save. */
+    refusal: { refusal: ManagedFileRefusal; detail?: string } | null;
+    /** Set after a successful save so the editor can confirm rather than just
+     *  going quiet. Cleared on the next edit. */
+    savedAt: number | null;
+  } | null;
+  /**
    * The model list a picker renders (Cebab-ws0.3). `null` until the server has
    * answered at all — which a picker must distinguish from an EMPTY answer:
    * "not asked yet" hides the list, "asked and there is nothing" says so.
@@ -943,6 +975,7 @@ export const initialState: AppState = {
   projects: [],
   projectScans: {},
   managedCopy: null,
+  managedEdit: null,
   modelCatalogue: null,
   activeProjectId: null,
   sessionsByProject: {},
@@ -1012,6 +1045,47 @@ function getActiveSessionId(state: AppState, projectId: number): string | undefi
  * of two things the operator sees, and `App.tsx` has no test file. The JSX
  * there is a ternary over this.
  */
+/**
+ * Cebab-ws0.10: what the managed-file editor should render right now.
+ *
+ * A pure function over the slice rather than a chain of ternaries in the
+ * component, because the three unhappy states are easy to collapse and only one
+ * of them is safe to type into: a file still loading, a file the server
+ * refused, and a file that is absent-and-will-be-created all look like an empty
+ * textarea. The last is editable; the first two are not.
+ */
+export type ManagedEditorMode =
+  | { mode: 'loading' }
+  | { mode: 'refused'; refusal: ManagedFileRefusal; detail?: string }
+  | { mode: 'editing'; content: string; creating: boolean };
+
+export function managedEditorMode(edit: NonNullable<AppState['managedEdit']>): ManagedEditorMode {
+  if (edit.status === 'loading') return { mode: 'loading' };
+  // A refusal wins over a draft even when one is present: a failed SAVE keeps
+  // the operator's text on screen (losing it would be unforgivable) but the
+  // reason has to be the thing they see.
+  if (edit.refusal !== null && edit.draft === null) {
+    return {
+      mode: 'refused',
+      refusal: edit.refusal.refusal,
+      ...(edit.refusal.detail !== undefined && { detail: edit.refusal.detail }),
+    };
+  }
+  if (edit.draft === null) return { mode: 'loading' };
+  return { mode: 'editing', content: edit.draft, creating: !edit.exists };
+}
+
+/**
+ * Is there anything to save? False while a save is in flight, and false when
+ * the buffer still matches what was read — an always-enabled Save invites a
+ * no-op write, and every write here appends an audit row.
+ */
+export function canSaveManagedEdit(edit: NonNullable<AppState['managedEdit']>): boolean {
+  if (edit.status !== 'ready') return false;
+  if (edit.draft === null) return false;
+  return edit.draft !== edit.loaded;
+}
+
 export function showsNewChatPreview(state: AppState): boolean {
   const projectId = state.activeProjectId;
   if (projectId === null) return false;
@@ -1095,6 +1169,16 @@ export type Action =
   | { type: 'managed_copy_started' }
   /** Cebab-ws0.9: close the modal, whatever state it was in. */
   | { type: 'managed_copy_close' }
+  | {
+      type: 'managed_edit_open';
+      projectId: number;
+      projectName: string;
+      kind: ManagedFileKind;
+    }
+  | { type: 'managed_edit_kind'; kind: ManagedFileKind }
+  | { type: 'managed_edit_draft'; text: string }
+  | { type: 'managed_edit_saving' }
+  | { type: 'managed_edit_close' }
   | { type: 'select_session'; projectId: number; sessionId: string }
   | { type: 'new_session'; projectId: number }
   | { type: 'user_send'; text: string }
@@ -1257,6 +1341,60 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case 'managed_copy_close':
       return { ...state, managedCopy: null };
+
+    case 'managed_edit_open':
+      // Opens on the click, before the server has answered — so `status` is
+      // 'loading' and `draft` is null. An editor that opened empty and then
+      // filled in would invite typing into a buffer about to be replaced.
+      return {
+        ...state,
+        managedEdit: {
+          projectId: action.projectId,
+          projectName: action.projectName,
+          kind: action.kind,
+          status: 'loading',
+          draft: null,
+          loaded: null,
+          relPath: null,
+          exists: false,
+          sensitive: false,
+          mtimeMs: 0,
+          refusal: null,
+          savedAt: null,
+        },
+      };
+
+    case 'managed_edit_kind':
+      // Switching tabs re-reads from the server rather than caching per kind:
+      // three buffers held open across a save is three chances to write back a
+      // stale token, and the read is a local file.
+      if (!state.managedEdit) return state;
+      return {
+        ...state,
+        managedEdit: {
+          ...state.managedEdit,
+          kind: action.kind,
+          status: 'loading',
+          draft: null,
+          loaded: null,
+          relPath: null,
+          refusal: null,
+          savedAt: null,
+        },
+      };
+
+    case 'managed_edit_draft':
+      if (!state.managedEdit) return state;
+      // Clearing `savedAt` on the first keystroke after a save: leaving it set
+      // would show "saved" over a buffer that no longer matches what was saved.
+      return { ...state, managedEdit: { ...state.managedEdit, draft: action.text, savedAt: null } };
+
+    case 'managed_edit_saving':
+      if (!state.managedEdit) return state;
+      return { ...state, managedEdit: { ...state.managedEdit, status: 'saving', refusal: null } };
+
+    case 'managed_edit_close':
+      return { ...state, managedEdit: null };
 
     case 'select_session':
       return {
@@ -1726,6 +1864,76 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         ...state,
         managedCopy: { ...state.managedCopy, status: 'done', result: msg.result },
       };
+
+    case 'managed_file': {
+      // Same late-answer guard the copy preflight carries above, and it needs
+      // the KIND as well as the project: the operator can switch tabs faster
+      // than a read completes, and an answer for the tab they left would
+      // repaint the one they are looking at with another file's bytes.
+      const e = state.managedEdit;
+      if (!e || e.projectId !== msg.projectId || e.kind !== msg.kind) return state;
+      if (!msg.result.ok) {
+        return {
+          ...state,
+          managedEdit: {
+            ...e,
+            status: 'ready',
+            draft: null,
+            loaded: null,
+            refusal: { refusal: msg.result.refusal },
+          },
+        };
+      }
+      const r = msg.result;
+      return {
+        ...state,
+        managedEdit: {
+          ...e,
+          status: 'ready',
+          draft: r.content,
+          loaded: r.content,
+          relPath: r.relPath,
+          exists: r.exists,
+          sensitive: r.sensitive,
+          mtimeMs: r.mtimeMs,
+          refusal: null,
+        },
+      };
+    }
+
+    case 'managed_file_written': {
+      const e = state.managedEdit;
+      if (!e || e.projectId !== msg.projectId || e.kind !== msg.kind) return state;
+      if (!msg.result.ok) {
+        return {
+          ...state,
+          managedEdit: {
+            ...e,
+            status: 'ready',
+            refusal: {
+              refusal: msg.result.refusal,
+              ...(msg.result.detail !== undefined && { detail: msg.result.detail }),
+            },
+          },
+        };
+      }
+      // `loaded` moves to the draft: the file on disk is now what is on screen,
+      // so the editor stops offering to save the same bytes again. And the new
+      // token replaces the old one — without that a second save in the same
+      // sitting would be refused as stale, which is worse than no check at all.
+      return {
+        ...state,
+        managedEdit: {
+          ...e,
+          status: 'ready',
+          loaded: e.draft,
+          exists: true,
+          mtimeMs: msg.result.mtimeMs,
+          refusal: null,
+          savedAt: msg.result.mtimeMs,
+        },
+      };
+    }
 
     case 'projects': {
       // Prune any drafted multi-agent participants that vanished from the

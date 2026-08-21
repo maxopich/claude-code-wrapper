@@ -49,6 +49,7 @@ function project(overrides: Partial<Project> = {}): Project {
     busAgentName: null,
     model: null,
     startPermissionMode: null,
+    isManaged: false,
     managed: null,
     ...overrides,
   };
@@ -75,6 +76,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Handle
       <ProjectList
         projectScans={{}}
         onCopyToManaged={() => {}}
+        onEditManagedConfig={() => {}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}

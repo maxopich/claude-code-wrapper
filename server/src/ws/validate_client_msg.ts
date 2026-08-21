@@ -46,6 +46,7 @@
 import {
   isControlReasonCode,
   isKickMode,
+  isManagedFileKind,
   isPauseExpiryAction,
   isSessionPermissionMode,
   isStopReasonCode,
@@ -87,6 +88,13 @@ const controlReason = { kind: 'string', is: isControlReasonCode } as const;
 const stopReason = { kind: 'string', is: isStopReasonCode } as const;
 const expiryAction = { kind: 'string', is: isPauseExpiryAction } as const;
 const kickMode = { kind: 'string', is: isKickMode } as const;
+/**
+ * Cebab-ws0.10. The closed set of editable files, composed from the shared
+ * guard rather than restated — this is the field that decides which path the
+ * server writes to, so a spelling that drifted from `MANAGED_EDITABLE` would be
+ * a validator that admits a kind the resolver then refuses.
+ */
+const managedFileKind = { kind: 'string', is: isManagedFileKind } as const;
 
 const SHAPES: Table = {
   list_projects: {},
@@ -113,6 +121,13 @@ const SHAPES: Table = {
   // caller-supplied path or name ever reaches the filesystem.
   preflight_managed_copy: { projectId: 'number' },
   copy_project_to_managed: { projectId: 'number' },
+  read_managed_file: { projectId: 'number', kind: managedFileKind },
+  write_managed_file: {
+    projectId: 'number',
+    kind: managedFileKind,
+    content: 'string',
+    baseMtimeMs: 'number',
+  },
   get_model_catalogue: { projectId: 'number?', refresh: 'boolean?' },
   load_session: { projectId: 'number', sessionId: 'string' },
   get_settings: {},
