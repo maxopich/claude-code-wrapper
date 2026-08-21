@@ -378,3 +378,114 @@ export function isDirectChildOf(
   const rel = impl.relative(parent, child);
   return impl === path.win32 ? rel.toLowerCase() === name.toLowerCase() : rel === name;
 }
+
+// ---- the write ----
+
+/** Why a write was refused. There is no partial success: either the new bytes
+ *  are wholly at the path or the previous contents are untouched. */
+export type SafeWriteRefusal =
+  /** Content larger than the caller's cap. Nothing was written. */
+  | 'too_large'
+  /** The containing directory is missing, unwritable, or not a directory. */
+  | 'unwritable'
+  /** The temp file was created but could not be moved into place. */
+  | 'commit_failed';
+
+export type SafeWriteResult =
+  { ok: true; mtimeMs: number } | { ok: false; refusal: SafeWriteRefusal };
+
+/**
+ * Replace a file's contents, or refuse (`Cebab-ws0.10`).
+ *
+ * WHY THIS IS NOT `fs.writeFileSync` WITH A COMMENT. Everything above this line
+ * exists because a path can be re-pointed between the check and the use, and
+ * the reads answer that by holding one descriptor. A write cannot borrow that
+ * answer — it has to put bytes at a NAME — so it answers the same hazard the
+ * only other way there is: build the content somewhere else, then replace the
+ * name in one step.
+ *
+ *   - A symlink planted at the target is DESTROYED by the rename rather than
+ *     written through. `writeFileSync` would follow it and deposit the
+ *     operator's config wherever it pointed; `O_NOFOLLOW` would merely refuse,
+ *     leaving the planted link in place. This is the stronger of the two.
+ *   - A reader never sees a half-written file, and a crash mid-write leaves the
+ *     previous contents intact. `rename` is atomic within a filesystem, which
+ *     is why the temp file is created in the TARGET'S OWN DIRECTORY and not in
+ *     `os.tmpdir()` — a cross-device rename is not atomic and, on most hosts,
+ *     is not even a rename.
+ *
+ * `mode` applies at creation, so the bytes are never briefly world-readable on
+ * the way to being `0600` — the window a `writeFileSync`-then-`chmod` leaves
+ * open, on exactly the credential-bearing files `pathLooksSensitive` names.
+ *
+ * Never throws, matching its neighbours: a caller handling a project's files
+ * gets a typed refusal to map onto its own failure path.
+ */
+export function writeFileAtomicBounded(
+  filePath: string,
+  bytes: Buffer,
+  opts: { maxBytes: number; mode: number },
+): SafeWriteResult {
+  if (bytes.byteLength > opts.maxBytes) return { ok: false, refusal: 'too_large' };
+
+  const dir = path.dirname(filePath);
+  // Dot-prefixed and suffixed so a temp left behind by a killed process is
+  // recognisable and is not mistaken for a config file by anything that scans
+  // the directory — `Cebab-ws0.6`'s scan reads `.mcp.json` by exact name, but a
+  // future glob would otherwise pick these up.
+  const tmp = path.join(dir, `.${path.basename(filePath)}.cebab-tmp-${process.pid}-${Date.now()}`);
+
+  let fd: number | undefined;
+  try {
+    // `wx` — fail if it somehow exists, rather than truncating a file we did
+    // not create. Combined with the pid+time suffix this cannot collide with a
+    // concurrent write from this process.
+    fd = fs.openSync(tmp, 'wx', opts.mode);
+    fs.writeSync(fd, bytes, 0, bytes.byteLength, 0);
+    // Durability before the rename: a rename that lands before the data is
+    // flushed can survive a power loss pointing at an empty file.
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+  } catch {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* already closed or never opened cleanly */
+      }
+    }
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* never created */
+    }
+    return { ok: false, refusal: 'unwritable' };
+  }
+
+  try {
+    // Replaces whatever is at the path — regular file, or a symlink pointing
+    // somewhere it should not. Node maps this to `MoveFileEx(...,
+    // MOVEFILE_REPLACE_EXISTING)` on Windows, so it overwrites there too rather
+    // than failing on an existing destination.
+    fs.renameSync(tmp, filePath);
+  } catch {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* the rename may have half-succeeded; nothing more to do */
+    }
+    return { ok: false, refusal: 'commit_failed' };
+  }
+
+  // Read the committed mtime back rather than stamping `Date.now()`: it is
+  // handed to the caller as an optimistic-concurrency token and has to be the
+  // value a later `stat` will produce, at the filesystem's own resolution.
+  try {
+    return { ok: true, mtimeMs: fs.statSync(filePath).mtimeMs };
+  } catch {
+    // The bytes ARE committed; only the token is unavailable. Reporting a
+    // failure here would tell the operator their save was lost when it was not.
+    return { ok: true, mtimeMs: 0 };
+  }
+}

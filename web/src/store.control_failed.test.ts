@@ -43,6 +43,7 @@ function seedBusRun(): AppState {
           busAgentName: null,
           model: null,
           startPermissionMode: null,
+          isManaged: false,
           managed: null,
         },
       ],

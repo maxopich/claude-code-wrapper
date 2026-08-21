@@ -67,6 +67,7 @@ function project(overrides: Partial<Project> = {}): Project {
     busAgentName: null,
     model: null,
     startPermissionMode: null,
+    isManaged: false,
     managed: null,
     ...overrides,
   };
@@ -93,6 +94,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Spies 
       <ProjectList
         projectScans={{}}
         onCopyToManaged={() => {}}
+        onEditManagedConfig={() => {}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}
@@ -193,6 +195,7 @@ describe('[a11y] session rows are operable from the keyboard', () => {
         <ProjectList
           projectScans={{}}
           onCopyToManaged={() => {}}
+          onEditManagedConfig={() => {}}
           projects={[project()]}
           activeProjectId={PID}
           activeSessionByProject={{ [PID]: 'sess-aaaaaaa1' }}

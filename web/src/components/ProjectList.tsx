@@ -45,6 +45,7 @@ export function ProjectList(props: {
   onSetProjectStartPermissionMode: (projectId: number, mode: SessionPermissionMode | null) => void;
   /** Cebab-ws0.9: open the managed-copy modal for this project. */
   onCopyToManaged: (projectId: number) => void;
+  onEditManagedConfig: (projectId: number, projectName: string) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
   /**
    * Cluster I C2 UI: trigger a per-session JSONL download. Returns a
@@ -277,7 +278,30 @@ export function ProjectList(props: {
                    *  name, Select… and the trust pill. A managed agent does not
                    *  offer it — copying a copy is legal but is not a thing to
                    *  put in front of anybody. */}
-                  {!p.managed && !inSelectMode && (
+                  {/* Cebab-ws0.10: the mirror of the copy row below. Cebab
+                   *  owns every byte under its agents directory, so its config
+                   *  is safe to edit from the app; an ordinary project in the
+                   *  operator's own workspace is left alone, and offers no
+                   *  affordance rather than one that refuses. */}
+                  {p.isManaged && !inSelectMode && (
+                    <li className="session-row session-row-managed-edit">
+                      <span className="session-marker" aria-hidden="true">
+                        ✎
+                      </span>
+                      <button
+                        type="button"
+                        className="session-name"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onEditManagedConfig(p.id, p.name);
+                        }}
+                        title={`Edit ${p.name}'s settings.json, .mcp.json and CLAUDE.md. Cebab owns this copy, so nothing in your own workspace is touched.`}
+                      >
+                        edit config
+                      </button>
+                    </li>
+                  )}
+                  {!p.isManaged && !inSelectMode && (
                     <li className="session-row session-row-managed-copy">
                       <span className="session-marker" aria-hidden="true">
                         ⧉

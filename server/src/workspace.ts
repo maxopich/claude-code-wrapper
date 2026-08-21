@@ -182,6 +182,10 @@ export function rowToProject(row: ProjectRow) {
     busAgentName: row.bus_agent_name,
     model: row.model,
     startPermissionMode: resolveStartPermissionMode(row.start_permission_mode) ?? null,
+    // The structural answer, which is what any gate must use. `managed` below
+    // is provenance and additionally requires the columns — see the protocol's
+    // note on why the two are not interchangeable.
+    isManaged: isManagedProjectPath(row.path),
     managed: managedProvenance(row),
   };
 }

@@ -37,6 +37,7 @@ import { listEvents, listEventsTail } from '../repo/events.js';
 import { persistMessage } from '../runner/orchestrator.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
+import { readManagedFile, writeManagedFile } from '../managed_file.js';
 import { mcpStatusNoteSpec } from '../runner/mcp_status_note.js';
 import { onInFlightChange, registerQuery, snapshotInFlight } from '../runner/lifecycle.js';
 import { buildActiveRunsMsg } from '../notifications/active_runs.js';
@@ -3953,6 +3954,50 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       if (outcome.registered) sendProjects(conn, await syncWorkspaceProjects());
       return;
     }
+    case 'read_managed_file': {
+      const r = readManagedFile(msg.projectId, msg.kind);
+      send(conn.ws, {
+        type: 'managed_file',
+        projectId: msg.projectId,
+        kind: msg.kind,
+        result: r.ok
+          ? {
+              ok: true,
+              relPath: r.read.relPath,
+              content: r.read.content,
+              exists: r.read.exists,
+              mtimeMs: r.read.mtimeMs,
+              sensitive: r.read.sensitive,
+            }
+          : { ok: false, refusal: r.refusal },
+      });
+      return;
+    }
+    case 'write_managed_file': {
+      const w = writeManagedFile(msg.projectId, msg.kind, msg.content, msg.baseMtimeMs, (m) =>
+        send(conn.ws, m),
+      );
+      send(conn.ws, {
+        type: 'managed_file_written',
+        projectId: msg.projectId,
+        kind: msg.kind,
+        result: w.ok
+          ? { ok: true, mtimeMs: w.mtimeMs, created: w.created }
+          : { ok: false, refusal: w.refusal, ...(w.detail ? { detail: w.detail } : {}) },
+      });
+      if (!w.ok) return;
+      // Cebab-ws0.10: the edit just invalidated two things that are shown next
+      // to the editor. The cached `system/init` snapshot describes a session
+      // started before this file changed, and `Cebab-ws0.6`'s per-project scan
+      // read these exact declarations on the last `projects` emit. Dropping the
+      // snapshot means the next authority request re-probes instead of serving
+      // a reading from before the change; re-emitting re-runs the scan. Same
+      // two steps `set_project_start_permission_mode` takes, for the same
+      // reason.
+      conn.authorityCache.delete(msg.projectId);
+      sendProjects(conn, await syncWorkspaceProjects());
+      return;
+    }
     case 'set_project_start_permission_mode': {
       // Cebab-ws0.4. The audit-then-write half lives in
       // `project_start_mode.ts` so its ordering can be tested with a throwing
@@ -4193,6 +4238,15 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // type. A table would union the three maps, and `Map` is invariant in
       // its value type, so the union is assignable to none of them.
       const CANCEL_REASON = 'operator cancelled';
+      // Captured BEFORE the switch, and it has to be. `kind` used to appear on
+      // this variant alone, so TypeScript treated it as an ordinary property
+      // and narrowed only the property in the branches below. Once a second
+      // variant carried a `kind` of string LITERALS (`Cebab-ws0.10`'s
+      // `ManagedFileKind`), `kind` became a valid discriminant across
+      // `ClientMsg` — so the exhausted `default` now narrows `msg` itself to
+      // `never`, and reading `msg.kind` there stopped compiling. The value is
+      // the same; only where it is legal to read it changed.
+      const cancelKind: string = msg.kind;
       let gateName: string;
       let matched: boolean;
       switch (msg.kind) {
@@ -4227,7 +4281,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           // The validator checks `kind` is a string, not which string. An
           // unknown one is a client bug, not an attack surface — nothing is
           // parked under it either way.
-          console.log(`[gate] cancel for unknown kind=${JSON.stringify(msg.kind)} — no-op`);
+          console.log(`[gate] cancel for unknown kind=${JSON.stringify(cancelKind)} — no-op`);
           return;
       }
       if (!matched) {

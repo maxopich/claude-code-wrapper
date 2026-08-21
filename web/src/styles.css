@@ -1309,6 +1309,73 @@ pre {
   box-shadow: 0 0 8px var(--ok);
   animation: pulse 1.6s ease-in-out infinite;
 }
+/* ── Managed config editor (Cebab-ws0.10) ─────────────────────────────────── */
+.managed-file-modal {
+  max-width: 46rem;
+}
+.managed-file-tabs {
+  display: flex;
+  gap: var(--s-1);
+  border-bottom: 1px solid var(--line-3);
+  margin-bottom: var(--s-2);
+}
+.managed-file-tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: var(--s-1) var(--s-2);
+  font: inherit;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.managed-file-tab:hover {
+  color: var(--fg-1);
+}
+/* The selected tab is marked by weight and an underline as well as colour —
+ * `aria-selected` carries it for assistive tech, and neither may be the only
+ * signal. */
+.managed-file-tab.is-active {
+  color: var(--fg-1);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+.managed-file-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.managed-file-path {
+  margin: 0;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+}
+.managed-file-absent {
+  color: var(--fg-3);
+}
+/* Same three-way signalling as the copy dialog's credential block — border,
+ * tint and a glyph in the markup — because this one is stronger still: those
+ * bytes are on screen right now rather than about to be duplicated. */
+.managed-file-secret {
+  margin: 0;
+  border: 1px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+  padding: var(--s-1) var(--s-2);
+  color: var(--warn-ink);
+}
+.managed-file-glyph {
+  font-size: 0.9em;
+}
+.managed-file-error {
+  margin: 0;
+  color: var(--err-ink);
+}
+.managed-file-saved {
+  margin: 0;
+  color: var(--ok-ink);
+}
 /* ── Managed copy modal (Cebab-ws0.9) ─────────────────────────────────────── */
 .managed-copy-modal {
   max-width: 34rem;
