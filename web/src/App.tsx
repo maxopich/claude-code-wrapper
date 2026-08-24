@@ -521,9 +521,7 @@ function AppShell({
   // they replace; drawer-open is narrow-tier-only and not persisted; `tier` is
   // derived from a ResizeObserver on `.app` (effect below).
   const appRef = useRef<HTMLDivElement>(null);
-  const [navPinned, setNavPinned] = useState(() =>
-    readStored('cebab.navPinned', false, (r) => r === 'true'),
-  );
+  const [navPinned, setNavPinned] = useState(initialNavPinned);
   const [inspPinned, setInspPinned] = useState(() =>
     readStored('cebab.inspPinned', false, (r) => r === 'true'),
   );
@@ -2962,6 +2960,29 @@ export function sendThenApply(input: {
   }
   input.apply();
   return true;
+}
+
+/**
+ * Cebab-vl5: does a fresh install open with the nav rail pinned?
+ *
+ * It does now. The rail collapses to a 66px strip when unpinned, and above the
+ * narrow tier the hamburger is `display: none` — so a first-time operator on a
+ * 16:10 display (where `permanentPanels` is false) had no visible control that
+ * opened the project list, while the composer told them to pick a project "in
+ * the sidebar". Starting pinned makes that sentence true on first paint.
+ *
+ * Only the FALLBACK changed. The effect beside `navPinned` writes
+ * `cebab.navPinned` on mount, so anyone who has ever loaded Cebab already has
+ * the key: a stored `'false'` still wins and an operator who unpinned stays
+ * unpinned. The always-visible pin button (styles.css) is what rescues THOSE
+ * operators — the two halves cover different people, which is why the bead
+ * asked for both.
+ *
+ * Exported for the gate — the alternative is driving all of App.tsx through
+ * jsdom to observe one localStorage fallback.
+ */
+export function initialNavPinned(): boolean {
+  return readStored('cebab.navPinned', true, (r) => r === 'true');
 }
 
 export function composerDisabledReason(s: {

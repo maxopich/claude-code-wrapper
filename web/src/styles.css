@@ -683,10 +683,20 @@ pre {
   color: var(--accent-ink);
   border-color: var(--accent);
 }
-/* Hide the pin until the rail is expanded. */
-.app[data-nav-pinned='false']:not([data-tier='narrow'])
-  .sidebar:not(:hover):not(:focus-within)
-  .pin-btn,
+/* Hide the pin until the rail is expanded — INSPECTOR ONLY.
+ *
+ * Cebab-vl5: the nav rail's pin used to fade with it, and that made the
+ * collapsed sidebar a dead end. Above the narrow tier the hamburger is
+ * `display: none`, `permanentPanels` is false on any 16:10 display, and a
+ * fresh install started unpinned — so the only route to the project list was
+ * hovering a 66px strip, and the one control that opens it was invisible until
+ * you had already found it. A rail may hide its own escape hatch only if there
+ * is another way in; the sidebar has none, so its pin now stays visible while
+ * collapsed. `navRailAffordance.test.ts` holds that.
+ *
+ * The inspector keeps the fade: it is a secondary surface, reachable from a
+ * session that is already running, and nothing depends on discovering it to
+ * start work. Its `:focus-within` half stays (railFocus.test.ts / U02). */
 .app[data-insp-pinned='false']:not([data-tier='narrow'])
   .inspector:not(:hover):not(:focus-within)
   .pin-btn {
@@ -6256,6 +6266,11 @@ pre {
   transform: translateY(1px);
   opacity: 0.85;
 }
+/* Cebab-7dk: `.pin-btn` joined this list. Without it the control that expands
+ * a collapsed rail took Tab focus with no ring at all — WCAG 2.1 AA 2.4.7 on
+ * the app's primary navigation. It slipped `focusVisible.test.ts` because that
+ * gate's hidden-control scan reads rules whose selector is a lone class, and
+ * the pin's fade is a descendant selector. */
 .primary-btn:focus-visible,
 .ghost-btn:focus-visible,
 .icon-btn:focus-visible,
@@ -6263,7 +6278,8 @@ pre {
 .main-tab:focus-visible,
 .lifecycle-btn:focus-visible,
 .mode-toggle .pill:focus-visible,
-.input-box button:focus-visible {
+.input-box button:focus-visible,
+.pin-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
