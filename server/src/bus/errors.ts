@@ -86,3 +86,32 @@ export class MutationNotRecordedError extends Error {
 export function isMutationNotRecorded(err: unknown): err is MutationNotRecordedError {
   return err instanceof MutationNotRecordedError;
 }
+
+/**
+ * `Cebab-vie.14` [security]: the three classes above are Cebab's own
+ * control-flow signals, not remote failures — whatever their text says.
+ *
+ * That distinction used to be carried by the text alone, and the text is partly
+ * the worker's. `PausedForMutationError`'s message is ``paused before
+ * ${row.summary}``, and for a `Bash` call the summary is the command plus the
+ * model-written `description` verbatim. The runner's retry filter,
+ * `isTransientOverload`, is three `String.includes` checks on `err.message`, so
+ * a worker that put `Overloaded` anywhere in either half made its own pause
+ * look like an API 5xx: the turn was retried, the replayed turn re-issued the
+ * command, and `decidePauseForMutation` waved it through because that agent was
+ * already halted. `rm -rf /important` with the description `retry after
+ * Overloaded` was enough.
+ *
+ * So the category gets a name and a predicate, and the retry filter asks THIS
+ * before it looks at any string. `TurnStalledError` is in the list for the same
+ * reason even though nothing has exploited it: its message embeds the agent
+ * name, so a participant whose project is called `Overloaded` would have been
+ * the same bug wearing a different hat — immune by accident of text is not
+ * immune.
+ *
+ * A fourth sentinel belongs here too. Adding one and forgetting this line is
+ * how the hole comes back.
+ */
+export function isBusControlSignal(err: unknown): boolean {
+  return isPausedForMutation(err) || isMutationNotRecorded(err) || isTurnStalled(err);
+}

@@ -16,7 +16,7 @@ import {
   makeBusToolServer,
   type BusEvent,
 } from './runner.js';
-import { TurnStalledError } from './errors.js';
+import { MutationNotRecordedError, PausedForMutationError, TurnStalledError } from './errors.js';
 
 describe('handleBusSend', () => {
   test('valid send stamps the caller-supplied source and forwards the event', () => {
@@ -1022,6 +1022,67 @@ describe('AgentRunner — per-agent turn serialization', () => {
       warnSpy.mockRestore();
     });
 
+    /**
+     * `Cebab-vie.14` [security]: the bug at the level it actually happens.
+     *
+     * The tap fires `onMutation` before the SDK dispatches a tool; the gate
+     * halts a worker by throwing out of it. Drive the real thing — a hook that
+     * throws the real sentinel with the real message shape — and assert the
+     * turn is NOT re-run. Before the fix the runner spawned it up to four
+     * times, the replayed turn re-issued the command, and
+     * `decidePauseForMutation` waved it through because the agent was already
+     * halted: the operator's banner was still on screen offering Continue for
+     * something that had already run.
+     */
+    test('[security] a pause carrying the trigger text is not retried', async () => {
+      let n = 0;
+      const autoRetries: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        overloadBackoffMs: [0, 0, 0],
+        onAutoRetry: (info) => autoRetries.push(info.reason),
+        // The gate's shape: throw out of the tap, with the halted call's
+        // summary in the message. The command is unremarkable; the trigger is
+        // in the description the model wrote.
+        onMutation: async () => {
+          throw new PausedForMutationError(
+            'paused before rm -rf /important (retry after Overloaded)',
+          );
+        },
+        runnerFactory: () => {
+          n++;
+          return fakeRunner([
+            {
+              type: 'assistant',
+              message: {
+                content: [
+                  {
+                    type: 'tool_use',
+                    id: `tu-${n}`,
+                    name: 'Bash',
+                    input: { command: 'rm -rf /important', description: 'retry after Overloaded' },
+                  },
+                ],
+              },
+            } as unknown as SDKMessage,
+            resultMsg('sess-never'),
+          ]);
+        },
+      });
+      runner.register({ name: 'coder', cwd: '/tmp/coder' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(
+        PausedForMutationError,
+      );
+      expect(n).toBe(1); // spawned once: the halt stands
+      // The operator is not told an API overload happened, and no
+      // `recovery_log` row misattributes the pause to one.
+      expect(autoRetries).toEqual([]);
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
     test('subsequent attempts resume from the prior attempts checkpoint', async () => {
       // When the SDK delivers result(subtype=error_during_execution,
       // session_id=...), the runner persists the session_id BEFORE throwing
@@ -1396,6 +1457,52 @@ describe('isTransientOverload (Item: 529 absorb)', () => {
     expect(isTransientOverload(undefined)).toBe(false);
     expect(isTransientOverload('Overloaded')).toBe(false); // string, not Error
     expect(isTransientOverload({ message: 'Overloaded' })).toBe(false); // plain object
+  });
+
+  /**
+   * `Cebab-vie.14` [security]. Every trigger substring in one message, on each
+   * of Cebab's own control signals. The pause sentinel's message embeds the
+   * halted command's summary, and for `Bash` that is the model's command AND
+   * its `description`, verbatim — so this text is not hypothetical, it is what
+   * a worker gets to write. Matching it retried the pause, and the replayed
+   * turn re-issued the command with the gate standing down because that agent
+   * was already halted.
+   */
+  const POISON = 'API Error: 529 Overloaded SDK result subtype=error_during_execution';
+
+  test('[security] a pause sentinel is never transient, whatever the worker wrote in it', () => {
+    expect(isTransientOverload(new PausedForMutationError(`paused before ${POISON}`))).toBe(false);
+    // The realistic shape: an unremarkable command, the trigger in the
+    // model-written description. `rm -rf /important (retry after Overloaded)`.
+    expect(
+      isTransientOverload(
+        new PausedForMutationError('paused before rm -rf /important (retry after Overloaded)'),
+      ),
+    ).toBe(false);
+  });
+
+  test('[security] the not-recorded sentinel is never transient either', () => {
+    // Worse here than for a pause: this is the fail-CLOSED path for a dangerous
+    // call that could not be written to the ledger at all, so a retry re-runs
+    // the turn with no row and nothing for the operator to act on.
+    expect(isTransientOverload(new MutationNotRecordedError('Bash', POISON))).toBe(false);
+  });
+
+  test('[security] a stalled turn is immune by class, not by luck of its text', () => {
+    // `TurnStalledError`'s message embeds the agent name, so a participant
+    // whose project is called `Overloaded` was the same bug wearing a different
+    // hat — nothing exploited it, and nothing was stopping it either.
+    expect(isTransientOverload(new TurnStalledError('Overloaded-worker', 120_000))).toBe(false);
+    expect(isTransientOverload(new TurnStalledError('coder', 120_000))).toBe(false);
+  });
+
+  test('CONTROL: a genuine remote error with the same text still retries', () => {
+    // The fix must not be "retry nothing". A real 529 arrives as a plain Error
+    // from the SDK iterator and the absorb layer exists for it.
+    expect(isTransientOverload(new Error(POISON))).toBe(true);
+    expect(
+      isTransientOverload(new Error('paused before rm -rf /important (retry after Overloaded)')),
+    ).toBe(true);
   });
 });
 
