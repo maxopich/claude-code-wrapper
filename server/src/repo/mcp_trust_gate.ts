@@ -308,6 +308,54 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
 }
 
 /**
+ * Cebab-ygu.6 / Cebab-ygu.17 [security]: the names a PROBE must not start.
+ *
+ * The authority probe is a real spawn — it exists to read
+ * `system/init.mcp_servers`, and that field only exists because the CLI
+ * actually tried to start each server — but it cannot prompt. Since
+ * `Cebab-ws0.7` it fires ~400ms after the operator lands on a project, so a
+ * TOFU modal here would mean arrowing down a sidebar throws dialogs. And it
+ * ran ungated: a server the operator answered "Deny & remember" to was started
+ * anyway, and a `pending_tofu` server ran before they were ever asked.
+ *
+ * So the rule is the strict one, and it is deliberately stricter than the
+ * gate's: **a probe starts only what is already trusted.** Everything else —
+ * `denied`, `pending_tofu`, `hash_changed`, `declaration_changed` — is refused.
+ * `deny_once` needs no case of its own: it only ever arises from a prompt,
+ * which only fires when a server is not trusted, so the rule already covers it.
+ *
+ * The audit obligation is the gate's, not a new one. A `denied` server is a
+ * standing operator decision being ENFORCED, which is exactly what
+ * `mcp.trust_silent_refusal` records, so this writes the same row the gated
+ * path writes. A `pending_tofu` server is not a decision — nothing was
+ * refused, the operator has simply never been asked — and a row per sidebar
+ * navigation would be noise in a hash chain that exists to be read.
+ *
+ * Returns names, so this can only refuse a server the resolver can SEE. A
+ * declaration Cebab cannot attribute is still started; that is the same limit
+ * `awaitMcpTrustDecisions` has (it skips rows with no `originPath` for the
+ * same structural reason), not a gap this function introduces.
+ */
+export function refuseUnapprovedForProbe(
+  projectId: number,
+  servers: readonly McpServerView[],
+): string[] {
+  const refused: string[] = [];
+  for (const server of servers) {
+    // Both skips mirror `awaitMcpTrustDecisions`: Cebab pins its own injected
+    // servers, and a row with no origin has no anchor for a decision.
+    if (server.scope === 'cebab-injected') continue;
+    if (!server.originPath) continue;
+    if (server.trust === 'trusted') continue;
+    refused.push(server.name);
+    if (server.trust === 'denied') {
+      recordSilentRefusal(projectId, server.name, server.originPath, 'denied_remember');
+    }
+  }
+  return refused;
+}
+
+/**
  * Register B20: reject every MCP decision still parked on this connection.
  * Called from `ws.on('close')`. Returns how many were released.
  *

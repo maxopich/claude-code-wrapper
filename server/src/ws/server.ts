@@ -2276,7 +2276,7 @@ function sendProjects(conn: Conn, rows: ProjectRow[]): void {
  * makes their answer bind. A caller that drops it silently reintroduces the
  * exact defect this fixed — the operator clicks Deny and the binary loads.
  *
- * The five call sites, i.e. every path to a spawn:
+ * The five call sites that go through THIS gate:
  *   - `start_multi_agent` orchestrator + chain — bus scopes.
  *   - `add_multi_agent_participant` — bus scopes. A mid-run add reaches the
  *     same widened `runner.register`, and used to reach it with NO gate at
@@ -2285,6 +2285,17 @@ function sendProjects(conn: Conn, rows: ProjectRow[]): void {
  *     runner read-only; Continue is where a turn actually spawns, and a
  *     restart is exactly when a participant's settings may have changed.
  *   - `runOneTurn` (single-agent) — trust-derived scopes, the default.
+ *
+ * They are not every path to a spawn, and this comment used to say they were.
+ * `probeSessionStarted` is a sixth — reached from `runAuthorityProbe` below,
+ * from the `get_model_catalogue` refresh, and from two live smoke scripts —
+ * and it slipped past review twice on the strength of that sentence
+ * (Cebab-ygu.6 / Cebab-ygu.17). It cannot use this gate: it fires ~400ms after
+ * the operator lands on a project, so it has no operator to park on. It takes
+ * the strict posture instead and starts only servers that are already trusted;
+ * `refuseUnapprovedForProbe` in `repo/mcp_trust_gate.ts` is the half of the
+ * decision matrix it does use, and `runner/probe.ts` applies it itself so no
+ * probe call site has to remember.
  *
  * `settingSources` must match what the spawn will pass the SDK. See the
  * note on the parameter.
