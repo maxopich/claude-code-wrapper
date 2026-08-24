@@ -7,7 +7,12 @@ import { closeDb, getDb } from '../db.js';
 import { config } from '../config.js';
 import { _resetOperatorIdCache } from '../notifications/operator.js';
 import { checkTrust, recordTrustDecision } from './mcp_trust.js';
-import { awaitMcpTrustDecisions, denyOnceKey, makeTrustGateState } from './mcp_trust_gate.js';
+import {
+  awaitMcpTrustDecisions,
+  denyOnceKey,
+  makeTrustGateState,
+  refuseUnapprovedForProbe,
+} from './mcp_trust_gate.js';
 import * as safetyAudit from '../notifications/safety_audit.js';
 
 // Cluster B Phase 4b (§4.4): TOFU spawn-gate tests.
@@ -694,5 +699,91 @@ describe('[security] a rewritten declaration re-gates instead of passing silentl
         args: ['mcp/swapped-server.mjs'],
       }).decision,
     ).toBe('trusted');
+  });
+});
+
+// ---- Cebab-ygu.6 / Cebab-ygu.17: what a probe is allowed to start ----
+
+describe('[security] refuseUnapprovedForProbe — a probe starts only what is trusted', () => {
+  const ORIGIN = '/u/proj/.mcp.json';
+
+  function view(name: string, trust: McpServerView['trust'], over: Partial<McpServerView> = {}) {
+    return {
+      name,
+      status: 'unknown',
+      scope: 'mcp-json',
+      originPath: ORIGIN,
+      tools: [],
+      trust,
+      ...over,
+    } as McpServerView;
+  }
+
+  function refusalRows(): Array<{ reason_code: string; payload_json: string }> {
+    return getDb()
+      .prepare<[], { reason_code: string; payload_json: string }>(
+        `SELECT reason_code, payload_json FROM safety_audit
+          WHERE kind = 'mcp.trust_silent_refusal' ORDER BY id`,
+      )
+      .all();
+  }
+
+  test('a denied server is refused AND the enforcement is recorded', () => {
+    // The failure both beads describe: the operator answered "Deny & remember"
+    // on a real turn, then landed on the project and the probe started the
+    // binary anyway — no prompt, no refusal, no row.
+    const refused = refuseUnapprovedForProbe(3, [view('payments', 'denied')]);
+    expect(refused).toEqual(['payments']);
+    const rows = refusalRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reason_code).toBe('denied_remember');
+    expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({
+      projectId: 3,
+      serverName: 'payments',
+      originPath: ORIGIN,
+      enforcement: 'denied_mcp_servers+disallowed_tools',
+    });
+  });
+
+  test('every not-yet-approved state is refused, with no audit row', () => {
+    // Nothing was DECIDED for these, so there is no enforcement to record —
+    // and a row per sidebar navigation would be noise in a chain that exists
+    // to be read. The refusal itself is what matters.
+    const refused = refuseUnapprovedForProbe(3, [
+      view('never-seen', 'pending_tofu'),
+      view('rebuilt', 'hash_changed'),
+      view('swapped', 'declaration_changed'),
+    ]);
+    expect(refused).toEqual(['never-seen', 'rebuilt', 'swapped']);
+    expect(refusalRows()).toEqual([]);
+  });
+
+  test('a trusted server is NOT refused', () => {
+    // The control. Without it "refuse everything" passes every case above, and
+    // the panel would report nothing for anybody — the probe exists to read a
+    // status that only exists because the server ran.
+    expect(refuseUnapprovedForProbe(3, [view('approved', 'trusted')])).toEqual([]);
+    expect(refusalRows()).toEqual([]);
+  });
+
+  test('cebab-injected and anchorless rows are skipped, matching the gate', () => {
+    // Same two skips `awaitMcpTrustDecisions` makes. `cebab_bus` is pinned by
+    // Cebab; a row with no originPath has no anchor for a decision, so naming
+    // it here would refuse something no operator can ever approve.
+    const refused = refuseUnapprovedForProbe(3, [
+      view('cebab_bus', 'trusted', { scope: 'cebab-injected' }),
+      view('no-anchor', 'unknown', { originPath: undefined }),
+    ]);
+    expect(refused).toEqual([]);
+  });
+
+  test('a mixed project refuses only the unapproved half', () => {
+    const refused = refuseUnapprovedForProbe(3, [
+      view('approved', 'trusted'),
+      view('payments', 'denied'),
+      view('never-seen', 'pending_tofu'),
+    ]);
+    expect(refused).toEqual(['payments', 'never-seen']);
+    expect(refusalRows()).toHaveLength(1); // only the standing decision
   });
 });

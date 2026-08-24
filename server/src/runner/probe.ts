@@ -28,6 +28,19 @@
  * Goes through `pickRunner`, so mock mode replays a fixture's init exactly as
  * every other Cebab spawn does.
  *
+ * WHAT IT REFUSES TO START (Cebab-ygu.6 / Cebab-ygu.17). This is a spawn, and
+ * it used to be an ungated one: `gateProjectsForSpawn`'s header listed "every
+ * path to a spawn" and did not list this. A server the operator had answered
+ * "Deny & remember" to was started by it anyway, and a never-seen server ran
+ * before they were ever asked — with no prompt, no refusal and no
+ * `safety_audit` row. A probe cannot prompt (since `Cebab-ws0.7` it fires ~400ms
+ * after the operator lands on a project, so a modal here would mean arrowing
+ * down a sidebar throws dialogs), so it takes the strict posture instead: it
+ * starts only what is already trusted. `refuseUnapprovedForProbe` decides, and
+ * this function computes the list ITSELF rather than taking it as an option —
+ * there are four call sites, and the same argument H04 makes about `runClaude`
+ * applies here: no call site can get half of it right if none of them owns it.
+ *
  * SIDE EFFECT, deliberate (Cebab-ws0.3): while the CLI is up and before the
  * abort, this also refreshes the account-wide model catalogue. The list rides
  * the initialize handshake, so it is already in hand — asking for it here costs
@@ -43,6 +56,8 @@ import { registerQuery } from './lifecycle.js';
 import type { SettingSource } from './claude.js';
 import { translate } from '../ws/translate.js';
 import { refreshModelCatalogue } from './model_catalogue.js';
+import { resolveProjectAuthority } from '../repo/project_authority.js';
+import { refuseUnapprovedForProbe } from '../repo/mcp_trust_gate.js';
 
 /**
  * A probe that has not produced an init by now is not going to. Generous
@@ -67,6 +82,30 @@ export async function probeSessionStarted(opts: {
   projectId: number;
   settingSources: readonly SettingSource[];
 }): Promise<ServerMsg | null> {
+  // [security] Resolve against the scopes THIS spawn will use, not the
+  // project's Trust setting — the same rule `gateProjectsForSpawn` carries.
+  // A probe resolved against different scopes would compute denials for a
+  // surface the spawn does not load, and miss the one it does.
+  //
+  // `mode: 'cache'` is what keeps this from recursing: cache mode reads files
+  // and the trust ledger, and never spawns.
+  //
+  // No project row (the live smoke scripts pass `projectId: 0`) → no
+  // authority → no names → nothing refused. Structural rather than a policy
+  // choice: `deniedMcpServers` needs names, and there are none to give.
+  const authority = resolveProjectAuthority({
+    projectId: opts.projectId,
+    mode: 'cache',
+    // No cast: `SettingSource` (the SDK's) and `SettingScope` (Cebab's) are
+    // both 'user' | 'project' | 'local' today, and letting the compiler check
+    // that is the point — if the SDK ever widens its union, this line goes red
+    // instead of silently resolving against a scope the resolver cannot read.
+    settingSources: opts.settingSources,
+  });
+  const deniedMcpServers = authority
+    ? refuseUnapprovedForProbe(opts.projectId, authority.mcpServers)
+    : [];
+
   const ac = new AbortController();
   let runner: Runner | undefined;
   let unregister: (() => void) | undefined;
@@ -87,6 +126,10 @@ export async function probeSessionStarted(opts: {
       settingSources: [...opts.settingSources],
       abortController: ac,
       maxTurns: 1,
+      // Empty stays empty: `mcpDenialOptions` returns `{}` for an empty list,
+      // so a project whose servers are all approved spawns byte-identically
+      // to before this existed.
+      ...(deniedMcpServers.length > 0 ? { deniedMcpServers } : {}),
       // Unreachable in practice (we abort at init, before any tool call) and
       // deliberately still a deny: a probe must never be able to act.
       canUseTool: async () => ({
