@@ -3395,3 +3395,167 @@ describe('store / managed copy (Cebab-ws0.9)', () => {
     expect(s.managedCopy?.result).toEqual({ ok: false, error: 'nope' });
   });
 });
+
+describe('store / tool output survives the fold (Cebab-003)', () => {
+  const SID = 'sid-003';
+
+  /** Open a project and start a session that has already called one tool. */
+  function afterToolCall(toolUseId = 'tu-1', toolName = 'Bash') {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'run the tests' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: SID,
+        projectId: PID,
+        model: 'opus-4',
+        tools: [],
+      },
+    });
+    return reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'assistant_message',
+        sessionId: SID,
+        uuid: 'a-1',
+        blocks: [
+          { type: 'tool_use', id: toolUseId, name: toolName, input: { command: 'npm test' } },
+        ],
+      },
+    });
+  }
+
+  function lastMessage(s: ReturnType<typeof open>) {
+    const msgs = activeSession(s)!.messages;
+    return msgs[msgs.length - 1];
+  }
+
+  test('string content lands verbatim, tagged with the tool that produced it', () => {
+    const s = reduce(afterToolCall(), {
+      type: 'server',
+      msg: {
+        type: 'user_message',
+        sessionId: SID,
+        uuid: 'u-1',
+        blocks: [{ type: 'tool_result', tool_use_id: 'tu-1', content: '3 passed, 0 failed' }],
+      },
+    });
+    expect(lastMessage(s)).toMatchObject({
+      kind: 'system',
+      subtype: 'tool_result',
+      text: '3 passed, 0 failed',
+      toolName: 'Bash',
+    });
+  });
+
+  test('array-of-text-parts content is flattened, not dumped as JSON', () => {
+    // 2 of 118 measured real results use this arm; the old fold rendered it
+    // as [{"type":"text","text":"…"}].
+    const s = reduce(afterToolCall(), {
+      type: 'server',
+      msg: {
+        type: 'user_message',
+        sessionId: SID,
+        uuid: 'u-1',
+        blocks: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-1',
+            content: [
+              { type: 'text', text: 'first' },
+              { type: 'text', text: 'second' },
+            ],
+          },
+        ],
+      },
+    });
+    const m = lastMessage(s);
+    expect(m).toMatchObject({ kind: 'system', text: 'first\nsecond' });
+    expect((m as { text: string }).text).not.toContain('"type"');
+  });
+
+  test('is_error is carried onto the message', () => {
+    const s = reduce(afterToolCall(), {
+      type: 'server',
+      msg: {
+        type: 'user_message',
+        sessionId: SID,
+        uuid: 'u-1',
+        blocks: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-1',
+            content: 'command not found',
+            is_error: true,
+          },
+        ],
+      },
+    });
+    expect(lastMessage(s)).toMatchObject({ isError: true, text: 'command not found' });
+  });
+
+  test('a non-erroring result carries no isError flag at all', () => {
+    const s = reduce(afterToolCall(), {
+      type: 'server',
+      msg: {
+        type: 'user_message',
+        sessionId: SID,
+        uuid: 'u-1',
+        blocks: [{ type: 'tool_result', tool_use_id: 'tu-1', content: 'ok' }],
+      },
+    });
+    expect(lastMessage(s)).not.toHaveProperty('isError');
+  });
+
+  test('an unmatched tool_use_id leaves toolName undefined rather than guessing', () => {
+    const s = reduce(afterToolCall('tu-1', 'Bash'), {
+      type: 'server',
+      msg: {
+        type: 'user_message',
+        sessionId: SID,
+        uuid: 'u-1',
+        blocks: [{ type: 'tool_result', tool_use_id: 'tu-elsewhere', content: 'orphan' }],
+      },
+    });
+    expect(lastMessage(s)).not.toHaveProperty('toolName');
+  });
+
+  test('the right name is picked when two tools are in flight', () => {
+    let s = afterToolCall('tu-a', 'Read');
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'assistant_message',
+        sessionId: SID,
+        uuid: 'a-2',
+        blocks: [{ type: 'tool_use', id: 'tu-b', name: 'Grep', input: {} }],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'user_message',
+        sessionId: SID,
+        uuid: 'u-1',
+        blocks: [{ type: 'tool_result', tool_use_id: 'tu-a', content: 'file contents' }],
+      },
+    });
+    expect(lastMessage(s)).toMatchObject({ toolName: 'Read' });
+  });
+
+  test('sessionPhase still leaves tool-running when the result lands', () => {
+    const before = afterToolCall();
+    expect(sessionPhase(activeSession(before)!, true)).toBe('tool-running');
+    const after = reduce(before, {
+      type: 'server',
+      msg: {
+        type: 'user_message',
+        sessionId: SID,
+        uuid: 'u-1',
+        blocks: [{ type: 'tool_result', tool_use_id: 'tu-1', content: 'done' }],
+      },
+    });
+    expect(sessionPhase(activeSession(after)!, true)).not.toBe('tool-running');
+  });
+});

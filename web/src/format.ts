@@ -108,8 +108,8 @@ export function formatResultDuration(ms: number): string {
 
 /**
  * Extract the copyable text for a chat message, or `null` when there's nothing
- * worth a copy button (system separators, the per-turn result footer, the
- * interactive permission card). Assistant turns return their joined rendered
+ * worth a copy button (system separators other than tool output, the per-turn
+ * result footer, the interactive permission card). Assistant turns return their joined rendered
  * text blocks — tool_use / tool_result / thinking blocks are dropped so the
  * operator copies the prose, not the JSON scaffolding. Drives the hover copy
  * button in `MessageBlock`.
@@ -121,6 +121,11 @@ export function messageCopyText(m: MessageView): string | null {
       return m.text || null;
     case 'error':
       return m.message || null;
+    // Cebab-003: tool output is copyable now that it is visible. Other system
+    // messages (the `init` banner, `system_event` summaries) stay `null` —
+    // they are separators, not content.
+    case 'system':
+      return m.subtype === 'tool_result' ? m.text || null : null;
     case 'assistant': {
       const text = m.blocks
         .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')

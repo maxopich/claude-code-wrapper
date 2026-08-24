@@ -34,7 +34,25 @@ export type MessageView =
       id: string;
       blocks: ContentBlock[];
     }
-  | { kind: 'system'; id: string; subtype: string; text: string }
+  | {
+      kind: 'system';
+      id: string;
+      subtype: string;
+      text: string;
+      /**
+       * Cebab-003: `true` when the tool_result this message was folded from
+       * carried `is_error`. Optional — absent on `init` / `system_event`
+       * messages and on any state replayed from a pre-003 build.
+       */
+      isError?: boolean;
+      /**
+       * Cebab-003: the name of the tool this output came from, resolved at
+       * reduce time by matching `tool_use_id` against an earlier assistant
+       * `tool_use` block. `undefined` when the pair could not be matched
+       * (parallel tools whose call scrolled out of a replayed window).
+       */
+      toolName?: string;
+    }
   | { kind: 'command_output'; id: string; text: string }
   | {
       kind: 'result';
@@ -2776,20 +2794,22 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'user_message': {
       const projectId = projectFor(state, msg.sessionId);
       if (projectId === null) return state;
-      const text = msg.blocks
-        .map((b) => {
-          if (b.type === 'tool_result') {
-            const c = b.content;
-            return typeof c === 'string' ? c : JSON.stringify(c);
-          }
-          return JSON.stringify(b);
-        })
-        .join('\n');
+      // Cebab-003: a `user` SDK message is how tool output comes back (the API
+      // puts tool_result blocks in user messages, never assistant ones).
+      // Measured across 9 real session logs: 118 user messages, 118
+      // tool_result blocks, one per message, no prompt echo — so this fold is
+      // always "the tool spoke", and MessageBlock renders it as such.
+      const text = msg.blocks.map(toolResultText).join('\n');
+      const isError = msg.blocks.some((b) => b.type === 'tool_result' && b.is_error === true);
+      const session = state.sessionsByProject[projectId]?.[msg.sessionId];
+      const toolName = session ? resolveToolName(session.messages, msg.blocks) : undefined;
       return appendMessage(state, projectId, msg.sessionId, {
         kind: 'system',
         id: nextId(),
         subtype: 'tool_result',
         text,
+        ...(isError ? { isError: true } : {}),
+        ...(toolName !== undefined ? { toolName } : {}),
       });
     }
 
@@ -3622,6 +3642,55 @@ export function countControlledParticipants(
     }
   }
   return n;
+}
+
+/**
+ * Cebab-003: flatten one block of a `user_message` into displayable text.
+ *
+ * `tool_result.content` is a plain string in the overwhelming majority of real
+ * turns (116 of 118 measured), but the API also allows the content-part array
+ * form — `[{ type: 'text', text: … }]` — which the previous `JSON.stringify`
+ * rendered as its own JSON scaffolding. Flatten that arm; anything else
+ * pretty-prints rather than collapsing to one unreadable line.
+ */
+function toolResultText(b: ContentBlock): string {
+  if (b.type === 'tool_result') {
+    const c = b.content;
+    if (typeof c === 'string') return c;
+    if (Array.isArray(c)) {
+      const parts = c as Array<{ type?: string; text?: string }>;
+      if (parts.every((p) => p?.type === 'text' && typeof p.text === 'string')) {
+        return parts.map((p) => p.text).join('\n');
+      }
+    }
+    return JSON.stringify(c, null, 2);
+  }
+  // Not observed on the live path, but `translate.ts` forwards whatever the
+  // SDK hands it: render a text block as its text rather than as JSON.
+  if (b.type === 'text') return b.text;
+  return JSON.stringify(b);
+}
+
+/**
+ * Cebab-003: name the tool a batch of tool_result blocks answers, by matching
+ * the first block's `tool_use_id` against the `tool_use` blocks already in the
+ * transcript. Same backwards-scan shape as {@link pendingToolName}; returns
+ * undefined when nothing matches, and the card falls back to a bare
+ * "tool output" label.
+ */
+function resolveToolName(messages: MessageView[], blocks: ContentBlock[]): string | undefined {
+  const first = blocks.find(
+    (b): b is Extract<ContentBlock, { type: 'tool_result' }> => b.type === 'tool_result',
+  );
+  if (!first) return undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.kind !== 'assistant') continue;
+    for (const b of m.blocks) {
+      if (b.type === 'tool_use' && b.id === first.tool_use_id) return b.name;
+    }
+  }
+  return undefined;
 }
 
 function summarizeSystemEvent(subtype: string, payload: unknown): string {
