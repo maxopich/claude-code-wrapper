@@ -69,7 +69,15 @@ export function decidePauseForMutation(
   }
   // Already waiting on the operator: this agent's turn is dead, so there is
   // nothing left to halt and a second pending row would only duplicate the
-  // banner. Defensive — the tap shouldn't see another call from a dead turn.
+  // banner.
+  //
+  // `Cebab-vie.13`: this branch used to be the hole rather than the defence.
+  // Killing the turn left the agent's turn QUEUE untouched, so the next
+  // delivery — a peer's `bus_send`, an orchestrator follow-up, a retry —
+  // started a fresh turn that arrived here and was waved through, for as long
+  // as the operator left the banner un-actioned. The pause now holds the
+  // queue too (`holdAgent` below), so the only caller that can still reach
+  // this line is a sibling `tool_use` block from the dead turn itself.
   if (agent.hasPendingPause) return { action: 'run' };
   return { action: 'pause' };
 }
@@ -123,10 +131,16 @@ export function shouldHaltUnrecordedMutation(
  *
  * `row` is the already-persisted mutation (the tap appends before gating), so
  * it carries every fact the gate needs: session, agent, tool, summary, category.
+ *
+ * `holdAgent` is the router's `runner.holdForMutation` — the halt is a queue
+ * hold plus a dead turn, not a dead turn alone (`Cebab-vie.13`). Optional only
+ * so the pure-DB tests can call this without a runner; every production caller
+ * passes it.
  */
 export function applyPauseGate(
   row: MutationRecord,
   onPendingMutation?: (sessionId: string, pending: MutationRecord[]) => void,
+  holdAgent?: (agentName: string) => void,
 ): void {
   const { sessionId, agentName } = row;
   const session = getMultiAgentSession(sessionId);
@@ -149,6 +163,21 @@ export function applyPauseGate(
   }
   if (decision.action === 'run') return;
 
+  // `Cebab-vie.13`: hold the agent's turn QUEUE, not just this turn. Killing
+  // the turn is what the throw below does, and on its own it bought nothing —
+  // the next delivery to this agent started a fresh turn whose dangerous
+  // commands ran unapproved. Installed BEFORE the row write and the sink so
+  // the hold cannot be missed by any path that gives up between here and the
+  // throw. Released by the router's `continueThroughMutation`.
+  //
+  // Lives here rather than in each router for this module's stated reason:
+  // orchestrator.ts and chain.ts must not drift on a gate decision, and
+  // "does the queue stay held" is one.
+  try {
+    holdAgent?.(agentName);
+  } catch (err) {
+    console.error('[bus] holding the paused agent queue failed', err);
+  }
   try {
     setMutationPauseState(row.id, 'pending');
   } catch (err) {
@@ -174,6 +203,10 @@ export function applyPauseGate(
  *
  * The row stays `approved` rather than being cleared: it IS the one-shot grant
  * that lets the replayed turn re-issue the same command exactly once.
+ *
+ * Releasing the agent's QUEUE hold is the caller's job, because the runner
+ * lives in the router — see `continueThroughMutation` in orchestrator.ts and
+ * chain.ts, both of which release before they look up the replay prompt.
  */
 export function releasePauseForMutation(
   sessionId: string,

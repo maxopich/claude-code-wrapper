@@ -66,6 +66,11 @@ describe('decidePauseForMutation [security]', () => {
     ).toEqual({ action: 'consume-approval', approvalId: 7 });
   });
 
+  // `Cebab-vie.13`: this `run` is only safe because the halt now holds the
+  // agent's turn QUEUE as well as killing its turn (`applyPauseGate` →
+  // `AgentRunner.holdForMutation`). Reached by a sibling `tool_use` block from
+  // the already-dead turn; a LATER turn used to reach it too, and was waved
+  // straight through.
   it('does NOT open a second pause for an agent already halted', () => {
     expect(
       decidePauseForMutation('dangerous', armed, {

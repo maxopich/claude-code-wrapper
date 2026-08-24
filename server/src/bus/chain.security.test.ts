@@ -10,10 +10,14 @@ import { CEBAB_SOURCE, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import { BUS_MESSAGE_TAG_STEM } from './message_fence.js';
 import { realOpenTags } from '../test_support/fence_probe.js';
 import { resolveSdkMcpTool } from '../runner/mock.js';
-import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
+import {
+  createMultiAgentSession,
+  listMultiAgentEvents,
+  listPendingMutations,
+} from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import { unregisterLiveSession } from './session_registry.js';
-import type { BusEvent } from './runner.js';
+import { AgentRunner, type BusEvent } from './runner.js';
 import type { Runner } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
@@ -391,5 +395,108 @@ describe('[security] a dangerous call that cannot be recorded is halted, not run
     expect(onPendingRetry).not.toHaveBeenCalled();
 
     unregisterLiveSession(handle.sessionId);
+  });
+});
+
+// `Cebab-vie.13` [security]: chain's half of the queue hold. The gate halts a
+// turn by throwing, which on its own left the participant's turn QUEUE open —
+// so the next delivery ran a fresh turn and its dangerous commands were waved
+// through by `decidePauseForMutation`'s `hasPendingPause` branch.
+//
+// Chain's sequential topology makes a follow-on delivery rarer than in
+// orchestrator mode, not impossible, and the two routers share `applyPauseGate`
+// precisely so a gate decision cannot differ between them. What is per-router
+// is the WIRING — passing the runner's hold in, and giving it back on Continue
+// — so that is what these assert, at the runner boundary. What the hold then
+// does to the queue is pinned in `runner.pause.test.ts`, and end-to-end
+// through a live session in `orchestrator.wiring.test.ts`.
+describe('[security] a chain participant held at a dangerous command holds its queue', () => {
+  function mkAgent(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  /** One dangerous Bash call, then the turn ends. `dispatched` records the
+   *  call only if the tap did NOT throw. */
+  function dangerousRunnerFactory(dispatched: string[]) {
+    return (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_rm',
+                name: 'Bash',
+                input: { command: 'rm -rf /tmp/victim' },
+              },
+            ],
+          },
+        } as unknown as SDKMessage;
+        dispatched.push('rm -rf /tmp/victim');
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  async function runHeld(pauseOnDangerous: boolean) {
+    const workspace = path.join(tmpRoot, `ws-hold-${String(pauseOnDangerous)}`);
+    fs.mkdirSync(workspace, { recursive: true });
+    const dispatched: string[] = [];
+    const hold = vi.spyOn(AgentRunner.prototype, 'holdForMutation');
+    const release = vi.spyOn(AgentRunner.prototype, 'releaseMutationHold');
+    const handle = await startChainSession({
+      participants: [mkAgent('coder'), mkAgent('reviewer')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      pauseOnDangerous,
+      runnerFactory: dangerousRunnerFactory(dispatched),
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    return { handle, dispatched, hold, release };
+  }
+
+  test('the pause takes the hold, and Continue gives it back', async () => {
+    const { handle, dispatched, hold, release } = await runHeld(true);
+    try {
+      expect(dispatched).toEqual([]);
+      expect(hold.mock.calls.map((c) => c[0])).toEqual(['coder']);
+
+      const held = listPendingMutations(handle.sessionId);
+      expect(held).toHaveLength(1);
+
+      // Released BEFORE the replay-prompt lookup, so the early `return` on a
+      // missing prompt cannot strand a participant whose banner is gone.
+      expect(release).not.toHaveBeenCalled();
+      await handle.continueThroughMutation(held[0]!.id);
+      expect(release.mock.calls.map((c) => c[0])).toEqual(['coder']);
+    } finally {
+      hold.mockRestore();
+      release.mockRestore();
+      unregisterLiveSession(handle.sessionId);
+    }
+  });
+
+  test('control: with the gate DISARMED nothing is held and the command runs', async () => {
+    // Without this the wiring could be "hold on every dangerous mutation",
+    // which would park participants for operators who never armed the gate.
+    const { handle, dispatched, hold, release } = await runHeld(false);
+    try {
+      expect(dispatched).toEqual(['rm -rf /tmp/victim']);
+      expect(hold).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      hold.mockRestore();
+      release.mockRestore();
+      unregisterLiveSession(handle.sessionId);
+    }
   });
 });
