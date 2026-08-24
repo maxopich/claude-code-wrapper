@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ServerMsg, McpServerView } from '@cebab/shared/protocol';
 import { abandonPendingGates, MAX_PENDING_GATES } from '../gate_abandon.js';
-import { listForServer, recordTrustDecision } from './mcp_trust.js';
+import { listForServer, previousDeclaration, recordTrustDecision } from './mcp_trust.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 
 // Cluster B Phase 4b (§4.4): Pre-spawn TOFU gate.
@@ -190,6 +190,7 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
         continue;
       case 'pending_tofu':
       case 'hash_changed':
+      case 'declaration_changed':
         // Fall through to the prompt path.
         break;
       default: {
@@ -202,8 +203,12 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
     }
 
     const pendingId = randomUUID();
-    const reason: 'first_seen' | 'hash_changed' =
-      server.trust === 'hash_changed' ? 'hash_changed' : 'first_seen';
+    const reason: 'first_seen' | 'hash_changed' | 'declaration_changed' =
+      server.trust === 'hash_changed'
+        ? 'hash_changed'
+        : server.trust === 'declaration_changed'
+          ? 'declaration_changed'
+          : 'first_seen';
     const command = server.config?.command ?? '';
     const args = server.config?.args;
     const binarySha = server.binarySha;
@@ -220,6 +225,19 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
         }
       }
     }
+    // Cebab-rxg: same idea one level up. For a changed DECLARATION the useful
+    // comparison is the program itself, not its hash — the reproduced attack
+    // swapped `node <script>` for another script and never moved a hash at
+    // all, because a bare command has none.
+    let previousCommand: string | undefined;
+    let previousArgs: string[] | undefined;
+    if (reason === 'declaration_changed') {
+      const prior = previousDeclaration(server.name, originPath);
+      if (prior) {
+        previousCommand = prior.command;
+        previousArgs = prior.args;
+      }
+    }
 
     const envelope: ServerMsg = {
       type: 'mcp_auto_install_pending',
@@ -231,6 +249,8 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
       ...(args && args.length > 0 ? { args } : {}),
       ...(binarySha ? { binarySha } : {}),
       ...(previousSha ? { previousSha } : {}),
+      ...(previousCommand !== undefined ? { previousCommand } : {}),
+      ...(previousArgs !== undefined ? { previousArgs } : {}),
     };
 
     // H15: fail closed rather than park an unbounded number of decisions.
@@ -315,6 +335,10 @@ function applyDecision(args: {
       recordTrustDecision({
         serverName: args.server.name,
         originPath: args.originPath,
+        // Cebab-rxg: record WHAT was approved. Without these two the row
+        // matches any future declaration under the same name.
+        command: args.server.config?.command ?? '',
+        args: args.server.config?.args ?? [],
         binarySha: args.server.binarySha ?? null,
         decision: 'trusted',
       });
@@ -324,6 +348,8 @@ function applyDecision(args: {
       recordTrustDecision({
         serverName: args.server.name,
         originPath: args.originPath,
+        command: args.server.config?.command ?? '',
+        args: args.server.config?.args ?? [],
         binarySha: args.decision.binarySha,
         decision: 'trusted_pinned_hash',
       });
@@ -342,6 +368,8 @@ function applyDecision(args: {
       recordTrustDecision({
         serverName: args.server.name,
         originPath: args.originPath,
+        command: args.server.config?.command ?? '',
+        args: args.server.config?.args ?? [],
         binarySha: args.server.binarySha ?? null,
         decision: 'denied_remember',
       });

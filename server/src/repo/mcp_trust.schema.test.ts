@@ -49,25 +49,62 @@ describe('migration 016_mcp_trust schema shape', () => {
     expect(byName.origin_path).toMatchObject({ type: 'TEXT', notnull: 1 });
     // binary_sha is nullable on purpose (npx, etc.).
     expect(byName.binary_sha).toMatchObject({ type: 'TEXT', notnull: 0 });
+    // Migration 038 (Cebab-rxg) put the declaration into the identity. Also
+    // nullable, and for a different reason: NULL marks a decision recorded
+    // before 038, which is what makes those re-prompt once.
+    expect(byName.command).toMatchObject({ type: 'TEXT', notnull: 0 });
+    expect(byName.args_json).toMatchObject({ type: 'TEXT', notnull: 0 });
     expect(byName.decision).toMatchObject({ type: 'TEXT', notnull: 1 });
     expect(byName.operator).toMatchObject({ type: 'TEXT', notnull: 1 });
   });
 
-  test('UNIQUE(server_name, origin_path, binary_sha) is enforced', () => {
+  test('UNIQUE(server_name, origin_path, command, args_json, binary_sha) is enforced', () => {
+    // Widened by 038 (Cebab-rxg). The identity used to be the triple, so a
+    // rewritten declaration under an approved name replaced nothing and
+    // matched everything.
     const db = getDb();
-    db.prepare(
-      `INSERT INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
-        VALUES (?, ?, ?, ?, ?, ?)`,
-    ).run(1000, 'srv', '/etc/mcp.json', 'deadbeef', 'trusted', 'local-user');
-    // Same triple → constraint violation.
+    const insert = db.prepare(
+      `INSERT INTO mcp_trust (ts, server_name, origin_path, command, args_json, binary_sha, decision, operator)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insert.run(1000, 'srv', '/etc/mcp.json', 'node', '["a.mjs"]', 'deadbeef', 'trusted', 'op');
+    // Same identity → constraint violation.
     expect(() =>
-      db
-        .prepare(
-          `INSERT INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(2000, 'srv', '/etc/mcp.json', 'deadbeef', 'denied_remember', 'local-user'),
+      insert.run(
+        2000,
+        'srv',
+        '/etc/mcp.json',
+        'node',
+        '["a.mjs"]',
+        'deadbeef',
+        'denied_remember',
+        'op',
+      ),
     ).toThrowError(/UNIQUE constraint/);
+    // A DIFFERENT declaration at the same name+origin+sha is a distinct row —
+    // which is the whole point: it is a decision the operator has not made.
+    expect(() =>
+      insert.run(3000, 'srv', '/etc/mcp.json', 'node', '["b.mjs"]', 'deadbeef', 'trusted', 'op'),
+    ).not.toThrow();
+  });
+
+  test('a NULL declaration sits outside both unique keys, and that is bounded', () => {
+    // Worth stating rather than discovering. SQLite treats NULLs as distinct,
+    // so the pre-038 carry-over shape (command/args_json NULL) conflicts with
+    // nothing — two legacy rows for one server could coexist.
+    //
+    // Bounded because nothing WRITES that shape: `TrustDecisionInput` requires
+    // both fields, so the only NULL rows are the ones 038 copied over, and 033
+    // had already deduped the null-sha set to one row per (name, origin).
+    // `checkTrust` cannot match them either, so the worst case is one extra
+    // prompt, not a silent pass.
+    const db = getDb();
+    const insert = db.prepare(
+      `INSERT INTO mcp_trust (ts, server_name, origin_path, command, args_json, binary_sha, decision, operator)
+        VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+    );
+    insert.run(1000, 'legacy', '/etc/mcp.json', 'trusted', 'op');
+    expect(() => insert.run(2000, 'legacy', '/etc/mcp.json', 'trusted', 'op')).not.toThrow();
   });
 
   test('different binary_sha for same (server_name, origin_path) is allowed', () => {
@@ -111,16 +148,21 @@ describe('migration 016_mcp_trust schema shape', () => {
     // Migration 033's partial unique index closes it. The SQLite fact the old
     // comment documented is still true; it is now a fact about the table-level
     // UNIQUE alone, which is why 033 exists.
+    //
+    // Migration 038 widened the partial index to carry the declaration too, so
+    // the two writes below name one — an `npx` server the operator decided on
+    // twice. The D09 contract this case exists for is unchanged: at a NULL sha
+    // the second decision must REPLACE the first rather than pile up.
     const db = getDb();
     db.prepare(
-      `INSERT INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
-        VALUES (?, ?, ?, NULL, ?, ?)`,
+      `INSERT INTO mcp_trust (ts, server_name, origin_path, command, args_json, binary_sha, decision, operator)
+        VALUES (?, ?, ?, 'npx', '["-y","x"]', NULL, ?, ?)`,
     ).run(1000, 'srv', '/etc/mcp.json', 'trusted', 'local-user');
     expect(() =>
       db
         .prepare(
-          `INSERT INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
-            VALUES (?, ?, ?, NULL, ?, ?)`,
+          `INSERT INTO mcp_trust (ts, server_name, origin_path, command, args_json, binary_sha, decision, operator)
+            VALUES (?, ?, ?, 'npx', '["-y","x"]', NULL, ?, ?)`,
         )
         .run(2000, 'srv', '/etc/mcp.json', 'denied_remember', 'local-user'),
     ).toThrowError(/UNIQUE constraint/);
@@ -135,8 +177,8 @@ describe('migration 016_mcp_trust schema shape', () => {
     // ORDER BY.
     const db = getDb();
     const write = db.prepare(
-      `INSERT OR REPLACE INTO mcp_trust (ts, server_name, origin_path, binary_sha, decision, operator)
-        VALUES (?, ?, ?, NULL, ?, ?)`,
+      `INSERT OR REPLACE INTO mcp_trust (ts, server_name, origin_path, command, args_json, binary_sha, decision, operator)
+        VALUES (?, ?, ?, 'npx', '["-y","x"]', NULL, ?, ?)`,
     );
     write.run(1000, 'srv', '/etc/mcp.json', 'trusted', 'local-user');
     write.run(2000, 'srv', '/etc/mcp.json', 'denied_remember', 'local-user');

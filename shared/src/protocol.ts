@@ -3291,8 +3291,17 @@ export type ServerMsg =
       command: string;
       args?: string[];
       binarySha?: string;
-      reason: 'first_seen' | 'hash_changed';
+      /**
+       * Cebab-rxg: `declaration_changed` fires when this server was approved
+       * before at this name+origin but with a DIFFERENT command/args — a
+       * different program wearing an approved name. `previousCommand` /
+       * `previousArgs` carry what the operator actually approved, so the modal
+       * can show before/after rather than asking them to remember.
+       */
+      reason: 'first_seen' | 'hash_changed' | 'declaration_changed';
       previousSha?: string;
+      previousCommand?: string;
+      previousArgs?: string[];
     }
   | {
       /**
@@ -3855,7 +3864,7 @@ export type McpServerView = {
     /** NAMES only — the spec's BE-B12 [security] invariant: never values. */
     envKeys?: string[];
   };
-  trust: 'trusted' | 'pending_tofu' | 'hash_changed' | 'denied' | 'unknown';
+  trust: 'trusted' | 'pending_tofu' | 'hash_changed' | 'declaration_changed' | 'denied' | 'unknown';
   binarySha?: string;
   firstSeenAt?: number;
   lastSeenAt?: number;

@@ -75,6 +75,11 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
     writeMcpJson({ evil: { command: '/bin/echo' } });
     recordTrustDecision({
       serverName: 'evil',
+      // Cebab-rxg: the declaration is part of the identity now; it must match
+      // the `.mcp.json` written above. (The denial would apply at ANY
+      // declaration via register D08's recency probe — these say it plainly.)
+      command: '/bin/echo',
+      args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
       decision: 'denied_remember',
@@ -108,6 +113,8 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
     writeMcpJson({ fine: { command: 'echo' } });
     recordTrustDecision({
       serverName: 'fine',
+      command: 'echo',
+      args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
       decision: 'trusted',
@@ -136,6 +143,8 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
     writeMcpJson({ evil: { command: '/bin/echo' } });
     recordTrustDecision({
       serverName: 'evil',
+      command: '/bin/echo',
+      args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
       decision: 'denied_remember',
@@ -146,6 +155,8 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
     );
     recordTrustDecision({
       serverName: 'harmless',
+      command: 'echo',
+      args: [],
       originPath: path.join(otherDir, '.mcp.json'),
       binarySha: null,
       decision: 'trusted',
@@ -176,6 +187,8 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
     writeMcpJson({ evil: { command: '/bin/echo' } });
     recordTrustDecision({
       serverName: 'evil',
+      command: '/bin/echo',
+      args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
       decision: 'denied_remember',

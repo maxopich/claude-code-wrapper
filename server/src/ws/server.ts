@@ -4181,6 +4181,15 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         recordTrustDecision({
           serverName: msg.serverName,
           originPath: msg.originPath,
+          // Cebab-rxg: the ungated path records DENIALS only, and the wire
+          // carries no declaration to record. Empty is safe here and nowhere
+          // else: `checkTrust`'s recency probe matches a `denied_remember` at
+          // name+origin regardless of declaration, so this denial still covers
+          // every future rewrite of the entry. An empty declaration on an
+          // APPROVAL would be the bug — which is why the two escalating
+          // decisions cannot reach this branch (see the refusal above).
+          command: '',
+          args: [],
           binarySha: msg.binarySha ?? null,
           decision: 'denied_remember',
         });

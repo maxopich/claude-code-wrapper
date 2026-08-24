@@ -8071,6 +8071,16 @@ pre {
   color: var(--accent-ink);
   border-color: var(--accent);
 }
+/* Cebab-rxg: a changed declaration is the error tier, not the warn tier — an
+ * approved name now points at a different program. Ink token for `color`. */
+.gate-modal-reason-declaration_changed {
+  color: var(--err-ink);
+  border-color: var(--err);
+}
+.gate-modal-decl-prev {
+  color: var(--fg-2);
+  text-decoration: line-through;
+}
 .gate-modal-reason-env {
   color: var(--err-ink);
   border-color: var(--err);

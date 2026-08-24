@@ -598,6 +598,12 @@ describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
     // the resolver lookup. The null-distinct lookup still matches.
     rec({
       serverName: 'remembered',
+      // Cebab-rxg: the recorded declaration must match the one the settings
+      // file above declares, or the resolver reports `declaration_changed`
+      // instead — which is the point of that change, and would make this case
+      // assert the wrong thing.
+      command: 'npx',
+      args: [],
       originPath: path.join(projectPath, '.claude', 'settings.json'),
       binarySha: null,
       decision: 'trusted',
@@ -626,9 +632,10 @@ describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
     );
     const { recordTrustDecision: rec } = await import('./mcp_trust.js');
     const originPath = path.join(projectPath, '.claude', 'settings.json');
-    rec({ serverName: 'twice', originPath, binarySha: null, decision: 'denied_remember' });
+    const decl = { command: 'npx', args: [] as string[] };
+    rec({ serverName: 'twice', originPath, ...decl, binarySha: null, decision: 'denied_remember' });
     await new Promise((r) => setTimeout(r, 5)); // distinct ts
-    rec({ serverName: 'twice', originPath, binarySha: null, decision: 'trusted' });
+    rec({ serverName: 'twice', originPath, ...decl, binarySha: null, decision: 'trusted' });
 
     const out = resolveProjectAuthority({ projectId, mode: 'cache' });
     const view = out!.mcpServers.find((s) => s.name === 'twice')!;
@@ -659,6 +666,8 @@ describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
     const { recordTrustDecision: rec } = await import('./mcp_trust.js');
     rec({
       serverName: 'bad',
+      command: 'npx',
+      args: [],
       originPath: path.join(projectPath, '.claude', 'settings.json'),
       binarySha: null,
       decision: 'denied_remember',
@@ -684,6 +693,8 @@ describe('resolveProjectAuthority — Phase 4 TOFU JOIN', () => {
     const v1Sha = csha(fakeBin)!;
     rec({
       serverName: 'pinned',
+      command: fakeBin,
+      args: [],
       originPath: path.join(projectPath, '.claude', 'settings.json'),
       binarySha: v1Sha,
       decision: 'trusted_pinned_hash',
