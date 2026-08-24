@@ -751,7 +751,17 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
     if (!view.originPath) continue;
     const candidateSha = view.config?.command ? computeBinarySha(view.config.command) : null;
     if (candidateSha !== null) view.binarySha = candidateSha;
-    const lookup = checkTrust(view.name, view.originPath, candidateSha);
+    // Cebab-rxg: the DECLARATION is part of the lookup, not just the command's
+    // hash. `computeBinarySha` returns null for every non-absolute command, so
+    // `npx`, `node` and `bash` shared one identity and a rewritten `.mcp.json`
+    // matched the row the operator had approved for a different program.
+    const lookup = checkTrust({
+      serverName: view.name,
+      originPath: view.originPath,
+      candidateSha,
+      command: view.config?.command ?? '',
+      args: view.config?.args ?? [],
+    });
     switch (lookup.decision) {
       case 'trusted':
       case 'trusted_pinned_hash':
@@ -759,6 +769,9 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
         break;
       case 'denied_remember':
         view.trust = 'denied';
+        break;
+      case 'declaration_changed':
+        view.trust = 'declaration_changed';
         break;
       case 'hash_changed':
         view.trust = 'hash_changed';

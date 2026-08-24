@@ -72,6 +72,16 @@ function viewPending(name: string, originPath: string, command?: string): McpSer
   return view;
 }
 
+/**
+ * Cebab-rxg: the trust identity now includes the declaration, so a lookup has
+ * to ask about the SAME command/args the gate recorded. `viewPending` with no
+ * command produces a view with no `config`, and the gate records `''` / `[]`
+ * for it — hence the defaults here.
+ */
+function look(name: string, originPath: string, candidateSha: string | null, command = '') {
+  return checkTrust({ serverName: name, originPath, candidateSha, command, args: [] });
+}
+
 function viewTrusted(name: string, originPath: string): McpServerView {
   return {
     name,
@@ -231,7 +241,11 @@ describe('awaitMcpTrustDecisions — first_seen prompt + trust decision', () => 
     expect(gate.pending.size).toBe(0); // entry cleaned up
 
     // mcp_trust row written.
-    const lookup = checkTrust('new-mcp', '/u/proj/.claude/settings.json', null);
+    // The declaration is part of the identity (Cebab-rxg), so the lookup has
+    // to name the command the gate just recorded. Asking with a different one
+    // returns `declaration_changed` — which is the whole point, and is what
+    // this line caught when it was first adapted.
+    const lookup = look('new-mcp', '/u/proj/.claude/settings.json', null, '/usr/local/bin/new-mcp');
     expect(lookup.decision).toBe('trusted');
   });
 
@@ -249,7 +263,7 @@ describe('awaitMcpTrustDecisions — first_seen prompt + trust decision', () => 
     const entry = gate.pending.get(env.pendingId)!;
     entry.resolve({ kind: 'allow_pinned', binarySha: 'abc123pinned' });
     await gatePromise;
-    const lookup = checkTrust('pinned-mcp', '/u/proj/.claude/settings.json', 'abc123pinned');
+    const lookup = look('pinned-mcp', '/u/proj/.claude/settings.json', 'abc123pinned', '/bin/x');
     expect(lookup.decision).toBe('trusted_pinned_hash');
     expect(lookup.decision === 'trusted_pinned_hash' && lookup.binarySha).toBe('abc123pinned');
   });
@@ -277,7 +291,7 @@ describe('awaitMcpTrustDecisions — deny outcomes', () => {
     expect(outcome.refused).toEqual([
       { serverName: 'drop-mcp', originPath: '/u/proj/.claude/settings.json', persisted: true },
     ]);
-    const lookup = checkTrust('drop-mcp', '/u/proj/.claude/settings.json', null);
+    const lookup = look('drop-mcp', '/u/proj/.claude/settings.json', null);
     expect(lookup.decision).toBe('denied_remember');
   });
 
@@ -303,9 +317,7 @@ describe('awaitMcpTrustDecisions — deny outcomes', () => {
       true,
     );
     // No mcp_trust row — deny_once is in-memory.
-    expect(checkTrust('once-mcp', '/u/proj/.claude/settings.json', null).decision).toBe(
-      'first_seen',
-    );
+    expect(look('once-mcp', '/u/proj/.claude/settings.json', null).decision).toBe('first_seen');
   });
 
   test('deny_once short-circuits the same gate state on a repeat pass (no re-prompt)', async () => {
@@ -381,6 +393,10 @@ describe('awaitMcpTrustDecisions — hash_changed flow', () => {
     recordTrustDecision({
       serverName: 'churn-mcp',
       originPath: '/u/proj/.claude/settings.json',
+      // Same (empty) declaration the config-less `viewHashChanged` produces —
+      // this case is about the HASH changing, so the declaration must not.
+      command: '',
+      args: [],
       binarySha: 'oldsha',
       decision: 'trusted_pinned_hash',
     });
@@ -404,7 +420,7 @@ describe('awaitMcpTrustDecisions — hash_changed flow', () => {
     await gatePromise;
 
     // Lookup with the new sha now returns trusted_pinned_hash.
-    const lookup = checkTrust('churn-mcp', '/u/proj/.claude/settings.json', 'newsha');
+    const lookup = look('churn-mcp', '/u/proj/.claude/settings.json', 'newsha');
     expect(lookup.decision).toBe('trusted_pinned_hash');
   });
 });
@@ -578,5 +594,105 @@ describe('[security] H04 — refusals reach the caller', () => {
     // Distinguishes post-H04 rows (denial applied) from the older rows that
     // recorded a refusal the spawn then ignored.
     expect(payload.enforcement).toBe('denied_mcp_servers+disallowed_tools');
+  });
+});
+
+// ---- Cebab-rxg: declaration_changed flow ----
+
+describe('[security] a rewritten declaration re-gates instead of passing silently', () => {
+  const ORIGIN = '/u/proj/.mcp.json';
+
+  /** A view shaped the way `enrichWithTrustState` shapes one, for a declared
+   *  server whose trust state the resolver has already computed. */
+  function view(trust: McpServerView['trust'], command: string, args: string[]): McpServerView {
+    return {
+      name: 'kitchen',
+      status: 'unknown',
+      scope: 'mcp-json',
+      originPath: ORIGIN,
+      tools: [],
+      trust,
+      config: { command, args },
+    };
+  }
+
+  test('the operator is prompted, with what they approved before', async () => {
+    // Step 1: the operator approves `node mcp/kitchen-server.mjs` through the
+    // gate, exactly as the live repro did.
+    const sinkA = makeSink();
+    const gateA = makeTrustGateState();
+    const promiseA = awaitMcpTrustDecisions({
+      projectId: 7,
+      gate: gateA,
+      send: sinkA.send,
+      servers: [view('pending_tofu', 'node', ['mcp/kitchen-server.mjs'])],
+    });
+    const envA = sinkA.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
+    expect(envA.reason).toBe('first_seen');
+    gateA.pending.get(envA.pendingId)!.resolve({ kind: 'allow' });
+    await promiseA;
+
+    // Step 2: `.mcp.json` is rewritten in place — same name, same command,
+    // different script. This is what the resolver now computes for it.
+    expect(
+      checkTrust({
+        serverName: 'kitchen',
+        originPath: ORIGIN,
+        candidateSha: null,
+        command: 'node',
+        args: ['mcp/swapped-server.mjs'],
+      }).decision,
+    ).toBe('declaration_changed');
+
+    // Step 3: the gate prompts rather than continuing. Before this change the
+    // switch took `case 'trusted': continue` and the swapped script spawned
+    // with no modal, no refusal and no audit row.
+    const sinkB = makeSink();
+    const gateB = makeTrustGateState();
+    const promiseB = awaitMcpTrustDecisions({
+      projectId: 7,
+      gate: gateB,
+      send: sinkB.send,
+      servers: [view('declaration_changed', 'node', ['mcp/swapped-server.mjs'])],
+    });
+    expect(sinkB.sent).toHaveLength(1);
+    const envB = sinkB.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
+    expect(envB.reason).toBe('declaration_changed');
+    // The operator cannot judge the change without both halves of it.
+    expect(envB.previousCommand).toBe('node');
+    expect(envB.previousArgs).toEqual(['mcp/kitchen-server.mjs']);
+    expect(envB.command).toBe('node');
+    expect(envB.args).toEqual(['mcp/swapped-server.mjs']);
+
+    // And denying it keeps the swapped script out.
+    gateB.pending.get(envB.pendingId)!.resolve({ kind: 'deny_remember' });
+    const outcome = await promiseB;
+    expect(outcome.persistedDenials).toBe(1);
+  });
+
+  test('approving the new declaration makes the NEXT spawn silent again', async () => {
+    // Steady state has to come back, or every subsequent spawn re-prompts and
+    // the gate becomes noise the operator clicks through.
+    const sink = makeSink();
+    const gate = makeTrustGateState();
+    const promise = awaitMcpTrustDecisions({
+      projectId: 7,
+      gate,
+      send: sink.send,
+      servers: [view('declaration_changed', 'node', ['mcp/swapped-server.mjs'])],
+    });
+    const env = sink.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
+    gate.pending.get(env.pendingId)!.resolve({ kind: 'allow' });
+    await promise;
+
+    expect(
+      checkTrust({
+        serverName: 'kitchen',
+        originPath: ORIGIN,
+        candidateSha: null,
+        command: 'node',
+        args: ['mcp/swapped-server.mjs'],
+      }).decision,
+    ).toBe('trusted');
   });
 });

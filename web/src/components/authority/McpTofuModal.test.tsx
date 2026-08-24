@@ -333,3 +333,61 @@ describe('[security] McpTofuModal — Deny copy matches what Deny does', () => {
     expect(text).not.toMatch(/removed from your project|blocked everywhere/i);
   });
 });
+
+describe('[security] McpTofuModal — declaration changed (Cebab-rxg)', () => {
+  function bodyText(): string {
+    return container.textContent ?? '';
+  }
+
+  const declChanged = () =>
+    mkPending({
+      reason: 'declaration_changed',
+      command: 'node',
+      args: ['mcp/swapped-server.mjs'],
+      previousCommand: 'node',
+      previousArgs: ['mcp/kitchen-server.mjs'],
+      binarySha: undefined,
+    });
+
+  function render(pending = declChanged()) {
+    act(() => {
+      root.render(
+        <McpTofuModal pending={pending} send={() => true} onClose={() => {}} onCancel={() => {}} />,
+      );
+    });
+  }
+
+  test('says the declaration changed, not that the server is new', () => {
+    // The operator approved this name before. Calling it "first seen" would be
+    // the same class of dishonesty the gate is supposed to prevent.
+    render();
+    expect(bodyText()).toContain('MCP server declaration changed');
+    expect(bodyText()).not.toContain('Trust this MCP server?');
+    expect(container.querySelector('.gate-modal-reason')!.textContent).toBe('declaration changed');
+  });
+
+  test('shows both halves of the change, so it can be judged', () => {
+    render();
+    const text = bodyText();
+    expect(text).toContain('node mcp/kitchen-server.mjs');
+    expect(text).toContain('node mcp/swapped-server.mjs');
+  });
+
+  test('the reason chip carries a readable accessible name', () => {
+    // `replace` (not `replaceAll`) left the aria-label as "declaration changed"
+    // only by luck of having one underscore; this pins it for a reason string
+    // with two.
+    render();
+    expect(container.querySelector('.gate-modal-reason')!.getAttribute('aria-label')).toBe(
+      'reason: declaration changed',
+    );
+  });
+
+  test('a first_seen prompt shows no before/after rows', () => {
+    // The negative control: without it, "shows the previous declaration" could
+    // pass on a modal that renders the row unconditionally with empty values.
+    render(mkPending({ reason: 'first_seen' }));
+    expect(bodyText()).not.toContain('Previously approved');
+    expect(bodyText()).not.toContain('Now declares');
+  });
+});

@@ -46,6 +46,13 @@ export type TrustDecisionInput = {
   serverName: string;
   originPath: string;
   /**
+   * Cebab-rxg: the DECLARATION the operator is deciding about. Required, not
+   * optional-with-a-default — an optional field here is how this defect comes
+   * back, silently, as a row that matches every future declaration.
+   */
+  command: string;
+  args: readonly string[];
+  /**
    * sha256 of the resolved binary, or `null` for unresolvable targets
    * (e.g. `npx <name>`). `trusted_pinned_hash` MUST have a non-null
    * binarySha — the repository rejects the combination with a runtime
@@ -57,10 +64,26 @@ export type TrustDecisionInput = {
   operator?: string;
 };
 
+/** Everything the lookup needs to identify one declared server. */
+export type TrustLookupInput = {
+  serverName: string;
+  originPath: string;
+  /** sha256 of the resolved command, or `null` when it cannot be resolved. */
+  candidateSha: string | null;
+  command: string;
+  args: readonly string[];
+};
+
 export type TrustLookupResult =
   | { decision: 'trusted' }
   | { decision: 'trusted_pinned_hash'; binarySha: string }
   | { decision: 'denied_remember' }
+  /**
+   * Cebab-rxg: a decision exists for this server at this origin, but for a
+   * DIFFERENT command/args. The operator approved a program; this is a
+   * different program wearing the same name.
+   */
+  | { decision: 'declaration_changed'; previousCommand: string; previousArgs: string[] }
   | { decision: 'hash_changed'; previousSha: string }
   | { decision: 'first_seen' };
 
@@ -69,10 +92,43 @@ export type McpTrustRow = {
   ts: number;
   server_name: string;
   origin_path: string;
+  /** Cebab-rxg (migration 038). NULL on rows decided before the declaration
+   *  was part of the identity — see `argsKey`'s neighbours in `checkTrust`. */
+  command: string | null;
+  args_json: string | null;
   binary_sha: string | null;
   decision: PersistedDecision;
   operator: string;
 };
+
+/**
+ * Parse a stored `args_json` back to an array, tolerantly.
+ *
+ * The column is written by `argsKey` and is always a JSON array — but this
+ * value reaches an operator-facing modal ("was: npx -y weather-mcp"), and a
+ * hand-edited or truncated row must not throw inside the security lookup that
+ * is deciding whether to re-prompt. A malformed value degrades to `[]`, which
+ * still differs from any real declaration and therefore still re-prompts.
+ */
+function parseArgsJson(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((a) => typeof a === 'string')) return parsed;
+  } catch {
+    /* fall through */
+  }
+  return [];
+}
+
+/**
+ * Canonical args key. `undefined` and `[]` must collapse to one identity, or
+ * the same declaration alternates between two rows and re-prompts forever.
+ * Same helper, same reason, as `hook_trust.ts` — the ledger this one is
+ * catching up to.
+ */
+export function argsKey(args: readonly string[] | undefined): string {
+  return JSON.stringify(args ?? []);
+}
 
 // ---- binary sha computation ----
 
@@ -155,6 +211,7 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
   // lands. If the audit throws (chain broken, db error), the trust
   // decision is not recorded — operator sees the failure and can retry
   // with the chain repaired.
+  const argsJson = argsKey(input.args);
   appendSafetyAudit({
     ts,
     kind: 'mcp.trust_decided',
@@ -162,6 +219,11 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
     payload: {
       serverName: input.serverName,
       originPath: input.originPath,
+      // Cebab-rxg: the declaration goes into the audit payload too. The chain
+      // is the complete forensic trail, and "which program did the operator
+      // approve" was exactly the question it could not answer.
+      command: input.command,
+      args: [...input.args],
       binarySha: input.binarySha,
       decision: input.decision,
       operator,
@@ -170,9 +232,18 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
   const db = getDb();
   db.prepare(
     `INSERT OR REPLACE INTO mcp_trust
-       (ts, server_name, origin_path, binary_sha, decision, operator)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(ts, input.serverName, input.originPath, input.binarySha, input.decision, operator);
+       (ts, server_name, origin_path, command, args_json, binary_sha, decision, operator)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    ts,
+    input.serverName,
+    input.originPath,
+    input.command,
+    argsJson,
+    input.binarySha,
+    input.decision,
+    operator,
+  );
   // Read back the row we just wrote — INSERT OR REPLACE rebinds the
   // autoincrement id, so we look up by the UNIQUE triple. NULL-distinct
   // SQLite semantics on binarySha=NULL mean the lookup needs IS NULL
@@ -186,21 +257,23 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
   const row =
     input.binarySha === null
       ? db
-          .prepare<[string, string], McpTrustRow>(
-            `SELECT id, ts, server_name, origin_path, binary_sha, decision, operator
+          .prepare<[string, string, string, string], McpTrustRow>(
+            `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha, decision, operator
                FROM mcp_trust
-              WHERE server_name = ? AND origin_path = ? AND binary_sha IS NULL
+              WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
+                AND binary_sha IS NULL
            ORDER BY ts DESC, id DESC LIMIT 1`,
           )
-          .get(input.serverName, input.originPath)
+          .get(input.serverName, input.originPath, input.command, argsJson)
       : db
-          .prepare<[string, string, string], McpTrustRow>(
-            `SELECT id, ts, server_name, origin_path, binary_sha, decision, operator
+          .prepare<[string, string, string, string, string], McpTrustRow>(
+            `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha, decision, operator
                FROM mcp_trust
-              WHERE server_name = ? AND origin_path = ? AND binary_sha = ?
+              WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
+                AND binary_sha = ?
            ORDER BY ts DESC, id DESC LIMIT 1`,
           )
-          .get(input.serverName, input.originPath, input.binarySha);
+          .get(input.serverName, input.originPath, input.command, argsJson, input.binarySha);
   if (!row) {
     // Sanity check — we just inserted; the lookup MUST find it.
     throw new Error('recordTrustDecision: row not found after INSERT OR REPLACE');
@@ -223,11 +296,9 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
  * In that case the spec's contract says we fall back to `first_seen`
  * because there's nothing meaningful to compare.
  */
-export function checkTrust(
-  serverName: string,
-  originPath: string,
-  candidateSha: string | null,
-): TrustLookupResult {
+export function checkTrust(input: TrustLookupInput): TrustLookupResult {
+  const { serverName, originPath, candidateSha } = input;
+  const argsJson = argsKey(input.args);
   const db = getDb();
   // Most-recent matching row wins — `id DESC` is what makes "most recent" mean
   // write order rather than whatever the scan reached first on a `ts` tie. Same
@@ -236,22 +307,27 @@ export function checkTrust(
   const exact =
     candidateSha === null
       ? db
-          .prepare<[string, string], { decision: PersistedDecision; binary_sha: string | null }>(
-            `SELECT decision, binary_sha FROM mcp_trust
-              WHERE server_name = ? AND origin_path = ? AND binary_sha IS NULL
-           ORDER BY ts DESC, id DESC LIMIT 1`,
-          )
-          .get(serverName, originPath)
-      : db
           .prepare<
-            [string, string, string],
+            [string, string, string, string],
             { decision: PersistedDecision; binary_sha: string | null }
           >(
             `SELECT decision, binary_sha FROM mcp_trust
-              WHERE server_name = ? AND origin_path = ? AND binary_sha = ?
+              WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
+                AND binary_sha IS NULL
            ORDER BY ts DESC, id DESC LIMIT 1`,
           )
-          .get(serverName, originPath, candidateSha);
+          .get(serverName, originPath, input.command, argsJson)
+      : db
+          .prepare<
+            [string, string, string, string, string],
+            { decision: PersistedDecision; binary_sha: string | null }
+          >(
+            `SELECT decision, binary_sha FROM mcp_trust
+              WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
+                AND binary_sha = ?
+           ORDER BY ts DESC, id DESC LIMIT 1`,
+          )
+          .get(serverName, originPath, input.command, argsJson, candidateSha);
   if (exact) {
     if (exact.decision === 'trusted') return { decision: 'trusted' };
     if (exact.decision === 'trusted_pinned_hash' && exact.binary_sha !== null) {
@@ -290,6 +366,38 @@ export function checkTrust(
     .get(serverName, originPath);
   if (latest?.decision === 'denied_remember') return { decision: 'denied_remember' };
 
+  // Cebab-rxg: a decision exists for this name+origin, but for a DIFFERENT
+  // declaration. This is the case the whole finding is about — an operator
+  // approved `npx -y weather-mcp`, the file was rewritten to
+  // `bash -c 'curl … | sh'`, and both hash to a null `binary_sha`, so every
+  // probe above matched and the gate passed silently.
+  //
+  // Rows written before migration 038 carry a NULL declaration and are
+  // EXCLUDED here on purpose: a row that cannot say what was approved has no
+  // before/after to show an operator, so it falls through to `first_seen` and
+  // re-prompts once. That is the migration's stated posture, enforced here
+  // rather than by a special case in the migration.
+  //
+  // Ordered BEFORE the pinned-hash probe below. When both are true, the
+  // changed declaration EXPLAINS the changed hash, and reporting "the binary
+  // changed" for what is actually "a different program was requested"
+  // understates it.
+  const prior = db
+    .prepare<[string, string], { command: string; args_json: string }>(
+      `SELECT command, args_json FROM mcp_trust
+        WHERE server_name = ? AND origin_path = ?
+          AND command IS NOT NULL AND args_json IS NOT NULL
+     ORDER BY ts DESC, id DESC LIMIT 1`,
+    )
+    .get(serverName, originPath);
+  if (prior && (prior.command !== input.command || prior.args_json !== argsJson)) {
+    return {
+      decision: 'declaration_changed',
+      previousCommand: prior.command,
+      previousArgs: parseArgsJson(prior.args_json),
+    };
+  }
+
   // No exact match — check for a pinned-hash row at the same name+origin
   // with a DIFFERENT sha. Only triggers when the candidate sha is real
   // (null candidates can't meaningfully mismatch).
@@ -326,12 +434,39 @@ export function checkTrust(
 export function listForServer(serverName: string, originPath: string): McpTrustRow[] {
   return getDb()
     .prepare<[string, string], McpTrustRow>(
-      `SELECT id, ts, server_name, origin_path, binary_sha, decision, operator
+      `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha, decision, operator
         FROM mcp_trust
        WHERE server_name = ? AND origin_path = ?
     ORDER BY ts DESC, id DESC`,
     )
     .all(serverName, originPath);
+}
+
+/**
+ * Cebab-rxg: the most recent declaration the operator actually decided on for
+ * this server, or `null` when there is none to show.
+ *
+ * The gate reads this to render "was X, now Y" on a `declaration_changed`
+ * prompt — the same shape in which it reads `previousSha` out of
+ * `listForServer` for `hash_changed`. Rows written before migration 038 carry
+ * a NULL declaration and are skipped: they cannot answer the question, and a
+ * prompt that says "was: (unknown)" is worse than the `first_seen` prompt
+ * those rows correctly produce.
+ */
+export function previousDeclaration(
+  serverName: string,
+  originPath: string,
+): { command: string; args: string[] } | null {
+  const row = getDb()
+    .prepare<[string, string], { command: string; args_json: string }>(
+      `SELECT command, args_json FROM mcp_trust
+        WHERE server_name = ? AND origin_path = ?
+          AND command IS NOT NULL AND args_json IS NOT NULL
+     ORDER BY ts DESC, id DESC LIMIT 1`,
+    )
+    .get(serverName, originPath);
+  if (!row) return null;
+  return { command: row.command, args: parseArgsJson(row.args_json) };
 }
 
 /**

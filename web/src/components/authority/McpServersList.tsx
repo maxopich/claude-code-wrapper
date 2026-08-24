@@ -18,7 +18,8 @@ import { useCopyFeedback } from '../../useCopyFeedback';
 //              for the full measured table.
 //   - WHAT   — `command` + `args` from `config`
 //   - TRUST  — `trust` chip from the mcp_trust JOIN (Phase 4):
-//                trusted / pending_tofu / hash_changed / denied / unknown
+//                trusted / pending_tofu / hash_changed / declaration_changed /
+//                denied / unknown
 //   - STATUS — runtime status dot (gray "configured" by default — UI-B15:
 //              never reads "running" without server confirmation)
 //
@@ -44,6 +45,10 @@ const TRUST_CHIP_CLASS: Record<McpServerView['trust'], string> = {
   trusted: 'mcp-trust-ok',
   pending_tofu: 'mcp-trust-warn',
   hash_changed: 'mcp-trust-err',
+  // Cebab-rxg: error tier alongside `hash_changed`. A server whose declaration
+  // changed under an approved name is the more serious of the two — the
+  // program itself was swapped, not merely rebuilt.
+  declaration_changed: 'mcp-trust-err',
   denied: 'mcp-trust-err',
   unknown: 'mcp-trust-muted',
 };
@@ -52,6 +57,7 @@ const TRUST_LABEL: Record<McpServerView['trust'], string> = {
   trusted: 'trusted',
   pending_tofu: 'pending TOFU',
   hash_changed: 'hash changed',
+  declaration_changed: 'declaration changed',
   denied: 'denied',
   unknown: 'unknown',
 };

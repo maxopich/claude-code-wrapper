@@ -65,11 +65,16 @@ describe('migration 033_mcp_trust_null_safe_key schema shape', () => {
     expect(idx?.partial).toBe(1);
   });
 
-  test('it keys on (server_name, origin_path) — binary_sha is the WHERE, not a column', () => {
+  test('it keys on the full identity — binary_sha is the WHERE, not a column', () => {
+    // Widened by migration 038 (Cebab-rxg): the identity gained `command` and
+    // `args_json`, because keying on the name alone let an approved server be
+    // repointed at another program. `binary_sha` is still the WHERE and still
+    // not a column — that half of 033's design is what this line was written
+    // to protect and is unchanged.
     const cols = getDb()
       .prepare<[], { seqno: number; name: string }>(`PRAGMA index_info('mcp_trust_null_sha_key')`)
       .all();
-    expect(cols.map((c) => c.name)).toEqual(['server_name', 'origin_path']);
+    expect(cols.map((c) => c.name)).toEqual(['server_name', 'origin_path', 'command', 'args_json']);
   });
 
   test("016's table-level UNIQUE is still there — 033 is additive", () => {

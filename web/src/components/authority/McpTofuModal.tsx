@@ -10,9 +10,10 @@ import { useModalSurface } from '../../useModalSurface';
 //
 // UI contract (spec §5.4):
 //   - Title: "Trust this MCP server?" (or "MCP server binary changed" for
-//     hash_changed)
+//     hash_changed, "MCP server declaration changed" for declaration_changed)
 //   - Body: server name, originPath, command, args, current binarySha,
-//     previousSha (when hash_changed), reason chip
+//     previousSha (when hash_changed), previously-approved vs now-declares
+//     (when declaration_changed — Cebab-rxg), reason chip
 //   - Four buttons: Trust / Trust & pin hash / Deny once / Deny & remember
 //   - "Trust & pin hash" is GREYED when binarySha is absent (npx etc) —
 //     pinning a sha that can't be computed is meaningless
@@ -74,6 +75,11 @@ export function McpTofuModal(props: {
   }
 
   const isHashChanged = pending.reason === 'hash_changed';
+  // Cebab-rxg: the server was approved before at this name+origin, but for a
+  // DIFFERENT program. Distinct from hash_changed on purpose — the reproduced
+  // attack swapped `node <script>` for another script and moved no hash at
+  // all, because a bare command has none to move.
+  const isDeclChanged = pending.reason === 'declaration_changed';
   const canPinHash = Boolean(pending.binarySha);
   const titleId = `mcp-tofu-title-${pending.pendingId}`;
 
@@ -89,13 +95,17 @@ export function McpTofuModal(props: {
       <div className="gate-modal modal-surface">
         <header className="gate-modal-header">
           <h3 id={titleId} className="gate-modal-title">
-            {isHashChanged ? 'MCP server binary changed' : 'Trust this MCP server?'}
+            {isDeclChanged
+              ? 'MCP server declaration changed'
+              : isHashChanged
+                ? 'MCP server binary changed'
+                : 'Trust this MCP server?'}
           </h3>
           <span
             className={`gate-modal-reason gate-modal-reason-${pending.reason}`}
-            aria-label={`reason: ${pending.reason.replace('_', ' ')}`}
+            aria-label={`reason: ${pending.reason.replaceAll('_', ' ')}`}
           >
-            {pending.reason === 'hash_changed' ? 'hash changed' : 'first seen'}
+            {isDeclChanged ? 'declaration changed' : isHashChanged ? 'hash changed' : 'first seen'}
           </span>
         </header>
         <dl className="gate-modal-facts">
@@ -148,11 +158,31 @@ export function McpTofuModal(props: {
               </dd>
             </div>
           )}
+          {isDeclChanged && pending.previousCommand !== undefined && (
+            <div className="gate-modal-fact">
+              <dt>Previously approved</dt>
+              <dd>
+                <code className="gate-modal-decl-prev">
+                  {[pending.previousCommand, ...(pending.previousArgs ?? [])].join(' ') || '(none)'}
+                </code>
+              </dd>
+            </div>
+          )}
+          {isDeclChanged && (
+            <div className="gate-modal-fact">
+              <dt>Now declares</dt>
+              <dd>
+                <code>{[pending.command, ...(pending.args ?? [])].join(' ') || '(none)'}</code>
+              </dd>
+            </div>
+          )}
         </dl>
         <p className="gate-modal-help">
-          {isHashChanged
-            ? 'The binary at this path has a different sha than the one you previously trusted. Approve only if you expect the change (e.g. a legitimate upgrade).'
-            : 'The Cebab session resolver has never seen this MCP server declaration before. Approve only if you intentionally added it.'}
+          {isDeclChanged
+            ? 'You approved this server name before, but it declared a different program then. Approving here trusts the new one. Approve only if you made this change yourself — a declaration you did not edit that changed anyway is how an approved name gets pointed at something else.'
+            : isHashChanged
+              ? 'The binary at this path has a different sha than the one you previously trusted. Approve only if you expect the change (e.g. a legitimate upgrade).'
+              : 'The Cebab session resolver has never seen this MCP server declaration before. Approve only if you intentionally added it.'}
         </p>
         {/*
           Register H04. Until 2026-08-02 Deny recorded a decision and the
