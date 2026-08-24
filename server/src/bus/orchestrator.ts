@@ -46,6 +46,7 @@ import {
   recordSessionTeardown,
   setMultiAgentSessionLifecycle,
   setExecuteMode,
+  setMutationPauseState,
   setMutationPromoted,
   setPauseOnDangerous,
   setPendingRetry,
@@ -66,8 +67,10 @@ import type {
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import { turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
 import {
   applyPauseGate,
+  findPendingMutation,
   releasePauseForMutation,
   shouldHaltUnrecordedMutation,
 } from './pause_gate.js';
@@ -359,8 +362,15 @@ export type OrchestratorSessionHandle = {
    *   - bus_send calls the draining turn issues return their "delivered to
    *     <recipient>" white lie (same oracle-suppression pattern as mute,
    *     by-construction in `bus/runner.ts:handleBusSend`).
-   *   - No new turns ever start for the kicked agent because the router
-   *     drops every event addressed to it before the `deliver?.()` call.
+   *   - No new turns ever start for the kicked agent. For routed traffic the
+   *     router drops every event addressed to it before the `deliver?.()`
+   *     call — but that reasoning only covers turns that BEGIN as a
+   *     `BusEvent`. `handle.retry()` and `handle.continueThroughMutation()`
+   *     are turn-starters that do not, and this sentence was false for both
+   *     of them until `Cebab-vie.9`/`.10`: each resurrected a kicked worker
+   *     with a full tool-capable turn, Continue's replay carrying the
+   *     one-shot approval grant for the dangerous command. They now ask
+   *     `checkTurnRefused` first.
    *
    * The WS handler calls this AFTER persisting the DB flip
    * (per_agent_control.setParticipantKicked) so the durable source-of-
@@ -432,6 +442,15 @@ type OrchestratorRouter = {
   kickAgent: (agentName: string) => boolean;
   /** Probe for tests + multi-agent forensic bundle (C4f follow-up). */
   isKicked: (agentName: string) => boolean;
+  /**
+   * `Cebab-vie.9` / `.10` / `.18` [security]: the precondition check the two
+   * operator replay seams (`retry`, `continueThroughMutation`) must pass before
+   * starting a turn, since neither originates from a `BusEvent` and so neither
+   * is downstream of the router's own gates. Non-null means refused AND the
+   * operator has already been told — see the implementation for why that
+   * contract is shaped like `checkBudgetExhausted`'s.
+   */
+  checkTurnRefused: (agentName: string) => TurnRefusalReason | null;
 };
 
 /**
@@ -597,6 +616,45 @@ export function createOrchestratorRouter(params: {
   const captureError = (text: string) => {
     if (firstError !== null) return; // only the FIRST error sticks
     firstError = text.slice(0, 200);
+  };
+
+  /**
+   * Append a `cebab → user kind=error` row and push it to the live sink — the
+   * channel `onWorkerFailed` already uses to explain itself, and the one the
+   * operator's scrollback renders. Deliberately does NOT bump `hopsCount`:
+   * Cebab explaining itself is not a hop, same reasoning as the synthetic
+   * budget-exhausted event.
+   *
+   * Fully guarded. A refusal that could not be persisted must still be a
+   * refusal — the caller returns either way.
+   */
+  const emitOperatorError = (reasonText: string): void => {
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        USER_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      try {
+        sink.onEvent(
+          sessionId,
+          {
+            ts: row.ts,
+            source: CEBAB_SOURCE,
+            destination: USER_RECIPIENT,
+            kind: 'error',
+            text: reasonText,
+          },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[orchestrator] operator-error onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      console.error('[orchestrator] persist operator-error event failed', persistErr);
+    }
   };
 
   const teardown = async (reason: MultiAgentEndedReason) => {
@@ -1206,6 +1264,38 @@ export function createOrchestratorRouter(params: {
   };
   const isKicked = (agentName: string): boolean => kickedSet.has(agentName);
 
+  /**
+   * `Cebab-vie.9` / `.10` / `.18` [security]: may a turn start for `agentName`
+   * RIGHT NOW? Returns the reason it must not, or null.
+   *
+   * Every other turn in this router is started from a `BusEvent` and is
+   * therefore already downstream of these three checks — the `kickedSet` drops
+   * at the top of `handleEvent`, the `ended` flag, and `checkBudgetExhausted`
+   * before each wake. `handle.retry()` and `handle.continueThroughMutation()`
+   * are turn-starters that do NOT come from an event, so that enforcement was
+   * structurally absent for them, and the drain contract this module documents
+   * ("no new turns ever start for the kicked agent") had two back doors.
+   *
+   * Contract, deliberately the same one `checkBudgetExhausted` already carries:
+   * **a non-null answer means the operator has already been told.** Callers
+   * refuse in two lines and do not compose their own message.
+   *
+   * The budget branch tears the session down as it refuses, because that is
+   * what this router does at the cap on every other wake attempt. Refusing
+   * without it would leave an operator clicking Retry into a permanent no.
+   */
+  const checkTurnRefused = (agentName: string): TurnRefusalReason | null => {
+    if (kickedSet.has(agentName)) {
+      emitOperatorError(turnRefusalText('kicked', agentName));
+      return 'kicked';
+    }
+    if (ended) {
+      emitOperatorError(turnRefusalText('ended', agentName));
+      return 'ended';
+    }
+    return checkBudgetExhausted() ? 'budget' : null;
+  };
+
   return {
     teardown,
     handleEvent,
@@ -1224,6 +1314,7 @@ export function createOrchestratorRouter(params: {
     isMuted,
     kickAgent: (agentName) => setKick(agentName, true),
     isKicked,
+    checkTurnRefused,
   };
 }
 
@@ -2009,6 +2100,32 @@ export function wireOrchestratorSession(p: {
     async retry() {
       const pending = getPendingRetry(sessionId);
       if (!pending) return;
+      // `Cebab-vie.9` / `.18` [security]: this is a turn-starter that does not
+      // come from a `BusEvent`, so the router's kick / ended / budget gates are
+      // not in its path — a kicked worker was resurrected here with a full
+      // tool-capable turn. Checked BEFORE the slot is cleared, so a refusal
+      // that keeps the slot leaves the banner intact.
+      const refused = router.checkTurnRefused(pending.agentName);
+      if (refused === 'kicked') {
+        // The worker is gone for good (kick is irreversible), so its
+        // pending-retry banner is offering something that can never happen.
+        // Clear it — the operator already has the refusal in scrollback.
+        try {
+          setPendingRetry(sessionId, null);
+        } catch (err) {
+          console.error('[orchestrator] clear pending-retry for kicked agent failed', err);
+        }
+        try {
+          p.onPendingRetry?.(sessionId, null);
+        } catch (err) {
+          console.error('[orchestrator] kicked-retry onPendingRetry-null callback threw', err);
+        }
+        return;
+      }
+      // `ended` / `budget`: the session is over (the budget branch just tore it
+      // down). The slot stays as it is — teardown owns what happens to it, and
+      // an ended session's banners are not this function's to reap.
+      if (refused) return;
       // Clear the slot BEFORE re-delivery so a racing second click sees the
       // empty slot. A re-fail re-enters `onWorkerFailed`, which re-asserts
       // a fresh descriptor and re-emits the `multi_agent_pending_retry`
@@ -2037,6 +2154,40 @@ export function wireOrchestratorSession(p: {
       // Item #5: idempotent operator-Continue path. The row is looked up among
       // the CURRENTLY pending ones, so a racing second click (or a stale id
       // from a client that missed a broadcast) finds nothing and no-ops.
+      const held = findPendingMutation(sessionId, mutationId);
+      if (!held) return;
+      // `Cebab-vie.10` / `.18` [security]: the sibling of `retry`'s guard, and
+      // the sharper half — kick does not clear pending mutations, so without
+      // this a kicked worker could be resurrected by the operator clicking
+      // Continue, and the replay carried the one-shot approval grant, i.e. it
+      // re-issued the dangerous command PRE-APPROVED while its `bus_send`
+      // output was dropped as `kicked_source`. Checked BEFORE
+      // `releasePauseForMutation`, so a refusal never burns the grant.
+      const refused = router.checkTurnRefused(held.agentName);
+      if (refused === 'kicked') {
+        // Nothing will ever run this command, so the banner is resolved rather
+        // than approved: `consumed` clears it from the pending set AND leaves
+        // no unspent grant behind for a reconstructed run to honour.
+        try {
+          setMutationPauseState(held.id, 'consumed');
+        } catch (err) {
+          console.error('[orchestrator] resolve kicked agent pending mutation failed', err);
+        }
+        // The hold exists to stop this agent's queue; a kicked agent has no
+        // queue worth holding, and leaving it standing would keep in-memory
+        // state that no banner explains.
+        runner.releaseMutationHold(held.agentName);
+        try {
+          p.onPendingMutation?.(sessionId, listPendingMutations(sessionId));
+        } catch (err) {
+          console.error('[orchestrator] kicked-continue onPendingMutation sink threw', err);
+        }
+        return;
+      }
+      // `ended` / `budget`: leave the row pending. The session is finished and
+      // its teardown clears pending mutations; resolving it here would forge an
+      // operator decision the operator did not get to make.
+      if (refused) return;
       const pending = releasePauseForMutation(sessionId, mutationId, p.onPendingMutation);
       if (!pending) return;
       // `Cebab-vie.13`: release the queue hold BEFORE the replay-prompt lookup.

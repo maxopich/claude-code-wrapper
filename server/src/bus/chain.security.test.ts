@@ -14,6 +14,7 @@ import {
   createMultiAgentSession,
   listMultiAgentEvents,
   listPendingMutations,
+  setPendingRetry,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import { unregisterLiveSession } from './session_registry.js';
@@ -498,5 +499,173 @@ describe('[security] a chain participant held at a dangerous command holds its q
       release.mockRestore();
       unregisterLiveSession(handle.sessionId);
     }
+  });
+});
+
+/**
+ * `Cebab-vie.18` [security]: chain's half of the replay-seam guard.
+ *
+ * `retry()` and `continueThroughMutation()` are turn-starters that do not begin
+ * as a `BusEvent`, so chain's `ended` flag and hop budget — both enforced
+ * inside `handleEvent` — were not in their path either. Chain has no kick set
+ * (mute/pause/kick are all refused in chain mode), so `kicked` is unreachable
+ * here and the guard has two branches rather than three.
+ *
+ * A duplicated fix needs a check at each site, which is what this file is for;
+ * what the refusal then means for the operator is pinned in
+ * `orchestrator.wiring.test.ts`.
+ */
+describe('[security] a chain replay seam refuses a turn the router would not start', () => {
+  function mkAgent(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  /** One dangerous Bash call, then the turn ends. `dispatched` records the
+   *  call only if the tap did NOT throw — so an empty array means the pause
+   *  gate stopped it, and a non-empty one means it ran. */
+  function dangerousRunnerFactory(dispatched: string[]) {
+    return (): Runner => {
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_rm_cap',
+                name: 'Bash',
+                input: { command: 'rm -rf /tmp/victim' },
+              },
+            ],
+          },
+        } as unknown as SDKMessage;
+        dispatched.push('rm -rf /tmp/victim');
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  /** Records one entry per turn actually STARTED. */
+  function countingFactory(started: string[]) {
+    return (opts: { prompt: string }): Runner => {
+      started.push(opts.prompt);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  async function startWithSlot(started: string[]) {
+    const workspace = path.join(tmpRoot, 'ws-replay');
+    fs.mkdirSync(workspace, { recursive: true });
+    const handle = await startChainSession({
+      participants: [mkAgent('coder'), mkAgent('reviewer')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      onPendingRetry: vi.fn(),
+      runnerFactory: countingFactory(started),
+    });
+    await new Promise((r) => setImmediate(r));
+    started.length = 0; // ignore the opening turn; we measure the REPLAY
+    setPendingRetry(handle.sessionId, {
+      agentName: 'coder',
+      prompt: 'the failed task',
+      reason: 'boom',
+      ts: Date.now(),
+      errorEventId: 0,
+    });
+    return handle;
+  }
+
+  test('Retry on an ended session starts no turn and says so', async () => {
+    const started: string[] = [];
+    const handle = await startWithSlot(started);
+    // Teardown WITHOUT the handle's own cleanup: `stop` clears the slot and
+    // stops the runner, so it would no-op for reasons that have nothing to do
+    // with the guard. A crashed teardown is the state a click really lands in.
+    await handle.stop('stopped');
+    // `stop` clears the slot, so re-assert it: what is under test is the guard,
+    // not whether a cleared slot no-ops (it always did).
+    setPendingRetry(handle.sessionId, {
+      agentName: 'coder',
+      prompt: 'the failed task',
+      reason: 'boom',
+      ts: Date.now(),
+      errorEventId: 0,
+    });
+
+    await handle.retry();
+    await new Promise((r) => setImmediate(r));
+
+    expect(started).toEqual([]);
+    const errs = listMultiAgentEvents(handle.sessionId)
+      .filter((e) => e.kind === 'error')
+      .map((e) => e.text);
+    expect(errs.some((t) => t.includes('This session has ended'))).toBe(true);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  test('Continue past the hop cap starts no turn and leaves the banner pending', async () => {
+    // The other replay seam, and it needs a session that is AT the cap while
+    // still holding a pending mutation. `hopBudget: 1` gets there during
+    // startup: the briefings and the initial prompt go through
+    // `forwardCebabEvent`, which bumps the counter and does NOT check it, so
+    // the first participant's turn still runs and its `rm -rf` still parks a
+    // banner — with the budget already spent underneath.
+    const workspace = path.join(tmpRoot, 'ws-continue-cap');
+    fs.mkdirSync(workspace, { recursive: true });
+    const dispatched: string[] = [];
+    const handle = await startChainSession({
+      participants: [mkAgent('coder'), mkAgent('reviewer')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      pauseOnDangerous: true,
+      hopBudget: 1,
+      runnerFactory: dangerousRunnerFactory(dispatched),
+    });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    const held = listPendingMutations(handle.sessionId);
+    expect(held).toHaveLength(1);
+    expect(dispatched).toEqual([]);
+
+    await handle.continueThroughMutation(held[0]!.id);
+    await new Promise((r) => setImmediate(r));
+
+    // The approved command never ran, and the grant was never burnt: the row
+    // is still `pending`, because refusing is not the operator deciding.
+    expect(dispatched).toEqual([]);
+    expect(listPendingMutations(handle.sessionId).map((m) => m.id)).toEqual([held[0]!.id]);
+    const errs = listMultiAgentEvents(handle.sessionId)
+      .filter((e) => e.kind === 'error')
+      .map((e) => e.text);
+    expect(errs.some((t) => t.includes('Hop budget exhausted'))).toBe(true);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  test('CONTROL: on a live session the same Retry replays the captured prompt', async () => {
+    const started: string[] = [];
+    const handle = await startWithSlot(started);
+
+    await handle.retry();
+    await new Promise((r) => setImmediate(r));
+
+    expect(started).toEqual(['the failed task']);
+
+    unregisterLiveSession(handle.sessionId);
   });
 });

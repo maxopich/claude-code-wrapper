@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { ORCHESTRATOR_AGENT_NAME, createOrchestratorRouter } from './orchestrator.js';
 import { computeSessionPaths } from './paths.js';
-import { CEBAB_SOURCE } from './runtime.js';
+import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
 import {
   createMultiAgentSession,
   listMultiAgentEvents,
@@ -52,6 +52,7 @@ function buildRouter(
     initialKickedAgents?: string[];
     initialMutedAgents?: string[];
     lifecycle?: MultiAgentLifecycle;
+    hopBudget?: number;
   } = {},
 ) {
   const workerNames = opts.workerNames ?? ['reviewer', 'editor'];
@@ -70,7 +71,7 @@ function buildRouter(
     lifecycle,
     onEvent,
     onEnded,
-    hopBudget: 1000,
+    hopBudget: opts.hopBudget ?? 1000,
     initialKickedAgents: opts.initialKickedAgents,
     initialMutedAgents: opts.initialMutedAgents,
   });
@@ -227,5 +228,113 @@ describe('RouterDropReasonCode includes kicked_source + kicked_destination', () 
     const dst: CodeUnion = 'kicked_destination';
     expect(src).toBe('kicked_source');
     expect(dst).toBe('kicked_destination');
+  });
+});
+
+/**
+ * `Cebab-vie.9` / `Cebab-vie.10` / `Cebab-vie.18` [security]: the precondition
+ * check the two operator replay seams ask before starting a turn.
+ *
+ * The drop filters above cover every turn that BEGINS as a `BusEvent`, which is
+ * what the module's drain-contract comment relies on. `handle.retry()` and
+ * `handle.continueThroughMutation()` do not begin as events, so none of that
+ * reached them — this predicate is what they consult instead. Tested here
+ * because it reads the same `kickedSet` these tests already own; the
+ * end-to-end "no turn was actually spawned" halves live in
+ * `orchestrator.wiring.test.ts`.
+ */
+describe('createOrchestratorRouter — checkTurnRefused (the replay-seam gate)', () => {
+  const errorTexts = (sessionId: string): string[] =>
+    listMultiAgentEvents(sessionId)
+      .filter((e) => e.kind === 'error' && e.source === CEBAB_SOURCE)
+      .map((e) => e.text);
+
+  test('a live worker is not refused, and nothing is written', () => {
+    const { router, sessionId } = buildRouter();
+    expect(router.checkTurnRefused('reviewer')).toBeNull();
+    expect(errorTexts(sessionId)).toEqual([]);
+  });
+
+  test('a kicked worker is refused, and the operator is told once', () => {
+    const { router, sessionId, onEvent } = buildRouter();
+    router.kickAgent('reviewer');
+    expect(router.checkTurnRefused('reviewer')).toBe('kicked');
+
+    const texts = errorTexts(sessionId);
+    expect(texts).toHaveLength(1);
+    expect(texts[0]).toContain('`reviewer` was removed from this session');
+    // The refusal reaches the attached client too, not just the DB.
+    expect(onEvent).toHaveBeenCalled();
+  });
+
+  test('a kicked worker does not shadow its peers', () => {
+    const { router } = buildRouter();
+    router.kickAgent('reviewer');
+    expect(router.checkTurnRefused('editor')).toBeNull();
+  });
+
+  test('the R-A/R-B reseed path is refused too', () => {
+    const { router } = buildRouter({ initialKickedAgents: ['reviewer'] });
+    expect(router.checkTurnRefused('reviewer')).toBe('kicked');
+  });
+
+  test('the refusal is not a hop — it must not consume the budget it protects', () => {
+    // `hopBudget: 1` with one hop already spent would refuse for 'budget'
+    // instead of 'kicked' if the explanation itself counted. It also must not
+    // push a session at 0 hops toward its cap just by explaining a refusal.
+    const { router, sessionId } = buildRouter();
+    router.kickAgent('reviewer');
+    router.checkTurnRefused('reviewer');
+    router.checkTurnRefused('reviewer');
+    // Two refusals, two explanations, and `handleEvent`'s counter untouched:
+    // the events exist but were never counted as hops (the count is internal,
+    // so the observable is that a third call still says `kicked`).
+    expect(errorTexts(sessionId)).toHaveLength(2);
+    expect(router.checkTurnRefused('reviewer')).toBe('kicked');
+  });
+
+  test('an ended session refuses every agent, kicked or not', () => {
+    const { router, sessionId } = buildRouter();
+    void router.teardown('stopped');
+    expect(router.checkTurnRefused('reviewer')).toBe('ended');
+    expect(errorTexts(sessionId).at(-1)).toContain('This session has ended');
+  });
+
+  /**
+   * Reaching the cap with the session STILL RUNNING is the live window a Retry
+   * click lands in, and it needs the right kind of hop: `orchestrator → user`
+   * persists, bumps the counter, and returns BEFORE the budget check (pinned
+   * as intended in `orchestrator.test.ts` — the orchestrator answering the
+   * operator must not trip the brake). A routed hop would tear the session
+   * down on the spot and the answer below would be `ended`, which is a
+   * different branch.
+   */
+  const spendAHopWithoutTripping = (router: ReturnType<typeof buildRouter>['router']) => {
+    router.handleEvent(
+      makeEvent({
+        source: ORCHESTRATOR_AGENT_NAME,
+        destination: USER_RECIPIENT,
+        text: 'answering the operator',
+      }),
+    );
+  };
+
+  test('at the hop cap the answer is `budget`, and the session is torn down', () => {
+    const { router, sessionId, onEnded } = buildRouter({ hopBudget: 1 });
+    spendAHopWithoutTripping(router);
+    expect(router.checkTurnRefused('reviewer')).toBe('budget');
+    expect(onEnded).toHaveBeenCalled();
+    expect(errorTexts(sessionId).some((t) => t.includes('Hop budget exhausted'))).toBe(true);
+  });
+
+  test('kick outranks budget: a kicked agent is never reported as a budget stop', () => {
+    // Ordering matters for what the operator reads. A kicked worker refused
+    // with "hop budget exhausted" would also TEAR THE SESSION DOWN, turning a
+    // per-participant refusal into a session-wide stop.
+    const { router, onEnded } = buildRouter({ hopBudget: 1 });
+    spendAHopWithoutTripping(router);
+    router.kickAgent('reviewer');
+    expect(router.checkTurnRefused('reviewer')).toBe('kicked');
+    expect(onEnded).not.toHaveBeenCalled();
   });
 });
