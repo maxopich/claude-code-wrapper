@@ -259,4 +259,19 @@ describe('messageCopyText', () => {
     expect(messageCopyText(system)).toBeNull();
     expect(messageCopyText(perm)).toBeNull();
   });
+
+  // Cebab-003: tool output is the one system message with content, so it is
+  // the one system message worth a copy button. The case above still pins
+  // that every OTHER subtype stays null.
+  test('a system/tool_result yields its text', () => {
+    const out: MessageView = {
+      kind: 'system',
+      id: 's',
+      subtype: 'tool_result',
+      text: '3 passed, 0 failed',
+    };
+    const empty: MessageView = { kind: 'system', id: 's', subtype: 'tool_result', text: '' };
+    expect(messageCopyText(out)).toBe('3 passed, 0 failed');
+    expect(messageCopyText(empty)).toBeNull();
+  });
 });

@@ -74,8 +74,12 @@ export function MessageBlock(props: {
     );
   }
 
+  // Cebab-003: tool output is the one system message with something to say.
+  // Everything else that lands as `kind: 'system'` — the `init` banner, the
+  // `system_event` summaries — still renders nothing, exactly as before.
   if (m.kind === 'system') {
-    return null;
+    if (m.subtype !== 'tool_result') return null;
+    return <ToolResultCard message={m} />;
   }
 
   if (m.kind === 'command_output') {
@@ -220,6 +224,70 @@ export function MessageBlock(props: {
   return null;
 }
 
+/**
+ * Cebab-003: the tool-output card.
+ *
+ * Lines/chars, not bytes: four local `formatBytes` copies already exist in
+ * this tree (ArtifactsView, PermissionCards, ManagedCopyModal, SettingsModal)
+ * and a fifth buys nothing a line count doesn't say better for tool output.
+ */
+const PREVIEW_LINES = 8;
+const PREVIEW_CHARS = 1000;
+/**
+ * Hard ceiling on characters handed to the DOM even when expanded. Real tool
+ * results measured out at a 19 KB max, so this is a guard against the
+ * pathological `Read` of a generated file, not the common case. The
+ * CopyButton always carries the FULL string, so the cap can never hide output
+ * the operator has no way to retrieve — and the note below says it was cut.
+ */
+const RENDER_CAP = 20_000;
+
+function ToolResultCard({ message: m }: { message: Extract<MessageView, { kind: 'system' }> }) {
+  const [open, setOpen] = useState(false);
+  const full = m.text;
+  const lines = full.split('\n');
+  const preview = lines.slice(0, PREVIEW_LINES).join('\n').slice(0, PREVIEW_CHARS);
+  const hasMore = preview.length < full.length;
+  const capped = open && full.length > RENDER_CAP;
+  const shown = open ? full.slice(0, RENDER_CAP) : preview;
+  const label = `${m.toolName ?? 'tool'} ${m.isError ? 'error' : 'output'}`;
+
+  return (
+    <div className={`msg tool-result msg-group${m.isError ? ' has-error' : ''}`}>
+      <div className="avatar tool" aria-hidden="true">
+        ⎿
+      </div>
+      <div className="msg-body">
+        <div className="role">{label}</div>
+        {full.trim() === '' ? (
+          <pre className="tool-result-body is-empty">(no output)</pre>
+        ) : (
+          <pre className="tool-result-body">{shown}</pre>
+        )}
+        {capped && (
+          <div className="tool-result-note">
+            … truncated for display at {RENDER_CAP.toLocaleString()} characters — Copy takes the
+            whole thing.
+          </div>
+        )}
+        {hasMore && (
+          <button
+            type="button"
+            className="ghost-btn tool-result-toggle"
+            aria-expanded={open}
+            onClick={() => setOpen((o) => !o)}
+          >
+            {open
+              ? '▾ show less'
+              : `▸ show all${lines.length > PREVIEW_LINES ? ` · ${lines.length} lines` : ` · ${full.length} characters`}`}
+          </button>
+        )}
+      </div>
+      <CopyButton text={full} className="msg-copy" label="Copy tool output" />
+    </div>
+  );
+}
+
 function BlockRender({ block }: { block: ContentBlock }) {
   if (block.type === 'text') return <Markdown text={block.text} />;
   if (block.type === 'tool_use')
@@ -229,16 +297,10 @@ function BlockRender({ block }: { block: ContentBlock }) {
         <pre>{JSON.stringify(block.input, null, 2)}</pre>
       </div>
     );
-  if (block.type === 'tool_result')
-    return (
-      <div className="block-tool-result">
-        <pre>
-          {typeof block.content === 'string'
-            ? block.content
-            : JSON.stringify(block.content, null, 2)}
-        </pre>
-      </div>
-    );
+  // No `tool_result` arm: BlockRender is only ever called with an assistant
+  // message's blocks, and the API puts tool_result blocks in USER messages.
+  // The arm that used to live here was unreachable from the day it was
+  // written; tool output now renders through <ToolResultCard> (Cebab-003).
   if (block.type === 'thinking')
     return (
       <details className="block-thinking">

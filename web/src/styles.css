@@ -2030,6 +2030,42 @@ pre {
   color: var(--fg-2);
   font-style: italic;
 }
+/* Cebab-003: the tool-output card. Mono body on the `--bg-2` surface so it
+ * reads as machine output next to the serif reading bodies of the user/agent
+ * turns, and scrolls inside itself rather than stretching the transcript. */
+.msg.tool-result .tool-result-body {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line-1);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg.tool-result .tool-result-body.is-empty {
+  color: var(--fg-3);
+  font-style: italic;
+}
+.msg.tool-result .tool-result-note {
+  color: var(--fg-2);
+  font-size: var(--t-sm);
+  margin-top: 4px;
+}
+.msg.tool-result .tool-result-toggle {
+  margin-top: 4px;
+  font-size: var(--t-sm);
+}
+/* Ink token, never the fill — the role line is text. */
+.msg.tool-result.has-error .role {
+  color: var(--err-ink);
+}
+.msg.tool-result.has-error .tool-result-body {
+  border-color: var(--err);
+}
 .msg.result.ok {
   border-color: var(--ok);
 }
@@ -2163,13 +2199,6 @@ pre {
   font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 500;
-}
-.block-tool-result {
-  background: var(--bg-2);
-  border: 1px solid var(--line-1);
-  padding: 6px 10px;
-  border-radius: var(--r-sm);
-  margin-top: 4px;
 }
 .block-thinking {
   color: var(--fg-3);
