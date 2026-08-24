@@ -75,9 +75,21 @@ export function decidePauseForMutation(
   // Killing the turn left the agent's turn QUEUE untouched, so the next
   // delivery — a peer's `bus_send`, an orchestrator follow-up, a retry —
   // started a fresh turn that arrived here and was waved through, for as long
-  // as the operator left the banner un-actioned. The pause now holds the
-  // queue too (`holdAgent` below), so the only caller that can still reach
-  // this line is a sibling `tool_use` block from the dead turn itself.
+  // as the operator left the banner un-actioned. The pause now holds the queue
+  // too (`holdAgent` below).
+  //
+  // `Cebab-vie.14` closed the OTHER way in, and the vie.13 note here overstated
+  // matters until it did: the runner's overload retry re-runs the halted turn
+  // from inside `runOneTurn`, downstream of the queue, so the hold never saw
+  // it. The replayed turn re-issued the command with a fresh `tool_use` id and
+  // landed exactly here — with `hasPendingPause` true, because the pause it was
+  // meant to respect is what made it true. That retry fired because the
+  // sentinel's message contains the worker's own command text; the retry filter
+  // class-checks now.
+  //
+  // So the two callers that can still reach this line are a sibling `tool_use`
+  // block from the dead turn, and a genuine second call inside it. Both are
+  // this turn; neither is a new one.
   if (agent.hasPendingPause) return { action: 'run' };
   return { action: 'pause' };
 }

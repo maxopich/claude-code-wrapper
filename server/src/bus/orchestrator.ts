@@ -1371,6 +1371,12 @@ export function wireOrchestratorSession(p: {
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
    *  real (mock-aware) `pickRunner` when omitted. */
   runnerFactory?: AgentRunnerDeps['runnerFactory'];
+  /** Injectable for tests, beside `runnerFactory` and for the same reason:
+   *  the production schedule is 1 s / 3 s / 10 s, so a test asserting that a
+   *  turn was NOT retried would pass while merely being faster than the first
+   *  backoff. Pass `[0, 0, 0]` to make a retry that WOULD happen happen at
+   *  once. Omit in production. */
+  overloadBackoffMs?: AgentRunnerDeps['overloadBackoffMs'];
   /** Hop budget for this session (caller resolves precedence; omit to use
    *  `DEFAULT_HOP_BUDGET`). */
   hopBudget?: number;
@@ -1666,6 +1672,7 @@ export function wireOrchestratorSession(p: {
     },
     abortController,
     runnerFactory: p.runnerFactory,
+    ...(p.overloadBackoffMs !== undefined ? { overloadBackoffMs: p.overloadBackoffMs } : {}),
     // Mock replay (MOCK=1). The orchestrator's own slug is fixed, so a shipped
     // fixture addresses it by name; the workers' slugs are the operator's
     // project names, so their scripts address `${ORCHESTRATOR}` and the

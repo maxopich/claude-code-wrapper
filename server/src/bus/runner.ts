@@ -27,7 +27,7 @@ import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusRecipient } from './paths.js';
 import { classifyMutationScope } from './guardrail.js';
-import { TurnStalledError } from './errors.js';
+import { isBusControlSignal, TurnStalledError } from './errors.js';
 
 /**
  * Stalled-turn watchdog thresholds (ms). A turn that yields no SDKMessage for
@@ -906,6 +906,11 @@ export class AgentRunner {
     //
     // Errors that are NOT transient overloads (mutation pause sentinel,
     // unknown CLI failures, abort) propagate immediately — no retries.
+    // `Cebab-vie.14`: that was a claim about the sentinel's message text until
+    // `isTransientOverload` started class-checking, and the text is partly the
+    // worker's. The guard lives in the predicate rather than here so there is
+    // one place to get it right; a copy at this call site would be a second
+    // place to forget it.
     const backoffMs = this.deps.overloadBackoffMs ?? DEFAULT_OVERLOAD_BACKOFF_MS;
     const maxAttempts = backoffMs.length + 1;
     let lastErr: unknown;
@@ -926,7 +931,10 @@ export class AgentRunner {
         // orchestrator.ts) can emit an `auto_retry` ServerMsg + write a
         // recovery_log row. `[security]` BE-D7: we're already inside the
         // `isTransientOverload(err)` branch — the hook can't fire on a
-        // non-transient error.
+        // non-transient error. `Cebab-vie.14`: true since that predicate
+        // started class-checking, and false before it — a gate pause reached
+        // here and was reported to the operator, and written to
+        // `recovery_log`, as `reason: 'transient_overload'`.
         console.warn(
           `[runner] ${agentName} hit transient overload (attempt ${attempt + 1}/${maxAttempts}): ${(err as Error).message}. Backing off ${delay}ms before retry.`,
         );
@@ -1415,13 +1423,25 @@ export const DEFAULT_OVERLOAD_BACKOFF_MS: readonly number[] = [1000, 3000, 10000
  * wrapper ("SDK result subtype=error_during_execution") — both of which the
  * bus has been seeing during the regression.
  *
- * Permissive matching: a false positive retries a non-transient error
- * `MAX_RETRIES` times before giving up (annoying log noise, no correctness
- * impact). False negatives surface immediately as before.
+ * **Cebab's own control signals are answered `false` before any string is read**
+ * (`Cebab-vie.14` [security]). The substring matching below is permissive by
+ * design, and its cost used to be described as "annoying log noise, no
+ * correctness impact" — which held only for errors nobody writes. A
+ * `PausedForMutationError` carries the paused command's summary, and for `Bash`
+ * that summary is the model's own command and description verbatim, so a worker
+ * could put `Overloaded` in either half and have its pause retried: the
+ * replayed turn re-issued the command and the gate waved it through, because
+ * that agent was already halted. Class first, text second — see
+ * `isBusControlSignal`.
+ *
+ * Permissive matching otherwise stands: a false positive on a genuine remote
+ * error retries it `MAX_RETRIES` times before giving up, which is noise. False
+ * negatives surface immediately as before.
  *
  * Exported for unit tests.
  */
 export function isTransientOverload(err: unknown): boolean {
+  if (isBusControlSignal(err)) return false;
   if (!(err instanceof Error)) return false;
   const m = err.message;
   return (

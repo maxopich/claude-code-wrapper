@@ -1209,3 +1209,133 @@ describe('wireOrchestratorSession — the replay seams refuse what the router wo
     unregisterLiveSession(SESSION_ID);
   });
 });
+
+/**
+ * `Cebab-vie.14` [security]: end-to-end, the case where the command itself is
+ * unremarkable.
+ *
+ * The pause gate halts a worker by throwing `PausedForMutationError`, whose
+ * message is ``paused before ${row.summary}`` — and for a `Bash` call that
+ * summary is the model's command AND its `description`, verbatim. The runner's
+ * retry filter matched on message text, so a worker that wrote `Overloaded`
+ * into either half had its own pause absorbed as an API 5xx: the turn was
+ * re-run, the replayed turn re-issued the command with a fresh `tool_use` id,
+ * and `decidePauseForMutation` waved it through — because the pause it was
+ * meant to respect is what made `hasPendingPause` true.
+ *
+ * `dispatched` is the measurement: the fake runner appends to it only AFTER the
+ * `tool_use` block, so the generator reaches that line only if the tap did not
+ * throw. An empty array means the command never ran.
+ */
+describe('wireOrchestratorSession — a worker cannot write its own way past the gate (Cebab-vie.14) [security]', () => {
+  function worker(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  /** Issues one dangerous Bash call whose model-written description carries the
+   *  retry trigger, then — only if it was allowed to continue — records it. */
+  function poisonedRunnerFactory(started: string[], dispatched: string[]) {
+    return (opts: { prompt: string }): Runner => {
+      started.push(opts.prompt);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: `tu-poison-${started.length}`,
+                name: 'Bash',
+                input: { command: 'rm -rf /important', description: 'retry after Overloaded' },
+              },
+            ],
+          },
+        } as unknown as SDKMessage;
+        dispatched.push('rm -rf /important');
+        yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  test('the halt stands, the turn is not re-run, and the command never dispatches', async () => {
+    setPauseOnDangerous(SESSION_ID, true);
+    const started: string[] = [];
+    const dispatched: string[] = [];
+    const coder = worker('coder');
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers: [coder],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      briefedAgents: ['coder'],
+      // Retries would be instant if they happened at all, so a green here is
+      // not the backoff schedule hiding them.
+      overloadBackoffMs: [0, 0, 0],
+      runnerFactory: poisonedRunnerFactory(started, dispatched),
+    });
+
+    deliver('coder', 'do the thing');
+    await settle();
+
+    expect(dispatched).toEqual([]);
+    expect(started).toEqual(['do the thing']); // one attempt, not four
+    // And the operator's banner is for a command that has NOT run.
+    expect(listPendingMutations(SESSION_ID).map((m) => m.summary)).toEqual([
+      'rm -rf /important (retry after Overloaded)',
+    ]);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('CONTROL: a genuine transient failure on the same session still retries', async () => {
+    // Without this the fix could be "the runner stopped retrying", which would
+    // hand every operator a worker-failed banner on each 529 blip.
+    setPauseOnDangerous(SESSION_ID, true);
+    const started: string[] = [];
+    const workspace = path.join(tmpRoot, 'workspace-control');
+    fs.mkdirSync(workspace, { recursive: true });
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers: [worker('coder')],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      briefedAgents: ['coder'],
+      overloadBackoffMs: [0, 0, 0],
+      runnerFactory: (opts: { prompt: string }): Runner => {
+        started.push(opts.prompt);
+        const first = started.length === 1;
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          if (first) throw new Error('API Error: 529 Overloaded');
+          yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      },
+    });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    deliver('coder', 'do the thing');
+    await settle();
+    expect(started).toHaveLength(2); // absorbed and retried
+    warnSpy.mockRestore();
+
+    unregisterLiveSession(SESSION_ID);
+  });
+});
