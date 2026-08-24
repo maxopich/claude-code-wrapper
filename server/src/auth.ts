@@ -66,15 +66,42 @@ export function authTokenPath(): string {
 }
 
 /**
- * Generate a fresh token, write it to disk (mode 0600), and cache it.
- * Idempotent: subsequent calls overwrite the file with a new random
- * value. Always call once at server boot before mounting routes.
+ * Generate a fresh token and cache it IN MEMORY. No file is written.
+ *
+ * Cebab-ygu.41 split this out of `initAuthToken`, and the split is the fix.
+ * `initAuthToken` ran before `server.listen()` and is destructive — it unlinks
+ * and rewrites `~/.cebab/auth-token` — so a boot that then failed to bind its
+ * port (a second server on an occupied 4319) invalidated the HEALTHY server's
+ * on-disk token on its way to doing nothing. The live server kept working,
+ * because `verifyToken` compares against this in-memory value; what broke was
+ * every reader of the FILE, including `ws_smoke.ts`, which started failing 401
+ * against a perfectly good server.
+ *
+ * Generating early is safe and deliberate: both readers take the token at
+ * REQUEST time (`auth_token_route` calls `getAuthToken()` inside its handler,
+ * the WS upgrade calls `verifyToken`), and no request can arrive before the
+ * socket is bound. Doing it here rather than in the bound callback means
+ * `getAuthToken()` can never throw and `verifyToken` can never see a null,
+ * even in an ordering nobody has thought of.
  */
-export function initAuthToken(): string {
+export function generateAuthToken(): string {
+  token = crypto.randomBytes(32).toString('hex');
+  return token;
+}
+
+/**
+ * Write the cached token to disk (mode 0600). THE DESTRUCTIVE HALF — it
+ * unlinks any existing file first — so call it only once the server is
+ * actually listening (`index.ts` does it from `startListening`'s `onBound`).
+ *
+ * Throws if no token has been generated: writing an empty file here would
+ * lock out every client while looking like a successful boot.
+ */
+export function persistAuthToken(): string {
+  const current = getAuthToken();
   // See the db.ts call site: either of the two can be first depending on boot
   // order, so both go through `ensureDataDir` (Cebab-ws0.8).
   ensureDataDir();
-  token = crypto.randomBytes(32).toString('hex');
   const p = authTokenPath();
   // writeFileSync + mode: ensure file is created 0600 even if it pre-exists
   // with looser permissions (writeFileSync doesn't chmod existing files,
@@ -92,8 +119,33 @@ export function initAuthToken(): string {
   // not enforced here. Passing the mode on Windows is harmless but
   // misleading, so gate it.
   const writeOpts = process.platform === 'win32' ? {} : { mode: 0o600 };
-  fs.writeFileSync(p, token, writeOpts);
-  return token;
+  fs.writeFileSync(p, current, writeOpts);
+  return current;
+}
+
+/**
+ * Generate a fresh token, write it to disk (mode 0600), and cache it.
+ * Idempotent: subsequent calls overwrite the file with a new random value.
+ *
+ * The composition of the two halves above, kept because it is the honest
+ * contract for every caller that is not the boot path — a test, or any future
+ * caller that wants a token on disk now. `index.ts` deliberately does NOT use
+ * it: the two halves happen at different moments there, and the gap between
+ * them is the whole point (Cebab-ygu.41).
+ */
+export function initAuthToken(): string {
+  generateAuthToken();
+  return persistAuthToken();
+}
+
+/**
+ * Test-only: forget the cached token so a case can reach the "boot generated
+ * nothing" state. Nothing in production may call this — the token's lifetime
+ * is the process's. Same shape as `_resetOperatorIdCache` and
+ * `__resetProbeConcurrencyForTests`.
+ */
+export function _resetTokenForTests(): void {
+  token = null;
 }
 
 export function getAuthToken(): string {
