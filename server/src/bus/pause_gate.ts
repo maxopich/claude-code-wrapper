@@ -195,6 +195,19 @@ export function applyPauseGate(
 }
 
 /**
+ * Which currently-pending mutation is `mutationId`, or null.
+ *
+ * Exists because the two routers must answer "whose turn would this Continue
+ * start?" BEFORE `releasePauseForMutation` burns the grant — a kicked worker's
+ * Continue must not leave an `approved` row behind (`Cebab-vie.10`). Exported
+ * rather than inlined at each seam so there stays exactly one definition of
+ * "which row is this", which `releasePauseForMutation` below also uses.
+ */
+export function findPendingMutation(sessionId: string, mutationId: number): MutationRecord | null {
+  return listPendingMutations(sessionId).find((m) => m.id === mutationId) ?? null;
+}
+
+/**
  * Operator clicked Continue on one banner: move that mutation from `pending` to
  * `approved` and broadcast what is still waiting. Returns the released record
  * so the caller can replay that agent's captured prompt, or `null` when there
@@ -213,7 +226,7 @@ export function releasePauseForMutation(
   mutationId: number,
   onPendingMutation?: (sessionId: string, pending: MutationRecord[]) => void,
 ): MutationRecord | null {
-  const pending = listPendingMutations(sessionId).find((m) => m.id === mutationId);
+  const pending = findPendingMutation(sessionId, mutationId);
   if (!pending) return null;
   try {
     setMutationPauseState(mutationId, 'approved');

@@ -80,8 +80,10 @@ import type {
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
 import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import { turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
 import {
   applyPauseGate,
+  findPendingMutation,
   releasePauseForMutation,
   shouldHaltUnrecordedMutation,
 } from './pause_gate.js';
@@ -245,6 +247,14 @@ type ChainRouter = {
    *  clears" half of migration 010, so a transient-error banner doesn't outlive
    *  the recovery. */
   onTurnSucceeded: (agentName: string) => void;
+  /**
+   * `Cebab-vie.18` [security]: the precondition check the two operator replay
+   * seams (`retry`, `continueThroughMutation`) must pass before starting a
+   * turn, since neither originates from a `BusEvent` and so neither is
+   * downstream of the router's own gates. Non-null means refused AND the
+   * operator has already been told.
+   */
+  checkTurnRefused: (agentName: string) => TurnRefusalReason | null;
 };
 
 /**
@@ -573,6 +583,105 @@ export function createChainRouter(params: {
     }
   };
 
+  /**
+   * Append a `cebab → user kind=error` row and push it to the live sink — the
+   * channel `onWorkerFailed` already uses, and the one the operator's
+   * scrollback renders. Does NOT bump `hopsCount`: Cebab explaining itself is
+   * not a hop. Mirrors `orchestrator.ts`.
+   */
+  const emitOperatorError = (reasonText: string): void => {
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        USER_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      try {
+        sink.onEvent(
+          sessionId,
+          {
+            ts: row.ts,
+            source: CEBAB_SOURCE,
+            destination: USER_RECIPIENT,
+            kind: 'error',
+            text: reasonText,
+          },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[chain] operator-error onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      console.error('[chain] persist operator-error event failed', persistErr);
+    }
+  };
+
+  /**
+   * At the cap: append a synthetic `cebab → _sink kind=error` event so the
+   * trail explains the stop, then tear down. Returns true iff the caller must
+   * refuse. Persist+wire directly (NOT via `forwardCebabEvent`) so the count
+   * does not also bump for the error itself — the displayed ratio reads
+   * exactly `hopBudget/hopBudget` at the moment of refusal. F3 normally drops
+   * `source=cebab` in `handleEvent`; bypassing here mirrors the same pattern
+   * `forwardCebabEvent` uses for legitimate Cebab traffic.
+   *
+   * A closure rather than an inline block (`Cebab-vie.18`) because there are
+   * now two callers — the router's own wake and `checkTurnRefused` — and this
+   * is the orchestrator's `checkBudgetExhausted` down to the wording, which is
+   * exactly the kind of thing that drifts once it is written twice.
+   */
+  const checkBudgetExhausted = (): boolean => {
+    if (hopsCount < hopBudget) return false;
+    if (ended) return true; // already torn down by a previous trip; just block
+    const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
+    // PR-7: this synthetic error is THIS run's first_error if none earlier.
+    captureError(reasonText);
+    try {
+      const row = appendMultiAgentEvent(
+        sessionId,
+        CEBAB_SOURCE,
+        SINK_RECIPIENT,
+        'error',
+        reasonText,
+      );
+      sink.onEvent(
+        sessionId,
+        {
+          ts: Date.now(),
+          source: CEBAB_SOURCE,
+          destination: SINK_RECIPIENT,
+          kind: 'error',
+          text: reasonText,
+        },
+        row.id,
+      );
+    } catch (err) {
+      console.error('[chain] persist budget-exhausted event failed', err);
+    }
+    void teardown('stopped');
+    return true;
+  };
+
+  /**
+   * `Cebab-vie.18` [security]: may a turn start for `agentName` right now?
+   * Returns the reason it must not, or null; non-null means the operator has
+   * already been told. See `orchestrator.ts`'s twin for the full rationale.
+   *
+   * Two branches, not three: chain has no kick set. Mute, pause and kick are
+   * all refused in chain mode, so `kicked` is unreachable here — and inventing
+   * a branch for it would be a check that can never fire, which is worse than
+   * its absence.
+   */
+  const checkTurnRefused = (agentName: string): TurnRefusalReason | null => {
+    if (ended) {
+      emitOperatorError(turnRefusalText('ended', agentName));
+      return 'ended';
+    }
+    return checkBudgetExhausted() ? 'budget' : null;
+  };
+
   const handleEvent = (ev: BusEvent) => {
     if (ended) return;
     // F3: source=cebab is Cebab's own traffic, routed in-process via
@@ -763,42 +872,8 @@ export function createChainRouter(params: {
       return;
     }
     // Hop-budget enforcement: the hop we just persisted is in the trail; if
-    // it pushed us to the cap, refuse to wake the next agent and surface a
-    // synthetic `cebab → _sink kind=error` event so the trail explains the
-    // stop. Persist+wire directly (NOT via `forwardCebabEvent`) so the count
-    // does not also bump for the error itself — the displayed ratio reads
-    // exactly `hopBudget/hopBudget` at the moment of refusal. F3 normally
-    // drops `source=cebab` in `handleEvent`; bypassing here mirrors the same
-    // pattern `forwardCebabEvent` uses for legitimate Cebab traffic.
-    if (hopsCount >= hopBudget) {
-      const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
-      // PR-7: this synthetic error is THIS run's first_error if none earlier.
-      captureError(reasonText);
-      try {
-        const row = appendMultiAgentEvent(
-          sessionId,
-          CEBAB_SOURCE,
-          SINK_RECIPIENT,
-          'error',
-          reasonText,
-        );
-        sink.onEvent(
-          sessionId,
-          {
-            ts: Date.now(),
-            source: CEBAB_SOURCE,
-            destination: SINK_RECIPIENT,
-            kind: 'error',
-            text: reasonText,
-          },
-          row.id,
-        );
-      } catch (err) {
-        console.error('[chain] persist budget-exhausted event failed', err);
-      }
-      void teardown('stopped');
-      return;
-    }
+    // it pushed us to the cap, refuse to wake the next agent.
+    if (checkBudgetExhausted()) return;
     // Fire-and-forget: must NOT block the sending agent's in-flight turn
     // (this runs inside its bus_send tool call). Mirrors the old
     // `sendKeys(...).catch(...)`.
@@ -1012,6 +1087,7 @@ export function createChainRouter(params: {
     sendServerMsg,
     onWorkerFailed,
     onTurnSucceeded,
+    checkTurnRefused,
   };
 }
 
@@ -1534,6 +1610,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     async retry() {
       const pending = getPendingRetry(sessionId);
       if (!pending) return;
+      // `Cebab-vie.18` [security]: a turn-starter that does not come from a
+      // `BusEvent`, so the router's `ended` / budget gates are not in its path
+      // — a Retry click ran a full turn on an ended session and past the hop
+      // cap. Mirrors orchestrator.ts, minus the kick branch chain has no set
+      // for. The slot stays put: teardown owns it.
+      if (router.checkTurnRefused(pending.agentName)) return;
       // Clear the slot BEFORE re-delivery so a racing second click sees
       // the empty slot and no-ops. If the retried turn fails again, the
       // onWorkerFailed callback re-asserts the slot with a fresh reason
@@ -1556,6 +1638,14 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       deliver(pending.agentName, pending.prompt);
     },
     async continueThroughMutation(mutationId: number) {
+      const held = findPendingMutation(sessionId, mutationId);
+      if (!held) return;
+      // `Cebab-vie.18` [security]: checked BEFORE `releasePauseForMutation` so
+      // a refusal never burns the one-shot approval grant — see
+      // orchestrator.ts's mirror. The row stays `pending`: the session is over
+      // and its teardown clears pending mutations, and resolving it here would
+      // forge a decision the operator did not get to make.
+      if (router.checkTurnRefused(held.agentName)) return;
       const pending = releasePauseForMutation(sessionId, mutationId, opts.onPendingMutation);
       if (!pending) return;
       // `Cebab-vie.13`: release the queue hold BEFORE the replay-prompt lookup

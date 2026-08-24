@@ -20,6 +20,8 @@ import { registerLiveSession, unregisterLiveSession } from './session_registry.j
 import {
   appendMultiAgentMutation,
   createMultiAgentSession,
+  findUnconsumedApproval,
+  getPendingRetry,
   getMultiAgentSession,
   listAgentSessions,
   listMultiAgentEvents,
@@ -28,6 +30,7 @@ import {
   listPendingMutations,
   setMutationPauseState,
   setPauseOnDangerous,
+  setPendingRetry,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
 import { setProjectModel, upsertProject } from '../repo/projects.js';
@@ -956,6 +959,252 @@ describe('wireOrchestratorSession — a held worker stays held (Cebab-vie.13) [s
       'delegation after the restart',
       'delegation after the restart',
     ]);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+});
+
+/**
+ * `Cebab-vie.9` / `Cebab-vie.10` / `Cebab-vie.18` [security]: the two operator
+ * replay seams start turns, and asked nothing before doing it.
+ *
+ * Every other turn in the bus begins as a `BusEvent` and is therefore already
+ * downstream of the router's kick drops, its `ended` flag and its hop budget.
+ * `retry()` and `continueThroughMutation()` do not begin as events, so that
+ * enforcement was structurally absent: a kicked worker was resurrected with a
+ * full tool-capable turn, and Continue's replay carried the one-shot approval
+ * grant, i.e. re-issued the approved `rm -rf` PRE-APPROVED — while its
+ * `bus_send` output was dropped as `kicked_source`, so the operator saw drop
+ * notices and nothing about what the worker actually did.
+ *
+ * The measurement is the fake runner's captured list: it records one entry per
+ * turn actually STARTED, so "nothing ran" is an empty array rather than an
+ * inference.
+ */
+describe('wireOrchestratorSession — the replay seams refuse what the router would (Cebab-vie.9/.10/.18) [security]', () => {
+  function fakeFactory(
+    captured: Array<{ cwd: string; prompt: string }>,
+    dangerousCwd?: string,
+  ): (opts: { cwd: string; prompt: string }) => Runner {
+    let dangerousTurns = 0;
+    return (opts) => {
+      captured.push({ cwd: opts.cwd, prompt: opts.prompt });
+      const emitDanger = opts.cwd === dangerousCwd && dangerousTurns++ === 0;
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        if (emitDanger) {
+          yield {
+            type: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'tu-danger-2',
+                  name: 'Bash',
+                  input: { command: 'rm -rf /tmp/x' },
+                },
+              ],
+            },
+          } as unknown as SDKMessage;
+        }
+        yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function worker(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  function wire(
+    workers: ResolvedAgent[],
+    captured: Array<{ cwd: string; prompt: string }>,
+    opts: { dangerous?: boolean; hopBudget?: number } = {},
+  ) {
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    return wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      briefedAgents: workers.map((w) => w.agentName),
+      runnerFactory: fakeFactory(captured, opts.dangerous ? workers[0]!.cwd : undefined),
+      ...(opts.hopBudget !== undefined ? { hopBudget: opts.hopBudget } : {}),
+    });
+  }
+
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  const errors = (): string[] =>
+    listMultiAgentEvents(SESSION_ID)
+      .filter((e) => e.kind === 'error' && e.source === CEBAB_SOURCE)
+      .map((e) => e.text);
+
+  test('Retry does not resurrect a kicked worker, and its banner goes with it', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle, router } = wire([worker('coder')], captured);
+    setPendingRetry(SESSION_ID, {
+      agentName: 'coder',
+      prompt: 'the failed task',
+      reason: 'boom',
+      ts: Date.now(),
+      errorEventId: 0,
+    });
+
+    router.kickAgent('coder');
+    await handle.retry();
+    await settle();
+
+    expect(captured).toEqual([]);
+    // Kick is irreversible, so a banner offering a Retry that can never happen
+    // must not outlive it.
+    expect(getPendingRetry(SESSION_ID)).toBeNull();
+    expect(errors().some((t) => t.includes('`coder` was removed from this session'))).toBe(true);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('CONTROL: Retry still replays for a live worker', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle } = wire([worker('coder')], captured);
+    setPendingRetry(SESSION_ID, {
+      agentName: 'coder',
+      prompt: 'the failed task',
+      reason: 'boom',
+      ts: Date.now(),
+      errorEventId: 0,
+    });
+
+    await handle.retry();
+    await settle();
+
+    expect(captured.map((c) => c.prompt)).toEqual(['the failed task']);
+    expect(getPendingRetry(SESSION_ID)).toBeNull();
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('Continue does not resurrect a kicked worker, and leaves NO approval grant', async () => {
+    setPauseOnDangerous(SESSION_ID, true);
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const coder = worker('coder');
+    const { handle, router, deliver } = wire([coder], captured, { dangerous: true });
+
+    deliver('coder', 'first task');
+    await settle();
+    const held = listPendingMutations(SESSION_ID);
+    expect(held).toHaveLength(1);
+    expect(captured).toHaveLength(1);
+
+    // The operator kicks the held worker, then clicks Continue on its banner.
+    router.kickAgent('coder');
+    await handle.continueThroughMutation(held[0]!.id);
+    await settle();
+
+    // No second turn: the `rm -rf` never runs.
+    expect(captured).toHaveLength(1);
+    // The banner resolves rather than lingering — kick is irreversible, so a
+    // Continue that stays clickable would refuse forever.
+    expect(listPendingMutations(SESSION_ID)).toEqual([]);
+    // And no unspent grant is left behind. This is the sharp half of vie.10:
+    // an `approved` row here would pre-authorise `rm -rf /tmp/x` for any later
+    // turn by this agent, including one a reconstructed run starts.
+    expect(findUnconsumedApproval(SESSION_ID, 'coder', 'Bash', 'rm -rf /tmp/x')).toBeNull();
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('CONTROL: Continue still replays for a live worker', async () => {
+    setPauseOnDangerous(SESSION_ID, true);
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle, deliver } = wire([worker('coder')], captured, { dangerous: true });
+
+    deliver('coder', 'first task');
+    await settle();
+    const held = listPendingMutations(SESSION_ID);
+    await handle.continueThroughMutation(held[0]!.id);
+    await settle();
+
+    expect(captured.map((c) => c.prompt)).toEqual(['first task', 'first task']);
+    expect(listPendingMutations(SESSION_ID)).toEqual([]);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('Retry past the hop cap starts no turn and stops the session', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle, router } = wire([worker('coder')], captured, { hopBudget: 1 });
+    setPendingRetry(SESSION_ID, {
+      agentName: 'coder',
+      prompt: 'the failed task',
+      reason: 'boom',
+      ts: Date.now(),
+      errorEventId: 0,
+    });
+    // `orchestrator → user` bumps the hop counter and returns before the
+    // budget check, so the session sits AT the cap and still `running` — the
+    // window a Retry click lands in with no resume dance required.
+    router.handleEvent({
+      ts: Date.now(),
+      source: ORCHESTRATOR_AGENT_NAME,
+      destination: USER_RECIPIENT,
+      kind: 'reply',
+      text: 'answering the operator',
+    });
+
+    await handle.retry();
+    await settle();
+
+    expect(captured).toEqual([]);
+    expect(errors().some((t) => t.includes('Hop budget exhausted'))).toBe(true);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('once the budget stop has landed, a second Retry is refused as `ended`', async () => {
+    // The `ended` branch needs a torn-down session that still has something to
+    // replay, and `handle.stop` is not it — stop clears the pending-retry slot,
+    // clears pending mutations AND calls `runner.stop()`, so both seams no-op
+    // on their own. The BUDGET teardown does none of that (`Cebab-vie.18`: the
+    // row survives and the agents stay registered), which is exactly why a
+    // click landing after it used to run a full turn.
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle, router } = wire([worker('coder')], captured, { hopBudget: 1 });
+    setPendingRetry(SESSION_ID, {
+      agentName: 'coder',
+      prompt: 'the failed task',
+      reason: 'boom',
+      ts: Date.now(),
+      errorEventId: 0,
+    });
+    router.handleEvent({
+      ts: Date.now(),
+      source: ORCHESTRATOR_AGENT_NAME,
+      destination: USER_RECIPIENT,
+      kind: 'reply',
+      text: 'answering the operator',
+    });
+
+    await handle.retry(); // refused: budget — and tears the session down
+    // The slot deliberately survives a non-kick refusal: teardown owns it, and
+    // an operator who resumes the session should still see what failed.
+    expect(getPendingRetry(SESSION_ID)).not.toBeNull();
+
+    await handle.retry(); // refused again, now for the reason that outlives it
+    await settle();
+
+    expect(captured).toEqual([]);
+    expect(errors().some((t) => t.includes('This session has ended'))).toBe(true);
 
     unregisterLiveSession(SESSION_ID);
   });
