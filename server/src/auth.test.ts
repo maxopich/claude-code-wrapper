@@ -3,7 +3,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from './config.js';
-import { authTokenPath, getAuthToken, initAuthToken, verifyToken } from './auth.js';
+import {
+  _resetTokenForTests,
+  authTokenPath,
+  generateAuthToken,
+  getAuthToken,
+  initAuthToken,
+  persistAuthToken,
+  verifyToken,
+} from './auth.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -88,5 +96,70 @@ describe('getAuthToken', () => {
   test('returns the active token after init', () => {
     const tok = initAuthToken();
     expect(getAuthToken()).toBe(tok);
+  });
+});
+
+// ---- Cebab-ygu.41: generating a token must not touch the file on disk ----
+
+describe('[security][Cebab-ygu.41] generateAuthToken / persistAuthToken', () => {
+  test('generateAuthToken writes NO file and still answers every reader', () => {
+    // The fix, stated as behaviour. `index.ts` calls this during boot, before
+    // it knows whether it can even bind its port; both readers take the token
+    // at request time, so the in-memory value is all that is needed until the
+    // socket exists.
+    const tok = generateAuthToken();
+    expect(tok).toMatch(/^[0-9a-f]{64}$/);
+    expect(fs.existsSync(authTokenPath())).toBe(false);
+    expect(getAuthToken()).toBe(tok);
+    expect(verifyToken(tok)).toBe(true);
+  });
+
+  test('A DOOMED BOOT LEAVES THE RUNNING SERVER’S TOKEN FILE INTACT', () => {
+    // The regression, without needing two servers and a port. Server A is
+    // live and its token is on disk; server B boots, generates its own, and
+    // then fails to bind — so it must never reach `persistAuthToken`.
+    //
+    // Before the split this was `initAuthToken()`, which unlinked and rewrote
+    // the file: the live server kept working (it compares against its own
+    // in-memory copy) while `ws_smoke.ts`, which reads the FILE, started
+    // failing 401 against it.
+    const serverA = initAuthToken();
+    const onDisk = fs.readFileSync(authTokenPath(), 'utf8');
+    expect(onDisk).toBe(serverA);
+
+    const serverB = generateAuthToken();
+    expect(serverB).not.toBe(serverA);
+
+    expect(fs.readFileSync(authTokenPath(), 'utf8')).toBe(serverA);
+  });
+
+  test('persistAuthToken writes the cached token at mode 0600', () => {
+    const tok = generateAuthToken();
+    persistAuthToken();
+    expect(fs.readFileSync(authTokenPath(), 'utf8')).toBe(tok);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(authTokenPath()).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  test('persistAuthToken replaces a pre-existing loose-moded file', () => {
+    // Same guarantee `initAuthToken` had: the unlink-first pattern is what
+    // makes 0600 hold for a file an earlier build left at 0644.
+    fs.mkdirSync(path.dirname(authTokenPath()), { recursive: true });
+    fs.writeFileSync(authTokenPath(), 'stale', { mode: 0o644 });
+    const tok = generateAuthToken();
+    persistAuthToken();
+    expect(fs.readFileSync(authTokenPath(), 'utf8')).toBe(tok);
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(authTokenPath()).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  test('persistAuthToken refuses to write when nothing was generated', () => {
+    // An empty file here would lock out every client while looking like a
+    // clean boot — the same class of silent-wrong-state this bead is about.
+    _resetTokenForTests();
+    expect(() => persistAuthToken()).toThrowError(/not initialized/);
+    expect(fs.existsSync(authTokenPath())).toBe(false);
   });
 });

@@ -10,8 +10,9 @@ import { runMigrationIntegrityBootCheck } from './migration_integrity.js';
 import { emit as emitNotification } from './notifications/dispatcher.js';
 import { describeChainFailure, startWsServer } from './ws/server.js';
 import { createShutdown, registerSignalHandlers } from './shutdown.js';
+import { startListening } from './listen.js';
 import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
-import { authTokenPath, initAuthToken } from './auth.js';
+import { authTokenPath, generateAuthToken, persistAuthToken } from './auth.js';
 import { mountAuthTokenRoute } from './auth_token_route.js';
 import { mountSessionLogExport } from './session_log_export.js';
 import { getSession } from './repo/sessions.js';
@@ -101,12 +102,17 @@ function main(): void {
     `[cebab] workspace=${root} (${workspaceRootValid() ? 'ok' : 'missing — set via UI'})`,
   );
 
-  // F4: generate per-launch WS auth token before mounting routes. The token
-  //     lands in ~/.cebab/auth-token (mode 0600); the browser fetches it
-  //     via the Origin-gated /auth-token endpoint below, and the WS
-  //     upgrade requires it as `?token=`. See server/src/auth.ts.
-  initAuthToken();
-  console.log(`[cebab] auth-token written to ${authTokenPath()}`);
+  // F4: the per-launch WS auth token. The browser fetches it via the
+  // Origin-gated /auth-token endpoint below, and the WS upgrade requires it as
+  // `?token=`. See server/src/auth.ts.
+  //
+  // Cebab-ygu.41 split the generate from the write. It is GENERATED here, so
+  // `getAuthToken()` and `verifyToken` are answerable from the moment routes
+  // are mounted; it lands in ~/.cebab/auth-token (mode 0600) only once the
+  // socket is bound, below. The write unlinks and replaces that file, and this
+  // boot may still fail to acquire its port — in which case it must not have
+  // invalidated the RUNNING server's token on the way out.
+  generateAuthToken();
 
   const app = express();
   app.get('/health', (_req, res) => {
@@ -148,8 +154,28 @@ function main(): void {
   // graceful shutdown path can stop it cleanly.
   const stopSessionPurgeCron = startSessionPurgeCron();
 
-  server.listen(config.port, config.host, () => {
-    console.log(`[cebab] listening at http://${config.host}:${config.port}`);
+  // Cebab-ygu.41: `listen` had no `'error'` listener, so a bind failure became
+  // an uncaught exception — which the containment handler below then swallowed
+  // with "server stays up", leaving a process alive with no listening socket.
+  // `startListening` owns that failure path; everything destructive or
+  // process-global now happens in `onBound`, so a boot that never binds
+  // changes nothing.
+  startListening({
+    server,
+    // `ws` re-emits the http server's bind failure on the WebSocketServer, and
+    // its forwarder is attached first (at `startWsServer` above), so guarding
+    // only `server` left the raw stack trace on screen. Measured on the first
+    // end-to-end run of this fix.
+    errorSources: [wss],
+    port: config.port,
+    host: config.host,
+    exit: (code) => process.exit(code),
+    onBound: () => {
+      persistAuthToken();
+      console.log(`[cebab] auth-token written to ${authTokenPath()}`);
+      installContainmentHandlers();
+      console.log(`[cebab] listening at http://${config.host}:${config.port}`);
+    },
   });
 
   // Register C15: the sequence lives in `shutdown.ts` so it can be tested.
@@ -170,15 +196,26 @@ function main(): void {
   });
 
   registerSignalHandlers(shutdown);
+}
 
-  // Last-resort containment: a stray unhandled rejection or uncaught exception
-  // must NOT take down the whole server. The motivating case is the multi-agent
-  // bus — closing a wedged worker Query rejects its in-flight control/MCP
-  // promises with "Query closed before response received", and Node's default is
-  // to terminate the process on an unhandled rejection. One background worker's
-  // teardown should never kill the operator's session (and every sibling agent
-  // with it), so we log and stay up. Deliberate posture for a local single-user
-  // tool; revisit if it ever masks real state corruption.
+/**
+ * Last-resort containment: a stray unhandled rejection or uncaught exception
+ * must NOT take down the whole server. The motivating case is the multi-agent
+ * bus — closing a wedged worker Query rejects its in-flight control/MCP
+ * promises with "Query closed before response received", and Node's default is
+ * to terminate the process on an unhandled rejection. One background worker's
+ * teardown should never kill the operator's session (and every sibling agent
+ * with it), so we log and stay up. Deliberate posture for a local single-user
+ * tool; revisit if it ever masks real state corruption.
+ *
+ * INSTALLED ONLY AFTER THE SOCKET IS BOUND (Cebab-ygu.41). It used to be
+ * installed unconditionally, which meant it also covered BOOT failures — and
+ * the reasoning above does not reach those. A process that never acquired a
+ * socket has no session to protect, so "contained; server stays up" turned a
+ * loud, correct crash into a silent zombie. Boot-phase failures now do what
+ * Node does by default: print and exit non-zero.
+ */
+function installContainmentHandlers(): void {
   process.on('unhandledRejection', (reason) => {
     console.error('[cebab] unhandledRejection (contained; server stays up)', reason);
   });
