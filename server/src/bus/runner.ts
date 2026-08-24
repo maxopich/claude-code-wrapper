@@ -355,9 +355,12 @@ export type AgentRunnerDeps = {
    *   - emits a `multi_agent_mutation` ServerMsg via `sink.onMutation`,
    *   - when `pause_on_dangerous=1` and this agent has neither a live pause
    *     nor an unspent Continue grant for this exact call, flips the row to
-   *     `pause_state='pending'`, emits `multi_agent_pending_mutations`, and
+   *     `pause_state='pending'`, emits `multi_agent_pending_mutations`,
+   *     takes a `holdForMutation` on this agent's turn queue, and
    *     throws `PausedForMutationError` to abort the turn (best-effort —
-   *     see the race-window risk in the plan).
+   *     see the race-window risk in the plan). The hold is what makes the
+   *     halt outlive the turn (`Cebab-vie.13`); the router releases it on
+   *     Continue.
    *
    * Throwing PROPAGATES out of `deliverTurn`; the router's `.catch`
    * recognises `PausedForMutationError` and does NOT teardown. Any other
@@ -545,6 +548,13 @@ export type AgentRunnerDeps = {
 };
 
 /**
+ * Who is holding an agent's turn queue. `operator` is the mute/pause/kick
+ * `pause` verb; `mutation` is the pause-on-dangerous gate (`Cebab-vie.13`).
+ * They share one gate promise but claim it independently — see `pauseGates`.
+ */
+type GateHolder = 'operator' | 'mutation';
+
+/**
  * Owns the set of bus agents for one multi-agent session and runs their
  * turns. Replaces tmux session/window management + `send-keys` waking.
  *
@@ -597,8 +607,22 @@ export class AgentRunner {
    * predates pause already gives us that). Re-pause / re-resume return
    * false without state change — caller (WS handler) surfaces as
    * `already_in_state`.
+   *
+   * **Two holders, one gate** (`Cebab-vie.13`). The pause-on-dangerous brake
+   * needs the same queue hold, and reusing `pause`/`resume` for it would make
+   * each verb release the OTHER's hold: an operator Continue would lift a
+   * standing operator pause, and a pause-expiry `auto_resume` would lift the
+   * hold on a worker still sitting at an unapproved `rm -rf`. Both widen
+   * privilege, which is the wrong direction for this file — so the gate
+   * carries a holder SET and `release()` fires only when it empties. The
+   * public verbs are per-holder wrappers whose return value still means "did
+   * THIS holder's state change", which is what the WS `already_in_state`
+   * reply is derived from.
    */
-  private readonly pauseGates = new Map<string, { promise: Promise<void>; release: () => void }>();
+  private readonly pauseGates = new Map<
+    string,
+    { promise: Promise<void>; release: () => void; holders: Set<GateHolder> }
+  >();
   /**
    * Cluster C Phase 4c (spec AE-5 [security]): count of deliverTurn calls
    * the agent has queued but not yet started (i.e. waiting on the tail).
@@ -712,10 +736,10 @@ export class AgentRunner {
   }
 
   /**
-   * Cluster C Phase 4c: install a never-resolving gate at the head of
-   * `agentName`'s turn queue. Returns true if a fresh gate was installed,
-   * false if the agent was already paused (idempotent re-pause is a no-op
-   * so the WS handler can surface `already_in_state`).
+   * Cluster C Phase 4c: hold `agentName`'s turn queue behind a never-resolving
+   * gate at the operator's request. Returns true if the operator's hold is
+   * new, false if the agent was already operator-paused (idempotent re-pause
+   * is a no-op so the WS handler can surface `already_in_state`).
    *
    * Semantics:
    *   - In-flight turn (the one whose `runOneTurn` is already executing
@@ -727,7 +751,8 @@ export class AgentRunner {
    *     takes effect. That preserves the runner's serialization
    *     invariant (no two `--resume` subprocesses for the same agent at
    *     once).
-   *   - `resume(agentName)` resolves the gate and clears the map entry,
+   *   - `resume(agentName)` drops the operator's hold, and — if no other
+   *     holder remains — resolves the gate and clears the map entry,
    *     unblocking every queued delivery in FIFO order. The
    *     `turnTails`-chain pattern guarantees order.
    *
@@ -738,13 +763,52 @@ export class AgentRunner {
    * server-restart between the two would lose the operator's intent.
    */
   pause(agentName: string): boolean {
+    return this.acquireHold(agentName, 'operator');
+  }
+
+  /**
+   * `Cebab-vie.13`: hold `agentName`'s queue because the pause-on-dangerous
+   * gate halted it at an unapproved `dangerous` command. Same mechanism as
+   * `pause` — see the `pauseGates` header for why they are separate holders
+   * of one gate rather than one shared flag.
+   *
+   * Called from `applyPauseGate`, so the two routers install it identically.
+   * Released by `releaseMutationHold` when the operator clicks Continue; a
+   * standing operator pause is unaffected either way.
+   */
+  holdForMutation(agentName: string): boolean {
+    return this.acquireHold(agentName, 'mutation');
+  }
+
+  /** `Cebab-vie.13`: release the mutation hold (operator clicked Continue). */
+  releaseMutationHold(agentName: string): boolean {
+    return this.releaseHold(agentName, 'mutation');
+  }
+
+  /**
+   * Install (or join) the gate at the head of `agentName`'s queue on behalf of
+   * `holder`. Returns true iff THIS holder's state changed — a second holder
+   * joining an existing gate returns true too (its hold is new), while a
+   * repeat from the same holder returns false so the WS handler can surface
+   * `already_in_state`.
+   */
+  private acquireHold(agentName: string, holder: GateHolder): boolean {
     if (!this.specs.has(agentName)) return false;
-    if (this.pauseGates.has(agentName)) return false;
+    const existing = this.pauseGates.get(agentName);
+    if (existing) {
+      // A gate is already parking this agent's queue. Adding a holder is the
+      // whole change: installing a second gate would chain a promise behind
+      // one that is not going to resolve, and the release bookkeeping below
+      // would then have to unwind two of them in the right order.
+      if (existing.holders.has(holder)) return false;
+      existing.holders.add(holder);
+      return true;
+    }
     let release!: () => void;
     const promise = new Promise<void>((res) => {
       release = res;
     });
-    this.pauseGates.set(agentName, { promise, release });
+    this.pauseGates.set(agentName, { promise, release, holders: new Set([holder]) });
     const prevTail = this.turnTails.get(agentName) ?? Promise.resolve();
     // Chain the gate AFTER the existing tail so the in-flight turn (if
     // any) completes first, then the gate parks subsequent calls.
@@ -756,17 +820,31 @@ export class AgentRunner {
   }
 
   /**
-   * Cluster C Phase 4c: release the pause gate for `agentName`. Returns
-   * true iff a gate was actually cleared (`false` on re-resume / not-
-   * paused). The release is synchronous from the gate's POV: queued
-   * `deliverTurn` calls' `.then()` fire in the next microtask.
+   * Drop `holder`'s claim on `agentName`'s gate. Returns true iff this holder
+   * actually held it. The queue only drains once the LAST holder lets go —
+   * that is the whole point of the set, and reverting it to an unconditional
+   * `release()` is what lets one verb lift another's hold.
    */
-  resume(agentName: string): boolean {
+  private releaseHold(agentName: string, holder: GateHolder): boolean {
     const gate = this.pauseGates.get(agentName);
     if (!gate) return false;
+    if (!gate.holders.delete(holder)) return false;
+    if (gate.holders.size > 0) return true;
     this.pauseGates.delete(agentName);
     gate.release();
     return true;
+  }
+
+  /**
+   * Cluster C Phase 4c: drop the OPERATOR's hold on `agentName`. Returns
+   * true iff the operator was holding it (`false` on re-resume / not-
+   * paused). The release is synchronous from the gate's POV: queued
+   * `deliverTurn` calls' `.then()` fire in the next microtask — but only
+   * once the pause-on-dangerous hold is gone too, if one is also standing.
+   * Resuming a worker does not approve the command it was halted at.
+   */
+  resume(agentName: string): boolean {
+    return this.releaseHold(agentName, 'operator');
   }
 
   /**
@@ -781,9 +859,14 @@ export class AgentRunner {
     return this.pendingDeliveries.get(agentName) ?? 0;
   }
 
-  /** Test-only probe: is the gate currently installed? */
+  /** Test-only probe: is the OPERATOR holding this agent's queue? */
   isPaused(agentName: string): boolean {
-    return this.pauseGates.has(agentName);
+    return this.pauseGates.get(agentName)?.holders.has('operator') === true;
+  }
+
+  /** Test-only probe: is the pause-on-dangerous gate holding this agent's queue? */
+  isHeldForMutation(agentName: string): boolean {
+    return this.pauseGates.get(agentName)?.holders.has('mutation') === true;
   }
 
   private async runOneTurn(agentName: string, promptText: string): Promise<void> {

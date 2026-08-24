@@ -18,11 +18,16 @@ import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 import { registerLiveSession, unregisterLiveSession } from './session_registry.js';
 import {
+  appendMultiAgentMutation,
   createMultiAgentSession,
   getMultiAgentSession,
   listAgentSessions,
   listMultiAgentEvents,
+  listMultiAgentMutations,
   listParticipants,
+  listPendingMutations,
+  setMutationPauseState,
+  setPauseOnDangerous,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
 import { setProjectModel, upsertProject } from '../repo/projects.js';
@@ -770,5 +775,188 @@ describe('wireOrchestratorSession — per-project model (Cebab-ws0.3)', () => {
     const workerCall = captured.find((c) => c.cwd === worker.cwd);
     expect(workerCall).toBeDefined();
     expect('model' in workerCall!).toBe(false);
+  });
+});
+
+/**
+ * `Cebab-vie.13` [security]: the pause-on-dangerous gate holds the agent's turn
+ * QUEUE, not just the turn it halted.
+ *
+ * The halt is a `PausedForMutationError` thrown out of the mutation tap, which
+ * kills the running turn and nothing else. The turn queue was untouched, so the
+ * next delivery to that worker — a peer's `bus_send`, an orchestrator
+ * follow-up, a retry — started a fresh turn, and `decidePauseForMutation`
+ * waves an already-held agent through (`hasPendingPause` → `run`). Its next
+ * dangerous command therefore ran with no approval, for as long as the
+ * operator left the banner un-actioned.
+ *
+ * Driven through `wireOrchestratorSession` rather than through `applyPauseGate`
+ * directly, because the defect is in the WIRING: the gate has to be handed the
+ * runner's hold, and `continueThroughMutation` has to give it back.
+ */
+describe('wireOrchestratorSession — a held worker stays held (Cebab-vie.13) [security]', () => {
+  /** Turn 1 for `dangerousAgent` emits an `rm -rf` tool_use; every other turn
+   *  is an ordinary empty turn. Records one entry per turn actually STARTED —
+   *  which is the whole measurement: a parked delivery never gets here. */
+  function fakeFactory(
+    captured: Array<{ cwd: string; prompt: string }>,
+    dangerousCwd: string,
+  ): (opts: { cwd: string; prompt: string }) => Runner {
+    let dangerousTurns = 0;
+    return (opts) => {
+      captured.push({ cwd: opts.cwd, prompt: opts.prompt });
+      const emitDanger = opts.cwd === dangerousCwd && dangerousTurns++ === 0;
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        if (emitDanger) {
+          yield {
+            type: 'assistant',
+            message: {
+              content: [
+                {
+                  type: 'tool_use',
+                  id: 'tu-danger-1',
+                  name: 'Bash',
+                  input: { command: 'rm -rf /tmp/x' },
+                },
+              ],
+            },
+          } as unknown as SDKMessage;
+        }
+        yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function worker(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  function wire(workers: ResolvedAgent[], captured: Array<{ cwd: string; prompt: string }>) {
+    const workspace = path.join(tmpRoot, 'workspace');
+    fs.mkdirSync(workspace, { recursive: true });
+    return wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      // Every worker has already spoken, so no briefing is prepended and the
+      // captured prompts are the raw bytes each assertion below names.
+      briefedAgents: workers.map((w) => w.agentName),
+      runnerFactory: fakeFactory(captured, workers[0]!.cwd),
+    });
+  }
+
+  /** Turns start on a promise chain, so "did anything start" needs the
+   *  macrotask queue drained, not just one microtask flush. */
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  test('a delivery arriving while a worker is held does not start a turn until Continue', async () => {
+    setPauseOnDangerous(SESSION_ID, true);
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const coder = worker('coder');
+    const { handle, deliver } = wire([coder, worker('reviewer')], captured);
+
+    // Turn 1 issues `rm -rf` → the gate halts it and holds the queue.
+    deliver('coder', 'first task');
+    await settle();
+    const held = listPendingMutations(SESSION_ID);
+    expect(held.map((m) => m.summary)).toEqual(['rm -rf /tmp/x']);
+    expect(captured).toHaveLength(1);
+
+    // A peer's reply lands for the same worker while the banner is up. THIS is
+    // the bug: before the fix it started a turn immediately.
+    deliver('coder', 'peer reply while held');
+    await settle();
+    expect(captured).toHaveLength(1);
+
+    // Another worker is unaffected — the hold is per-agent, not a session stop.
+    deliver('reviewer', 'unrelated work');
+    await settle();
+    expect(captured.map((c) => c.prompt)).toEqual(['first task', 'unrelated work']);
+
+    // Operator clicks Continue → the queued delivery runs, and the replay
+    // follows it (queued first, so delivered first).
+    //
+    // NOTE the fourth entry, and read it as a defect rather than a contract:
+    // `continueThroughMutation` replays `lastPrompt`, which `deliver` rewrites
+    // on every call, so the prompt whose turn was actually halted ("first
+    // task") has been overwritten by the queued one. The command the operator
+    // approved is therefore not necessarily re-issued. That is pre-existing
+    // and independent of the hold — the same overwrite happened when the
+    // queued delivery ran immediately — so it is filed separately
+    // (`Cebab-vie.28`) rather than fixed here, and asserted as it is so the fix
+    // has something to change.
+    await handle.continueThroughMutation(held[0]!.id);
+    await settle();
+    expect(captured.map((c) => c.prompt)).toEqual([
+      'first task',
+      'unrelated work',
+      'peer reply while held',
+      'peer reply while held',
+    ]);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('CONTROL: with the gate disarmed, the same delivery runs straight away', async () => {
+    setPauseOnDangerous(SESSION_ID, false);
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { deliver } = wire([worker('coder')], captured);
+
+    deliver('coder', 'first task');
+    await settle();
+    deliver('coder', 'second task');
+    await settle();
+
+    // The `rm -rf` is still recorded — it is un-gated, not unlogged.
+    expect(listMultiAgentMutations(SESSION_ID).map((m) => m.summary)).toEqual(['rm -rf /tmp/x']);
+    expect(listPendingMutations(SESSION_ID)).toEqual([]);
+    expect(captured.map((c) => c.prompt)).toEqual(['first task', 'second task']);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('R-B: wiring a session that is already holding a mutation reinstalls the hold', async () => {
+    // Exactly the state a restart leaves behind: the `pending` row is in
+    // SQLite, the in-memory gate died with the old process. Register B04 does
+    // this for the operator pause; without the same reseed here the operator
+    // comes back to a worker shown as held whose next delegation is delivered.
+    setPauseOnDangerous(SESSION_ID, true);
+    const coder = worker('coder');
+    const row = appendMultiAgentMutation(SESSION_ID, 'coder', 'Bash', 'dangerous', 'rm -rf /srv', {
+      filePath: null,
+      cwd: coder.cwd,
+      toolUseId: null,
+    });
+    setMutationPauseState(row.id, 'pending');
+
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { handle, deliver } = wire([coder], captured);
+
+    deliver('coder', 'delegation after the restart');
+    await settle();
+    expect(captured).toHaveLength(0);
+
+    // Continue releases the reseeded hold and the delegation runs. It runs
+    // twice for the `Cebab-vie.28` reason above — the queued delivery, then the
+    // replay of the same captured prompt.
+    await handle.continueThroughMutation(row.id);
+    await settle();
+    expect(captured.map((c) => c.prompt)).toEqual([
+      'delegation after the restart',
+      'delegation after the restart',
+    ]);
+
+    unregisterLiveSession(SESSION_ID);
   });
 });

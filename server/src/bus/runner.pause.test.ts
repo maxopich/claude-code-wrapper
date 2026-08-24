@@ -223,6 +223,130 @@ describe('AgentRunner — pause + resume (spec §5.2, AE-4)', () => {
 });
 
 /**
+ * `Cebab-vie.13` [security]: the pause-on-dangerous gate holds the same queue,
+ * as a SEPARATE holder. The two verbs must not release each other — an
+ * operator Continue that lifted a standing operator pause, or a pause-expiry
+ * `auto_resume` that lifted the hold on a worker sitting at an unapproved
+ * `rm -rf`, would both widen privilege silently.
+ *
+ * `settled()` is how each test asks "did a turn start?" without racing: the
+ * factory is only invoked once `runOneTurn` actually begins, so a flush
+ * followed by a call-count assertion is the negative, and `pollUntil` is the
+ * positive.
+ */
+describe('AgentRunner — the mutation hold is a second, independent holder [security]', () => {
+  let originalApiKey: string | undefined;
+  beforeEach(() => {
+    originalApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+  afterEach(() => {
+    if (originalApiKey !== undefined) process.env.ANTHROPIC_API_KEY = originalApiKey;
+  });
+
+  /** Let every queued microtask + timer callback run, so a turn that WOULD
+   *  start has started by the time we assert it didn't. */
+  const settled = (): Promise<unknown> => new Promise((r) => setTimeout(r, 20));
+
+  test('a mutation hold parks the next deliverTurn; releasing it lets the turn run', async () => {
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    expect(runner.holdForMutation('alpha')).toBe(true);
+    expect(runner.isHeldForMutation('alpha')).toBe(true);
+    // The operator never paused this agent, so the operator probe stays false
+    // — the two holds are reported apart, not merged into one "paused" bit.
+    expect(runner.isPaused('alpha')).toBe(false);
+
+    const queued = runner.deliverTurn('alpha', 'peer bus_send while held');
+    await settled();
+    expect(runnerFactory.mock.calls.length).toBe(0);
+
+    expect(runner.releaseMutationHold('alpha')).toBe(true);
+    await pollUntil(() => turnStarted.length >= 1);
+    turnReleases[0]!();
+    await queued;
+    expect(runner.isHeldForMutation('alpha')).toBe(false);
+  });
+
+  test('operator resume does NOT release a mutation hold', async () => {
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    runner.pause('alpha');
+    runner.holdForMutation('alpha');
+    const queued = runner.deliverTurn('alpha', 'delivery');
+
+    // The operator resumes (or a pause-expiry timer auto-resumes for them).
+    expect(runner.resume('alpha')).toBe(true);
+    expect(runner.isPaused('alpha')).toBe(false);
+    await settled();
+    // Still parked: the worker is sitting at an unapproved dangerous command.
+    expect(runnerFactory.mock.calls.length).toBe(0);
+    expect(runner.isHeldForMutation('alpha')).toBe(true);
+
+    runner.releaseMutationHold('alpha');
+    await pollUntil(() => turnStarted.length >= 1);
+    turnReleases[0]!();
+    await queued;
+  });
+
+  test('Continue does NOT release a standing operator pause', async () => {
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    runner.holdForMutation('alpha');
+    runner.pause('alpha');
+    const queued = runner.deliverTurn('alpha', 'delivery');
+
+    expect(runner.releaseMutationHold('alpha')).toBe(true);
+    expect(runner.isHeldForMutation('alpha')).toBe(false);
+    await settled();
+    // Still parked: the operator paused this worker and has not resumed it.
+    expect(runnerFactory.mock.calls.length).toBe(0);
+    expect(runner.isPaused('alpha')).toBe(true);
+
+    runner.resume('alpha');
+    await pollUntil(() => turnStarted.length >= 1);
+    turnReleases[0]!();
+    await queued;
+  });
+
+  test('the in-flight turn is not cancelled by a mutation hold', async () => {
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    const inFlight = runner.deliverTurn('alpha', 'first');
+    await pollUntil(() => turnStarted.length >= 1);
+    // The hold is installed from inside this very turn's mutation tap.
+    runner.holdForMutation('alpha');
+    turnReleases[0]!();
+    await expect(inFlight).resolves.toBeUndefined();
+    expect(runnerFactory.mock.calls.length).toBe(1);
+  });
+
+  test('re-holding is an idempotent no-op; releasing an unheld agent is false', () => {
+    const runner = new AgentRunner({
+      onEvent: () => undefined,
+      runnerFactory: () => fakeRunner([resultMsg('s1')]),
+    });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    expect(runner.holdForMutation('alpha')).toBe(true);
+    expect(runner.holdForMutation('alpha')).toBe(false);
+    expect(runner.releaseMutationHold('alpha')).toBe(true);
+    expect(runner.releaseMutationHold('alpha')).toBe(false);
+    // Unknown agent: no throw, no gate.
+    expect(runner.holdForMutation('ghost')).toBe(false);
+    expect(runner.releaseMutationHold('ghost')).toBe(false);
+  });
+});
+
+/**
  * Poll until predicate true. The pause-release path advances via
  * microtasks; `await new Promise(setTimeout)` lets the chain flush so the
  * next runOneTurn fires its factory + populates turnStarted/turnReleases.

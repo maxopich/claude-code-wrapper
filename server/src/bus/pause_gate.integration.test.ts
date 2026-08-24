@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
@@ -62,6 +62,7 @@ function gate(
   summary: string,
   category: 'mutate' | 'dangerous' = 'dangerous',
   onPending?: (sessionId: string, pending: MutationRecord[]) => void,
+  onHold?: (agentName: string) => void,
 ): { row: MutationRecord; paused: boolean } {
   const row = appendMultiAgentMutation(SID, agent, 'Bash', category, summary, {
     filePath: null,
@@ -69,7 +70,7 @@ function gate(
     toolUseId: null,
   });
   try {
-    applyPauseGate(row, onPending);
+    applyPauseGate(row, onPending, onHold);
     return { row, paused: false };
   } catch (err) {
     if (!isPausedForMutation(err)) throw err;
@@ -177,6 +178,67 @@ describe('pause gate over a real DB [security]', () => {
     // A grant outliving its session would silently pre-approve the same
     // command in a reconstructed run.
     expect(findUnconsumedApproval(SID, 'coder', 'Bash', 'rm -rf /tmp/x')).toBeNull();
+  });
+
+  // `Cebab-vie.13` [security]. The gate halts a turn by throwing; the agent's
+  // turn QUEUE is the router's, so the gate reaches it through `holdAgent`.
+  // The negative half matters as much as the positive: a hold taken on the
+  // `run` or `consume-approval` branches would park an agent that the gate
+  // just decided to let through, with no banner and so no way to release it.
+  describe('the halt reaches the agent queue, and only on a real pause', () => {
+    test('holdAgent fires once, naming the paused agent', () => {
+      const holds: string[] = [];
+      expect(
+        gate('coder', 'rm -rf /tmp/x', 'dangerous', undefined, (n) => holds.push(n)).paused,
+      ).toBe(true);
+      expect(holds).toEqual(['coder']);
+    });
+
+    test('an ordinary `mutate` takes no hold', () => {
+      const holds: string[] = [];
+      gate('coder', 'create /tmp/note', 'mutate', undefined, (n) => holds.push(n));
+      expect(holds).toEqual([]);
+    });
+
+    test('a disarmed gate takes no hold', () => {
+      setPauseOnDangerous(SID, false);
+      const holds: string[] = [];
+      gate('coder', 'rm -rf /tmp/x', 'dangerous', undefined, (n) => holds.push(n));
+      expect(holds).toEqual([]);
+    });
+
+    test('spending a Continue grant takes no hold — that call is being let through', () => {
+      const first = gate('coder', 'rm -rf /tmp/x').row;
+      releasePauseForMutation(SID, first.id);
+      const holds: string[] = [];
+      expect(
+        gate('coder', 'rm -rf /tmp/x', 'dangerous', undefined, (n) => holds.push(n)).paused,
+      ).toBe(false);
+      expect(holds).toEqual([]);
+    });
+
+    test('a sibling call from the already-dead turn takes no second hold', () => {
+      gate('coder', 'rm -rf /tmp/x');
+      const holds: string[] = [];
+      gate('coder', 'rm -rf /tmp/y', 'dangerous', undefined, (n) => holds.push(n));
+      expect(holds).toEqual([]);
+    });
+
+    test('a throwing holdAgent still halts the turn', () => {
+      // The hold is in-memory and the throw is the operator's protection; a
+      // runner that refuses the hold must not turn a pause into a green light.
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        expect(
+          gate('coder', 'rm -rf /tmp/x', 'dangerous', undefined, () => {
+            throw new Error('runner gone');
+          }).paused,
+        ).toBe(true);
+        expect(listPendingMutations(SID)).toHaveLength(1);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
   });
 
   test('a halted agent does not stack a second pending row', () => {

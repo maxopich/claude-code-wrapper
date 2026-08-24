@@ -1200,7 +1200,12 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     // Pause gate — fires only on `dangerous`-category mutations (see
     // `applyPauseGate`, shared with orchestrator.ts so the two routers cannot
     // drift). MCP calls and ordinary edits classify as `mutate` and run free.
-    applyPauseGate(row, opts.onPendingMutation);
+    // `Cebab-vie.13`: the third argument holds this participant's turn QUEUE
+    // until the operator continues, so the halt is not one turn deep. Chain's
+    // sequential topology makes a follow-on delivery rarer than in
+    // orchestrator mode, not impossible — a retry or a Continue for a
+    // different mutation reaches the same place.
+    applyPauseGate(row, opts.onPendingMutation, (name) => runner.holdForMutation(name));
   };
 
   // Migration 012 + Phase E: tool-result tap (mirrors orchestrator.ts's
@@ -1553,6 +1558,10 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     async continueThroughMutation(mutationId: number) {
       const pending = releasePauseForMutation(sessionId, mutationId, opts.onPendingMutation);
       if (!pending) return;
+      // `Cebab-vie.13`: release the queue hold BEFORE the replay-prompt lookup
+      // — see orchestrator.ts's mirror for why the `return` below must not be
+      // reachable with the hold still standing.
+      runner.releaseMutationHold(pending.agentName);
       const replayPrompt = lastPromptOut.get(pending.agentName);
       if (!replayPrompt) {
         console.warn(

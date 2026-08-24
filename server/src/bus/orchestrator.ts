@@ -42,6 +42,7 @@ import {
   endMultiAgentSession,
   getPendingRetry,
   getProjectBusState,
+  listPendingMutations,
   recordSessionTeardown,
   setMultiAgentSessionLifecycle,
   setExecuteMode,
@@ -1435,7 +1436,10 @@ export function wireOrchestratorSession(p: {
     // landing mid-turn, and R-B reconstructed sessions where the in-memory
     // closure has no value to read. Per-agent (migration 031): another
     // worker's pause does not suppress this one's gate.
-    applyPauseGate(row, p.onPendingMutation);
+    // `Cebab-vie.13`: the third argument holds this agent's turn QUEUE for as
+    // long as the banner is un-actioned. Without it the halt was one turn deep
+    // and the next delivery ran the agent's next dangerous command unapproved.
+    applyPauseGate(row, p.onPendingMutation, (name) => runner.holdForMutation(name));
   };
 
   // Migration 012: tool-result tap. Flips `confirmed_at` on the matching
@@ -1717,6 +1721,29 @@ export function wireOrchestratorSession(p: {
   // it never completed a turn before the restart).
   for (const s of p.seededSessions ?? []) {
     if (runner.has(s.agentName)) runner.seedSession(s.agentName, s.cliSessionId);
+  }
+
+  // `Cebab-vie.13`, R-B half — the same reseed Register B04 does one function
+  // over for the OPERATOR pause, for the same reason: the queue hold is
+  // in-memory and died with the old process, while the `pending` mutation row
+  // that justifies it is in SQLite and came back. Reseeding only the banner
+  // would show the operator a worker held at an unapproved command whose next
+  // delegation is delivered normally.
+  //
+  // This function is the shared path for a fresh start AND for reconstruct, so
+  // one call site covers both; on a fresh session id the query returns [] and
+  // nothing happens. Chain mode has no equivalent because chain
+  // reconstruction is not implemented and bails explicitly (`resume.ts`).
+  try {
+    for (const name of new Set(listPendingMutations(sessionId).map((m) => m.agentName))) {
+      if (!runner.holdForMutation(name)) {
+        console.warn(
+          `[orchestrator] could not reinstall the mutation hold for ${sessionId}/${name}; it is shown held but its turns are NOT`,
+        );
+      }
+    }
+  } catch (err) {
+    console.error('[orchestrator] reseeding mutation holds failed', err);
   }
 
   // Worker briefing, prepended once to each worker's first turn (mirrors
@@ -2012,6 +2039,14 @@ export function wireOrchestratorSession(p: {
       // from a client that missed a broadcast) finds nothing and no-ops.
       const pending = releasePauseForMutation(sessionId, mutationId, p.onPendingMutation);
       if (!pending) return;
+      // `Cebab-vie.13`: release the queue hold BEFORE the replay-prompt lookup.
+      // The `return` below is not an error path the operator can retry — the
+      // grant is already burnt and the banner already gone — so releasing
+      // after it would leave the agent held with nothing left to click.
+      // Deliveries that queued during the hold now drain in FIFO order, ahead
+      // of the replay: they were enqueued first, and the grant stays unspent
+      // until some turn re-issues that exact command.
+      runner.releaseMutationHold(pending.agentName);
       const replayPrompt = lastPrompt.get(pending.agentName);
       if (!replayPrompt) {
         console.warn(
