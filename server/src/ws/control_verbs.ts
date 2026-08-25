@@ -34,39 +34,57 @@ import {
  * is reviewable in isolation. Lives in a dedicated module so the growing
  * controllability surface doesn't bloat `ws/server.ts`.
  *
- * Handler flow (spec §3 invariant 2 — every control action dual-writes to
- * safety_audit BEFORE the wire ack):
+ * Handler flow. `Cebab-vie.3` / `Cebab-vie.7` reversed the middle of it, and
+ * the rule that came out is one sentence:
+ *
+ *   **A control action that cannot be written to the hash chain does not
+ *   happen.**
  *
  *   1. Validate the wire shape (reasonCode enum, 'other' + reasonText
  *      pairing, mode-specific topology guards).
- *   2. Validate the participant exists + isn't already in the target state
- *      (idempotent: re-mute fails with `already_in_state` so a stale UI
- *      doesn't surface success-then-no-effect).
- *   3. Flip the persistence layer (`per_agent_control.setParticipantMuted`).
+ *   2. Validate the participant exists + isn't already in the target state,
+ *      by READING `getControlState` (idempotent: re-mute fails with
+ *      `already_in_state` so a stale UI doesn't surface success-then-no-
+ *      effect). The read is what lets step 3 come before step 4 — using the
+ *      write's own `changes > 0` as the check would mean auditing a no-op.
+ *   3. Write the safety_audit row (kind='agent_control.muted' etc.). If the
+ *      append throws, NOTHING has been applied and the verb returns
+ *      `audit_write_failed`.
+ *   4. Flip the persistence layer (`per_agent_control.setParticipantMuted`).
  *      The DB write is the source-of-truth and MUST land before the
  *      router's in-memory set is updated; otherwise an R-B restart between
- *      step 3 and step 4 could lose the mute.
- *   4. Update the router's in-memory `mutedSet` via the OrchestratorSessionHandle's
+ *      step 4 and step 5 could lose the mute.
+ *   5. Update the router's in-memory `mutedSet` via the OrchestratorSessionHandle's
  *      `setMute`. The router's per-event drop check (in
  *      `bus/orchestrator.ts:handleEvent`) consults THIS set.
- *   5. Write the safety_audit row (kind='agent_control.muted' or
- *      'agent_control.unmuted', reasonCode from the operator's choice,
- *      payload carries the agent slug + projectId).
  *   6. Send the `participant_mute_changed` ServerMsg echo so the client
  *      reducer can reconcile its optimistic flip. Every `ok: false` above
  *      ships as `participant_control_failed` instead — see that variant's
  *      note in `shared/src/protocol.ts` for why it is not a `wrapper_error`.
  *
- * Why the OrchestratorSessionHandle.setMute call (step 4) sits between
- * the DB flip (3) and the audit write (5):
- *   - If audit append fails AFTER the router is updated, the operator's
- *     intent is honored but the trail breaks. The handler logs and returns
- *     `audit_write_failed`. Register B12: an earlier version of this note
- *     said "a retry just re-attempts the audit" — it does not, because the
- *     DB idempotency guard returns first. See the catch block itself.
- *   - If we ordered audit before router update + audit failed, we'd have
- *     to roll back the DB flip — adding atomicity complexity for a corner
- *     case that's already covered by the retry path.
+ * WHY IT USED TO BE THE OTHER WAY, AND WHY THAT ARGUMENT WAS ALREADY DEAD.
+ * This note used to justify auditing last: rolling back would add "atomicity
+ * complexity for a corner case that's already covered by the retry path". Six
+ * lines below it, register B12 recorded that there IS no retry path —
+ * `setParticipantMuted` is `UPDATE … WHERE muted != ?`, so a second attempt
+ * matched zero rows and returned at the idempotency guard ABOVE the audit
+ * block. The two halves of this header contradicted each other for months
+ * while mute, pause and kick applied without a record and told the operator
+ * they had been refused. There is no rollback in the new order either: the
+ * only thing that can fail after the audit is the write itself, which the
+ * pre-read has already established will change the row.
+ *
+ * WHAT FAIL-CLOSED COSTS, said out loud. `unmute` and `resume` refuse too, so
+ * while the audit store is broken an already-restrained agent stays
+ * restrained. The escape hatch is Stop, which appends nothing to the chain and
+ * therefore still works when the chain is what is broken. `Cebab-vie.25`
+ * proposes giving Stop an audit row; if it does, that append must be
+ * best-effort, or the last working control goes with it.
+ *
+ * The AUTO-kick path (pause expiry, `runPauseExpiry` below) keeps the old
+ * order deliberately: there is no operator to refuse, and refusing would leave
+ * an expired pause neither resumed nor kicked — a worse state than an
+ * unrecorded auto-kick.
  *
  * Failure code semantics:
  *   - invalid_request          — the frame is malformed (unknown reasonCode,
@@ -76,9 +94,12 @@ import {
  *                                B21/N04: these nine sites used to return
  *                                `already_in_state`, so a client bug reached
  *                                the operator as "the agent is already muted"
- *   - audit_write_failed       — the action APPLIED and the audit append
- *                                threw. The only code here that does NOT
- *                                mean "return-without-action" (register B12)
+ *   - audit_write_failed       — the audit append threw, so the action did
+ *                                NOT apply (`Cebab-vie.3`/`.7`; it used to be
+ *                                the one code here that meant the opposite).
+ *                                Retrying it is now meaningful: nothing was
+ *                                written, so the idempotency read does not
+ *                                short-circuit the second attempt
  *   - participant_not_found    — (sessionId, projectId) doesn't identify a
  *                                participant row, or the live router has no
  *                                agent by that slug (register B19)
@@ -196,38 +217,23 @@ function runMuteUnmute(input: ExecuteMuteInput, targetMuted: boolean): ExecuteMu
     };
   }
 
-  // Idempotency guard on the DB column. setParticipantMuted returns false
-  // when the row already matched the target — the handler surfaces that as
-  // `already_in_state` so the UI can roll back an optimistic flip cleanly.
-  const dbChanged = setParticipantMuted(msg.sessionId, msg.projectId, targetMuted);
-  if (!dbChanged) {
+  // Cebab-vie.7: idempotency is decided by a READ, not by the write's own
+  // `changes > 0`. The write has to come after the audit now, and auditing
+  // first would otherwise record a row for a no-op flip.
+  const state = getControlState(msg.sessionId, msg.projectId);
+  if (!state) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `participant ${msg.projectId} has no control row in session ${msg.sessionId}`,
+    };
+  }
+  if (state.muted === targetMuted) {
     return {
       ok: false,
       failureCode: 'already_in_state',
       message: `${participant.bus_agent_name} is already ${targetMuted ? 'muted' : 'unmuted'}`,
     };
-  }
-
-  // Sync the orchestrator router's in-memory mute set. Missing handle is
-  // possible in tests + during a corner-case where the live session was
-  // torn down between getMultiAgentSession and here; we still write the
-  // audit + return ok, but log the divergence so it's visible.
-  if (input.orchestratorHandle) {
-    // Register B19 (adjacent): `setMute` is a plain Set flip with no roster
-    // lookup, so unlike `pauseAgent` a false here cannot mean "unknown
-    // agent" — it can only mean the router mirror was ALREADY at the target
-    // while the DB was not, i.e. the two had drifted. Not an operator-facing
-    // failure (the flip we wanted is now true on both sides), but it is the
-    // signal that would explain a later "why was this agent muted?".
-    if (!input.orchestratorHandle.setMute(participant.bus_agent_name, targetMuted)) {
-      console.warn(
-        `[ws] executeMute(${msg.sessionId}/${msg.projectId}): router mute mirror for ${participant.bus_agent_name} was already ${targetMuted} while the DB was not — drift, now converged`,
-      );
-    }
-  } else {
-    console.warn(
-      `[ws] executeMute(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to update router mute set`,
-    );
   }
 
   // safety_audit dual-write. mute + unmute are BOTH safety class per spec
@@ -251,25 +257,60 @@ function runMuteUnmute(input: ExecuteMuteInput, targetMuted: boolean): ExecuteMu
     auditId = appendAudit(auditInput).id;
   } catch (err) {
     console.error(`[ws] executeMute safety_audit append failed for ${msg.sessionId}`, err);
-    // DB + router are already aligned with the new state — surface the
-    // failure but don't roll back.
+    // Cebab-vie.7: NOTHING has been applied at this point, and that is the
+    // whole change. This used to run after the DB flip and the router flip,
+    // so the agent was muted, the chain had no record of it, and the operator
+    // was told "Mute refused" — a false sentence about a real effect.
     //
-    // Register B12: this used to say "the operator can retry; the retry
-    // path short-circuits the DB step so only the audit re-attempt runs."
-    // That is not what happens. `setParticipantMuted` is
-    // `UPDATE … WHERE muted != ?` returning `changes > 0`, so on the second
-    // attempt it matches zero rows and the handler returns at the
-    // `!dbChanged` guard ABOVE — the audit block is never reached again.
-    // The row stays applied and unaudited, and the operator has no verb
-    // that repairs it. `audit_write_failed` at least says so out loud
-    // instead of reporting the flip as a no-op; a repair path is a separate
-    // decision (it means writing history into an append-only log).
+    // Register B12 recorded why it could not be repaired: `setParticipantMuted`
+    // is `UPDATE … WHERE muted != ?`, so a retry matched zero rows and returned
+    // at the idempotency guard ABOVE the audit block. That guard is now a READ
+    // of unchanged state, so the retry reaches here again and succeeds once the
+    // store recovers. The defect closes rather than being documented.
     return {
       ok: false,
       failureCode: 'audit_write_failed',
       message: `safety_audit append failed: ${(err as Error).message}`,
     };
   }
+
+  // Recorded — now apply. The DB write is the source of truth and MUST land
+  // before the router's in-memory set, or an R-B restart between the two loses
+  // the mute.
+  if (!setParticipantMuted(msg.sessionId, msg.projectId, targetMuted)) {
+    // The read above said this WOULD change. `better-sqlite3` is synchronous
+    // and this handler runs to completion on one event loop, so there is no
+    // window for a concurrent writer — a false here means the row moved
+    // underneath us some other way. Logged rather than failed: the audit row
+    // is written, the end state is what the operator asked for, and rolling
+    // the audit back is not a thing an append-only chain does.
+    console.warn(
+      `[ws] executeMute(${msg.sessionId}/${msg.projectId}): row was already ${targetMuted ? 'muted' : 'unmuted'} at write time though the pre-read said otherwise — audited anyway`,
+    );
+  }
+
+  // Sync the orchestrator router's in-memory mute set. Missing handle is
+  // possible in tests + during a corner-case where the live session was
+  // torn down between getMultiAgentSession and here; we still return ok, but
+  // log the divergence so it's visible.
+  if (input.orchestratorHandle) {
+    // Register B19 (adjacent): `setMute` is a plain Set flip with no roster
+    // lookup, so unlike `pauseAgent` a false here cannot mean "unknown
+    // agent" — it can only mean the router mirror was ALREADY at the target
+    // while the DB was not, i.e. the two had drifted. Not an operator-facing
+    // failure (the flip we wanted is now true on both sides), but it is the
+    // signal that would explain a later "why was this agent muted?".
+    if (!input.orchestratorHandle.setMute(participant.bus_agent_name, targetMuted)) {
+      console.warn(
+        `[ws] executeMute(${msg.sessionId}/${msg.projectId}): router mute mirror for ${participant.bus_agent_name} was already ${targetMuted} while the DB was not — drift, now converged`,
+      );
+    }
+  } else {
+    console.warn(
+      `[ws] executeMute(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to update router mute set`,
+    );
+  }
+
   return { ok: true, auditId };
 }
 
@@ -353,6 +394,9 @@ export type ExecutePauseInput = {
   orchestratorHandle:
     | {
         pauseAgent: (agentName: string) => boolean;
+        /** `Cebab-vie.3`: asked BEFORE the audit row is written — see the use
+         *  site for why the two false-reasons of `pauseAgent` had to split. */
+        hasAgent: (agentName: string) => boolean;
         getPendingDeliveries: (agentName: string) => number;
       }
     | undefined;
@@ -492,15 +536,17 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
     };
   }
 
-  // DB flip — repo returns false if already paused (idempotency).
-  const pausedUntil = now() + msg.timeoutMs;
-  const dbChanged = setParticipantPause(
-    msg.sessionId,
-    msg.projectId,
-    pausedUntil,
-    msg.expiryAction,
-  );
-  if (!dbChanged) {
+  // Cebab-vie.3: idempotency by READ, so the audit can come first without
+  // recording a row for a no-op.
+  const state = getControlState(msg.sessionId, msg.projectId);
+  if (!state) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `participant ${msg.projectId} has no control row in session ${msg.sessionId}`,
+    };
+  }
+  if (state.pausedUntil !== null) {
     return {
       ok: false,
       failureCode: 'already_in_state',
@@ -508,47 +554,27 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
     };
   }
 
-  // Sync the AgentRunner pause gate. Missing handle: log + still write
-  // the audit so the operator's intent survives. Chain sessions no longer
-  // reach here — they're rejected up front with `chain_pause_unsupported`
-  // (register B03) — so `undefined` means the session was torn down between
-  // the lookup and here, and the DB row is the surviving record of intent.
-  if (input.orchestratorHandle) {
-    // Register B19: this return value used to be discarded. `AgentRunner.
-    // pause()` returns false in two cases, and the first is the dangerous
-    // one — `!this.specs.has(agentName)`, i.e. the runner has never heard
-    // of this slug, so NO GATE WAS INSTALLED. Reporting `ok` with a
-    // `pausedUntil` there is register B03 all over again: the operator sees
-    // "paused until 14:32" while the worker keeps taking turns.
-    //
-    // So we undo the DB flip and fail. B03's own stated principle is that
-    // the rejection must leave "none of that residue behind claiming a
-    // pause that was never in force"; it just never covered this door.
-    // `participant_not_found` is the right code — the participant row
-    // exists, but the *live router* has no agent by that name, which is the
-    // same "no live target" family the two guards above use.
-    if (!input.orchestratorHandle.pauseAgent(participant.bus_agent_name)) {
-      clearParticipantPause(msg.sessionId, msg.projectId);
-      console.error(
-        `[ws] executePause(${msg.sessionId}/${msg.projectId}): runner refused to gate ${participant.bus_agent_name} — DB flip rolled back`,
-      );
-      return {
-        ok: false,
-        failureCode: 'participant_not_found',
-        message: `the live router has no agent named ${participant.bus_agent_name} — nothing was paused`,
-      };
-    }
-  } else {
-    console.warn(
-      `[ws] executePause(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to install pause gate`,
-    );
+  // Cebab-vie.3: the runner's roster is checked BEFORE anything is written.
+  // `pauseAgent` returning false for an unknown slug is register B19's
+  // dangerous case — no gate installed — and B03's principle is that such a
+  // rejection must leave "none of that residue behind claiming a pause that was
+  // never in force". An audit row saying `agent_control.paused` is exactly that
+  // residue, so with the audit moved first the roster check has to move ahead
+  // of it too.
+  if (input.orchestratorHandle && !input.orchestratorHandle.hasAgent(participant.bus_agent_name)) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `the live router has no agent named ${participant.bus_agent_name} — nothing was paused`,
+    };
   }
 
-  // safety_audit dual-write — kind='agent_control.paused'. Operational
-  // class per spec §3, but pause STILL writes to safety_audit because
-  // it's an operator action with forensic value. The expiry timer's
-  // `pause.expired_without_resume` event (C4c2) is the safety-class
-  // variant.
+  const pausedUntil = now() + msg.timeoutMs;
+
+  // safety_audit FIRST — kind='agent_control.paused'. Operational class per
+  // spec §3, but pause STILL writes to safety_audit because it's an operator
+  // action with forensic value. The expiry timer's
+  // `pause.expired_without_resume` event (C4c2) is the safety-class variant.
   const auditInput: SafetyAuditInput = {
     ts: now(),
     sessionId: msg.sessionId,
@@ -569,11 +595,67 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
     auditId = appendAudit(auditInput).id;
   } catch (err) {
     console.error(`[ws] executePause safety_audit append failed for ${msg.sessionId}`, err);
+    // Cebab-vie.3: nothing is installed at this point, and that is the whole
+    // change. This used to run after the DB flip AND after `pauseAgent`, so a
+    // failed append left a never-resolving runner gate with no expiry timer
+    // (the timer is armed by the WS handler on `ok: true`) and no Resume
+    // affordance in the UI — an agent stopped for the remainder of the process,
+    // with a hand-sent frame or a server restart as the only exits.
     return {
       ok: false,
       failureCode: 'audit_write_failed',
       message: `safety_audit append failed: ${(err as Error).message}`,
     };
+  }
+
+  // Recorded — now apply.
+  if (!setParticipantPause(msg.sessionId, msg.projectId, pausedUntil, msg.expiryAction)) {
+    // See `executeMute` for why this is a warn and not a failure: the pre-read
+    // said the row was unpaused, and nothing else runs between the two.
+    console.warn(
+      `[ws] executePause(${msg.sessionId}/${msg.projectId}): row was already paused at write time though the pre-read said otherwise — audited anyway`,
+    );
+  }
+
+  // Sync the AgentRunner pause gate. Missing handle: log + keep the DB row, so
+  // the operator's intent survives. Chain sessions no longer reach here —
+  // they're rejected up front with `chain_pause_unsupported` (register B03) —
+  // so `undefined` means the session was torn down between the lookup and here,
+  // and the DB row is the surviving record of intent.
+  if (input.orchestratorHandle) {
+    // Register B19: this return value used to be discarded. `AgentRunner.
+    // pause()` returns false in two cases, and the first is the dangerous
+    // one — `!this.specs.has(agentName)`, i.e. the runner has never heard
+    // of this slug, so NO GATE WAS INSTALLED. Reporting `ok` with a
+    // `pausedUntil` there is register B03 all over again: the operator sees
+    // "paused until 14:32" while the worker keeps taking turns.
+    //
+    // So we undo the DB flip and fail. B03's own stated principle is that
+    // the rejection must leave "none of that residue behind claiming a
+    // pause that was never in force"; it just never covered this door.
+    // `participant_not_found` is the right code — the participant row
+    // exists, but the *live router* has no agent by that name, which is the
+    // same "no live target" family the two guards above use.
+    //
+    // Cebab-vie.3 leaves one audit row behind here that the DB flip no longer
+    // backs: the chain says a pause was attempted and rolled back. That is the
+    // BE-1 trade `recordTrustDecision` makes too — over-record rather than
+    // under-record — and it is the direction that cannot hide an action.
+    if (!input.orchestratorHandle.pauseAgent(participant.bus_agent_name)) {
+      clearParticipantPause(msg.sessionId, msg.projectId);
+      console.error(
+        `[ws] executePause(${msg.sessionId}/${msg.projectId}): runner refused to gate ${participant.bus_agent_name} — DB flip rolled back (audit row ${auditId} stands)`,
+      );
+      return {
+        ok: false,
+        failureCode: 'participant_not_found',
+        message: `the live router has no agent named ${participant.bus_agent_name} — nothing was paused`,
+      };
+    }
+  } else {
+    console.warn(
+      `[ws] executePause(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to install pause gate`,
+    );
   }
 
   const queuedDeliveries =
@@ -644,13 +726,64 @@ export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResu
     };
   }
 
-  const dbChanged = clearParticipantPause(msg.sessionId, msg.projectId);
-  if (!dbChanged) {
+  // Cebab-vie.3: idempotency by READ, so the audit can come first.
+  const state = getControlState(msg.sessionId, msg.projectId);
+  if (!state) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `participant ${msg.projectId} has no control row in session ${msg.sessionId}`,
+    };
+  }
+  if (state.pausedUntil === null) {
     return {
       ok: false,
       failureCode: 'already_in_state',
       message: `${participant.bus_agent_name} is not currently paused`,
     };
+  }
+
+  const auditInput: SafetyAuditInput = {
+    ts: now(),
+    sessionId: msg.sessionId,
+    agentId: participant.bus_agent_name,
+    kind: 'agent_control.resumed',
+    reasonCode: msg.reasonCode,
+    payload: {
+      projectId: msg.projectId,
+      agentSlug: participant.bus_agent_name,
+      reasonText: msg.reasonText ?? null,
+    },
+  };
+  let auditId: string;
+  try {
+    auditId = appendAudit(auditInput).id;
+  } catch (err) {
+    console.error(`[ws] executeResume safety_audit append failed for ${msg.sessionId}`, err);
+    // Cebab-vie.3: resume refuses too, and the asymmetry is deliberate — this
+    // is the ONE verb where fail-closed leaves the agent restrained. The rule
+    // is worth more than the exception: "a control action that cannot be
+    // recorded does not happen" is one sentence an operator can hold, and an
+    // unrecorded RELEASE is the harder forensic question ("who unmuted it?"),
+    // not the easier one.
+    //
+    // The escape hatch is Stop, which appends nothing to the chain and
+    // therefore still works when the chain is what is broken (`ws/server.ts`,
+    // `case 'stop_multi_agent'`). `Cebab-vie.25` proposes giving Stop an audit
+    // row; if it does, that append MUST be best-effort, or this door closes
+    // with it.
+    return {
+      ok: false,
+      failureCode: 'audit_write_failed',
+      message: `safety_audit append failed: ${(err as Error).message}`,
+    };
+  }
+
+  // Recorded — now apply.
+  if (!clearParticipantPause(msg.sessionId, msg.projectId)) {
+    console.warn(
+      `[ws] executeResume(${msg.sessionId}/${msg.projectId}): row was already unpaused at write time though the pre-read said otherwise — audited anyway`,
+    );
   }
   if (input.orchestratorHandle) {
     // Register B19, and deliberately NOT symmetric with pause. `resume()`
@@ -673,29 +806,6 @@ export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResu
     console.warn(
       `[ws] executeResume(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to release pause gate`,
     );
-  }
-  const auditInput: SafetyAuditInput = {
-    ts: now(),
-    sessionId: msg.sessionId,
-    agentId: participant.bus_agent_name,
-    kind: 'agent_control.resumed',
-    reasonCode: msg.reasonCode,
-    payload: {
-      projectId: msg.projectId,
-      agentSlug: participant.bus_agent_name,
-      reasonText: msg.reasonText ?? null,
-    },
-  };
-  let auditId: string;
-  try {
-    auditId = appendAudit(auditInput).id;
-  } catch (err) {
-    console.error(`[ws] executeResume safety_audit append failed for ${msg.sessionId}`, err);
-    return {
-      ok: false,
-      failureCode: 'audit_write_failed',
-      message: `safety_audit append failed: ${(err as Error).message}`,
-    };
   }
   const queuedDeliveries =
     input.orchestratorHandle?.getPendingDeliveries(participant.bus_agent_name) ?? 0;
@@ -901,14 +1011,65 @@ export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResu
   // double-click is "idempotent ack with the dedicated failure code"
   // — the operator's intent has already been honored; the second
   // click should not surface as a hard error.
-  const kickedAt = now();
-  const dbChanged = setParticipantKicked(msg.sessionId, msg.projectId, kickedAt, msg.mode);
-  if (!dbChanged) {
+  // Cebab-vie.7: idempotency by READ, so the audit can come first without
+  // recording a row for a double-click.
+  const state = getControlState(msg.sessionId, msg.projectId);
+  if (!state) {
+    return {
+      ok: false,
+      failureCode: 'participant_not_found',
+      message: `participant ${msg.projectId} has no control row in session ${msg.sessionId}`,
+    };
+  }
+  if (state.kickedAt !== null) {
     return {
       ok: false,
       failureCode: 'participant_already_kicked',
       message: `${participant.bus_agent_name} is already kicked`,
     };
+  }
+
+  const kickedAt = now();
+
+  // safety_audit FIRST. Kind='agent_control.kicked'. The payload carries
+  // `mode` so a future hard-mode rollout can be distinguished forensically
+  // without schema migration.
+  const auditInput: SafetyAuditInput = {
+    ts: kickedAt,
+    sessionId: msg.sessionId,
+    agentId: participant.bus_agent_name,
+    kind: 'agent_control.kicked',
+    reasonCode: msg.reasonCode,
+    payload: {
+      projectId: msg.projectId,
+      agentSlug: participant.bus_agent_name,
+      reasonText: msg.reasonText ?? null,
+      mode: msg.mode,
+      kickedAt,
+    },
+  };
+  let auditId: string;
+  try {
+    auditId = appendAudit(auditInput).id;
+  } catch (err) {
+    console.error(`[ws] executeKick safety_audit append failed for ${msg.sessionId}`, err);
+    // Cebab-vie.7. This block used to run AFTER the kick, and its own comment
+    // said what that cost: "Kick is the worst place for that gap, since the
+    // action cannot be undone either." The agent was drained irreversibly, the
+    // chain had no record, and register B12's dead end meant no retry could add
+    // one. Recording first makes the refusal true and makes the retry work.
+    return {
+      ok: false,
+      failureCode: 'audit_write_failed',
+      message: `safety_audit append failed: ${(err as Error).message}`,
+    };
+  }
+
+  // Recorded — now apply. Irreversible from here.
+  if (!setParticipantKicked(msg.sessionId, msg.projectId, kickedAt, msg.mode)) {
+    console.warn(
+      `[ws] executeKick(${msg.sessionId}/${msg.projectId}): row was already kicked at write time though the pre-read said otherwise — audited anyway`,
+    );
   }
 
   // Sync the orchestrator router's in-memory kickedSet. Missing handle
@@ -930,41 +1091,6 @@ export function executeKickParticipant(input: ExecuteKickInput): ExecuteKickResu
     console.warn(
       `[ws] executeKick(${msg.sessionId}/${msg.projectId}): no live orchestrator handle to update router kickedSet`,
     );
-  }
-
-  // safety_audit dual-write. Kind='agent_control.kicked'. The payload
-  // carries `mode` so a future hard-mode rollout can be distinguished
-  // forensically without schema migration.
-  const auditInput: SafetyAuditInput = {
-    ts: kickedAt,
-    sessionId: msg.sessionId,
-    agentId: participant.bus_agent_name,
-    kind: 'agent_control.kicked',
-    reasonCode: msg.reasonCode,
-    payload: {
-      projectId: msg.projectId,
-      agentSlug: participant.bus_agent_name,
-      reasonText: msg.reasonText ?? null,
-      mode: msg.mode,
-      kickedAt,
-    },
-  };
-  let auditId: string;
-  try {
-    auditId = appendAudit(auditInput).id;
-  } catch (err) {
-    console.error(`[ws] executeKick safety_audit append failed for ${msg.sessionId}`, err);
-    // DB + router are already aligned with the kicked state (irreversibly).
-    // We surface the failure but don't roll back — same posture as mute,
-    // including register B12's correction: a retry returns at the
-    // `participant_already_kicked` guard above and never re-reaches this
-    // block, so the audit row is not recoverable by retrying. Kick is the
-    // worst place for that gap, since the action cannot be undone either.
-    return {
-      ok: false,
-      failureCode: 'audit_write_failed',
-      message: `safety_audit append failed: ${(err as Error).message}`,
-    };
   }
 
   // Cluster C Phase 4f: per-participant forensic bundle for the kick.

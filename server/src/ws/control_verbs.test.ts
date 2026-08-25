@@ -367,9 +367,13 @@ function resumeMsgFor(
   };
 }
 
-function makeFakePauseHandle() {
+function makeFakePauseHandle(knownAgents: readonly string[] = ['worker-slug']) {
   const paused = new Set<string>();
   return {
+    // `Cebab-vie.3`: the roster read the executor now consults BEFORE writing
+    // anything. Defaults to knowing the seeded worker so every existing case
+    // reads unchanged.
+    hasAgent: vi.fn((name: string) => knownAgents.includes(name)),
     pauseAgent: vi.fn((name: string) => {
       if (paused.has(name)) return false;
       paused.add(name);
@@ -1483,90 +1487,254 @@ describe('[security] a malformed control frame is invalid_request, never already
   });
 });
 
-describe('[security] an audit-append failure is audit_write_failed, and the state DID change', () => {
+describe('[security] an audit-append failure means the action did NOT happen', () => {
+  // `Cebab-vie.3` / `Cebab-vie.7`. This suite used to be named "…and the state
+  // DID change", and every case asserted the fail-open: the DB column flipped,
+  // the chain had no row, and the operator was told "refused". It was green,
+  // `[security]`-tagged, and pinning the defect — the tell was its own comment,
+  // "The whole point of the separate code: this is NOT a no-op."
+  //
+  // Rewritten rather than deleted, keeping each case's subject and inverting
+  // its assertion, so the file still records what happens on an audit failure
+  // — the opposite answer.
   const boom = () => {
     throw new Error('chain is broken');
   };
 
-  test('mute: the DB column is flipped and the code says so', () => {
+  function auditRows(kind: string): number {
+    return (
+      getDb().prepare(`SELECT COUNT(*) as c FROM safety_audit WHERE kind = ?`).get(kind) as {
+        c: number;
+      }
+    ).c;
+  }
+
+  test('mute: the DB column is NOT flipped, and "refused" is now true', () => {
     const { workerId } = seedSession();
+    const handle = makeFakeOrchestratorHandle();
     const result = executeMuteParticipant({
       msg: muteMsg({ projectId: workerId }),
-      orchestratorHandle: makeFakeOrchestratorHandle(),
+      orchestratorHandle: handle,
       sessionMode: 'orchestrator',
       appendAudit: boom as never,
     });
     expect(result).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
-    // The whole point of the separate code: this is NOT a no-op.
-    expect(getControlState('sess-1', workerId)?.muted).toBe(true);
+    expect(getControlState('sess-1', workerId)?.muted).toBe(false);
+    // And the router mirror never moved either — the DB is checked first
+    // because it is the source of truth, but a mute lives in BOTH places and
+    // only one of them gates an event.
+    expect(handle.setMute).not.toHaveBeenCalled();
   });
 
-  test('kick: same, and kick cannot be undone', () => {
+  test('kick: nothing is drained — the verb that cannot be undone is the one that must not half-happen', () => {
     const { workerId } = seedSession();
+    const handle = makeFakeKickHandle();
     const result = executeKickParticipant({
       msg: kickMsg({ projectId: workerId }),
-      orchestratorHandle: makeFakeKickHandle(),
+      orchestratorHandle: handle,
       sessionMode: 'orchestrator',
       appendAudit: boom as never,
     });
     expect(result).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
-    expect(getControlState('sess-1', workerId)?.kickedAt).not.toBeNull();
+    expect(getControlState('sess-1', workerId)?.kickedAt).toBeNull();
+    expect(handle.kickAgent).not.toHaveBeenCalled();
   });
 
-  test('pause + resume both report it', () => {
+  test('pause: no DB row, and no runner gate — the stranded pause has no cause left', () => {
+    // `Cebab-vie.3`'s whole complaint: the gate went in, the expiry timer did
+    // not (it is armed by the WS handler on `ok: true`), and the UI rendered no
+    // Resume. Asserting `pauseAgent` was never called is the half that matters
+    // — a DB-only fix would leave the agent stopped.
     const { workerId } = seedSession();
+    const handle = makeFakePauseHandle();
     expect(
       executePauseParticipant({
         msg: pauseMsg({ projectId: workerId }),
-        orchestratorHandle: makeFakePauseHandle(),
+        orchestratorHandle: handle,
         sessionMode: 'orchestrator',
         appendAudit: boom as never,
       }),
     ).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
+    expect(handle.pauseAgent).not.toHaveBeenCalled();
+  });
 
-    // The row is now paused (unaudited); resume it and break the audit again.
+  test('resume: refuses too, and the agent stays paused — fail-closed, stated', () => {
+    // The one case where fail-closed costs something real, so it is asserted
+    // rather than left implicit: a broken chain means an already-paused agent
+    // stays paused. Stop is the escape hatch and appends nothing to the chain
+    // (`ws/server.ts`, `case 'stop_multi_agent'`) — see `Cebab-vie.25`.
+    const { workerId } = seedSession();
+    const handle = makeFakePauseHandle();
+    expect(
+      executePauseParticipant({
+        msg: pauseMsg({ projectId: workerId }),
+        orchestratorHandle: handle,
+        sessionMode: 'orchestrator',
+      }),
+    ).toMatchObject({ ok: true });
+
     expect(
       executeResumeParticipant({
         msg: resumeMsgFor({ projectId: workerId }),
-        orchestratorHandle: makeFakePauseHandle(),
+        orchestratorHandle: handle,
         sessionMode: 'orchestrator',
         appendAudit: boom as never,
       }),
     ).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
+    expect(getControlState('sess-1', workerId)?.pausedUntil).not.toBeNull();
+    expect(handle.resumeAgent).not.toHaveBeenCalled();
   });
 
-  test('retrying does NOT re-attempt the audit — the row stays unaudited', () => {
-    // Register B12. The code used to carry a comment promising the opposite
-    // ("the retry path's short-circuit will short-circuit the DB step, so
-    // only the audit re-attempt runs"). It cannot: `setParticipantMuted` is
-    // `UPDATE … WHERE muted != ?`, so the second call matches zero rows and
-    // the handler returns at the `!dbChanged` guard, above the audit block.
+  test('no audit row is written for any of them', () => {
+    // The inverse of the four cases above, asserted once. Without it, an
+    // implementation that wrote the row and then threw would satisfy every
+    // "state unchanged" assertion.
     const { workerId } = seedSession();
-    const appendAudit = vi.fn(() => {
-      throw new Error('chain is broken');
-    });
     executeMuteParticipant({
       msg: muteMsg({ projectId: workerId }),
       orchestratorHandle: makeFakeOrchestratorHandle(),
       sessionMode: 'orchestrator',
-      appendAudit: appendAudit as never,
+      appendAudit: boom as never,
     });
+    expect(auditRows('agent_control.muted')).toBe(0);
+  });
+
+  test('retrying NOW re-attempts the audit and succeeds — register B12 closed', () => {
+    // The clearest single statement of what changed. This case used to be
+    // named "retrying does NOT re-attempt the audit — the row stays unaudited",
+    // and it was correct: `setParticipantMuted` is `UPDATE … WHERE muted != ?`,
+    // so the second call matched zero rows and returned at the `!dbChanged`
+    // guard ABOVE the audit block. The guard is now a READ of state that the
+    // failed attempt never moved, so the retry reaches the audit again.
+    const { workerId } = seedSession();
+    let fail = true;
+    const appendAudit = vi.fn(() => {
+      if (fail) throw new Error('chain is broken');
+      return { id: 'audit-2' };
+    });
+
+    expect(
+      executeMuteParticipant({
+        msg: muteMsg({ projectId: workerId }),
+        orchestratorHandle: makeFakeOrchestratorHandle(),
+        sessionMode: 'orchestrator',
+        appendAudit: appendAudit as never,
+      }),
+    ).toMatchObject({ ok: false, failureCode: 'audit_write_failed' });
     expect(appendAudit).toHaveBeenCalledTimes(1);
 
+    fail = false;
     const retry = executeMuteParticipant({
       msg: muteMsg({ projectId: workerId }),
       orchestratorHandle: makeFakeOrchestratorHandle(),
       sessionMode: 'orchestrator',
       appendAudit: appendAudit as never,
     });
-    // Still 1: the retry never reached the audit block.
-    expect(appendAudit).toHaveBeenCalledTimes(1);
-    expect(retry).toMatchObject({ ok: false, failureCode: 'already_in_state' });
-    // And there is no audit row for the flip that did happen.
-    const rows = getDb()
-      .prepare(`SELECT COUNT(*) as c FROM safety_audit WHERE kind = 'agent_control.muted'`)
-      .get() as { c: number };
-    expect(rows.c).toBe(0);
+    // 2, not 1: the retry reached the audit block instead of short-circuiting
+    // at `already_in_state`.
+    expect(appendAudit).toHaveBeenCalledTimes(2);
+    expect(retry).toMatchObject({ ok: true });
+    expect(getControlState('sess-1', workerId)?.muted).toBe(true);
+  });
+
+  test('a genuine no-op still short-circuits, and writes no audit row', () => {
+    // The control for the reorder: `already_in_state` must be decided BEFORE
+    // the audit, or every double-click writes a row for a flip that did not
+    // happen. Uses a real appendAudit so the row count is meaningful.
+    const { workerId } = seedSession();
+    setParticipantMuted('sess-1', workerId, true);
+    const result = executeMuteParticipant({
+      msg: muteMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeOrchestratorHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toMatchObject({ ok: false, failureCode: 'already_in_state' });
+    expect(auditRows('agent_control.muted')).toBe(0);
+  });
+});
+
+describe('[security] the audit row lands BEFORE the state moves (Cebab-vie.3/.7)', () => {
+  // The four "nothing applied" cases above all observe the FAILURE path. This
+  // one observes the SUCCESS path, and it is the case that a reorder which only
+  // looks reordered would pass: move the audit back down and every assertion in
+  // this file still holds except this one.
+  //
+  // The seam is `appendAudit` itself — it reads the world at the moment it is
+  // called, which is the only place the ordering is observable from outside.
+
+  test('mute: when the audit runs, the DB and the router mirror are still untouched', () => {
+    const { workerId } = seedSession();
+    const handle = makeFakeOrchestratorHandle();
+    let stateAtAuditTime: boolean | undefined;
+    let muteCallsAtAuditTime = -1;
+    const appendAudit = vi.fn(() => {
+      stateAtAuditTime = getControlState('sess-1', workerId)?.muted;
+      muteCallsAtAuditTime = handle.setMute.mock.calls.length;
+      return { id: 'audit-1' };
+    });
+
+    const result = executeMuteParticipant({
+      msg: muteMsg({ projectId: workerId }),
+      orchestratorHandle: handle,
+      sessionMode: 'orchestrator',
+      appendAudit: appendAudit as never,
+    });
+
+    expect(result).toMatchObject({ ok: true });
+    expect({ stateAtAuditTime, muteCallsAtAuditTime }).toEqual({
+      stateAtAuditTime: false,
+      muteCallsAtAuditTime: 0,
+    });
+    // …and both moved afterwards, or the assertion above passes on a verb that
+    // does nothing at all.
+    expect(getControlState('sess-1', workerId)?.muted).toBe(true);
+    expect(handle.setMute).toHaveBeenCalledWith('worker-slug', true);
+  });
+
+  test('pause: same ordering, and the runner gate is the last thing installed', () => {
+    const { workerId } = seedSession();
+    const handle = makeFakePauseHandle();
+    let pausedAtAuditTime: number | null | undefined;
+    let pauseCallsAtAuditTime = -1;
+    const appendAudit = vi.fn(() => {
+      pausedAtAuditTime = getControlState('sess-1', workerId)?.pausedUntil;
+      pauseCallsAtAuditTime = handle.pauseAgent.mock.calls.length;
+      return { id: 'audit-1' };
+    });
+
+    expect(
+      executePauseParticipant({
+        msg: pauseMsg({ projectId: workerId }),
+        orchestratorHandle: handle,
+        sessionMode: 'orchestrator',
+        appendAudit: appendAudit as never,
+      }),
+    ).toMatchObject({ ok: true });
+
+    expect({ pausedAtAuditTime, pauseCallsAtAuditTime }).toEqual({
+      pausedAtAuditTime: null,
+      pauseCallsAtAuditTime: 0,
+    });
+    expect(getControlState('sess-1', workerId)?.pausedUntil).not.toBeNull();
+    expect(handle.pauseAgent).toHaveBeenCalledWith('worker-slug');
+  });
+
+  test('kick: the forensic bundle still lands after a successful audit', () => {
+    // The reorder moved code past the audit; this is the check that nothing
+    // that used to run after it got dropped on the way.
+    const { workerId } = seedSession();
+    const result = executeKickParticipant({
+      msg: kickMsg({ projectId: workerId }),
+      orchestratorHandle: makeFakeKickHandle(),
+      sessionMode: 'orchestrator',
+    });
+    expect(result).toMatchObject({ ok: true });
+    expect(getControlState('sess-1', workerId)?.kickedAt).not.toBeNull();
+    const forensics = (
+      getDb().prepare(`SELECT COUNT(*) as c FROM controllability_forensics`).get() as { c: number }
+    ).c;
+    expect(forensics).toBe(1);
   });
 });
 
@@ -1577,8 +1745,15 @@ describe('[security] pause reports failure when no gate was actually installed',
     // nothing is gated. Reporting ok with a `pausedUntil` there is exactly
     // the B03 defect (an operator watching "paused until 14:32" while the
     // worker keeps taking turns), reached through a different door.
+    //
+    // `Cebab-vie.3` moved WHERE this is detected, not whether: the audit row is
+    // now written first, so an unknown slug has to be refused before it — the
+    // executor asks `hasAgent` and never reaches `pauseAgent`. The assertions
+    // below are the same property (no residue of any kind), read off the new
+    // seam.
     const { workerId } = seedSession();
     const handle = {
+      hasAgent: vi.fn(() => false),
       pauseAgent: vi.fn(() => false),
       getPendingDeliveries: vi.fn(() => 0),
     };
@@ -1589,7 +1764,8 @@ describe('[security] pause reports failure when no gate was actually installed',
     });
 
     expect(result).toMatchObject({ ok: false, failureCode: 'participant_not_found' });
-    expect(handle.pauseAgent).toHaveBeenCalledWith('worker-slug');
+    expect(handle.hasAgent).toHaveBeenCalledWith('worker-slug');
+    expect(handle.pauseAgent).not.toHaveBeenCalled();
     // No residue claiming a pause that is not in force.
     expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
     // And no audit row for a pause that never happened.
