@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { MuteReasonModal } from './MuteReasonModal';
-import { reasonOptionsFor } from './controlReasons';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g5 — MuteReasonModal contract:
 //   - Single shared modal for the non-destructive verbs (mute, unmute, resume)
@@ -353,5 +353,38 @@ describe('MuteReasonModal — dismissal without dispatch', () => {
     });
     expect(onClose).toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('MuteReasonModal — what the verb does not do (Cebab-vie.5)', () => {
+  function limitsText(): string | null {
+    return document.querySelector('.control-verb-limits')?.textContent ?? null;
+  }
+
+  test('the limits line is rendered, and it is this verb\u2019s', () => {
+    // A string that exists in the module and never reaches the screen is the
+    // same defect as a wrong one, so this asserts the DOM rather than the
+    // constant — and asserts identity, so a modal wired to another verb's
+    // sentence fails.
+    render({ action: 'mute', agentLabel: 'scribe' });
+    expect(limitsText()).toBe(VERB_LIMITS['mute']);
+  });
+
+  test('it names the levers that do bound a running turn', () => {
+    // The Cebab-vie.17 correction: when this bead was filed a hop really was
+    // an unbounded agent turn. Telling an operator "nothing stops it" would be
+    // the new wrong answer. Reddens if the clause is trimmed away as verbose.
+    render({ action: 'mute', agentLabel: 'scribe' });
+    expect(limitsText()).toContain('per-hop turn cap');
+    expect(limitsText()).toContain('Stop ends the whole session');
+  });
+
+  test('the undo verbs state no limit', () => {
+    // Unmute and Resume remove a restriction, so there is nothing to disclaim.
+    // Reddens if `VERB_LIMITS` is ever given a blanket entry.
+    render({ action: 'unmute', agentLabel: 'scribe' });
+    expect(limitsText(), 'unmute').toBeNull();
+    render({ action: 'resume', agentLabel: 'scribe' });
+    expect(limitsText(), 'resume').toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode, PauseExpiryAction } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
-import { reasonOptionsFor } from './controlReasons';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g5: pause-specific reason picker. Extends the
 // MuteReasonModal shape with two pause-only controls:
@@ -152,6 +152,7 @@ export function PauseReasonModal({
           told — its bus_send still echoes success, but the orchestrator stops scheduling new turns.
           Queued deliveries fire on Resume (manually or auto-).
         </p>
+        <p className="gate-modal-help control-verb-limits">{VERB_LIMITS.pause}</p>
         <fieldset className="pause-reason-modal-fieldset">
           <legend className="pause-reason-modal-legend">Reason</legend>
           <ul className="pause-reason-modal-reason-list">

@@ -159,3 +159,34 @@ export function reasonOptionsFor(verb: ControlVerb): readonly ReasonOption[] {
     return caveat === undefined ? opt : { ...opt, caveat };
   });
 }
+
+/**
+ * `Cebab-vie.5`: the always-true sentence for a verb, shown whatever reason is
+ * picked.
+ *
+ * It exists because the caveats above cannot cover the commonest path. Every
+ * modal defaults to `topology_repair`, which has no caveat and should not have
+ * one — so an operator who takes the default and submits would otherwise be
+ * told nothing about what keeps running.
+ *
+ * The second clause is the `Cebab-vie.17` correction, and it is the part that
+ * was previously true nowhere on screen. When this bead was filed, a bus hop
+ * really was an unbounded agent turn; #387 shipped `AgentRunnerDeps.maxTurns`
+ * (floor `config.maxTurns`, operator-settable as Settings → "Default max
+ * turns"), so a runaway loop inside a hop IS bounded now — just not by any of
+ * these verbs. Telling an operator "nothing stops it" would be the new wrong
+ * answer; naming the levers that do exist is the right one.
+ *
+ * `unmute` and `resume` are absent for the same reason they carry no caveats.
+ */
+export const VERB_LIMITS: Partial<Record<ControlVerb, string>> = {
+  mute:
+    'Mute changes what you hear, not what the agent does — it keeps receiving, keeps being woken for new turns, and keeps running tools. ' +
+    'No per-agent verb aborts a running turn: the per-hop turn cap (Settings → Default max turns) ends the hop, and Stop ends the whole session.',
+  pause:
+    'The turn already running is not interrupted; the gate applies to the next one. ' +
+    'No per-agent verb aborts a running turn: the per-hop turn cap (Settings → Default max turns) ends the hop, and Stop ends the whole session.',
+  kick:
+    'The turn already running is not interrupted — it drains in the background, and there is no hard kill in v1. ' +
+    'The per-hop turn cap (Settings → Default max turns) ends the hop, and Stop ends the whole session.',
+};

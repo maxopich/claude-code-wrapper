@@ -10416,6 +10416,14 @@ pre {
   color: var(--warn-ink);
 }
 
+/* Cebab-vie.5: what the verb does NOT do, whatever reason is picked. Its own
+   paragraph rather than more sentences on the existing one — the operator has
+   to be able to find it without re-reading the mechanics above it. Same ink
+   token as the per-reason caveat, so the two read as one register. */
+.control-verb-limits {
+  color: var(--warn-ink);
+}
+
 /* Free-text notes input. */
 .kick-modal-text-label {
   display: flex;

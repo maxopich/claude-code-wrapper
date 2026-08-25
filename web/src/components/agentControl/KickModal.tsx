@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode, KickMode } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
-import { reasonOptionsFor } from './controlReasons';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g3: kick confirmation modal with reason-code picker.
 // Mounted by ParticipantControlMenu's Kick… item; first surface that
@@ -114,6 +114,7 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
           captured alongside the <code>agent_control.kicked</code> safety_audit row at the moment of
           kick.
         </p>
+        <p className="gate-modal-help control-verb-limits">{VERB_LIMITS.kick}</p>
         <fieldset className="kick-modal-fieldset">
           <legend className="kick-modal-legend">Reason</legend>
           <ul className="kick-modal-reason-list">

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
-import { reasonOptionsFor } from './controlReasons';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g5: reason-code picker shared by the non-destructive
 // participant control verbs — Mute, Unmute, and Resume. Phase 4g2 pinned
@@ -136,6 +136,9 @@ export function MuteReasonModal({
           </h3>
         </header>
         <p className="gate-modal-help">{copy.help}</p>
+        {VERB_LIMITS[action] ? (
+          <p className="gate-modal-help control-verb-limits">{VERB_LIMITS[action]}</p>
+        ) : null}
         <fieldset className="mute-reason-modal-fieldset">
           <legend className="mute-reason-modal-legend">Reason</legend>
           <ul className="mute-reason-modal-reason-list">

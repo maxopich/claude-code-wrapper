@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { PauseReasonModal } from './PauseReasonModal';
-import { reasonOptionsFor } from './controlReasons';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g5 — PauseReasonModal contract:
 //   - Reason picker (8 options, default topology_repair)
@@ -398,5 +398,29 @@ describe('PauseReasonModal — per-reason caveats (Cebab-vie.5)', () => {
     const expected = reasonOptionsFor('pause').find((o) => o.code === 'runaway_loop')!.caveat;
     expect(expected).toBeTruthy();
     expect(caveatFor('runaway_loop')).toBe(expected);
+  });
+});
+
+describe('PauseReasonModal — what the verb does not do (Cebab-vie.5)', () => {
+  function limitsText(): string | null {
+    return document.querySelector('.control-verb-limits')?.textContent ?? null;
+  }
+
+  test('the limits line is rendered, and it is this verb\u2019s', () => {
+    // A string that exists in the module and never reaches the screen is the
+    // same defect as a wrong one, so this asserts the DOM rather than the
+    // constant — and asserts identity, so a modal wired to another verb's
+    // sentence fails.
+    render();
+    expect(limitsText()).toBe(VERB_LIMITS['pause']);
+  });
+
+  test('it names the levers that do bound a running turn', () => {
+    // The Cebab-vie.17 correction: when this bead was filed a hop really was
+    // an unbounded agent turn. Telling an operator "nothing stops it" would be
+    // the new wrong answer. Reddens if the clause is trimmed away as verbose.
+    render();
+    expect(limitsText()).toContain('per-hop turn cap');
+    expect(limitsText()).toContain('Stop ends the whole session');
   });
 });
