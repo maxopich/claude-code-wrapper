@@ -103,9 +103,22 @@ export function getControlState(sessionId: string, projectId: number): ControlSt
 }
 
 /**
- * Fetch every participant's control state for a session. Used by R-A
- * (browser reattach) + R-B (server restart) to rebuild the in-memory
- * mute/pause/kick sets without an N+1 query per participant.
+ * Fetch every participant's control state for a session.
+ *
+ * This comment used to say "Used by R-A (browser reattach) + R-B (server
+ * restart) to rebuild the in-memory mute/pause/kick sets", and described a
+ * caller that had never existed: R-B rebuilds those sets from the three
+ * narrower reads below (`listMutedAgentNames` / `listKickedAgentNames` /
+ * `listActivePauseEntries`), and R-A rebuilt nothing at all — which is the
+ * defect `Cebab-vie.6` / `Cebab-vie.4` were, since a browser that is told
+ * nothing about a standing mute renders no way to lift it.
+ *
+ * The R-A half is now true. `buildParticipantControlSnapshots`
+ * (`ws/participant_control_snapshot.ts`) is the one caller, and it wants
+ * every flag of every participant in one pass, which is what this returns and
+ * the three narrower reads do not. Note it returns a row per PARTICIPANT, not
+ * per *controlled* participant — an untouched participant is an all-clear row,
+ * not an absent one, and the caller filters.
  */
 export function listControlStates(sessionId: string): ControlState[] {
   return getDb()

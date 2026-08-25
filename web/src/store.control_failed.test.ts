@@ -54,6 +54,7 @@ function seedBusRun(): AppState {
     type: 'server',
     msg: {
       type: 'multi_agent_started',
+      participantControls: [],
       sessionId: BUS_SESSION,
       mode: 'orchestrator',
       participants: [1, 2],

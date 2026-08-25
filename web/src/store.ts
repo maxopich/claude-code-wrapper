@@ -7,6 +7,7 @@ import type {
   MultiAgentEventKind,
   MultiAgentLifecycle,
   MultiAgentMutationView,
+  ParticipantControlSnapshot,
   PendingAskUserQuestionView,
   MultiAgentTemplate,
   PauseExpiryAction,
@@ -570,6 +571,29 @@ export type ParticipantControlView = {
   kickReasonCode?: ControlReasonCode;
   kickReasonText?: string;
 };
+
+/**
+ * `Cebab-vie.6` / `Cebab-vie.4`: turn the attach envelope's control snapshots
+ * into the map the three `participant_*_changed` echoes maintain.
+ *
+ * A straight key-by-projectId fold, and it can be, because the wire type was
+ * given the same field names this view uses rather than a vocabulary of its
+ * own — a snapshot that needed translating here is a snapshot that can be
+ * translated WRONG here, silently, on a path with no operator feedback.
+ *
+ * Note what is NOT done: no filtering of expired pauses, no normalising of a
+ * kicked participant's other flags. Whether a pause is still live is a
+ * `pausedUntil > now` question and every reader already asks it; re-deciding
+ * it once, here, at attach time, would freeze the answer at the moment the
+ * socket opened.
+ */
+export function hydrateParticipantControls(
+  snapshots: readonly ParticipantControlSnapshot[],
+): Record<number, ParticipantControlView> {
+  const out: Record<number, ParticipantControlView> = {};
+  for (const snap of snapshots) out[snap.projectId] = { ...snap };
+  return out;
+}
 
 /**
  * Multi-agent / bus runtime UI state. Lives alongside the existing
@@ -2096,11 +2120,15 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // A future R-A enhancement could rehydrate from the server's
             // safety_audit table.
             routerDrops: [],
-            // Phase 4g1: per-participant control state accumulates from
-            // the three `participant_*_changed` ServerMsgs. Empty at
-            // start; a future R-A enhancement could rehydrate by reading
-            // back from the server's per_agent_control table.
-            participantControls: {},
+            // Phase 4g1: per-participant control state accumulates from the
+            // three `participant_*_changed` ServerMsgs — and, since
+            // `Cebab-vie.6` / `Cebab-vie.4`, STARTS from what the server knows
+            // rather than from nothing. That "future R-A enhancement" is the
+            // line below: the envelope carries every standing mute / pause /
+            // kick, so a browser refresh no longer discards all three while
+            // the server keeps enforcing them. Empty array on a fresh start,
+            // which is the same `{}` this used to hardcode.
+            participantControls: hydrateParticipantControls(msg.participantControls),
             // Cluster G Phase 2c (UI-A3): per-session MOCK posture, projected
             // from `multi_agent_sessions.mock` server-side. Spread-omit when
             // the wire field is absent (pre-G2c server, or a live session)
