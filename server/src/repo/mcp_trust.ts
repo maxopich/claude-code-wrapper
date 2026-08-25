@@ -59,6 +59,13 @@ export type TrustDecisionInput = {
    * error (the protocol type layer should also gate this from the UI).
    */
   binarySha: string | null;
+  /**
+   * Cebab-1af: sha256 per file this declaration points at, or `null` when it
+   * points at none we can read. Required for the same reason `command` is —
+   * an optional field defaults to "pinned nothing" at every call site that
+   * forgets it, and a row that pinned nothing can never mismatch.
+   */
+  scriptShas: Record<string, string> | null;
   decision: PersistedDecision;
   /** Defaults to `getOperatorId()` when absent — clients can't be trusted to report it. */
   operator?: string;
@@ -72,6 +79,9 @@ export type TrustLookupInput = {
   candidateSha: string | null;
   command: string;
   args: readonly string[];
+  /** Cebab-1af: what the declaration's files hash to RIGHT NOW, from
+   *  `computeScriptShas`. Compared against what the matching row approved. */
+  candidateScriptShas: Record<string, string> | null;
 };
 
 export type TrustLookupResult =
@@ -85,6 +95,17 @@ export type TrustLookupResult =
    */
   | { decision: 'declaration_changed'; previousCommand: string; previousArgs: string[] }
   | { decision: 'hash_changed'; previousSha: string }
+  /**
+   * Cebab-1af: the declaration is byte-identical to the approved one and the
+   * command's own hash still matches — but a file it runs does not. The
+   * supply-chain shape: nothing in `.mcp.json` moved.
+   */
+  | {
+      decision: 'script_changed';
+      changedPaths: string[];
+      previousShas: Record<string, string>;
+      candidateShas: Record<string, string>;
+    }
   | { decision: 'first_seen' };
 
 export type McpTrustRow = {
@@ -97,6 +118,10 @@ export type McpTrustRow = {
   command: string | null;
   args_json: string | null;
   binary_sha: string | null;
+  /** Cebab-1af (migration 039). NULL when the decision pinned no files — see
+   *  `computeScriptShas`. Also NULL on every row decided before 039; there is
+   *  no backfill, deliberately. */
+  script_shas_json: string | null;
   decision: PersistedDecision;
   operator: string;
 };
@@ -174,6 +199,214 @@ export function computeBinarySha(command: string): string | null {
   return createHash('sha256').update(read.bytes).digest('hex');
 }
 
+// ---- script pinning (Cebab-1af) ----
+
+/**
+ * `Cebab-1af` [security]: how many files ONE declaration may make us hash.
+ *
+ * A backstop, not a policy. Real declarations name at most one local script
+ * (`node build/index.js`); the ceiling exists because `args` is
+ * project-controlled and `enrichWithTrustState` runs on every authority
+ * resolve, so an args array of a thousand file paths would otherwise be a
+ * read amplifier aimed at the operator's own machine.
+ *
+ * Over the cap we return `null` — no pin at all — rather than the first eight.
+ * A partial pin would report "unchanged" for a declaration whose ninth file was
+ * rewritten, and a pin that is silently narrower than what it appears to cover
+ * is the failure this whole module exists to avoid.
+ */
+const MAX_HASHED_SCRIPTS = 8;
+
+/**
+ * Value recorded for a candidate that IS a regular file but is larger than
+ * `MAX_HASHABLE_BINARY_BYTES`.
+ *
+ * Not a sha, and deliberately not an omission. Omitting the key would let a
+ * rewrite hide behind size: pad the script past 64 MiB and its entry vanishes,
+ * and a vanished entry cannot mismatch. Recording the sentinel keeps the entry
+ * present, so `sha -> too-large` reads as the change it is. It cannot collide
+ * with a real value: every other entry is 64 lowercase hex characters.
+ */
+export const SCRIPT_TOO_LARGE = 'too-large';
+
+/**
+ * `Cebab-1af`: hash every file an MCP declaration points at.
+ *
+ * `computeBinarySha` pins the COMMAND, and only when it is absolute. That
+ * leaves the shape the finding is about untouched: `{ command: 'node', args:
+ * ['mcp/kitchen-server.mjs'] }` pins nothing at all, so rewriting the script in
+ * place matched the operator's approval exactly — no modal, no audit row, new
+ * program.
+ *
+ * WHICH ARG IS THE SCRIPT? None, and all of them. Picking one is a guess, and a
+ * wrong guess pins bytes that are not what runs while still reporting
+ * "unchanged" — the failure `hook_trust.ts`'s own header calls worse than
+ * pinning nothing. `node --require ./preload.js server.mjs` has two files that
+ * both execute and no rule that names the right one. So every candidate is
+ * hashed and the question does not arise.
+ *
+ * ARGS ARE RESOLVED BY EXISTENCE; THE COMMAND IS RESOLVED BY SHAPE. The
+ * asymmetry is not stylistic — the two are resolved by different machinery:
+ *
+ *   - A COMMAND with no separator is looked up on `PATH` (`node`, `npx`,
+ *     `python3`), so what runs is whatever PATH finds at spawn time and there
+ *     is nothing stable to pin. A command CONTAINING a separator is a path
+ *     relative to the spawn cwd — the POSIX `execvp` rule, and the same rule
+ *     `hook_trust` applies to a hook's first token. Absolute commands are
+ *     skipped here because `computeBinarySha` already pins them, and pinning
+ *     one file in two columns would fire two prompts for one change.
+ *   - An ARG is never PATH-resolved. `node server.mjs` reads
+ *     `<cwd>/server.mjs`, so a bare arg token IS a relative path and the only
+ *     honest test is whether it names a readable file. The cost of that test is
+ *     that a package name which happens to also exist as a file in the project
+ *     (`npx -y weather-mcp` next to a file called `weather-mcp`) gets pinned
+ *     even though npx runs the registry copy. That pins a file this project
+ *     named and does not weaken anything: the entry can only produce a prompt,
+ *     never suppress one.
+ *
+ * NOT candidates, each for a reason:
+ *   - tokens starting with `-`: flags. `--config=./x.json` is therefore missed;
+ *     the space-separated form is not, and inventing an `=`-splitter here would
+ *     be the start of the argv parser this deliberately is not.
+ *   - `~/...`: neither `execvp` nor an interpreter expands a tilde — the shell
+ *     does, and there is no shell in this spawn. Resolving it would pin a file
+ *     the CLI would never open.
+ *   - anything that is not a readable regular file: missing paths, directories
+ *     (`npx -y @mcp/server-filesystem /Users/me/Desktop`), FIFOs and devices.
+ *     `readFileBounded` refuses all of them at the descriptor, which is also
+ *     what stops `/dev/zero` in an args array from parking the event loop.
+ *
+ * Returns `null` when nothing was pinned. That is the common case (`npx <pkg>`)
+ * and it is not an error: a null means identity tracking without change
+ * detection, exactly as it does for `binary_sha`.
+ */
+export function computeScriptShas(
+  command: string,
+  args: readonly string[],
+  projectPath: string,
+): Record<string, string> | null {
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
+  const seen = new Set<string>();
+  let hashed = 0;
+
+  for (const token of scriptCandidates(command, args)) {
+    if (seen.has(token)) continue;
+    seen.add(token);
+    // `path.resolve` leaves an absolute token alone and anchors every other
+    // one at the spawn cwd, which for both the single-agent turn and every bus
+    // participant is the project root.
+    const read = readFileBounded(path.resolve(projectPath, token), MAX_HASHABLE_BINARY_BYTES);
+    if (!read.ok) {
+      // `unreadable` (missing / no permission), `not_a_file` (directory, FIFO,
+      // device) and `read_failed` all mean the same thing here: this token does
+      // not name bytes we can identify. No entry, no claim.
+      if (read.refusal !== 'too_large') continue;
+      out[token] = SCRIPT_TOO_LARGE;
+    } else {
+      out[token] = createHash('sha256').update(read.bytes).digest('hex');
+    }
+    hashed += 1;
+    if (hashed > MAX_HASHED_SCRIPTS) return null;
+  }
+
+  const keys = Object.keys(out);
+  if (keys.length === 0) return null;
+  const sorted: Record<string, string> = {};
+  for (const k of keys.sort()) sorted[k] = out[k];
+  return sorted;
+}
+
+/** The tokens `computeScriptShas` will try to read, in declaration order. */
+function* scriptCandidates(command: string, args: readonly string[]): Generator<string> {
+  if (commandIsRelativePath(command)) yield command;
+  for (const arg of args) {
+    if (!arg || arg.startsWith('-')) continue;
+    yield arg;
+  }
+}
+
+/** A command the spawn resolves as a PATH rather than through `PATH` — and that
+ *  `computeBinarySha` has not already pinned. */
+function commandIsRelativePath(command: string): boolean {
+  if (!command || path.isAbsolute(command)) return false;
+  return command.includes('/') || command.includes('\\');
+}
+
+/**
+ * Canonical storage form for `mcp_trust.script_shas_json`: keys sorted, or NULL
+ * when nothing was pinned.
+ *
+ * Sorted so the column is diffable by eye and stable across resolves; the
+ * comparison below reads the parsed object and does not depend on it.
+ */
+export function serializeScriptShas(shas: Record<string, string> | null): string | null {
+  if (!shas) return null;
+  const keys = Object.keys(shas).sort();
+  if (keys.length === 0) return null;
+  const canonical: Record<string, string> = {};
+  for (const k of keys) canonical[k] = shas[k];
+  return JSON.stringify(canonical);
+}
+
+/**
+ * Parse a stored `script_shas_json` back to a map, tolerantly.
+ *
+ * Degrades to `null`, NOT to `{}`, and the difference is the safe direction:
+ * both stop `script_changed` from firing, but `null` also means the row reads
+ * as "pinned nothing", which is the honest description of a value this code
+ * could not understand. `parseArgsJson` degrades to `[]` because there an
+ * unparseable value must still MISMATCH; here it must simply not claim.
+ */
+export function parseScriptShas(raw: string | null): Record<string, string> | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof v !== 'string') return null;
+      out[k] = v;
+    }
+    return Object.keys(out).length === 0 ? null : out;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Which pinned files differ from what the operator approved.
+ *
+ * ONLY A VALUE PRESENT ON BOTH SIDES CAN PROVE A CHANGE — the rule
+ * `hook_trust.ts` already states for its single hash, applied per entry:
+ *
+ *   - present then, present now, different  -> CHANGED. The finding's case.
+ *   - present then, absent now              -> not a change. A script that has
+ *     gone away cannot run; the spawn fails loudly on its own, and prompting
+ *     for a deletion is the noise that teaches operators to click through.
+ *   - absent then, present now              -> not a change. Most often a file
+ *     the server itself writes next to one it was pointed at. The narrower
+ *     case it leaves open — approving a declaration whose script does not
+ *     exist YET, then creating it — is real, and is why nothing here treats a
+ *     null approval as evidence of anything.
+ *
+ * `Object.hasOwn` rather than a bare index: the keys come from a project's own
+ * declaration via `JSON.parse`, so `constructor` is a reachable key name and
+ * `approved['constructor']` finds `Object.prototype`'s — a truthy value that is
+ * not a sha, which would report a change on a file nobody touched.
+ */
+export function changedScriptPaths(
+  approved: Readonly<Record<string, string>> | null,
+  candidate: Readonly<Record<string, string>> | null,
+): string[] {
+  if (!approved || !candidate) return [];
+  const changed: string[] = [];
+  for (const [token, sha] of Object.entries(candidate)) {
+    if (!Object.hasOwn(approved, token)) continue;
+    if (approved[token] !== sha) changed.push(token);
+  }
+  return changed.sort();
+}
+
 // ---- write path ----
 
 /**
@@ -212,6 +445,7 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
   // decision is not recorded — operator sees the failure and can retry
   // with the chain repaired.
   const argsJson = argsKey(input.args);
+  const scriptShasJson = serializeScriptShas(input.scriptShas);
   appendSafetyAudit({
     ts,
     kind: 'mcp.trust_decided',
@@ -225,6 +459,10 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
       command: input.command,
       args: [...input.args],
       binarySha: input.binarySha,
+      // Cebab-1af: and WHICH BYTES were approved. The chain is the complete
+      // forensic trail; "the operator approved `node server.mjs`" does not say
+      // which `server.mjs`.
+      scriptShas: input.scriptShas,
       decision: input.decision,
       operator,
     },
@@ -232,8 +470,9 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
   const db = getDb();
   db.prepare(
     `INSERT OR REPLACE INTO mcp_trust
-       (ts, server_name, origin_path, command, args_json, binary_sha, decision, operator)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (ts, server_name, origin_path, command, args_json, binary_sha, script_shas_json,
+        decision, operator)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     ts,
     input.serverName,
@@ -241,6 +480,7 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
     input.command,
     argsJson,
     input.binarySha,
+    scriptShasJson,
     input.decision,
     operator,
   );
@@ -258,7 +498,8 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
     input.binarySha === null
       ? db
           .prepare<[string, string, string, string], McpTrustRow>(
-            `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha, decision, operator
+            `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha,
+                    script_shas_json, decision, operator
                FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
                 AND binary_sha IS NULL
@@ -267,7 +508,8 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
           .get(input.serverName, input.originPath, input.command, argsJson)
       : db
           .prepare<[string, string, string, string, string], McpTrustRow>(
-            `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha, decision, operator
+            `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha,
+                    script_shas_json, decision, operator
                FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
                 AND binary_sha = ?
@@ -309,9 +551,13 @@ export function checkTrust(input: TrustLookupInput): TrustLookupResult {
       ? db
           .prepare<
             [string, string, string, string],
-            { decision: PersistedDecision; binary_sha: string | null }
+            {
+              decision: PersistedDecision;
+              binary_sha: string | null;
+              script_shas_json: string | null;
+            }
           >(
-            `SELECT decision, binary_sha FROM mcp_trust
+            `SELECT decision, binary_sha, script_shas_json FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
                 AND binary_sha IS NULL
            ORDER BY ts DESC, id DESC LIMIT 1`,
@@ -320,20 +566,50 @@ export function checkTrust(input: TrustLookupInput): TrustLookupResult {
       : db
           .prepare<
             [string, string, string, string, string],
-            { decision: PersistedDecision; binary_sha: string | null }
+            {
+              decision: PersistedDecision;
+              binary_sha: string | null;
+              script_shas_json: string | null;
+            }
           >(
-            `SELECT decision, binary_sha FROM mcp_trust
+            `SELECT decision, binary_sha, script_shas_json FROM mcp_trust
               WHERE server_name = ? AND origin_path = ? AND command = ? AND args_json = ?
                 AND binary_sha = ?
            ORDER BY ts DESC, id DESC LIMIT 1`,
           )
           .get(serverName, originPath, input.command, argsJson, candidateSha);
   if (exact) {
+    // A denial is checked FIRST and answers on its own. The three decisions are
+    // mutually exclusive so the order among them never mattered; it matters now
+    // that something sits between them. A denied server must not be re-offered
+    // to the operator because a file it points at moved — there is nothing to
+    // re-decide, and the change-prompt's buttons include Trust.
+    if (exact.decision === 'denied_remember') return { decision: 'denied_remember' };
+
+    // Cebab-1af: identity matched, so the declaration is byte-identical to the
+    // one that was approved. That is exactly the state in which a rewritten
+    // script is invisible — `binary_sha` hashes the COMMAND, and `node` has
+    // none. Ask about the files instead.
+    //
+    // Applies to `trusted` and `trusted_pinned_hash` alike. A pin is a claim
+    // about the interpreter's bytes, not the script's, so `Trust & pin hash` on
+    // `node server.mjs` never covered this either.
+    const approvedShas = parseScriptShas(exact.script_shas_json);
+    const changedPaths = changedScriptPaths(approvedShas, input.candidateScriptShas);
+    if (changedPaths.length > 0) {
+      return {
+        decision: 'script_changed',
+        changedPaths,
+        // Both non-null: `changedScriptPaths` returns [] unless they are.
+        previousShas: approvedShas!,
+        candidateShas: input.candidateScriptShas!,
+      };
+    }
+
     if (exact.decision === 'trusted') return { decision: 'trusted' };
     if (exact.decision === 'trusted_pinned_hash' && exact.binary_sha !== null) {
       return { decision: 'trusted_pinned_hash', binarySha: exact.binary_sha };
     }
-    if (exact.decision === 'denied_remember') return { decision: 'denied_remember' };
   }
   // Register D08: a denial applies at ANY sha — the rule this module's own
   // header states ("denied_remember (any sha) → silent refusal"). The exact
@@ -434,7 +710,8 @@ export function checkTrust(input: TrustLookupInput): TrustLookupResult {
 export function listForServer(serverName: string, originPath: string): McpTrustRow[] {
   return getDb()
     .prepare<[string, string], McpTrustRow>(
-      `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha, decision, operator
+      `SELECT id, ts, server_name, origin_path, command, args_json, binary_sha,
+              script_shas_json, decision, operator
         FROM mcp_trust
        WHERE server_name = ? AND origin_path = ?
     ORDER BY ts DESC, id DESC`,

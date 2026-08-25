@@ -82,6 +82,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
+      scriptShas: null,
       decision: 'denied_remember',
     });
 
@@ -117,6 +118,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
+      scriptShas: null,
       decision: 'trusted',
     });
 
@@ -147,6 +149,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
+      scriptShas: null,
       decision: 'denied_remember',
     });
     fs.writeFileSync(
@@ -159,6 +162,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       args: [],
       originPath: path.join(otherDir, '.mcp.json'),
       binarySha: null,
+      scriptShas: null,
       decision: 'trusted',
     });
 
@@ -191,6 +195,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       args: [],
       originPath: path.join(projectDir, '.mcp.json'),
       binarySha: null,
+      scriptShas: null,
       decision: 'denied_remember',
     });
 
