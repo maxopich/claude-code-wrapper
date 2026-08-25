@@ -22,7 +22,13 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit -p shared && tsc --noEmit -p server && tsc --noEmit -p web",
     "test": "vitest run",
-    "test:security": "node scripts/security-test-gate.mjs"
+    "test:security": "node scripts/security-test-gate.mjs",
+    "loop": "node scripts/loop.mjs",
+    "loop:night": "mkdir -p .loop && tmux new -d -s cebab-loop 'caffeinate -is node scripts/loop.mjs --merge --until 8 --until 07:00 2>&1 | tee -a .loop/console.log' && echo 'started \u2014 npm run loop:watch'",
+    "loop:stop": "mkdir -p .loop && touch .loop/HALT && echo 'HALT set \u2014 stops at the next stage boundary'",
+    "loop:watch": "tmux attach -t cebab-loop",
+    "loop:status": "node scripts/loop.mjs --status",
+    "loop:recover": "git checkout main && git reset --hard && (pkill -f 'tsx watch' || true) && rm -f .loop/HALT && echo recovered"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
