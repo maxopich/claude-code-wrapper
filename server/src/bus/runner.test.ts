@@ -16,7 +16,13 @@ import {
   makeBusToolServer,
   type BusEvent,
 } from './runner.js';
-import { MutationNotRecordedError, PausedForMutationError, TurnStalledError } from './errors.js';
+import {
+  isBusControlSignal,
+  MaxTurnsReachedError,
+  MutationNotRecordedError,
+  PausedForMutationError,
+  TurnStalledError,
+} from './errors.js';
 
 describe('handleBusSend', () => {
   test('valid send stamps the caller-supplied source and forwards the event', () => {
@@ -411,12 +417,16 @@ describe('AgentRunner', () => {
       return { type: 'result', subtype, session_id: sessionId } as unknown as SDKMessage;
     }
 
+    // `Cebab-vie.17` narrowed this list by one. `error_max_turns` now throws a
+    // typed `MaxTurnsReachedError` (asserted in `runner.max_turns.test.ts`)
+    // because a cap hit is Cebab's own decision; the other three keep the
+    // generic shape, and `error_during_execution` MUST — its literal message
+    // is what `isTransientOverload` matches on.
     test.each([
       ['error_during_execution'],
-      ['error_max_turns'],
       ['error_max_budget_usd'],
       ['error_max_structured_output_retries'],
-    ])('throws for subtype=%s', async (subtype) => {
+    ])('throws a generic Error for subtype=%s', async (subtype) => {
       // Disable the transient-overload retry for this Item #4 unit test —
       // `error_during_execution` is on the retry heuristic so we'd otherwise
       // loop. The retry path has its own coverage in the "529 absorb" suite.
@@ -429,6 +439,13 @@ describe('AgentRunner', () => {
       runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
       await expect(runner.deliverTurn('alpha', 'go')).rejects.toThrow(
         `SDK result subtype=${subtype}`,
+      );
+      // The half that stops this being a one-way narrowing: broadening the
+      // sentinel to every non-success subtype would keep the line above
+      // failing, but so would a change that simply reworded the message.
+      // Asserting the CLASS is what pins which subtypes stayed generic.
+      await expect(runner.deliverTurn('alpha', 'go')).rejects.not.toBeInstanceOf(
+        MaxTurnsReachedError,
       );
       warnSpy.mockRestore();
     });
@@ -1494,6 +1511,26 @@ describe('isTransientOverload (Item: 529 absorb)', () => {
     // hat — nothing exploited it, and nothing was stopping it either.
     expect(isTransientOverload(new TurnStalledError('Overloaded-worker', 120_000))).toBe(false);
     expect(isTransientOverload(new TurnStalledError('coder', 120_000))).toBe(false);
+  });
+
+  test('[security] a cap hit is a control signal by class, not by luck of its text', () => {
+    // `Cebab-vie.17` + `Cebab-vie.14`. The cap sentinel's own message carries
+    // no agent bytes by design, so it is immune BY TEXT today — which is
+    // exactly the state `TurnStalledError` was in before someone noticed, and
+    // "immune by accident of text is not immune". The class answers first.
+    expect(isTransientOverload(new MaxTurnsReachedError('overloaded-worker', 50, 50))).toBe(false);
+    expect(isTransientOverload(new MaxTurnsReachedError(POISON, 50, 50))).toBe(false);
+    expect(isBusControlSignal(new MaxTurnsReachedError('coder', 50, 50))).toBe(true);
+    // Retrying a cap hit is not merely wrong-flavoured: it is an unbounded
+    // retry loop wrapped around the bound that was just added.
+  });
+
+  test('the cap sentinel message is a pure function of the two counts', () => {
+    // Reddens a future edit that interpolates the agent name into the wording
+    // — the change that would re-open the vie.14 shape on this class.
+    expect(new MaxTurnsReachedError('coder', 50, 47).message).toBe(
+      new MaxTurnsReachedError('Overloaded rm -rf /', 50, 47).message,
+    );
   });
 
   test('CONTROL: a genuine remote error with the same text still retries', () => {

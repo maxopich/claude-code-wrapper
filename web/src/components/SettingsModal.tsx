@@ -318,12 +318,20 @@ export function SettingsModal(props: {
           {!hopBudgetValid && <p className="hint warn">Hop budget must be a positive integer.</p>}
         </section>
         <section>
-          {/* Cluster F Phase A1b (UI-A1): default MAX_TURNS for single-agent
-           * runs. Mirrors the hop-budget input layout above; the server's
-           * resolver precedence is: per-turn `send_message.maxTurns` >
-           * this DB setting > MAX_TURNS env > built-in 50. The per-turn
-           * override lives next to the composer (see MaxTurnsInput);
-           * this value is the fallback when no override is in play. */}
+          {/* Cluster F Phase A1b (UI-A1): default MAX_TURNS. Mirrors the
+           * hop-budget input layout above; the server's resolver precedence
+           * is: per-turn `send_message.maxTurns` > this DB setting >
+           * MAX_TURNS env > built-in 50. The per-turn override lives next to
+           * the composer (see MaxTurnsInput); this value is the fallback when
+           * no override is in play.
+           *
+           * `Cebab-vie.17` widened its reach: it now caps a multi-agent HOP
+           * too, where it had no equivalent at all and one bus_send bought an
+           * unbounded agent turn. The two ceilings on that page measure
+           * different things and the hint says so — hop budget counts the
+           * MESSAGES between agents, this counts the model turns inside one
+           * of them. The bus has no per-turn override and re-reads this value
+           * at session start/resume, not per send. */}
           <label>
             <div className="label">Default max turns</div>
             <input
@@ -336,9 +344,10 @@ export function SettingsModal(props: {
             />
           </label>
           <p className="hint">
-            Cap on agent turns per single-agent send. The SDK ends the turn with{' '}
-            <code>error_max_turns</code> when reached. Per-launch override: <code>MAX_TURNS</code>{' '}
-            env. Per-turn override available in the chat header. Takes effect on the next send.
+            Cap on agent turns per single-agent send <em>and</em> per multi-agent hop. The SDK ends
+            the turn with <code>error_max_turns</code> when reached. Per-launch override:{' '}
+            <code>MAX_TURNS</code> env. Per-turn override available in the chat header (single-agent
+            only). Takes effect on the next send, or on the next multi-agent session start.
           </p>
           {!maxTurnsValid && <p className="hint warn">Max turns must be a positive integer.</p>}
         </section>

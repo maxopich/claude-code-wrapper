@@ -1339,3 +1339,177 @@ describe('wireOrchestratorSession — a worker cannot write its own way past the
     unregisterLiveSession(SESSION_ID);
   });
 });
+
+describe('`Cebab-vie.17` — a bus hop is bounded, and the cap hit is recorded', () => {
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  function wireCapped(opts: {
+    maxTurns?: number;
+    result: SDKMessage;
+    captured: RunOptions[];
+    notifications: NotificationEnvelope[];
+    serverMsgs: unknown[];
+  }) {
+    const paths = computeSessionPaths(SESSION_ID);
+    fs.mkdirSync(path.join(tmpRoot, 'workspace'), { recursive: true });
+    const dir = path.join(tmpRoot, 'coder');
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject('coder', dir);
+    return wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers: [{ projectId: proj.id, agentName: 'coder', cwd: dir, projectName: 'coder' }],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+      overloadBackoffMs: [],
+      sendNotification: (env) => opts.notifications.push(env),
+      sendServerMsg: (m) => opts.serverMsgs.push(m),
+      runnerFactory: (o) => {
+        opts.captured.push(o);
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield opts.result;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      },
+    });
+  }
+
+  const capResult = {
+    type: 'result',
+    subtype: 'error_max_turns',
+    session_id: 'sess-cap',
+    num_turns: 3,
+  } as unknown as SDKMessage;
+
+  test('the session cap reaches the spawn', async () => {
+    // Non-default value on purpose — `config.maxTurns` would be satisfied by
+    // the runner's own floor even if the wiring dropped the value.
+    const captured: RunOptions[] = [];
+    const { deliver } = wireCapped({
+      maxTurns: 3,
+      result: { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage,
+      captured,
+      notifications: [],
+      serverMsgs: [],
+    });
+    deliver('coder', 'go');
+    await settle();
+    expect(captured[0]!.maxTurns).toBe(3);
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('a cap hit audits, tells the operator, AND still parks a retry', async () => {
+    // All three, deliberately. Asserting only the audit row would pass on a
+    // change that emitted INSTEAD of falling through to `onWorkerFailed`,
+    // which would silently drop the Retry chip — i.e. record the stop and
+    // remove the recovery.
+    const serverMsgs: unknown[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { deliver } = wireCapped({
+      maxTurns: 3,
+      result: capResult,
+      captured: [],
+      notifications: [],
+      serverMsgs,
+    });
+    deliver('coder', 'go');
+    await settle();
+
+    const rows = getDb()
+      .prepare(
+        `SELECT kind, reason_code, agent_id, payload_json FROM safety_audit
+         WHERE kind = 'max_turns.hit'`,
+      )
+      .all() as Array<{
+      kind: string;
+      reason_code: string;
+      agent_id: string;
+      payload_json: string;
+    }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reason_code).toBe('max_turns_exceeded');
+    expect(rows[0]!.agent_id).toBe('coder');
+    expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({
+      effectiveMaxTurns: 3,
+      numTurns: 3,
+      surface: 'bus',
+    });
+    expect(verifyChain().ok).toBe(true);
+
+    // The envelope rides `sendServerMsg` — the wiring layer's rebind-aware
+    // generic channel, which its own comment names as the `dispatcher.emit`
+    // fan-out. `sendNotification` is the ROUTER's channel and is not reachable
+    // from a `deliverTurn` `.catch`.
+    const envelopes = serverMsgs.filter(
+      (m): m is NotificationEnvelope & { type: 'notification' } =>
+        (m as { type?: string }).type === 'notification',
+    );
+    expect(envelopes).toHaveLength(1);
+    expect(envelopes[0]).toMatchObject({
+      class: 'safety',
+      severity: 'warn',
+      reasonCode: 'max_turns_exceeded',
+      sticky: true,
+      dedupeKey: `max_turns.hit:${SESSION_ID}:coder`,
+    });
+
+    const errText = listMultiAgentEvents(SESSION_ID)
+      .filter((e) => e.kind === 'error' && e.destination === USER_RECIPIENT)
+      .map((e) => e.text)
+      .join('\n');
+    // Honest and actionable, and NOT the raw SDK enum the operator used to be
+    // shown. The negative half is what makes this non-vacuous.
+    expect(errText).toContain('cap of 3 model turns (3 ran)');
+    expect(errText).toContain('Retry');
+    expect(errText).not.toContain('subtype=');
+
+    expect(getPendingRetry(SESSION_ID)).not.toBeNull();
+
+    errSpy.mockRestore();
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('a cap hit is not retried by the overload loop', async () => {
+    const captured: RunOptions[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const paths = computeSessionPaths(SESSION_ID);
+    fs.mkdirSync(path.join(tmpRoot, 'workspace'), { recursive: true });
+    const dir = path.join(tmpRoot, 'coder2');
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject('coder', dir);
+    const { deliver } = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths,
+      workers: [{ projectId: proj.id, agentName: 'coder', cwd: dir, projectName: 'coder' }],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      maxTurns: 3,
+      // Armed, and fast — so "not retried" is a real answer rather than the
+      // test merely finishing before the first backoff would have elapsed.
+      overloadBackoffMs: [0, 0, 0],
+      runnerFactory: (o) => {
+        captured.push(o);
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield capResult;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      },
+    });
+    deliver('coder', 'go');
+    await settle();
+    expect(captured).toHaveLength(1);
+    warn.mockRestore();
+    errSpy.mockRestore();
+    unregisterLiveSession(SESSION_ID);
+  });
+});

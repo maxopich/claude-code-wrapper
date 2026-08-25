@@ -1048,3 +1048,66 @@ describe('startChainSession — per-project model (Cebab-ws0.3)', () => {
     expect('model' in captured[0]!).toBe(false);
   });
 });
+
+describe('startChainSession — per-hop turn cap (`Cebab-vie.17`)', () => {
+  // Same WIRING argument as the model block above: `bus/runner.ts` is asserted
+  // against a captured factory, but nothing there proves `startChainSession`
+  // actually forwards the cap into the `AgentRunner`. Drop that one line and
+  // every unit test still passes while no chain participant is ever bounded.
+  function captureOpts(captured: { maxTurns?: number }[]) {
+    return (opts: { maxTurns?: number }): Runner => {
+      captured.push(opts);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function participant(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  test('the session cap reaches the first participant spawn', async () => {
+    const workspace = path.join(tmpRoot, 'ws-cap');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: { maxTurns?: number }[] = [];
+    await startChainSession({
+      participants: [participant('cap-a'), participant('cap-b')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      // Non-default: `config.maxTurns` would be satisfied by the runner's own
+      // floor even with the forward deleted.
+      maxTurns: 3,
+      runnerFactory: captureOpts(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.maxTurns).toBe(3);
+  });
+
+  test('a chain started without a cap is still bounded, not unbounded', async () => {
+    const workspace = path.join(tmpRoot, 'ws-nocap');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: { maxTurns?: number }[] = [];
+    await startChainSession({
+      participants: [participant('nocap-a'), participant('nocap-b')],
+      initialPrompt: 'go',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: captureOpts(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+    // `in`, not a value check: `{ maxTurns: undefined }` reaches the SDK with
+    // no cap at all, which is the state this bead removed.
+    expect('maxTurns' in captured[0]!).toBe(true);
+    expect(captured[0]!.maxTurns).toBe(config.maxTurns);
+  });
+});

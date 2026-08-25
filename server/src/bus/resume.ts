@@ -69,6 +69,9 @@ export type ResumeCallbacks = {
    *  between runs takes effect immediately. The router seeds its in-memory
    *  `hopsCount` from the DB so enforcement carries over the restart. */
   hopBudget: number;
+  /** `Cebab-vie.17`: re-resolved per-hop turn cap, for the same reason and on
+   *  the same schedule as `hopBudget` above. */
+  maxTurns: number;
   /** Item #4: pending-retry set/clear callback for a reconstructed router.
    *  Forwarded into `wireOrchestratorSession`; the initial banner restore
    *  travels on `multi_agent_started.pendingRetry` (hydrated from the
@@ -167,6 +170,7 @@ export async function attemptResumeMultiAgent(
         onEvent: callbacks.onEvent,
         onEnded: callbacks.onEnded,
         hopBudget: callbacks.hopBudget,
+        maxTurns: callbacks.maxTurns,
         onPendingRetry: callbacks.onPendingRetry,
         onMutation: callbacks.onMutation,
         onPendingMutation: callbacks.onPendingMutation,
@@ -233,6 +237,7 @@ export async function resumeMultiAgentTarget(
     | 'onEvent'
     | 'onEnded'
     | 'hopBudget'
+    | 'maxTurns'
     | 'onPendingRetry'
     | 'onMutation'
     | 'onPendingMutation'
@@ -259,6 +264,7 @@ export async function resumeMultiAgentTarget(
         onEvent: callbacks.onEvent,
         onEnded: callbacks.onEnded,
         hopBudget: callbacks.hopBudget,
+        maxTurns: callbacks.maxTurns,
         onPendingRetry: callbacks.onPendingRetry,
         onMutation: callbacks.onMutation,
         onPendingMutation: callbacks.onPendingMutation,

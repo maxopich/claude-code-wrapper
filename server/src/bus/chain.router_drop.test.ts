@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createChainRouter } from './chain.js';
 import { computeSessionPaths } from './paths.js';
+import { hopBudgetExhaustedText } from './turn_guard.js';
 import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT } from './runtime.js';
 import {
   createMultiAgentSession,
@@ -59,7 +60,10 @@ type Captured = {
   retries: Array<PendingRetryDescriptor | null>;
 };
 
-function makeRouter(agentNames: string[] = AGENTS): {
+function makeRouter(
+  agentNames: string[] = AGENTS,
+  opts: { hopBudget?: number } = {},
+): {
   router: ReturnType<typeof createChainRouter>;
   captured: Captured;
   onEnded: ReturnType<typeof vi.fn>;
@@ -81,7 +85,7 @@ function makeRouter(agentNames: string[] = AGENTS): {
     onEvent: vi.fn(),
     onEnded,
     deliver,
-    hopBudget: 1000,
+    hopBudget: opts.hopBudget ?? 1000,
     sendNotification: (env) => {
       captured.notifications.push(env);
     },
@@ -512,5 +516,62 @@ describe('[Cebab-wsq] a dropped chain event parks the run instead of wedging it'
 
     expect(deliver).not.toHaveBeenCalled();
     expect(getMultiAgentSession(SESSION_ID)!.status).toBe('running');
+  });
+});
+
+describe('[security] `Cebab-vie.17` — the chain twin writes the same row, with its own mode', () => {
+  test('the budget stop writes one audit row and one sticky toast', () => {
+    const { router, captured, onEnded } = makeRouter(AGENTS, { hopBudget: 1 });
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' }));
+
+    expect(selectAuditRows()).toEqual([
+      { kind: 'hop_budget.exhausted', reason_code: 'hop_budget_exhausted' },
+    ]);
+    expect(captured.notifications).toHaveLength(1);
+    expect(captured.notifications[0]).toMatchObject({
+      class: 'safety',
+      severity: 'warn',
+      sticky: true,
+      dedupeKey: `hop_budget.exhausted:${SESSION_ID}`,
+    });
+    expect(captured.notifications[0]!.message).toBe(hopBudgetExhaustedText(1, 1));
+    expect(onEnded).toHaveBeenCalled();
+  });
+
+  test('mode is `chain`, not the orchestrator string it was copied from', () => {
+    // The exact copy-paste this shared helper exists to make visible.
+    const { router } = makeRouter(AGENTS, { hopBudget: 1 });
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' }));
+    const payload = getDb()
+      .prepare(`SELECT payload_json FROM safety_audit WHERE kind = 'hop_budget.exhausted' LIMIT 1`)
+      .get() as { payload_json: string };
+    expect(JSON.parse(payload.payload_json)).toEqual({
+      hopsCount: 1,
+      hopBudget: 1,
+      mode: 'chain',
+    });
+  });
+
+  test('a broken audit chain does NOT stop the teardown', () => {
+    const paths = computeSessionPaths(SESSION_ID);
+    fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
+    const onEnded = vi.fn();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const router = createChainRouter({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      agentNames: AGENTS,
+      paths,
+      onEvent: vi.fn(),
+      onEnded,
+      deliver: vi.fn(),
+      hopBudget: 1,
+    });
+    getDb().exec('DROP TABLE safety_audit');
+    router.handleEvent(ev({ source: 'coder', destination: 'reviewer' }));
+
+    expect(onEnded).toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });

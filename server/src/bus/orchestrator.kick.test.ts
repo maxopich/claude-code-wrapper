@@ -249,6 +249,14 @@ describe('createOrchestratorRouter — checkTurnRefused (the replay-seam gate)',
       .filter((e) => e.kind === 'error' && e.source === CEBAB_SOURCE)
       .map((e) => e.text);
 
+  /** `Cebab-vie.17`: how many hash-chain rows say the budget stopped a run. */
+  const budgetAuditRowCount = (): number =>
+    (
+      getDb()
+        .prepare(`SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'hop_budget.exhausted'`)
+        .get() as { n: number }
+    ).n;
+
   test('a live worker is not refused, and nothing is written', () => {
     const { router, sessionId } = buildRouter();
     expect(router.checkTurnRefused('reviewer')).toBeNull();
@@ -325,6 +333,10 @@ describe('createOrchestratorRouter — checkTurnRefused (the replay-seam gate)',
     expect(router.checkTurnRefused('reviewer')).toBe('budget');
     expect(onEnded).toHaveBeenCalled();
     expect(errorTexts(sessionId).some((t) => t.includes('Hop budget exhausted'))).toBe(true);
+    // The positive control for the assertion in the next test: a real budget
+    // stop DOES write the row, so `0` there means "kick won", not "the query
+    // never finds anything".
+    expect(budgetAuditRowCount()).toBe(1);
   });
 
   test('kick outranks budget: a kicked agent is never reported as a budget stop', () => {
@@ -336,5 +348,11 @@ describe('createOrchestratorRouter — checkTurnRefused (the replay-seam gate)',
     router.kickAgent('reviewer');
     expect(router.checkTurnRefused('reviewer')).toBe('kicked');
     expect(onEnded).not.toHaveBeenCalled();
+    // `Cebab-vie.17`: and no `hop_budget.exhausted` row either. The existing
+    // `onEnded` assertion alone would not catch an emit hoisted out of
+    // `checkBudgetExhausted` and up to the `checkTurnRefused` call site — the
+    // session would stay alive while the chain recorded a stop that never
+    // happened.
+    expect(budgetAuditRowCount()).toBe(0);
   });
 });
