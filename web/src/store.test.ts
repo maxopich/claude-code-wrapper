@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   activeSession,
+  countControlledParticipants,
   eventDefaultCollapsed,
   initialState,
   isSessionPending,
@@ -929,6 +930,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
       type: 'server',
       msg: {
         type: 'multi_agent_started',
+        participantControls: [],
         sessionId: 'bus-1',
         mode: 'orchestrator',
         participants: [10, 20],
@@ -1127,6 +1129,7 @@ describe('store / agent_activity (ephemeral liveness)', () => {
       type: 'server',
       msg: {
         type: 'multi_agent_started',
+        participantControls: [],
         sessionId: 'sess-A',
         mode: 'orchestrator',
         participants: [1, 2],
@@ -1224,6 +1227,7 @@ describe('store / hop budget', () => {
       type: 'server',
       msg: {
         type: 'multi_agent_started',
+        participantControls: [],
         sessionId: 's-budget',
         mode: 'orchestrator',
         participants: [1],
@@ -1264,9 +1268,162 @@ describe('store / hop budget', () => {
 // the `multi_agent_pending_retry` ServerMsg, (c) clear on session end so the
 // banner doesn't linger on a stopped/crashed row, and (d) honor the
 // optimistic `ma_clear_pending_retry` action with idempotent re-asserts.
+// `Cebab-vie.6` / `Cebab-vie.4`: control state is REPLAYED on attach.
+//
+// Mute, pause and kick were durable and reseeded server-side from the start;
+// the browser was the half that forgot. Every attach handed this reducer an
+// empty control map, so after a refresh the menu computed `isMuted === false`
+// and rendered **Mute…** for an agent the router was still muting, and
+// **Pause…** for one whose turns were still parked behind a live gate — the
+// Unmute and Resume items are drawn from exactly the state that had gone
+// missing. The server kept enforcing all three; the operator simply lost every
+// affordance that undoes them.
+//
+// `ParticipantControlMenu.test.tsx` already pins the second half of that
+// sentence ("muted=true: Unmute… replaces Mute…", "paused alive: only
+// Resume…"). The missing link was only ever this fold, which is why it is the
+// only new client-side case.
+describe('store / participant controls hydrate on attach (Cebab-vie.6, Cebab-vie.4)', () => {
+  const base = {
+    type: 'multi_agent_started' as const,
+    sessionId: 's-ctrl',
+    mode: 'orchestrator' as const,
+    participants: [7, 8],
+    participantAgentNames: ['orchestrator', 'alpha', 'beta'],
+    lifecycle: 'persistent' as const,
+    sessionFolder: '/ws/.cebab/s-ctrl',
+    hopBudget: 30,
+    pauseOnDangerous: false,
+    mutations: [],
+    pendingMutations: [],
+    participantControls: [],
+  };
+
+  test('an empty array leaves the map empty (fresh start is unchanged)', () => {
+    const s = reduce(initialState, { type: 'server', msg: base });
+    expect(s.multiAgent.active!.participantControls).toEqual({});
+  });
+
+  test('snapshots are keyed by projectId and keep every field', () => {
+    const pausedUntil = Date.now() + 60_000;
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...base,
+        participantControls: [
+          {
+            projectId: 7,
+            muted: true,
+            mutedReasonCode: 'runaway_loop' as const,
+            mutedReasonText: 'looping',
+            pausedUntil: null,
+            kickedAt: null,
+          },
+          {
+            projectId: 8,
+            muted: false,
+            pausedUntil,
+            pauseExpiryAction: 'auto_kick' as const,
+            pauseReasonCode: 'forensics' as const,
+            kickedAt: null,
+          },
+        ],
+      },
+    });
+    const controls = s.multiAgent.active!.participantControls;
+    expect(Object.keys(controls)).toEqual(['7', '8']);
+    expect(controls[7]).toEqual({
+      projectId: 7,
+      muted: true,
+      mutedReasonCode: 'runaway_loop',
+      mutedReasonText: 'looping',
+      pausedUntil: null,
+      kickedAt: null,
+    });
+    expect(controls[8].pausedUntil).toBe(pausedUntil);
+    expect(controls[8].pauseExpiryAction).toBe('auto_kick');
+    // The reduction the whole bead is about: this is what the menu reads to
+    // decide between Mute… and Unmute…, and between Pause… and Resume….
+    expect(controls[7].muted).toBe(true);
+    expect(controls[8].pausedUntil !== null && controls[8].pausedUntil > Date.now()).toBe(true);
+  });
+
+  test('a hydrated entry is merged onto, not replaced, by a later live echo', () => {
+    // The two paths have to compose: a mute that arrived at attach and a pause
+    // issued afterwards belong to one participant. A reducer that hydrated by
+    // overwriting would silently drop the standing mute on the next verb.
+    const attached = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...base,
+        participantControls: [
+          {
+            projectId: 7,
+            muted: true,
+            mutedReasonCode: 'off_task' as const,
+            pausedUntil: null,
+            kickedAt: null,
+          },
+        ],
+      },
+    });
+    const pausedUntil = Date.now() + 60_000;
+    const s = reduce(attached, {
+      type: 'server',
+      msg: {
+        type: 'participant_pause_changed',
+        sessionId: 's-ctrl',
+        projectId: 7,
+        pausedUntil,
+        expiryAction: 'auto_resume',
+        reasonCode: 'forensics',
+        actor: 'operator',
+        queuedDeliveries: 0,
+        ts: Date.now(),
+      },
+    });
+    const ctrl = s.multiAgent.active!.participantControls[7];
+    expect(ctrl.muted).toBe(true);
+    expect(ctrl.pausedUntil).toBe(pausedUntil);
+  });
+
+  test('an expired pause deadline is hydrated as-is — the client decides liveness', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...base,
+        participantControls: [
+          { projectId: 7, muted: false, pausedUntil: Date.now() - 60_000, kickedAt: null },
+        ],
+      },
+    });
+    // Not filtered on either side. `countControlledParticipants` and the pills
+    // both apply `> now`, so a stale deadline reads as not-paused without any
+    // party having to decide that once and freeze it.
+    expect(s.multiAgent.active!.participantControls[7].pausedUntil).toBeLessThan(Date.now());
+    expect(countControlledParticipants(s.multiAgent.active!, Date.now())).toBe(0);
+  });
+
+  test('a kicked participant survives the attach', () => {
+    const kickedAt = Date.now() - 5_000;
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...base,
+        participantControls: [
+          { projectId: 8, muted: false, pausedUntil: null, kickedAt, kickMode: 'drain' as const },
+        ],
+      },
+    });
+    expect(s.multiAgent.active!.participantControls[8].kickedAt).toBe(kickedAt);
+    expect(countControlledParticipants(s.multiAgent.active!, Date.now())).toBe(1);
+  });
+});
+
 describe('store / pending retry', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
+    participantControls: [],
     sessionId: 's-pr',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -1423,6 +1580,7 @@ describe('store / pending retry', () => {
 describe('store / pause-on-dangerous + mutations', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
+    participantControls: [],
     sessionId: 's-pom',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -1763,6 +1921,7 @@ describe('store / trustChipState (Item #6)', () => {
 describe('store / recoveryContext (Item #7)', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
+    participantControls: [],
     sessionId: 's-rec',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -1852,6 +2011,7 @@ describe('store / recoveryContext (Item #7)', () => {
 describe('store / router_drop accumulation (Phase 6d)', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
+    participantControls: [],
     sessionId: 's-drop',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -1968,6 +2128,7 @@ describe('store / participant control reducer cases', () => {
       type: 'server',
       msg: {
         type: 'multi_agent_started',
+        participantControls: [],
         sessionId: 'bus-1',
         mode: 'orchestrator',
         participants: [PID, 42, 9, 7],
@@ -2162,6 +2323,7 @@ describe('store / countControlledParticipants', () => {
       type: 'server',
       msg: {
         type: 'multi_agent_started',
+        participantControls: [],
         sessionId: 'bus-2',
         mode: 'chain',
         participants: [PID],
@@ -2185,6 +2347,7 @@ describe('store / countControlledParticipants', () => {
       type: 'server',
       msg: {
         type: 'multi_agent_started',
+        participantControls: [],
         sessionId: 'bus-3',
         mode: 'orchestrator',
         participants: [PID, 1, 2, 3, 4],
@@ -2783,6 +2946,7 @@ describe('store / session_started threads mock onto SessionView + knownSessions 
 describe('store / multi_agent_started.mock projection (Phase 2c)', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
+    participantControls: [],
     sessionId: 'bus-m',
     mode: 'orchestrator' as const,
     participants: [1],
