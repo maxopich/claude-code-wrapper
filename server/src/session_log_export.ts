@@ -126,6 +126,18 @@ const SAFE_SID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
  */
 export const REDACTED_CONTENT_POLICY = 'redacted/no-stream-partials';
 
+/**
+ * Stands in for a line the export could not parse — a hand-edited log, or (the
+ * reachable case) a final line torn by a concurrent append while a live session
+ * is being exported.
+ *
+ * Deliberately NOT an SDK message type, and deliberately not silence: a reader
+ * can tell a 68-line artifact with one unparsable line from a 67-line one, and
+ * `bytes` says how much was there. What it does not do is hand over bytes no
+ * rule has inspected.
+ */
+export const UNPARSABLE_LINE_TYPE = 'cebab_unparsable_line';
+
 export type ExportFormat = 'redacted' | 'raw';
 
 /**
@@ -166,10 +178,19 @@ export function exportFilename(sessionId: string, sessionStartMs: number | null)
  *     session skip a full walk. See `runner/message_classes.ts` for why the
  *     rule is shared with the `events` writer rather than spelled here.
  *   - **Anything else → parsed, redacted, re-serialized.**
- *   - **Not valid JSON → preserved verbatim.** The operator may have hand-
- *     edited the file, or a concurrent write may have torn the final line, and
- *     silently dropping it would lose forensic data. Empty lines (the newline
- *     after the last line) pass through the same way.
+ *   - **Not valid JSON → a placeholder recording that a line was here.** This
+ *     used to ship the bytes verbatim, reasoned as "the operator may have
+ *     hand-edited the file, and silently dropping it would lose forensic
+ *     data". The reasoning is right and the conclusion was the bypass: a
+ *     concurrent write TEARS the final line, which is the ordinary case when
+ *     exporting a live session — `runner/logger.ts` appends to a `flags: 'a'`
+ *     stream with no coordination against readers, and this route opens a read
+ *     stream with none either. Measured: `readline` emits the truncated tail as
+ *     a line, `JSON.parse` fails, and a torn `content_block_delta` therefore
+ *     sailed past the class rule with its text intact. So the FACT of the line
+ *     survives — with its byte count, which is the forensic signal — and the
+ *     unvetted bytes do not. Empty lines (the newline after the last line) pass
+ *     through unchanged.
  *
  * The shape guard before reading `.type` is not defensive noise: `JSON.parse`
  * legitimately returns `null`, a number, a string or an array for a hand-edited
@@ -187,7 +208,10 @@ export function redactJsonlLine(line: string): string | null {
     const { redacted } = redactSensitive(parsed);
     return JSON.stringify(redacted);
   } catch {
-    return line;
+    return JSON.stringify({
+      type: UNPARSABLE_LINE_TYPE,
+      bytes: Buffer.byteLength(line, 'utf8'),
+    });
   }
 }
 

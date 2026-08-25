@@ -33,6 +33,7 @@ import {
   RAW_ACK_VALUE,
   REDACTED_CONTENT_POLICY,
   redactJsonlLine,
+  UNPARSABLE_LINE_TYPE,
 } from './session_log_export.js';
 import { isStreamPartial } from './runner/message_classes.js';
 
@@ -146,9 +147,38 @@ describe('redactJsonlLine', () => {
     });
   });
 
-  test('preserves non-JSON lines verbatim (hand-edited or torn writes)', () => {
+  test('records that an unparsable line was here, without shipping its bytes', () => {
+    // REWRITTEN, not deleted (`Cebab-ygu.47`). This used to assert verbatim
+    // passthrough, reasoned as "silently dropping non-JSON would lose forensic
+    // data" — and its own name said "torn writes", so the repo already knew
+    // about the case and chose to ship the bytes. That choice is the bypass:
+    // a torn `content_block_delta` never reaches the class rule, so it sailed
+    // through with its text intact. The forensic intent is kept — the fact and
+    // the size survive — and the unvetted bytes are what go.
     const garbage = 'this is not json at all';
-    expect(redactJsonlLine(garbage)).toBe(garbage);
+    const out = redactJsonlLine(garbage);
+    expect(out).not.toBeNull();
+    expect(out).not.toContain(garbage);
+    expect(JSON.parse(out!)).toEqual({
+      type: UNPARSABLE_LINE_TYPE,
+      bytes: Buffer.byteLength(garbage, 'utf8'),
+    });
+  });
+
+  test('[security] a TORN delta does not ship its text', () => {
+    // The reachable shape, and the whole reason the case above changed:
+    // `logger.ts` appends with no coordination against readers, so exporting a
+    // live session routinely observes a final line the writer has not finished.
+    // Measured: readline emits it, JSON.parse fails.
+    //
+    // The torn line must be a DELTA carrying the canary — a torn `assistant`
+    // line would pass this test while the bypass stayed wide open.
+    const torn =
+      '{"type":"stream_event","event":{"type":"content_block_delta","index":0,' +
+      `"delta":{"type":"text_delta","text":"plain_marker = ${'REDACTION' + '-CANARY-' + '77'}`;
+    const out = redactJsonlLine(torn);
+    expect(out).not.toContain('REDACTION' + '-CANARY-' + '77');
+    expect(JSON.parse(out!).type).toBe(UNPARSABLE_LINE_TYPE);
   });
 
   test('redacts a nested ApiKey case-insensitively', () => {
