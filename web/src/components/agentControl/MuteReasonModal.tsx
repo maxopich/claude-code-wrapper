@@ -87,7 +87,16 @@ type ActionCopy = {
 const COPY: Record<MuteAction, ActionCopy> = {
   mute: {
     verb: 'Mute',
-    help: 'Drop every outbound bus event this participant produces at the orchestrator router. The agent is NOT told — its bus_send returns success regardless. Reversible via Unmute.',
+    // `Cebab-vie.8`: the second sentence about Unmute is the bead's residual.
+    // "Reversible via Unmute" was true and read as more than it said — an
+    // operator reasonably heard "nothing is lost". What is reversible is the
+    // dropping; the messages dropped meanwhile are gone, and Unmute does not
+    // replay them (pinned at `server/src/bus/orchestrator.mute.test.ts`). The
+    // case that costs the most is muting a participant the orchestrator is
+    // waiting on: its reply is discarded and the run is left with nobody
+    // working. Cebab now posts a note when that happens, and saying so here is
+    // what turns the note from a surprise into the thing they were warned of.
+    help: 'Drop every outbound bus event this participant produces at the orchestrator router. The agent is NOT told — its bus_send returns success regardless. Unmute stops the dropping, but does not replay what was dropped: mute a participant the orchestrator is waiting on and its reply is discarded, leaving the run with nobody working until you send a prompt or Stop. Cebab posts a note in the transcript when that happens.',
   },
   unmute: {
     verb: 'Unmute',
