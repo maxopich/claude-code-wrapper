@@ -67,7 +67,14 @@ export function ParticipantStatePills({ control }: ParticipantStatePillsProps) {
         <span
           className="ma-control-pill is-kicked"
           aria-label={`kicked${reason}`}
-          title={`This participant has been kicked from the session${reason ? '. Reason' + reason : ''}. They will not send or receive any further bus events.`}
+          // `Cebab-vie.12`: this said only "will not send or receive any
+          // further bus events" — literally true and load-bearingly narrow,
+          // because a delivered prompt is not a bus event. A delivery already
+          // queued for this worker started a full turn anyway
+          // (`Cebab-vie.11`). Now that no turn starts either, the pill can say
+          // the thing the operator actually needs, and the in-flight
+          // exception is named rather than left to the modal.
+          title={`This participant has been kicked from the session${reason ? '. Reason' + reason : ''}. They will not send or receive any further bus events, and no further turns will start for them — any turn already running finishes.`}
         >
           <span aria-hidden="true">⨯</span> kicked
         </span>

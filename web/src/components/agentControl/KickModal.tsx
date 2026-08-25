@@ -106,8 +106,10 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
         </header>
         <p className="gate-modal-help">
           Kick drops this participant from the routing set. The in-flight turn (if any) drains in
-          the background; further bus_send calls from this agent are dropped at the router. There is
-          no <em>unkick</em> verb — the participant is out for the rest of this session.
+          the background; further bus_send calls from this agent are dropped at the router. Any
+          delivery still waiting in its queue is discarded rather than run, and Retry and Continue
+          are refused for it. There is no <em>unkick</em> verb — the participant is out for the rest
+          of this session.
         </p>
         <p className="gate-modal-help">
           A multi-agent forensic bundle (recent bus events, mutations attributed to this agent) is

@@ -24,6 +24,13 @@ import type { MultiAgentRun } from '../../store';
 // upgrade to --warn — kick is a stronger statement and worth a visual
 // nudge so the operator notices the participant is permanently out of
 // the loop for this session.
+//
+// `Cebab-vie.12`: the kicked tooltip used to say "out of the loop until the
+// session ends", which was false — a delivery already queued for that worker
+// still ran a full tool-capable turn (`Cebab-vie.11`). It now describes what
+// kick does rather than what it was meant to do, in-flight turn included,
+// because "out of the loop" is exactly the phrase that made the drain
+// exception invisible.
 
 export type ParticipantControlsCounterProps = {
   run: MultiAgentRun;
@@ -87,7 +94,7 @@ export function ParticipantControlsCounter({ run }: ParticipantControlsCounterPr
       aria-label={`${n} participant${n === 1 ? '' : 's'} controlled (${breakdownText})`}
       title={
         anyKicked
-          ? `${n} participant${n === 1 ? '' : 's'} controlled this session: ${breakdownText}. At least one has been kicked — they're out of the loop until the session ends.`
+          ? `${n} participant${n === 1 ? '' : 's'} controlled this session: ${breakdownText}. At least one has been kicked — no further turns start for them, and any turn still running finishes.`
           : `${n} participant${n === 1 ? '' : 's'} controlled this session: ${breakdownText}.`
       }
     >
