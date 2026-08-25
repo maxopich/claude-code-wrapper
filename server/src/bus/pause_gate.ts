@@ -90,6 +90,14 @@ export function decidePauseForMutation(
   // So the two callers that can still reach this line are a sibling `tool_use`
   // block from the dead turn, and a genuine second call inside it. Both are
   // this turn; neither is a new one.
+  //
+  // `Cebab-vie.16`: the first of those two was aspirational when it was
+  // written. A pause threw out of the runner's block loop, so the blocks after
+  // it in the same assistant message were never classified, never persisted and
+  // never audited — the sibling could not reach this line because it could not
+  // reach the tap. The runner replays them now, after closing the subprocess,
+  // and this branch is what makes that replay quiet: recorded, no second
+  // banner, no second throw.
   if (agent.hasPendingPause) return { action: 'run' };
   return { action: 'pause' };
 }

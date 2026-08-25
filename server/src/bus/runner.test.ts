@@ -548,6 +548,377 @@ describe('AgentRunner', () => {
       expect(seen[2]!.summary).toContain('rm -rf');
     });
 
+    // --- Cebab-vie.16: the blocks AFTER the one that paused --------------
+    //
+    // A pause ends the turn by throwing out of the tap, and that throw used to
+    // end the block loop with it. So a worker that emitted two dangerous
+    // commands in ONE assistant message paused on the first and left Cebab's
+    // ledgers holding only that one — no `multi_agent_mutations` row for the
+    // second, no guardrail verdict, no dangerous-mutation notification and so
+    // no hash-chained `safety_audit` row, and no pending-mutation entry.
+    // Meanwhile whether the CLI had already dispatched it is a race
+    // (`Cebab-vie.15`), so there was no record in either direction.
+    //
+    // Two things in the tree already described this as live before it was:
+    // `decidePauseForMutation`'s comment ("the two callers that can still
+    // reach this line are a sibling `tool_use` block from the dead turn…") and
+    // `pause_gate.integration.test.ts`'s "a sibling call from the already-dead
+    // turn takes no second hold", which was green while testing a call the
+    // runner never made.
+    describe('[security] a pause no longer hides the rest of its own message', () => {
+      function twoDangerousBlocks(): SDKMessage {
+        return {
+          type: 'assistant',
+          message: {
+            content: [
+              { type: 'tool_use', id: 'first', name: 'Bash', input: { command: 'rm -rf /tmp/a' } },
+              { type: 'tool_use', id: 'second', name: 'Bash', input: { command: 'rm -rf /tmp/b' } },
+            ],
+          },
+        } as unknown as SDKMessage;
+      }
+
+      /** Pauses on the FIRST tapped call only, like the real gate. */
+      function pauseOnceRunner(
+        seen: { tool: string; summary: string; toolUseId?: string; filePath?: string }[],
+        opts: { error?: () => Error; closes?: string[] } = {},
+      ) {
+        let tapped = 0;
+        return new AgentRunner({
+          onEvent: () => {},
+          onMutation: async (_agent, toolName, _cwd, cls) => {
+            tapped++;
+            if (tapped === 1)
+              throw (
+                opts.error ?? (() => new PausedForMutationError('paused before rm -rf /tmp/a'))
+              )();
+            seen.push({
+              tool: toolName,
+              summary: cls.summary,
+              ...(cls.toolUseId !== undefined ? { toolUseId: cls.toolUseId } : {}),
+              ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
+            });
+            opts.closes?.push('tap');
+          },
+          runnerFactory: () => {
+            const inner = fakeRunner([twoDangerousBlocks(), resultMsg('sess-x')]);
+            return {
+              ...inner,
+              close: () => opts.closes?.push('close'),
+            };
+          },
+        });
+      }
+
+      test('the second block is still tapped after the first one pauses', async () => {
+        const seen: { tool: string; summary: string; toolUseId?: string }[] = [];
+        const runner = pauseOnceRunner(seen);
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(
+          PausedForMutationError,
+        );
+        expect(seen).toHaveLength(1);
+        expect(seen[0]!.summary).toContain('rm -rf /tmp/b');
+      });
+
+      test('it arrives through the same tap, so its payload is complete', async () => {
+        // The deferred replay shares one body with the loop. A record-only
+        // shortcut would be a second, thinner spelling of the ledger — this is
+        // what would notice.
+        const seen: { tool: string; summary: string; toolUseId?: string; filePath?: string }[] = [];
+        let tapped = 0;
+        const runner = new AgentRunner({
+          onEvent: () => {},
+          onMutation: async (_agent, toolName, cwd, cls) => {
+            tapped++;
+            if (tapped === 1) throw new PausedForMutationError('paused before rm -rf /tmp/a');
+            seen.push({
+              tool: toolName,
+              summary: cls.summary,
+              ...(cls.toolUseId !== undefined ? { toolUseId: cls.toolUseId } : {}),
+              ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
+            });
+            expect(cwd).toBe('/tmp/coder');
+            expect(cls.category).toBe('mutate');
+            // Cluster F: the out-of-scope verdict has to survive the deferral —
+            // it is the field the guardrail audit row is written from.
+            expect(cls.guardrailViolation?.violatedPath).toBe('/etc/passwd');
+          },
+          runnerFactory: () =>
+            fakeRunner([
+              {
+                type: 'assistant',
+                message: {
+                  content: [
+                    {
+                      type: 'tool_use',
+                      id: 'first',
+                      name: 'Bash',
+                      input: { command: 'rm -rf /tmp/a' },
+                    },
+                    {
+                      type: 'tool_use',
+                      id: 'second',
+                      name: 'Write',
+                      input: { file_path: '/etc/passwd', content: 'x' },
+                    },
+                  ],
+                },
+              } as unknown as SDKMessage,
+              resultMsg('sess-x'),
+            ]),
+        });
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(
+          PausedForMutationError,
+        );
+        expect(seen).toEqual([
+          {
+            tool: 'Write',
+            summary: expect.stringContaining('/etc/passwd'),
+            toolUseId: 'second',
+            filePath: '/etc/passwd',
+          },
+        ]);
+      });
+
+      test('the replay runs AFTER the subprocess is closed', async () => {
+        // The ordering is the design, not an accident. Recording inline before
+        // rethrowing would delay the throw, and the throw plus close() is what
+        // may reap the subprocess before the CLI dispatches the sibling. A row
+        // two milliseconds later is worth the same; a kill two milliseconds
+        // later is not.
+        const order: string[] = [];
+        const runner = pauseOnceRunner([], { closes: order });
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(
+          PausedForMutationError,
+        );
+        expect(order).toEqual(['close', 'tap']);
+      });
+
+      test('the pause is still what reaches the router, unchanged', async () => {
+        const runner = pauseOnceRunner([]);
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        const err = await runner.deliverTurn('coder', 'go').catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(PausedForMutationError);
+        expect((err as Error).message).toBe('paused before rm -rf /tmp/a');
+      });
+
+      test('MutationNotRecordedError defers the same way', async () => {
+        // Cebab-aqd's fail-closed path exits the loop identically, and its
+        // siblings are the ones least likely to be recorded by anything else.
+        const seen: { tool: string; summary: string }[] = [];
+        const runner = pauseOnceRunner(seen, {
+          error: () => new MutationNotRecordedError('Bash', 'rm -rf /tmp/a'),
+        });
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(
+          MutationNotRecordedError,
+        );
+        expect(seen.map((m) => m.summary)).toEqual([expect.stringContaining('rm -rf /tmp/b')]);
+      });
+
+      test('a deferred block that throws AGAIN is logged, and the first error still escapes', async () => {
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        try {
+          const runner = new AgentRunner({
+            onEvent: () => {},
+            onMutation: async (_agent, _tool, _cwd, cls) => {
+              throw new PausedForMutationError(`paused before ${cls.summary}`);
+            },
+            runnerFactory: () => fakeRunner([twoDangerousBlocks(), resultMsg('sess-x')]),
+          });
+          runner.register({ name: 'coder', cwd: '/tmp/coder' });
+          const err = await runner.deliverTurn('coder', 'go').catch((e: unknown) => e);
+          // The FIRST pause is the operator's banner; a second throw from the
+          // dead turn must not overwrite it.
+          expect((err as Error).message).toContain('rm -rf /tmp/a');
+          expect(errSpy).toHaveBeenCalled();
+        } finally {
+          errSpy.mockRestore();
+        }
+      });
+
+      test('an ID-LESS block that paused is not replayed on top of itself', async () => {
+        // What makes `slice(i + 1)` load-bearing, and it is only visible here.
+        // For a block carrying a `tool_use` id the off-by-one is inert: the id
+        // enters `tappedToolUseIds` BEFORE the hook is awaited, so re-tapping
+        // it returns at the dedupe check — measured, by reverting the `+ 1` and
+        // watching every other case in this describe stay green. An id-less
+        // block has no such absorber ("it cannot be recognised as a repeat"),
+        // so the slice index is the only thing keeping the halted call out of
+        // the ledger twice.
+        const seen: string[] = [];
+        let tapped = 0;
+        const runner = new AgentRunner({
+          onEvent: () => {},
+          onMutation: async (_a, _t, _c, cls) => {
+            tapped++;
+            if (tapped === 1) throw new PausedForMutationError('paused before rm -rf /tmp/a');
+            seen.push(cls.summary);
+          },
+          runnerFactory: () =>
+            fakeRunner([
+              {
+                type: 'assistant',
+                message: {
+                  content: [
+                    { type: 'tool_use', name: 'Bash', input: { command: 'rm -rf /tmp/a' } },
+                    { type: 'tool_use', name: 'Bash', input: { command: 'rm -rf /tmp/b' } },
+                  ],
+                },
+              } as unknown as SDKMessage,
+              resultMsg('sess-x'),
+            ]),
+        });
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        await expect(runner.deliverTurn('coder', 'go')).rejects.toBeInstanceOf(
+          PausedForMutationError,
+        );
+        expect(seen).toEqual([expect.stringContaining('rm -rf /tmp/b')]);
+      });
+
+      test('control: a message that completes normally defers nothing', async () => {
+        const seen: string[] = [];
+        const runner = new AgentRunner({
+          onEvent: () => {},
+          onMutation: async (_a, _t, _c, cls) => {
+            seen.push(cls.summary);
+          },
+          runnerFactory: () => fakeRunner([twoDangerousBlocks(), resultMsg('sess-x')]),
+        });
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        await runner.deliverTurn('coder', 'go');
+        // Both tapped once each, in order, by the loop — not one by the loop
+        // and one by a replay that fired when it should not have.
+        expect(seen).toHaveLength(2);
+        expect(seen[0]).toContain('rm -rf /tmp/a');
+        expect(seen[1]).toContain('rm -rf /tmp/b');
+      });
+
+      test('control: an error from OUTSIDE the tap defers nothing', async () => {
+        // A stall, an SDK failure, an aborted stream: there is no partially
+        // tapped message, so there is nothing to replay. Stashing
+        // unconditionally would replay a message that was fully processed.
+        const seen: string[] = [];
+        const runner = new AgentRunner({
+          onEvent: () => {},
+          onMutation: async (_a, _t, _c, cls) => {
+            seen.push(cls.summary);
+          },
+          runnerFactory: () => ({
+            [Symbol.asyncIterator]: async function* () {
+              yield twoDangerousBlocks();
+              throw new Error('SDK exploded');
+            },
+            close: () => {},
+          }),
+        });
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        await expect(runner.deliverTurn('coder', 'go')).rejects.toThrow('SDK exploded');
+        expect(seen).toHaveLength(2);
+      });
+    });
+
+    // --- Cebab-vie.16: the halted agent dispatches nothing else ----------
+    //
+    // The deferred replay above makes the sibling call VISIBLE. This makes it
+    // not happen. `canUseTool` is the only thing the CLI asks before dispatch,
+    // and `src/bus_pause_gate_smoke.ts` measured (2026-08-25) that it IS
+    // consulted for an in-cwd `Bash` and an in-cwd `Write`, and that a deny
+    // returned there stops the command — the auto-approve window is reads, and
+    // the gate never fires on reads.
+    describe('[security] canUseTool denies while a mutation hold stands', () => {
+      function gated() {
+        return new AgentRunner({
+          onEvent: () => {},
+          // Presence of the ask hook is what selects production's
+          // `permissionMode: 'default'` + live canUseTool posture.
+          onAskUserQuestion: async () => 'answer',
+        });
+      }
+      /** The callback the SDK would be handed for this agent. */
+      function gateFor(runner: InstanceType<typeof AgentRunner>, agent: string) {
+        return (
+          runner as unknown as {
+            makeCanUseTool: (
+              a: string,
+            ) => (
+              t: string,
+              i: unknown,
+              c: { toolUseID: string },
+            ) => Promise<{ behavior: string; message?: string }>;
+          }
+        ).makeCanUseTool(agent);
+      }
+
+      test('a held agent is denied; the same agent unheld is allowed', async () => {
+        const runner = gated();
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        const gate = gateFor(runner, 'coder');
+        // Control first: nothing held, the bus's auto-allow posture stands.
+        expect((await gate('Bash', { command: 'ls' }, { toolUseID: 't1' })).behavior).toBe('allow');
+        runner.holdForMutation('coder');
+        const denied = await gate('Bash', { command: 'rm -rf /tmp/b' }, { toolUseID: 't2' });
+        expect(denied.behavior).toBe('deny');
+        expect(denied.message).toContain('waiting for operator approval');
+      });
+
+      test('releasing the hold restores dispatch — the Continue replay is not blocked', async () => {
+        const runner = gated();
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        const gate = gateFor(runner, 'coder');
+        runner.holdForMutation('coder');
+        expect((await gate('Bash', { command: 'x' }, { toolUseID: 't1' })).behavior).toBe('deny');
+        // `continueThroughMutation` calls this BEFORE re-delivering the
+        // captured prompt, so the replayed turn must find the gate open.
+        runner.releaseMutationHold('coder');
+        expect((await gate('Bash', { command: 'x' }, { toolUseID: 't2' })).behavior).toBe('allow');
+      });
+
+      test('an OPERATOR pause does not deny — Pause stays a scheduling gate', async () => {
+        // `Cebab-vie.2` is open on precisely this: a paused agent's running
+        // turn keeps going by design. Denying on the operator holder would
+        // half-close it here, silently, in a change about something else. The
+        // two holders share one gate, so `pauseGates.has(agent)` would NOT
+        // distinguish them — the holder set is the whole distinction.
+        const runner = gated();
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        const gate = gateFor(runner, 'coder');
+        runner.pause('coder');
+        expect(
+          (await gate('Bash', { command: 'rm -rf /tmp/b' }, { toolUseID: 't1' })).behavior,
+        ).toBe('allow');
+      });
+
+      test('the hold is per agent', async () => {
+        const runner = gated();
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        runner.register({ name: 'scribe', cwd: '/tmp/scribe' });
+        runner.holdForMutation('coder');
+        expect((await gateFor(runner, 'coder')('Bash', {}, { toolUseID: 'a' })).behavior).toBe(
+          'deny',
+        );
+        expect((await gateFor(runner, 'scribe')('Bash', {}, { toolUseID: 'b' })).behavior).toBe(
+          'allow',
+        );
+      });
+
+      test('a held agent can still be asked a question — the deny order matters', async () => {
+        // AskUserQuestion is how the operator is reached. It is parked, not
+        // dispatched, so the mutation deny must not swallow it... except it
+        // does, and deliberately: a halted turn is being ended, not consulted.
+        // Pinned so the choice is visible if anyone changes the order.
+        const runner = gated();
+        runner.register({ name: 'coder', cwd: '/tmp/coder' });
+        runner.holdForMutation('coder');
+        const r = await gateFor(runner, 'coder')('AskUserQuestion', {}, { toolUseID: 'q' });
+        expect(r.behavior).toBe('deny');
+        expect(r.message).toContain('waiting for operator approval');
+      });
+    });
+
     // --- B10: the tap must not record a call the policy will deny ---------
     //
     // A `tool_use` block says the SDK is ABOUT to dispatch. For a
