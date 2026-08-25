@@ -170,12 +170,31 @@ describe('[security] a hostile project CLAUDE.md is injected as inert, fenced te
 
     // It never produced a routed bus event. Every persisted/forwarded event
     // is Cebab-sourced (briefing, the compact marker, the initial prompt) —
-    // nothing sourced from a participant, and no dest=user final.
+    // nothing sourced from a participant, and no forged `final`.
     const events = listMultiAgentEvents(handle.sessionId);
     expect(events.length).toBeGreaterThan(0);
     expect(events.every((e) => e.source === CEBAB_SOURCE)).toBe(true);
-    expect(events.some((e) => e.destination === USER_RECIPIENT)).toBe(false);
     expect(events.some((e) => e.text.includes('PWNED'))).toBe(false);
+    expect(events.some((e) => e.kind === 'final')).toBe(false);
+
+    // `Cebab-vie.8` rewrote the assertion that used to sit here — a blanket
+    // `no event has destination=user`. It read as a forgery check and was
+    // really a proxy for "nothing was routed", so it went red the moment Cebab
+    // itself gained a reason to address the operator: this participant's turn
+    // ends without a `bus_send`, which strands the chain, and the stranded-run
+    // detector says so.
+    //
+    // Rewritten rather than deleted, and strictly stronger: it pins WHOSE the
+    // `dest=user` row is and what it says, so a forged one would still fail —
+    // where "there are none" would have passed for a forgery the moment
+    // anything legitimate appeared alongside it.
+    const toUser = events.filter((e) => e.destination === USER_RECIPIENT);
+    expect(toUser).toHaveLength(1);
+    expect(toUser[0]!.source).toBe(CEBAB_SOURCE);
+    expect(toUser[0]!.text).toContain('Nothing is running in this session');
+    // Chain mode has no operator composer, so the row must not offer one.
+    expect(toUser[0]!.text).toContain('only way out');
+    expect(toUser[0]!.text).not.toContain('PWNED');
 
     unregisterLiveSession(handle.sessionId);
   });

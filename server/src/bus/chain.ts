@@ -58,6 +58,7 @@ import {
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
+  getLastMultiAgentEvent,
   getPendingRetry,
   recordSessionTeardown,
   setMutationPromoted,
@@ -90,6 +91,7 @@ import {
   MutationNotRecordedError,
 } from './errors.js';
 import { hopBudgetExhaustedText, turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
+import { decideStrandedRun, strandedRunText, type StrandedCause } from './quiescence.js';
 import {
   applyPauseGate,
   findPendingMutation,
@@ -269,6 +271,16 @@ type ChainRouter = {
    * operator has already been told.
    */
   checkTurnRefused: (agentName: string) => TurnRefusalReason | null;
+  /**
+   * `Cebab-vie.8`: turn-liveness bookkeeping, called by `deliver` and by its
+   * `.finally`. The router owns the count so every conjunct of the
+   * stranded-run decision is read in one place — see `bus/quiescence.ts`.
+   *
+   * `onTurnStarted` also clears the recorded router drop: a turn starting
+   * means the drop is no longer the last thing that happened in this session.
+   */
+  onTurnStarted: () => void;
+  onTurnSettled: (agentName: string) => void;
 };
 
 /**
@@ -328,6 +340,13 @@ export function createChainRouter(params: {
    *  `BusSink.sendServerMsg` so the rebound sink keeps shipping the
    *  dangerous-mutation safety toast. */
   sendServerMsg?: BusSink['sendServerMsg'];
+  /**
+   * `Cebab-vie.8`: is any agent's turn queue held right now? Injected because
+   * the gates live on the `AgentRunner` and this module is pure routing — the
+   * same reason the security tests can build this router standalone. Absent
+   * means "no gates", which for a router with no runner is the truth.
+   */
+  isAnyGateHeld?: () => boolean;
 }): ChainRouter {
   const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
     params;
@@ -357,6 +376,14 @@ export function createChainRouter(params: {
   // run.
   let sinkEpoch = 0;
   let ended = false;
+  /**
+   * `Cebab-vie.8`: how many `deliverTurn` calls are outstanding, and the last
+   * message this router threw away. A chain is linear, so the count is only
+   * ever 0 or 1 — it is a count anyway so the two routers read identically,
+   * and so a future parallel chain stage cannot silently break the rule.
+   */
+  let turnsInFlight = 0;
+  let lastDrop: StrandedCause | null = null;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Incremented on every successful append (handleEvent + forwardCebabEvent)
   // so it stays in lockstep with what the UI sees as `run.events.length`.
@@ -440,6 +467,15 @@ export function createChainRouter(params: {
     title: string;
     message: string;
   }) => {
+    // `Cebab-vie.8`: one set site — every drop in this router funnels through
+    // here. Recorded unconditionally; a drop that did NOT strand the run is
+    // simply overwritten by the next `onTurnStarted`.
+    lastDrop = {
+      reasonCode: params.reasonCode,
+      source: params.source,
+      destination: params.destination,
+      kind: params.kind,
+    };
     const result = emitNotification(
       {
         class: 'safety',
@@ -1018,6 +1054,69 @@ export function createChainRouter(params: {
   // If no last prompt is known (the agent failed before `deliver` was
   // ever called, e.g. an unknown-agent error), we fall back to crashed
   // teardown — there's nothing to retry.
+  /**
+   * `Cebab-vie.8`: a turn started / a turn settled, and — on the settle that
+   * takes the count to zero — has this run been left with nobody running and a
+   * trail that still says otherwise?
+   *
+   * Chain mode has no mute verb, so the drop that strands it is a different
+   * one: a participant addressing an agent that is not on the roster, or the
+   * non-terminal participant reaching for `_sink`. The shape afterwards is
+   * identical, including the false `X working` bar, which is why this is a
+   * shared detector rather than a mute-specific patch.
+   *
+   * The recovery sentence is NOT: a chain handle carries `sendUserPrompt:
+   * null`, so there is no composer and Stop really is the only way out. Saying
+   * otherwise here would repeat the mistake that made this bead's own notes
+   * wrong about orchestrator mode.
+   *
+   * Persisted directly, bypassing `forwardCebabEvent`, so it does not bump
+   * `hopsCount` — same reason `onWorkerFailed` below and the budget-exhaust
+   * row do.
+   */
+  const onTurnStarted = () => {
+    turnsInFlight += 1;
+    lastDrop = null;
+  };
+  const onTurnSettled = (agentName: string) => {
+    turnsInFlight = Math.max(0, turnsInFlight - 1);
+    const decision = decideStrandedRun({
+      turnsInFlight,
+      ended,
+      anyGateHeld: params.isAnyGateHeld?.() ?? false,
+      tail: getLastMultiAgentEvent(sessionId),
+      cause: lastDrop,
+    });
+    if (!decision) return;
+    const text = strandedRunText({
+      awaitingAgent: decision.awaitingAgent,
+      cause: decision.cause,
+      recovery: 'stop-only',
+    });
+    console.warn(
+      `[chain] stranded run after ${agentName}'s turn: nothing in flight, ` +
+        `tail awaits ${decision.awaitingAgent}`,
+    );
+    // Deliberately NOT `captureError` — mirrors the orchestrator's reasoning,
+    // and keeps the two modes' rails comparable.
+    try {
+      const row = appendMultiAgentEvent(sessionId, CEBAB_SOURCE, USER_RECIPIENT, 'error', text);
+      try {
+        sink.onEvent(
+          sessionId,
+          { ts: row.ts, source: CEBAB_SOURCE, destination: USER_RECIPIENT, kind: 'error', text },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[chain] stranded-run onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      // The tail still points at the agent, so the next settle can try again.
+      // Throwing would surface inside a `.finally`.
+      console.error('[chain] persist stranded-run event failed', persistErr);
+    }
+  };
+
   const onWorkerFailed = (agentName: string, prompt: string, err: unknown) => {
     if (ended) return;
     // Cebab-wsq: this turn failed, so it will never reach `onTurnSucceeded`,
@@ -1134,6 +1233,8 @@ export function createChainRouter(params: {
     onWorkerFailed,
     onTurnSucceeded,
     checkTurnRefused,
+    onTurnStarted,
+    onTurnSettled,
   };
 }
 
@@ -1568,6 +1669,11 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     // re-uses these exact bytes won't double-brief.)
     const deliveredPrompt = prompt;
     lastPromptOut.set(agentName, deliveredPrompt);
+    // `Cebab-vie.8`: bracket the turn. This is the ONLY `deliverTurn` call
+    // site in chain mode — Retry, Continue-through-mutation and every routed
+    // hop funnel through `deliver` — so the count is complete by construction
+    // rather than by enumerating callers.
+    router.onTurnStarted();
     void runner
       .deliverTurn(agentName, prompt)
       .then(() => {
@@ -1620,7 +1726,14 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         console.error(`[chain] deliverTurn(${agentName}) failed`, err);
         router.onWorkerFailed(agentName, deliveredPrompt, err);
       })
-      .finally(() => activity.onTurnEnd(agentName));
+      .finally(() => {
+        activity.onTurnEnd(agentName);
+        // AFTER the `.then`/`.catch` above: `onWorkerFailed` writes its own
+        // `cebab → user` row, and the stranded check reads the tail that row
+        // leaves behind. Reversing the order would report a failed participant
+        // as a wedged run.
+        router.onTurnSettled(agentName);
+      });
   };
 
   router = createChainRouter({
@@ -1628,6 +1741,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     iterationId,
     agentNames,
     paths,
+    isAnyGateHeld: () => runner.anyGateHeld(),
     onEvent: opts.onEvent,
     onEnded: opts.onEnded,
     onTeardown,

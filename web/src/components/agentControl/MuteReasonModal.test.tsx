@@ -120,6 +120,35 @@ describe('MuteReasonModal — render', () => {
   });
 });
 
+describe('MuteReasonModal — the stranded-delegation warning (Cebab-vie.8)', () => {
+  test("mute's help says what Unmute does NOT undo", () => {
+    // The bead's residual. "Reversible via Unmute" was true and read as more
+    // than it said: an operator reasonably heard "nothing is lost". What is
+    // reversible is the dropping — the dropped messages are gone, and the case
+    // that costs most is muting a participant the orchestrator is waiting on.
+    //
+    // Asserted on the rendered text rather than on the COPY constant, because
+    // a help string that stops being rendered is the same defect as one that
+    // stops being true.
+    render({ action: 'mute', agentLabel: 'scribe' });
+    const help = document.querySelector('.mute-reason-modal')?.textContent ?? '';
+    expect(help).toContain('does not replay');
+    expect(help).toContain('nobody working');
+  });
+
+  test('unmute and resume do not carry the mute warning', () => {
+    // Negative control. `REASON_OPTIONS` is one list rendered identically for
+    // all three verbs, so a warning appended in the wrong place would show on
+    // verbs it does not describe — which is the cross-verb copy defect tracked
+    // separately as `Cebab-vie.5`.
+    for (const action of ['unmute', 'resume'] as const) {
+      render({ action, agentLabel: 'scribe' });
+      const help = document.querySelector('.mute-reason-modal')?.textContent ?? '';
+      expect(help, action).not.toContain('nobody working');
+    }
+  });
+});
+
 describe('MuteReasonModal — action prop changes copy', () => {
   test('action=mute: title and button say Mute', () => {
     render({ action: 'mute', agentLabel: 'beta' });

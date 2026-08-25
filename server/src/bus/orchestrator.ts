@@ -40,6 +40,7 @@ import {
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
+  getLastMultiAgentEvent,
   getPendingRetry,
   getProjectBusState,
   listPendingMutations,
@@ -77,6 +78,7 @@ import {
   MutationNotRecordedError,
 } from './errors.js';
 import { hopBudgetExhaustedText, turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
+import { decideStrandedRun, strandedRunText, type StrandedCause } from './quiescence.js';
 import {
   applyPauseGate,
   findPendingMutation,
@@ -465,6 +467,17 @@ type OrchestratorRouter = {
    * contract is shaped like `checkBudgetExhausted`'s.
    */
   checkTurnRefused: (agentName: string) => TurnRefusalReason | null;
+  /**
+   * `Cebab-vie.8`: turn-liveness bookkeeping, called by `deliver` and by its
+   * `.finally`. The router owns the count (not the wiring) so that every
+   * conjunct of the stranded-run decision is read in one place — see
+   * `bus/quiescence.ts`.
+   *
+   * `onTurnStarted` also clears the recorded router drop: a turn starting
+   * means the drop is no longer the last thing that happened in this session.
+   */
+  onTurnStarted: (agentName: string) => void;
+  onTurnSettled: (agentName: string) => void;
 };
 
 /**
@@ -548,6 +561,18 @@ export function createOrchestratorRouter(params: {
    * a future R-A/R-B-control-state slice).
    */
   initialKickedAgents?: readonly string[];
+  /**
+   * `Cebab-vie.8`: is any agent's turn queue held right now? Injected rather
+   * than read, because the gates live on the `AgentRunner` and this module is
+   * about routing. The stranded-run check needs it to tell a wedged run from a
+   * held one — a paused (or mutation-held) worker also ends its turn with the
+   * tail pointing at itself, but the operator has a Resume/Continue button.
+   *
+   * Optional so the many test call sites that build a bare router keep
+   * compiling; absent means "no gates", which for a router with no runner is
+   * the truth.
+   */
+  isAnyGateHeld?: () => boolean;
 }): OrchestratorRouter {
   const {
     sessionId,
@@ -576,6 +601,17 @@ export function createOrchestratorRouter(params: {
    * intent.
    */
   const mutedSet: Set<string> = new Set(params.initialMutedAgents ?? []);
+  /**
+   * `Cebab-vie.8`: how many `deliverTurn` calls are outstanding, and the last
+   * message this router threw away.
+   *
+   * The count is what makes "nobody is running" observable at all — the bus
+   * runs several workers in parallel, so the agent whose turn just ended is
+   * not evidence about the session. The drop is cleared whenever a turn
+   * starts, so if it is still set when the count reaches zero, it is why.
+   */
+  let turnsInFlight = 0;
+  let lastDrop: StrandedCause | null = null;
   /**
    * Cluster C Phase 4d (spec §3 invariant 1 + §5.1 kick semantics): set of
    * agent slugs the operator has kicked. Unlike `mutedSet` (one-way: drop
@@ -806,6 +842,16 @@ export function createOrchestratorRouter(params: {
     title: string;
     message: string;
   }) => {
+    // `Cebab-vie.8`: one set site, because every drop in this router already
+    // funnels through here. Recording it unconditionally is deliberate — a
+    // drop that did NOT strand the run is simply overwritten by the next
+    // `onTurnStarted`, and no drop reason is privileged over another.
+    lastDrop = {
+      reasonCode: params.reasonCode,
+      source: params.source,
+      destination: params.destination,
+      kind: params.kind,
+    };
     const result = emitNotification(
       {
         class: 'safety',
@@ -1182,6 +1228,78 @@ export function createOrchestratorRouter(params: {
   };
   const getLifecycle = (): MultiAgentLifecycle => lifecycleRef;
 
+  /**
+   * `Cebab-vie.8`: a turn started / a turn settled, and — on the settle that
+   * takes the count to zero — has this run been left with nobody running and a
+   * trail that still says otherwise?
+   *
+   * The decision itself is `decideStrandedRun` (`bus/quiescence.ts`), which
+   * holds all four conjuncts so dropping one is a visible edit. Everything
+   * here is the state it reads.
+   *
+   * The note is persisted DIRECTLY, bypassing `forwardCebabEvent`, so it does
+   * not bump `hopsCount` — same reason `onWorkerFailed` and
+   * `checkBudgetExhausted` do. Cebab explaining why a run stopped is not a hop
+   * the run took, and counting it would make the operator's `n / budget` chip
+   * disagree with the trail.
+   *
+   * Self-limiting: the row lands with `destination = 'user'`, so the next
+   * `tailAwaitsAgent` is false and the same stranding cannot be reported
+   * twice. No flag, nothing to keep in sync, and it re-arms by itself if the
+   * operator sends a prompt and the run strands again.
+   */
+  const onTurnStarted = () => {
+    turnsInFlight += 1;
+    lastDrop = null;
+  };
+  const onTurnSettled = (agentName: string) => {
+    turnsInFlight = Math.max(0, turnsInFlight - 1);
+    const decision = decideStrandedRun({
+      turnsInFlight,
+      ended,
+      anyGateHeld: params.isAnyGateHeld?.() ?? false,
+      tail: getLastMultiAgentEvent(sessionId),
+      cause: lastDrop,
+    });
+    if (!decision) return;
+    const text = strandedRunText({
+      awaitingAgent: decision.awaitingAgent,
+      cause: decision.cause,
+      recovery: 'orchestrator-prompt',
+    });
+    console.warn(
+      `[orchestrator] stranded run after ${agentName}'s turn: nothing in flight, ` +
+        `tail awaits ${decision.awaitingAgent}`,
+    );
+    // Deliberately NOT `captureError`. `first_error` is permanent, and an
+    // orchestrator run the operator rescues with one prompt should not carry a
+    // stop-reason for a stop that did not stick — unlike a worker failure or a
+    // budget exhaust, both of which really are the end.
+    try {
+      const row = appendMultiAgentEvent(sessionId, CEBAB_SOURCE, USER_RECIPIENT, 'error', text);
+      try {
+        sink.onEvent(
+          sessionId,
+          {
+            ts: row.ts,
+            source: CEBAB_SOURCE,
+            destination: USER_RECIPIENT,
+            kind: 'error',
+            text,
+          },
+          row.id,
+        );
+      } catch (sinkErr) {
+        console.error('[orchestrator] stranded-run onEvent threw', sinkErr);
+      }
+    } catch (persistErr) {
+      // A failed persist means the tail still points at the agent, so the next
+      // settle re-evaluates and can try again. Nothing is lost by not throwing
+      // here, and throwing would surface inside a `.finally`.
+      console.error('[orchestrator] persist stranded-run event failed', persistErr);
+    }
+  };
+
   // Worker failure handler (Item #4). The deliver() .catch in
   // wireOrchestratorSession calls this when a worker's deliverTurn rejects
   // (iterator throw OR non-success result.subtype). Persist a synthetic
@@ -1364,6 +1482,8 @@ export function createOrchestratorRouter(params: {
     kickAgent: (agentName) => setKick(agentName, true),
     isKicked,
     checkTurnRefused,
+    onTurnStarted,
+    onTurnSettled,
   };
 }
 
@@ -1956,6 +2076,11 @@ export function wireOrchestratorSession(p: {
     // agent is.
     const deliveredPrompt = prompt;
     lastPrompt.set(agentName, deliveredPrompt);
+    // `Cebab-vie.8`: bracket the turn. This is the ONLY `deliverTurn` call
+    // site in the router — Retry, Continue-through-mutation, the roster prompt
+    // and every routed hop all funnel through `deliver` — so the count is
+    // complete by construction rather than by enumerating callers.
+    router.onTurnStarted(agentName);
     void runner
       .deliverTurn(agentName, prompt)
       .then(() => {
@@ -2016,7 +2141,15 @@ export function wireOrchestratorSession(p: {
         console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
         router.onWorkerFailed(agentName, deliveredPrompt, err);
       })
-      .finally(() => activity.onTurnEnd(agentName));
+      .finally(() => {
+        activity.onTurnEnd(agentName);
+        // AFTER `onTurnEnd`, and after the `.then`/`.catch` above have run:
+        // `onWorkerFailed` writes its own `cebab → user` row and parks a
+        // pending-retry slot, and the stranded check reads the tail that row
+        // leaves behind. Reversing the order would have the detector see the
+        // pre-failure tail and report a failed worker as a wedged run.
+        router.onTurnSettled(agentName);
+      });
   };
 
   router = createOrchestratorRouter({
@@ -2025,6 +2158,7 @@ export function wireOrchestratorSession(p: {
     workerNames,
     paths,
     lifecycle,
+    isAnyGateHeld: () => runner.anyGateHeld(),
     onEvent: p.onEvent,
     onEnded: p.onEnded,
     onTeardown,

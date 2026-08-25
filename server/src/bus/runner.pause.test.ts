@@ -346,6 +346,75 @@ describe('AgentRunner — the mutation hold is a second, independent holder [sec
   });
 });
 
+describe('AgentRunner — anyGateHeld (Cebab-vie.8)', () => {
+  // The stranded-run detector asks this to tell "nobody is running because the
+  // run is wedged" apart from "nobody is running because a gate is holding
+  // somebody, and the operator has a Continue/Resume button". Getting it wrong
+  // in the false direction puts a red note on a healthy paused run.
+  //
+  // Every case pairs a true with the false either side of it, because a
+  // hard-coded `return true` satisfies each "is held" assertion on its own and
+  // a hard-coded `return false` satisfies each "is not held" one.
+  test('false with no gates, true while the operator holds one, false after resume', () => {
+    const { runnerFactory } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    expect(runner.anyGateHeld()).toBe(false);
+    expect(runner.pause('alpha')).toBe(true);
+    expect(runner.anyGateHeld()).toBe(true);
+    expect(runner.resume('alpha')).toBe(true);
+    expect(runner.anyGateHeld()).toBe(false);
+  });
+
+  test('the pause-on-dangerous hold counts too', () => {
+    // Reddens if `anyGateHeld` is written against the operator holder only —
+    // which is the likelier mistake, since "paused" reads as an operator verb.
+    // The mutation hold is the case the detector actually needs: it is what
+    // ends a worker's turn while the tail still points at that worker.
+    const { runnerFactory } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    expect(runner.holdForMutation('alpha')).toBe(true);
+    expect(runner.isPaused('alpha')).toBe(false);
+    expect(runner.anyGateHeld()).toBe(true);
+    expect(runner.releaseMutationHold('alpha')).toBe(true);
+    expect(runner.anyGateHeld()).toBe(false);
+  });
+
+  test('two holders on one agent: releasing one leaves the gate held', () => {
+    // Reddens an implementation that treats the first release as the last —
+    // the same one-verb-lifts-another-verb's-hold defect `releaseHold`'s
+    // holder set exists to prevent, seen from the detector's side.
+    const { runnerFactory } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    runner.pause('alpha');
+    runner.holdForMutation('alpha');
+    expect(runner.anyGateHeld()).toBe(true);
+    runner.resume('alpha');
+    expect(runner.anyGateHeld()).toBe(true);
+    runner.releaseMutationHold('alpha');
+    expect(runner.anyGateHeld()).toBe(false);
+  });
+
+  test('it is ANY agent, not one named agent', () => {
+    // The detector has no agent to ask about: it has just watched the last
+    // running turn settle and wants to know whether anything at all can still
+    // move the run. Reddens a per-agent narrowing.
+    const { runnerFactory } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    runner.register({ name: 'beta', cwd: '/tmp/beta' });
+
+    expect(runner.pause('beta')).toBe(true);
+    expect(runner.isPaused('alpha')).toBe(false);
+    expect(runner.anyGateHeld()).toBe(true);
+  });
+});
+
 /**
  * Poll until predicate true. The pause-release path advances via
  * microtasks; `await new Promise(setTimeout)` lets the chain flush so the

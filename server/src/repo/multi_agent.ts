@@ -1256,6 +1256,36 @@ export function appendMultiAgentEvent(
     .get(Number(info.lastInsertRowid))!;
 }
 
+/**
+ * `Cebab-vie.8`: the session's most recent event, or `undefined` for a session
+ * with none.
+ *
+ * The routers ask this when a turn settles and no turn is left running, to
+ * decide whether the run has been left waiting on an agent that will never
+ * answer (`bus/quiescence.ts`). It is a DB read rather than a field the router
+ * keeps in step, and that is the whole point: four separate places persist an
+ * event (`handleEvent`, `forwardCebabEvent`, `onWorkerFailed`,
+ * `checkBudgetExhausted`, and the note this exists for makes five), so a
+ * mirrored copy would need every one of them to remember. Reading the table
+ * means the detector and the operator's scrollback cannot disagree about which
+ * event came last, because they are looking at the same row.
+ *
+ * `ORDER BY id DESC LIMIT 1`, not by `ts`: `ts` is `Date.now()` at insert, so
+ * several events from one hop routinely share a millisecond and a `ts` order
+ * has no defined answer among them. SQLite happens to return the last-inserted
+ * row for such a tie today (measured), which is exactly why not to depend on
+ * it — and a clock that steps backwards between two writes makes the two
+ * orders disagree outright. `id` is the insertion order the projector already
+ * sorts by, so the detector reads the same "last" row the operator sees.
+ */
+export function getLastMultiAgentEvent(sessionId: string): MultiAgentEventRow | undefined {
+  return getDb()
+    .prepare<[string], MultiAgentEventRow>(
+      'SELECT * FROM multi_agent_events WHERE session_id = ? ORDER BY id DESC LIMIT 1',
+    )
+    .get(sessionId);
+}
+
 export function listMultiAgentEvents(sessionId: string, sinceId = 0): MultiAgentEventRow[] {
   return getDb()
     .prepare<[string, number], MultiAgentEventRow>(

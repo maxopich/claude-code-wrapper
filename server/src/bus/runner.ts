@@ -879,6 +879,36 @@ export class AgentRunner {
     return this.pendingDeliveries.get(agentName) ?? 0;
   }
 
+  /**
+   * `Cebab-vie.8`: is ANY agent's turn queue held, by any holder?
+   *
+   * The stranded-run detector needs this because a held queue is the one way a
+   * run can have zero turns running and still not be stuck: the pause-on-
+   * dangerous gate ends the worker's turn by throwing
+   * `PausedForMutationError`, leaving the event tail pointing at the worker it
+   * held, and an operator pause does the same to whatever is delivered next.
+   * Both hand the operator a Continue/Resume affordance, so neither is a run
+   * that needs telling it has stopped.
+   *
+   * Holder-agnostic on purpose. The detector's question is "is something going
+   * to move this run again", and both holders answer it the same way — asking
+   * per holder would be a distinction with no consequence here, and one more
+   * place to forget a third holder.
+   *
+   * A gate entry only exists while it is held: `releaseHold` deletes the map
+   * entry when the last holder lets go, so a non-empty map already means a live
+   * hold. The per-entry `holders.size` check below is therefore redundant
+   * against that invariant, and kept anyway — it costs nothing and it is what
+   * stops this returning true forever if a future holder ever leaves an empty
+   * gate behind.
+   */
+  anyGateHeld(): boolean {
+    for (const gate of this.pauseGates.values()) {
+      if (gate.holders.size > 0) return true;
+    }
+    return false;
+  }
+
   /** Test-only probe: is the OPERATOR holding this agent's queue? */
   isPaused(agentName: string): boolean {
     return this.pauseGates.get(agentName)?.holders.has('operator') === true;

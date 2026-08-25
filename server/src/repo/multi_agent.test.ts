@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { upsertProject } from './projects.js';
@@ -16,6 +16,7 @@ import {
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
+  getLastMultiAgentEvent,
   getLastRunForTemplate,
   getMultiAgentSession,
   listMultiAgentEvents,
@@ -346,6 +347,81 @@ describe('clearFinishedMultiAgentSessions', () => {
     expect(listMultiAgentSessions().map((r) => r.id)).toEqual(['alive']);
     expect(listParticipants('alive')).toHaveLength(1);
     expect(listMultiAgentEvents('alive')).toHaveLength(1);
+  });
+});
+
+describe('getLastMultiAgentEvent (Cebab-vie.8)', () => {
+  test('returns undefined for a session with no events', () => {
+    createMultiAgentSession('empty', 'orchestrator', 'i');
+    expect(getLastMultiAgentEvent('empty')).toBeUndefined();
+  });
+
+  test('returns the most recently inserted row, not the newest timestamp', () => {
+    // MEASURED: the tie case does NOT discriminate. Three inserts inside one
+    // millisecond leave `ORDER BY ts DESC` and `ORDER BY id DESC` returning
+    // the same row, because SQLite happens to scan in rowid order and its sort
+    // keeps that order for equal keys. Swapping the implementation to `ts` and
+    // running the tie case alone comes back green.
+    //
+    // Which is the reason to key on `id` rather than a reason not to test it:
+    // the tie behaviour is an implementation accident, not a documented
+    // guarantee, and ties are routine (`appendMultiAgentEvent` stamps
+    // `Date.now()`, and one hop writes several events per millisecond). So the
+    // case below makes the two orders genuinely disagree — a clock that steps
+    // backwards between two writes, which NTP does — and asserts insertion
+    // order wins. That is the mutation this test exists to redden.
+    createMultiAgentSession('s', 'orchestrator', 'i');
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      nowSpy.mockReturnValue(1_700_000_000_000);
+      appendMultiAgentEvent('s', 'cebab', 'orchestrator', 'prompt', 'first');
+      // The highest `ts` in the session belongs to the MIDDLE row.
+      nowSpy.mockReturnValue(1_700_000_000_900);
+      appendMultiAgentEvent('s', 'orchestrator', 'scribe', 'prompt', 'second');
+      nowSpy.mockReturnValue(1_700_000_000_100);
+      appendMultiAgentEvent('s', 'scribe', 'orchestrator', 'reply', 'third');
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const last = getLastMultiAgentEvent('s');
+    expect(last?.text).toBe('third');
+    expect(last?.destination).toBe('orchestrator');
+    const all = listMultiAgentEvents('s');
+    expect(last?.id).toBe(all[all.length - 1]!.id);
+    // Positive control on the premise: the newest-by-ts row really is a
+    // different one, so "third" cannot be the answer both orders would give.
+    const newestByTs = [...all].sort((a, b) => b.ts - a.ts)[0]!;
+    expect(newestByTs.text).toBe('second');
+  });
+
+  test('a tie on ts is the routine case, and still answers', () => {
+    // Not a discriminator (see above) — it pins the ordinary shape: several
+    // events written by one hop inside a single millisecond must still yield
+    // the last one, not a throw or an arbitrary pick.
+    createMultiAgentSession('tied', 'orchestrator', 'i');
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    try {
+      appendMultiAgentEvent('tied', 'cebab', 'orchestrator', 'prompt', 'a');
+      appendMultiAgentEvent('tied', 'orchestrator', 'scribe', 'prompt', 'b');
+    } finally {
+      nowSpy.mockRestore();
+    }
+    const all = listMultiAgentEvents('tied');
+    expect(new Set(all.map((e) => e.ts)).size).toBe(1);
+    expect(getLastMultiAgentEvent('tied')?.text).toBe('b');
+  });
+
+  test('is scoped to the session', () => {
+    // Reddens a query that forgot its WHERE clause: with one busy session on
+    // the box, an unscoped tail would answer every other session's detector.
+    createMultiAgentSession('mine', 'orchestrator', 'i');
+    createMultiAgentSession('theirs', 'chain', 'j');
+    appendMultiAgentEvent('mine', 'orchestrator', 'scribe', 'prompt', 'mine-last');
+    appendMultiAgentEvent('theirs', 'a', 'b', 'reply', 'theirs-last');
+
+    expect(getLastMultiAgentEvent('mine')?.text).toBe('mine-last');
+    expect(getLastMultiAgentEvent('theirs')?.text).toBe('theirs-last');
   });
 });
 
