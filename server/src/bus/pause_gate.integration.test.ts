@@ -217,6 +217,12 @@ describe('pause gate over a real DB [security]', () => {
       expect(holds).toEqual([]);
     });
 
+    // `Cebab-vie.16`: this case is REACHABLE now. It was written against
+    // `decidePauseForMutation`'s stated contract and was green the whole time
+    // while describing a call the runner never made — the pause's throw exited
+    // the block loop, so no sibling ever reached the gate. The runner now
+    // replays the dying message's remaining blocks through the same tap, which
+    // is the caller this always meant.
     test('a sibling call from the already-dead turn takes no second hold', () => {
       gate('coder', 'rm -rf /tmp/x');
       const holds: string[] = [];

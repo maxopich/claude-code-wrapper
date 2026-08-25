@@ -145,6 +145,18 @@ export type BusEvent = {
 /** Minimal MCP tool-result shape (structurally a `CallToolResult`). */
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
+/**
+ * One content block off a raw `assistant` SDKMessage, narrowed only as far as
+ * the mutation tap needs. Deliberately loose — `type` is checked at use, and a
+ * block that is not a `tool_use` is skipped rather than rejected, because this
+ * narrows an SDK shape the runner does not own.
+ *
+ * Named (`Cebab-vie.16`) because it is now the parameter type of an extracted
+ * method and the element type of the deferred-replay array, not just an inline
+ * cast at one site.
+ */
+type ToolUseBlock = { type?: string; name?: string; id?: string; input?: unknown };
+
 function toolError(text: string): ToolResult {
   return { content: [{ type: 'text', text }], isError: true };
 }
@@ -1166,6 +1178,48 @@ export class AgentRunner {
             `bus_send instead of doing it yourself.`,
         };
       }
+      // `Cebab-vie.16` [security]: an agent halted at an unapproved dangerous
+      // command dispatches nothing else.
+      //
+      // A pause stops the turn by throwing out of the mutation tap, and the
+      // tap runs per BLOCK — so the second `tool_use` of the same assistant
+      // message was never Cebab's to stop: the throw had already left the
+      // block loop, and whether the CLI dispatched it was a race the parent
+      // only sometimes wins (`Cebab-vie.15`). This is the seam that decides
+      // that race, because it is the one thing the CLI asks BEFORE dispatch.
+      //
+      // The `'mutation'` holder specifically, never `'operator'`. An operator
+      // pause is documented as a turn-SCHEDULING gate that does not touch the
+      // running turn — `Cebab-vie.2` is open on exactly that, and quietly
+      // half-closing it here would change what the Pause button means in a
+      // change about something else. `holders` is the distinction; `pauseGates`
+      // membership is not.
+      //
+      // Free and exact: `applyPauseGate` installs the hold BEFORE the pending
+      // write, the sink and the throw, deliberately ("so the hold cannot be
+      // missed by any path that gives up between here and the throw"), so by
+      // the time a sibling's control request arrives the Map already says so.
+      // No DB read on a per-tool-call path.
+      //
+      // MEASURED, because this seam is not a universal gate and a deny here
+      // could have been decoration — `src/bus_pause_gate_smoke.ts`, 2026-08-25:
+      // an in-cwd Read is resolved by the CLI and never reaches this callback,
+      // but an in-cwd `Bash` and an in-cwd `Write` are both consulted, and a
+      // deny returned here stops the command from running. The bypassed class
+      // is reads; the gate only ever fires on `dangerous`; they do not overlap.
+      //
+      // The Continue path is unaffected: `continueThroughMutation` calls
+      // `releaseMutationHold` BEFORE re-delivering, so the replayed turn's
+      // first tool call finds no hold.
+      if (this.pauseGates.get(agentName)?.holders.has('mutation')) {
+        return {
+          behavior: 'deny',
+          message:
+            `Cebab has paused you at a dangerous command that is waiting for operator ` +
+            `approval, so \`${toolName}\` was not run. Stop issuing tool calls and end ` +
+            `your turn; the operator will decide whether the paused command proceeds.`,
+        };
+      }
       if (toolName !== 'AskUserQuestion' || !onAsk) {
         return { behavior: 'allow', updatedInput: input };
       }
@@ -1186,6 +1240,101 @@ export class AgentRunner {
         else this.parked.set(agentName, remaining);
       }
     };
+  }
+
+  /**
+   * Tap ONE `tool_use` block: classify it, skip what the policy would deny or
+   * the ledger already has, attach the guardrail verdict, and hand it to the
+   * mutation hook — which persists it, emits it, and may throw to halt the
+   * turn (the pause-on-dangerous gate).
+   *
+   * Extracted from the message loop for `Cebab-vie.16`. It has two callers now
+   * and they differ only in what they do with a throw: the loop stashes the
+   * blocks after this one and lets it propagate; the deferred replay in the
+   * `finally` logs and moves on, because the turn is already over by then. One
+   * body rather than two means the replayed block gets the identical treatment
+   * — same classifier, same dedupe, same guardrail verdict, same hook payload
+   * — which is the whole point. A record-only shortcut for the deferred path
+   * would have been a second, thinner spelling of the ledger, and the thinner
+   * one is the one nobody reads until it is wrong.
+   */
+  private async tapToolUseBlock(
+    agentName: string,
+    spec: AgentSpec,
+    delegateOnly: boolean,
+    tappedToolUseIds: Set<string>,
+    block: ToolUseBlock,
+  ): Promise<void> {
+    if (!this.deps.onMutation) return;
+    if (block?.type !== 'tool_use') return;
+    const toolName = typeof block.name === 'string' ? block.name : '';
+    if (!toolName) return;
+    // B10: this block says the SDK is ABOUT to dispatch — not that it
+    // will. For a `delegate-only` agent, `makeCanUseTool` denies
+    // everything outside `isDelegationAllowedTool` when the SDK asks,
+    // which is AFTER this message. Without this check the orchestrator
+    // writing a stray `Bash` gets a dangerous mutation row, and can
+    // trip the pause-on-dangerous gate and halt the session, for a
+    // command that never ran.
+    //
+    // Deliberately the SAME predicate the gate uses rather than a
+    // copy: two spellings of "what may the orchestrator call" would
+    // drift, and the copy that drifts is the one nobody is testing.
+    if (delegateOnly && !isDelegationAllowedTool(toolName)) return;
+    const cls = classifyToolCall(toolName, block.input);
+    if (cls.category === 'read') return;
+    const toolUseId = typeof block.id === 'string' ? block.id : undefined;
+    // B15: a retry re-runs this turn with the same prompt and may
+    // `--resume` the failed attempt's checkpoint, so a block seen
+    // once can arrive again. Fire once per id per hop.
+    //
+    // An id-less block always fires: it cannot be recognised as a
+    // repeat, and silently dropping it would lose a real mutation.
+    // Over-recording an unidentifiable call is the safer error for a
+    // ledger the pause gate reads.
+    //
+    // `Cebab-vie.16`: the deferred replay shares this set with the loop that
+    // stashed the block, so a block recorded there is not recorded twice.
+    if (toolUseId !== undefined) {
+      if (tappedToolUseIds.has(toolUseId)) return;
+      tappedToolUseIds.add(toolUseId);
+    }
+    // Cluster F Phase D5+: classify path scope vs agent cwd. The
+    // consultant-mode prompt forbids out-of-scope mutations; this
+    // surfaces violations post-hoc rather than denying them. (Not
+    // because there is no gate — `makeCanUseTool` above IS live on
+    // every production turn; it allows everything for agents without
+    // `toolPolicy: 'delegate-only'`. See guardrail.ts's header for
+    // why turning that seam into enforcement is not free.) The
+    // verdict rides on the hook payload — the orchestrator/chain
+    // sink persists it on the mutation row and the WS broadcast
+    // fan-out fires the safety_audit dispatcher. In-scope
+    // mutations (the common case) carry no `guardrailViolation`
+    // field, so existing tests / sinks that don't look at the
+    // field continue to behave identically.
+    const scope = classifyMutationScope({
+      agentCwd: spec.cwd,
+      filePath: cls.filePath,
+    });
+    const guardrailViolation = scope.inScope
+      ? undefined
+      : { violatedPath: scope.resolvedPath, reasonCode: scope.reasonCode };
+    // Awaited so the gate can persist + emit + throw before the
+    // loop yields back to the SDK. A throw propagates.
+    await this.deps.onMutation(agentName, toolName, spec.cwd, {
+      category: cls.category,
+      summary: cls.summary,
+      // Migration 026: capture the full tool input so the Logs
+      // drawer shows the complete command/args (repo caps the size).
+      toolInput: block.input,
+      ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
+      ...(toolUseId !== undefined ? { toolUseId } : {}),
+      ...(guardrailViolation ? { guardrailViolation } : {}),
+      // Cluster F Phase F3: Bash mutations carry the rule that
+      // pinned the category. Non-Bash mutations leave `reason`
+      // undefined (the tool name is the rationale).
+      ...(cls.reason ? { classifierReason: cls.reason } : {}),
+    });
   }
 
   private async runOneAttempt(
@@ -1310,6 +1459,11 @@ export class AgentRunner {
     const stallToolCeilingMs = this.deps.stallToolCeilingMs ?? DEFAULT_STALL_TOOL_CEILING_MS;
     const turnStartedAt = Date.now();
     let lastMsgAt = turnStartedAt;
+    // `Cebab-vie.16`: the `tool_use` blocks of the assistant message that was
+    // being tapped when the mutation hook threw. Non-empty only on that path —
+    // one message's tail at most, since the throw leaves the `for await`
+    // immediately.
+    let deferredBlocks: ToolUseBlock[] = [];
     let toolInFlight = false;
     let softNotified = false;
     let stalledAbort = false;
@@ -1405,81 +1559,35 @@ export class AgentRunner {
         // abort the turn (pause-on-dangerous gate). The cwd-side race
         // window — SDK may dispatch the tool before the throw lands — is
         // documented as a best-effort caveat in the plan.
+        //
+        // `Cebab-vie.16`: a throw from the hook ends the TURN, and it used to
+        // end this loop with it — so every block after the one that paused was
+        // never classified, never persisted, never given a guardrail verdict
+        // and never audited. A worker that emitted `rm -rf /a` and `rm -rf /b`
+        // in one message left Cebab's ledgers holding only the first, while
+        // whether the CLI already dispatched the second is a race
+        // (`Cebab-vie.15`). The remaining blocks are stashed here and replayed
+        // below — see `deferredBlocks` at the `finally` for why not inline.
         if (this.deps.onMutation) {
           const am = msg as {
             type?: string;
-            message?: {
-              content?: Array<{ type?: string; name?: string; id?: string; input?: unknown }>;
-            };
+            message?: { content?: ToolUseBlock[] };
           };
           if (am.type === 'assistant' && Array.isArray(am.message?.content)) {
-            for (const block of am.message.content) {
-              if (block?.type !== 'tool_use') continue;
-              const toolName = typeof block.name === 'string' ? block.name : '';
-              if (!toolName) continue;
-              // B10: this block says the SDK is ABOUT to dispatch — not that it
-              // will. For a `delegate-only` agent, `makeCanUseTool` denies
-              // everything outside `isDelegationAllowedTool` when the SDK asks,
-              // which is AFTER this message. Without this check the orchestrator
-              // writing a stray `Bash` gets a dangerous mutation row, and can
-              // trip the pause-on-dangerous gate and halt the session, for a
-              // command that never ran.
-              //
-              // Deliberately the SAME predicate the gate uses rather than a
-              // copy: two spellings of "what may the orchestrator call" would
-              // drift, and the copy that drifts is the one nobody is testing.
-              if (delegateOnly && !isDelegationAllowedTool(toolName)) continue;
-              const cls = classifyToolCall(toolName, block.input);
-              if (cls.category === 'read') continue;
-              const toolUseId = typeof block.id === 'string' ? block.id : undefined;
-              // B15: a retry re-runs this turn with the same prompt and may
-              // `--resume` the failed attempt's checkpoint, so a block seen
-              // once can arrive again. Fire once per id per hop.
-              //
-              // An id-less block always fires: it cannot be recognised as a
-              // repeat, and silently dropping it would lose a real mutation.
-              // Over-recording an unidentifiable call is the safer error for a
-              // ledger the pause gate reads.
-              if (toolUseId !== undefined) {
-                if (tappedToolUseIds.has(toolUseId)) continue;
-                tappedToolUseIds.add(toolUseId);
+            const blocks = am.message.content;
+            for (let i = 0; i < blocks.length; i++) {
+              try {
+                await this.tapToolUseBlock(
+                  agentName,
+                  spec,
+                  delegateOnly,
+                  tappedToolUseIds,
+                  blocks[i]!,
+                );
+              } catch (tapErr) {
+                deferredBlocks = blocks.slice(i + 1);
+                throw tapErr;
               }
-              // Cluster F Phase D5+: classify path scope vs agent cwd. The
-              // consultant-mode prompt forbids out-of-scope mutations; this
-              // surfaces violations post-hoc rather than denying them. (Not
-              // because there is no gate — `makeCanUseTool` above IS live on
-              // every production turn; it allows everything for agents without
-              // `toolPolicy: 'delegate-only'`. See guardrail.ts's header for
-              // why turning that seam into enforcement is not free.) The
-              // verdict rides on the hook payload — the orchestrator/chain
-              // sink persists it on the mutation row and the WS broadcast
-              // fan-out fires the safety_audit dispatcher. In-scope
-              // mutations (the common case) carry no `guardrailViolation`
-              // field, so existing tests / sinks that don't look at the
-              // field continue to behave identically.
-              const scope = classifyMutationScope({
-                agentCwd: spec.cwd,
-                filePath: cls.filePath,
-              });
-              const guardrailViolation = scope.inScope
-                ? undefined
-                : { violatedPath: scope.resolvedPath, reasonCode: scope.reasonCode };
-              // Awaited so the gate can persist + emit + throw before the
-              // loop yields back to the SDK. A throw propagates.
-              await this.deps.onMutation(agentName, toolName, spec.cwd, {
-                category: cls.category,
-                summary: cls.summary,
-                // Migration 026: capture the full tool input so the Logs
-                // drawer shows the complete command/args (repo caps the size).
-                toolInput: block.input,
-                ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
-                ...(toolUseId !== undefined ? { toolUseId } : {}),
-                ...(guardrailViolation ? { guardrailViolation } : {}),
-                // Cluster F Phase F3: Bash mutations carry the rule that
-                // pinned the category. Non-Bash mutations leave `reason`
-                // undefined (the tool name is the rationale).
-                ...(cls.reason ? { classifierReason: cls.reason } : {}),
-              });
             }
           }
         }
@@ -1602,6 +1710,36 @@ export class AgentRunner {
         console.error(`[runner] close(${agentName}) failed`, closeErr);
       }
       unregister();
+      // `Cebab-vie.16`: the tapped message's remaining blocks, recorded now
+      // that the turn is dead and the subprocess is closed.
+      //
+      // AFTER the close, deliberately, and the obvious edit is the wrong one.
+      // Recording them inline before rethrowing would delay the throw — and the
+      // throw plus the `close()` above is what may reap the subprocess before
+      // the CLI dispatches the sibling, which is the only thing standing
+      // between a paused `rm -rf /b` and a run one (`Cebab-vie.15`: the parent
+      // sometimes wins that race, and cannot be made to always win). Killing is
+      // safety and recording is forensics: a row written two milliseconds later
+      // is worth exactly the same, and a command killed two milliseconds later
+      // is not.
+      //
+      // Full hook, gate included, rather than a record-only shortcut. With a
+      // pending pause already standing `decidePauseForMutation` answers `run`,
+      // so no second banner and no second throw; and on the
+      // `MutationNotRecordedError` path — where no pending row exists — a
+      // dangerous sibling whose own INSERT succeeds correctly installs its hold
+      // and banner before throwing. Either way the FIRST error is the one that
+      // reaches the router, so a throw from here is logged and dropped.
+      for (const block of deferredBlocks) {
+        try {
+          await this.tapToolUseBlock(agentName, spec, delegateOnly, tappedToolUseIds, block);
+        } catch (deferErr) {
+          console.error(
+            `[runner] deferred mutation tap for ${agentName} failed (the turn had already ended)`,
+            deferErr,
+          );
+        }
+      }
     }
   }
 
