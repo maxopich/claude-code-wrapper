@@ -4,3 +4,4 @@ export * from './artifact.js';
 export * from './mcp_status.js';
 export * from './redact.js';
 export * from './topology.js';
+export * from './bus_tail.js';

@@ -25,7 +25,12 @@ import type {
   ModelCatalogueEntry,
 } from '@cebab/shared/protocol';
 import type { MutationCategory, PermissionDecisionReason } from '@cebab/shared';
-import { notConnected, type McpServerStatus } from '@cebab/shared';
+import {
+  BUS_SENTINEL_RECIPIENTS,
+  notConnected,
+  tailAwaitsAgent,
+  type McpServerStatus,
+} from '@cebab/shared';
 
 export type MessageView =
   | { kind: 'user'; id: string; text: string }
@@ -3861,8 +3866,14 @@ export function pendingToolName(s: SessionView): string | undefined {
  * Routing sentinels that are never a real participant: a `destination` of
  * `_sink`/`user` is a terminal hop (nobody is computing next) and `cebab` is
  * the injector source, never a destination.
+ *
+ * `Cebab-vie.8`: re-exported rather than declared. The server evaluates the
+ * same tail rule (to decide when a run has been left with nobody running), so
+ * the set and the predicate moved to `shared/src/bus_tail.ts` — see its header
+ * for why two spellings of this could disagree without anything noticing.
+ * `agentIdentity.ts` still imports `MA_SENTINELS` from here.
  */
-export const MA_SENTINELS: ReadonlySet<string> = new Set(['_sink', 'user', 'cebab']);
+export const MA_SENTINELS = BUS_SENTINEL_RECIPIENTS;
 
 /**
  * Which bus participant is currently computing, inferred from the event tail.
@@ -3875,6 +3886,13 @@ export const MA_SENTINELS: ReadonlySet<string> = new Set(['_sink', 'user', 'ceba
  * read-only recovered run is not actually executing) and on an empty
  * `run.pendingMutations` (the pause-on-dangerous gate is holding a worker
  * mid-turn).
+ *
+ * `Cebab-vie.8`: the tail half of the rule is `tailAwaitsAgent` in
+ * `@cebab/shared`, because the server needs the identical question answered —
+ * "would the bar call this tail working?" — to decide when to tell the operator
+ * that nothing is running after all. The run-level gates above stay here: they
+ * read client state (`awaitingContinue`, `pendingRetry`, `pendingMutations`)
+ * that has no server-side counterpart in the same shape.
  */
 export function activeAgent(run: MultiAgentRun): string | null {
   if (run.status !== 'running') return null;
@@ -3882,8 +3900,7 @@ export function activeAgent(run: MultiAgentRun): string | null {
   const evs = run.events;
   if (evs.length === 0) return null;
   const last = evs[evs.length - 1];
-  if (last.kind === 'error') return null;
-  if (MA_SENTINELS.has(last.destination)) return null;
+  if (!tailAwaitsAgent(last)) return null;
   return last.destination;
 }
 
