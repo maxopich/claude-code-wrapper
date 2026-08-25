@@ -19,6 +19,7 @@ import { useCopyFeedback } from '../../useCopyFeedback';
 //   - WHAT   — `command` + `args` from `config`
 //   - TRUST  — `trust` chip from the mcp_trust JOIN (Phase 4):
 //                trusted / pending_tofu / hash_changed / declaration_changed /
+//                script_changed /
 //                denied / unknown
 //   - STATUS — runtime status dot (gray "configured" by default — UI-B15:
 //              never reads "running" without server confirmation)
@@ -49,6 +50,10 @@ const TRUST_CHIP_CLASS: Record<McpServerView['trust'], string> = {
   // changed under an approved name is the more serious of the two — the
   // program itself was swapped, not merely rebuilt.
   declaration_changed: 'mcp-trust-err',
+  // Cebab-1af: error tier for the same reason. A rewritten script under an
+  // unchanged declaration is the swap `declaration_changed` catches, done in
+  // the one place a `git diff` of the config shows nothing.
+  script_changed: 'mcp-trust-err',
   denied: 'mcp-trust-err',
   unknown: 'mcp-trust-muted',
 };
@@ -58,6 +63,7 @@ const TRUST_LABEL: Record<McpServerView['trust'], string> = {
   pending_tofu: 'pending TOFU',
   hash_changed: 'hash changed',
   declaration_changed: 'declaration changed',
+  script_changed: 'script changed',
   denied: 'denied',
   unknown: 'unknown',
 };

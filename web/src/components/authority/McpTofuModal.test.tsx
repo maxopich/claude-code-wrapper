@@ -391,3 +391,72 @@ describe('[security] McpTofuModal — declaration changed (Cebab-rxg)', () => {
     expect(bodyText()).not.toContain('Now declares');
   });
 });
+
+describe('[security] McpTofuModal — script changed (Cebab-1af)', () => {
+  const V1 = 'a'.repeat(64);
+  const V2 = 'b'.repeat(64);
+
+  function bodyText(): string {
+    return container.textContent ?? '';
+  }
+
+  const scriptChanged = () =>
+    mkPending({
+      reason: 'script_changed',
+      command: 'node',
+      args: ['mcp/kitchen-server.mjs'],
+      binarySha: undefined,
+      changedScripts: [{ path: 'mcp/kitchen-server.mjs', previousSha: V1, sha: V2 }],
+    });
+
+  function render(pending = scriptChanged()) {
+    act(() => {
+      root.render(
+        <McpTofuModal pending={pending} send={() => true} onClose={() => {}} onCancel={() => {}} />,
+      );
+    });
+  }
+
+  test('says the SCRIPT changed — not that the server is new, nor that the declaration moved', () => {
+    // Three reasons now share this modal and two of them would be lies here.
+    // "First seen" hides that the operator already approved this name;
+    // "declaration changed" points them at a config file that is byte-identical
+    // to the one they approved, which is the fastest way to conclude the gate
+    // is broken and click through.
+    render();
+    expect(bodyText()).toContain('MCP server script changed');
+    expect(bodyText()).not.toContain('MCP server declaration changed');
+    expect(bodyText()).not.toContain('Trust this MCP server?');
+    expect(container.querySelector('.gate-modal-reason')!.textContent).toBe('script changed');
+    expect(container.querySelector('.gate-modal-reason')!.getAttribute('aria-label')).toBe(
+      'reason: script changed',
+    );
+  });
+
+  test('names the file and shows both hashes', () => {
+    // Reddens: the modal ignoring `changedScripts`. The declaration is
+    // identical on both sides, so this list is the entire content of the
+    // prompt — a modal that renders only the reason chip says a file changed
+    // and cannot say which.
+    render();
+    const text = bodyText();
+    expect(text).toContain('mcp/kitchen-server.mjs');
+    expect(text).toContain(V1);
+    expect(text).toContain(V2);
+  });
+
+  test('a first_seen prompt renders no script rows', () => {
+    // The negative control: without it, the case above passes on a modal that
+    // renders the section unconditionally.
+    render(mkPending({ reason: 'first_seen' }));
+    expect(bodyText()).not.toContain('Script changed');
+  });
+
+  test('the help text points at the file rather than at the config', () => {
+    // The operator's next action is to look at a file, and the copy has to say
+    // so — "approve only if you made this change" against an unchanged config
+    // sends them to `git diff` and it shows nothing.
+    render();
+    expect(bodyText()).toContain('the file it runs is not');
+  });
+});

@@ -10,10 +10,12 @@ import { useModalSurface } from '../../useModalSurface';
 //
 // UI contract (spec §5.4):
 //   - Title: "Trust this MCP server?" (or "MCP server binary changed" for
-//     hash_changed, "MCP server declaration changed" for declaration_changed)
+//     hash_changed, "MCP server declaration changed" for declaration_changed,
+//     "MCP server script changed" for script_changed)
 //   - Body: server name, originPath, command, args, current binarySha,
 //     previousSha (when hash_changed), previously-approved vs now-declares
-//     (when declaration_changed — Cebab-rxg), reason chip
+//     (when declaration_changed — Cebab-rxg), the per-file was/now list (when
+//     script_changed — Cebab-1af), reason chip
 //   - Four buttons: Trust / Trust & pin hash / Deny once / Deny & remember
 //   - "Trust & pin hash" is GREYED when binarySha is absent (npx etc) —
 //     pinning a sha that can't be computed is meaningless
@@ -80,6 +82,11 @@ export function McpTofuModal(props: {
   // attack swapped `node <script>` for another script and moved no hash at
   // all, because a bare command has none to move.
   const isDeclChanged = pending.reason === 'declaration_changed';
+  // Cebab-1af: the declaration is IDENTICAL to the approved one here — that is
+  // what makes this its own reason rather than a variant of the two above.
+  // Showing a before/after of the declaration would show two identical lines,
+  // so the files carry the whole message.
+  const isScriptChanged = pending.reason === 'script_changed';
   const canPinHash = Boolean(pending.binarySha);
   const titleId = `mcp-tofu-title-${pending.pendingId}`;
 
@@ -97,15 +104,23 @@ export function McpTofuModal(props: {
           <h3 id={titleId} className="gate-modal-title">
             {isDeclChanged
               ? 'MCP server declaration changed'
-              : isHashChanged
-                ? 'MCP server binary changed'
-                : 'Trust this MCP server?'}
+              : isScriptChanged
+                ? 'MCP server script changed'
+                : isHashChanged
+                  ? 'MCP server binary changed'
+                  : 'Trust this MCP server?'}
           </h3>
           <span
             className={`gate-modal-reason gate-modal-reason-${pending.reason}`}
             aria-label={`reason: ${pending.reason.replaceAll('_', ' ')}`}
           >
-            {isDeclChanged ? 'declaration changed' : isHashChanged ? 'hash changed' : 'first seen'}
+            {isDeclChanged
+              ? 'declaration changed'
+              : isScriptChanged
+                ? 'script changed'
+                : isHashChanged
+                  ? 'hash changed'
+                  : 'first seen'}
           </span>
         </header>
         <dl className="gate-modal-facts">
@@ -176,13 +191,29 @@ export function McpTofuModal(props: {
               </dd>
             </div>
           )}
+          {isScriptChanged &&
+            (pending.changedScripts ?? []).map((f) => (
+              <div className="gate-modal-fact" key={f.path}>
+                <dt>Script changed</dt>
+                <dd>
+                  <code className="gate-modal-path">{f.path}</code>
+                  <div className="gate-modal-script-shas">
+                    <code className="gate-modal-sha gate-modal-sha-prev">{f.previousSha}</code>
+                    <span aria-hidden="true">→</span>
+                    <code className="gate-modal-sha">{f.sha}</code>
+                  </div>
+                </dd>
+              </div>
+            ))}
         </dl>
         <p className="gate-modal-help">
           {isDeclChanged
             ? 'You approved this server name before, but it declared a different program then. Approving here trusts the new one. Approve only if you made this change yourself — a declaration you did not edit that changed anyway is how an approved name gets pointed at something else.'
-            : isHashChanged
-              ? 'The binary at this path has a different sha than the one you previously trusted. Approve only if you expect the change (e.g. a legitimate upgrade).'
-              : 'The Cebab session resolver has never seen this MCP server declaration before. Approve only if you intentionally added it.'}
+            : isScriptChanged
+              ? 'This declaration is unchanged from the one you approved — the file it runs is not. Nothing in the config moved, so a diff of it shows nothing. Approve only if you edited or upgraded this file yourself.'
+              : isHashChanged
+                ? 'The binary at this path has a different sha than the one you previously trusted. Approve only if you expect the change (e.g. a legitimate upgrade).'
+                : 'The Cebab session resolver has never seen this MCP server declaration before. Approve only if you intentionally added it.'}
         </p>
         {/*
           Register H04. Until 2026-08-02 Deny recorded a decision and the

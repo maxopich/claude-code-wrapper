@@ -8143,6 +8143,17 @@ pre {
   font-style: italic;
 }
 
+/* Cebab-1af: the was/now pair for one file whose bytes changed under an
+   unchanged declaration. Wraps rather than truncates — two sha256s are the
+   only evidence on offer here, and a clipped one cannot be compared. */
+.gate-modal-script-shas {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+}
+
 .gate-modal-buttons {
   display: flex;
   flex-wrap: wrap;
