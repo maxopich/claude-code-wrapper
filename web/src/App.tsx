@@ -1145,7 +1145,12 @@ function AppShell({
         class: 'operational',
         dedupeKey: `session_log_export:ok:${sessionId}`,
         title: 'Session log downloaded',
-        message: result.filename,
+        // `Cebab-ygu.47`: the download is redacted AND filtered — it carries the
+        // conversation, not the token-by-token stream that built it. Says so
+        // because the operator's ARCHIVE decision changed even though their
+        // SHARE decision did not; someone keeping this for their own records
+        // should know what is not in it.
+        message: `${result.filename} — redacted; live typing detail is not included.`,
         sticky: false,
       });
     } catch (err) {
@@ -1235,7 +1240,8 @@ function AppShell({
         class: 'operational',
         dedupeKey: 'bulk_session_export:ok',
         title: `Exported ${ok} ${noun(ok)}`,
-        message: 'Each session log downloaded as a .jsonl file.',
+        message:
+          'Each session log downloaded as a redacted .jsonl file — live typing detail is not included.',
         sticky: false,
       });
     } else {
