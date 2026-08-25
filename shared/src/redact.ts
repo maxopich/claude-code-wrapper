@@ -339,6 +339,183 @@ function valueContainsSensitivePattern(value: string): boolean {
   return SENSITIVE_VALUE_PATTERNS.some((re) => re.test(value));
 }
 
+// ---- Cebab-ygu.51: a credential-NAMED assignment inside free text ----
+
+/**
+ * `Cebab-ygu.51` [security]. Mask the VALUE of `name = value` where the NAME is
+ * credential-shaped, wherever that pair appears inside a string.
+ *
+ * WHY THIS EXISTS. Everything above works on JSON STRUCTURE: a sensitive KEY,
+ * a sensitive PATH with a sibling body, a vendor-shaped VALUE. An assistant
+ * message is none of those — its text sits under the key `text`, which no key
+ * rule matches, and a self-chosen secret matches no vendor pattern. So
+ * a `db_password` line naming a passphrase the operator chose themselves went
+ * out of a durable message verbatim, in the "share-safe" export.
+ *
+ * (The examples in this file name no value, deliberately: an assignment written
+ * out in full is what the secret scan reads, and the rule below would mask this
+ * comment if it ever walked one.)
+ *
+ * `Cebab-ygu.47` measured that class as empty and it was not: the durable
+ * copies in that transcript were masked because the SAME STRING also happened
+ * to contain an AKIA key, and the branch above replaces the entire string when
+ * any value pattern hits. Remove the unrelated secret and the marker leaks.
+ * Masking by coincidence looks identical to masking by rule until you take the
+ * coincidence away.
+ *
+ * WHY IT IS NOT THE OVER-MASKING THE BEAD FEARED. That worry — "a rule broad
+ * enough to catch this masks every message body, which is the transcript the
+ * export exists to provide" — is about WHOLE-STRING masking. This masks the
+ * VALUE SPAN and leaves the prose, including the key name, readable.
+ *
+ * Measured by running this function's output against the previous output over
+ * 24 real session transcripts (4390 lines): **4 lines masked more, on 2 distinct
+ * spans**, both inside a `Read` of Cebab's own `ws/server.ts` (`session_id:
+ * sessionId`). Two identifiers in a source file — a false positive of exactly
+ * the cheap kind the module header licenses. The generic alternative that was
+ * rejected — any 32+ char mixed-case-and-digits token, i.e. entropy with no key
+ * name — masks **1544 spans** on the same corpus (session ids, base64 blobs,
+ * hashes). That is the cliff, and it is why this is keyed on the NAME and
+ * nothing else.
+ *
+ * WHAT IT DELIBERATELY DOES NOT CATCH: a value with neither a credential-shaped
+ * key nor a credential-shaped value. `plain_marker = <secret>` is
+ * indistinguishable from prose, and reaching it means the 1544. Pinned as a
+ * known limit in `redact.test.ts` rather than left to be rediscovered.
+ */
+/**
+ * One candidate `name <sep> value` pair. The 8-character floor on the VALUE is
+ * in the pattern AND re-checked after trailing punctuation is trimmed, since the
+ * trim can take a match below it. Deliberately generic: the NAME is
+ * judged by `isSensitiveKey`, the module's existing predicate, rather than by a
+ * second vocabulary baked into this pattern. A name masked as a JSON key and a
+ * name masked inside prose must be the same list, or the two drift and only one
+ * of them is ever tested.
+ *
+ * Also why this is not one big alternation: `SENSITIVE_KEY_PATTERNS` carries an
+ * anchor (`^cookie$`) and a lookahead (`auth(?:orization)?(?!or)`) that cannot
+ * be spliced into a larger expression and keep their meaning. Extracting the
+ * token and asking the real predicate keeps both exactly as they read.
+ *
+ * EVERY REPETITION IS BOUNDED, and the first draft's were not — CodeQL caught
+ * what `security/detect-unsafe-regex` passed, and the two are not the same
+ * question (the eslint rule checks star height, which was 1 either way).
+ *
+ * The draft had `[ \t]*["']?[ \t]*` between name and separator, then `[ \t]*`
+ * again after it. Two failures, both quadratic on input a project controls:
+ *
+ *   - with no quote present, a run of N tabs splits across those two stars N+1
+ *     ways, and every split is tried;
+ *   - even ONE greedy `[ \t]*` followed by a disjoint `[:=]` re-tries every
+ *     length on failure, at every start position — so `-\t\t\t…` is O(N²)
+ *     with no ambiguity involved at all.
+ *
+ * `{0,8}` fixes both by construction rather than by argument: the work at any
+ * start position is now a constant, so the scan is linear in the string. Eight
+ * is far more whitespace than any real `name = value` carries, and a line that
+ * exceeds it simply is not a candidate — the safe direction, since the value
+ * still has to survive `isSensitiveKey` to be masked at all.
+ *
+ * NO LOOKBEHIND pinning the name to a maximal run, though it would also remove
+ * the `-----` re-entry: it would make a run LONGER than 64 characters
+ * unmatchable, where the current form matches the last 64 before the separator
+ * — and `isSensitiveKey` is a substring test, so the tail is the half that
+ * carries the word.
+ */
+const CREDENTIAL_ASSIGNMENT =
+  /([A-Za-z0-9_.-]{1,64})["']?[ \t]{0,8}[:=][ \t]{0,8}["']?([A-Za-z0-9_.+=~-]{8,})/g;
+
+/**
+ * Values that are code, not credentials. Each was MEASURED as a false positive
+ * over this repo's own sources, standing in for code quoted inside a transcript:
+ *
+ *   - a dotted identifier — `token = authTokenRef.current`
+ *   - a language keyword  — `secret = undefined`
+ *
+ * The value character class in the pattern above does the rest of this work by
+ * excluding code punctuation entirely (`(`, `<`, `&`, `/`, `|`), which is what
+ * removed `crypto.randomBytes(32`, `Map<string`, `initAuthToken(` and
+ * `…&format=redacted` from the candidate set. Narrowing by what a value CANNOT
+ * contain rather than by what it must look like keeps a real hyphenated
+ * passphrase in scope, which an entropy floor would not.
+ */
+const NON_CREDENTIAL_VALUES: ReadonlySet<string> = new Set([
+  'undefined',
+  'Infinity',
+  'NaN',
+  'function',
+  'readonly',
+  'continue',
+]);
+
+function isIdentifier(segment: string): boolean {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(segment);
+}
+
+/** `authTokenRef.current`, `process.env.FOO` — a reference to a value, not one. */
+function isDottedCodeReference(value: string): boolean {
+  if (!value.includes('.')) return false;
+  // `split`/`every` rather than a nested-quantifier regex: `(?:\.[A-Za-z…]*)+`
+  // is star height 2 and `security/detect-unsafe-regex` rejects that shape.
+  return value.split('.').every(isIdentifier);
+}
+
+/**
+ * Replace every credential-named assignment's VALUE in `str` with the redaction
+ * token. Returns `str` unchanged when nothing matched.
+ *
+ * EXACTLY the matched spans, and an earlier version of this masked every other
+ * occurrence of the same value too — on the theory that an assistant turn which
+ * states a secret once as an assignment and then repeats it bare would otherwise
+ * ship the second copy. Measured against the operator's own 24 session
+ * transcripts, that theory cost more than it bought: a `Read` of `ws/server.ts`
+ * matched once on `session_id: sessionId` and the repeat pass then replaced the
+ * identifier `sessionId` on twenty unrelated lines of the file. One match
+ * mangling a whole body is not the "false positives are cheap" this module's
+ * header licenses, and the repeat case was hypothetical — no transcript in the
+ * corpus contained one. Removed, with the measurement, rather than tuned.
+ *
+ * Idempotent by construction: `<redacted>` contains `<` and `>`, neither of
+ * which the value class accepts, so this function's own output can never be a
+ * candidate value on a second pass.
+ */
+export function maskCredentialAssignments(str: string): string {
+  CREDENTIAL_ASSIGNMENT.lastIndex = 0;
+  /** [start, end) of each value to mask, in ascending order. */
+  let spans: Array<[number, number]> | undefined;
+  let match: RegExpExecArray | null;
+  while ((match = CREDENTIAL_ASSIGNMENT.exec(str)) !== null) {
+    const [, name, matched] = match;
+    // A REJECTED candidate must give the text back. `exec` leaves `lastIndex`
+    // past the whole match, so `deploy-notes.txt: db_password = <secret>` was
+    // consumed as the pair (`deploy-notes.txt`, `db_password`) — rejected on the
+    // name, and the real assignment inside it never scanned. Rewinding to just
+    // past the NAME re-enters the same text one candidate later. Strictly
+    // increasing (`name` is at least one character), so it cannot loop.
+    CREDENTIAL_ASSIGNMENT.lastIndex = match.index + name.length;
+    if (!isSensitiveKey(name)) continue;
+    // A sentence-final period is punctuation, not key material. Trailing dots
+    // only — `=` stays, because it is base64 padding.
+    let value = matched;
+    while (value.endsWith('.')) value = value.slice(0, -1);
+    if (value.length < 8) continue;
+    if (NON_CREDENTIAL_VALUES.has(value)) continue;
+    if (isDottedCodeReference(value)) continue;
+    const start = match.index + match[0].length - matched.length;
+    (spans ??= []).push([start, start + value.length]);
+    // Accepted: skip past the value so it is not re-scanned as a name.
+    CREDENTIAL_ASSIGNMENT.lastIndex = match.index + match[0].length;
+  }
+  if (!spans) return str;
+  let out = '';
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    out += str.slice(cursor, start) + REDACTED_TOKEN;
+    cursor = end;
+  }
+  return out + str.slice(cursor);
+}
+
 /**
  * Body fields of a `tool_result` block (register of0).
  *
@@ -484,6 +661,16 @@ function walk(
       // report to be correct.
       fields.push(path || ROOT_FIELD);
       return REDACTED_TOKEN;
+    }
+    // Cebab-ygu.51: only AFTER the wholesale check above, and the order is the
+    // design. A vendor-shaped token is unambiguous evidence that the whole
+    // string is credential-bearing, so it keeps masking wholesale; this rule
+    // fires on the strings that carry a secret and nothing else to notice it by,
+    // and masks the span so the transcript survives.
+    const spanMasked = maskCredentialAssignments(value);
+    if (spanMasked !== value) {
+      fields.push(path || ROOT_FIELD);
+      return spanMasked;
     }
     return value;
   }
