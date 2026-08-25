@@ -31,8 +31,10 @@ import {
   mountSessionLogExport,
   RAW_ACK_HEADER,
   RAW_ACK_VALUE,
+  REDACTED_CONTENT_POLICY,
   redactJsonlLine,
 } from './session_log_export.js';
+import { isStreamPartial } from './runner/message_classes.js';
 
 // ── Pure-function tests ──────────────────────────────────────────────
 
@@ -79,7 +81,10 @@ describe('redactJsonlLine', () => {
       apiKey: 'leak-me',
     });
     const out = redactJsonlLine(line);
-    const parsed = JSON.parse(out);
+    // `Cebab-ygu.47` made this non-total; a durable class must never be the
+    // null case, so assert that before parsing rather than casting past it.
+    expect(out).not.toBeNull();
+    const parsed = JSON.parse(out!);
     expect(parsed.text).toBe('ok');
     expect(parsed.auth_token).toBe('<redacted>');
     expect(parsed.apiKey).toBe('<redacted>');
@@ -123,8 +128,9 @@ describe('redactJsonlLine', () => {
 
     test('a Read of a project .mcp.json exports no part of its body', () => {
       const out = redactJsonlLine(readOf('/proj/.mcp.json'));
+      expect(out).not.toBeNull();
       expect(out).not.toContain(SECRET);
-      const parsed = JSON.parse(out);
+      const parsed = JSON.parse(out!);
       // Still a valid JSONL line, and the path survives — it is what tells the
       // operator WHICH file was read.
       expect(parsed.tool_use_result.file.filePath).toBe('/proj/.mcp.json');
@@ -134,8 +140,9 @@ describe('redactJsonlLine', () => {
 
     test('an ordinary file round-trips with its body intact', () => {
       const out = redactJsonlLine(readOf('/proj/README.md'));
+      expect(out).not.toBeNull();
       expect(out).toContain(SECRET);
-      expect(JSON.parse(out).message.content[0].content).toBe(MCP_BODY);
+      expect(JSON.parse(out!).message.content[0].content).toBe(MCP_BODY);
     });
   });
 
@@ -775,5 +782,227 @@ describe('[security] /session-log :: cancelled downloads release the descriptor'
       process.off('warning', onWarning);
     }
     expect(warnings).not.toContain('MaxListenersExceededWarning');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// `Cebab-ygu.47` — streaming partials are not part of the redacted artifact.
+//
+// TWO RULES FOR EVERY CASE BELOW, both learned from the measurement:
+//
+//   1. Never assert on `fields` / `redactedFields` as evidence of safety. The
+//      redactor's own registers are about a truthful `fields` sitting beside a
+//      leak, and the measured 35 KB leaky artifact contained 183 `<redacted>`
+//      tokens. Presence of the token proves the redactor RAN, nothing more.
+//   2. Canaries are assembled at RUNTIME and are deliberately NOT
+//      vendor-shaped. `sk-…` / `AKIA…` are already masked by
+//      SENSITIVE_VALUE_PATTERNS, so a canary of that shape would go green with
+//      the bug fully live. Runtime assembly also keeps the required
+//      `Secret scan (gitleaks)` check at full strength — no by-value allowlist
+//      entry needed, because the literal never appears in the source.
+// ─────────────────────────────────────────────────────────────────────
+
+/** Non-vendor-shaped, assembled at runtime. See rule 2 above. */
+const CANARY = 'REDACTION' + '-CANARY-' + '77';
+/** A secret CHOPPED across two deltas — the shape no per-line rule can match. */
+const PHRASE_HEAD = 'correct-horse-battery-';
+const PHRASE_TAIL = 'staple-9271';
+
+/**
+ * The real envelope shape observed on disk, not a minimised one. A hand-shrunk
+ * `{ type: 'stream_event', text: … }` could be masked by an unrelated rule and
+ * would prove nothing about the class exclusion.
+ */
+function delta(sid: string, text: string): Record<string, unknown> {
+  return {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'text_delta', text },
+    },
+    parent_tool_use_id: null,
+    session_id: sid,
+    uuid: 'uuid-delta',
+  };
+}
+
+function typesOf(body: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const l of body.split('\n')) {
+    if (!l) continue;
+    try {
+      const t = (JSON.parse(l) as { type?: string }).type ?? '(none)';
+      out[t] = (out[t] ?? 0) + 1;
+    } catch {
+      out['(unparsable)'] = (out['(unparsable)'] ?? 0) + 1;
+    }
+  }
+  return out;
+}
+
+describe('[security] redactJsonlLine :: streaming partials are dropped', () => {
+  test('a delta carrying a non-vendor-shaped secret returns null', () => {
+    expect(redactJsonlLine(JSON.stringify(delta('s1', `key = ${CANARY}`)))).toBeNull();
+  });
+
+  test('a durable message is NEVER the null case', () => {
+    // The other half of the rule. Without this, "drop everything" passes.
+    for (const type of ['assistant', 'user', 'system', 'result', 'rate_limit_event']) {
+      expect(redactJsonlLine(JSON.stringify({ type, text: 'hello' }))).not.toBeNull();
+    }
+  });
+
+  test('a line whose parsed value is not an object survives the shape guard', () => {
+    // `JSON.parse` legitimately yields these. Reading `.type` on `null` throws,
+    // and that throw would land in the catch and be MISREPORTED as "not JSON".
+    expect(redactJsonlLine('null')).toBe('null');
+    expect(redactJsonlLine('42')).toBe('42');
+    expect(redactJsonlLine('[1,2]')).toBe('[1,2]');
+    expect(redactJsonlLine('"a string"')).toBe('"a string"');
+  });
+
+  test('a line with no `type` at all is kept, not dropped', () => {
+    // Reddens a rule that treats a missing/odd type as droppable.
+    expect(redactJsonlLine(JSON.stringify({ foo: 1 }))).not.toBeNull();
+  });
+});
+
+describe('[security] /session-log :: the redacted artifact carries no streaming partials', () => {
+  const SID = 'sess-partials';
+
+  /** One turn: init, four deltas (two carrying secrets), the durable reply. */
+  function writeLeakyLog(): void {
+    writeJsonl(SID, [
+      { type: 'system', subtype: 'init', session_id: SID },
+      delta(SID, 'here are the notes: '),
+      delta(SID, `plain_marker = ${CANARY}`),
+      // The chopped secret: neither line contains a matchable value.
+      delta(SID, `db_password = ${PHRASE_HEAD}`),
+      delta(SID, PHRASE_TAIL),
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'done' }] } },
+      { type: 'result', subtype: 'success', session_id: SID },
+    ]);
+  }
+
+  test('the canary does not cross the socket', async () => {
+    // Every pure-function case above can be green while the endpoint leaks —
+    // the loop could `String(out)` the null away. At least one canary has to
+    // travel the real response body.
+    writeLeakyLog();
+    const res = await request({ path: `/session-log/${SID}?token=${token}` });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toContain(CANARY);
+  });
+
+  test('BOTH halves of a secret split across two deltas are gone', async () => {
+    // The load-bearing assertion in this file. Asserting only on the JOINED
+    // string passes TODAY, with the bug fully live, because no single line
+    // ever contained it — which is precisely why value-pattern redaction can
+    // never fix this class.
+    writeLeakyLog();
+    const res = await request({ path: `/session-log/${SID}?token=${token}` });
+    expect(res.body).not.toContain(PHRASE_HEAD);
+    expect(res.body).not.toContain(PHRASE_TAIL);
+    expect(res.body).not.toContain(PHRASE_HEAD + PHRASE_TAIL);
+  });
+
+  test('the durable classes survive — the fix is not "drop everything"', async () => {
+    writeLeakyLog();
+    const res = await request({ path: `/session-log/${SID}?token=${token}` });
+    // Assert the exact multiset of TYPES, not a line count: a count assertion
+    // passes just as well when the wrong lines were dropped.
+    expect(typesOf(res.body)).toEqual({ system: 1, assistant: 1, result: 1 });
+    expect(res.body).toContain('"done"');
+  });
+
+  test('a log of nothing but partials exports an empty body, and one audit row', async () => {
+    const sid = 'sess-all-partials';
+    writeJsonl(sid, [delta(sid, 'a'), delta(sid, 'b')]);
+    const countRows = (): number =>
+      (getDb().prepare('SELECT COUNT(*) AS c FROM safety_audit').get() as { c: number }).c;
+    const before = countRows();
+    const res = await request({ path: `/session-log/${sid}?token=${token}` });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('');
+    expect(countRows() - before).toBe(1);
+  });
+
+  test('format=raw still ships the partials, byte for byte', async () => {
+    // Reddens the class rule leaking onto the raw path — e.g. someone routing
+    // raw through the line loop "for consistency". `toContain(CANARY)` alone
+    // would still pass if raw dropped OTHER lines, so the assertion is
+    // byte-equality with the file: raw is the complete trace, and mock-fixture
+    // capture depends on that.
+    writeLeakyLog();
+    const res = await request({
+      path: `/session-log/${SID}?token=${token}&format=raw`,
+      extraHeaders: { 'X-Cebab-Acknowledge-Raw': 'I-understand' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain(CANARY);
+    expect(res.body).toContain(PHRASE_HEAD);
+    expect(res.body).toBe(fs.readFileSync(path.join(config.logsDir, `${SID}.jsonl`), 'utf8'));
+  });
+
+  test('the export does not modify the file it read', async () => {
+    // Pins "redact at display, not at write", which was otherwise only prose,
+    // and reddens an implementation that "fixes" the log instead of the artifact.
+    writeLeakyLog();
+    const p = path.join(config.logsDir, `${SID}.jsonl`);
+    const before = fs.readFileSync(p);
+    await request({ path: `/session-log/${SID}?token=${token}` });
+    expect(fs.readFileSync(p).equals(before)).toBe(true);
+  });
+
+  test('the audit row records which code path produced the bytes', async () => {
+    // Reddens versioning smuggled into `reasonCode`, and asserts the EXACT
+    // constant — "the tag is present" would pass on undefined.
+    writeLeakyLog();
+    await request({ path: `/session-log/${SID}?token=${token}` });
+    const row = getDb()
+      .prepare(
+        `SELECT reason_code, payload_json FROM safety_audit
+         WHERE kind = 'session.exported' ORDER BY ts DESC LIMIT 1`,
+      )
+      .get() as { reason_code: string; payload_json: string };
+    expect(row.reason_code).toBe('exported_redacted');
+    expect(JSON.parse(row.payload_json).contentPolicy).toBe(REDACTED_CONTENT_POLICY);
+  });
+
+  test('a raw export carries no contentPolicy — it applies no content policy', async () => {
+    writeLeakyLog();
+    await request({
+      path: `/session-log/${SID}?token=${token}&format=raw`,
+      extraHeaders: { 'X-Cebab-Acknowledge-Raw': 'I-understand' },
+    });
+    const row = getDb()
+      .prepare(
+        `SELECT reason_code, payload_json FROM safety_audit
+         WHERE kind = 'session.exported' ORDER BY ts DESC LIMIT 1`,
+      )
+      .get() as { reason_code: string; payload_json: string };
+    expect(row.reason_code).toBe('exported_raw');
+    expect(JSON.parse(row.payload_json).contentPolicy).toBeUndefined();
+  });
+});
+
+describe('[security] the export and the events table agree on what is durable', () => {
+  // `Cebab-ygu.47`'s root cause was two independent answers to one question.
+  // Testing the predicate alone would prove nothing about the call sites, so
+  // this exercises BOTH: the export's null case, and `persistMessage`'s
+  // returns-null-for-partials contract.
+  test('isStreamPartial classifies every observed type the same way for both', () => {
+    const durable = ['assistant', 'user', 'system', 'result', 'rate_limit_event', 'wrapper'];
+    for (const t of durable) {
+      expect(isStreamPartial(t)).toBe(false);
+      expect(redactJsonlLine(JSON.stringify({ type: t }))).not.toBeNull();
+    }
+    expect(isStreamPartial('stream_event')).toBe(true);
+    expect(redactJsonlLine(JSON.stringify({ type: 'stream_event' }))).toBeNull();
+    // Unknown and empty default to DURABLE — a deny-list fails visibly (a new
+    // type shows up in the artifact) rather than silently losing it.
+    expect(isStreamPartial('')).toBe(false);
+    expect(isStreamPartial('some_future_type')).toBe(false);
   });
 });

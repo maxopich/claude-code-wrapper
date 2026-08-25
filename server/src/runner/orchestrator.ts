@@ -2,6 +2,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { bumpSession } from '../repo/sessions.js';
 import { insertEvent, nextSeq } from '../repo/events.js';
 import { logEvent, type LogFailureReason } from './logger.js';
+import { isStreamPartial } from './message_classes.js';
 
 /**
  * Persist one SDK message. Stream deltas go only to the per-session JSONL
@@ -26,18 +27,23 @@ export async function persistMessage(
   const logResult = await logEvent(sessionId, msg);
   if (!logResult.ok) onLogFailure?.(logResult.reason);
 
-  // The events table skips stream_event: those are high-volume partials that
-  // would balloon the DB and slow down replaySession() with no payoff (the
-  // following 'assistant' message carries the final text anyway).
-  if (type === 'stream_event') return null;
+  // The events table skips streaming partials: they are high-volume, they would
+  // balloon the DB and slow down replaySession(), and the 'assistant' message
+  // that follows carries the final text anyway.
+  //
+  // `Cebab-ygu.47`: the rule moved to `message_classes.ts` because the redacted
+  // session-log export needs the SAME answer. It did not have it, and the gap
+  // was the leak — the export shipped deltas the DB had never held, so a secret
+  // chopped across two of them survived a redaction pass that no per-line rule
+  // could ever have caught. A future high-volume type goes in that module, not
+  // here, so both consumers move together.
+  if (isStreamPartial(type)) return null;
 
   const seq = nextSeq(sessionId);
   const raw = JSON.stringify(msg);
   insertEvent(sessionId, seq, type, subtype, raw);
 
-  // bumpSession only on terminal events; stream_event already returned above.
-  // Other high-volume types in the future should also be excluded here so
-  // last_event_at stays semantically meaningful.
+  // bumpSession only on terminal events; partials already returned above.
   if (type === 'result') {
     // `total_cost_usd` is this INVOCATION's cost, not a running session total:
     // it equals `sum(modelUsage[*].costUSD)`, and those are per-invocation

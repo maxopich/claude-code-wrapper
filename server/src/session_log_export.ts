@@ -23,16 +23,40 @@
  * Privacy posture (per UI_Findings/medium/I-session-management.md §3 +
  * agentic-reviewer constraints):
  *
- *   - **Redact at display, not at write.** Storage retains raw bytes; the
- *     export reads the on-disk file as-is and applies LogsModal's redaction
- *     policy (`shared/src/redact.ts`) line-by-line via `redactSensitive()`.
- *     Default `format=redacted`; raw output is opt-in.
+ *   - **Redact at display, not at write.** Storage retains raw bytes and the
+ *     export never modifies the file. Default `format=redacted`; raw is opt-in.
+ *   - **The redacted artifact's corpus is the DURABLE message classes** — the
+ *     same set `runner/orchestrator.ts` writes to the `events` table, via the
+ *     shared `isStreamPartial` predicate in `runner/message_classes.ts`.
+ *     Streaming partials are excluded, and the reason is structural rather
+ *     than a missing pattern: `redactSensitive` masks values under sensitive
+ *     KEY names plus a few value shapes, a delta carries free text under the
+ *     key `text`, and a secret is CHOPPED ACROSS DELTAS so no per-line rule can
+ *     match either half. Measured (`Cebab-ygu.47`): a `db_password` masked
+ *     correctly in the durable `assistant` message shipped as the fragment
+ *     `horse-battery-staple-…` in the `content_block_delta` that built it.
+ *
+ *     This paragraph used to say the export "applies LogsModal's redaction
+ *     policy line-by-line", and that sentence is what let the leak through
+ *     review. It was true about the POLICY and false about the CORPUS: the
+ *     modal reads `events`, which never contained a partial, so anyone
+ *     reasoning from the claimed parity concluded the export was covered.
+ *   - **Consequence, stated rather than hidden.** A partial with no durable
+ *     counterpart — a turn killed by `query.interrupt()`, an abandoned tool
+ *     input — is not in the redacted artifact. `format=raw` is the only
+ *     complete trace. Note it is reachable by curl only: both UI call sites
+ *     hardcode `redacted`. The operator's escape hatch is that the file itself
+ *     is readable on disk (same machine, same uid, mode 0600), not that the
+ *     app offers it. Mock fixtures must therefore be captured from the on-disk
+ *     file or a raw export, never from a redacted download.
+ *   - **Lines that are not valid JSON.** See `redactJsonlLine`.
  *   - **`format=raw` requires `X-Cebab-Acknowledge-Raw: I-understand`**.
  *     The UI (slice 2) sets this header only after a typed-confirmation
  *     modal. Curl users have to set it explicitly — non-trivial, by design.
  *   - **Per-export forensic row.** Every successful export writes a
  *     `safety_audit` row (kind=`session.exported`, reasonCode=`exported_redacted`
- *     or `exported_raw`) BEFORE the body lands. If the audit append fails the
+ *     or `exported_raw`, plus `payload.contentPolicy` for a redacted one — see
+ *     `REDACTED_CONTENT_POLICY`) BEFORE the body lands. If the audit append fails the
  *     stream never starts (BE-1: the operator's intent must be recorded; if
  *     we can't, we don't ship the data). Audit rows survive session deletion
  *     because of Cluster I's bulk-delete preservation invariant.
@@ -58,6 +82,7 @@ import { verifyToken } from './auth.js';
 import { buildAllowedOrigins, isAllowedHost } from './origin.js';
 import { recordRejection } from './notifications/origin_rejections.js';
 import { appendSafetyAudit } from './notifications/safety_audit.js';
+import { isStreamPartial } from './runner/message_classes.js';
 
 /** Header the UI sends to opt into a raw (non-redacted) export. */
 export const RAW_ACK_HEADER = 'x-cebab-acknowledge-raw';
@@ -78,6 +103,28 @@ export const RAW_ACK_VALUE = 'I-understand';
  * filename from ever escaping `config.logsDir`.
  */
 const SAFE_SID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+
+/**
+ * What a `format=redacted` artifact contains, stamped onto every export's
+ * `safety_audit` row.
+ *
+ * `Cebab-ygu.47`'s sharpest point was not the leak itself: it was that the
+ * chain asserted `exported_redacted` while the file held plaintext. Read six
+ * months later, `reasonCode` alone cannot tell an artifact produced by the
+ * leaky build from one produced by this one. A constant naming the CODE PATH
+ * closes exactly that gap — bump the string whenever the policy changes.
+ *
+ * Deliberately a policy tag and NOT a measurement (no dropped-line count, no
+ * size, no hash). The row is written BEFORE the body by design (BE-1, below),
+ * so nothing about the emitted bytes is knowable yet; producing a count would
+ * need a second full read that a live session invalidates anyway, and a second
+ * row would break the one-export-one-row invariant and could not amend the
+ * first (the chain is hashed over `payload_json`). And a count of what was
+ * REMOVED attests nothing about what REMAINS — which is the same
+ * looks-like-assurance-but-isn't failure this bead is about. The row attests
+ * intent and policy; the artifact attests itself.
+ */
+export const REDACTED_CONTENT_POLICY = 'redacted/no-stream-partials';
 
 export type ExportFormat = 'redacted' | 'raw';
 
@@ -107,17 +154,36 @@ export function exportFilename(sessionId: string, sessionStartMs: number | null)
 }
 
 /**
- * Per-line redaction. Each JSONL line is a JSON-encoded SDKMessage; we
- * parse, run `redactSensitive`, and re-serialize. Lines that aren't valid
- * JSON are preserved verbatim — operator may have hand-edited the file
- * (or it could be a partial line during concurrent writes mid-export),
- * and silently dropping non-JSON would lose forensic data. Empty lines
- * (the final newline after the last line) pass through.
+ * The whole per-line decision for a `format=redacted` export. **Returns `null`
+ * when the line is not part of the artifact at all** — it is no longer a total
+ * function, and the name predates that.
+ *
+ * Each JSONL line is a JSON-encoded SDKMessage. Three outcomes:
+ *
+ *   - **A streaming partial → `null`** (`Cebab-ygu.47`). Dropped BEFORE the
+ *     redactor, so the code says "this class never reaches it" rather than
+ *     "we redact and then discard" — and so 42 of the 68 lines in the measured
+ *     session skip a full walk. See `runner/message_classes.ts` for why the
+ *     rule is shared with the `events` writer rather than spelled here.
+ *   - **Anything else → parsed, redacted, re-serialized.**
+ *   - **Not valid JSON → preserved verbatim.** The operator may have hand-
+ *     edited the file, or a concurrent write may have torn the final line, and
+ *     silently dropping it would lose forensic data. Empty lines (the newline
+ *     after the last line) pass through the same way.
+ *
+ * The shape guard before reading `.type` is not defensive noise: `JSON.parse`
+ * legitimately returns `null`, a number, a string or an array for a hand-edited
+ * line, and `parsed.type` on `null` THROWS — into the `catch` below, where it
+ * would be misreported as "not JSON" and shipped verbatim.
  */
-export function redactJsonlLine(line: string): string {
+export function redactJsonlLine(line: string): string | null {
   if (line.length === 0) return line;
   try {
     const parsed: unknown = JSON.parse(line);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const type = (parsed as { type?: unknown }).type;
+      if (typeof type === 'string' && isStreamPartial(type)) return null;
+    }
     const { redacted } = redactSensitive(parsed);
     return JSON.stringify(redacted);
   } catch {
@@ -296,7 +362,13 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
         sessionId: sid,
         kind: 'session.exported',
         reasonCode: format === 'raw' ? 'exported_raw' : 'exported_redacted',
-        payload: { sessionId: sid, format, origin: origin || null },
+        payload: {
+          sessionId: sid,
+          format,
+          origin: origin || null,
+          // Which code path produced the bytes. See REDACTED_CONTENT_POLICY.
+          ...(format === 'redacted' ? { contentPolicy: REDACTED_CONTENT_POLICY } : {}),
+        },
       });
     } catch (err) {
       console.error('[http] /session-log: safety_audit append failed', err);
@@ -369,6 +441,12 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
     let waitingForDrain = false;
     rl.on('line', (line: string) => {
       const out = redactJsonlLine(line);
+      // `Cebab-ygu.47`: a dropped line is a NO-OP here and nothing else. It must
+      // not touch `waitingForDrain`, pause/resume the readline, call `res.end()`
+      // (`rl.on('close')` is the sole end — an early end on a trailing partial
+      // would truncate the artifact) or run `teardown()`. Dropping strictly
+      // reduces writes, so it can only relieve backpressure, never create it.
+      if (out === null) return;
       let ok: boolean;
       try {
         ok = res.write(out + '\n');

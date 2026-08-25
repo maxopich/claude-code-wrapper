@@ -710,3 +710,49 @@ describe('[security] the second copy of a sensitive file body (of0)', () => {
     );
   });
 });
+
+describe('[security] pinned limitation: a streaming delta is NOT this module’s job', () => {
+  // `Cebab-ygu.47`. Recording what this redactor does NOT do, because believing
+  // otherwise is what shipped plaintext credentials in the "share-safe" export.
+  //
+  // Two structural reasons, and neither is a missing pattern:
+  //   1. A delta's text sits under the key `text`, which no KEY rule matches
+  //      and no key rule ever could without masking every message body.
+  //   2. A secret is CHOPPED ACROSS DELTAS, so no VALUE rule can match either
+  //      half however long the list grows.
+  //
+  // The answer is the CORPUS, not the values: `session_log_export.ts` excludes
+  // the whole message class via `runner/message_classes.ts`. Do not "fix" this
+  // here — a rule broad enough to catch case 2 would mask every message body,
+  // which is the transcript the export exists to provide.
+
+  // Assembled at runtime, non-vendor-shaped, so the secret scan stays at full
+  // strength and the case is not accidentally passed by a vendor pattern.
+  const CANARY = 'REDACTION' + '-CANARY-' + '77';
+
+  const delta = (text: string) => ({
+    type: 'stream_event',
+    event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } },
+  });
+
+  it('does not mask a plain secret under event.delta.text', () => {
+    const { redacted, fields } = redactSensitive(delta(`plain_marker = ${CANARY}`));
+    expect(JSON.stringify(redacted)).toContain(CANARY);
+    expect(fields).toEqual([]);
+  });
+
+  it('cannot see a value split across two deltas, by construction', () => {
+    const head = redactSensitive(delta('db_password = correct-horse-battery-'));
+    const tail = redactSensitive(delta('staple-9271'));
+    expect(JSON.stringify(head.redacted)).toContain('correct-horse-battery-');
+    expect(JSON.stringify(tail.redacted)).toContain('staple-9271');
+  });
+
+  it('CONTROL: a vendor-shaped token in the same position IS masked', () => {
+    // The half that keeps the two cases above from reading as "the redactor is
+    // broken". It works on what it can see; the delta corpus is what it cannot.
+    const vendor = 'AKIA' + 'ABCDEFGHIJKLMNOP';
+    const { redacted } = redactSensitive(delta(`key = ${vendor}`));
+    expect(JSON.stringify(redacted)).not.toContain(vendor);
+  });
+});
