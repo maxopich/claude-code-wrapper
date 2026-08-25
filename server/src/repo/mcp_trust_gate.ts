@@ -25,6 +25,7 @@ import { appendSafetyAudit } from '../notifications/safety_audit.js';
 //   - per-session deny_once hit  → silent refusal + safety_audit row
 //   - trust='pending_tofu'       → emit `first_seen` pending + await decision
 //   - trust='hash_changed'       → emit `hash_changed` pending + await decision
+//   - trust='script_changed'     → emit `script_changed` pending + await decision
 //   - trust='unknown' (no path)  → silent (no anchor; same as cebab-injected)
 //
 // The "block" is structural: `awaitMcpTrustDecisions` returns a Promise that
@@ -191,6 +192,7 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
       case 'pending_tofu':
       case 'hash_changed':
       case 'declaration_changed':
+      case 'script_changed':
         // Fall through to the prompt path.
         break;
       default: {
@@ -203,12 +205,14 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
     }
 
     const pendingId = randomUUID();
-    const reason: 'first_seen' | 'hash_changed' | 'declaration_changed' =
+    const reason: 'first_seen' | 'hash_changed' | 'declaration_changed' | 'script_changed' =
       server.trust === 'hash_changed'
         ? 'hash_changed'
         : server.trust === 'declaration_changed'
           ? 'declaration_changed'
-          : 'first_seen';
+          : server.trust === 'script_changed'
+            ? 'script_changed'
+            : 'first_seen';
     const command = server.config?.command ?? '';
     const args = server.config?.args;
     const binarySha = server.binarySha;
@@ -239,6 +243,12 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
       }
     }
 
+    // Cebab-1af: the declaration is identical on both sides of a
+    // `script_changed`, so a before/after of the declaration would show the
+    // operator two identical lines. The files are the entire difference, and
+    // the resolver already worked out which ones.
+    const changedScripts = reason === 'script_changed' ? server.scriptChanges : undefined;
+
     const envelope: ServerMsg = {
       type: 'mcp_auto_install_pending',
       pendingId,
@@ -251,6 +261,7 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
       ...(previousSha ? { previousSha } : {}),
       ...(previousCommand !== undefined ? { previousCommand } : {}),
       ...(previousArgs !== undefined ? { previousArgs } : {}),
+      ...(changedScripts && changedScripts.length > 0 ? { changedScripts } : {}),
     };
 
     // H15: fail closed rather than park an unbounded number of decisions.
@@ -320,7 +331,11 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
  *
  * So the rule is the strict one, and it is deliberately stricter than the
  * gate's: **a probe starts only what is already trusted.** Everything else —
- * `denied`, `pending_tofu`, `hash_changed`, `declaration_changed` — is refused.
+ * `denied`, `pending_tofu`, `hash_changed`, `declaration_changed`,
+ * `script_changed` — is refused. That list is prose; the CODE is a whitelist of
+ * one, which is why `Cebab-1af` added a sixth state without touching this
+ * function. A blacklist would have needed an edit here and would have started
+ * the new state silently if it did not get one.
  * `deny_once` needs no case of its own: it only ever arises from a prompt,
  * which only fires when a server is not trusted, so the rule already covers it.
  *
@@ -388,6 +403,10 @@ function applyDecision(args: {
         command: args.server.config?.command ?? '',
         args: args.server.config?.args ?? [],
         binarySha: args.server.binarySha ?? null,
+        // Cebab-1af: record WHICH BYTES were approved, not just which program
+        // was named. The row this writes is the baseline every later spawn is
+        // compared against.
+        scriptShas: args.server.scriptShas ?? null,
         decision: 'trusted',
       });
       args.outcome.approvals += 1;
@@ -399,6 +418,7 @@ function applyDecision(args: {
         command: args.server.config?.command ?? '',
         args: args.server.config?.args ?? [],
         binarySha: args.decision.binarySha,
+        scriptShas: args.server.scriptShas ?? null,
         decision: 'trusted_pinned_hash',
       });
       args.outcome.approvals += 1;
@@ -419,6 +439,7 @@ function applyDecision(args: {
         command: args.server.config?.command ?? '',
         args: args.server.config?.args ?? [],
         binarySha: args.server.binarySha ?? null,
+        scriptShas: args.server.scriptShas ?? null,
         decision: 'denied_remember',
       });
       args.outcome.persistedDenials += 1;
