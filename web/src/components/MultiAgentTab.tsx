@@ -659,7 +659,7 @@ export function DraftView(props: {
               operator opts in explicitly per session. Survives R-B once set. */}
           <label
             className="ma-pause-mutation-checkbox"
-            title="When enabled, the session pauses before EVERY dangerous command (rm, sudo, force-push, curl|sh, writes to system or secret paths, destructive infra/cluster/DB ops) from any worker and asks for your approval. Each command needs its own Continue — approving one does not disarm the toggle — and workers are gated independently, so pausing one does not let another through. Ordinary edits and MCP tool calls run without a prompt. Survives a Cebab server restart."
+            title="When enabled, a worker halts at a dangerous command (rm, sudo, force-push, curl|sh, writes to system or secret paths, destructive infra/cluster/DB ops) and waits for your approval. Each command needs its own Continue — approving one does not disarm the toggle — and workers are gated independently, so pausing one does not let another through. Once a worker is halted it runs nothing further until you decide. The one caveat, because it is a race Cebab cannot always win: the command that triggers the halt may already have been dispatched when the halt lands, so treat the pause as reliably STOPPING the worker rather than as a guarantee that the first command never ran. Ordinary edits and MCP tool calls run without a prompt. Survives a Cebab server restart."
           >
             <input
               type="checkbox"
@@ -2449,7 +2449,7 @@ function SessionSettingsPanel(props: {
                 ? `On · holding ${run.pendingMutations.length} worker${
                     run.pendingMutations.length === 1 ? '' : 's'
                   }`
-                : 'On · every dangerous command needs approval'}
+                : 'On · a dangerous command halts the worker for approval'}
             </dd>
           </>
         )}

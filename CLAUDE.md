@@ -148,6 +148,7 @@ npm --workspace server exec tsx src/mcp_scope_smoke.ts            # live: which 
 npm --workspace server exec tsx src/system_prompt_smoke.ts        # live: what system prompt a Cebab turn actually runs with
 npm --workspace server exec tsx src/managed_file_smoke.ts         # live: is an edited managed config what the next spawn loads?
 npm --workspace server exec tsx src/bus_max_turns_smoke.ts        # live: does the per-hop turn cap actually bind a bus hop?
+npm --workspace server exec tsx src/bus_pause_gate_smoke.ts       # live: is canUseTool consulted before a worker's tool is dispatched?
 ```
 
 **A project's own `.mcp.json` loads iff `settingSources` includes `'project'`** — i.e. iff the project is Trusted. Re-measured 2026-08-19 on SDK 0.3.220 (`mcp_scope_smoke.ts`, which exists so the next person re-runs it rather than trusting this sentence). The consequence is the one operators hit: an **untrusted** project does not merely miss its project-scoped servers, and a server that IS loaded can still contribute zero tools because it started and **failed** — a state that looks identical, from inside a session, to a server that was never declared. `claude mcp list` run from a Bash tool call does NOT disambiguate: it is a separate CLI process reporting on config files, not on the session it runs inside. The authority panel's probe (`runner/probe.ts`) is what answers the question, by reading `system/init.mcp_servers` from a real spawn.
