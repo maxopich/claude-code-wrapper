@@ -226,6 +226,7 @@ import {
   executeUnmuteParticipant,
 } from './control_verbs.js';
 import { getPauseExpiryRegistry, type PauseExpiryEntry } from './pause_expiry.js';
+import { buildParticipantControlSnapshots } from './participant_control_snapshot.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type {
   IterationSummary,
@@ -3119,8 +3120,14 @@ function dispatchGuardrailViolationForConn(
  * up to date: emit `multi_agent_started` (the reducer clears the event list
  * to []), then replay persisted events in DB-id order so the scrollback
  * rebuilds before any live event from the re-attached tailer arrives.
+ *
+ * Exported for direct testing, like its neighbours in this file. The envelope
+ * this builds is the only place a re-attaching browser learns anything, so
+ * asserting on a re-implementation of it would be asserting on the test
+ * author — `emit_resumed_controls.test.ts` calls the real thing with a
+ * capturing socket instead.
  */
-function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
+export function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   conn.multiAgent = resumed.handle;
   // Register B01: remember which sink generation this conn owns, so its WS
   // close only silences the stream if nobody re-attached in the meantime.
@@ -3194,6 +3201,10 @@ function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     executeMode,
     mutations,
     pendingMutations,
+    // `Cebab-vie.6` / `Cebab-vie.4`: the standing mute / pause / kick state, so
+    // a refresh stops discarding all three. This is the attach path for R-A,
+    // R-B and reopen alike, which is why the fix needs no per-caller work.
+    participantControls: buildParticipantControlSnapshots(resumed.handle.sessionId),
     ...(pendingQuestion
       ? {
           pendingQuestion: {
@@ -5119,6 +5130,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             executeMode: handle.executeMode,
             mutations: [],
             pendingMutations: [],
+            // Fresh start: no verb has run, so this is necessarily `[]`. Calling
+            // the builder anyway is the point — one expression for this field
+            // across all three sites means no site can hand-write an empty
+            // array that looks right and is wrong.
+            participantControls: buildParticipantControlSnapshots(handle.sessionId),
             ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
           });
         } catch (err) {
@@ -5215,6 +5231,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           executeMode: false,
           mutations: [],
           pendingMutations: [],
+          // As the orchestrator branch. Chain mode additionally refuses all
+          // four control verbs, so this is empty twice over — via the builder,
+          // so it stays correct if that ever changes.
+          participantControls: buildParticipantControlSnapshots(handle.sessionId),
           ...(chainRow?.mock === 1 ? { mock: true } : {}),
         });
       } catch (err) {
