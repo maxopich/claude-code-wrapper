@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode, KickMode } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g3: kick confirmation modal with reason-code picker.
 // Mounted by ParticipantControlMenu's Kick… item; first surface that
@@ -34,49 +35,6 @@ import { useModalSurface } from '../../useModalSurface';
 // The 4g2 menu already disables Kick in chain mode and on
 // already-kicked participants, so the user-visible paths to a
 // `wrapper_error` are narrow.
-
-const REASON_OPTIONS: Array<{ code: ControlReasonCode; label: string; help: string }> = [
-  {
-    code: 'runaway_loop',
-    label: 'Runaway loop',
-    help: 'Agent stuck retrying or oscillating without progress.',
-  },
-  {
-    code: 'off_task',
-    label: 'Off-task',
-    help: "Agent drifted from the relayed request and isn't coming back.",
-  },
-  {
-    code: 'cost_ceiling',
-    label: 'Cost ceiling',
-    help: 'Cumulative spend or token use is climbing past acceptable bounds.',
-  },
-  {
-    code: 'tool_misuse',
-    label: 'Tool misuse',
-    help: 'Agent invoked a tool in a way that risks harm or violates policy.',
-  },
-  {
-    code: 'incorrect_output',
-    label: 'Incorrect output',
-    help: "Agent's most recent answer is wrong and can't be salvaged.",
-  },
-  {
-    code: 'forensics',
-    label: 'Forensics',
-    help: 'Need to freeze this agent to inspect its state without further mutation.',
-  },
-  {
-    code: 'topology_repair',
-    label: 'Topology repair',
-    help: "Reshuffling the participant set; this agent isn't needed for the current task.",
-  },
-  {
-    code: 'other',
-    label: 'Other',
-    help: 'Requires a free-text explanation in the field below.',
-  },
-];
 
 const KICK_MODE: KickMode = 'drain';
 
@@ -156,10 +114,11 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
           captured alongside the <code>agent_control.kicked</code> safety_audit row at the moment of
           kick.
         </p>
+        <p className="gate-modal-help control-verb-limits">{VERB_LIMITS.kick}</p>
         <fieldset className="kick-modal-fieldset">
           <legend className="kick-modal-legend">Reason</legend>
           <ul className="kick-modal-reason-list">
-            {REASON_OPTIONS.map((opt) => (
+            {reasonOptionsFor('kick').map((opt) => (
               <li key={opt.code} className="kick-modal-reason-row">
                 <label className="kick-modal-reason-label">
                   <input
@@ -173,6 +132,9 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
                   <span className="kick-modal-reason-text">
                     <span className="kick-modal-reason-label-text">{opt.label}</span>
                     <span className="kick-modal-reason-help">{opt.help}</span>
+                    {opt.caveat ? (
+                      <span className="control-reason-caveat">{opt.caveat}</span>
+                    ) : null}
                   </span>
                 </label>
               </li>

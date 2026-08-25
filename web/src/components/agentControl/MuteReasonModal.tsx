@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g5: reason-code picker shared by the non-destructive
 // participant control verbs — Mute, Unmute, and Resume. Phase 4g2 pinned
@@ -31,49 +32,6 @@ import { useModalSurface } from '../../useModalSurface';
 // so a stray Enter from an unrelated context cannot trip an action. The
 // actions here are non-destructive (mute / unmute / resume are all
 // reversible), but the symmetry with KickModal helps muscle memory.
-
-const REASON_OPTIONS: Array<{ code: ControlReasonCode; label: string; help: string }> = [
-  {
-    code: 'runaway_loop',
-    label: 'Runaway loop',
-    help: 'Agent stuck retrying or oscillating without progress.',
-  },
-  {
-    code: 'off_task',
-    label: 'Off-task',
-    help: "Agent drifted from the relayed request and isn't coming back.",
-  },
-  {
-    code: 'cost_ceiling',
-    label: 'Cost ceiling',
-    help: 'Cumulative spend or token use is climbing past acceptable bounds.',
-  },
-  {
-    code: 'tool_misuse',
-    label: 'Tool misuse',
-    help: 'Agent invoked a tool in a way that risks harm or violates policy.',
-  },
-  {
-    code: 'incorrect_output',
-    label: 'Incorrect output',
-    help: "Agent's most recent answer is wrong and can't be salvaged.",
-  },
-  {
-    code: 'forensics',
-    label: 'Forensics',
-    help: 'Need to freeze this agent to inspect its state without further mutation.',
-  },
-  {
-    code: 'topology_repair',
-    label: 'Topology repair',
-    help: 'Operator-driven reshape of the participant set — neutral default.',
-  },
-  {
-    code: 'other',
-    label: 'Other',
-    help: 'Requires a free-text explanation in the field below.',
-  },
-];
 
 export type MuteAction = 'mute' | 'unmute' | 'resume';
 
@@ -178,10 +136,13 @@ export function MuteReasonModal({
           </h3>
         </header>
         <p className="gate-modal-help">{copy.help}</p>
+        {VERB_LIMITS[action] ? (
+          <p className="gate-modal-help control-verb-limits">{VERB_LIMITS[action]}</p>
+        ) : null}
         <fieldset className="mute-reason-modal-fieldset">
           <legend className="mute-reason-modal-legend">Reason</legend>
           <ul className="mute-reason-modal-reason-list">
-            {REASON_OPTIONS.map((opt) => (
+            {reasonOptionsFor(action).map((opt) => (
               <li key={opt.code} className="mute-reason-modal-reason-row">
                 <label className="mute-reason-modal-reason-label">
                   <input
@@ -195,6 +156,9 @@ export function MuteReasonModal({
                   <span className="mute-reason-modal-reason-text">
                     <span className="mute-reason-modal-reason-label-text">{opt.label}</span>
                     <span className="mute-reason-modal-reason-help">{opt.help}</span>
+                    {opt.caveat ? (
+                      <span className="control-reason-caveat">{opt.caveat}</span>
+                    ) : null}
                   </span>
                 </label>
               </li>

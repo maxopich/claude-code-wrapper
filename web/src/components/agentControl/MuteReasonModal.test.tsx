@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { MuteReasonModal } from './MuteReasonModal';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g5 — MuteReasonModal contract:
 //   - Single shared modal for the non-destructive verbs (mute, unmute, resume)
@@ -117,6 +118,36 @@ describe('MuteReasonModal — render', () => {
   test('default reason is topology_repair', () => {
     render();
     expect(findReasonInput('topology_repair').checked).toBe(true);
+  });
+});
+
+describe('MuteReasonModal — per-reason caveats (Cebab-vie.5)', () => {
+  /** The caveat text rendered inside the row whose radio is `code`. */
+  function caveatFor(code: string): string | null {
+    const row = findReasonInput(code).closest('.mute-reason-modal-reason-row');
+    return row?.querySelector('.control-reason-caveat')?.textContent ?? null;
+  }
+
+  test('the reasons this verb cannot remedy carry a caveat, and the others do not', () => {
+    // Both directions in one test on purpose: "a caveat is rendered" is
+    // satisfied by rendering one on all eight rows, and "topology_repair has
+    // none" is satisfied by rendering none at all.
+    render({ action: 'mute', agentLabel: 'scribe' });
+    for (const code of ['runaway_loop', 'cost_ceiling', 'tool_misuse', 'forensics']) {
+      expect(caveatFor(code), code).toBeTruthy();
+    }
+    for (const code of ['off_task', 'incorrect_output', 'topology_repair', 'other']) {
+      expect(caveatFor(code), code).toBeNull();
+    }
+  });
+
+  test('the caveat is the one this verb owns', () => {
+    // Reddens if the modal renders another verb's list — the strings differ
+    // per verb precisely because the three fail the operator differently.
+    render({ action: 'mute', agentLabel: 'scribe' });
+    const expected = reasonOptionsFor('mute').find((o) => o.code === 'runaway_loop')!.caveat;
+    expect(expected).toBeTruthy();
+    expect(caveatFor('runaway_loop')).toBe(expected);
   });
 });
 
@@ -322,5 +353,38 @@ describe('MuteReasonModal — dismissal without dispatch', () => {
     });
     expect(onClose).toHaveBeenCalled();
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('MuteReasonModal — what the verb does not do (Cebab-vie.5)', () => {
+  function limitsText(): string | null {
+    return document.querySelector('.control-verb-limits')?.textContent ?? null;
+  }
+
+  test('the limits line is rendered, and it is this verb\u2019s', () => {
+    // A string that exists in the module and never reaches the screen is the
+    // same defect as a wrong one, so this asserts the DOM rather than the
+    // constant — and asserts identity, so a modal wired to another verb's
+    // sentence fails.
+    render({ action: 'mute', agentLabel: 'scribe' });
+    expect(limitsText()).toBe(VERB_LIMITS['mute']);
+  });
+
+  test('it names the levers that do bound a running turn', () => {
+    // The Cebab-vie.17 correction: when this bead was filed a hop really was
+    // an unbounded agent turn. Telling an operator "nothing stops it" would be
+    // the new wrong answer. Reddens if the clause is trimmed away as verbose.
+    render({ action: 'mute', agentLabel: 'scribe' });
+    expect(limitsText()).toContain('per-hop turn cap');
+    expect(limitsText()).toContain('Stop ends the whole session');
+  });
+
+  test('the undo verbs state no limit', () => {
+    // Unmute and Resume remove a restriction, so there is nothing to disclaim.
+    // Reddens if `VERB_LIMITS` is ever given a blanket entry.
+    render({ action: 'unmute', agentLabel: 'scribe' });
+    expect(limitsText(), 'unmute').toBeNull();
+    render({ action: 'resume', agentLabel: 'scribe' });
+    expect(limitsText(), 'resume').toBeNull();
   });
 });

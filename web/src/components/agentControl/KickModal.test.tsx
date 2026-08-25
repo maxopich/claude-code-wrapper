@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { KickModal } from './KickModal';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g3 — KickModal contract:
 //   - Renders dialog scaffold (role=dialog, aria-modal=true)
@@ -267,5 +268,59 @@ describe('KickModal — an undelivered kick keeps the dialog (Cebab-u0s)', () =>
     expect(document.querySelector('.kick-modal')).not.toBeNull();
     const after = document.querySelector('.kick-modal-text-input') as HTMLTextAreaElement;
     expect(after.value).toBe('ignored three redirects, removing it');
+  });
+});
+
+describe('KickModal — per-reason caveats (Cebab-vie.5)', () => {
+  /** The caveat text rendered inside the row whose radio is `code`. */
+  function caveatFor(code: string): string | null {
+    const row = findReasonInput(code).closest('.kick-modal-reason-row');
+    return row?.querySelector('.control-reason-caveat')?.textContent ?? null;
+  }
+
+  test('the reasons this verb cannot remedy carry a caveat, and the others do not', () => {
+    // Both directions in one test on purpose: "a caveat is rendered" is
+    // satisfied by rendering one on all eight rows, and "topology_repair has
+    // none" is satisfied by rendering none at all.
+    render();
+    for (const code of ['runaway_loop', 'cost_ceiling', 'tool_misuse', 'forensics']) {
+      expect(caveatFor(code), code).toBeTruthy();
+    }
+    for (const code of ['off_task', 'incorrect_output', 'topology_repair', 'other']) {
+      expect(caveatFor(code), code).toBeNull();
+    }
+  });
+
+  test('the caveat is the one this verb owns', () => {
+    // Reddens if the modal renders another verb's list — the strings differ
+    // per verb precisely because the three fail the operator differently.
+    render();
+    const expected = reasonOptionsFor('kick').find((o) => o.code === 'runaway_loop')!.caveat;
+    expect(expected).toBeTruthy();
+    expect(caveatFor('runaway_loop')).toBe(expected);
+  });
+});
+
+describe('KickModal — what the verb does not do (Cebab-vie.5)', () => {
+  function limitsText(): string | null {
+    return document.querySelector('.control-verb-limits')?.textContent ?? null;
+  }
+
+  test('the limits line is rendered, and it is this verb\u2019s', () => {
+    // A string that exists in the module and never reaches the screen is the
+    // same defect as a wrong one, so this asserts the DOM rather than the
+    // constant — and asserts identity, so a modal wired to another verb's
+    // sentence fails.
+    render();
+    expect(limitsText()).toBe(VERB_LIMITS['kick']);
+  });
+
+  test('it names the levers that do bound a running turn', () => {
+    // The Cebab-vie.17 correction: when this bead was filed a hop really was
+    // an unbounded agent turn. Telling an operator "nothing stops it" would be
+    // the new wrong answer. Reddens if the clause is trimmed away as verbose.
+    render();
+    expect(limitsText()).toContain('per-hop turn cap');
+    expect(limitsText()).toContain('Stop ends the whole session');
   });
 });

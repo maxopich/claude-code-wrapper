@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode, PauseExpiryAction } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
+import { reasonOptionsFor, VERB_LIMITS } from './controlReasons';
 
 // Cluster C Phase 4g5: pause-specific reason picker. Extends the
 // MuteReasonModal shape with two pause-only controls:
@@ -15,60 +16,20 @@ import { useModalSurface } from '../../useModalSurface';
 //     and runs the same kick-forensics capture chain — for cases where
 //     the operator wants "give it 5 more minutes, then it's out."
 //
-// The reason picker mirrors MuteReasonModal verbatim. We deliberately
-// don't share the radio list as a sub-component yet — the lists are
-// short, identical strings show up in one place per file (and grep-able
-// for code review), and the inlining keeps each modal a single-file
-// read.
+// `Cebab-vie.5`: the reason list lives in `./controlReasons` and is shared
+// with MuteReasonModal and KickModal. The comment that used to sit here
+// argued the other way — three inlined copies, because "identical strings
+// show up in one place per file (and grep-able for code review)". Measured
+// before the move: they were not identical. Kick's `topology_repair` help
+// had diverged and nothing detected it, because "identical" was an
+// assertion nobody was checking. The radio MARKUP is still per-modal (the
+// class prefixes differ); only the vocabulary is shared.
 //
 // Default selections:
 //   - reasonCode: 'topology_repair' (matches the C4g2 placeholder)
 //   - duration:   15 minutes (matches the C4g2 "Pause for 15m" preset
 //     which we replace with this modal)
 //   - expiry:     auto_resume (safer default — auto_kick is destructive)
-
-const REASON_OPTIONS: Array<{ code: ControlReasonCode; label: string; help: string }> = [
-  {
-    code: 'runaway_loop',
-    label: 'Runaway loop',
-    help: 'Agent stuck retrying or oscillating without progress.',
-  },
-  {
-    code: 'off_task',
-    label: 'Off-task',
-    help: "Agent drifted from the relayed request and isn't coming back.",
-  },
-  {
-    code: 'cost_ceiling',
-    label: 'Cost ceiling',
-    help: 'Cumulative spend or token use is climbing past acceptable bounds.',
-  },
-  {
-    code: 'tool_misuse',
-    label: 'Tool misuse',
-    help: 'Agent invoked a tool in a way that risks harm or violates policy.',
-  },
-  {
-    code: 'incorrect_output',
-    label: 'Incorrect output',
-    help: "Agent's most recent answer is wrong and can't be salvaged.",
-  },
-  {
-    code: 'forensics',
-    label: 'Forensics',
-    help: 'Need to freeze this agent to inspect its state without further mutation.',
-  },
-  {
-    code: 'topology_repair',
-    label: 'Topology repair',
-    help: 'Operator-driven reshape of the participant set — neutral default.',
-  },
-  {
-    code: 'other',
-    label: 'Other',
-    help: 'Requires a free-text explanation in the field below.',
-  },
-];
 
 type DurationPreset = '5m' | '15m' | '60m' | 'custom';
 
@@ -191,10 +152,11 @@ export function PauseReasonModal({
           told — its bus_send still echoes success, but the orchestrator stops scheduling new turns.
           Queued deliveries fire on Resume (manually or auto-).
         </p>
+        <p className="gate-modal-help control-verb-limits">{VERB_LIMITS.pause}</p>
         <fieldset className="pause-reason-modal-fieldset">
           <legend className="pause-reason-modal-legend">Reason</legend>
           <ul className="pause-reason-modal-reason-list">
-            {REASON_OPTIONS.map((opt) => (
+            {reasonOptionsFor('pause').map((opt) => (
               <li key={opt.code} className="pause-reason-modal-reason-row">
                 <label className="pause-reason-modal-reason-label">
                   <input
@@ -208,6 +170,9 @@ export function PauseReasonModal({
                   <span className="pause-reason-modal-reason-text">
                     <span className="pause-reason-modal-reason-label-text">{opt.label}</span>
                     <span className="pause-reason-modal-reason-help">{opt.help}</span>
+                    {opt.caveat ? (
+                      <span className="control-reason-caveat">{opt.caveat}</span>
+                    ) : null}
                   </span>
                 </label>
               </li>
