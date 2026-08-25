@@ -1,0 +1,249 @@
+/**
+ * Autonomous loop — configuration, and the `--until` stop condition.
+ *
+ * PURE. No fs, no process, no clock. `parseUntil` and every predicate below
+ * take `now` as an argument, which is what makes the deadline arithmetic
+ * testable at all: a helper that read `Date.now()` internally could only be
+ * tested by sleeping, and the overnight paths (stop at 07:00, reserve 45 min
+ * before a deadline) are exactly the ones nobody will sit through.
+ *
+ * WHY UNKNOWN KEYS ARE AN ERROR RATHER THAN A WARNING. The config carries
+ * `guard.denyPaths` — the list that decides which files the loop refuses to
+ * merge unattended. A typo there (`denyPath`, `deny_paths`) silently produces
+ * an EMPTY deny list layered under the defaults, and the guard then passes
+ * everything it was configured to stop. That is the `project_gates_pass_
+ * vacuously` shape: a gate that runs, reports success, and measures nothing.
+ * So a key the defaults do not define is refused by name, and the driver
+ * exits 2 rather than starting a run on a config it did not understand.
+ */
+
+/** Thrown for anything the operator can fix by editing config or CLI flags. */
+export class ConfigError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ConfigError';
+  }
+}
+
+/**
+ * Built-in defaults. This object is also the SCHEMA: `resolveConfig` rejects
+ * any key an override introduces that does not appear here, so adding a
+ * setting means adding it to this literal.
+ *
+ * Every budget limit ships wired but OFF (null / 0 / empty). The maintainer
+ * wants to see where consumption actually goes across real runs before
+ * anything is capped, and a limit that fires unasked during the first week is
+ * indistinguishable from a bug. `loop.merge` is false for the same reason:
+ * the first runs must be observable before anything merges itself.
+ */
+export const DEFAULTS = Object.freeze({
+  select: {
+    maxPriority: 2,
+    excludeLabels: ['loop-stuck', 'needs-human', 'epic'],
+    excludeTypes: ['epic', 'decision'],
+    excludeIdPrefixes: [],
+    sortPolicy: 'hybrid',
+  },
+  build: {
+    model: 'opus',
+    effort: 'high',
+    maxTurns: 60,
+    permissionMode: 'acceptEdits',
+    timeoutMs: 2400000,
+    tiers: [],
+  },
+  gate: {
+    playgroundTier: 'auto',
+    playgroundTriggerPaths: ['server/', 'shared/'],
+    playgroundRoot: '../Playground',
+    liveSmokes: false,
+    auditGate: true,
+    stepTimeoutMs: 900000,
+  },
+  guard: {
+    denyPaths: [
+      '.github/**',
+      '.husky/**',
+      '.semgrep/**',
+      '.npmrc',
+      '.gitleaks.toml',
+      'osv-scanner.toml',
+      'eslint.config.js',
+      'vitest.config.ts',
+      'vitest.setup.mjs',
+      'scripts/audit-gate.mjs',
+      'scripts/security-test-gate.mjs',
+      'scripts/kanban-sync.mjs',
+      'scripts/kanban-sync.test.mjs',
+      'package-lock.json',
+    ],
+    maxFilesChanged: 25,
+    maxNetLinesAdded: 600,
+    allowTestDeletions: false,
+    forbidInDiff: ['--no-verify'],
+  },
+  ci: {
+    requiredContext: 'Lint, Typecheck, Test',
+    pollIntervalMs: 30000,
+    appearTimeoutMs: 300000,
+    completeTimeoutMs: 1800000,
+  },
+  loop: {
+    until: ['1'],
+    maxRepairs: 2,
+    consecutiveParkLimit: 3,
+    merge: false,
+  },
+  limits: {
+    costCeilingUsd: null,
+    beadCostCeilingUsd: null,
+    cooldownMsBetweenBeads: 0,
+    reserveMs: 2700000,
+    onSessionLimit: 'halt',
+    onWeeklyLimit: 'halt',
+  },
+  harvest: {
+    followUpPriority: 3,
+    followUpLabel: 'loop-found',
+    syncBoardAtEnd: true,
+  },
+});
+
+const UNTIL_COUNT = /^\d+$/;
+const UNTIL_CLOCK = /^(\d{1,2}):(\d{2})$/;
+const UNTIL_DURATION = /^(\d+)([hm])$/;
+
+/**
+ * `--until` is one flag with four forms, because bead-count, clock-time and
+ * wall-clock budget are the same decision. Parse by SHAPE.
+ *
+ * Clock and duration both reduce to `{ kind: 'deadline', at }` — the caller
+ * needs no case analysis, and `reserveBlocks` below has exactly one kind to
+ * look at. `raw` survives so `--status` can name which condition tripped.
+ *
+ * Anything unrecognised THROWS. There is deliberately no fallback to the
+ * default: `--until 8h30m` silently meaning "one bead" is worse than refusing
+ * to start, because the operator finds out at 3am by way of an empty ledger.
+ */
+export function parseUntil(value, now) {
+  if (typeof value !== 'string') {
+    throw new ConfigError(`--until expects a string, received ${typeof value}`);
+  }
+  const raw = value.trim();
+  if (raw === 'drain') return { kind: 'drain', raw };
+
+  if (UNTIL_COUNT.test(raw)) {
+    const count = Number(raw);
+    if (count < 1) throw new ConfigError(`--until ${raw}: iteration count must be at least 1`);
+    return { kind: 'count', raw, count };
+  }
+
+  const clock = UNTIL_CLOCK.exec(raw);
+  if (clock) {
+    const hours = Number(clock[1]);
+    const minutes = Number(clock[2]);
+    if (hours > 23) throw new ConfigError(`--until ${raw}: hour must be 00-23`);
+    if (minutes > 59) throw new ConfigError(`--until ${raw}: minute must be 00-59`);
+    const base = new Date(now);
+    const at = new Date(base.getFullYear(), base.getMonth(), base.getDate(), hours, minutes, 0, 0);
+    // "Next occurrence of that LOCAL time" — already past today means tomorrow.
+    if (at.getTime() <= now) at.setDate(at.getDate() + 1);
+    return { kind: 'deadline', raw, at: at.getTime() };
+  }
+
+  const duration = UNTIL_DURATION.exec(raw);
+  if (duration) {
+    const amount = Number(duration[1]);
+    if (amount < 1) throw new ConfigError(`--until ${raw}: duration must be at least 1`);
+    const ms = duration[2] === 'h' ? amount * 3600000 : amount * 60000;
+    return { kind: 'deadline', raw, at: now + ms };
+  }
+
+  throw new ConfigError(
+    `--until ${raw}: unrecognised. Expected an iteration count (8), a local time (07:00), ` +
+      `a duration (2h, 90m), or the literal 'drain'.`,
+  );
+}
+
+/** Has one parsed condition tripped? `drained` comes from SELECT finding nothing. */
+export function untilTripped(condition, { iterations, now, drained }) {
+  switch (condition.kind) {
+    case 'count':
+      return iterations >= condition.count;
+    case 'deadline':
+      return now >= condition.at;
+    case 'drain':
+      return drained === true;
+    default:
+      throw new ConfigError(`unknown --until kind: ${condition.kind}`);
+  }
+}
+
+/** First condition to trip wins; returns it so the run can report which one. */
+export function firstTripped(conditions, ctx) {
+  for (const condition of conditions) {
+    if (untilTripped(condition, ctx)) return condition;
+  }
+  return null;
+}
+
+/**
+ * "Do not start a bead you cannot finish." With less than `reserveMs` left
+ * against a DEADLINE, stop before SELECT rather than beginning an iteration
+ * that gets cut off half-built.
+ *
+ * Count and drain conditions have no deadline to reserve against, so
+ * `reserveMs` is inert for them — that is specified behaviour, not an
+ * oversight, and the test asserts it in both directions.
+ */
+export function reserveBlocks(conditions, { now }, reserveMs) {
+  if (!reserveMs || reserveMs <= 0) return null;
+  for (const condition of conditions) {
+    if (condition.kind !== 'deadline') continue;
+    if (condition.at - now < reserveMs) return condition;
+  }
+  return null;
+}
+
+const isPlainObject = (value) =>
+  value !== null && typeof value === 'object' && !Array.isArray(value);
+
+/**
+ * Deep-merge overrides onto defaults, collecting every unknown key rather than
+ * throwing at the first — the operator should see the whole list, not fix one
+ * typo per run. Arrays are REPLACED wholesale: a `denyPaths` override means
+ * "this list", never "the defaults plus these", which would make removing a
+ * default entry impossible.
+ */
+function mergeLayer(base, override, path, unknown) {
+  const out = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    const here = path ? `${path}.${key}` : key;
+    if (!Object.prototype.hasOwnProperty.call(base, key)) {
+      unknown.push(here);
+      continue;
+    }
+    if (isPlainObject(base[key]) && isPlainObject(value)) {
+      out[key] = mergeLayer(base[key], value, here, unknown);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+/**
+ * defaults -> file -> CLI. Later layers win. Throws ConfigError naming every
+ * unknown key across all layers; the driver turns that into exit 2.
+ */
+export function resolveConfig({ file = {}, cli = {} } = {}) {
+  const unknown = [];
+  let merged = mergeLayer(DEFAULTS, file, '', unknown);
+  merged = mergeLayer(merged, cli, '', unknown);
+  if (unknown.length > 0) {
+    throw new ConfigError(
+      `unknown config key${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}`,
+    );
+  }
+  return merged;
+}

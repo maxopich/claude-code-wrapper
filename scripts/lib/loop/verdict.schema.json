@@ -1,0 +1,52 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "outcome",
+    "summary",
+    "commit_type",
+    "commit_scope",
+    "commit_subject",
+    "files_changed",
+    "tests",
+    "risk",
+    "needs_human",
+    "follow_ups"
+  ],
+  "properties": {
+    "outcome": { "enum": ["implemented", "no_change_needed", "blocked"] },
+    "summary": { "type": "string", "maxLength": 600 },
+    "commit_type": { "enum": ["fix", "feat", "chore", "docs", "refactor", "test"] },
+    "commit_scope": { "type": "string", "maxLength": 20 },
+    "commit_subject": { "type": "string", "maxLength": 72 },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["added", "modified", "deleted", "commands_run"],
+      "properties": {
+        "added": { "type": "array", "items": { "type": "string" } },
+        "modified": { "type": "array", "items": { "type": "string" } },
+        "deleted": { "type": "array", "items": { "type": "string" } },
+        "commands_run": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "risk": { "enum": ["low", "medium", "high"] },
+    "needs_human": { "type": "boolean" },
+    "needs_human_reason": { "type": "string" },
+    "follow_ups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["title", "type", "why", "evidence"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 120 },
+          "type": { "enum": ["bug", "task", "chore", "feature", "decision"] },
+          "why": { "type": "string", "maxLength": 400 },
+          "evidence": { "type": "string", "maxLength": 600 }
+        }
+      }
+    }
+  }
+}
