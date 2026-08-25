@@ -366,6 +366,14 @@ const POSTURE_ALLOWLIST = new Map([
     'server/src/ws/single_agent_model_wiring.test.ts',
     'names it as the value the read-side guard exists to stop',
   ],
+  // Cebab-vie.16: the smoke that MEASURES this seam. It names the branch to
+  // explain why omitting `onAskUserQuestion` measured the wrong posture — the
+  // SDK's own `CLAUDE_SDK_CAN_USE_TOOL_SHADOWED` warning is quoted there. A
+  // record of the mistake, not a claim about how the bus runs.
+  [
+    'server/src/bus_pause_gate_smoke.ts',
+    'names the test-only branch to explain a mis-measurement it corrects',
+  ],
   [SELF, 'this gate'],
 ]);
 
