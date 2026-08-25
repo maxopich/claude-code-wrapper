@@ -360,6 +360,19 @@ export type OrchestratorSessionHandle = {
    */
   pauseAgent: (agentName: string) => boolean;
   resumeAgent: (agentName: string) => boolean;
+  /**
+   * `Cebab-vie.3`: does the RUNNER know this slug at all?
+   *
+   * `pauseAgent` returns false for two different reasons — an unknown agent
+   * (no gate installed, the dangerous one) and an operator hold already in
+   * place — and the caller cannot tell them apart from the boolean. That was
+   * tolerable while the audit row was written after the gate; it is not now
+   * that it is written before, because the unknown-agent case has to be
+   * refused with NOTHING written, audit row included.
+   *
+   * A read, not a mutation: safe to ask before deciding to record anything.
+   */
+  hasAgent: (agentName: string) => boolean;
   getPendingDeliveries: (agentName: string) => number;
   /**
    * Cluster C Phase 4d: flip the orchestrator router's in-memory kicked set.
@@ -2438,6 +2451,7 @@ export function wireOrchestratorSession(p: {
     isMuted: (agentName) => router.isMuted(agentName),
     pauseAgent: (agentName) => runner.pause(agentName),
     resumeAgent: (agentName) => runner.resume(agentName),
+    hasAgent: (agentName) => runner.has(agentName),
     getPendingDeliveries: (agentName) => runner.getPendingDeliveries(agentName),
     kickAgent: (agentName) => router.kickAgent(agentName),
     isKicked: (agentName) => router.isKicked(agentName),
