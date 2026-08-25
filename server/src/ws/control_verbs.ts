@@ -846,11 +846,21 @@ export function buildParticipantPauseChangedMsg(args: {
 //     running" though, because the router-side drops (orchestrator.ts
 //     kickedSet check, both directions) make sure none of its outbound
 //     bus_send calls reach a peer and none of the peers' replies wake a
-//     new turn for it. The drain happens by-construction: the in-flight
-//     turn's bus_send calls land in the router as `kicked_source` drops
-//     (forensically visible), and no new turn ever starts because all
-//     `ev.destination === <kicked>` events become `kicked_destination`
-//     drops.
+//     new turn for it. The in-flight turn's bus_send calls land in the
+//     router as `kicked_source` drops (forensically visible).
+//   - No new turn starts. This used to be justified "by-construction",
+//     because every `ev.destination === <kicked>` event becomes a
+//     `kicked_destination` drop — which is a statement about EVENTS and
+//     was being read as one about TURNS. A delivery routed before the
+//     kick is already past that check and sits on the runner's per-agent
+//     tail; when the in-flight turn settles it used to start a fresh,
+//     fully tool-enabled turn for the kicked worker (`Cebab-vie.11`).
+//     `AgentRunner` now re-reads eligibility at dequeue (`canStartTurn`,
+//     wired to the router's `isKicked`) and refuses, and
+//     `handle.kickAgent` releases any standing queue hold so a delivery
+//     parked on a pause gate reaches that refusal instead of waiting
+//     forever. So the guarantee holds — but by enforcement, not by
+//     construction, and the difference is what made it wrong for a year.
 //   - Hard mode (per-agent AbortController to actively cancel the
 //     in-flight turn) is deferred to v1.1 — the handler returns
 //     `hard_kill_unsupported_v1` on `mode: 'hard'`.

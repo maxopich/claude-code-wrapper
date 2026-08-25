@@ -428,3 +428,157 @@ async function pollUntil(predicate: () => boolean, maxTriesPer5ms = 200): Promis
   }
   throw new Error('pollUntil timed out waiting for predicate');
 }
+
+/**
+ * `Cebab-vie.1` [security]: the deliveries that were ALREADY WAITING when the
+ * operator clicked Pause.
+ *
+ * Every case above pauses an agent whose queue it has first drained on purpose
+ * — "run + finish first turn so the tail is clean". That is a scope fence, and
+ * the whole defect lived on the other side of it: `pause` used to splice its
+ * gate into `turnTails` as `prevTail.then(() => gatePromise)`, i.e. BEHIND
+ * everything already enqueued, so N waiting deliveries ran N full unattended
+ * turns after the click and only the N+1th was held. Meanwhile the
+ * `agent_control.paused` audit row said paused-from-T and the
+ * `participant_pause_changed` echo reported those same N turns to the operator
+ * as `queuedDeliveries` — the count being held back.
+ *
+ * A worker's turns are serialized, so "a delivery is waiting behind another
+ * one" is the ordinary state of a busy bus, not a corner case.
+ */
+describe('[security] a delivery already queued when Pause lands does NOT run (Cebab-vie.1)', () => {
+  let originalApiKey: string | undefined;
+  beforeEach(() => {
+    originalApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_API_KEY;
+  });
+  afterEach(() => {
+    if (originalApiKey !== undefined) process.env.ANTHROPIC_API_KEY = originalApiKey;
+  });
+
+  test('two deliveries queued behind an in-flight turn stay parked until resume', async () => {
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    // Deliberately do NOT drain: turn 1 runs, turns 2 and 3 wait behind it.
+    const first = runner.deliverTurn('alpha', 'first');
+    await turnStarted[0];
+    const queued = [runner.deliverTurn('alpha', 'q1'), runner.deliverTurn('alpha', 'q2')];
+
+    // The click lands while both are waiting.
+    expect(runner.pause('alpha')).toBe(true);
+
+    // The in-flight turn still drains — that is the spec'd §5.2 guarantee and
+    // the thing this must not break.
+    turnReleases[0]!();
+    await expect(first).resolves.toBeUndefined();
+
+    // …and the two that were waiting do not start. `runnerFactory` is only
+    // invoked once `runOneTurn` begins, so its call count IS "turns started".
+    await new Promise((r) => setTimeout(r, 30));
+    expect(runnerFactory).toHaveBeenCalledTimes(1);
+    expect(runner.getPendingDeliveries('alpha')).toBe(2);
+
+    // Resume releases them, in the order they arrived.
+    runner.resume('alpha');
+    await pollUntil(() => turnStarted.length >= 2);
+    turnReleases[1]!();
+    await queued[0];
+    await pollUntil(() => turnStarted.length >= 3);
+    turnReleases[2]!();
+    await queued[1];
+    expect(runnerFactory).toHaveBeenCalledTimes(3);
+    expect(runnerFactory.mock.calls.map((c) => c[0].prompt)).toEqual(['first', 'q1', 'q2']);
+  });
+
+  test('a delivery enqueued while paused and one enqueued before it drain in FIFO order', async () => {
+    // Guards the ordering half specifically: the fix moves the gate out of the
+    // tail chain, so if it also dropped the tail chain the two deliveries could
+    // start concurrently — two `claude --resume <same id>` processes, the exact
+    // thing `turnTails` exists to prevent.
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    const first = runner.deliverTurn('alpha', 'first');
+    await turnStarted[0];
+    const before = runner.deliverTurn('alpha', 'before-pause');
+    runner.pause('alpha');
+    const during = runner.deliverTurn('alpha', 'during-pause');
+
+    turnReleases[0]!();
+    await first;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(runnerFactory).toHaveBeenCalledTimes(1);
+    expect(runner.getPendingDeliveries('alpha')).toBe(2);
+
+    runner.resume('alpha');
+    await pollUntil(() => turnStarted.length >= 2);
+    // Only ONE turn is running at a time even after the gate lifts.
+    expect(runnerFactory).toHaveBeenCalledTimes(2);
+    turnReleases[1]!();
+    await before;
+    await pollUntil(() => turnStarted.length >= 3);
+    turnReleases[2]!();
+    await during;
+    expect(runnerFactory.mock.calls.map((c) => c[0].prompt)).toEqual([
+      'first',
+      'before-pause',
+      'during-pause',
+    ]);
+  });
+
+  test('a mutation hold binds an already-queued delivery too', async () => {
+    // The pause-on-dangerous brake shares the gate, so it inherited the same
+    // hole: a worker halted at an unapproved `rm -rf` still ran whatever was
+    // already waiting for it.
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    const first = runner.deliverTurn('alpha', 'first');
+    await turnStarted[0];
+    const queued = runner.deliverTurn('alpha', 'q1');
+    expect(runner.holdForMutation('alpha')).toBe(true);
+
+    turnReleases[0]!();
+    await first;
+    await new Promise((r) => setTimeout(r, 30));
+    expect(runnerFactory).toHaveBeenCalledTimes(1);
+
+    runner.releaseMutationHold('alpha');
+    await pollUntil(() => turnStarted.length >= 2);
+    turnReleases[1]!();
+    await queued;
+    expect(runnerFactory).toHaveBeenCalledTimes(2);
+  });
+
+  test('pause → resume → pause re-parks a delivery that is still waiting', async () => {
+    // The re-check is a LOOP, not one `await`. A second gate installed while a
+    // delivery sits in the queue has to bind it too; a single `if` would let it
+    // through on the pass after the first release.
+    const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    const first = runner.deliverTurn('alpha', 'first');
+    await turnStarted[0];
+    const queued = runner.deliverTurn('alpha', 'q1');
+    runner.pause('alpha');
+    turnReleases[0]!();
+    await first;
+
+    // Release and immediately re-hold, before the queued delivery can start.
+    runner.resume('alpha');
+    runner.pause('alpha');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(runnerFactory).toHaveBeenCalledTimes(1);
+
+    runner.resume('alpha');
+    await pollUntil(() => turnStarted.length >= 2);
+    turnReleases[1]!();
+    await queued;
+    expect(runnerFactory).toHaveBeenCalledTimes(2);
+  });
+});

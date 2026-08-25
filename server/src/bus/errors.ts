@@ -143,6 +143,52 @@ export function isMaxTurnsReached(err: unknown): err is MaxTurnsReachedError {
 }
 
 /**
+ * `Cebab-vie.11` / `Cebab-vie.1` [security]. Thrown by `AgentRunner.deliverTurn`
+ * when the dequeue-time re-check refuses a turn that was already queued — today
+ * that means the agent was kicked while its delivery sat behind another turn.
+ *
+ * The queue is the whole reason this class exists. Every other kick check runs
+ * when a delivery is CREATED: the router drops events addressed to a kicked
+ * agent, and `checkTurnRefused` gates the two operator replay seams. None of
+ * them can see a delivery that passed those checks and then waited — and a
+ * worker's turns are serialized, so waiting is the normal case, not the corner.
+ * A kick landing during that wait used to start a brand-new tool-capable turn.
+ *
+ * It is a rejection rather than a quiet resolve because the two are not the
+ * same statement. Resolving would run the routers' `.then`, i.e.
+ * `onTurnSucceeded`, which clears the agent's pending-retry slot — recording a
+ * success for a turn that never happened. The routers' `.catch` recognises this
+ * class and returns without taking the worker-failed path either: a refusal is
+ * not a failure, and parking a retry slot for a kicked agent would re-render
+ * the Retry banner the kick was supposed to take away.
+ *
+ * The operator has ALREADY been told when this throws. `canStartTurn` writes
+ * the `cebab → user kind=error` row as it refuses — the same contract
+ * `checkTurnRefused` carries ("a non-null answer means the operator has already
+ * been told"), so the catch stays silent instead of emitting a second row.
+ *
+ * The message is never rendered; it exists for logs. The operator-facing
+ * sentence lives once, in `turnRefusalText` (`bus/turn_guard.ts`).
+ */
+export class TurnRefusedError extends Error {
+  readonly __turnRefused = true as const;
+  readonly agentName: string;
+  constructor(agentName: string) {
+    super(
+      `queued turn for ${JSON.stringify(agentName)} refused at dequeue: the agent is no longer ` +
+        `eligible to start a turn (kicked). Nothing was run.`,
+    );
+    this.name = 'TurnRefusedError';
+    this.agentName = agentName;
+    Object.setPrototypeOf(this, TurnRefusedError.prototype);
+  }
+}
+
+export function isTurnRefused(err: unknown): err is TurnRefusedError {
+  return err instanceof TurnRefusedError;
+}
+
+/**
  * `Cebab-vie.14` [security]: the classes above are Cebab's own control-flow
  * signals, not remote failures — whatever their text says.
  *
@@ -169,15 +215,20 @@ export function isMaxTurnsReached(err: unknown): err is MaxTurnsReachedError {
  * turn, so retrying it means three more full-length attempts against the same
  * wall — an unbounded retry loop wrapped around the bound that was just added.
  *
- * A FIFTH sentinel belongs here too. Adding one and forgetting this line is how
- * the hole comes back — which is why `errors.control_signal_registry.test.ts`
- * now derives the membership from this file instead of trusting this sentence.
+ * `TurnRefusedError` (`Cebab-vie.11`) is the fifth, and the rule picks it out
+ * without needing a judgement call: a queued turn refused at dequeue is Cebab
+ * declining to start it, so a retry would be Cebab arguing with itself.
+ *
+ * A SIXTH belongs here too. Adding one and forgetting this line is how the hole
+ * comes back — which is why `errors.control_signal_registry.test.ts` now derives
+ * the membership from this file instead of trusting this sentence.
  */
 export function isBusControlSignal(err: unknown): boolean {
   return (
     isPausedForMutation(err) ||
     isMutationNotRecorded(err) ||
     isTurnStalled(err) ||
-    isMaxTurnsReached(err)
+    isMaxTurnsReached(err) ||
+    isTurnRefused(err)
   );
 }

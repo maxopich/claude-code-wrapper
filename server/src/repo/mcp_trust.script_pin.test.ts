@@ -131,6 +131,12 @@ describe('[security] computeScriptShas — which tokens get pinned', () => {
     ).toEqual({ './preload.js': preload, 'server.mjs': main });
   });
 
+  // 64 MB written synchronously, because the cap IS 64 MB and the test has to
+  // cross it. Windows CI measured this at 744 ms on one runner and 16 568 ms on
+  // another, on identical code — a 22x spread in temp-disk speed, which the
+  // default 5 s timeout turns into a coin flip. The explicit ceiling is about
+  // the fixture's cost, not the assertion's: nothing here waits on a promise
+  // that could hang, so a generous timeout cannot mask a real stall.
   test('a file over the hash cap is recorded as a sentinel, not omitted', () => {
     // Reddens: `continue` on `too_large`. An omitted entry cannot mismatch, so
     // padding a rewritten script past the cap would launder the change — the
@@ -145,7 +151,7 @@ describe('[security] computeScriptShas — which tokens get pinned', () => {
     expect(
       changedScriptPaths({ 'big.mjs': 'a'.repeat(64) }, { 'big.mjs': SCRIPT_TOO_LARGE }),
     ).toEqual(['big.mjs']);
-  });
+  }, 60_000);
 
   test('more resolvable files than the cap pins NONE of them', () => {
     // Reddens: truncating to the first 8. A partial pin is silently narrower

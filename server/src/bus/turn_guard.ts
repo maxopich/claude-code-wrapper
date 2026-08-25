@@ -10,6 +10,13 @@
  * enforcement is structurally in their path. They ran a full tool-capable turn
  * for a kicked worker, for an ended session, and past the hop cap.
  *
+ * `Cebab-vie.11` added a third consumer with a different shape: the runner's
+ * own dequeue gate, for a delivery that DID begin as an event, passed every
+ * check above, and then waited behind another turn while the operator kicked.
+ * It reuses `turnRefusalText` rather than composing its own — the sentence
+ * below states a guarantee, and a guarantee spelled two ways is one that gets
+ * weaker in whichever copy nobody is testing.
+ *
  * The decision itself cannot live here: it reads `kickedSet` / `ended` /
  * `hopsCount`, which are closure state inside each router. What CAN drift is
  * the wording an operator reads, and the set of reasons — so those live here,
@@ -32,7 +39,10 @@ export type TurnRefusalReason = 'kicked' | 'ended' | 'budget';
  */
 export function turnRefusalText(reason: 'kicked' | 'ended', agentName: string): string {
   if (reason === 'kicked') {
-    return `\`${agentName}\` was removed from this session, so nothing was run. A kicked participant never starts another turn — Retry and Continue included.`;
+    // "queued deliveries" leads the list because it is the leg that needs no
+    // operator action at all and so is the one an operator would not think to
+    // ask about (`Cebab-vie.11`); Retry and Continue are things they clicked.
+    return `\`${agentName}\` was removed from this session, so nothing was run. A kicked participant never starts another turn — already-queued deliveries, Retry and Continue included.`;
   }
   return `This session has ended, so \`${agentName}\` was not woken and nothing was run.`;
 }

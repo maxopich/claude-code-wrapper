@@ -950,15 +950,25 @@ describe('wireOrchestratorSession — a held worker stays held (Cebab-vie.13) [s
     await settle();
     expect(captured).toHaveLength(0);
 
-    // Continue releases the reseeded hold and the delegation runs. It runs
-    // twice for the `Cebab-vie.28` reason above — the queued delivery, then the
-    // replay of the same captured prompt.
+    // Continue releases the reseeded hold and the queued delegation runs. That
+    // turn issues an `rm -rf` of its own, which RE-ARMS the gate — so the
+    // replay `continueThroughMutation` queues behind it parks rather than
+    // running. `Cebab-vie.1` is why this assertion changed: this case used to
+    // expect the prompt twice, because the re-armed hold spliced itself into
+    // `turnTails` BEHIND the replay delivery and therefore could not hold it.
+    // The old expectation was `Cebab-vie.13`'s own property — "a worker held at
+    // a dangerous command stays held" — failing through the queue.
+    //
+    // `Cebab-vie.28` (Continue replays the wrong prompt when another delivery
+    // arrived first) is untouched and still open: the replay is parked here,
+    // not cancelled, so its captured-prompt bug is still reachable on the next
+    // Continue.
     await handle.continueThroughMutation(row.id);
     await settle();
-    expect(captured.map((c) => c.prompt)).toEqual([
-      'delegation after the restart',
-      'delegation after the restart',
-    ]);
+    expect(captured.map((c) => c.prompt)).toEqual(['delegation after the restart']);
+    // Parked, not lost — and parked on the NEW halt, which is the point.
+    expect(handle.getPendingDeliveries('coder')).toBe(1);
+    expect(listPendingMutations(SESSION_ID).map((m) => m.summary)).toEqual(['rm -rf /tmp/x']);
 
     unregisterLiveSession(SESSION_ID);
   });
@@ -1510,6 +1520,181 @@ describe('`Cebab-vie.17` — a bus hop is bounded, and the cap hit is recorded',
     expect(captured).toHaveLength(1);
     warn.mockRestore();
     errSpy.mockRestore();
+    unregisterLiveSession(SESSION_ID);
+  });
+});
+
+/**
+ * `Cebab-vie.11` / `Cebab-vie.12` / `Cebab-ygu.3` [security]: the third leg.
+ *
+ * `Cebab-vie.9`/`.10`/`.18` closed the two operator replay seams, and the suite
+ * above pins them. Both of those are turn-starters an operator CLICKS. The leg
+ * left open needed no operator error at all: a delivery routed while the
+ * worker's previous turn was still running sat on the runner's tail chain, past
+ * every check the router performs, and started a full tool-capable turn for a
+ * kicked worker whenever that previous turn happened to finish.
+ *
+ * These cases run the wiring end to end — a real `AgentRunner` behind
+ * `wireOrchestratorSession` — because the defect is precisely in the seam
+ * between the router's kicked set and the runner's queue, and
+ * `orchestrator.kick.test.ts` builds a router with no runner at all.
+ */
+describe('wireOrchestratorSession — a queued delivery dies with the kick (Cebab-vie.11) [security]', () => {
+  /** Every spawned turn parks until its `release()` fires. */
+  function blockingFactory(captured: Array<{ cwd: string; prompt: string }>) {
+    const releases: Array<() => void> = [];
+    const factory = (opts: { cwd: string; prompt: string }): Runner => {
+      captured.push({ cwd: opts.cwd, prompt: opts.prompt });
+      let release!: () => void;
+      const blocker = new Promise<void>((res) => {
+        release = res;
+      });
+      releases.push(release);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        await blocker;
+        yield { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+    return { factory, releases };
+  }
+
+  function worker(name: string): ResolvedAgent {
+    const dir = path.join(tmpRoot, name);
+    fs.mkdirSync(dir, { recursive: true });
+    const proj = upsertProject(name, dir);
+    return { projectId: proj.id, agentName: name, cwd: dir, projectName: name };
+  }
+
+  function wire(
+    workers: ResolvedAgent[],
+    runnerFactory: (opts: { cwd: string; prompt: string }) => Runner,
+  ) {
+    fs.mkdirSync(path.join(tmpRoot, 'workspace'), { recursive: true });
+    return wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      briefedAgents: workers.map((w) => w.agentName),
+      runnerFactory: runnerFactory as unknown as (opts: RunOptions) => Runner,
+    });
+  }
+
+  const settle = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  const errors = (): string[] =>
+    listMultiAgentEvents(SESSION_ID)
+      .filter((e) => e.kind === 'error' && e.source === CEBAB_SOURCE)
+      .map((e) => e.text);
+
+  test('the delivery already on the queue never becomes a turn', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { factory, releases } = blockingFactory(captured);
+    const { handle, deliver } = wire([worker('reviewer')], factory);
+
+    // Two deliveries, as one orchestrator turn calling bus_send twice would
+    // produce. The second waits behind the first.
+    deliver('reviewer', 'analyze A');
+    await settle();
+    expect(captured.map((c) => c.prompt)).toEqual(['analyze A']);
+    deliver('reviewer', 'also check B');
+    await settle();
+    expect(captured).toHaveLength(1);
+
+    // The operator kicks while turn 1 is still running.
+    expect(handle.kickAgent('reviewer')).toBe(true);
+
+    // Turn 1 drains — that is what `mode: 'drain'` promises.
+    releases[0]!();
+    await settle();
+
+    // Turn 2 never spawned. `captured` is appended by the factory itself, so
+    // its length IS the number of `claude` turns started.
+    expect(captured).toHaveLength(1);
+    // The operator is told, ONCE — `canStartTurn` writes the row and the
+    // router's `.catch` stays silent rather than emitting a second.
+    const kickedRows = errors().filter((t) =>
+      t.includes('`reviewer` was removed from this session'),
+    );
+    expect(kickedRows).toHaveLength(1);
+    // And NOT via the worker-failed path: that parks a pending-retry slot,
+    // which would put a live Retry button back in front of the operator for
+    // the participant they just removed.
+    expect(getPendingRetry(SESSION_ID)).toBeNull();
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('CONTROL: without the kick, the same queued delivery runs', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { factory, releases } = blockingFactory(captured);
+    const { deliver } = wire([worker('reviewer')], factory);
+
+    deliver('reviewer', 'analyze A');
+    await settle();
+    deliver('reviewer', 'also check B');
+    await settle();
+    expect(captured).toHaveLength(1);
+
+    releases[0]!();
+    await settle();
+    expect(captured.map((c) => c.prompt)).toEqual(['analyze A', 'also check B']);
+    expect(errors()).toEqual([]);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('a kick releases the holds, so a delivery parked on a pause gate is refused not stranded', async () => {
+    // The `auto_kick` expiry shape: `executeExpire` clears the pause column and
+    // kicks, and never calls `resumeAgent`. Without the release the parked
+    // delivery sits inside `await gate.promise` for the life of the process —
+    // its promise unsettled, `onTurnStarted` never balanced by `onTurnSettled`,
+    // so the activity bar shows the worker working forever.
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { factory, releases } = blockingFactory(captured);
+    const { handle, deliver } = wire([worker('reviewer')], factory);
+
+    deliver('reviewer', 'analyze A');
+    await settle();
+    deliver('reviewer', 'also check B');
+    await settle();
+    expect(handle.pauseAgent('reviewer')).toBe(true);
+
+    releases[0]!();
+    await settle();
+    expect(captured).toHaveLength(1);
+
+    expect(handle.kickAgent('reviewer')).toBe(true);
+    await settle();
+
+    expect(captured).toHaveLength(1);
+    expect(handle.getPendingDeliveries('reviewer')).toBe(0);
+    expect(
+      errors().filter((t) => t.includes('`reviewer` was removed from this session')),
+    ).toHaveLength(1);
+
+    unregisterLiveSession(SESSION_ID);
+  });
+
+  test('a re-kick changes nothing and releases nothing a second time', async () => {
+    // `kickAgent` returns false on a re-kick (the `participant_already_kicked`
+    // idempotent ack). The hold release must hang off that boolean, not run
+    // unconditionally — an unconditional release would let a second kick lift a
+    // hold that a LIVE agent had legitimately acquired in between.
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { factory } = blockingFactory(captured);
+    const { handle } = wire([worker('reviewer')], factory);
+
+    expect(handle.kickAgent('reviewer')).toBe(true);
+    expect(handle.kickAgent('reviewer')).toBe(false);
+
     unregisterLiveSession(SESSION_ID);
   });
 });
