@@ -90,6 +90,7 @@ const CALLBACKS = {
   onEvent: vi.fn(),
   onEnded: vi.fn(),
   hopBudget: 1000,
+  maxTurns: 50,
 };
 
 /** Register a live session whose `rebind` behaves however the case needs. */

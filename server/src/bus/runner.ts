@@ -22,12 +22,13 @@ import { createSdkMcpServer, tool, type SDKMessage } from '@anthropic-ai/claude-
 import { z } from 'zod';
 import { BUS_SEND_TOOL, classifyToolCall } from '@cebab/shared';
 import type { AskUserQuestionOption, AskUserQuestionView } from '@cebab/shared/protocol';
+import { config } from '../config.js';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusRecipient } from './paths.js';
 import { classifyMutationScope } from './guardrail.js';
-import { isBusControlSignal, TurnStalledError } from './errors.js';
+import { isBusControlSignal, MaxTurnsReachedError, TurnStalledError } from './errors.js';
 
 /**
  * Stalled-turn watchdog thresholds (ms). A turn that yields no SDKMessage for
@@ -515,6 +516,25 @@ export type AgentRunnerDeps = {
    *  default `DEFAULT_STALL_TOOL_CEILING_MS` (lenient so a slow tool isn't
    *  killed, but a never-returning one is still bounded). */
   stallToolCeilingMs?: number;
+  /**
+   * `Cebab-vie.17`: hard cap on model turns for ONE hop.
+   *
+   * This used to be absent entirely, so every worker and chain participant ran
+   * with no `maxTurns` at all while the single-agent path passed one. The hop
+   * budget counts MESSAGES between agents; it never counted the work inside a
+   * hop, so one `bus_send` bought an unbounded agent turn — no turn cap, no
+   * wall-clock cap, an idle-only stall watchdog, and a tool gate that
+   * auto-allows everything but `AskUserQuestion`.
+   *
+   * Resolved by the caller (`resolveMaxTurns()` in `ws/server.ts`: DB
+   * `max_turns` > `MAX_TURNS` env > `config.maxTurns`), re-read at every
+   * session start and resume, exactly like `hopBudget`. Optional here for the
+   * same reason `hopBudget` is optional on the routers' start opts — the test
+   * harnesses construct an `AgentRunner` directly — but ABSENT DOES NOT MEAN
+   * UNBOUNDED: it falls back to `config.maxTurns` at the spawn. Unboundedness
+   * is the bug, so it is the one value that must not be expressible.
+   */
+  maxTurns?: number;
   /**
    * Cluster G Phase 3 (G1): the BUS session id this AgentRunner belongs to.
    * Stamped onto every per-hop `registerQuery` call so the lifecycle
@@ -1058,6 +1078,11 @@ export class AgentRunner {
     const denied = this.specs.get(agentName)?.deniedMcpServers ?? spec.deniedMcpServers;
     const mcpDenial = denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {};
 
+    // Resolved once so the value that goes to the SDK and the value the cap-hit
+    // sentinel reports are the same number by construction, not by two call
+    // sites agreeing.
+    const effectiveMaxTurns = this.deps.maxTurns ?? config.maxTurns;
+
     const runner = factory({
       cwd: spec.cwd,
       prompt: promptText,
@@ -1067,6 +1092,20 @@ export class AgentRunner {
       ...mcpDenial,
       ...(spec.model ? { model: spec.model } : {}),
       settingSources: spec.settingSources ?? ['user'],
+      // `Cebab-vie.17`. UNCONDITIONAL, deliberately breaking the
+      // conditional-spread rule that governs `model` and `deniedMcpServers`
+      // above. That rule exists because absence there has a distinct correct
+      // meaning (the CLI's own default / no denials). Here absence means "an
+      // unbounded agent turn", which is precisely the bug this closes — so
+      // `'maxTurns' in opts` is true on every bus hop and is an assertable
+      // invariant rather than something a future call site has to remember.
+      //
+      // The floor is `config.maxTurns`, NOT `resolveMaxTurns()`: the runner
+      // cannot import `ws/server.ts`. Every production path goes through a WS
+      // handler that passes the resolved value, so the floor is only reached
+      // by direct construction (i.e. tests) — a path that then loses the DB
+      // setting, never the bound.
+      maxTurns: effectiveMaxTurns,
       mcpServers: {
         // Sole registration. The `bus` alias that shimmed the
         // `bus` → `cebab_bus` rename (e04769e, 2026-05-25) is gone: it only
@@ -1333,6 +1372,11 @@ export class AgentRunner {
           session_id?: string;
           subtype?: string;
           total_cost_usd?: number;
+          // snake_case, because this narrows the RAW `SDKMessage`. The
+          // single-agent site reads `numTurns` only because `translate()`
+          // camel-cases it first; `m.numTurns` would compile here under the
+          // cast and be `undefined` forever.
+          num_turns?: number;
         };
         // F7: bill the hop. Deliberately NOT nested inside the session_id
         // branch below — a result without a session id still cost money, and
@@ -1362,6 +1406,16 @@ export class AgentRunner {
           // write above is intentionally BEFORE the throw — retry resumes
           // from the same SDK boundary the failed turn saw, not the prior one.
           if (typeof m.subtype === 'string' && m.subtype !== 'success') {
+            // `Cebab-vie.17`: the cap Cebab now passes gets a CLASS, because a
+            // cap hit is Cebab's own decision and must never be swallowed by
+            // the overload-retry loop — see `isBusControlSignal`. The other
+            // three keep the generic shape on purpose: `error_during_execution`
+            // is matched BY THIS STRING in `isTransientOverload`, and the two
+            // `error_max_*` siblings are unreachable (Cebab sets no cost cap
+            // and requests no structured output).
+            if (m.subtype === 'error_max_turns') {
+              throw new MaxTurnsReachedError(agentName, effectiveMaxTurns, m.num_turns ?? 0);
+            }
             throw new Error(`SDK result subtype=${m.subtype}`);
           }
         }

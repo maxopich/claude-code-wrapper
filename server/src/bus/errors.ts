@@ -88,8 +88,63 @@ export function isMutationNotRecorded(err: unknown): err is MutationNotRecordedE
 }
 
 /**
- * `Cebab-vie.14` [security]: the three classes above are Cebab's own
- * control-flow signals, not remote failures — whatever their text says.
+ * `Cebab-vie.17`. Thrown by the runner when a hop ends with the SDK's
+ * `error_max_turns` result subtype — i.e. the per-hop turn cap Cebab now passes
+ * (`AgentRunnerDeps.maxTurns`) stopped the agent mid-task.
+ *
+ * The other three non-success subtypes stay a plain `Error`, and the line is not
+ * arbitrary: **a sentinel exists iff Cebab itself made the decision that stopped
+ * the turn.** The pause gate, the fail-closed ledger, the stall watchdog and now
+ * the cap are all Cebab saying no. `error_during_execution` is the remote saying
+ * no, and its literal message is what `isTransientOverload` matches on, so a
+ * class for it would darken the whole overload-absorption layer.
+ *
+ * The message is what the routers' `onWorkerFailed` renders verbatim into the
+ * operator's `cebab → user kind=error` row, so it has to be honest about two
+ * things at once: the turn was cut off mid-task, and nothing was lost — the
+ * runner writes the hop's `--resume` checkpoint immediately BEFORE this throw
+ * (see the `m.session_id` capture in `runOneAttempt`), so Retry genuinely
+ * continues from where it stopped rather than restarting the hop.
+ *
+ * It interpolates NO agent-controlled bytes. That is not what makes it safe —
+ * `isBusControlSignal` below is — but it means there is no second surface to
+ * reason about, and the message stays a pure function of two integers.
+ */
+export class MaxTurnsReachedError extends Error {
+  readonly __maxTurnsReached = true as const;
+  readonly agentName: string;
+  /** The cap that was in force for this hop. */
+  readonly maxTurns: number;
+  /**
+   * SDK `result.num_turns` — how many model turns actually ran. Measured
+   * live: this comes back ONE HIGHER than the cap (3 against a cap of 2), so
+   * the wording says "cap of N (M ran)" rather than "M/N", which reads as a
+   * broken fraction.
+   */
+  readonly numTurns: number;
+  constructor(agentName: string, maxTurns: number, numTurns: number) {
+    super(
+      `reached the per-hop turn cap of ${maxTurns} model turns (${numTurns} ran) and stopped ` +
+        `mid-task. ` +
+        `Nothing was lost: this hop's checkpoint was written first, so Retry resumes the agent ` +
+        `from exactly where it stopped. If it needs more room, raise "Default max turns" in ` +
+        `Settings before retrying; if it is looping, Abandon instead.`,
+    );
+    this.name = 'MaxTurnsReachedError';
+    this.agentName = agentName;
+    this.maxTurns = maxTurns;
+    this.numTurns = numTurns;
+    Object.setPrototypeOf(this, MaxTurnsReachedError.prototype);
+  }
+}
+
+export function isMaxTurnsReached(err: unknown): err is MaxTurnsReachedError {
+  return err instanceof MaxTurnsReachedError;
+}
+
+/**
+ * `Cebab-vie.14` [security]: the classes above are Cebab's own control-flow
+ * signals, not remote failures — whatever their text says.
  *
  * That distinction used to be carried by the text alone, and the text is partly
  * the worker's. `PausedForMutationError`'s message is ``paused before
@@ -109,9 +164,20 @@ export function isMutationNotRecorded(err: unknown): err is MutationNotRecordedE
  * the same bug wearing a different hat — immune by accident of text is not
  * immune.
  *
- * A fourth sentinel belongs here too. Adding one and forgetting this line is
- * how the hole comes back.
+ * `MaxTurnsReachedError` (`Cebab-vie.17`) is the fourth, and it is here for the
+ * category rather than for an exploit: a cap Cebab chose is Cebab stopping the
+ * turn, so retrying it means three more full-length attempts against the same
+ * wall — an unbounded retry loop wrapped around the bound that was just added.
+ *
+ * A FIFTH sentinel belongs here too. Adding one and forgetting this line is how
+ * the hole comes back — which is why `errors.control_signal_registry.test.ts`
+ * now derives the membership from this file instead of trusting this sentence.
  */
 export function isBusControlSignal(err: unknown): boolean {
-  return isPausedForMutation(err) || isMutationNotRecorded(err) || isTurnStalled(err);
+  return (
+    isPausedForMutation(err) ||
+    isMutationNotRecorded(err) ||
+    isTurnStalled(err) ||
+    isMaxTurnsReached(err)
+  );
 }

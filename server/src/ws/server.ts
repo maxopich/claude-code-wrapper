@@ -3238,6 +3238,7 @@ async function resumeOnConnect(conn: Conn): Promise<void> {
     const resumed = await attemptResumeMultiAgent({
       ...resumeCallbacks(conn),
       hopBudget: resolveHopBudget(),
+      maxTurns: resolveMaxTurns(),
       onResumeFailed: (sessionId) => {
         // Surface auto-resume failures as a wrapper_error toast so the
         // operator notices instead of "Cebab silently lost my session".
@@ -5008,6 +5009,12 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           : null;
       const hopBudget = requestedHopBudget ?? resolveHopBudget();
 
+      // `Cebab-vie.17`: the per-hop model-turn cap, resolved on the same
+      // schedule as the budget above and from the SAME setting the
+      // single-agent path uses — one number, one Settings field. No per-run
+      // override: `msg` carries no `maxTurns`, deliberately.
+      const maxTurns = resolveMaxTurns();
+
       if (msg.mode === 'orchestrator') {
         let workers;
         try {
@@ -5065,6 +5072,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             sendRouterDrop,
             sendServerMsg,
             hopBudget,
+            maxTurns,
             pauseOnDangerous: msg.pauseOnDangerous === true,
             // Execute mode (orchestrator only): flips worker briefings from
             // consultant to "may change your own project". Persisted + survives R-B.
@@ -5173,6 +5181,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           sendRouterDrop,
           sendServerMsg,
           hopBudget,
+          maxTurns,
           pauseOnDangerous: msg.pauseOnDangerous === true,
           // PR-7: stamp template provenance onto the row.
           templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
@@ -5277,6 +5286,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         const result = await resumeMultiAgentTarget(msg.sessionId, {
           ...resumeCallbacks(conn),
           hopBudget: resolveHopBudget(),
+          maxTurns: resolveMaxTurns(),
         });
         if (!result.ok) {
           const message =
@@ -5762,6 +5772,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         resumeCallbacks: {
           ...resumeCallbacks(conn),
           hopBudget: resolveHopBudget(),
+          maxTurns: resolveMaxTurns(),
         },
         send: (m) => send(conn.ws, m),
       });

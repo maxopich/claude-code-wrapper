@@ -138,6 +138,11 @@ export function reconstructOrchestratorSession(
      *  current settings + env on every reconstruct so a budget change
      *  between runs takes effect on Continue). */
     hopBudget: number;
+    /** `Cebab-vie.17`: re-resolved per-hop turn cap, read fresh for the same
+     *  reason `hopBudget` is — a Settings change between runs takes effect on
+     *  Continue. Required here (unlike on the routers' start opts) so the
+     *  compiler is the gate on every resume seam. */
+    maxTurns: number;
     /** Item #4: forwarded into the rebuilt router so a failure that
      *  happens AFTER the reconstruct (e.g. on the operator's Continue or
      *  on a subsequent retry) emits the pending-retry ServerMsg to the
@@ -263,6 +268,7 @@ export function reconstructOrchestratorSession(
       seededSessions,
       briefedAgents,
       hopBudget: callbacks.hopBudget,
+      maxTurns: callbacks.maxTurns,
       initialHopsCount,
       // Item #5: surface the persisted opt-in onto the rebuilt handle so the
       // UI re-attaches with the correct toggle state. The runtime read is

@@ -65,9 +65,18 @@ import type {
   ServerMsg,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
+import {
+  dispatchBusMaxTurnsReached,
+  dispatchHopBudgetExhausted,
+} from '../notifications/bus_limits.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
-import { turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
+import {
+  isMaxTurnsReached,
+  isPausedForMutation,
+  isTurnStalled,
+  MutationNotRecordedError,
+} from './errors.js';
+import { hopBudgetExhaustedText, turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
 import {
   applyPauseGate,
   findPendingMutation,
@@ -187,6 +196,11 @@ export type StartOrchestratorOpts = {
    *  `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`); omit to use the
    *  default. */
   hopBudget?: number;
+  /** `Cebab-vie.17`: hard cap on model turns inside ONE hop, i.e. the bound on
+   *  the WORK a hop does, where `hopBudget` bounds the MESSAGES between hops.
+   *  Caller resolves precedence (`resolveMaxTurns()`); omit and the runner
+   *  falls back to `config.maxTurns` — never to unbounded. */
+  maxTurns?: number;
   /** Per-session pending-retry slot change → `multi_agent_pending_retry`
    *  ServerMsg. Fires when a worker's deliverTurn fails (set) and after a
    *  successful retry or abandon (clear). Optional; the router null-checks
@@ -705,7 +719,7 @@ export function createOrchestratorRouter(params: {
   const checkBudgetExhausted = (): boolean => {
     if (hopsCount < hopBudget) return false;
     if (ended) return true; // already torn down by a previous trip; just block
-    const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
+    const reasonText = hopBudgetExhaustedText(hopsCount, hopBudget);
     // PR-7: the budget-exhausted text IS this session's first error.
     // Capturing here (not inside teardown) makes the source explicit and
     // covers the case where `firstError` is still null because no earlier
@@ -732,6 +746,41 @@ export function createOrchestratorRouter(params: {
       );
     } catch (err) {
       console.error('[orchestrator] persist budget-exhausted event failed', err);
+    }
+    // `Cebab-vie.17`: the brake firing is a safety event, and the hash chain had
+    // no row for it — the single-agent cap hit writes one and the session-wide
+    // runaway stop did not, so an operator reading the audit log saw no trace
+    // that a run had been force-stopped.
+    //
+    // DIVERGENCE FROM `dispatchRouterDrop`, ON PURPOSE: that helper refuses to
+    // proceed when the audit append fails (BE-1). Here "proceed" IS the
+    // teardown, and refusing it would leave a runaway session running because
+    // its audit row could not be written — failing open on the one control this
+    // whole function is. So the log line is the remedy and the teardown below
+    // happens either way. The try/catch is not decoration either:
+    // `dispatcher.emit`'s `persistNotification` sits outside its own try, so a
+    // broken `notifications` table THROWS out of `emit` and would otherwise
+    // skip the teardown.
+    try {
+      const stopNotified = dispatchHopBudgetExhausted({
+        sessionId,
+        hopsCount,
+        hopBudget,
+        mode: 'orchestrator',
+        send: (msg) => {
+          if (msg.type === 'notification') {
+            sink.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      });
+      if (!stopNotified.ok) {
+        console.error(
+          '[orchestrator] hop_budget.exhausted dispatcher.emit failed',
+          stopNotified.error,
+        );
+      }
+    } catch (err) {
+      console.error('[orchestrator] hop_budget.exhausted emit threw', err);
     }
     void teardown('stopped');
     return true;
@@ -1380,6 +1429,9 @@ export function wireOrchestratorSession(p: {
   /** Hop budget for this session (caller resolves precedence; omit to use
    *  `DEFAULT_HOP_BUDGET`). */
   hopBudget?: number;
+  /** Per-hop model-turn cap for this session (`Cebab-vie.17`; caller resolves
+   *  precedence via `resolveMaxTurns()`, omit to use `config.maxTurns`). */
+  maxTurns?: number;
   /** R-B seed: number of persisted hops already in the DB for this
    *  session before this wiring call. The router's in-memory `hopsCount`
    *  starts from this value so enforcement carries over a server restart.
@@ -1611,6 +1663,10 @@ export function wireOrchestratorSession(p: {
     // Cluster G Phase 3 (G1): bus session id for the lifecycle registry's
     // per-hop snapshot. Same value for every orchestrator + worker hop.
     sessionId,
+    // `Cebab-vie.17`: per-session, not per-spec — `resolveMaxTurns()` takes no
+    // projectId, and there are four `register()` sites that would each have to
+    // remember a spec field (mid-run `addWorker` included).
+    maxTurns: p.maxTurns,
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);
@@ -1930,6 +1986,31 @@ export function wireOrchestratorSession(p: {
             });
           } catch (logErr) {
             console.error('[orchestrator] appendRecoveryLog stall-abort threw', logErr);
+          }
+        }
+        if (isMaxTurnsReached(err)) {
+          // `Cebab-vie.17`: the per-hop cap fired. Emit the audited safety
+          // notification and FALL THROUGH — `onWorkerFailed` is the recovery
+          // (a pending-retry slot, the `cebab → user kind=error` row carrying
+          // this error's own sentence, Retry / Abandon), and the notification
+          // is additive to it, not instead of it. Same shape as the stall
+          // branch above for the same reason.
+          //
+          // `router.sendServerMsg` is the REBIND-AWARE sink; a `.catch`
+          // firing after a reconnect is exactly the case it exists for, so the
+          // construction-time `p.sendServerMsg` next door must not be
+          // copied here.
+          try {
+            const capped = dispatchBusMaxTurnsReached({
+              sessionId,
+              err,
+              send: (msg) => router.sendServerMsg(msg),
+            });
+            if (!capped.ok) {
+              console.error('[orchestrator] max_turns.hit dispatcher.emit failed', capped.error);
+            }
+          } catch (emitErr) {
+            console.error('[orchestrator] max_turns.hit emit threw', emitErr);
           }
         }
         console.error(`[orchestrator] deliverTurn(${agentName}) failed`, err);
@@ -2322,6 +2403,7 @@ export async function startOrchestratorSession(
     sendRouterDrop: opts.sendRouterDrop,
     sendServerMsg: opts.sendServerMsg,
     hopBudget: opts.hopBudget,
+    maxTurns: opts.maxTurns,
     pauseOnDangerous: opts.pauseOnDangerous,
     executeMode: opts.executeMode,
   });

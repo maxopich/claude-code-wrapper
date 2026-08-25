@@ -73,7 +73,7 @@ function seedReconstructable(opts?: { mode?: 'orchestrator' | 'chain' }): {
   return { sessionFolder };
 }
 
-const cbs = () => ({ onEvent: vi.fn(), onEnded: vi.fn(), hopBudget: 1000 });
+const cbs = () => ({ onEvent: vi.fn(), onEnded: vi.fn(), hopBudget: 1000, maxTurns: 50 });
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-reconstruct-'));
@@ -218,6 +218,7 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
       onEnded: vi.fn(),
       onResumeFailed,
       hopBudget: 1000,
+      maxTurns: 50,
     });
 
     expect(resumed).not.toBeNull();
@@ -241,6 +242,7 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
       onEnded: vi.fn(),
       onResumeFailed,
       hopBudget: 1000,
+      maxTurns: 50,
     });
 
     expect(resumed).toBeNull();
@@ -259,6 +261,7 @@ describe('Cluster A Phase 6: session_reconstructed emit on R-B success', () => {
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       sendServerMsg,
     });
 
@@ -303,6 +306,7 @@ describe('Cluster A Phase 6: session_reconstructed emit on R-B success', () => {
         onEvent: vi.fn(),
         onEnded: vi.fn(),
         hopBudget: 1000,
+        maxTurns: 50,
       }),
     ).not.toThrow();
     // Banner still landed in scrollback as the fallback recovery signal.

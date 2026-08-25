@@ -69,6 +69,7 @@ function makeStubbedResumed(sessionId: string, mode: 'chain' | 'orchestrator'): 
     lifecycle: row.lifecycle ?? 'persistent',
     sessionFolder: row.session_folder ?? null,
     hopBudget: 1000,
+    maxTurns: 50,
   };
   return {
     handle: handle as unknown as OrchestratorSessionHandle,
@@ -98,6 +99,7 @@ const dummyResumeCallbacks = {
   onEvent: vi.fn(),
   onEnded: vi.fn(),
   hopBudget: 1000,
+  maxTurns: 50,
 };
 
 beforeEach(() => {

@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createOrchestratorRouter, ORCHESTRATOR_AGENT_NAME } from './orchestrator.js';
 import { computeSessionPaths } from './paths.js';
+import { hopBudgetExhaustedText } from './turn_guard.js';
 import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT } from './runtime.js';
 import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
 import type { BusEvent } from './runner.js';
@@ -57,7 +58,7 @@ type Captured = {
   drops: Array<{ reasonCode: RouterDropReasonCode; source: string; destination: string }>;
 };
 
-function makeRouter(): {
+function makeRouter(opts: { hopBudget?: number } = {}): {
   router: ReturnType<typeof createOrchestratorRouter>;
   captured: Captured;
 } {
@@ -73,7 +74,7 @@ function makeRouter(): {
     lifecycle: 'persistent',
     onEvent: vi.fn(),
     onEnded: vi.fn(),
-    hopBudget: 1000,
+    hopBudget: opts.hopBudget ?? 1000,
     sendNotification: (env) => {
       captured.notifications.push(env);
     },
@@ -294,5 +295,123 @@ describe('[security][BE-2] safety class is NEVER coalesced at the recording laye
     const keys = new Set(captured.notifications.map((n) => n.dedupeKey));
     expect(keys.size).toBe(1);
     expect([...keys][0]).toBe(`router_drop:forged_source:${SESSION_ID}`);
+  });
+});
+
+describe('[security] `Cebab-vie.17` — the hop budget firing writes to the chain', () => {
+  test('the budget stop writes exactly one audit row and one sticky toast', () => {
+    // "some audit row exists" would pass on any router drop, so the count and
+    // the payload numbers are what make this real.
+    const { router, captured } = makeRouter({ hopBudget: 1 });
+    router.handleEvent(ev({ source: 'coder', destination: ORCHESTRATOR_AGENT_NAME }));
+
+    const rows = selectAuditRows();
+    expect(rows).toEqual([
+      {
+        kind: 'hop_budget.exhausted',
+        reason_code: 'hop_budget_exhausted',
+        session_id: SESSION_ID,
+      },
+    ]);
+    expect(captured.notifications).toHaveLength(1);
+    expect(captured.notifications[0]).toMatchObject({
+      class: 'safety',
+      severity: 'warn',
+      sticky: true,
+      sessionId: SESSION_ID,
+      dedupeKey: `hop_budget.exhausted:${SESSION_ID}`,
+    });
+    expect(captured.notifications[0]!.message).toBe(hopBudgetExhaustedText(1, 1));
+  });
+
+  test('mode is `orchestrator` here — the chain twin must say otherwise', () => {
+    const { router } = makeRouter({ hopBudget: 1 });
+    router.handleEvent(ev({ source: 'coder', destination: ORCHESTRATOR_AGENT_NAME }));
+    const payload = getDb()
+      .prepare(`SELECT payload_json FROM safety_audit WHERE kind = 'hop_budget.exhausted' LIMIT 1`)
+      .get() as { payload_json: string };
+    expect(JSON.parse(payload.payload_json)).toEqual({
+      hopsCount: 1,
+      hopBudget: 1,
+      mode: 'orchestrator',
+    });
+  });
+
+  test('one row per session, however many wakes are refused afterwards', () => {
+    // A budget stop is a SESSION event, so the chain must carry exactly one
+    // row for it — not one per subsequent refusal, which is what an operator
+    // reading the log would have to de-duplicate by hand.
+    //
+    // Measured, so it does not overclaim: this reddens only when BOTH layers
+    // go. Every caller (`handleEvent`, `sendUserPrompt`, `checkTurnRefused`)
+    // returns on `ended` before reaching `checkBudgetExhausted`, and
+    // `checkBudgetExhausted` short-circuits on `ended` again. Removing either
+    // one alone leaves this green — which is the honest description of a
+    // belt-and-braces invariant, and the reason this test asserts the operator
+    // -visible count rather than claiming to pin one line.
+    const { router, captured } = makeRouter({ hopBudget: 1 });
+    router.handleEvent(ev({ source: 'coder', destination: ORCHESTRATOR_AGENT_NAME }));
+    router.handleEvent(ev({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME }));
+    router.sendUserPrompt('again');
+    expect(router.checkTurnRefused('coder')).toBe('ended');
+    expect(selectAuditRows()).toHaveLength(1);
+    expect(captured.notifications).toHaveLength(1);
+  });
+
+  test('a broken audit chain does NOT stop the teardown', () => {
+    // The one deliberate divergence from BE-1, and the only case pinning it.
+    // Every other safety emitter refuses to proceed when the append fails;
+    // here "proceed" IS the teardown, so refusing would leave a runaway
+    // session running because its audit row could not be written.
+    const paths = computeSessionPaths(SESSION_ID);
+    const onEnded = vi.fn();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const router = createOrchestratorRouter({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      workerNames: WORKERS,
+      paths,
+      lifecycle: 'persistent',
+      onEvent: vi.fn(),
+      onEnded,
+      hopBudget: 1,
+    });
+    getDb().exec('DROP TABLE safety_audit');
+    router.handleEvent(ev({ source: 'coder', destination: ORCHESTRATOR_AGENT_NAME }));
+
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', expect.anything());
+    // The synthetic explanatory row still lands, so the operator still has the
+    // transcript even with the chain unavailable.
+    const events = getDb()
+      .prepare(`SELECT text FROM multi_agent_events WHERE kind = 'error'`)
+      .all() as Array<{ text: string }>;
+    expect(events.some((e) => e.text.includes('Hop budget exhausted'))).toBe(true);
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  test('a broken notifications table does not stop the teardown either', () => {
+    // `dispatcher.emit`'s `persistNotification` sits OUTSIDE its own try, so
+    // this failure mode is a THROW rather than an `ok:false` — which the
+    // routers' own try/catch is there for.
+    const paths = computeSessionPaths(SESSION_ID);
+    const onEnded = vi.fn();
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const router = createOrchestratorRouter({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      workerNames: WORKERS,
+      paths,
+      lifecycle: 'persistent',
+      onEvent: vi.fn(),
+      onEnded,
+      hopBudget: 1,
+    });
+    getDb().exec('DROP TABLE notifications');
+    router.handleEvent(ev({ source: 'coder', destination: ORCHESTRATOR_AGENT_NAME }));
+
+    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', expect.anything());
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });

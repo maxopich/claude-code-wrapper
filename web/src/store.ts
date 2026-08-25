@@ -964,9 +964,11 @@ export type SettingsView = {
    *  value regardless of which precedence step won. */
   defaultHopBudget: number;
   /**
-   * Cluster F Phase A1a (UI-A1): resolved default MAX_TURNS for
-   * single-agent runs. Precedence mirrors `defaultHopBudget`:
+   * Cluster F Phase A1a (UI-A1): resolved default MAX_TURNS.
+   * Precedence mirrors `defaultHopBudget`:
    * DB setting (`max_turns`) > `MAX_TURNS` env > built-in 50.
+   * `Cebab-vie.17`: no longer single-agent-only — the same number now
+   * caps one multi-agent HOP, which had no cap of any kind.
    * Optional for forward-compat — older servers omit and the F-A1b
    * SettingsModal input falls back to placeholder copy without a
    * known value.

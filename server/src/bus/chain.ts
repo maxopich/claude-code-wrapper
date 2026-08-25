@@ -78,9 +78,18 @@ import type {
   ServerMsg,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
+import {
+  dispatchBusMaxTurnsReached,
+  dispatchHopBudgetExhausted,
+} from '../notifications/bus_limits.js';
 import { appendRecoveryLog } from '../repo/recovery_log.js';
-import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
-import { turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
+import {
+  isMaxTurnsReached,
+  isPausedForMutation,
+  isTurnStalled,
+  MutationNotRecordedError,
+} from './errors.js';
+import { hopBudgetExhaustedText, turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
 import {
   applyPauseGate,
   findPendingMutation,
@@ -149,6 +158,11 @@ export type StartChainOpts = {
    *  `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`); omit to use the
    *  default. */
   hopBudget?: number;
+  /** `Cebab-vie.17`: hard cap on model turns inside ONE hop, i.e. the bound on
+   *  the WORK a hop does, where `hopBudget` bounds the MESSAGES between hops.
+   *  Caller resolves precedence (`resolveMaxTurns()`); omit and the runner
+   *  falls back to `config.maxTurns` — never to unbounded. */
+  maxTurns?: number;
   /** Per-session pending-retry slot change → `multi_agent_pending_retry`
    *  ServerMsg. `pending: null` clears (after a successful retry or an
    *  abandon); a descriptor sets/replaces. Optional so tests can skip it;
@@ -635,7 +649,7 @@ export function createChainRouter(params: {
   const checkBudgetExhausted = (): boolean => {
     if (hopsCount < hopBudget) return false;
     if (ended) return true; // already torn down by a previous trip; just block
-    const reasonText = `Hop budget exhausted (${hopsCount}/${hopBudget}). The session was stopped to prevent a runaway loop. Raise the limit in Settings or via the CEBAB_HOP_BUDGET env var to extend.`;
+    const reasonText = hopBudgetExhaustedText(hopsCount, hopBudget);
     // PR-7: this synthetic error is THIS run's first_error if none earlier.
     captureError(reasonText);
     try {
@@ -659,6 +673,38 @@ export function createChainRouter(params: {
       );
     } catch (err) {
       console.error('[chain] persist budget-exhausted event failed', err);
+    }
+    // `Cebab-vie.17`: the brake firing is a safety event, and the hash chain had
+    // no row for it — the single-agent cap hit writes one and the session-wide
+    // runaway stop did not, so an operator reading the audit log saw no trace
+    // that a run had been force-stopped.
+    //
+    // DIVERGENCE FROM `dispatchRouterDrop`, ON PURPOSE: that helper refuses to
+    // proceed when the audit append fails (BE-1). Here "proceed" IS the
+    // teardown, and refusing it would leave a runaway session running because
+    // its audit row could not be written — failing open on the one control this
+    // whole function is. So the log line is the remedy and the teardown below
+    // happens either way. The try/catch is not decoration either:
+    // `dispatcher.emit`'s `persistNotification` sits outside its own try, so a
+    // broken `notifications` table THROWS out of `emit` and would otherwise
+    // skip the teardown.
+    try {
+      const stopNotified = dispatchHopBudgetExhausted({
+        sessionId,
+        hopsCount,
+        hopBudget,
+        mode: 'chain',
+        send: (msg) => {
+          if (msg.type === 'notification') {
+            sink.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      });
+      if (!stopNotified.ok) {
+        console.error('[chain] hop_budget.exhausted dispatcher.emit failed', stopNotified.error);
+      }
+    } catch (err) {
+      console.error('[chain] hop_budget.exhausted emit threw', err);
     }
     void teardown('stopped');
     return true;
@@ -1345,6 +1391,8 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     // Cluster G Phase 3 (G1): bus session id for the lifecycle registry's
     // per-hop snapshot. Same value every hop of this chain run.
     sessionId,
+    // `Cebab-vie.17`: per-session, not per-spec — see the orchestrator twin.
+    maxTurns: opts.maxTurns,
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);
@@ -1542,6 +1590,31 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
             });
           } catch (logErr) {
             console.error('[chain] appendRecoveryLog stall-abort threw', logErr);
+          }
+        }
+        if (isMaxTurnsReached(err)) {
+          // `Cebab-vie.17`: the per-hop cap fired. Emit the audited safety
+          // notification and FALL THROUGH — `onWorkerFailed` is the recovery
+          // (a pending-retry slot, the `cebab → user kind=error` row carrying
+          // this error's own sentence, Retry / Abandon), and the notification
+          // is additive to it, not instead of it. Same shape as the stall
+          // branch above for the same reason.
+          //
+          // `router.sendServerMsg` is the REBIND-AWARE sink; a `.catch` firing
+          // after a reconnect is exactly the case it exists for, so the
+          // construction-time `opts.sendServerMsg` used elsewhere in this file
+          // must not be copied here.
+          try {
+            const capped = dispatchBusMaxTurnsReached({
+              sessionId,
+              err,
+              send: (msg) => router.sendServerMsg(msg),
+            });
+            if (!capped.ok) {
+              console.error('[chain] max_turns.hit dispatcher.emit failed', capped.error);
+            }
+          } catch (emitErr) {
+            console.error('[chain] max_turns.hit emit threw', emitErr);
           }
         }
         console.error(`[chain] deliverTurn(${agentName}) failed`, err);

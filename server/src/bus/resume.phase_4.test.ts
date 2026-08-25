@@ -98,6 +98,7 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -144,6 +145,7 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -179,6 +181,7 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -243,6 +246,7 @@ describe('[B02] the supersede sweep does not crash-mark a still-live session [se
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       sendServerMsg: vi.fn(),
     });
 
@@ -262,6 +266,7 @@ describe('[B02] the supersede sweep does not crash-mark a still-live session [se
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -286,6 +291,7 @@ describe('[B02] the supersede sweep does not crash-mark a still-live session [se
         onEvent: vi.fn(),
         onEnded: vi.fn(),
         hopBudget: 1000,
+        maxTurns: 50,
         sendServerMsg: (m) => sent.push(m),
       }),
     ).resolves.not.toThrow();
@@ -308,6 +314,7 @@ describe('[BE-11 / D2 precursor] attemptResumeMultiAgent emits chain_not_reconst
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       onResumeFailed,
       sendServerMsg: (m) => {
         sent.push(m);
@@ -355,6 +362,7 @@ describe('[BE-11 / D2 precursor] attemptResumeMultiAgent emits chain_not_reconst
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       hopBudget: 1000,
+      maxTurns: 50,
       sendServerMsg: (m) => sent.push(m),
     });
 
