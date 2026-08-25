@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
-import { CONTROL_REASON_OPTIONS } from './controlReasons';
+import { reasonOptionsFor } from './controlReasons';
 
 // Cluster C Phase 4g5: reason-code picker shared by the non-destructive
 // participant control verbs — Mute, Unmute, and Resume. Phase 4g2 pinned
@@ -139,7 +139,7 @@ export function MuteReasonModal({
         <fieldset className="mute-reason-modal-fieldset">
           <legend className="mute-reason-modal-legend">Reason</legend>
           <ul className="mute-reason-modal-reason-list">
-            {CONTROL_REASON_OPTIONS.map((opt) => (
+            {reasonOptionsFor(action).map((opt) => (
               <li key={opt.code} className="mute-reason-modal-reason-row">
                 <label className="mute-reason-modal-reason-label">
                   <input
@@ -153,6 +153,9 @@ export function MuteReasonModal({
                   <span className="mute-reason-modal-reason-text">
                     <span className="mute-reason-modal-reason-label-text">{opt.label}</span>
                     <span className="mute-reason-modal-reason-help">{opt.help}</span>
+                    {opt.caveat ? (
+                      <span className="control-reason-caveat">{opt.caveat}</span>
+                    ) : null}
                   </span>
                 </label>
               </li>

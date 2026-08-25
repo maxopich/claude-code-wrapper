@@ -10400,6 +10400,22 @@ pre {
   color: var(--fg-2, var(--fg));
 }
 
+/* Cebab-vie.5: what the verb will NOT do about the reason just selected.
+   Shared across the three reason pickers because the vocabulary is
+   (`components/agentControl/controlReasons.ts`) — a per-modal copy would drift
+   the way the reason list itself did.
+
+   `--warn-ink`, never the `--warn` fill: this is text, and the fill token has
+   no contrast guarantee against the surface behind it. Rendered as a block so
+   it sits under the help line rather than running on from it — an operator
+   scanning for the caveat must be able to find it without reading the help. */
+.control-reason-caveat {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-xs, 11px);
+  color: var(--warn-ink);
+}
+
 /* Free-text notes input. */
 .kick-modal-text-label {
   display: flex;

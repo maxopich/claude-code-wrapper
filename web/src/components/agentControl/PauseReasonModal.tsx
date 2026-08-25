@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode, PauseExpiryAction } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
-import { CONTROL_REASON_OPTIONS } from './controlReasons';
+import { reasonOptionsFor } from './controlReasons';
 
 // Cluster C Phase 4g5: pause-specific reason picker. Extends the
 // MuteReasonModal shape with two pause-only controls:
@@ -155,7 +155,7 @@ export function PauseReasonModal({
         <fieldset className="pause-reason-modal-fieldset">
           <legend className="pause-reason-modal-legend">Reason</legend>
           <ul className="pause-reason-modal-reason-list">
-            {CONTROL_REASON_OPTIONS.map((opt) => (
+            {reasonOptionsFor('pause').map((opt) => (
               <li key={opt.code} className="pause-reason-modal-reason-row">
                 <label className="pause-reason-modal-reason-label">
                   <input
@@ -169,6 +169,9 @@ export function PauseReasonModal({
                   <span className="pause-reason-modal-reason-text">
                     <span className="pause-reason-modal-reason-label-text">{opt.label}</span>
                     <span className="pause-reason-modal-reason-help">{opt.help}</span>
+                    {opt.caveat ? (
+                      <span className="control-reason-caveat">{opt.caveat}</span>
+                    ) : null}
                   </span>
                 </label>
               </li>

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { KickModal } from './KickModal';
+import { reasonOptionsFor } from './controlReasons';
 
 // Cluster C Phase 4g3 — KickModal contract:
 //   - Renders dialog scaffold (role=dialog, aria-modal=true)
@@ -267,5 +268,35 @@ describe('KickModal — an undelivered kick keeps the dialog (Cebab-u0s)', () =>
     expect(document.querySelector('.kick-modal')).not.toBeNull();
     const after = document.querySelector('.kick-modal-text-input') as HTMLTextAreaElement;
     expect(after.value).toBe('ignored three redirects, removing it');
+  });
+});
+
+describe('KickModal — per-reason caveats (Cebab-vie.5)', () => {
+  /** The caveat text rendered inside the row whose radio is `code`. */
+  function caveatFor(code: string): string | null {
+    const row = findReasonInput(code).closest('.kick-modal-reason-row');
+    return row?.querySelector('.control-reason-caveat')?.textContent ?? null;
+  }
+
+  test('the reasons this verb cannot remedy carry a caveat, and the others do not', () => {
+    // Both directions in one test on purpose: "a caveat is rendered" is
+    // satisfied by rendering one on all eight rows, and "topology_repair has
+    // none" is satisfied by rendering none at all.
+    render();
+    for (const code of ['runaway_loop', 'cost_ceiling', 'tool_misuse', 'forensics']) {
+      expect(caveatFor(code), code).toBeTruthy();
+    }
+    for (const code of ['off_task', 'incorrect_output', 'topology_repair', 'other']) {
+      expect(caveatFor(code), code).toBeNull();
+    }
+  });
+
+  test('the caveat is the one this verb owns', () => {
+    // Reddens if the modal renders another verb's list — the strings differ
+    // per verb precisely because the three fail the operator differently.
+    render();
+    const expected = reasonOptionsFor('kick').find((o) => o.code === 'runaway_loop')!.caveat;
+    expect(expected).toBeTruthy();
+    expect(caveatFor('runaway_loop')).toBe(expected);
   });
 });

@@ -26,14 +26,22 @@
  */
 import type { ControlReasonCode } from '@cebab/shared/protocol';
 
+/** The five per-agent control verbs that render this picker. */
+export type ControlVerb = 'mute' | 'unmute' | 'pause' | 'resume' | 'kick';
+
 export type ReasonOption = {
   code: ControlReasonCode;
   label: string;
   /** The observation that prompted the operator. Never an outcome. */
   help: string;
+  /**
+   * What THIS verb will not do about that observation. Present only where the
+   * verb cannot deliver the remedy the reason implies — see `CAVEATS`.
+   */
+  caveat?: string;
 };
 
-export const CONTROL_REASON_OPTIONS: readonly ReasonOption[] = [
+const BASE_OPTIONS: readonly ReasonOption[] = [
   {
     code: 'runaway_loop',
     label: 'Runaway loop',
@@ -62,7 +70,14 @@ export const CONTROL_REASON_OPTIONS: readonly ReasonOption[] = [
   {
     code: 'forensics',
     label: 'Forensics',
-    help: 'Need to freeze this agent to inspect its state without further mutation.',
+    // `Cebab-vie.5`: this used to read "Need to freeze this agent to inspect
+    // its state without further mutation" — the one entry that stated a
+    // CAPABILITY rather than an observation, and a capability no verb in v1
+    // has. Worse on Mute and Pause, which promised two things neither does:
+    // the forensic BUNDLE is kick-only (`captureKickForensics` writes the
+    // `controllability_forensics` row keyed to the kick's audit row). The want
+    // is real and stays; what it gets is now in the caveats.
+    help: "You want this agent's state captured for later review.",
   },
   {
     code: 'topology_repair',
@@ -75,3 +90,72 @@ export const CONTROL_REASON_OPTIONS: readonly ReasonOption[] = [
     help: 'Requires a free-text explanation in the field below.',
   },
 ];
+
+/**
+ * Per-verb corrections, keyed by reason.
+ *
+ * THIS IS THE ALTERNATIVE TO FILTERING THE VOCABULARY, which is the other fix
+ * `Cebab-vie.5` floated and the wrong one. "I muted it because spend was
+ * climbing" is a true and useful `safety_audit` record even though mute does
+ * not reduce spend — dropping `cost_ceiling` from mute's list would destroy
+ * forensic information to fix a copy bug. A caveat corrects the operator's
+ * inference instead of deleting their reason.
+ *
+ * `unmute` and `resume` have no entries, deliberately rather than by omission:
+ * they REMOVE a restriction, so there is no outcome to disclaim. The reasons
+ * there record why the operator is lifting the control.
+ *
+ * Absent for `off_task`, `incorrect_output`, `topology_repair` and `other`
+ * under every verb: each verb is a reasonable response to those, so there is
+ * nothing to correct. A caveat everywhere would be wallpaper within a week.
+ *
+ * Every sentence here is a claim about the code, and each is checkable:
+ * mute is outbound-only (one `mutedSet.has(ev.source)` read in the router; the
+ * deliver branches consult nothing and `bus/runner.ts` has no `mute`
+ * reference); `AgentRunner.pause` gates the NEXT turn and documents "current
+ * in-flight turn NOT cancelled"; kick is pinned to `mode: 'drain'` because the
+ * server answers `hard_kill_unsupported_v1`.
+ */
+const CAVEATS: Partial<Record<ControlVerb, Partial<Record<ControlReasonCode, string>>>> = {
+  mute: {
+    runaway_loop:
+      'Mute does not stop the loop — it stops you seeing it. The agent keeps being woken and keeps spending.',
+    cost_ceiling:
+      'Mute does not reduce spend: the agent keeps receiving messages and keeps running turns.',
+    tool_misuse: 'Mute does not block tool calls. They keep running, unmediated.',
+    forensics: 'Mute freezes nothing, and captures no bundle — only Kick captures one.',
+  },
+  pause: {
+    runaway_loop:
+      'The turn already running is not interrupted; the gate applies to the next one, so a loop inside the current turn keeps going.',
+    cost_ceiling:
+      'The turn already running keeps spending until it ends. Only the next turn is held.',
+    tool_misuse:
+      'The turn already running keeps its remaining tool calls; only the next turn is held.',
+    forensics:
+      'A queued turn is held, but a turn already running is not frozen — and no bundle is captured. Only Kick captures one.',
+  },
+  kick: {
+    runaway_loop:
+      'The turn already running drains rather than aborting, so a loop inside it runs until that turn ends.',
+    cost_ceiling: 'The turn already running keeps spending until it drains.',
+    tool_misuse:
+      'The turn already running keeps its remaining tool calls while it drains. There is no hard kill in v1.',
+    forensics:
+      'The bundle is captured at the moment of the kick — but the turn already running is not frozen; it drains.',
+  },
+};
+
+/**
+ * The eight reasons, with this verb's caveats attached.
+ *
+ * Always all eight, for every verb. A per-verb filter is the edit to resist —
+ * see `CAVEATS` for why the reason is audit data and the caveat is the fix.
+ */
+export function reasonOptionsFor(verb: ControlVerb): readonly ReasonOption[] {
+  const forVerb = CAVEATS[verb];
+  return BASE_OPTIONS.map((opt) => {
+    const caveat = forVerb?.[opt.code];
+    return caveat === undefined ? opt : { ...opt, caveat };
+  });
+}

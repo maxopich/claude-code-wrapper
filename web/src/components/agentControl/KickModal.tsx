@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ControlReasonCode, KickMode } from '@cebab/shared/protocol';
 import { useModalSurface } from '../../useModalSurface';
-import { CONTROL_REASON_OPTIONS } from './controlReasons';
+import { reasonOptionsFor } from './controlReasons';
 
 // Cluster C Phase 4g3: kick confirmation modal with reason-code picker.
 // Mounted by ParticipantControlMenu's Kick… item; first surface that
@@ -117,7 +117,7 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
         <fieldset className="kick-modal-fieldset">
           <legend className="kick-modal-legend">Reason</legend>
           <ul className="kick-modal-reason-list">
-            {CONTROL_REASON_OPTIONS.map((opt) => (
+            {reasonOptionsFor('kick').map((opt) => (
               <li key={opt.code} className="kick-modal-reason-row">
                 <label className="kick-modal-reason-label">
                   <input
@@ -131,6 +131,9 @@ export function KickModal({ projectId, agentLabel, onClose, onSubmit }: KickModa
                   <span className="kick-modal-reason-text">
                     <span className="kick-modal-reason-label-text">{opt.label}</span>
                     <span className="kick-modal-reason-help">{opt.help}</span>
+                    {opt.caveat ? (
+                      <span className="control-reason-caveat">{opt.caveat}</span>
+                    ) : null}
                   </span>
                 </label>
               </li>
