@@ -2468,6 +2468,26 @@ export type ServerMsg =
        */
       pendingMutations: MultiAgentMutationView[];
       /**
+       * `Cebab-vie.6` / `Cebab-vie.4`: every participant carrying a standing
+       * mute / pause / kick at attach time, so a browser refresh stops
+       * silently discarding all three. Empty on fresh starts (no verb has run
+       * yet) and for chain sessions (all four control verbs refuse chain
+       * mode); populated on R-A re-attach, R-B reconstruct and reopen. An
+       * all-clear participant — one whose only history is a mute since undone
+       * — is omitted rather than sent blank; absent and all-clear render
+       * identically, and the array then means what the client's map already
+       * documents itself to mean.
+       *
+       * REQUIRED, unlike the additive-optional fields above, and that is the
+       * emit-site defence rather than a style choice. An absent optional field
+       * hydrates to an empty map, which is indistinguishable from "no controls
+       * were ever applied" — i.e. an emit site that forgot it would reproduce
+       * exactly the defect this closes, invisibly. Required makes the compiler
+       * the test: all three `multi_agent_started` sites in `ws/server.ts` must
+       * supply it, and all three call one builder.
+       */
+      participantControls: ParticipantControlSnapshot[];
+      /**
        * Populated when a bus agent's turn is parked on an AskUserQuestion the
        * operator hasn't answered yet. Survives R-A re-attach (the parked
        * Promise lives in the in-process pending-questions registry and is
@@ -4544,6 +4564,62 @@ export type PendingAskUserQuestionView = {
   agent: string;
   toolUseId: string;
   questions: AskUserQuestionView[];
+};
+
+/**
+ * `Cebab-vie.6` / `Cebab-vie.4`: one participant's standing mute / pause /
+ * kick state, as it is at the moment the browser attaches. Carried on
+ * `multi_agent_started.participantControls`.
+ *
+ * All three controls were already durable (`multi_agent_participants`
+ * columns) and already reseeded server-side on restart — what did not exist
+ * was any way to tell a re-attaching BROWSER about them. So a refresh left the
+ * client's control map empty while the server's mute mirror, pause gate and
+ * expiry timer all stayed in force, and the affordance that undoes each
+ * control is rendered from exactly the state that had gone missing: no muted
+ * flag, no Unmute item; no live `pausedUntil`, no Resume item.
+ *
+ * Field names deliberately mirror the client's `ParticipantControlView`, which
+ * the three live `participant_*_changed` echoes already build — a snapshot
+ * that needed translating would be a second vocabulary for one concept. (Note
+ * the server's own DB-side `ControlState.kickedMode` is `kickMode` here; the
+ * reading side names it.)
+ *
+ * The reason fields are recovered from the hash chain rather than the
+ * participant row, which does not store them — same recovery
+ * `reconstruct.ts` already performs for a paused participant's reason after a
+ * restart. They are optional because that lookup can legitimately come back
+ * empty (no audit row, or a `reason_code` outside the current vocabulary);
+ * the STATE still ships in that case, since a pill with no reason is a far
+ * smaller loss than a control the operator cannot see.
+ */
+export type ParticipantControlSnapshot = {
+  /** Participant this state belongs to. The key the client maps by, and the
+   *  same id every `participant_*_changed` envelope carries. */
+  projectId: number;
+  /** Current mute state. `false` appears only alongside another set flag —
+   *  an all-clear participant is omitted from the array entirely. */
+  muted: boolean;
+  mutedReasonCode?: ControlReasonCode;
+  mutedReasonText?: string;
+  /**
+   * Absolute epoch ms the pause auto-expires at, or `null` when not paused.
+   * Shipped VERBATIM, including a deadline already in the past: "is this
+   * pause still live" is a `> Date.now()` comparison and it belongs on the
+   * client, which is where it is already written (the pills, the counter chip
+   * and the control menu each make it). A second copy of that rule, evaluated
+   * against a clock the operator never sees, is how the two answers start to
+   * disagree.
+   */
+  pausedUntil: number | null;
+  pauseExpiryAction?: PauseExpiryAction;
+  pauseReasonCode?: ControlReasonCode;
+  pauseReasonText?: string;
+  /** Set once kicked; never cleared (there is no unkick verb in v1). */
+  kickedAt: number | null;
+  kickMode?: KickMode;
+  kickReasonCode?: ControlReasonCode;
+  kickReasonText?: string;
 };
 
 export type MultiAgentMutationView = {
