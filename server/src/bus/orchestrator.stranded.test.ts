@@ -246,6 +246,82 @@ describe('a muted worker mid-delegation (Cebab-vie.8)', () => {
   });
 });
 
+describe('a turn that is still running (Cebab-vie.8)', () => {
+  test('the run is not stranded while another agent is mid-turn', async () => {
+    // The `turnsInFlight` count is what makes "nobody is running" a statement
+    // about the SESSION rather than about the one turn that just ended. Bus
+    // hops overlap by construction: `deliver` for the next agent is called
+    // synchronously from inside the sending agent's turn, so the sender
+    // settles while the recipient is still working.
+    //
+    // `coder`'s turn here never finishes, which makes the assertion
+    // deterministic instead of a race: whatever order the runtime picks, the
+    // session genuinely has a live turn throughout.
+    //
+    // Reddens on removing `router.onTurnStarted(agentName)` from `deliver` —
+    // without the increment the orchestrator's settle takes the count to zero
+    // and reports a wedge while `coder` is mid-Bash.
+    const coder = makeWorker('coder');
+    let releaseCoder!: () => void;
+    const coderBlocked = new Promise<void>((r) => {
+      releaseCoder = r;
+    });
+    const wired: ReturnType<typeof wireOrchestratorSession> = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers: [coder],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: (() => {
+        let turn = 0;
+        return (): Runner => {
+          const mine = turn++;
+          async function* gen(): AsyncGenerator<SDKMessage> {
+            if (mine === 0) {
+              // The orchestrator delegates from inside its own turn, exactly
+              // as a real `bus_send` does.
+              wired.router.handleEvent({
+                ts: Date.now(),
+                source: ORCHESTRATOR_AGENT_NAME,
+                destination: 'coder',
+                kind: 'prompt',
+                text: 'go',
+              });
+            } else {
+              await coderBlocked;
+            }
+            yield {
+              type: 'result',
+              subtype: 'success',
+              session_id: `s${mine}`,
+            } as unknown as SDKMessage;
+          }
+          const it = gen();
+          return { [Symbol.asyncIterator]: () => it, close: () => undefined };
+        };
+      })(),
+    });
+
+    wired.deliver(ORCHESTRATOR_AGENT_NAME, 'plan the round');
+    await flush(16);
+
+    // Premise: the delegation landed and is the tail, so the detector really
+    // does have an agent-addressed tail in front of it — the silence below is
+    // the count, not a missing row.
+    const evs = listMultiAgentEvents(SESSION_ID);
+    expect(evs.at(-1)!.destination).toBe('coder');
+    expect(strandedRows()).toHaveLength(0);
+
+    // Positive control: let `coder` finish without sending anything and the
+    // same run reports immediately.
+    releaseCoder();
+    await flush(16);
+    expect(strandedRows()).toHaveLength(1);
+  });
+});
+
 describe('which drop gets the blame (Cebab-vie.8)', () => {
   test('a drop that a later turn superseded is not reported as the cause', async () => {
     // The recorded drop is cleared when a turn starts, because a turn starting
