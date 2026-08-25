@@ -74,6 +74,7 @@ import { appendRecoveryLog } from '../repo/recovery_log.js';
 import {
   isMaxTurnsReached,
   isPausedForMutation,
+  isTurnRefused,
   isTurnStalled,
   MutationNotRecordedError,
 } from './errors.js';
@@ -387,19 +388,27 @@ export type OrchestratorSessionHandle = {
    *
    * Drain semantics (drain mode, the only v1-supported mode):
    *   - In-flight turn at kick time keeps running — `AgentRunner` is NOT
-   *     told to abort. The router-side drops are the only enforcement.
+   *     told to abort. That is the ONE turn kick does not stop.
    *   - bus_send calls the draining turn issues return their "delivered to
    *     <recipient>" white lie (same oracle-suppression pattern as mute,
    *     by-construction in `bus/runner.ts:handleBusSend`).
-   *   - No new turns ever start for the kicked agent. For routed traffic the
-   *     router drops every event addressed to it before the `deliver?.()`
-   *     call — but that reasoning only covers turns that BEGIN as a
-   *     `BusEvent`. `handle.retry()` and `handle.continueThroughMutation()`
-   *     are turn-starters that do not, and this sentence was false for both
-   *     of them until `Cebab-vie.9`/`.10`: each resurrected a kicked worker
-   *     with a full tool-capable turn, Continue's replay carrying the
-   *     one-shot approval grant for the dangerous command. They now ask
-   *     `checkTurnRefused` first.
+   *   - No new turns ever start for the kicked agent. That sentence has been
+   *     here since Phase 4d and was false three times over, because the router
+   *     drops EVENTS and the claim is about TURNS:
+   *       · `handle.retry()` / `handle.continueThroughMutation()` are
+   *         turn-starters that never begin as an event, so none of the
+   *         router's gates was in their path (`Cebab-vie.9`/`.10`/`.18`).
+   *         Each resurrected a kicked worker with a full tool-capable turn,
+   *         Continue's replay carrying the one-shot approval grant for the
+   *         dangerous command. They now ask `checkTurnRefused` first.
+   *       · A delivery that DID begin as an event, passed the drops, and then
+   *         waited on the runner's per-agent tail while the operator kicked
+   *         (`Cebab-vie.11`). Turns are serialized, so waiting is the ordinary
+   *         state of a busy worker rather than a corner case. `AgentRunner`
+   *         now re-reads eligibility at DEQUEUE via its `canStartTurn` dep,
+   *         wired below to `isKicked`, and refuses with `TurnRefusedError`.
+   *     Only the third bullet needed the runner to learn anything, which is
+   *     why `kickAgent` below is no longer a pure router flip.
    *
    * The WS handler calls this AFTER persisting the DB flip
    * (per_agent_control.setParticipantKicked) so the durable source-of-
@@ -480,6 +489,17 @@ type OrchestratorRouter = {
    * contract is shaped like `checkBudgetExhausted`'s.
    */
   checkTurnRefused: (agentName: string) => TurnRefusalReason | null;
+  /**
+   * `Cebab-vie.11` [security]: write the operator's `cebab → user kind=error`
+   * row for a refused turn, without deciding anything.
+   *
+   * Split out of `checkTurnRefused` for the runner's dequeue gate, which has
+   * already decided (it holds the agent name and the reason) and must NOT
+   * re-run the budget branch — that branch tears the session down as it
+   * refuses, which is a reasonable answer to a Retry click and a wrong one to
+   * a delivery quietly reaching the head of a queue.
+   */
+  emitTurnRefused: (reason: 'kicked' | 'ended', agentName: string) => void;
   /**
    * `Cebab-vie.8`: turn-liveness bookkeeping, called by `deliver` and by its
    * `.finally`. The router owns the count (not the wiring) so that every
@@ -1464,13 +1484,17 @@ export function createOrchestratorRouter(params: {
    * what this router does at the cap on every other wake attempt. Refusing
    * without it would leave an operator clicking Retry into a permanent no.
    */
+  const emitTurnRefused = (reason: 'kicked' | 'ended', agentName: string): void => {
+    emitOperatorError(turnRefusalText(reason, agentName));
+  };
+
   const checkTurnRefused = (agentName: string): TurnRefusalReason | null => {
     if (kickedSet.has(agentName)) {
-      emitOperatorError(turnRefusalText('kicked', agentName));
+      emitTurnRefused('kicked', agentName);
       return 'kicked';
     }
     if (ended) {
-      emitOperatorError(turnRefusalText('ended', agentName));
+      emitTurnRefused('ended', agentName);
       return 'ended';
     }
     return checkBudgetExhausted() ? 'budget' : null;
@@ -1495,6 +1519,7 @@ export function createOrchestratorRouter(params: {
     kickAgent: (agentName) => setKick(agentName, true),
     isKicked,
     checkTurnRefused,
+    emitTurnRefused,
     onTurnStarted,
     onTurnSettled,
   };
@@ -1800,6 +1825,27 @@ export function wireOrchestratorSession(p: {
     // projectId, and there are four `register()` sites that would each have to
     // remember a spec field (mid-run `addWorker` included).
     maxTurns: p.maxTurns,
+    // `Cebab-vie.11` [security]: the LAST gate before a queued delivery becomes
+    // a process. Every other kick check runs when a delivery is created — the
+    // router's `kickedSet` drops for events, `checkTurnRefused` for the two
+    // replay seams — and none of them can see a delivery that passed and then
+    // waited behind another turn. Because this sits at the dequeue rather than
+    // at a call site, it needs no enumeration of callers to be complete.
+    //
+    // Kicked only. `ended` and `budget` are `checkTurnRefused`'s to answer and
+    // deliberately not asked here: its budget branch TEARS THE SESSION DOWN as
+    // it refuses, which is the right answer to an operator clicking Retry and
+    // the wrong one to a delivery quietly reaching the head of a queue.
+    //
+    // Emitting from inside a predicate is the established shape in this file
+    // (`checkTurnRefused` does the same, for the same reason): the refusal and
+    // the sentence the operator reads must not be able to drift apart. The
+    // runner's `TurnRefusedError` is therefore silent at the `.catch` below.
+    canStartTurn: (agentName) => {
+      if (!router.isKicked(agentName)) return true;
+      router.emitTurnRefused('kicked', agentName);
+      return false;
+    },
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);
@@ -2110,6 +2156,14 @@ export function wireOrchestratorSession(p: {
         // nothing further so the session stays `running` waiting for
         // Continue.
         if (isPausedForMutation(err)) return;
+        // `Cebab-vie.11`: the dequeue gate refused a queued delivery for a
+        // kicked agent. Silent on purpose, twice over. The operator already has
+        // the row — `canStartTurn` wrote it as it refused, the same contract
+        // `checkTurnRefused` carries — so emitting here would double it. And
+        // `onWorkerFailed` is the wrong recovery: it parks a pending-retry slot,
+        // which would put a live Retry button back in front of the operator for
+        // the participant they just removed.
+        if (isTurnRefused(err)) return;
         if (isTurnStalled(err)) {
           // The watchdog auto-aborted a wedged turn. Record the recovery
           // (closes the forensic gap a stalled turn used to leave) and fall
@@ -2453,7 +2507,23 @@ export function wireOrchestratorSession(p: {
     resumeAgent: (agentName) => runner.resume(agentName),
     hasAgent: (agentName) => runner.has(agentName),
     getPendingDeliveries: (agentName) => runner.getPendingDeliveries(agentName),
-    kickAgent: (agentName) => router.kickAgent(agentName),
+    kickAgent: (agentName) => {
+      const changed = router.kickAgent(agentName);
+      if (changed) {
+        // `Cebab-vie.11` [security]: a delivery already parked at
+        // `deliverTurn`'s `await gate.promise` cannot notice the kick from
+        // inside the wait, and nothing else would settle it — the `auto_kick`
+        // expiry path clears the pause COLUMN and never calls `resumeAgent`,
+        // so the gate outlives the pause that justified it. Releasing sends
+        // those deliveries back around the re-check loop, where `canStartTurn`
+        // refuses them. Nothing runs either way; this is the difference between
+        // refused and stranded (an unsettled promise, a `pendingDeliveries`
+        // slot that never drains, and an `onTurnStarted` never balanced by
+        // `onTurnSettled` — i.e. a run that looks busy forever).
+        runner.releaseAllHolds(agentName);
+      }
+      return changed;
+    },
     isKicked: (agentName) => router.isKicked(agentName),
   };
 

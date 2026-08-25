@@ -28,7 +28,12 @@ import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusRecipient } from './paths.js';
 import { classifyMutationScope } from './guardrail.js';
-import { isBusControlSignal, MaxTurnsReachedError, TurnStalledError } from './errors.js';
+import {
+  isBusControlSignal,
+  MaxTurnsReachedError,
+  TurnRefusedError,
+  TurnStalledError,
+} from './errors.js';
 
 /**
  * Stalled-turn watchdog thresholds (ms). A turn that yields no SDKMessage for
@@ -452,6 +457,29 @@ export type AgentRunnerDeps = {
    * turn (the deny already happened). Absent (the default) → no-op.
    */
   onGuardrailViolation?: (agentName: string, toolName: string) => void;
+  /**
+   * `Cebab-vie.11` [security]: may `agentName` start a turn RIGHT NOW? Asked at
+   * DEQUEUE time — immediately before a queued delivery would become a real
+   * `claude` process — not when that delivery was enqueued.
+   *
+   * The distinction is the whole point. A worker's turns are serialized, so a
+   * delivery routed while the previous turn is still running waits; everything
+   * the operator does during that wait (kick, most sharply) happens after every
+   * check the delivery already passed. The router's `kickedSet` drops gate
+   * EVENTS and `checkTurnRefused` gates the two replay seams — neither can see a
+   * delivery that is already inside the runner.
+   *
+   * Returning false must be accompanied by telling the operator: the runner
+   * throws `TurnRefusedError`, and the routers' `.catch` deliberately stays
+   * silent on it. Same contract as `checkTurnRefused`, and stated in both
+   * places because breaking it produces either silence or a doubled row.
+   *
+   * Optional. `chain.ts` omits it — chain mode refuses kick outright
+   * (`chain_topology_broken`), so there is no state for it to read. Absent means
+   * every dequeued turn starts, which is byte-identical to the behaviour before
+   * this existed.
+   */
+  canStartTurn?: (agentName: string) => boolean;
   /** Injectable for tests; defaults to the real `pickRunner` (mock-aware). */
   runnerFactory?: (opts: RunOptions & Partial<MockOptions>) => Runner;
   /** Shared cancellation for the whole session's turns. */
@@ -614,19 +642,29 @@ export class AgentRunner {
   private readonly parked = new Map<string, number>();
   /**
    * Cluster C Phase 4c (spec §5.2 + AE-4 + AE-5): per-agent pause gate.
-   * `pause(name)` overwrites `turnTails.get(name)` with a never-resolving
-   * promise so the NEXT `deliverTurn` chains off it and parks until
-   * `resume(name)` flips the gate. The IN-FLIGHT turn (whose runOneTurn
-   * promise was already in progress when pause arrived) is unaffected —
-   * it completes naturally per the spec's "current in-flight turn NOT
-   * cancelled" guarantee.
+   * `pause(name)` records a never-resolving promise here; every turn checks
+   * this map on its way OUT of the queue (`deliverTurn`) and waits on the
+   * promise if one is present, until `resume(name)` flips the gate. The
+   * IN-FLIGHT turn (whose `runOneTurn` was already executing when pause
+   * arrived) is unaffected — it is already past the check, which is the spec's
+   * "current in-flight turn NOT cancelled" guarantee.
    *
-   * Resume calls `release()` to fulfill the gate promise; queued
-   * deliverTurn calls then proceed in FIFO order, each waiting for the
-   * one before it to finish (the chained `turnTails.set` pattern that
-   * predates pause already gives us that). Re-pause / re-resume return
-   * false without state change — caller (WS handler) surfaces as
-   * `already_in_state`.
+   * `Cebab-vie.1` [security] moved that check. The gate used to splice itself
+   * into `turnTails` as `prevTail.then(() => gatePromise)`, i.e. BEHIND every
+   * delivery already queued, so pausing an agent with N waiting deliveries let
+   * all N run first — full, unattended, auto-allow-everything turns, while the
+   * `agent_control.paused` audit row said the agent was paused from the moment
+   * of the click and `queuedDeliveries: N` presented that same count to the
+   * operator as the number being held back. Reading the map at dequeue instead
+   * makes "in flight" mean what it says, rather than "in flight or anywhere in
+   * the queue".
+   *
+   * Resume calls `release()` to fulfill the gate promise; parked deliveries
+   * then proceed in FIFO order, each waiting for the one before it to finish
+   * (the chained `turnTails.set` pattern that predates pause still gives us
+   * that — a parked delivery holds the tail, so nothing overtakes it).
+   * Re-pause / re-resume return false without state change — caller (WS
+   * handler) surfaces as `already_in_state`.
    *
    * **Two holders, one gate** (`Cebab-vie.13`). The pause-on-dangerous brake
    * needs the same queue hold, and reusing `pause`/`resume` for it would make
@@ -735,11 +773,46 @@ export class AgentRunner {
     // "stuck behind this agent" mental model for AE-5's queuedDeliveries.
     this.pendingDeliveries.set(agentName, (this.pendingDeliveries.get(agentName) ?? 0) + 1);
     const tail = this.turnTails.get(agentName) ?? Promise.resolve();
-    const result = tail.then(() => {
-      this.pendingDeliveries.set(
-        agentName,
-        Math.max(0, (this.pendingDeliveries.get(agentName) ?? 1) - 1),
-      );
+    const result = tail.then(async () => {
+      // `Cebab-vie.1` / `Cebab-vie.11` [security]: re-read the agent's control
+      // state HERE, at the moment this delivery would become a real process —
+      // not when it was enqueued. Everything upstream (the router's kicked/muted
+      // drops, `checkTurnRefused`, the operator's Pause click) ran while this
+      // call was still waiting behind another turn, and a worker's turns are
+      // serialized, so waiting is the ordinary case. Reading once on the way in
+      // is what let a kick and a pause both arrive too late to stop anything.
+      //
+      // A loop, and in this order:
+      //   - refusal BEFORE the gate, so a kicked agent is never parked behind a
+      //     promise that may never resolve (`releaseAllHolds` covers the case
+      //     where the kick lands while it is already parked);
+      //   - re-check AFTER each wait, because pause → resume → pause installs a
+      //     NEW gate, and because a kick can land while parked.
+      try {
+        for (;;) {
+          if (this.deps.canStartTurn && !this.deps.canStartTurn(agentName)) {
+            throw new TurnRefusedError(agentName);
+          }
+          const gate = this.pauseGates.get(agentName);
+          if (!gate) break;
+          await gate.promise;
+        }
+      } finally {
+        // Decremented AFTER the gate clears, not before it: a delivery parked
+        // on the gate is still queued, and `getPendingDeliveries` is documented
+        // as "the queue parked behind a pause gate AND the queue behind a slow
+        // in-flight turn" — the AE-5 `queuedDeliveries` figure the operator
+        // reads as "stuck behind this agent right now".
+        //
+        // In a `finally` because the loop now has TWO exits and both leave the
+        // queue. A refusal that skipped this would pin the counter at its
+        // pre-refusal value for the rest of the session, which is the same
+        // class of stale-state bug this whole change is about.
+        this.pendingDeliveries.set(
+          agentName,
+          Math.max(0, (this.pendingDeliveries.get(agentName) ?? 1) - 1),
+        );
+      }
       return this.runOneTurn(agentName, promptText);
     });
     // Advance the tail regardless of this turn's outcome so one failed or
@@ -764,16 +837,19 @@ export class AgentRunner {
    * Semantics:
    *   - In-flight turn (the one whose `runOneTurn` is already executing
    *     when pause arrives) is NOT cancelled. The spec's §5.2 model is
-   *     "current in-flight finishes; inbound queues" — `pause` here only
-   *     installs the gate for the NEXT delivery onward.
-   *   - The gate is composed via `tail.then(() => gatePromise)` so it
-   *     waits for any currently-pending tail before the gate itself
-   *     takes effect. That preserves the runner's serialization
-   *     invariant (no two `--resume` subprocesses for the same agent at
-   *     once).
+   *     "current in-flight finishes; inbound queues" — and `inbound queues`
+   *     covers a delivery that has arrived and not yet started, which is why
+   *     the gate binds every turn that has not entered `runOneTurn` rather
+   *     than only ones that arrive after the click (`Cebab-vie.1`).
+   *   - The gate is READ at dequeue, in `deliverTurn`. It is not spliced into
+   *     `turnTails`; splicing put it behind the existing queue, which is
+   *     exactly the delivery set it most needed to hold. Serialization is
+   *     unaffected — the tail chain still orders turns, and a delivery waiting
+   *     on the gate holds the tail, so there is still never a second
+   *     `--resume` subprocess for the same agent.
    *   - `resume(agentName)` drops the operator's hold, and — if no other
    *     holder remains — resolves the gate and clears the map entry,
-   *     unblocking every queued delivery in FIFO order. The
+   *     unblocking every parked delivery in FIFO order. The
    *     `turnTails`-chain pattern guarantees order.
    *
    * Caller responsibility: the WS handler MUST persist the pause to
@@ -829,13 +905,59 @@ export class AgentRunner {
       release = res;
     });
     this.pauseGates.set(agentName, { promise, release, holders: new Set([holder]) });
-    const prevTail = this.turnTails.get(agentName) ?? Promise.resolve();
-    // Chain the gate AFTER the existing tail so the in-flight turn (if
-    // any) completes first, then the gate parks subsequent calls.
-    this.turnTails.set(
-      agentName,
-      prevTail.then(() => promise),
-    );
+    // `Cebab-vie.1` [security]: recording the gate is the WHOLE operation. It
+    // used to also splice itself into the turn queue as
+    // `prevTail.then(() => promise)` — which chains it AFTER everything already
+    // enqueued, so N deliveries waiting at the moment of the click ran N full
+    // unattended turns and only the N+1th was ever held. The intent was "the
+    // in-flight turn finishes", and that is still true, but it was implemented
+    // as "everything already queued finishes", which is a different and much
+    // larger promise.
+    //
+    // `deliverTurn` now reads this map at dequeue instead, so a gate installed
+    // at any point before a turn actually starts holds it.
+    //
+    // Measured, because it is easy to assume otherwise: putting the chaining
+    // BACK does not reintroduce the bug — the dequeue read still parks those
+    // deliveries, so the two mechanisms agree and the whole pause suite stays
+    // green either way. It is removed because it is now a second spelling of
+    // one rule, and because it is not entirely inert: while a gate stands, a
+    // chained delivery never reaches its `.then`, so `canStartTurn` never runs
+    // for it. That is the paused-THEN-kicked case, where the chaining turns a
+    // prompt refusal into a wait for `releaseAllHolds` — see the kick suite.
+    return true;
+  }
+
+  /**
+   * `Cebab-vie.11` [security]: drop every holder's claim at once and let the
+   * queue drain, whatever it was being held for.
+   *
+   * Only kick calls this, and only because kick is terminal. A delivery parked
+   * at `deliverTurn`'s `await gate.promise` is inside the wait — it cannot
+   * notice the kick until something settles that promise. Nothing would: the
+   * `auto_kick` expiry path clears the pause COLUMN and never calls
+   * `resumeAgent`, so the gate outlives the pause that justified it. The
+   * delivery's promise never settles, its `pendingDeliveries` slot never
+   * drains, and the router's `onTurnStarted` is never balanced by
+   * `onTurnSettled` — the run looks busy forever.
+   *
+   * Releasing sends those deliveries back around the loop, where `canStartTurn`
+   * refuses them. Nothing runs; the difference is between refused and stranded.
+   * The same reasoning is already written down for the mutation holder, where
+   * `continueThroughMutation`'s kicked branch releases it because "a kicked
+   * agent has no queue worth holding, and leaving it standing would keep
+   * in-memory state that no banner explains."
+   *
+   * Deliberately NOT a public verb for anything else: `resume` and
+   * `releaseMutationHold` release exactly one holder each, which is what stops
+   * an operator Continue from lifting a standing operator pause.
+   */
+  releaseAllHolds(agentName: string): boolean {
+    const gate = this.pauseGates.get(agentName);
+    if (!gate) return false;
+    this.pauseGates.delete(agentName);
+    gate.holders.clear();
+    gate.release();
     return true;
   }
 
