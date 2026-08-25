@@ -642,16 +642,39 @@ describe('[security] the second copy of a sensitive file body (of0)', () => {
   // THE critical negative. Without it the rule could silently become
   // unconditional — masking every tool_result body in every session — and every
   // positive above would still pass.
+  //
+  // `Cebab-ygu.51` took `fields` away as the way to ask. This control used to
+  // assert that `message.content[0].content` and `tool_use_result.file.content`
+  // were ABSENT from `fields`; the credential-named-assignment rule now masks
+  // the `CLIENT_SECRET` line INSIDE that same body, at that same path, so the
+  // path is present for a completely different reason. `fields` reports WHERE a
+  // mask landed and has never reported WHICH RULE put it there.
+  //
+  // So the control asks the output instead, and comes out sharper than it went
+  // in: the two bodies are the SAME BYTES at different paths, and the
+  // difference between "wholesale" and "one span" is now asserted directly
+  // rather than inferred from a report that cannot tell them apart.
   it('does NOT touch a tool_result body when no sensitive path is declared', () => {
-    const benign = readOf('/proj/README.md');
-    const { redacted, fields } = redactSensitive(benign);
-    expect(JSON.stringify(redacted)).toContain(SECRET);
-    // `session_id` is still masked here by the key rule, which is exactly the
-    // false-reassurance shape this whole register is about: `fields` being
-    // non-empty never meant the body was inspected. Assert the two body paths
-    // specifically.
-    expect(fields).not.toContain('message.content[0].content');
-    expect(fields).not.toContain('tool_use_result.file.content');
+    const bodyOf = (filePath: string) =>
+      (
+        redactSensitive(readOf(filePath)) as {
+          redacted: { tool_use_result: { file: { content: string } } };
+        }
+      ).redacted.tool_use_result.file.content;
+
+    // Sensitive path: the of0 rule masks the body WHOLESALE, one token.
+    expect(bodyOf('/proj/.mcp.json')).toBe('<redacted>');
+
+    // Benign path, identical bytes: the document survives — which is what
+    // "does not touch the body" has to mean, and what a rule gone unconditional
+    // would destroy.
+    const benign = bodyOf('/proj/README.md');
+    expect(benign).toContain('mcpServers');
+    expect(benign).toContain('project-server');
+    // …and the credential quoted inside it is gone anyway, by the narrow rule
+    // rather than the wholesale one. A README that quotes an MCP config is a
+    // real shape, and shipping its client secret was never the intent here.
+    expect(benign).not.toContain(SECRET);
   });
 
   // Pins the results-only scoping. An assistant event carries no file body, only
@@ -712,19 +735,31 @@ describe('[security] the second copy of a sensitive file body (of0)', () => {
 });
 
 describe('[security] pinned limitation: a streaming delta is NOT this module’s job', () => {
-  // `Cebab-ygu.47`. Recording what this redactor does NOT do, because believing
-  // otherwise is what shipped plaintext credentials in the "share-safe" export.
+  // `Cebab-ygu.47`, amended by `Cebab-ygu.51`. Recording what this redactor does
+  // NOT do, because believing otherwise is what shipped plaintext credentials in
+  // the "share-safe" export.
   //
-  // Two structural reasons, and neither is a missing pattern:
+  // Two structural reasons were recorded here, and ONE of them survived:
   //   1. A delta's text sits under the key `text`, which no KEY rule matches
-  //      and no key rule ever could without masking every message body.
-  //   2. A secret is CHOPPED ACROSS DELTAS, so no VALUE rule can match either
-  //      half however long the list grows.
+  //      — still true of the key, no longer true of the text. `Cebab-ygu.51`
+  //      reads the STRING for `name = value` where the NAME is credential-shaped,
+  //      so a secret that arrives whole inside one delta is now masked.
+  //   2. A secret CHOPPED ACROSS DELTAS is still beyond any per-line rule, and
+  //      always will be — the tail carries no name to key on and no shape to
+  //      match. This is the limitation that is actually structural.
   //
-  // The answer is the CORPUS, not the values: `session_log_export.ts` excludes
-  // the whole message class via `runner/message_classes.ts`. Do not "fix" this
-  // here — a rule broad enough to catch case 2 would mask every message body,
-  // which is the transcript the export exists to provide.
+  // The paragraph that used to sit here said "do not fix this — a rule broad
+  // enough to catch case 2 would mask every message body, which is the transcript
+  // the export exists to provide." That was true of WHOLESALE masking and false
+  // of span masking, and the difference was never measured until `Cebab-ygu.51`
+  // measured it: the assignment rule masks 0 spans across 24 real session
+  // transcripts (4390 lines), while the entropy rule it was really warning about
+  // — any 32+ char mixed-case-and-digit token — masks 1544. The warning was
+  // right about the cliff and wrong about where the edge was.
+  //
+  // The corpus answer stands regardless: `session_log_export.ts` excludes the
+  // whole message class via `runner/message_classes.ts`, so none of this reaches
+  // the export either way.
 
   // Assembled at runtime, non-vendor-shaped, so the secret scan stays at full
   // strength and the case is not accidentally passed by a vendor pattern.
@@ -741,11 +776,27 @@ describe('[security] pinned limitation: a streaming delta is NOT this module’s
     expect(fields).toEqual([]);
   });
 
-  it('cannot see a value split across two deltas, by construction', () => {
+  it('masks the HEAD of a value split across deltas, because the head carries the name', () => {
+    // This case used to assert that the head LEAKED — `expect(...).toContain(
+    // 'correct-horse-battery-')` — and it was green for two months. A test that
+    // pins the defect is indistinguishable from a test that pins the behaviour
+    // until someone reads what it is asserting.
+    //
+    // `Cebab-ygu.51` masks it: `db_password` is in the delta, the value starts in
+    // the same delta, and the rule needs nothing else.
     const head = redactSensitive(delta('db_password = correct-horse-battery-'));
+    expect(JSON.stringify(head.redacted)).not.toContain('correct-horse-battery-');
+    expect(head.fields).toEqual(['event.delta.text']);
+  });
+
+  it('cannot see the TAIL of that value, by construction', () => {
+    // The half that is genuinely structural, and the reason the case above was
+    // rewritten rather than deleted. `staple-9271` arrives with no name beside
+    // it and no shape to match; a rule that caught it would have to catch every
+    // hyphenated token in every transcript.
     const tail = redactSensitive(delta('staple-9271'));
-    expect(JSON.stringify(head.redacted)).toContain('correct-horse-battery-');
     expect(JSON.stringify(tail.redacted)).toContain('staple-9271');
+    expect(tail.fields).toEqual([]);
   });
 
   it('CONTROL: a vendor-shaped token in the same position IS masked', () => {
@@ -754,5 +805,187 @@ describe('[security] pinned limitation: a streaming delta is NOT this module’s
     const vendor = 'AKIA' + 'ABCDEFGHIJKLMNOP';
     const { redacted } = redactSensitive(delta(`key = ${vendor}`));
     expect(JSON.stringify(redacted)).not.toContain(vendor);
+  });
+});
+
+describe('[security] a credential-NAMED assignment in free text (Cebab-ygu.51)', () => {
+  // Every canary is assembled at RUNTIME. gitleaks scans this file and the
+  // `.*\.test\.ts$` blanket exemption was removed, so a split literal keeps the
+  // secret scan at full strength instead of growing a by-value exemption.
+  //
+  // None of them is vendor-shaped, deliberately: if one were, the wholesale
+  // value-pattern branch would mask it and every case here would pass for the
+  // wrong reason — which is precisely the fixture luck this bead is about.
+  const PASSWORD = 'correct-horse' + '-battery-staple-' + '9271';
+  const APIKEY = 'ik' + '_live_' + 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6';
+
+  /** The durable shape the export ships and `Cebab-ygu.47` believed was safe. */
+  const assistantSaying = (text: string) => ({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'text', text }] },
+  });
+
+  it('masks the value and names the path', () => {
+    // The finding. Reddens: removing the call in `walk`'s string branch, which
+    // ships this verbatim in the redacted export.
+    const { redacted, fields } = redactSensitive(
+      assistantSaying(`the file says db_password = ${PASSWORD}`),
+    );
+    expect(JSON.stringify(redacted)).not.toContain(PASSWORD);
+    expect(fields).toEqual(['message.content[0].text']);
+  });
+
+  it('leaves the prose and the key name readable — only the value goes', () => {
+    // Reddens: masking the whole string. The transcript is what the export
+    // exists to provide, and an operator who cannot see WHICH name was masked
+    // cannot act on it.
+    const { redacted } = redactSensitive(
+      assistantSaying(`I read deploy-notes.txt: db_password = ${PASSWORD}. Rotate it.`),
+    );
+    const text = (redacted as { message: { content: { text: string }[] } }).message.content[0]!
+      .text;
+    expect(text).toBe('I read deploy-notes.txt: db_password = <redacted>. Rotate it.');
+  });
+
+  it('masks the ASSIGNMENT and leaves a bare repeat — a measured trade, not an oversight', () => {
+    // This case used to assert the opposite, and the implementation used to
+    // replace every occurrence of a matched value. Measured against 24 real
+    // session transcripts, that pass turned ONE match on `session_id: sessionId`
+    // inside a `Read` of `ws/server.ts` into twenty mangled lines — the
+    // identifier `sessionId` scrubbed wherever it appeared in the file.
+    //
+    // One match destroying a whole body is not the "false positives are cheap"
+    // this module licenses, and the repeat case was hypothetical: no transcript
+    // in the corpus had one. So the rule masks exactly what it matched.
+    //
+    // Reddens in both directions: an implementation that masks nothing here, and
+    // one that reinstates the repeat pass.
+    const { redacted } = redactSensitive(
+      assistantSaying(`internal_api_key = ${APIKEY} — so export KEY then use ${APIKEY}`),
+    );
+    const text = (redacted as { message: { content: { text: string }[] } }).message.content[0]!
+      .text;
+    expect(text).toBe(`internal_api_key = <redacted> — so export KEY then use ${APIKEY}`);
+  });
+
+  it('a rejected pair earlier in the line does not swallow the real one', () => {
+    // Found by writing the case above as a SENTENCE rather than as a bare
+    // `key = value`. `exec` leaves lastIndex past the whole match, so the pair
+    // (`deploy-notes.txt`, `db_password`) was matched, rejected on its name, and
+    // consumed the assignment that followed it — masking nothing while every
+    // bare-pair test stayed green.
+    //
+    // Reddens: dropping the rewind to `match.index + name.length`.
+    const { redacted } = redactSensitive(
+      assistantSaying(`ran cat deploy-notes.txt: db_password = ${PASSWORD}`),
+    );
+    expect(JSON.stringify(redacted)).not.toContain(PASSWORD);
+  });
+
+  it('a sentence-final period is punctuation, not key material', () => {
+    // Reddens: dropping the trailing-dot trim, which masks the period along with
+    // the value and silently rewrites the prose around it.
+    const { redacted } = redactSensitive(assistantSaying(`db_password = ${PASSWORD}. Rotate it.`));
+    const text = (redacted as { message: { content: { text: string }[] } }).message.content[0]!
+      .text;
+    expect(text).toBe('db_password = <redacted>. Rotate it.');
+  });
+
+  it('the accepted vocabulary IS isSensitiveKey, not a second list', () => {
+    // Reddens: restating the key words inside the pattern. `session_id` is in
+    // SENSITIVE_KEY_PATTERNS and would be easy to leave out of a hand-copied
+    // alternation; `author` is excluded there by a lookahead that a copy would
+    // lose. Both are asserted so the two directions of drift fail separately.
+    const masked = redactSensitive(assistantSaying(`session_id = ${APIKEY}`));
+    expect(JSON.stringify(masked.redacted)).not.toContain(APIKEY);
+
+    const untouched = redactSensitive(assistantSaying(`author = ${APIKEY}`));
+    expect(JSON.stringify(untouched.redacted)).toContain(APIKEY);
+    expect(untouched.fields).toEqual([]);
+  });
+
+  it('accepts the separators and quoting a transcript actually contains', () => {
+    for (const line of [
+      `db_password: ${PASSWORD}`,
+      `"api_key": "${PASSWORD}"`,
+      `export CLIENT_SECRET='${PASSWORD}'`,
+      `ANTHROPIC_API_KEY=${PASSWORD}`,
+    ]) {
+      const { redacted } = redactSensitive(assistantSaying(line));
+      expect({ line, leaked: JSON.stringify(redacted).includes(PASSWORD) }).toEqual({
+        line,
+        leaked: false,
+      });
+    }
+  });
+
+  it('leaves prose and code references alone', () => {
+    // Both directions of the value filter, in one case, so neither "mask
+    // nothing" nor "mask everything" can pass it. Measured false positives from
+    // this repo's own sources — the stand-in for code quoted in a transcript.
+    for (const line of [
+      'the token is rotated weekly',
+      'const token = authTokenRef.current',
+      'const key = crypto.randomBytes(32)',
+      'let secret = undefined',
+      'apiKeySource = process.env.ANTHROPIC_API_KEY',
+    ]) {
+      const { redacted, fields } = redactSensitive(assistantSaying(line));
+      const text = (redacted as { message: { content: { text: string }[] } }).message.content[0]!
+        .text;
+      expect({ line, text, fields }).toEqual({ line, text: line, fields: [] });
+    }
+  });
+
+  it('a vendor-shaped token in the same string still masks WHOLESALE', () => {
+    // Reddens: putting the new rule BEFORE the value-pattern branch. A vendor
+    // token is unambiguous evidence the whole string is credential-bearing, and
+    // downgrading that to a span would be this change removing masking — the one
+    // direction it must never move.
+    const vendor = 'AKIA' + 'ABCDEFGHIJKLMNOP';
+    const { redacted } = redactSensitive(assistantSaying(`db_password = ${PASSWORD} ${vendor}`));
+    const text = (redacted as { message: { content: { text: string }[] } }).message.content[0]!
+      .text;
+    expect(text).toBe('<redacted>');
+  });
+
+  it('is a fixed point — redacting twice changes nothing', () => {
+    // Reddens: a rule that can match its own output. `<redacted>` contains `<`
+    // and `>`, which the value class rejects, so this holds by construction —
+    // and by construction is exactly the kind of claim that stops being true
+    // when someone widens a character class.
+    const once = redactSensitive(assistantSaying(`db_password = ${PASSWORD}`)).redacted;
+    const twice = redactSensitive(once);
+    expect(JSON.stringify(twice.redacted)).toBe(JSON.stringify(once));
+    expect(twice.fields).toEqual([]);
+  });
+
+  it('KNOWN LIMIT: a value with no credential-shaped name still leaks', () => {
+    // Pinned, not hidden. `plain_marker` is not a credential name and the value
+    // matches no pattern, so nothing distinguishes this from prose. Reaching it
+    // means an entropy rule, MEASURED at 1544 masked spans across 4390 lines of
+    // real transcripts against this rule's 0 — see the module header.
+    //
+    // The case exists so the next person meets the number before the idea.
+    const marker = 'REDACTION' + '-CANARY-' + '7f3a';
+    const { redacted, fields } = redactSensitive(assistantSaying(`plain_marker = ${marker}`));
+    expect(JSON.stringify(redacted)).toContain(marker);
+    expect(fields).toEqual([]);
+  });
+
+  it("the bead's control: masking no longer depends on an unrelated secret nearby", () => {
+    // `Cebab-ygu.47` measured "leaks OUTSIDE stream_event: NONE" and it was
+    // fixture luck — the durable copies carried an AKIA key in the same string,
+    // and the wholesale branch masked everything around it. Take the vendor
+    // token away and the marker used to walk straight out.
+    //
+    // Both halves asserted together, because the whole finding IS the delta
+    // between them.
+    const vendor = 'AKIA' + 'ABCDEFGHIJKLMNOP';
+    const withVendor = redactSensitive(assistantSaying(`db_password = ${PASSWORD} ${vendor}`));
+    const without = redactSensitive(assistantSaying(`db_password = ${PASSWORD}`));
+    expect(JSON.stringify(withVendor.redacted)).not.toContain(PASSWORD);
+    expect(JSON.stringify(without.redacted)).not.toContain(PASSWORD);
+    expect(without.fields).toEqual(['message.content[0].text']);
   });
 });

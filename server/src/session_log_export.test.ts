@@ -140,10 +140,24 @@ describe('redactJsonlLine', () => {
     });
 
     test('an ordinary file round-trips with its body intact', () => {
+      // The negative for the of0 rule: same bytes, benign path, body NOT masked
+      // wholesale. It used to say so as `expect(out).toContain(SECRET)` — one
+      // surviving token standing in for the whole body.
+      //
+      // `Cebab-ygu.51` made that proxy too strong without making the control
+      // wrong. The `CLIENT_SECRET` line inside the body is now masked by the
+      // credential-named-assignment rule — a strictly better outcome for a
+      // README that quotes an MCP config — while the of0 rule stays exactly as
+      // unfired as before. Asserting the body's own content is also the stronger
+      // control: a rule gone unconditional takes `mcpServers` with it, which no
+      // single-token check would notice.
       const out = redactJsonlLine(readOf('/proj/README.md'));
       expect(out).not.toBeNull();
-      expect(out).toContain(SECRET);
-      expect(JSON.parse(out!).message.content[0].content).toBe(MCP_BODY);
+      const body = JSON.parse(out!).message.content[0].content as string;
+      expect(body).not.toBe('<redacted>');
+      expect(body).toContain('mcpServers');
+      expect(body).toContain('project-server');
+      expect(body).not.toContain(SECRET);
     });
   });
 
@@ -420,6 +434,61 @@ describe('/session-log :: redacted format (default)', () => {
     expect(String(res.headers['content-disposition'])).toContain(
       'filename="cebab-sess-kno-20240115-093045.jsonl"',
     );
+  });
+});
+
+describe('[security] /session-log :: a durable message whose only secret is named (Cebab-ygu.51)', () => {
+  // `Cebab-ygu.47` closed the stream_event class and recorded that the durable
+  // messages were clean. They were clean IN THAT FILE, because every secret in
+  // it sat in a string that also held an AKIA key — and the redactor masks a
+  // whole string when a vendor pattern hits. Take the vendor token away and the
+  // durable copy walked out of the artifact whose whole purpose is to be
+  // shareable, under an audit row asserting `exported_redacted`.
+  //
+  // End to end through the real endpoint rather than against `redactSensitive`,
+  // because the unit is not where this went wrong: the rule was fine, the belief
+  // about which classes it covered was not.
+  //
+  // Assembled at runtime; not vendor-shaped, or it would pass for the old reason.
+  const PASSWORD = 'correct-horse' + '-battery-staple-' + '9271';
+
+  const durableTurn = () => [
+    {
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: `deploy-notes.txt says db_password = ${PASSWORD}` }],
+      },
+    },
+  ];
+
+  test('the redacted export drops it', async () => {
+    writeJsonl('sess-1', durableTurn());
+    const res = await request({
+      path: `/session-log/sess-1?token=${token}`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: defaultHostHeader(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).not.toContain(PASSWORD);
+    // The turn is still a transcript — the point of masking the span rather than
+    // the message. Without this, "drops it" is also satisfied by dropping the
+    // line, which is what the stream_event fix does and is wrong here.
+    expect(res.body).toContain('deploy-notes.txt says db_password =');
+  });
+
+  test('raw still carries it — the two formats have not converged', async () => {
+    // The control. A redactor that masked in the wrong layer, or an export that
+    // stopped serving raw, would pass the case above for the wrong reason.
+    writeJsonl('sess-1', durableTurn());
+    const res = await request({
+      path: `/session-log/sess-1?token=${token}&format=raw`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: defaultHostHeader(),
+      extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain(PASSWORD);
   });
 });
 
