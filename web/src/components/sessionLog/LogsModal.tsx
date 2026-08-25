@@ -339,6 +339,14 @@ function requestReveal(
  * (`triggerBlobDownload`), shared with the new per-session JSONL export
  * path. This wrapper just builds the NDJSON payload + filename.
  */
+/**
+ * NOT the `/session-log` HTTP export. This is a client-side blob of the rows
+ * already on screen — projected from the `events` table, already redacted
+ * server-side. Worth saying because the two were conflated in a P0 report
+ * (`Cebab-ygu.47`, whose leak was in the OTHER download, the sidebar `⤓`).
+ * Since that fix the two carry the same message classes for the first time:
+ * `events` never held streaming partials, and now neither does the export.
+ */
 function downloadNdjson(sessionId: string, rows: readonly LogRow[]): void {
   triggerBlobDownload({
     data: rows.map((r) => JSON.stringify(r)).join('\n'),

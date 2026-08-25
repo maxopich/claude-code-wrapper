@@ -39,6 +39,13 @@
  * paired flag stops "the modal lib defaults to ack:true" from
  * silently downgrading the privacy posture; an opt-in must spell
  * BOTH out.
+ *
+ * `Cebab-ygu.47`: the two formats differ in CORPUS as well as in masking.
+ * `redacted` carries the durable message classes only — streaming partials are
+ * excluded, because a secret chopped across two deltas can never be caught by a
+ * per-line rule. `raw` is the complete trace. Note that nothing in this app
+ * passes `format: 'raw'` today, so the redacted artifact is what every download
+ * button produces.
  */
 
 /** Mirror of the server's `X-Cebab-Acknowledge-Raw` header name. */

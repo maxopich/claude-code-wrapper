@@ -4,7 +4,8 @@ Reference detail lifted out of [`CLAUDE.md`](../CLAUDE.md). **Nothing under
 `docs/` is auto-loaded** — see [`bus-architecture.md`](bus-architecture.md) for
 the same note. Read this before touching `server/src/notifications/`,
 `server/src/bus/pause_gate.ts`, `server/src/bus/install_trust_gate.ts`,
-`server/src/auth.ts`, or `server/src/origin.ts`.
+`server/src/auth.ts`, `server/src/origin.ts`, or
+`server/src/session_log_export.ts`.
 
 The consultant-mode constraint itself, and the two limits on it, stay in
 `CLAUDE.md` — they are what an agent reads and acts on. This page is why it is
@@ -44,6 +45,20 @@ Behind the consultant-mode prompt and the pause-on-dangerous toggle (the _preven
 - **Operator controls — mute / pause / kick** (`server/src/ws/control_verbs.ts`, `pause_expiry.ts`): **mute** drops the agent's outbound bus messages (returning an _oracle_ white-lie "delivered" so it can't detect the drop); **pause** holds its turns behind an `auto_resume | auto_kick` expiry timer; **kick** one-way-drains it (drops both inbound and outbound). All three persist to `multi_agent_participants` columns and reseed on server restart (R-B).
 
   **The two operator replay seams are gated by the same state (`Cebab-vie.9`/`.10`/`.18`).** All of that enforcement lives on the path a `BusEvent` takes — which is why the kick contract could be stated as "no new turns ever start for the kicked agent: the router drops every event addressed to it before the wake". `handle.retry()` and `handle.continueThroughMutation()` are the only turn-starters that do **not** begin as an event, so none of it was structurally in their path: Retry resurrected a kicked worker with a full tool-capable turn, and Continue did the same _carrying the one-shot approval grant_, so the resurrected turn re-issued the approved `rm -rf` **pre-approved** — while its `bus_send` output was still dropped as `kicked_source`, leaving the operator with drop notices and no sight of what the worker actually did. The same two seams also ignored `ended` and the hop budget, which needs no resume dance to reach: several router paths bump the hop counter and return _before_ the budget check, so `hopsCount >= hopBudget` on a live session is an ordinary state. Both now call the router's `checkTurnRefused` first (`bus/turn_guard.ts` holds the reasons and the wording so the two routers cannot drift); a non-null answer means the turn does not start and the operator has already been told, via the same `cebab → user kind=error` channel a worker failure uses. A kicked worker's banner is resolved rather than left clickable — `consumed`, so no unspent grant survives it.
+
+## Session-log export
+
+`GET /session-log/:sid?token=…&format=redacted|raw` is the only route that hands a session's bytes to a human. Three gates, all in `session_log_export.ts`'s header: the Origin allow-list, the Host allow-list, and the per-launch auth token; `format=raw` additionally requires `X-Cebab-Acknowledge-Raw: I-understand`, which the UI sets only behind a typed confirmation. Every successful export writes a `safety_audit` row **before** the body lands (BE-1 — if the intent cannot be recorded, the data does not ship).
+
+**The redacted artifact's corpus is the durable message classes** (`Cebab-ygu.47`), not "the file with redaction applied". It used to be the latter, and that shipped plaintext credentials: measured on a real session, 35 KB of `format=redacted` with three canaries surviving, every one inside a `stream_event`. No additional pattern could have fixed it. `redactSensitive` masks values under sensitive key names plus a few value shapes; a delta carries free text under the key `text`, and a secret is **chopped across deltas**, so no per-line rule can match either half — the `db_password` that was masked correctly in the durable `assistant` message shipped as `horse-battery-staple-…` in the `content_block_delta` that built it. `runner/message_classes.ts` now holds the one predicate the `events` writer and the export both consult, as a **deny**-list so a new SDK type defaults to durable-and-redacted rather than silently vanishing.
+
+The header sentence that let this through review is worth remembering: it said the export "applies LogsModal's redaction policy line-by-line". True about the policy, false about the **corpus** — the modal reads `events`, which never contained a partial — so everyone reasoning from the claimed parity concluded the export was covered. A parity claim is only as good as the corpus it is claimed over.
+
+**An unparsable line records its own existence, not its bytes.** The export used to pass non-JSON through verbatim, reasoned as not losing forensic data. The reasoning holds; the conclusion was a bypass, because a class rule only sees lines that parse and `runner/logger.ts` appends with no coordination against readers — so exporting a live session routinely observes a torn final line, and a torn delta went through with its text intact. The fact and the byte count survive as a `cebab_unparsable_line` placeholder.
+
+**The audit row attests intent and policy; the artifact attests itself.** `payload.contentPolicy` names the code path that produced the bytes, so a row written by the leaky build is distinguishable from one written after the fix — the bead's sharpest point was that the chain asserted `exported_redacted` over a file holding plaintext. It is deliberately not a measurement: the row precedes the body, so nothing about the emitted bytes is knowable yet, and a count of what was removed attests nothing about what remains.
+
+**Two honest costs, stated here because the export's users need them.** A partial with no durable counterpart — a turn killed by `interrupt()`, an abandoned tool input — is not in the redacted artifact. And `format=raw` is reachable by curl only: both UI call sites hardcode `redacted`, so the operator's route to the complete trace is reading `~/.cebab/logs/<sid>.jsonl` directly (same machine, same uid, mode 0600), not a button.
 
 ## Browser threat model
 
