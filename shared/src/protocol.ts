@@ -3298,10 +3298,17 @@ export type ServerMsg =
        * `previousArgs` carry what the operator actually approved, so the modal
        * can show before/after rather than asking them to remember.
        */
-      reason: 'first_seen' | 'hash_changed' | 'declaration_changed';
+      /**
+       * Cebab-1af: `script_changed` fires when the declaration is byte-identical
+       * to the approved one but a file it RUNS is not. `changedScripts` names
+       * each one with both hashes, because the declaration itself shows the
+       * operator nothing — that is the whole shape of the finding.
+       */
+      reason: 'first_seen' | 'hash_changed' | 'declaration_changed' | 'script_changed';
       previousSha?: string;
       previousCommand?: string;
       previousArgs?: string[];
+      changedScripts?: Array<{ path: string; previousSha: string; sha: string }>;
     }
   | {
       /**
@@ -3864,8 +3871,29 @@ export type McpServerView = {
     /** NAMES only — the spec's BE-B12 [security] invariant: never values. */
     envKeys?: string[];
   };
-  trust: 'trusted' | 'pending_tofu' | 'hash_changed' | 'declaration_changed' | 'denied' | 'unknown';
+  trust:
+    | 'trusted'
+    | 'pending_tofu'
+    | 'hash_changed'
+    | 'declaration_changed'
+    /** Cebab-1af: declaration unchanged, a file it runs rewritten in place. */
+    | 'script_changed'
+    | 'denied'
+    | 'unknown';
   binarySha?: string;
+  /**
+   * Cebab-1af: sha256 per file this declaration points at, keyed by the token
+   * as declared. Absent when it points at none we can read (`npx <pkg>`), which
+   * is the common case. Carried on the view because the TOFU gate persists the
+   * operator's approval from it — the same reason `binarySha` is here.
+   */
+  scriptShas?: Record<string, string>;
+  /**
+   * Cebab-1af: set only when `trust === 'script_changed'`. The resolver already
+   * computed the diff to reach that verdict, so the gate renders it rather than
+   * asking the ledger a second question and risking a different answer.
+   */
+  scriptChanges?: Array<{ path: string; previousSha: string; sha: string }>;
   firstSeenAt?: number;
   lastSeenAt?: number;
 };

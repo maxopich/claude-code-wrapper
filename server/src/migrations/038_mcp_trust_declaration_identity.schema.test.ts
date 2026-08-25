@@ -57,24 +57,33 @@ describe('[security] 038_mcp_trust_declaration_identity', () => {
   test('the rebuild kept every pre-038 column', () => {
     // A table rebuild that silently drops a column would pass every behavioural
     // test that does not read it.
+    //
+    // CONTAINMENT, not equality, and the loosening is deliberate: this case is
+    // about what 038's rebuild DROPPED, and a later migration adding a column
+    // (039 added `script_shas_json`) is not that. Pinned as equality it went
+    // red for the one change it is not about, which is the shape of a test that
+    // gets "fixed" by pasting in the new name until nobody reads it. The full
+    // column list belongs to the newest migration's own schema test.
     const names = getDb()
       .prepare<[], ColumnInfo>('PRAGMA table_info(mcp_trust)')
       .all()
-      .map((c) => c.name)
-      .sort();
-    expect(names).toEqual(
-      [
-        'args_json',
-        'binary_sha',
-        'command',
-        'decision',
-        'id',
-        'operator',
-        'origin_path',
-        'server_name',
-        'ts',
-      ].sort(),
-    );
+      .map((c) => c.name);
+    for (const kept of [
+      'args_json',
+      'binary_sha',
+      'command',
+      'decision',
+      'id',
+      'operator',
+      'origin_path',
+      'server_name',
+      'ts',
+    ]) {
+      expect({ column: kept, present: names.includes(kept) }).toEqual({
+        column: kept,
+        present: true,
+      });
+    }
   });
 
   test('the UNIQUE identity covers the declaration', () => {

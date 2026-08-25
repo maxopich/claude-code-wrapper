@@ -44,7 +44,13 @@ const MCP_JSON_FILENAME = '.mcp.json';
 const MAX_CLAUDE_JSON_BYTES = 8 * 1024 * 1024;
 const CLAUDE_JSON_FILENAME = '.claude.json';
 import { getProject } from './projects.js';
-import { checkTrust, computeBinarySha, firstDecisionTs, listForServer } from './mcp_trust.js';
+import {
+  checkTrust,
+  computeBinarySha,
+  computeScriptShas,
+  firstDecisionTs,
+  listForServer,
+} from './mcp_trust.js';
 import { listSessionsForProject } from './sessions.js';
 import { getDb } from '../db.js';
 
@@ -727,7 +733,13 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
  *   - `trusted` / `trusted_pinned_hash` → `trust: 'trusted'`
  *   - `denied_remember`                  → `trust: 'denied'`
  *   - `hash_changed`                     → `trust: 'hash_changed'`
+ *   - `script_changed`                   → `trust: 'script_changed'` (Cebab-1af)
  *   - `first_seen`                       → `trust: 'pending_tofu'`
+ *
+ * `projectPath` is the spawn cwd, and it is required rather than derived from
+ * `originPath`: relative tokens in a declaration resolve against the directory
+ * the CLI runs in, not against the file the declaration was read from — the two
+ * differ for every server declared in `~/.claude.json`.
  *
  * Cebab-injected servers (`scope: 'cebab-injected'`, e.g. `cebab_bus`)
  * are always `trust: 'trusted'` — Cebab pins them, no operator decision
@@ -742,7 +754,7 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
  * null-sha path behave the same way. Both absent when the server has never had
  * a recorded decision.
  */
-export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
+export function enrichWithTrustState(views: McpServerView[], projectPath: string): McpServerView[] {
   for (const view of views) {
     if (view.scope === 'cebab-injected') {
       view.trust = 'trusted';
@@ -751,6 +763,14 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
     if (!view.originPath) continue;
     const candidateSha = view.config?.command ? computeBinarySha(view.config.command) : null;
     if (candidateSha !== null) view.binarySha = candidateSha;
+    // Cebab-1af: and the files the declaration RUNS, which `binary_sha` never
+    // covered — it hashes the command, and the command is `node`.
+    const scriptShas = computeScriptShas(
+      view.config?.command ?? '',
+      view.config?.args ?? [],
+      projectPath,
+    );
+    if (scriptShas !== null) view.scriptShas = scriptShas;
     // Cebab-rxg: the DECLARATION is part of the lookup, not just the command's
     // hash. `computeBinarySha` returns null for every non-absolute command, so
     // `npx`, `node` and `bash` shared one identity and a rewritten `.mcp.json`
@@ -761,6 +781,7 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
       candidateSha,
       command: view.config?.command ?? '',
       args: view.config?.args ?? [],
+      candidateScriptShas: scriptShas,
     });
     switch (lookup.decision) {
       case 'trusted':
@@ -775,6 +796,17 @@ export function enrichWithTrustState(views: McpServerView[]): McpServerView[] {
         break;
       case 'hash_changed':
         view.trust = 'hash_changed';
+        break;
+      case 'script_changed':
+        view.trust = 'script_changed';
+        // The diff is computed once, here, and carried on the view. The gate
+        // renders it; recomputing it there would be a second read of the same
+        // files with a window in between.
+        view.scriptChanges = lookup.changedPaths.map((token) => ({
+          path: token,
+          previousSha: lookup.previousShas[token],
+          sha: lookup.candidateShas[token],
+        }));
         break;
       case 'first_seen':
         view.trust = 'pending_tofu';
@@ -1040,7 +1072,7 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // state. Runs after the cebab-injected append so those rows get
   // 'trusted' via the same pass (no operator decision needed for
   // Cebab-pinned servers).
-  enrichWithTrustState(declaredMcp);
+  enrichWithTrustState(declaredMcp, project.path);
 
   // Tools: every tool name the SDK reported, attributed against layers +
   // MCP availability. When the cache is empty, no tools are resolved

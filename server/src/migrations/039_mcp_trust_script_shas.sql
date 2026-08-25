@@ -1,0 +1,45 @@
+-- Cebab-1af [security]: pin the FILES an MCP declaration points at.
+--
+-- The half of Cebab-rxg's design that migration 038 deliberately left out, so
+-- that two independent security mechanisms did not land in one review.
+--
+-- 038 put `command` + `args_json` into the identity, so REWRITING THE
+-- DECLARATION re-gates. It does not cover the other direction: declaration
+-- untouched, the script it points at rewritten in place.
+--
+--   .mcp.json:            { kitchen: { command: 'node',
+--                                      args: ['mcp/kitchen-server.mjs'] } }   <- unchanged
+--   mcp/kitchen-server.mjs:                                                   <- rewritten
+--
+-- Identity matches. `binary_sha` is NULL, because it hashes the COMMAND and
+-- `node` is not an absolute path. `checkTrust` returns `trusted` and the new
+-- program runs. Nothing an operator would notice in a `git diff` of the config
+-- — the npm/supply-chain shape.
+--
+-- WHY A PLAIN ADD COLUMN, where 038 needed a table rebuild. 038 widened the
+-- table-level UNIQUE, which SQLite cannot ALTER. This column is NOT part of the
+-- identity: it is the comparison payload, the same role `binary_sha` plays for
+-- a pinned absolute command and `hook_trust.script_sha` (030) plays next door.
+-- Adding it to the key would make every byte change a NEW ROW rather than a
+-- CHANGED one, and then nothing would ever mismatch — the ledger would grow a
+-- row per rewrite and prompt for none of them.
+--
+-- SHAPE: a canonical JSON object, `{ "<token as declared>": "<sha256 hex>" }`,
+-- keys sorted. An object rather than 030's single hash because an MCP
+-- declaration is `command` plus an ARGS ARRAY, and picking which arg is "the
+-- script" is a guess that can pin the wrong bytes — the failure `hook_trust`'s
+-- own header calls worse than pinning none. Every arg that names a readable
+-- file is pinned instead, so there is nothing to guess. See
+-- `computeScriptShas` in `repo/mcp_trust.ts` for the resolution rules and for
+-- why args are resolved by EXISTENCE while the command is resolved by SHAPE.
+--
+-- NULL means "this decision pinned no files": either the declaration names
+-- none (`npx -y weather-mcp`) or none could be read. It is also what every row
+-- decided before this migration carries, and there is NO BACKFILL, on purpose.
+-- A backfill would hash the bytes on disk today and record them as approved —
+-- but nobody approved them, and if the swap this migration exists to catch has
+-- already happened, the backfill pins the swapped script and reports
+-- "unchanged" forever. Detection starts at the operator's next decision, which
+-- for a live install is imminent: 038 shipped one day earlier and already makes
+-- every pre-038 row re-prompt exactly once.
+ALTER TABLE mcp_trust ADD COLUMN script_shas_json TEXT;

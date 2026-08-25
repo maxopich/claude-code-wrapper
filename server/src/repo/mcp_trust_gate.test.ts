@@ -83,8 +83,21 @@ function viewPending(name: string, originPath: string, command?: string): McpSer
  * command produces a view with no `config`, and the gate records `''` / `[]`
  * for it — hence the defaults here.
  */
-function look(name: string, originPath: string, candidateSha: string | null, command = '') {
-  return checkTrust({ serverName: name, originPath, candidateSha, command, args: [] });
+function look(
+  name: string,
+  originPath: string,
+  candidateSha: string | null,
+  command = '',
+  candidateScriptShas: Record<string, string> | null = null,
+) {
+  return checkTrust({
+    serverName: name,
+    originPath,
+    candidateSha,
+    command,
+    args: [],
+    candidateScriptShas,
+  });
 }
 
 function viewTrusted(name: string, originPath: string): McpServerView {
@@ -403,6 +416,7 @@ describe('awaitMcpTrustDecisions — hash_changed flow', () => {
       command: '',
       args: [],
       binarySha: 'oldsha',
+      scriptShas: null,
       decision: 'trusted_pinned_hash',
     });
 
@@ -644,6 +658,7 @@ describe('[security] a rewritten declaration re-gates instead of passing silentl
         serverName: 'kitchen',
         originPath: ORIGIN,
         candidateSha: null,
+        candidateScriptShas: null,
         command: 'node',
         args: ['mcp/swapped-server.mjs'],
       }).decision,
@@ -695,10 +710,130 @@ describe('[security] a rewritten declaration re-gates instead of passing silentl
         serverName: 'kitchen',
         originPath: ORIGIN,
         candidateSha: null,
+        candidateScriptShas: null,
         command: 'node',
         args: ['mcp/swapped-server.mjs'],
       }).decision,
     ).toBe('trusted');
+  });
+});
+
+// ---- Cebab-1af: script_changed flow ----
+
+describe('[security] a rewritten script re-gates, and the prompt names the file', () => {
+  const ORIGIN = '/u/proj/.mcp.json';
+  const ARGS = ['mcp/kitchen-server.mjs'];
+  const V1 = 'a'.repeat(64);
+  const V2 = 'b'.repeat(64);
+
+  /** A view shaped the way `enrichWithTrustState` shapes one once it has
+   *  hashed the declaration's files. */
+  function view(
+    trust: McpServerView['trust'],
+    scriptShas: Record<string, string>,
+    scriptChanges?: McpServerView['scriptChanges'],
+  ): McpServerView {
+    return {
+      name: 'kitchen',
+      status: 'unknown',
+      scope: 'mcp-json',
+      originPath: ORIGIN,
+      tools: [],
+      trust,
+      config: { command: 'node', args: ARGS },
+      scriptShas,
+      ...(scriptChanges ? { scriptChanges } : {}),
+    };
+  }
+
+  test('the prompt carries the changed file and both hashes', async () => {
+    // Step 1: approve `node mcp/kitchen-server.mjs` at V1 through the gate.
+    const sinkA = makeSink();
+    const gateA = makeTrustGateState();
+    const promiseA = awaitMcpTrustDecisions({
+      projectId: 9,
+      gate: gateA,
+      send: sinkA.send,
+      servers: [view('pending_tofu', { [ARGS[0]]: V1 })],
+    });
+    gateA.pending
+      .get((sinkA.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>).pendingId)!
+      .resolve({ kind: 'allow' });
+    await promiseA;
+
+    // Step 2: the DECLARATION is untouched — only the file's bytes moved. This
+    // is what the ledger now says about it, and it is the assertion that fails
+    // if `applyDecision` did not persist the approved shas in step 1.
+    const lookup = checkTrust({
+      serverName: 'kitchen',
+      originPath: ORIGIN,
+      candidateSha: null,
+      command: 'node',
+      args: ARGS,
+      candidateScriptShas: { [ARGS[0]]: V2 },
+    });
+    expect(lookup.decision).toBe('script_changed');
+
+    // Step 3: the gate prompts. Reddens: leaving `script_changed` out of the
+    // switch, where it would hit the exhaustiveness `default` and `continue` —
+    // the swapped script spawning with no modal and no audit row.
+    const sinkB = makeSink();
+    const gateB = makeTrustGateState();
+    const promiseB = awaitMcpTrustDecisions({
+      projectId: 9,
+      gate: gateB,
+      send: sinkB.send,
+      servers: [
+        view('script_changed', { [ARGS[0]]: V2 }, [{ path: ARGS[0], previousSha: V1, sha: V2 }]),
+      ],
+    });
+    expect(sinkB.sent).toHaveLength(1);
+    const env = sinkB.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
+    expect(env.reason).toBe('script_changed');
+    // The declaration is identical on both sides, so this list is the ONLY
+    // thing distinguishing the two spawns for the operator. Reddens: dropping
+    // `changedScripts` from the envelope, which leaves a modal that says a
+    // script changed and cannot say which.
+    expect(env.changedScripts).toEqual([{ path: ARGS[0], previousSha: V1, sha: V2 }]);
+    expect(env.command).toBe('node');
+    expect(env.args).toEqual(ARGS);
+
+    gateB.pending.get(env.pendingId)!.resolve({ kind: 'deny_remember' });
+    expect((await promiseB).persistedDenials).toBe(1);
+  });
+
+  test('approving the new bytes makes the NEXT spawn silent again', async () => {
+    // Steady state has to come back, or the gate re-prompts every spawn and
+    // becomes noise the operator clicks through. Reddens: `applyDecision`
+    // passing `scriptShas: null` — which persists a row that pins nothing, so
+    // this lookup answers `trusted` for the wrong reason and the case after it
+    // (a THIRD version) would never fire.
+    const sink = makeSink();
+    const gate = makeTrustGateState();
+    const promise = awaitMcpTrustDecisions({
+      projectId: 9,
+      gate,
+      send: sink.send,
+      servers: [
+        view('script_changed', { [ARGS[0]]: V2 }, [{ path: ARGS[0], previousSha: V1, sha: V2 }]),
+      ],
+    });
+    const env = sink.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
+    gate.pending.get(env.pendingId)!.resolve({ kind: 'allow' });
+    await promise;
+
+    const ask = (shas: Record<string, string>) =>
+      checkTrust({
+        serverName: 'kitchen',
+        originPath: ORIGIN,
+        candidateSha: null,
+        command: 'node',
+        args: ARGS,
+        candidateScriptShas: shas,
+      }).decision;
+    expect(ask({ [ARGS[0]]: V2 })).toBe('trusted');
+    // …and the new baseline is the approved bytes, not merely "something".
+    expect(ask({ [ARGS[0]]: 'c'.repeat(64) })).toBe('script_changed');
   });
 });
 
@@ -749,12 +884,19 @@ describe('[security] refuseUnapprovedForProbe — a probe starts only what is tr
     // Nothing was DECIDED for these, so there is no enforcement to record —
     // and a row per sidebar navigation would be noise in a chain that exists
     // to be read. The refusal itself is what matters.
+    //
+    // `rewritten` is Cebab-1af's state, and it needed no edit to this function
+    // — the code is a whitelist of ONE, so a sixth trust state is refused by
+    // construction. The case is here anyway, because the property that a new
+    // state defaults to refused is only true while nobody turns the whitelist
+    // into a list of known-bad values.
     const refused = refuseUnapprovedForProbe(3, [
       view('never-seen', 'pending_tofu'),
       view('rebuilt', 'hash_changed'),
       view('swapped', 'declaration_changed'),
+      view('rewritten', 'script_changed'),
     ]);
-    expect(refused).toEqual(['never-seen', 'rebuilt', 'swapped']);
+    expect(refused).toEqual(['never-seen', 'rebuilt', 'swapped', 'rewritten']);
     expect(refusalRows()).toEqual([]);
   });
 

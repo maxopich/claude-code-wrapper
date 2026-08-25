@@ -107,6 +107,7 @@ describe('[security] the authority probe honours the MCP trust ledger', () => {
       command: '/bin/echo',
       args: ['hi'],
       binarySha: null,
+      scriptShas: null,
       decision: 'denied_remember',
     });
 
@@ -134,6 +135,7 @@ describe('[security] the authority probe honours the MCP trust ledger', () => {
       command: '/bin/echo',
       args: ['hi'],
       binarySha: null,
+      scriptShas: null,
       decision: 'denied_remember',
     });
 
@@ -166,6 +168,7 @@ describe('[security] the authority probe honours the MCP trust ledger', () => {
       // because unrecognised, not because the fix refuses everything).
       // Returns null on a platform without /bin/echo, which still matches.
       binarySha: computeBinarySha('/bin/echo'),
+      scriptShas: null,
       decision: 'trusted',
     });
 

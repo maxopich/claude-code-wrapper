@@ -4203,6 +4203,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           command: '',
           args: [],
           binarySha: msg.binarySha ?? null,
+          // Cebab-1af: null for the same reason the declaration is empty — the
+          // wire carries no declaration, so there is nothing to resolve files
+          // from. A denial needs no file baseline anyway: the recency probe
+          // answers `denied_remember` before any comparison runs.
+          scriptShas: null,
           decision: 'denied_remember',
         });
       } catch (err) {
