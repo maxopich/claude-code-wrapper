@@ -625,7 +625,21 @@ describe('AgentRunner', () => {
         // The deferred replay shares one body with the loop. A record-only
         // shortcut would be a second, thinner spelling of the ledger — this is
         // what would notice.
-        const seen: { tool: string; summary: string; toolUseId?: string; filePath?: string }[] = [];
+        // Everything the callback observes is RECORDED here and asserted after
+        // the turn — never asserted inside onMutation. The deferred replay calls
+        // this tap through a try/catch in runner.ts that logs and continues
+        // (correct for production: a tap failure must not kill a turn), so an
+        // expect() that throws in here is swallowed and the suite stays green
+        // (`Cebab-7r8`). Push the values, assert once the turn has resolved.
+        const seen: {
+          tool: string;
+          summary: string;
+          cwd: string;
+          category: string;
+          violatedPath?: string;
+          toolUseId?: string;
+          filePath?: string;
+        }[] = [];
         let tapped = 0;
         const runner = new AgentRunner({
           onEvent: () => {},
@@ -635,14 +649,16 @@ describe('AgentRunner', () => {
             seen.push({
               tool: toolName,
               summary: cls.summary,
+              cwd,
+              category: cls.category,
+              // Cluster F: the out-of-scope verdict has to survive the deferral —
+              // it is the field the guardrail audit row is written from.
+              ...(cls.guardrailViolation?.violatedPath !== undefined
+                ? { violatedPath: cls.guardrailViolation.violatedPath }
+                : {}),
               ...(cls.toolUseId !== undefined ? { toolUseId: cls.toolUseId } : {}),
               ...(cls.filePath !== undefined ? { filePath: cls.filePath } : {}),
             });
-            expect(cwd).toBe('/tmp/coder');
-            expect(cls.category).toBe('mutate');
-            // Cluster F: the out-of-scope verdict has to survive the deferral —
-            // it is the field the guardrail audit row is written from.
-            expect(cls.guardrailViolation?.violatedPath).toBe('/etc/passwd');
           },
           runnerFactory: () =>
             fakeRunner([
@@ -676,6 +692,9 @@ describe('AgentRunner', () => {
           {
             tool: 'Write',
             summary: expect.stringContaining('/etc/passwd'),
+            cwd: '/tmp/coder',
+            category: 'mutate',
+            violatedPath: '/etc/passwd',
             toolUseId: 'second',
             filePath: '/etc/passwd',
           },
