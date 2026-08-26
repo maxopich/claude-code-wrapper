@@ -27,6 +27,8 @@
  * real path stayed broken. Label exclusion is asserted where it actually
  * lives: in the `bd ready` argv.
  */
+import path from 'node:path';
+
 import { describe, expect, test } from 'vitest';
 
 import {
@@ -774,18 +776,39 @@ describe('ledger', () => {
 // 3am and least likely to be exercised by accident.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { claimArgv, closeArgv, followUpArgv, parkArgv } from './lib/loop/beads.mjs';
+import {
+  claimArgv,
+  closeArgv,
+  followUpArgv,
+  makeBeads,
+  parkArgv,
+  showArgv,
+} from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject } from './lib/loop/git.mjs';
-import { classifyChecks, prChecksArgv, prMergeArgv } from './lib/loop/forge.mjs';
+import {
+  checkRunsArgv,
+  classifyCheckRuns,
+  failingSibling,
+  prMergeArgv,
+} from './lib/loop/forge.mjs';
 import {
   assertPlaygroundEnv,
   DETERMINISTIC_STEPS,
   parseEnvFile,
+  playgroundSmokeEnv,
+  playgroundSmokes,
   playgroundTriggered,
 } from './lib/loop/gate.mjs';
-import { buildArgv, detectUsageLimit, renderPrompt, resolveTier } from './lib/loop/build.mjs';
-import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
-import { parseArgs } from './loop.mjs';
+import {
+  buildArgv,
+  detectUsageLimit,
+  isMaxTurns,
+  makeBuild,
+  renderPrompt,
+  resolveTier,
+} from './lib/loop/build.mjs';
+import { allowReason, commandHeads, decide, splitSegments } from './lib/loop/loop-guard.mjs';
+import { harvest, parseArgs, watchCi } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 import { makeGit } from './lib/loop/git.mjs';
 import { stripComments } from './lib/strip_comments.mjs';
@@ -852,32 +875,103 @@ describe('git: branch discipline and commit shape', () => {
       commitSubject({ commit_type: 'docs', commit_scope: '', commit_subject: 'x' }, 'B-1'),
     ).toBe('docs: x (B-1)');
   });
+
+  test('the bead id is not doubled when the agent already wrote it', () => {
+    // Observed on the first PR the loop ever opened:
+    //   fix(web): give 8 hover-styled buttons a focus ring (Cebab-p5y) (Cebab-p5y)
+    // The agent writes the id itself because that IS this repo's convention —
+    // every recent commit ends `(Cebab-xxx)` — so it can see it in `git log`.
+    const v = (subject) => ({ commit_type: 'fix', commit_scope: 'web', commit_subject: subject });
+    expect(commitSubject(v('a focus ring (Cebab-p5y)'), 'Cebab-p5y')).toBe(
+      'fix(web): a focus ring (Cebab-p5y)',
+    );
+    // The other direction: when it is absent it must still be appended, or the
+    // fix trades one bug for a worse one.
+    expect(commitSubject(v('a focus ring'), 'Cebab-p5y')).toBe(
+      'fix(web): a focus ring (Cebab-p5y)',
+    );
+    // A DIFFERENT id in the subject is not this bead's id, so it is appended.
+    expect(commitSubject(v('x (Cebab-zzz)'), 'Cebab-p5y')).toBe(
+      'fix(web): x (Cebab-zzz) (Cebab-p5y)',
+    );
+  });
 });
 
 describe('forge: WATCH has three outcomes, not two', () => {
-  test('bucket drives the classification', () => {
-    const R = 'Lint, Typecheck, Test';
-    expect(classifyChecks([{ name: R, bucket: 'pass' }], R).outcome).toBe('green');
-    expect(classifyChecks([{ name: R, bucket: 'fail' }], R).outcome).toBe('red');
-    expect(classifyChecks([{ name: R, bucket: 'cancel' }], R).outcome).toBe('red');
-    expect(classifyChecks([{ name: R, bucket: 'pending' }], R).outcome).toBe('pending');
-    // A required check that is SKIPPED is not a failure.
-    expect(classifyChecks([{ name: R, bucket: 'skipping' }], R).outcome).toBe('green');
+  // Field names measured against the live endpoint, not assumed:
+  //   {name, status: completed|in_progress|queued, conclusion, html_url}
+  const runs = (list) => ({ check_runs: list });
+  const R = 'Lint, Typecheck, Test';
+
+  test('status and conclusion drive the classification', () => {
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'success' }]), R).outcome,
+    ).toBe('green');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'failure' }]), R).outcome,
+    ).toBe('red');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'cancelled' }]), R)
+        .outcome,
+    ).toBe('red');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'in_progress', conclusion: null }]), R).outcome,
+    ).toBe('pending');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'queued', conclusion: null }]), R).outcome,
+    ).toBe('pending');
+    // A required check that is SKIPPED is not a failure — a path-filtered job
+    // reports "nothing to do here" that way.
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'skipped' }]), R).outcome,
+    ).toBe('green');
+    // A conclusion this code has never seen, on a COMPLETED check, is red. An
+    // allow-list of failure words would make the first one GitHub adds read as
+    // a pass, which is the one direction that must never happen silently.
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'brand_new' }]), R)
+        .outcome,
+    ).toBe('red');
   });
 
   test('a check by another name is absent, not green', () => {
     // The distinction the `absent` outcome exists for: some other job passing
     // must never be read as the required context passing.
-    const verdict = classifyChecks(
-      [{ name: 'Other job', bucket: 'pass' }],
-      'Lint, Typecheck, Test',
+    const verdict = classifyCheckRuns(
+      runs([{ name: 'Other job', status: 'completed', conclusion: 'success' }]),
+      R,
     );
     expect(verdict.found).toBe(false);
     expect(verdict.outcome).not.toBe('green');
   });
 
-  test('argv shape', () => {
-    expect(prChecksArgv(7)).toEqual(['pr', 'checks', '7', '--json', 'name,state,bucket,link']);
+  test('failingSibling skips the aggregator and finds the matrix leg', () => {
+    // The required context is a job with `needs: [quality]`; its own log says
+    // only that a leg failed, never which line. The repair needs the leg.
+    const payload = runs([
+      { name: R, status: 'completed', conclusion: 'failure', html_url: 'x/runs/1/job/1' },
+      {
+        name: `${R} (windows-2022)`,
+        status: 'completed',
+        conclusion: 'failure',
+        html_url: 'x/runs/2/job/2',
+      },
+      { name: 'semgrep', status: 'completed', conclusion: 'success', html_url: 'x/runs/3/job/3' },
+    ]);
+    expect(failingSibling(payload, R).name).toBe(`${R} (windows-2022)`);
+    // The other direction: nothing failing means nothing to hand back.
+    expect(
+      failingSibling(runs([{ name: 'semgrep', status: 'completed', conclusion: 'success' }]), R),
+    ).toBe(null);
+  });
+
+  test('argv is scoped to ONE COMMIT, never to the PR', () => {
+    // `gh pr checks <n>` lags a force-push and served the PREVIOUS commit's
+    // verdict 1.2 seconds after a repair pushed (measured, ledger waitedMs).
+    const argv = checkRunsArgv('deadbeef');
+    expect(argv[0]).toBe('api');
+    expect(argv[1]).toContain('/commits/deadbeef/check-runs');
+    expect(argv.join(' ')).not.toContain('pr checks');
     expect(prMergeArgv(7)).toEqual(['pr', 'merge', '7', '--squash', '--delete-branch']);
     expect(prMergeArgv(7, { auto: true })).toContain('--auto');
   });
@@ -1478,6 +1572,671 @@ describe('the single-run lock (Cebab-qd2.5)', () => {
   });
 });
 
+// A real git repo in a temp dir, driven through the REAL `makeGit`.
+//
+// WHY REAL GIT. The defect these cases exist for WAS the diff expression
+// (`git diff main...HEAD` before anything is committed). A fake `run` would
+// have to fake `git diff` too, and a fake encoding the same wrong idea agrees
+// with it — see project_measure_history_before_designing_a_check.
+//
+// NO `sh -c` ANYWHERE. These run on windows-2022, which has no `sh` on PATH
+// for a bare spawn; file edits go through node:fs so the fixture means the
+// same thing on every runner.
+async function repoFixture() {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const made = [];
+
+  const mkRepo = async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loopgit-'));
+    made.push(dir);
+    const run = makeRunner({ cwd: dir });
+    const git = makeGit({ run, cwd: dir });
+    const g = (...args) => run('git', args);
+
+    await g('init', '-q');
+    // Not `init -b main`: this is the portable spelling on every git version.
+    await g('symbolic-ref', 'HEAD', 'refs/heads/main');
+    await g('config', 'user.email', 'loop@test');
+    await g('config', 'user.name', 'loop');
+    await g('config', 'commit.gpgsign', 'false');
+
+    const write = (rel, body) => {
+      const full = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, body);
+    };
+    const append = (rel, body) => fs.appendFileSync(path.join(dir, rel), body);
+    const read = (rel) => fs.readFileSync(path.join(dir, rel), 'utf8');
+
+    write('.gitignore', '.loop/\n');
+    write('.github/workflows/ci.yml', 'on: push\n');
+    write('server/a.ts', 'base\n');
+    await g('add', '-A');
+    await g('commit', '-q', '-m', 'base');
+    return { dir, git, write, append, read };
+  };
+
+  const cleanup = async () => {
+    for (const d of made) fs.rmSync(d, { recursive: true, force: true });
+  };
+  return { mkRepo, cleanup };
+}
+
+describe('the stages that had never run (Cebab-qd2.7)', () => {
+  // Every defect below sat in a path the loop had literally never executed:
+  // `--dry-run` returns DONE at the GATE boundary by design, so PUBLISH,
+  // WATCH, LAND and HARVEST were unreached by four merged PRs and 118 green
+  // tests. These cases exist so that stops being true.
+
+  // ── D4/D3: the guard was measuring an empty diff ────────────────────────
+  //
+  // BUILD edits the working tree and commits nothing, and CLAIM's `newBranch`
+  // leaves HEAD equal to main — so `git diff main...HEAD` compared main to
+  // itself. The guard passed unconditionally with a `.github/**` edit sitting
+  // right there, and `--merge` gates LAND on exactly that verdict.
+  //
+  // Reddens if `--cached` or the `stageAll()` call is dropped from
+  // `changedPaths` / `diffForGuard`.
+  test('the guard sees uncommitted and untracked work, before any commit', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, append, write } = await mkRepo();
+      await git.newBranch('Cebab-t1');
+      append('.github/workflows/ci.yml', 'evil\n'); // a denied path, modified
+      write('server/brand_new.ts', 'fresh\n'); // CREATED — invisible until staged
+
+      const paths = await git.changedPaths();
+      expect(paths).toContain('.github/workflows/ci.yml');
+      expect(paths).toContain('server/brand_new.ts');
+
+      const guard = evaluateGuard(await git.diffForGuard(), DEFAULTS.guard);
+      expect(guard.passed).toBe(false);
+      expect(guard.breaches.map((b) => b.rule)).toContain('denyPaths');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // `diffForGuard` must stage for ITSELF. The case above calls `changedPaths`
+  // first, which stages as a side effect — so it stayed green when
+  // `diffForGuard`'s own `stageAll()` was reverted, and a revert-check said so
+  // ("STAYED GREEN — the test does not defend this"). The driver happens to
+  // call GATE before PUBLISH today, which is exactly the kind of ordering
+  // coupling that produced D1. Nothing else touches the index here.
+  test('diffForGuard stages on its own, with no prior changedPaths call', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, write } = await mkRepo();
+      await git.newBranch('Cebab-t1b');
+      write('server/only_created.ts', 'fresh\n'); // untracked: needs the index
+      const diff = await git.diffForGuard();
+      expect(diff.files.map((f) => f.path)).toContain('server/only_created.ts');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // The other direction. Without it the case above is satisfied by a
+  // `diffForGuard` that reports every file in the repo on every call.
+  test('a branch with no work reports no change and no breach', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git } = await mkRepo();
+      await git.newBranch('Cebab-t2');
+      expect(await git.changedPaths()).toEqual([]);
+      expect(evaluateGuard(await git.diffForGuard(), DEFAULTS.guard).passed).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // ── D5/D6: teardown left the tree dirty, so the next run refused ────────
+  //
+  // `git reset --hard` does NOT remove untracked files (measured), so a file
+  // the agent CREATED survived onto main and the next run's preflight refused
+  // with "working tree is dirty". Reddens if `clean` leaves `restoreToMain`.
+  test('restoreToMain removes created files and returns to main', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, append, write } = await mkRepo();
+      await git.newBranch('Cebab-t3');
+      append('server/a.ts', 'edit\n');
+      write('server/created_by_agent.ts', 'leftover\n');
+      expect(await git.isClean()).toBe(false);
+
+      await git.restoreToMain();
+
+      expect(await git.isClean()).toBe(true);
+      expect(await git.currentBranch()).toBe('main');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // `.loop/` holds the run lock and the ledger and is gitignored. If the clean
+  // took ignored paths with it the loop would delete its own lock mid-run and
+  // a second process could start. `clean -fd` without `-x` spares them.
+  test('restoreToMain spares gitignored paths', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, write, read } = await mkRepo();
+      write('.loop/run.lock', 'held');
+      await git.restoreToMain();
+      expect(read('.loop/run.lock')).toBe('held');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // ── D8: the Playground tier had never once passed ──────────────────────
+  //
+  // Found by running the tier for the first time: `ws_smoke FAIL 240ms
+  // Unexpected server response: 401`. The server loads `../.env` itself and
+  // writes its per-launch token into the Playground data dir; the smokes were
+  // spawned with plain `process.env`, and `ws_smoke.ts` falls back to
+  // `~/.cebab/auth-token` when `CEBAB_AUTH_TOKEN_FILE` is unset. So it read
+  // the operator's REAL data dir and was refused — while also being the one
+  // thing an isolated gate must never do.
+  test('the Playground smokes inherit the Playground data dir, never ~/.cebab', () => {
+    const env = playgroundSmokeEnv(
+      { CEBAB_DATA_DIR: '/pg/.cebab-qa', WORKSPACE_ROOT: '/pg/agents', PORT: '4319' },
+      { HOME: '/home/op', PATH: '/usr/bin' },
+    );
+    // `path.resolve` prepends a DRIVE LETTER on Windows and `path.join` does
+    // not, so an expectation built with join against an implementation built
+    // with resolve is right on POSIX and red on the runner that gates the
+    // merge (`D:\\pg\\…` vs `\\pg\\…`). Mirrors the DATA_DIR line below.
+    // This exact fix was written by the loop's own repair pass on PR #403.
+    expect(env.CEBAB_AUTH_TOKEN_FILE).toBe(path.join(path.resolve('/pg/.cebab-qa'), 'auth-token'));
+    expect(env.CEBAB_DATA_DIR).toBe(path.resolve('/pg/.cebab-qa'));
+    expect(env.WORKSPACE_ROOT).toBe('/pg/agents');
+    expect(env.PATH).toBe('/usr/bin'); // the base env still comes through
+    // The whole point: nothing here can resolve to the operator's real dir.
+    expect(env.CEBAB_AUTH_TOKEN_FILE).not.toContain('/home/op');
+  });
+
+  // Reddens if `ws_smoke` is put back into the tier. It is already
+  // deterministic step 10 via `ci_smoke`, which runs it correctly — over a
+  // temp workspace it populates with the `Cebab` directory `ws_smoke.ts`
+  // requires by name, and with `MOCK=1`, without which `send_message` spawns a
+  // REAL claude turn and a green gate step quietly bills the subscription.
+  test('the Playground tier never runs ws_smoke', () => {
+    const off = playgroundSmokes({ liveSmokes: false });
+    expect(off).toEqual([]);
+
+    // The other direction: with live smokes ON the list is non-empty, so the
+    // case above cannot be satisfied by a function that always returns [].
+    const on = playgroundSmokes({ liveSmokes: true });
+    expect(on.length).toBeGreaterThan(0);
+    expect(on.map((x) => x.name)).toContain('live_smoke');
+
+    for (const list of [off, on]) {
+      expect(list.map((x) => x.name)).not.toContain('ws_smoke');
+      expect(list.map((x) => x.script)).not.toContain('src/ws_smoke.ts');
+    }
+  });
+
+  // ── D2: WATCH called healthy CI "never started" ─────────────────────────
+  //
+  // The required check `needs:` the ubuntu+windows matrix, and GitHub creates
+  // no check run for a gated job until its dependencies finish. Measured on
+  // PR #402: workflow at 08:12:13Z, required check at 08:23:36Z — 11m23s
+  // against a five-minute timeout. Every real run parked `ci_never_started`,
+  // which is never repaired and counts toward the breaker.
+  test('classifyCheckRuns reports whether anything is still pending', () => {
+    const required = 'Lint, Typecheck, Test';
+    // The real shape during the matrix, copied from the live endpoint: the
+    // required name is absent ENTIRELY while its legs run.
+    const during = classifyCheckRuns(
+      {
+        check_runs: [
+          {
+            name: 'Lint, Typecheck, Test (ubuntu-latest)',
+            status: 'in_progress',
+            conclusion: null,
+          },
+          { name: 'semgrep', status: 'completed', conclusion: 'success' },
+        ],
+      },
+      required,
+    );
+    expect(during.found).toBe(false);
+    expect(during.anyPending).toBe(true);
+
+    // Everything settled and the required name never showed up: the real
+    // "never started", and the only case that should ever park.
+    const settled = classifyCheckRuns(
+      { check_runs: [{ name: 'semgrep', status: 'completed', conclusion: 'success' }] },
+      required,
+    );
+    expect(settled.found).toBe(false);
+    expect(settled.anyPending).toBe(false);
+
+    // No checks at all is also not-pending, so a dead CI still parks.
+    expect(classifyCheckRuns({ check_runs: [] }, required).anyPending).toBe(false);
+  });
+
+  const pollingForge = (responses) => {
+    let i = 0;
+    return { pollChecks: async () => responses[Math.min(i++, responses.length - 1)] };
+  };
+  const watchConfig = {
+    ci: {
+      requiredContext: 'Lint, Typecheck, Test',
+      pollIntervalMs: 1,
+      appearTimeoutMs: 0, // already expired: only `anyPending` can hold it back
+      completeTimeoutMs: 60000,
+    },
+  };
+
+  // Reddens if `!status.anyPending` is dropped from the absent condition —
+  // with the timeout already expired, the first poll would return 'absent'.
+  test('a pending sibling check is not "CI never started"', async () => {
+    const forge = pollingForge([
+      { outcome: 'pending', found: false, anyPending: true, total: 3 },
+      { outcome: 'pending', found: false, anyPending: true, total: 3 },
+      { outcome: 'green', found: true, anyPending: false, total: 4 },
+    ]);
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      prNumber: 1,
+      parts: {},
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('green');
+  });
+
+  // The other direction, and it matters as much: a run where CI genuinely
+  // never starts must still park rather than poll until completeTimeoutMs.
+  test('nothing pending and the required name absent IS "CI never started"', async () => {
+    const forge = pollingForge([{ outcome: 'pending', found: false, anyPending: false, total: 2 }]);
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      prNumber: 1,
+      parts: {},
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('absent');
+  });
+
+  // ── D11: a turn-cap exhaustion was recorded as a generic crash ──────────
+  //
+  // Found by running the loop for real: the agent used all 40 turns without a
+  // verdict. The CLI exited NON-ZERO but still emitted a complete envelope —
+  //
+  //   {"terminal_reason":"max_turns",
+  //    "errors":["Reached maximum number of turns (40)"], ...}
+  //
+  // — and `build.mjs` returned on `result.code !== 0` BEFORE parsing it. So
+  // the ledger recorded `failure: 'exit'` with a truncated JSON fragment and
+  // `sessionId: null, numTurns: null, costUsd: null`. Three consequences: the
+  // operator cannot tell "needs more turns" from "the CLI broke" (opposite
+  // remedies), nobody can resume the session, and `costCeilingUsd` silently
+  // under-counts by exactly the runs worth knowing about.
+  test('isMaxTurns reads either signal, and neither is load-bearing alone', () => {
+    const real = {
+      terminal_reason: 'max_turns',
+      errors: ['Reached maximum number of turns (40)'],
+    };
+    expect(isMaxTurns(real)).toBe(true);
+    // Each alone — `terminal_reason` is undocumented and its vocabulary is not
+    // frozen; the errors string has its own wording risk.
+    expect(isMaxTurns({ terminal_reason: 'max_turns' })).toBe(true);
+    expect(isMaxTurns({ errors: ['Reached maximum number of turns (60)'] })).toBe(true);
+    // The other direction, so it cannot pass by always returning true.
+    expect(isMaxTurns({ session_id: 'x', num_turns: 3, structured_output: {} })).toBe(false);
+    expect(isMaxTurns({ terminal_reason: 'end_turn', errors: [] })).toBe(false);
+    expect(isMaxTurns(null)).toBe(false);
+    expect(isMaxTurns('not an object')).toBe(false);
+  });
+
+  test('a capped build keeps its session, turns and cost', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const libDir = path.join(path.dirname(url.fileURLToPath(import.meta.url)), 'lib', 'loop');
+    const loopDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loopbuild-'));
+
+    // Exactly what the CLI returned, exit code and all.
+    const envelope = JSON.stringify({
+      type: 'result',
+      session_id: '56889fbe-75a6-4510-9e17-10fa0248276f',
+      num_turns: 40,
+      total_cost_usd: 0.4137,
+      terminal_reason: 'max_turns',
+      errors: ['Reached maximum number of turns (40)'],
+    });
+    const run = async () => ({ code: 1, stdout: envelope, stderr: '', ms: 10, timedOut: false });
+
+    const build = makeBuild({ run, cwd: '/repo', config: DEFAULTS, libDir, loopDir });
+    const out = await build.run({ bead: { id: 'X-1', title: 't' }, attempt: 1, maxRepairs: 2 });
+
+    expect(out.ok).toBe(false);
+    expect(out.failure).toBe('max_turns'); // not the generic 'exit'
+    // The three that were being thrown away.
+    expect(out.sessionId).toBe('56889fbe-75a6-4510-9e17-10fa0248276f');
+    expect(out.numTurns).toBe(40);
+    expect(out.costUsd).toBe(0.4137);
+    // And the detail is a sentence, not 600 chars of JSON.
+    expect(out.detail).toContain('40 turns');
+    expect(out.detail).toContain('claude --resume');
+    fs.rmSync(loopDir, { recursive: true, force: true });
+  });
+
+  test('the machine parks a capped build under its own reason', () => {
+    // The remedy is the opposite of every other build failure — raise
+    // maxTurns or split the bead, rather than debug a crash — so the two must
+    // be distinguishable in the ledger.
+    const capped = next(STAGE.BUILD, { ok: false, failure: 'max_turns' }, {});
+    expect(capped.disposition).toBe(DISPOSITION.PARKED);
+    expect(capped.reason).toBe(REASON.MAX_TURNS);
+
+    // The other direction: everything else still parks as build_failed.
+    const crashed = next(STAGE.BUILD, { ok: false, failure: 'exit' }, {});
+    expect(crashed.reason).toBe(REASON.BUILD_FAILED);
+  });
+
+  // ── D17: the agent could not run a single gate command ─────────────────
+  //
+  // Claude Code auto-approves Bash it can classify as safe but requires
+  // approval for npm/npx/node, and `-p` has no approver — so the hook's
+  // silence meant REFUSED. Measured with the loop's own flags:
+  //
+  //   echo HELLO_FROM_BASH  -> ran,     denials []
+  //   npm run typecheck     -> REFUSED, "This command requires approval"
+  //   npm run typecheck     -> ran,     denials []   (hook returns `allow`)
+  //
+  // The consequence that is easy to miss: `verdict.tests.commands_run` is
+  // always empty, so `compareVerdictToGate` is STRUCTURALLY always 'unknown'
+  // and the spec's "the agent's report is not evidence" can never record
+  // agreement or disagreement, because there is never a claim.
+  test('the gate commands the agent needs are explicitly allowed', () => {
+    for (const cmd of [
+      'npm run typecheck',
+      'npm run lint',
+      'npm test',
+      'npx vitest run scripts/loop.test.mjs',
+      'node scripts/audit-gate.mjs',
+    ]) {
+      expect(allowReason(cmd), cmd).toBeTruthy();
+    }
+  });
+
+  test('deny wins over allow, in both orders', () => {
+    // An allow rule must never be able to widen the deny list. `npm install`
+    // matches no ALLOW rule anyway; the compound cases are the real risk,
+    // because their FIRST segment is a legitimate verification command.
+    for (const cmd of [
+      'npm install',
+      'npm run lint && git push origin main',
+      'npm test; gh pr merge 1',
+      'node x.mjs && rm -rf /',
+    ]) {
+      expect(decide(cmd), cmd).toBeTruthy(); // denied
+      expect(allowReason(cmd), cmd).toBeFalsy(); // and not allowed
+    }
+  });
+
+  test('read-only inspection is allowed, so it does not cost turns', () => {
+    // Measured in a capped session: `bd show Cebab-p5y` was refused outright
+    // and `grep -no … | sort -u -t: -k2` was refused because ONE part of the
+    // pipeline needed approval. 33 of that run's 41 bash calls were greps, and
+    // every refusal costs a turn from the budget that ends the build.
+    for (const cmd of ['grep -rn gh .', 'ls -la', 'cat package.json', 'bd show X-1', 'git log']) {
+      expect(decide(cmd), cmd).toBeFalsy();
+      expect(allowReason(cmd), cmd).toBeTruthy();
+    }
+  });
+
+  test('separators inside quotes are not separators', () => {
+    // A naive split treated the `|` in `grep -E 'a|b'` as a pipe. Measured:
+    // `npx vitest … | grep -E '✓|×|PASS'` became segments headed `grep -E '✓`,
+    // `×`, `PASS`, so a legitimate command was refused and a turn was spent.
+    expect(splitSegments("grep -E 'a|b' f")).toEqual(["grep -E 'a|b' f"]);
+    expect(splitSegments('grep -E "a|b" f')).toEqual(['grep -E "a|b" f']);
+    // And the deny direction, which is the sharper one: a read-only grep whose
+    // QUOTED ARGUMENT contains the words must not be denied as a push.
+    expect(decide("grep -E 'a|git push' f")).toBeFalsy();
+    expect(allowReason("grep -E 'a|git push' f")).toBeTruthy();
+    // The other direction: a real pipe still splits.
+    expect(splitSegments('a | b')).toEqual(['a ', ' b']);
+  });
+
+  test('a lone & is a redirection; && and background & are separators', () => {
+    // `2>&1` is the shape the agent actually writes, and splitting it left
+    // segments headed `1` — none allowable — so `npx vitest … 2>&1` was
+    // refused. That accounted for most of one capped session's refusals.
+    expect(splitSegments('npx vitest x 2>&1')).toEqual(['npx vitest x 2>&1']);
+    expect(splitSegments('npx vitest x &>log')).toEqual(['npx vitest x &>log']);
+    // But a real background `&` must still split, or it becomes a way past the
+    // deny list.
+    expect(splitSegments('sleep 5 & git push').length).toBe(2);
+    expect(decide('sleep 5 & git push')).toBeTruthy();
+    expect(splitSegments('a && b').length).toBe(2);
+  });
+
+  test('the exact commands one capped session was refused now pass', () => {
+    // Copied verbatim from the transcript of a build that used all 61 turns.
+    for (const cmd of [
+      'cd /repo && npx vitest run x 2>&1 | tail -30',
+      'cd /repo; npx vitest run x 2>&1 | tail -30',
+      "npx vitest run f 2>&1 | grep -E 'A|B|PASS' | head -40",
+      'pwd && npx vitest run f --reporter=dot 2>&1 | tail -15',
+      "grep -iE 'U19|passed' /tmp/vt.log | head -60",
+    ]) {
+      expect(decide(cmd), cmd).toBeFalsy();
+      expect(allowReason(cmd), cmd).toBeTruthy();
+    }
+    // Deny still wins over every one of those shapes.
+    expect(decide('npx vitest 2>&1 && gh pr merge 1')).toBeTruthy();
+    expect(decide('cd /x && git commit -m y')).toBeTruthy();
+  });
+
+  test('an allowable first segment does not carry an unrecognised second', () => {
+    // EVERY segment must be allowable, not just the head. Neither part below is
+    // DENIED, so the deny re-check inside allowReason cannot save this — the
+    // `every` is the only thing standing between the allow list and granting
+    // network access on the coat-tails of `npm run lint`. A revert-check found
+    // this undefended once the deny re-check was added ("STAYED GREEN").
+    for (const cmd of [
+      'npm run lint && curl https://example.com',
+      'npm test | ssh host',
+      'node x.mjs; docker run y',
+    ]) {
+      expect(decide(cmd), cmd).toBeFalsy(); // not denied...
+      expect(allowReason(cmd), cmd).toBeFalsy(); // ...and still not allowed
+    }
+  });
+
+  test('a command the hook does not recognise still defers', () => {
+    // The hook must not become an allow-list for everything. Network access in
+    // particular is not something to grant silently — it keeps the normal
+    // flow, which is neither allow nor deny.
+    for (const cmd of ['curl https://example.com', 'ssh host', 'docker run x']) {
+      expect(decide(cmd), cmd).toBeFalsy();
+      expect(allowReason(cmd), cmd).toBeFalsy();
+    }
+  });
+
+  // ── D19: a rejected push crashed the whole run ─────────────────────────
+  //
+  // `git.push`'s result was discarded while `commit` two lines above it was
+  // checked — the asymmetry is what marks it an oversight. A rejected push (a
+  // stale remote branch, a dropped network) then fell through to `createPr`,
+  // which throws; neither `runIteration` nor `main` had a catch, so the throw
+  // ended the RUN. An overnight `--until 8` lost seven good beads to one
+  // transient error.
+  test('a push that fails parks under its own reason, not build_failed', () => {
+    const pushed = next(STAGE.PUBLISH, { pushFailed: true }, {});
+    expect(pushed.disposition).toBe(DISPOSITION.PARKED);
+    expect(pushed.reason).toBe(REASON.PUSH_FAILED);
+
+    // The other direction, and the distinction that matters: the remedy for a
+    // failed push is a stale branch or the network, never the diff.
+    expect(next(STAGE.PUBLISH, { ok: false }, {}).reason).toBe(REASON.BUILD_FAILED);
+    expect(next(STAGE.PUBLISH, { lockfileDrift: true }, {}).reason).toBe(REASON.LOCKFILE_DRIFT);
+    // And a good push still proceeds.
+    expect(next(STAGE.PUBLISH, { ok: true }, {}).stage).toBe(STAGE.WATCH);
+  });
+
+  test('the ledger carries a crash so the morning triage can find it', () => {
+    // `jq \'select(.crash)\'` is the other half of the triage query, beside
+    // `.build.failure`. A record without one must not carry the key at all,
+    // or the query matches every row.
+    const crashed = buildRecord({ bead: 'X-1', crash: 'TypeError: boom\n  at y' }, 0);
+    expect(crashed.crash).toContain('TypeError: boom');
+    expect('crash' in buildRecord({ bead: 'X-1' }, 0)).toBe(false);
+  });
+
+  // ── D22: --bead silently built from an empty description ───────────────
+  //
+  // `--bead <id>` looked the id up in the READY LIST and fell back to
+  // `{ id, title: id, description: '' }` on a miss. Measured: 210 beads are
+  // ready and that lookup asked for 200, so ten of them produced a prompt
+  // reading `**Cebab-ouy — Cebab-ouy**` with no body — and an opus build spent
+  // its whole turn budget working from the id alone. A blocked, in-progress or
+  // closed bead degraded the same silent way.
+  test('bd show reports a miss by SHAPE, because the exit code is 0', async () => {
+    const calls = [];
+    const mk = (stdout) =>
+      makeBeads({
+        run: async (_bd, args) => {
+          calls.push(args);
+          return { code: 0, stdout, stderr: '', ms: 1 };
+        },
+        bd: '/bin/bd',
+        cwd: '/repo',
+      });
+
+    // The measured miss: exit 0, and an OBJECT where a hit is an array.
+    const missing = await mk('{"error":"no issues found matching the provided IDs"}').show('X-9');
+    expect(missing).toBe(null);
+    // The literal shape, and that the executor actually goes through the
+    // builder — this module keeps them apart so flag names can be pinned.
+    expect(showArgv('X-9')).toEqual(['show', 'X-9', '--json']);
+    expect(calls[0]).toEqual(showArgv('X-9'));
+
+    // The other direction, or the case above is satisfied by always returning
+    // null — which would refuse every run.
+    const hit = await mk('[{"id":"X-1","title":"t","description":"the real body"}]').show('X-1');
+    expect(hit.id).toBe('X-1');
+    expect(hit.description).toBe('the real body');
+
+    // Unparseable output is a miss, not a throw mid-run.
+    expect(await mk('not json').show('X-1')).toBe(null);
+  });
+
+  // The stub is what made the miss silent, so its absence is what must be
+  // pinned. A source scan for the same reason as the breaker: SELECT's forced
+  // branch performs I/O inside `runIteration` and has no seam.
+  const buildsABeadStub = (source) => {
+    const code = stripComments(source);
+    const at = code.indexOf('ctx.forcedBead');
+    if (at === -1) return { found: false, stubs: false };
+    const body = code.slice(at, at + 600);
+    return { found: true, stubs: /title:\s*ctx\.forcedBead/.test(body) };
+  };
+
+  test('--bead never fabricates a bead', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const verdict = buildsABeadStub(fs.readFileSync(path.join(here, 'loop.mjs'), 'utf8'));
+    expect(verdict.found, 'forced-bead branch located').toBe(true);
+    expect(verdict.stubs, 'must refuse, not fabricate a title from the id').toBe(false);
+  });
+
+  test('and that scan detects the reverted form', () => {
+    const reverted =
+      "if (ctx.forcedBead) { bead = rows.find(x) ?? { id: ctx.forcedBead, title: ctx.forcedBead, description: '' }; }";
+    expect(buildsABeadStub(reverted)).toEqual({ found: true, stubs: true });
+    const fixed =
+      'if (ctx.forcedBead) { bead = await beads.show(ctx.forcedBead); if (!bead) throw x; }';
+    expect(buildsABeadStub(fixed)).toEqual({ found: true, stubs: false });
+    expect(buildsABeadStub('const a = 1;').found).toBe(false);
+  });
+
+  // ── D23: a mistyped --config was silently ignored ──────────────────────
+  //
+  // `readJson(args.configPath ?? …, {})` swallowed a missing file AND a syntax
+  // error, so `--config .loop/typo.json` ran on the DEFAULTS — a different
+  // model, turn cap and deny list from the one the operator asked for — and
+  // nothing said so. Same shape as the guard measuring an empty diff and
+  // `--bead` building from an empty description: it succeeds and measures
+  // nothing. It also contradicts this module's own rule, which refuses an
+  // unknown KEY by name.
+  //
+  // A source scan, because the read happens inside `main()` with no seam. Both
+  // directions are exercised so it cannot pass vacuously.
+  const swallowsConfigErrors = (source) => {
+    const code = stripComments(source);
+    const at = code.indexOf('fileConfig');
+    if (at === -1) return { found: false, swallows: false };
+    const line = code.slice(at, code.indexOf(';', at));
+    return { found: true, swallows: line.includes('readJson') };
+  };
+
+  test('an explicit --config that cannot be read is refused, not ignored', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const verdict = swallowsConfigErrors(fs.readFileSync(path.join(here, 'loop.mjs'), 'utf8'));
+    expect(verdict.found, 'fileConfig assignment located').toBe(true);
+    expect(verdict.swallows, 'config must not go through the swallowing reader').toBe(false);
+  });
+
+  test('and that scan detects the reverted form', () => {
+    const reverted = 'const fileConfig = readJson(args.configPath ?? p, {});';
+    expect(swallowsConfigErrors(reverted)).toEqual({ found: true, swallows: true });
+    const fixed = 'const fileConfig = readConfigFile(args.configPath);';
+    expect(swallowsConfigErrors(fixed)).toEqual({ found: true, swallows: false });
+    expect(swallowsConfigErrors('const a = 1;').found).toBe(false);
+  });
+
+  // ── D1: HARVEST crashed on the first follow-up ──────────────────────────
+  //
+  // `parts` was built with `harvest: {}` two hundred lines from the `.push`,
+  // so filing a follow-up threw `Cannot read properties of undefined`.
+  // `follow_ups` is a required key of the verdict schema, so this fired on
+  // essentially every run that got this far. The bare `{}` below is the
+  // point: it reddens if the `??=` is removed, independently of whatever
+  // initializer the driver happens to use today.
+  test('harvest files follow-ups even when parts.harvest arrives bare', async () => {
+    const filed = [];
+    const parts = {
+      harvest: {},
+      verdict: { follow_ups: [{ title: 'a thing noticed', type: 'task' }] },
+    };
+    await harvest({
+      beads: {
+        close: async () => true,
+        park: async () => true,
+        fileFollowUp: async (f) => {
+          filed.push(f.title);
+          return 'Cebab-new1';
+        },
+      },
+      bead: { id: 'Cebab-src' },
+      parts,
+      disposition: 'guard_withheld',
+      reason: null,
+      config: DEFAULTS,
+      log: () => {},
+    });
+    expect(filed).toEqual(['a thing noticed']);
+    expect(parts.harvest.followUps).toEqual(['Cebab-new1']);
+  });
+});
+
 describe('the circuit breaker is per-run (Cebab-qd2.6)', () => {
   // A fresh, fully successful dry-run halted on its FIRST iteration with
   // "3 consecutive parks — " and an empty bead list. `consecutiveParks` was
@@ -1525,6 +2284,56 @@ describe('the circuit breaker is per-run (Cebab-qd2.6)', () => {
     // And a source without the field at all is reported as not-found, rather
     // than silently passing as "not seeded".
     expect(seedsBreakerFromDisk('const ctx = {};').found).toBe(false);
+  });
+
+  // ── D6: iterations stacked branches on each other ──────────────────────
+  //
+  // `git.toMain()` was called only from `teardown`, which runs ONCE in the
+  // outer finally, while `git.newBranch` runs per iteration from whatever is
+  // checked out. So bead 2 branched off `loop/<bead1>` and its PR carried bead
+  // 1's commits — and `loop:night` runs `--until 8`, so the intended overnight
+  // use produced eight cumulative, contaminated PRs.
+  //
+  // A source scan for the same reason as the breaker above: the call lives in
+  // `runIteration`'s `finally`, which takes no injectable seam. Both
+  // directions are exercised so it cannot pass vacuously.
+
+  /** Does `runIteration` put the checkout back before the next bead? */
+  const restoresEachIteration = (source) => {
+    const code = stripComments(source);
+    const start = code.indexOf('async function runIteration');
+    if (start === -1) return { found: false, restores: false };
+    const end = code.indexOf('async function watchCi', start);
+    const body = code.slice(start, end === -1 ? code.length : end);
+    return { found: true, restores: body.includes('restoreToMain(') };
+  };
+
+  test('runIteration returns the checkout to main before the next bead', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const source = fs.readFileSync(path.join(here, 'loop.mjs'), 'utf8');
+
+    const verdict = restoresEachIteration(source);
+    expect(verdict.found, 'runIteration located in loop.mjs').toBe(true);
+    expect(verdict.restores, 'each iteration must restore, not just teardown').toBe(true);
+  });
+
+  test('and that scan detects the reverted form', () => {
+    const reverted =
+      'async function runIteration() {\n  try {} finally { appendRecord(r); }\n}\n' +
+      'async function watchCi() { await git.restoreToMain(); }';
+    // The restore exists in the FILE but outside runIteration — which is
+    // exactly the bug, so a naive whole-file search would have missed it.
+    expect(restoresEachIteration(reverted)).toEqual({ found: true, restores: false });
+
+    const fixed =
+      'async function runIteration() {\n  try {} finally { await git.restoreToMain(); }\n}\n' +
+      'async function watchCi() {}';
+    expect(restoresEachIteration(fixed)).toEqual({ found: true, restores: true });
+
+    expect(restoresEachIteration('const x = 1;').found).toBe(false);
   });
 
   test('cross-run memory lives in the loop-stuck label, not the counter', () => {

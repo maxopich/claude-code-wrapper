@@ -59,9 +59,12 @@ export const DISPOSITION = Object.freeze({
 export const REASON = Object.freeze({
   NEEDS_HUMAN: 'needs_human',
   BUILD_FAILED: 'build_failed',
+  MAX_TURNS: 'max_turns',
   BLOCKED: 'blocked',
   GATE_FAILED: 'gate_failed',
   LOCKFILE_DRIFT: 'lockfile_drift',
+  PUSH_FAILED: 'push_failed',
+  CRASHED: 'crashed',
   CI_RED: 'ci_red',
   CI_NEVER_STARTED: 'ci_never_started',
   MERGE_FAILED: 'merge_failed',
@@ -101,7 +104,14 @@ export function next(stage, result = {}, ctx = {}) {
       // Non-zero exit, schema violation or timeout: park. BUILD is not retried
       // on its own failure — repairs exist for a red GATE or a red CI, where
       // there is a specific failing step to hand back.
-      if (result.ok === false) return park(REASON.BUILD_FAILED);
+      //
+      // A turn-cap exhaustion parks too, but under its OWN reason, because the
+      // remedy is the opposite of every other build failure: raise `maxTurns`
+      // or split the bead, rather than debug a crash. Recorded as a generic
+      // `build_failed` the two were indistinguishable in the ledger.
+      if (result.ok === false) {
+        return park(result.failure === 'max_turns' ? REASON.MAX_TURNS : REASON.BUILD_FAILED);
+      }
 
       const verdict = result.verdict ?? {};
       if (verdict.needs_human === true) return park(REASON.NEEDS_HUMAN);
@@ -129,6 +139,10 @@ export function next(stage, result = {}, ctx = {}) {
       // A lockfile change is a hard park: CI runs `git diff --exit-code
       // package-lock.json` and would fail every time.
       if (result.lockfileDrift) return park(REASON.LOCKFILE_DRIFT);
+      // A push that failed is not a build that failed: the remedy is a stale
+      // remote branch or the network, never the diff. Recorded as
+      // `build_failed` the two were indistinguishable in the ledger.
+      if (result.pushFailed) return park(REASON.PUSH_FAILED);
       if (result.ok === false) return park(REASON.BUILD_FAILED);
       // A guard breach does NOT abort. The PR is opened and labelled; only
       // LAND is suppressed, which ctx.guardPassed carries to the LAND gate.

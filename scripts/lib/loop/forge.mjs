@@ -8,18 +8,51 @@
  * mapping here and getting it wrong the first time GitHub returns something
  * unexpected.
  *
- * THE THREE OUTCOMES ARE NOT TWO. `absent` — no check by the required name
- * appeared within `appearTimeoutMs` — is distinct from `red`, and is not
+ * THE THREE OUTCOMES ARE NOT TWO. `absent` is distinct from `red`, and is not
  * repaired: it means the repo or the runner is wrong, not this bead's diff, so
  * a rebuild cannot fix it and it counts toward the circuit breaker.
+ *
+ * WHICH IS WHY `absent` CANNOT MEAN "HAS NOT APPEARED YET". Cebab's required
+ * check is a job with `needs: [quality]`, and GitHub creates no check run for
+ * a job until its dependencies finish — so the required context is genuinely
+ * missing from `gh pr checks` for as long as the matrix takes. Measured on
+ * PR #402's head SHA: the workflow started at 08:12:13Z and
+ * `Lint, Typecheck, Test` first appeared at 08:23:36Z, 11m23s later, against
+ * an `appearTimeoutMs` of five minutes. Every real run would have parked
+ * `ci_never_started`, and three of those halt the loop on the breaker.
+ *
+ * So `anyPending` is reported alongside the match, and the driver only calls a
+ * run absent when nothing at all is still moving. A pending sibling check is
+ * positive evidence that CI is alive and the required job is merely queued
+ * behind it; zero checks, or all of them settled without the required name
+ * ever showing up, is the real "never started".
  */
 
 export function prCreateArgv({ base, title }) {
   return ['pr', 'create', '--base', base, '--title', title, '--body-file', '-'];
 }
 
-export function prChecksArgv(pr) {
-  return ['pr', 'checks', String(pr), '--json', 'name,state,bucket,link'];
+/**
+ * Checks for ONE COMMIT, never for "the PR".
+ *
+ * `gh pr checks <n>` is PR-scoped and lags a force-push: for a window after a
+ * repair it still serves the PREVIOUS commit's results. Measured on the first
+ * repair the loop ever ran — the ledger recorded
+ *
+ *     ci: { conclusion: "failure", waitedMs: 1185, runUrl: ".../job/98126852808" }
+ *
+ * 1.2 seconds after the push, naming the OLD run's job, while the rerun for the
+ * new SHA was still `in_progress` and the required check did not exist for it
+ * yet. So every repair burned an attempt instantly on a stale verdict, and with
+ * `maxRepairs: 2` a single red consumed both repairs in seconds and parked a
+ * bead whose fix had in fact landed.
+ *
+ * `{owner}/{repo}` are resolved by `gh` from the checkout, so no slug is
+ * threaded through. 100 is well past this repo's dozen checks; a repo that
+ * exceeded it would need pagination here.
+ */
+export function checkRunsArgv(sha) {
+  return ['api', `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`];
 }
 
 export function prMergeArgv(pr, { auto = false } = {}) {
@@ -28,18 +61,53 @@ export function prMergeArgv(pr, { auto = false } = {}) {
   return args;
 }
 
-/** Classify one poll. Pure, so every branch is testable without a network. */
-export function classifyChecks(checks, requiredContext) {
-  const match = (checks ?? []).find((c) => c.name === requiredContext);
-  if (!match) return { outcome: 'pending', found: false };
-  const bucket = match.bucket ?? '';
-  if (bucket === 'pass' || bucket === 'skipping') {
-    return { outcome: 'green', found: true, link: match.link };
-  }
-  if (bucket === 'fail' || bucket === 'cancel') {
-    return { outcome: 'red', found: true, link: match.link };
-  }
-  return { outcome: 'pending', found: true, link: match.link };
+/**
+ * A completed check that did not succeed is RED, including a conclusion this
+ * code has never seen. The alternative — an allow-list of failure words —
+ * makes the first conclusion GitHub adds read as a pass, which is the one
+ * direction that must never happen silently.
+ *
+ * `skipped` is green because a skipped required check is how a path-filtered
+ * job reports "nothing to do here", exactly as `bucket: skipping` did.
+ */
+const GREEN_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
+
+/**
+ * Classify one poll of the SHA-scoped payload. Pure, so every branch is
+ * testable without a network.
+ *
+ * This re-derives what `gh pr checks`'s `bucket` used to collapse for us, and
+ * the header there warned against exactly that. It is done anyway because the
+ * commit-scoped endpoint does not expose `bucket`, and reading another
+ * commit's verdict is strictly worse than owning a two-line mapping that has
+ * cases in both directions.
+ */
+export function classifyCheckRuns(payload, requiredContext) {
+  const runs = Array.isArray(payload?.check_runs) ? payload.check_runs : [];
+  // Is anything still moving? This is what separates "the required job is
+  // queued behind its `needs:`" from "no CI is running at all".
+  const anyPending = runs.some((r) => r.status !== 'completed');
+  const match = runs.find((r) => r.name === requiredContext);
+  if (!match) return { outcome: 'pending', found: false, anyPending, total: runs.length };
+  const base = { found: true, link: match.html_url, anyPending, total: runs.length };
+  if (match.status !== 'completed') return { outcome: 'pending', ...base };
+  if (GREEN_CONCLUSIONS.has(match.conclusion)) return { outcome: 'green', ...base };
+  return { outcome: 'red', ...base };
+}
+
+/** The failing sibling job, whose log is worth handing to a repair. The
+ *  required context itself is an aggregator — its log says only that a matrix
+ *  leg failed, never which line. */
+export function failingSibling(payload, requiredContext) {
+  const runs = Array.isArray(payload?.check_runs) ? payload.check_runs : [];
+  return (
+    runs.find(
+      (r) =>
+        r.status === 'completed' &&
+        !GREEN_CONCLUSIONS.has(r.conclusion) &&
+        r.name !== requiredContext,
+    ) ?? null
+  );
 }
 
 export function makeForge({ run, cwd, dryRun = false }) {
@@ -55,17 +123,18 @@ export function makeForge({ run, cwd, dryRun = false }) {
       return { number: Number.isFinite(number) ? number : null, url };
     },
 
-    async pollChecks(pr, requiredContext) {
-      const r = await gh(prChecksArgv(pr));
-      // gh exits 8 while checks are pending and non-zero when any fails, so
-      // the exit code is not the signal — the JSON is.
+    async pollChecks(sha, requiredContext) {
+      const r = await gh(checkRunsArgv(sha));
+      // The exit code is not the signal — the JSON is.
       let parsed;
       try {
         parsed = JSON.parse(r.stdout);
       } catch {
-        return { outcome: 'pending', found: false, unparsed: true };
+        // Unknown, not empty: `anyPending` true keeps the driver waiting rather
+        // than reporting a CI that may be perfectly healthy as never started.
+        return { outcome: 'pending', found: false, unparsed: true, anyPending: true };
       }
-      return classifyChecks(parsed, requiredContext);
+      return classifyCheckRuns(parsed, requiredContext);
     },
 
     async merge(pr) {
@@ -87,17 +156,24 @@ export function makeForge({ run, cwd, dryRun = false }) {
       return r.code === 0;
     },
 
-    /** Last lines of the failing job's log, for the repair prompt. */
-    async failingLog(pr, requiredContext, lines = 80) {
-      const r = await gh(['pr', 'checks', String(pr), '--json', 'name,bucket,link']);
-      let checks;
+    /**
+     * Last lines of the failing job's log, for the repair prompt. SHA-scoped
+     * for the same reason as `pollChecks`, and the consequence of getting it
+     * wrong is sharper here: handing a repair the PREVIOUS commit's log asks
+     * the agent to fix something it has already fixed. Measured — attempt 3
+     * read the stale log, found its own fix already in place, and returned
+     * `no_change_needed` with `needs_human`.
+     */
+    async failingLog(sha, requiredContext, lines = 80) {
+      const r = await gh(checkRunsArgv(sha));
+      let parsed;
       try {
-        checks = JSON.parse(r.stdout);
+        parsed = JSON.parse(r.stdout);
       } catch {
         return '';
       }
-      const failed = checks.find((c) => c.bucket === 'fail' && c.name !== requiredContext);
-      const runId = failed?.link?.split('/runs/')?.[1]?.split('/')?.[0];
+      const failed = failingSibling(parsed, requiredContext);
+      const runId = failed?.html_url?.split('/runs/')?.[1]?.split('/')?.[0];
       if (!runId) return '';
       const log = await gh(['run', 'view', runId, '--log-failed'], { timeoutMs: 180000 });
       return log.stdout.split('\n').slice(-lines).join('\n');

@@ -115,6 +115,37 @@ const readJson = (file, fallback) => {
   }
 };
 
+/**
+ * The config file, or a loud refusal. NOT `readJson`.
+ *
+ * `readJson(args.configPath ?? …, {})` swallowed both a missing file and a
+ * syntax error and returned `{}`, so `--config .loop/typo.json` ran on the
+ * DEFAULTS while the operator believed they had configured something else —
+ * a different model, a different turn cap, a different deny list. Nothing
+ * anywhere said otherwise.
+ *
+ * That is the same shape as the guard measuring an empty diff and `--bead`
+ * building from an empty description: it succeeds, and measures nothing. It
+ * also contradicts this module's own philosophy — `resolveConfig` refuses an
+ * unknown KEY by name and exits 2, so a file it cannot parse at all deserves
+ * at least as much.
+ *
+ * An ABSENT default path is fine; running with no config is the normal case.
+ * An absent EXPLICIT path never is.
+ */
+function readConfigFile(explicitPath) {
+  const file = explicitPath ?? path.join(LOOP_DIR, 'config.json');
+  if (!fs.existsSync(file)) {
+    if (explicitPath) throw new ConfigError(`--config ${explicitPath} does not exist.`);
+    return {};
+  }
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new ConfigError(`${file} is not valid JSON — ${error?.message ?? error}`);
+  }
+}
+
 // ─── preflight (§13) ───────────────────────────────────────────────────────
 
 async function preflight({ run, config, git, dryRun }) {
@@ -156,7 +187,11 @@ async function preflight({ run, config, git, dryRun }) {
 
 async function runIteration({ ctx, deps, log }) {
   const { config, beads, git, forge, gate, build, dryRun } = deps;
-  const parts = { build: {}, gate: {}, guard: {}, harvest: {} };
+  // `harvest.followUps` is an ARRAY on purpose: HARVEST pushes into it, and
+  // an absent one threw `Cannot read properties of undefined (reading 'push')`
+  // on the first follow-up any verdict carried — which is most of them,
+  // `follow_ups` being a required key of the schema.
+  const parts = { build: {}, gate: {}, guard: {}, harvest: { beadClosed: false, followUps: [] } };
   let stage = STAGE.SELECT;
   let bead = null;
   let attempt = 1;
@@ -176,12 +211,20 @@ async function runIteration({ ctx, deps, log }) {
       switch (stage) {
         case STAGE.SELECT: {
           if (ctx.forcedBead) {
-            const rows = await beads.ready(config.select, 200);
-            bead = rows.find((b) => b.id === ctx.forcedBead) ?? {
-              id: ctx.forcedBead,
-              title: ctx.forcedBead,
-              description: '',
-            };
+            // Fetched DIRECTLY, never looked up in the ready list. That lookup
+            // asked for 200 rows against 210 ready beads and fell back to a
+            // stub `{ id, title: id, description: '' }` on a miss — so the
+            // agent got a prompt reading `**Cebab-ouy — Cebab-ouy**` with no
+            // body and spent a full turn budget on it. Refusing is the only
+            // honest answer: building from an empty description is worse than
+            // not starting.
+            bead = await beads.show(ctx.forcedBead);
+            if (!bead) {
+              throw new ConfigError(
+                `no bead ${ctx.forcedBead} — \`bd show\` found nothing. Refusing rather ` +
+                  `than building from an empty description.`,
+              );
+            }
             // --bead skips the queue but NOT the deny-path check.
             const stems = denyPathStems(config.guard.denyPaths);
             const text = `${bead.title}\n${bead.description ?? ''}`;
@@ -242,10 +285,13 @@ async function runIteration({ ctx, deps, log }) {
             risk: built.verdict?.risk ?? null,
             attempts: attempt,
           };
+          // Accounted whatever happened. A failed build still SPENT, and
+          // counting only successes let `costCeilingUsd` under-report by
+          // exactly the runs the operator most wants to know about.
+          ctx.spentUsd += built.costUsd ?? 0;
           if (built.ok) {
             parts.verdict = built.verdict;
             parts.commandsRun = built.verdict?.tests?.commands_run ?? [];
-            ctx.spentUsd += built.costUsd ?? 0;
           } else {
             // An unattended run has to diagnose itself. Without this the ledger
             // said `build_failed exit 1` three times and nothing more, and the
@@ -296,7 +342,21 @@ async function runIteration({ ctx, deps, log }) {
             result = { lockfileDrift: true };
             break;
           }
-          await git.push(bead.id, { force: attempt > 1 });
+          // The result is CHECKED, unlike before: `commit` two lines up was
+          // checked and this was not, so a rejected push (a stale remote
+          // branch, a dropped network) fell through to `createPr`, which
+          // throws — and that throw escaped the run entirely, losing every
+          // remaining bead of an overnight `--until 8` to one transient error.
+          const pushed = await git.push(bead.id, { force: attempt > 1 });
+          if (pushed.code !== 0) {
+            log(`publish: push FAILED — ${(pushed.stderr || pushed.stdout).trim().split('\n')[0]}`);
+            result = { pushFailed: true };
+            break;
+          }
+          // Captured AFTER the push: this is the commit CI will report on, and
+          // asking about the PR instead is what made a repair read the previous
+          // attempt's verdict 1.2 seconds later.
+          parts.headSha = await git.headSha();
           if (attempt === 1) {
             const pr = await forge.createPr({
               base: 'main',
@@ -313,12 +373,15 @@ async function runIteration({ ctx, deps, log }) {
         }
 
         case STAGE.WATCH:
-          result = await watchCi({ forge, config, prNumber, parts, log, halted });
+          result = await watchCi({ forge, config, sha: parts.headSha, parts, log, halted });
           if (result.outcome === 'red') {
-            repairContext = {
-              failedStep: 'CI',
-              output: await forge.failingLog(prNumber, config.ci.requiredContext),
-            };
+            const output = await forge.failingLog(parts.headSha, config.ci.requiredContext);
+            // An empty log is not nothing to report: the repair is about to run
+            // knowing only that "CI" failed, which is the same empty-brief
+            // shape as a bead with no description. Say so rather than let the
+            // attempt look informed.
+            if (!output) log('watch: no failing job log found — the repair goes in blind');
+            repairContext = { failedStep: 'CI', output };
           }
           break;
 
@@ -353,6 +416,26 @@ async function runIteration({ ctx, deps, log }) {
       if (step.stage === STAGE.DONE) break;
       stage = step.stage;
     }
+  } catch (error) {
+    // ONE ITERATION MUST NOT END THE RUN. Everything above is a stage that can
+    // throw — a forge call, a `gh` that could not authenticate, a bug here —
+    // and an unattended `--until 8` that loses seven good beads to the first
+    // transient failure is worse than one parked bead. The circuit breaker is
+    // what stops this becoming an infinite loop of crashes: a crash parks, and
+    // three parks halt.
+    disposition = DISPOSITION.PARKED;
+    reason = REASON.CRASHED;
+    parts.crash = String(error?.stack ?? error).slice(-600);
+    log(`iteration CRASHED — ${error?.message ?? error}`);
+    if (bead) {
+      // Park the bead too, so SELECT skips it next time. Its own failure must
+      // not replace the crash we are already reporting.
+      try {
+        await harvest({ beads, bead, parts, disposition, reason, config, log });
+      } catch (harvestError) {
+        log(`harvest after crash also failed — ${harvestError?.message ?? harvestError}`);
+      }
+    }
   } finally {
     parts.disposition = disposition;
     if (reason) parts.reason = reason;
@@ -361,6 +444,22 @@ async function runIteration({ ctx, deps, log }) {
       appendRecord(record, { appendLine: (line) => fs.appendFileSync(LEDGER_FILE, line) });
       if (deps.emitJson) process.stdout.write(`${JSON.stringify(record)}\n`);
     }
+    // The ledger goes first because it is the evidence: a git failure below
+    // must not be able to swallow the record of what just happened.
+    //
+    // Restoring per ITERATION, not only at teardown, is what stops the next
+    // bead branching off this one — `newBranch` branches from whatever is
+    // checked out, so bead 2's PR carried bead 1's commits and its diff
+    // against main showed both. `restoreToMain` also CLEANS, because
+    // `reset --hard` leaves untracked files behind and a file the agent
+    // created otherwise survived onto main and made the next run's preflight
+    // refuse to start.
+    try {
+      await git.restoreToMain();
+      if (bead && !dryRun) await git.deleteBranch(bead.id);
+    } catch (error) {
+      log(`iteration teardown: could not return to main — ${error?.message ?? error}`);
+    }
   }
 
   return { bead, disposition, drained };
@@ -368,12 +467,12 @@ async function runIteration({ ctx, deps, log }) {
 
 // ─── stage helpers ─────────────────────────────────────────────────────────
 
-async function watchCi({ forge, config, prNumber, parts, log, halted }) {
+async function watchCi({ forge, config, sha, parts, log, halted }) {
   const startedAt = Date.now();
   let everFound = false;
   for (;;) {
     if (halted()) return { outcome: 'pending', halted: true };
-    const status = await forge.pollChecks(prNumber, config.ci.requiredContext);
+    const status = await forge.pollChecks(sha, config.ci.requiredContext);
     if (status.found) everFound = true;
     if (status.outcome === 'green' || status.outcome === 'red') {
       parts.ci = {
@@ -387,8 +486,18 @@ async function watchCi({ forge, config, prNumber, parts, log, halted }) {
     const waited = Date.now() - startedAt;
     // Three outcomes, not two: a check that NEVER appeared is a repo or runner
     // problem, not this diff, so it is never repaired.
-    if (!everFound && waited > config.ci.appearTimeoutMs) {
-      log(`watch: no '${config.ci.requiredContext}' check after ${Math.round(waited / 1000)}s`);
+    //
+    // But "not appeared YET" is not that. Cebab's required check `needs:` the
+    // ubuntu+windows matrix, and GitHub creates no check run for a gated job
+    // until its dependencies finish — measured at 11m23s on PR #402 against a
+    // five-minute timeout, so this branch used to fire on every real run. A
+    // pending sibling is proof CI is alive, so absence is only declared once
+    // nothing at all is still moving.
+    if (!everFound && !status.anyPending && waited > config.ci.appearTimeoutMs) {
+      log(
+        `watch: no '${config.ci.requiredContext}' check after ${Math.round(waited / 1000)}s ` +
+          `and nothing else pending (${status.total ?? 0} check(s) seen)`,
+      );
       return { outcome: 'absent' };
     }
     if (waited > config.ci.completeTimeoutMs) return { outcome: 'absent' };
@@ -419,6 +528,13 @@ async function harvest({ beads, bead, parts, disposition, reason, config, log })
   // Losing a finding is the failure mode this loop exists to fix, so a
   // follow-up that cannot be filed stops the whole run rather than being
   // dropped with a warning.
+  //
+  // `??=` rather than trusting the caller's literal: this threw
+  // `Cannot read properties of undefined (reading 'push')` because `parts` was
+  // built with `harvest: {}` two hundred lines away, and the crash landed on
+  // the first follow-up any verdict carried. The initializer is fixed too, but
+  // the coupling is what made one typo reach this far.
+  parts.harvest.followUps ??= [];
   for (const followUp of parts.verdict?.follow_ups ?? []) {
     const id = await beads.fileFollowUp(followUp, bead.id, config.harvest);
     if (!id) throw new Error(`could not file follow-up "${followUp.title}" — refusing to lose it`);
@@ -476,7 +592,7 @@ async function main() {
 
   if (args.status) return printStatus();
 
-  const fileConfig = readJson(args.configPath ?? path.join(LOOP_DIR, 'config.json'), {});
+  const fileConfig = readConfigFile(args.configPath);
   const cliConfig = {};
   if (args.flags.merge) cliConfig.loop = { merge: true };
   if (args.noPlayground) cliConfig.gate = { playgroundTier: 'never' };
@@ -539,14 +655,11 @@ async function main() {
     // either refuses or carries them across, so resetting afterwards is one
     // step too late — and under `--dry-run` there are always such changes,
     // since BUILD runs but branch creation does not.
-    if (!(await git.isClean())) {
-      log('teardown: discarding uncommitted changes');
-      await git.resetHard();
-    }
-    await git.toMain();
+    if (!(await git.isClean())) log('teardown: discarding uncommitted changes');
+    await git.restoreToMain();
     if (!(await git.isClean())) {
       log('teardown: tree still dirty after checkout — resetting (a stage leaked)');
-      await git.resetHard();
+      await git.restoreToMain();
     }
     await run('node', ['scripts/predev-server.mjs'], { cwd: REPO_ROOT, timeoutMs: 30000 }).catch(
       () => {},
@@ -690,4 +803,4 @@ if (invokedDirectly) {
     });
 }
 
-export { EXIT, main, prBody };
+export { EXIT, harvest, main, prBody, watchCi };

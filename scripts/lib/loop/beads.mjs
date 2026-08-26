@@ -23,6 +23,21 @@
 /** §6.1 — see select.mjs for why the exclusions MUST be flags, not a filter. */
 export { readyArgv } from './select.mjs';
 
+/**
+ * ONE bead by id. `--bead` must never guess.
+ *
+ * It used to look the id up in the READY LIST and fall back to a stub with an
+ * empty description when it missed. Measured: 210 beads are ready and that
+ * lookup asked for 200, so ten of them silently produced a prompt reading
+ * `**Cebab-ouy — Cebab-ouy**` with no body at all — the agent worked from the
+ * id and nothing else, and burned a full turn budget doing it. A bead that is
+ * blocked, in progress or closed missed for the same reason and degraded the
+ * same silent way.
+ */
+export function showArgv(id) {
+  return ['show', id, '--json'];
+}
+
 export function claimArgv(id) {
   // --claim is atomic: assignee + status=in_progress, idempotent if already
   // ours. Two writes would leave a window where the bead is assigned but open.
@@ -101,6 +116,24 @@ export function makeBeads({ run, bd, cwd, dryRun = false }) {
       if (result.code !== 0) throw new Error(`bd ready failed: ${result.stderr.trim()}`);
       const rows = parseJson(result.stdout, 'ready');
       return Array.isArray(rows) ? rows : [];
+    },
+    /**
+     * THE EXIT CODE IS NOT THE SIGNAL. `bd show` on a missing id exits **0**
+     * and prints `{"error": "no issues found matching the provided IDs"}` — an
+     * object where a hit is an array — so the SHAPE is what decides. Checking
+     * `result.code !== 0` here would have returned that error object as if it
+     * were a bead.
+     */
+    async show(id) {
+      const result = await call(showArgv(id));
+      let rows;
+      try {
+        rows = parseJson(result.stdout, 'show');
+      } catch {
+        return null;
+      }
+      const row = Array.isArray(rows) ? rows[0] : null;
+      return row?.id ? row : null;
     },
     async claim(id) {
       const result = await write(claimArgv(id));

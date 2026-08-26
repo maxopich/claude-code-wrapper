@@ -85,8 +85,13 @@ export const DEFAULTS = Object.freeze({
   ci: {
     requiredContext: 'Lint, Typecheck, Test',
     pollIntervalMs: 30000,
-    appearTimeoutMs: 300000,
-    completeTimeoutMs: 1800000,
+    // Measured: Cebab's required check `needs:` the ubuntu+windows matrix and
+    // first appeared 11m23s after the workflow started. The driver's primary
+    // guard against a false `absent` is "nothing else is pending"; this is the
+    // backstop for a CI that produces no checks at all, so it sits well past
+    // the matrix rather than inside it.
+    appearTimeoutMs: 900000,
+    completeTimeoutMs: 2700000,
   },
   loop: {
     until: ['1'],
