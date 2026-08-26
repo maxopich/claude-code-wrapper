@@ -30,6 +30,39 @@
  * `readyArgvConformsToConfig` below is what keeps that wiring honest, because
  * this is now the only place the exclusion exists.
  *
+ * ────────────────────────────────────────────────────────────────────────────
+ * AND WHY THERE IS NO `skipPhrases` HERE EITHER. MEASURED, 2026-08-26, after
+ * three real runs cost $15 and one of them ($9.06) was a bead the loop could
+ * never have finished.
+ *
+ * The idea was to scan a bead's body for the phrases that mark a DECISION —
+ * `chooseBead` already has a text-scan seam for deny paths, so it was nearly
+ * free. Run backwards over all 242 open beads it does not survive contact:
+ *
+ *   'not fixed here'          4 hits — incl. Cebab-vie.30, an ordinary bug
+ *   'was not fixed'           2 hits — incl. Cebab-7r8, which the loop
+ *                                      COMPLETED in 20 turns
+ *   'unverified'              5 hits — incl. three ordinary bus bugs
+ *   'not measured'            4 hits — incl. the follow-up the loop had just
+ *                                      filed itself
+ *
+ * `Cebab-7r8`'s body carries "## Why it was not fixed in PR #402", which is
+ * this repo's standard heading for "I found this while doing something else".
+ * That is true of nearly every well-filed bead and says NOTHING about whether
+ * the work is suitable. The phrases mark why a bead exists, not what it costs.
+ *
+ * A size heuristic fails too, in the other direction: the bead that succeeded
+ * has a LONGER description (2.2k chars) than the one that capped (1.5k).
+ *
+ * So there is no automatic signal, and the honest mechanism is the explicit
+ * one that already exists: `needs-human` is in `select.excludeLabels` and
+ * reaches `bd ready --exclude-label`, which is measured to work. It is
+ * currently on zero beads — the exclusion is live and simply unused. The
+ * second line of defence is the agent itself, which is the only reader that
+ * can tell a decision from a defect: `build-prompt.md` asks it to return
+ * `needs_human` before starting, which costs a few turns instead of sixty.
+ * ────────────────────────────────────────────────────────────────────────────
+ *
  * DO NOT write a unit test that hands `chooseBead` a fixture carrying a
  * `labels` array. That object cannot come out of bd, so the test would pass
  * while the real path stayed broken — a fixture describing the impossible.

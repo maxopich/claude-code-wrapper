@@ -52,8 +52,21 @@ export const branchNameFor = (beadId) => `loop/${beadId}`;
 export function commitSubject(verdict, beadId) {
   const scope = verdict.commit_scope ? `(${verdict.commit_scope})` : '';
   const subject = String(verdict.commit_subject ?? '').trim();
-  const suffix = `(${beadId})`;
-  const body = subject.endsWith(suffix) ? subject : `${subject} ${suffix}`;
+  // BOTH SPELLINGS, because the agent learned the short one from `git log`.
+  // The first version matched the full id only, and the first commit the loop
+  // ever merged came out as
+  //
+  //   fix(bus): refuse a delivery reaching the queue head after teardown
+  //             (vie.32) (Cebab-vie.32) (#407)
+  //
+  // `vie.32` is this repo's own shorthand for a sub-bead, so this is the
+  // convention working as intended and the guard being too literal — not a
+  // model quirk to instruct away. Telling the agent not to write it stays the
+  // fragile half of the fix: it depends on the model complying, every time,
+  // with an instruction that contradicts what it can see in `git log`.
+  const short = beadId.slice(beadId.indexOf('-') + 1);
+  const suffixes = [`(${beadId})`, ...(short && short !== beadId ? [`(${short})`] : [])];
+  const body = suffixes.some((s) => subject.endsWith(s)) ? subject : `${subject} (${beadId})`;
   return `${verdict.commit_type}${scope}: ${body}`;
 }
 

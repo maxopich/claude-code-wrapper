@@ -26,6 +26,22 @@ larger than the remaining budget, return a verdict now with `needs_human: true` 
 what is left.
 {{/if}}
 
+## When this issue is not yours to finish
+
+Read the body before you start, and stop early if either of these is true. A verdict costs a
+few turns; running out of turns costs all {{max_turns}} of them and produces nothing.
+
+- **It is a DECISION, not a defect.** The body defers the fix pending a choice, names two
+  defensible answers and picks neither, or says the fix was deliberately not made because the
+  right approach is unsettled. Return `needs_human: true` now, with `needs_human_reason`
+  naming the choice that has to be made.
+- **The change it describes plainly cannot fit in {{max_turns}} turns** — for example it needs
+  a protocol change across several packages before anything observable moves. Say so the same
+  way rather than getting half-way.
+
+Judge this from what the ISSUE says, not from how hard the work looks to you. A hard but
+well-specified fix is exactly what you are here for.
+
 ## What done means
 
 - The behaviour the issue describes is actually changed. A test edited so it stops

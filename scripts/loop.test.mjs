@@ -3140,3 +3140,174 @@ describe('config values the code does not implement are refused (Cebab-qd2.9)', 
     }
   });
 });
+
+describe('the guard denies the loop its own harness (Cebab-qd2.13)', () => {
+  // Measured before the fix: `evaluateGuard` passed a diff editing
+  // `scripts/loop.mjs` with zero breaches, so with `--merge` the loop could
+  // rewrite the driver it was running from and land it unattended. Every
+  // safety property it has — this list, the breaker, the usage-limit halt,
+  // LAND's read-back — lives in those files.
+  const diffTouching = (path) => ({
+    files: [{ path, insertions: 5, deletions: 1, status: 'M' }],
+    addedLines: [],
+    removedLines: [],
+  });
+
+  test('every file of the harness is denied', () => {
+    for (const path of [
+      'scripts/loop.mjs',
+      'scripts/loop.test.mjs',
+      'scripts/loop-rehearsal.mjs',
+      'scripts/loop-rehearsal.test.mjs',
+      'scripts/lib/loop/config.mjs',
+      'scripts/lib/loop/forge.mjs',
+      // Not only .mjs: the prompt and the schema decide behaviour too.
+      'scripts/lib/loop/build-prompt.md',
+      'scripts/lib/loop/verdict.schema.json',
+      'scripts/lib/loop/loop-settings.json',
+    ]) {
+      const result = evaluateGuard(diffTouching(path), DEFAULTS.guard);
+      expect(result.passed, path).toBe(false);
+      expect(result.breaches[0].rule, path).toBe('denyPaths');
+    }
+  });
+
+  test('and ordinary work is not', () => {
+    // The other direction, and it is the one that matters for usefulness: a
+    // deny glob that matched everything would stop the loop landing anything.
+    for (const path of [
+      'server/src/bus/chain.ts',
+      'web/src/components/MultiAgentTab.tsx',
+      'scripts/dev.mjs',
+      'scripts/devBins.test.mjs',
+      'scripts/lib/strip_comments.mjs',
+      'docs/AUTONOMOUS_LOOP_SPEC.md',
+    ]) {
+      expect(evaluateGuard(diffTouching(path), DEFAULTS.guard).passed, path).toBe(true);
+    }
+  });
+
+  test('the `**` globs match a nested path, which is the whole point', () => {
+    // Pinned directly because an inert deny entry is invisible: it sits in the
+    // list, matches nothing, and the guard reports a clean pass. Argument
+    // order is (pattern, path) — getting it backwards makes every one of these
+    // read as a MISS, which is how this check first appeared to fail.
+    expect(matchesGlob('scripts/lib/loop/**', 'scripts/lib/loop/config.mjs')).toBe(true);
+    expect(matchesGlob('scripts/lib/loop/**', 'scripts/lib/strip_comments.mjs')).toBe(false);
+    expect(matchesGlob('.github/**', '.github/workflows/ci.yml')).toBe(true);
+  });
+});
+
+describe('an unsuitable bead is refused early, not explored (Cebab-qd2.16)', () => {
+  // Measured across three real runs: Cebab-7r8 (20 turns, $1.84) and
+  // Cebab-vie.32 (49 turns, $4.10) both landed; Cebab-v85 burned 61 turns and
+  // $9.06 twice over and produced nothing, because its fix is a decision
+  // nobody has taken. There is NO automatic signal that separates them — see
+  // select.mjs's header for the phrase-scan and size heuristics run backwards
+  // over all 242 open beads, and why both were rejected rather than shipped.
+
+  test('the label exclusion that IS the mechanism reaches the argv', () => {
+    // `needs-human` is the maintainer's explicit override. It is currently on
+    // zero beads, so nothing else would notice if this wiring broke.
+    expect(DEFAULTS.select.excludeLabels).toContain('needs-human');
+    const argv = readyArgv(DEFAULTS.select, { limit: 50 });
+    expect(readyArgvConformsToConfig(argv, DEFAULTS.select).conforms).toBe(true);
+    const at = argv.indexOf('--exclude-label');
+    expect(at).not.toBe(-1);
+    expect(argv[at + 1]).toContain('needs-human');
+  });
+
+  test('the prompt asks the agent to stop before spending the budget', () => {
+    // The agent is the only reader that can tell a decision from a defect, so
+    // this instruction is the second line of defence. A weak test on purpose —
+    // it proves the sentence is PRESENT, not that a model obeys it — but the
+    // failure it guards against is silent deletion during an edit, which is
+    // the one thing a string check does catch.
+    expect(REAL_PROMPT).toContain('needs_human: true');
+    expect(REAL_PROMPT).toContain('DECISION, not a defect');
+    // And it must be told the actual budget, not a hardcoded number.
+    expect(REAL_PROMPT).toContain('{{max_turns}}');
+    const rendered = renderPrompt(REAL_PROMPT, { max_turns: 60 });
+    expect(rendered).toContain('all 60 of them');
+    expect(rendered).not.toContain('{{max_turns}}');
+  });
+});
+
+describe('a park says how to resume it (Cebab-qd2.14)', () => {
+  const parkWith = async (parts) => {
+    const calls = [];
+    await harvest({
+      beads: {
+        park: async (id, evidence) => (calls.push(evidence), true),
+        close: async () => true,
+        note: async () => true,
+        fileFollowUp: async () => 'X',
+      },
+      bead: { id: 'Cebab-x1' },
+      parts: { harvest: { followUps: [] }, ...parts },
+      disposition: DISPOSITION.PARKED,
+      reason: REASON.MAX_TURNS,
+      config: DEFAULTS,
+      log: () => {},
+    });
+    return calls[0] ?? '';
+  };
+
+  test('a turn-cap park carries the resume command', async () => {
+    // A cap never reaches GATE, so the last-gate-step, CI and PR lines are all
+    // empty and the bead used to read `Parked by the autonomous loop:
+    // max_turns.` and nothing else — while the ledger held
+    // `claude --resume <session-id>`. The one actionable fact was in the file
+    // nobody opens first.
+    const evidence = await parkWith({
+      build: { detail: 'the agent used all 61 turns; inspect with `claude --resume abc-123`' },
+    });
+    expect(evidence).toContain('claude --resume abc-123');
+    expect(evidence).toContain('max_turns');
+  });
+
+  test('and a park with no detail is unchanged', async () => {
+    // The other direction: no empty line, no literal "undefined" on the bead.
+    const evidence = await parkWith({ ci: { runUrl: 'https://ci.invalid/1' } });
+    expect(evidence).toBe('Parked by the autonomous loop: max_turns.\nCI: https://ci.invalid/1');
+  });
+});
+
+describe('commitSubject knows both spellings of a bead id (Cebab-qd2.15)', () => {
+  const subject = (text, id) =>
+    commitSubject({ commit_type: 'fix', commit_scope: 'bus', commit_subject: text }, id);
+
+  test('the abbreviated id is not doubled', () => {
+    // The first commit the loop ever merged (#407) came out as
+    //   fix(bus): ... (vie.32) (Cebab-vie.32)
+    // because the guard matched the FULL id only, and `vie.32` is this repo's
+    // own shorthand — which is where the agent learned it.
+    expect(subject('refuse a delivery after teardown (vie.32)', 'Cebab-vie.32')).toBe(
+      'fix(bus): refuse a delivery after teardown (vie.32)',
+    );
+  });
+
+  test('the full id is still not doubled', () => {
+    expect(subject('refuse a delivery (Cebab-vie.32)', 'Cebab-vie.32')).toBe(
+      'fix(bus): refuse a delivery (Cebab-vie.32)',
+    );
+  });
+
+  test('and an id that is absent is still appended', () => {
+    // The other direction — a fix that simply stopped appending would pass
+    // both cases above and lose the convention entirely.
+    expect(subject('refuse a delivery', 'Cebab-vie.32')).toBe(
+      'fix(bus): refuse a delivery (Cebab-vie.32)',
+    );
+    expect(subject('give buttons a focus ring', 'Cebab-p5y')).toBe(
+      'fix(bus): give buttons a focus ring (Cebab-p5y)',
+    );
+  });
+
+  test('a suffix that merely resembles the short id does not suppress it', () => {
+    // `p5y` is the short form of `Cebab-p5y`, not of `Cebab-vie.32`.
+    expect(subject('a change (p5y)', 'Cebab-vie.32')).toBe(
+      'fix(bus): a change (p5y) (Cebab-vie.32)',
+    );
+  });
+});
