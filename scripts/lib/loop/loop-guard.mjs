@@ -28,6 +28,37 @@
  * Anything it cannot parse is ALLOWED: a hook that crashed closed on malformed
  * input would block the whole run for a reason nobody could see, and the
  * driver's own guard still refuses the resulting diff at PUBLISH.
+ *
+ * THE HOOK ALSO SAYS YES, and it has to. Claude Code auto-approves Bash it can
+ * classify as safe but requires approval for `npm`/`npx`/`node`, and `-p` has
+ * no approver — so staying silent about them means REFUSED. Measured with the
+ * loop's own flags:
+ *
+ *   echo HELLO_FROM_BASH   -> ran,     denials []
+ *   npm run typecheck      -> REFUSED, "This command requires approval"
+ *   npm run typecheck      -> ran,     denials []   (hook returns `allow`)
+ *
+ * The agent could therefore not run a single gate command. Its own PR summary
+ * said so: "Gates NOT run: npm/vitest/node all need approval unavailable in
+ * this loop; verified statically." Two consequences beyond the obvious one: an
+ * agent that cannot check its work writes blind, and `verdict.tests
+ * .commands_run` is always empty — so `compareVerdictToGate` is STRUCTURALLY
+ * always `unknown` and the spec's second governing rule, "the agent's report
+ * is not evidence", can never record agreement or disagreement because there
+ * is never a claim. A cheaper model spent all forty of its turns retrying a
+ * command that was never going to run.
+ *
+ * WHAT THIS COSTS, STATED PLAINLY. `npm`/`npx`/`node` can spawn anything, so a
+ * determined agent could route around the deny list — `node -e` reaches
+ * `git push` as easily as typing it. The deny rules stop the HONEST MISTAKE,
+ * the agent that helpfully commits and publishes; they were never a sandbox.
+ * Until now the approval gate happened to be backing them up, and the price of
+ * that accident was that no gate command ran at all. What remains real: the
+ * driver re-runs every gate itself and does not believe the verdict, the
+ * PUBLISH guard refuses the diff, `lockfileChanged()` catches drift, and the
+ * tree is reset and cleaned between iterations.
+ *
+ * DENY IS EVALUATED FIRST and wins outright, so nothing below can widen it.
  */
 
 /** Leading token of each `|`, `;`, `&&`, `||`, newline-separated segment,
@@ -96,6 +127,28 @@ export function decide(command) {
   return null;
 }
 
+/**
+ * Commands the loop NEEDS the agent to run. Deliberately narrow: the gate's own
+ * verbs plus the test runner, matched at command position like the deny rules.
+ * `npm` appears here only for `run`/`test`/`exec` — `install`/`ci` are denied
+ * above and deny wins.
+ */
+const ALLOW = [
+  (h) => base(h.head) === 'npm' && ['run', 'test', 'exec'].includes(h.args[0]),
+  (h) => base(h.head) === 'npm' && h.args.includes('exec'),
+  (h) => ['npx', 'node', 'tsc', 'vitest', 'eslint', 'prettier'].includes(base(h.head)),
+];
+
+/** Why this command should be explicitly allowed, or null to defer. */
+export function allowReason(command) {
+  const heads = commandHeads(command);
+  if (heads.length === 0) return null;
+  // EVERY segment must be allowable: `npm run lint && git push` must not ride
+  // in on its first half.
+  if (!heads.every((h) => ALLOW.some((rule) => rule(h)))) return null;
+  return 'a verification command the harness re-runs itself';
+}
+
 // Only run as a hook when executed directly, so the tests can import `decide`.
 if (process.argv[1] && process.argv[1].endsWith('loop-guard.mjs')) {
   let raw = '';
@@ -111,17 +164,27 @@ if (process.argv[1] && process.argv[1].endsWith('loop-guard.mjs')) {
       process.exit(0); // unparsable -> allow; see the header
     }
     if (call.tool_name !== 'Bash') process.exit(0);
-    const why = decide(call.tool_input?.command ?? '');
-    if (!why) process.exit(0);
-    process.stdout.write(
-      JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: `Denied by the autonomous loop: ${why}`,
-        },
-      }),
-    );
-    process.exit(0);
+    const command = call.tool_input?.command ?? '';
+    const emit = (permissionDecision, permissionDecisionReason) => {
+      process.stdout.write(
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision,
+            permissionDecisionReason,
+          },
+        }),
+      );
+      process.exit(0);
+    };
+
+    // Deny first, always: an allow rule must never be able to widen the list.
+    const why = decide(command);
+    if (why) emit('deny', `Denied by the autonomous loop: ${why}`);
+
+    const ok = allowReason(command);
+    if (ok) emit('allow', `Allowed by the autonomous loop: ${ok}`);
+
+    process.exit(0); // defer to the normal permission flow
   });
 }

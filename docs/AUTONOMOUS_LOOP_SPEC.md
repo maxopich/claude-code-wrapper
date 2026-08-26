@@ -174,7 +174,7 @@ must not silently widen the guard.
   "ci": {
     "requiredContext": "Lint, Typecheck, Test",
     "pollIntervalMs": 30000,
-    "appearTimeoutMs": 300000, // no such check after 5 min → infra problem, park
+    "appearTimeoutMs": 900000, // see below — 5 min fired on every healthy run
     "completeTimeoutMs": 1800000, // 30 min
   },
   "loop": {
@@ -424,9 +424,22 @@ bead, parks it, and does the same for the next two — halting the run on the ci
 three per-bead failures that all misdescribe one setup problem. In preflight it is a single exit 2
 at second zero, naming `Playground/README.md`, which already documents the exact file to write.
 
-Then: start `npm run dev:server` detached, poll `GET /health` until ready or 60 s, run
-`npm --workspace server exec tsx src/ws_smoke.ts`, and — only when `gate.liveSmokes` is true —
+Then: start `npm run dev:server` detached and poll `GET /health` until ready or 60 s. **That boot
+is the tier's signal** — it is the one thing `ci_smoke` cannot show, since `ci_smoke` runs against
+a mock server over a temp workspace. Then, and only when `gate.liveSmokes` is true, run
 `live_smoke.ts`, `mcp_scope_smoke.ts`, `managed_file_smoke.ts`, `bus_max_turns_smoke.ts`.
+
+**Not `ws_smoke.ts`** — this document originally prescribed it here and it can never pass in the
+Playground. `ws_smoke.ts` looks a project up by the literal name `Cebab` and exits when it is
+missing; `ci_smoke` creates `<tmpWs>/Cebab` for exactly that reason and also sets `MOCK=1`, without
+which `ws_smoke`'s `send_message` spawns a REAL `claude` turn — so a green gate step would quietly
+bill the subscription. `ci_smoke` is already deterministic step 10 and already runs it correctly.
+
+**Both halves run with the SAME env**, derived from the `.env` that preflight parsed. The server
+loads `../.env` on its own, so it writes its per-launch auth token into the Playground data dir; a
+smoke spawned with a bare `process.env` falls back to `~/.cebab/auth-token` and is refused with a
+401 — while reaching into live operator data on the way, which is the outcome this tier exists to
+prevent.
 
 Live smokes spawn real `claude` sessions against the maintainer's subscription. Default off.
 
@@ -461,11 +474,29 @@ up to `maxRepairs`. Exhausted → park.
 Poll `gh pr checks <pr> --json name,state,bucket,link` every `pollIntervalMs`, looking for the entry named
 exactly `ci.requiredContext`. Three distinct outcomes — do not collapse them:
 
-| Outcome  | Condition                                        | Action                                                                                                                                                            |
-| -------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `green`  | bucket `pass`                                    | → LAND                                                                                                                                                            |
-| `red`    | bucket `fail`                                    | Fetch the failing job log, re-enter BUILD with it, up to `maxRepairs`. Exhausted → park.                                                                          |
-| `absent` | no check with that name within `appearTimeoutMs` | Park with reason `ci_never_started`. **Counts toward the circuit breaker** — it usually means something is wrong with the repo or the runner, not with this bead. |
+| Outcome  | Condition                                                                           | Action                                                                                                                                                            |
+| -------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `green`  | bucket `pass`                                                                       | → LAND                                                                                                                                                            |
+| `red`    | bucket `fail`                                                                       | Fetch the failing job log, re-enter BUILD with it, up to `maxRepairs`. Exhausted → park.                                                                          |
+| `absent` | no check with that name within `appearTimeoutMs` **and nothing else still pending** | Park with reason `ci_never_started`. **Counts toward the circuit breaker** — it usually means something is wrong with the repo or the runner, not with this bead. |
+
+**`absent` cannot mean "has not appeared yet."** Cebab's required check is a job with
+`needs: [quality]`, and GitHub creates no check run for a gated job until its dependencies finish —
+so the required context is genuinely missing from the API for as long as the matrix takes. Measured
+on PR #402's head SHA: the workflow started at `08:12:13Z` and `Lint, Typecheck, Test` first
+appeared at `08:23:36Z`, **11m23s** later, against an `appearTimeoutMs` of five minutes. Every real
+run would have parked `ci_never_started`, and three of those halt the loop on the breaker. A
+pending sibling check is positive evidence that CI is alive; absence is only declared once nothing
+at all is still moving.
+
+**Poll by COMMIT SHA, never by PR number.** `gh pr checks <n>` is PR-scoped and lags a force-push:
+for a window after a repair it still serves the previous commit's results. Measured on the first
+repair the loop ever ran — the ledger recorded `waitedMs: 1185` and the OLD run's job URL, 1.2
+seconds after pushing, while the rerun for the new SHA was still `in_progress`. Every repair
+therefore burned an attempt instantly on a stale verdict, and with `maxRepairs: 2` a single red
+consumed both repairs in seconds and parked a bead whose fix had in fact landed. The same applies
+to fetching the failing log: handing a repair the previous commit's log asks the agent to fix
+something it has already fixed.
 
 A repair after a red CI branches back to BUILD, then GATE, then amends and force-pushes the same
 branch (`git push --force-with-lease`). Do not open a second PR.

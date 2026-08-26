@@ -778,7 +778,12 @@ describe('ledger', () => {
 
 import { claimArgv, closeArgv, followUpArgv, parkArgv } from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject } from './lib/loop/git.mjs';
-import { classifyChecks, prChecksArgv, prMergeArgv } from './lib/loop/forge.mjs';
+import {
+  checkRunsArgv,
+  classifyCheckRuns,
+  failingSibling,
+  prMergeArgv,
+} from './lib/loop/forge.mjs';
 import {
   assertPlaygroundEnv,
   DETERMINISTIC_STEPS,
@@ -795,7 +800,7 @@ import {
   renderPrompt,
   resolveTier,
 } from './lib/loop/build.mjs';
-import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
+import { allowReason, commandHeads, decide } from './lib/loop/loop-guard.mjs';
 import { harvest, parseArgs, watchCi } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 import { makeGit } from './lib/loop/git.mjs';
@@ -863,32 +868,103 @@ describe('git: branch discipline and commit shape', () => {
       commitSubject({ commit_type: 'docs', commit_scope: '', commit_subject: 'x' }, 'B-1'),
     ).toBe('docs: x (B-1)');
   });
+
+  test('the bead id is not doubled when the agent already wrote it', () => {
+    // Observed on the first PR the loop ever opened:
+    //   fix(web): give 8 hover-styled buttons a focus ring (Cebab-p5y) (Cebab-p5y)
+    // The agent writes the id itself because that IS this repo's convention —
+    // every recent commit ends `(Cebab-xxx)` — so it can see it in `git log`.
+    const v = (subject) => ({ commit_type: 'fix', commit_scope: 'web', commit_subject: subject });
+    expect(commitSubject(v('a focus ring (Cebab-p5y)'), 'Cebab-p5y')).toBe(
+      'fix(web): a focus ring (Cebab-p5y)',
+    );
+    // The other direction: when it is absent it must still be appended, or the
+    // fix trades one bug for a worse one.
+    expect(commitSubject(v('a focus ring'), 'Cebab-p5y')).toBe(
+      'fix(web): a focus ring (Cebab-p5y)',
+    );
+    // A DIFFERENT id in the subject is not this bead's id, so it is appended.
+    expect(commitSubject(v('x (Cebab-zzz)'), 'Cebab-p5y')).toBe(
+      'fix(web): x (Cebab-zzz) (Cebab-p5y)',
+    );
+  });
 });
 
 describe('forge: WATCH has three outcomes, not two', () => {
-  test('bucket drives the classification', () => {
-    const R = 'Lint, Typecheck, Test';
-    expect(classifyChecks([{ name: R, bucket: 'pass' }], R).outcome).toBe('green');
-    expect(classifyChecks([{ name: R, bucket: 'fail' }], R).outcome).toBe('red');
-    expect(classifyChecks([{ name: R, bucket: 'cancel' }], R).outcome).toBe('red');
-    expect(classifyChecks([{ name: R, bucket: 'pending' }], R).outcome).toBe('pending');
-    // A required check that is SKIPPED is not a failure.
-    expect(classifyChecks([{ name: R, bucket: 'skipping' }], R).outcome).toBe('green');
+  // Field names measured against the live endpoint, not assumed:
+  //   {name, status: completed|in_progress|queued, conclusion, html_url}
+  const runs = (list) => ({ check_runs: list });
+  const R = 'Lint, Typecheck, Test';
+
+  test('status and conclusion drive the classification', () => {
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'success' }]), R).outcome,
+    ).toBe('green');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'failure' }]), R).outcome,
+    ).toBe('red');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'cancelled' }]), R)
+        .outcome,
+    ).toBe('red');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'in_progress', conclusion: null }]), R).outcome,
+    ).toBe('pending');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'queued', conclusion: null }]), R).outcome,
+    ).toBe('pending');
+    // A required check that is SKIPPED is not a failure — a path-filtered job
+    // reports "nothing to do here" that way.
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'skipped' }]), R).outcome,
+    ).toBe('green');
+    // A conclusion this code has never seen, on a COMPLETED check, is red. An
+    // allow-list of failure words would make the first one GitHub adds read as
+    // a pass, which is the one direction that must never happen silently.
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'brand_new' }]), R)
+        .outcome,
+    ).toBe('red');
   });
 
   test('a check by another name is absent, not green', () => {
     // The distinction the `absent` outcome exists for: some other job passing
     // must never be read as the required context passing.
-    const verdict = classifyChecks(
-      [{ name: 'Other job', bucket: 'pass' }],
-      'Lint, Typecheck, Test',
+    const verdict = classifyCheckRuns(
+      runs([{ name: 'Other job', status: 'completed', conclusion: 'success' }]),
+      R,
     );
     expect(verdict.found).toBe(false);
     expect(verdict.outcome).not.toBe('green');
   });
 
-  test('argv shape', () => {
-    expect(prChecksArgv(7)).toEqual(['pr', 'checks', '7', '--json', 'name,state,bucket,link']);
+  test('failingSibling skips the aggregator and finds the matrix leg', () => {
+    // The required context is a job with `needs: [quality]`; its own log says
+    // only that a leg failed, never which line. The repair needs the leg.
+    const payload = runs([
+      { name: R, status: 'completed', conclusion: 'failure', html_url: 'x/runs/1/job/1' },
+      {
+        name: `${R} (windows-2022)`,
+        status: 'completed',
+        conclusion: 'failure',
+        html_url: 'x/runs/2/job/2',
+      },
+      { name: 'semgrep', status: 'completed', conclusion: 'success', html_url: 'x/runs/3/job/3' },
+    ]);
+    expect(failingSibling(payload, R).name).toBe(`${R} (windows-2022)`);
+    // The other direction: nothing failing means nothing to hand back.
+    expect(
+      failingSibling(runs([{ name: 'semgrep', status: 'completed', conclusion: 'success' }]), R),
+    ).toBe(null);
+  });
+
+  test('argv is scoped to ONE COMMIT, never to the PR', () => {
+    // `gh pr checks <n>` lags a force-push and served the PREVIOUS commit's
+    // verdict 1.2 seconds after a repair pushed (measured, ledger waitedMs).
+    const argv = checkRunsArgv('deadbeef');
+    expect(argv[0]).toBe('api');
+    expect(argv[1]).toContain('/commits/deadbeef/check-runs');
+    expect(argv.join(' ')).not.toContain('pr checks');
     expect(prMergeArgv(7)).toEqual(['pr', 'merge', '7', '--squash', '--delete-branch']);
     expect(prMergeArgv(7, { auto: true })).toContain('--auto');
   });
@@ -1661,7 +1737,12 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
       { CEBAB_DATA_DIR: '/pg/.cebab-qa', WORKSPACE_ROOT: '/pg/agents', PORT: '4319' },
       { HOME: '/home/op', PATH: '/usr/bin' },
     );
-    expect(env.CEBAB_AUTH_TOKEN_FILE).toBe(path.join('/pg/.cebab-qa', 'auth-token'));
+    // `path.resolve` prepends a DRIVE LETTER on Windows and `path.join` does
+    // not, so an expectation built with join against an implementation built
+    // with resolve is right on POSIX and red on the runner that gates the
+    // merge (`D:\\pg\\…` vs `\\pg\\…`). Mirrors the DATA_DIR line below.
+    // This exact fix was written by the loop's own repair pass on PR #403.
+    expect(env.CEBAB_AUTH_TOKEN_FILE).toBe(path.join(path.resolve('/pg/.cebab-qa'), 'auth-token'));
     expect(env.CEBAB_DATA_DIR).toBe(path.resolve('/pg/.cebab-qa'));
     expect(env.WORKSPACE_ROOT).toBe('/pg/agents');
     expect(env.PATH).toBe('/usr/bin'); // the base env still comes through
@@ -1697,14 +1778,21 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
   // PR #402: workflow at 08:12:13Z, required check at 08:23:36Z — 11m23s
   // against a five-minute timeout. Every real run parked `ci_never_started`,
   // which is never repaired and counts toward the breaker.
-  test('classifyChecks reports whether anything is still pending', () => {
+  test('classifyCheckRuns reports whether anything is still pending', () => {
     const required = 'Lint, Typecheck, Test';
-    // The real shape during the matrix: the required name is absent entirely.
-    const during = classifyChecks(
-      [
-        { name: 'Lint, Typecheck, Test (ubuntu-latest)', bucket: 'pending' },
-        { name: 'semgrep', bucket: 'pass' },
-      ],
+    // The real shape during the matrix, copied from the live endpoint: the
+    // required name is absent ENTIRELY while its legs run.
+    const during = classifyCheckRuns(
+      {
+        check_runs: [
+          {
+            name: 'Lint, Typecheck, Test (ubuntu-latest)',
+            status: 'in_progress',
+            conclusion: null,
+          },
+          { name: 'semgrep', status: 'completed', conclusion: 'success' },
+        ],
+      },
       required,
     );
     expect(during.found).toBe(false);
@@ -1712,12 +1800,15 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
 
     // Everything settled and the required name never showed up: the real
     // "never started", and the only case that should ever park.
-    const settled = classifyChecks([{ name: 'semgrep', bucket: 'pass' }], required);
+    const settled = classifyCheckRuns(
+      { check_runs: [{ name: 'semgrep', status: 'completed', conclusion: 'success' }] },
+      required,
+    );
     expect(settled.found).toBe(false);
     expect(settled.anyPending).toBe(false);
 
     // No checks at all is also not-pending, so a dead CI still parks.
-    expect(classifyChecks([], required).anyPending).toBe(false);
+    expect(classifyCheckRuns({ check_runs: [] }, required).anyPending).toBe(false);
   });
 
   const pollingForge = (responses) => {
@@ -1843,6 +1934,56 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     // The other direction: everything else still parks as build_failed.
     const crashed = next(STAGE.BUILD, { ok: false, failure: 'exit' }, {});
     expect(crashed.reason).toBe(REASON.BUILD_FAILED);
+  });
+
+  // ── D17: the agent could not run a single gate command ─────────────────
+  //
+  // Claude Code auto-approves Bash it can classify as safe but requires
+  // approval for npm/npx/node, and `-p` has no approver — so the hook's
+  // silence meant REFUSED. Measured with the loop's own flags:
+  //
+  //   echo HELLO_FROM_BASH  -> ran,     denials []
+  //   npm run typecheck     -> REFUSED, "This command requires approval"
+  //   npm run typecheck     -> ran,     denials []   (hook returns `allow`)
+  //
+  // The consequence that is easy to miss: `verdict.tests.commands_run` is
+  // always empty, so `compareVerdictToGate` is STRUCTURALLY always 'unknown'
+  // and the spec's "the agent's report is not evidence" can never record
+  // agreement or disagreement, because there is never a claim.
+  test('the gate commands the agent needs are explicitly allowed', () => {
+    for (const cmd of [
+      'npm run typecheck',
+      'npm run lint',
+      'npm test',
+      'npx vitest run scripts/loop.test.mjs',
+      'node scripts/audit-gate.mjs',
+    ]) {
+      expect(allowReason(cmd), cmd).toBeTruthy();
+    }
+  });
+
+  test('deny wins over allow, in both orders', () => {
+    // An allow rule must never be able to widen the deny list. `npm install`
+    // matches no ALLOW rule anyway; the compound cases are the real risk,
+    // because their FIRST segment is a legitimate verification command.
+    for (const cmd of [
+      'npm install',
+      'npm run lint && git push origin main',
+      'npm test; gh pr merge 1',
+      'node x.mjs && rm -rf /',
+    ]) {
+      expect(decide(cmd), cmd).toBeTruthy(); // denied
+      expect(allowReason(cmd), cmd).toBeFalsy(); // and not allowed
+    }
+  });
+
+  test('ordinary read-only work is still deferred, not allowed or denied', () => {
+    // The hook must not become an allow-list for everything: anything it does
+    // not recognise keeps the normal flow, which already permits `grep`.
+    for (const cmd of ['grep -rn gh .', 'ls -la', 'cat package.json']) {
+      expect(decide(cmd), cmd).toBeFalsy();
+      expect(allowReason(cmd), cmd).toBeFalsy();
+    }
   });
 
   // ── D1: HARVEST crashed on the first follow-up ──────────────────────────

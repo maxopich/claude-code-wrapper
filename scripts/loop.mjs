@@ -304,6 +304,10 @@ async function runIteration({ ctx, deps, log }) {
             break;
           }
           await git.push(bead.id, { force: attempt > 1 });
+          // Captured AFTER the push: this is the commit CI will report on, and
+          // asking about the PR instead is what made a repair read the previous
+          // attempt's verdict 1.2 seconds later.
+          parts.headSha = await git.headSha();
           if (attempt === 1) {
             const pr = await forge.createPr({
               base: 'main',
@@ -320,11 +324,11 @@ async function runIteration({ ctx, deps, log }) {
         }
 
         case STAGE.WATCH:
-          result = await watchCi({ forge, config, prNumber, parts, log, halted });
+          result = await watchCi({ forge, config, sha: parts.headSha, parts, log, halted });
           if (result.outcome === 'red') {
             repairContext = {
               failedStep: 'CI',
-              output: await forge.failingLog(prNumber, config.ci.requiredContext),
+              output: await forge.failingLog(parts.headSha, config.ci.requiredContext),
             };
           }
           break;
@@ -391,12 +395,12 @@ async function runIteration({ ctx, deps, log }) {
 
 // ─── stage helpers ─────────────────────────────────────────────────────────
 
-async function watchCi({ forge, config, prNumber, parts, log, halted }) {
+async function watchCi({ forge, config, sha, parts, log, halted }) {
   const startedAt = Date.now();
   let everFound = false;
   for (;;) {
     if (halted()) return { outcome: 'pending', halted: true };
-    const status = await forge.pollChecks(prNumber, config.ci.requiredContext);
+    const status = await forge.pollChecks(sha, config.ci.requiredContext);
     if (status.found) everFound = true;
     if (status.outcome === 'green' || status.outcome === 'red') {
       parts.ci = {

@@ -36,9 +36,25 @@ import { parseDiffLines, parseDiffStat } from './guard.mjs';
 
 export const branchNameFor = (beadId) => `loop/${beadId}`;
 
+/**
+ * The bead id is appended only when it is not already there.
+ *
+ * The agent writes it into `commit_subject` on its own, because that IS this
+ * repo's convention — every recent commit ends `(Cebab-xxx)` — and appending
+ * unconditionally produced, on the very first PR the loop ever opened:
+ *
+ *   fix(web): give 8 hover-styled buttons a focus ring (Cebab-p5y) (Cebab-p5y)
+ *
+ * Telling the agent in the prompt not to write it would be the fragile half of
+ * the fix: it depends on the model complying, every time, with an instruction
+ * that contradicts the convention it can see in `git log`.
+ */
 export function commitSubject(verdict, beadId) {
   const scope = verdict.commit_scope ? `(${verdict.commit_scope})` : '';
-  return `${verdict.commit_type}${scope}: ${verdict.commit_subject} (${beadId})`;
+  const subject = String(verdict.commit_subject ?? '').trim();
+  const suffix = `(${beadId})`;
+  const body = subject.endsWith(suffix) ? subject : `${subject} ${suffix}`;
+  return `${verdict.commit_type}${scope}: ${body}`;
 }
 
 export function makeGit({ run, cwd, dryRun = false }) {
@@ -132,6 +148,13 @@ export function makeGit({ run, cwd, dryRun = false }) {
       // A repair amends the same branch rather than opening a second PR.
       if (force) args.push('--force-with-lease');
       return write(args);
+    },
+    /** The commit WATCH must ask about. Polling by PR number reads whatever
+     *  GitHub currently associates with the PR, which after a repair
+     *  force-push is still the previous commit. */
+    async headSha() {
+      const r = await git(['rev-parse', 'HEAD']);
+      return r.stdout.trim();
     },
     /** Post-commit truth (R7). */
     async statOfHead() {
