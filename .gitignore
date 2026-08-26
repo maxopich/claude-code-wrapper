@@ -29,6 +29,13 @@ logs/
 *.sqlite-wal
 *.sqlite-shm
 
+# Autonomous loop runtime state (scripts/loop.mjs). The ledger, the HALT kill
+# switch, the console tee and the resolved config are all per-machine run state
+# — never committed. The loop's CODE is tracked on purpose, so `npm test` in CI
+# gates it; scripts/kanban-sync.mjs was gitignored and CI therefore never ran
+# its 20 tests (Cebab-8fa), which is the mistake this split exists to avoid.
+.loop/
+
 # npm/yarn output
 *.tgz
 .npm/
