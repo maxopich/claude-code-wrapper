@@ -15,6 +15,16 @@ Failing step: `{{failed_step}}`
 
 Fix the cause. Do not weaken the check that caught it.
 {{/if}}
+{{#if capped}}
+The previous attempt used all {{max_turns}} of its turns without returning a verdict. This
+session has been resumed, so your earlier work and your edits are still here. This is
+attempt {{attempt}} of {{max}}.
+
+Continue from where you stopped. Do not start over, and do not re-run checks that already
+passed — running out of turns a second time parks this issue for a human. If the work is
+larger than the remaining budget, return a verdict now with `needs_human: true` and say
+what is left.
+{{/if}}
 
 ## What done means
 

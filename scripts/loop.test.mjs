@@ -27,7 +27,9 @@
  * real path stayed broken. Label exclusion is asserted where it actually
  * lives: in the `bd ready` argv.
  */
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { describe, expect, test } from 'vitest';
 
@@ -46,6 +48,7 @@ import {
   STAGE,
   STAGE_ORDER,
   countsTowardBreaker,
+  landedOnStaleMain,
   next,
   resetsBreaker,
 } from './lib/loop/machine.mjs';
@@ -64,6 +67,13 @@ import {
 } from './lib/loop/ledger.mjs';
 
 const GUARD = DEFAULTS.guard;
+
+// The shipped BUILD prompt, read once. Asserting against the real file rather
+// than a copy is what stops the template and the renderer drifting apart.
+const REAL_PROMPT = readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'loop', 'build-prompt.md'),
+  'utf8',
+);
 
 // ─── config ────────────────────────────────────────────────────────────────
 
@@ -781,6 +791,7 @@ import {
   closeArgv,
   followUpArgv,
   makeBeads,
+  noteArgv,
   parkArgv,
   showArgv,
 } from './lib/loop/beads.mjs';
@@ -789,7 +800,10 @@ import {
   checkRunsArgv,
   classifyCheckRuns,
   failingSibling,
+  makeForge,
+  parsePrState,
   prMergeArgv,
+  prStateArgv,
 } from './lib/loop/forge.mjs';
 import {
   assertPlaygroundEnv,
@@ -803,6 +817,7 @@ import {
   buildArgv,
   detectUsageLimit,
   isMaxTurns,
+  limitScanText,
   makeBuild,
   renderPrompt,
   resolveTier,
@@ -2220,6 +2235,9 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
       beads: {
         close: async () => true,
         park: async () => true,
+        // `guard_withheld` now writes a note to the bead (Cebab-qd2.10). The
+        // stub grows a verb; the assertion below is untouched.
+        note: async () => true,
         fileFollowUp: async (f) => {
           filed.push(f.title);
           return 'Cebab-new1';
@@ -2341,5 +2359,784 @@ describe('the circuit breaker is per-run (Cebab-qd2.6)', () => {
     // future runs by label, so the evidence is not lost — it was being counted
     // twice.
     expect(DEFAULTS.select.excludeLabels).toContain('loop-stuck');
+  });
+});
+
+// ─── the green path that had never run (Cebab-qd2.8 … qd2.12) ──────────────
+
+describe('LAND verifies instead of predicting (Cebab-qd2.12)', () => {
+  // The whole success path after PUBLISH had never executed. Measured on the
+  // ledger after ten real iterations:
+  //
+  //     WATCH ever returned green : False
+  //     LAND ever merged          : False
+  //
+  // So these are FIRST executions, not regression guards, and the defect they
+  // close is the one that lives there: `gh pr merge --auto` does not merge —
+  // its own help says it "automatically merge[s] only after necessary
+  // requirements are met" — and `merge` returned `{ merged: true, queued: true }`
+  // for it while the driver dropped `queued`. The bead was closed on a
+  // PREDICTION.
+
+  const stateJson = (state, oid) =>
+    JSON.stringify({ state, mergeCommit: oid ? { oid } : null, mergedAt: null });
+
+  /** A `gh` whose replies are scripted in order, so every branch is reachable. */
+  const forgeWith = (script) => {
+    const calls = [];
+    const run = async (file, args) => {
+      const line = [file, ...args].join(' ');
+      calls.push(line);
+      const reply = script.shift();
+      if (!reply) throw new Error(`unscripted gh call: ${line}`);
+      return { code: reply.code ?? 0, stdout: reply.stdout ?? '', stderr: reply.stderr ?? '' };
+    };
+    return { calls, forge: makeForge({ run, cwd: '/r', sleep: async () => {} }) };
+  };
+
+  test('the merge argv pins the commit WATCH actually watched', () => {
+    // Reddens if `--match-head-commit` is dropped. Without it LAND asks the
+    // forge to merge "the PR", which is whatever its head is by then — the
+    // same class of mistake as polling checks by PR number instead of by SHA.
+    expect(prMergeArgv(7, { headSha: 'abc123' })).toEqual([
+      'pr',
+      'merge',
+      '7',
+      '--squash',
+      '--delete-branch',
+      '--match-head-commit',
+      'abc123',
+    ]);
+    // The other direction: no sha, no flag — an empty value must not become
+    // `--match-head-commit ''`, which the forge would reject outright.
+    expect(prMergeArgv(7)).not.toContain('--match-head-commit');
+    expect(prMergeArgv(7, { headSha: null })).not.toContain('--match-head-commit');
+    expect(prMergeArgv(7, { auto: true, headSha: 'abc' })).toContain('--auto');
+    expect(prStateArgv(7)).toEqual(['pr', 'view', '7', '--json', 'state,mergeCommit,mergedAt']);
+  });
+
+  test('parsePrState reads the merge commit, and its absence', () => {
+    expect(parsePrState(stateJson('MERGED', 'deadbeef'))).toMatchObject({
+      state: 'MERGED',
+      sha: 'deadbeef',
+    });
+    // A queued PR is OPEN with no merge commit — that null IS the difference.
+    expect(parsePrState(stateJson('OPEN', null))).toMatchObject({ state: 'OPEN', sha: null });
+    expect(parsePrState('not json').unparsed).toBe(true);
+  });
+
+  test('a direct merge that lands reports the real merge commit', async () => {
+    const { calls, forge } = forgeWith([
+      { code: 0 },
+      { code: 0, stdout: stateJson('MERGED', 'c0ffee1') },
+    ]);
+    const out = await forge.merge(12, { headSha: 'head1' });
+    expect(out).toMatchObject({ merged: true, queued: false, sha: 'c0ffee1', state: 'MERGED' });
+    // `land.sha` was hardcoded null on every ledger row ever written, so no
+    // record could be checked against main. Reddens if it goes back to null.
+    expect(out.sha).not.toBeNull();
+    expect(calls[0]).toContain('--match-head-commit head1');
+    expect(calls[1]).toContain('pr view 12');
+  });
+
+  test('a QUEUED auto-merge is not a merge', async () => {
+    // THE Cebab-qd2.12 CASE. Reddens the moment `merge` returns
+    // `merged: true` for the --auto path again.
+    const { forge } = forgeWith([
+      { code: 1, stderr: 'not mergeable' },
+      { code: 0, stdout: 'auto-merge enabled' },
+      { code: 0, stdout: stateJson('OPEN', null) },
+    ]);
+    const out = await forge.merge(12, { headSha: 'head1' });
+    expect(out.merged).toBe(false);
+    expect(out.queued).toBe(true);
+    expect(out.sha).toBeNull();
+  });
+
+  test('but --auto that landed immediately IS a merge', async () => {
+    // The other direction, and it is real: `gh` enables auto-merge and GitHub
+    // merges at once when the requirements were already met. Deciding from the
+    // exit code alone cannot tell these two apart; the state can.
+    const { forge } = forgeWith([
+      { code: 1, stderr: 'refused' },
+      { code: 0 },
+      { code: 0, stdout: stateJson('MERGED', 'abc999') },
+    ]);
+    expect(await forge.merge(12)).toMatchObject({ merged: true, queued: false, sha: 'abc999' });
+  });
+
+  test('both refused is neither merged nor queued', async () => {
+    const { forge } = forgeWith([
+      { code: 1, stderr: 'first refusal' },
+      { code: 1, stderr: 'second refusal' },
+    ]);
+    const out = await forge.merge(12);
+    expect(out).toMatchObject({ merged: false, queued: false, sha: null });
+    expect(out.error).toContain('refusal');
+  });
+
+  test('a merge that exited 0 but never reads MERGED is retried, then refused', async () => {
+    // The false-NEGATIVE direction. A direct merge that exited 0 has already
+    // happened, so a state that is not yet MERGED is replication lag —
+    // reporting it as a failure would park a bead whose change is on main.
+    // Retried, and only then given up on.
+    const { calls, forge } = forgeWith([
+      { code: 0 },
+      { code: 0, stdout: stateJson('OPEN', null) },
+      { code: 0, stdout: stateJson('OPEN', null) },
+      { code: 0, stdout: stateJson('OPEN', null) },
+    ]);
+    const out = await forge.merge(12);
+    expect(out.merged).toBe(false);
+    expect(out.error).toContain('exited 0 but the PR reads OPEN');
+    expect(calls.filter((c) => c.includes('pr view')).length).toBe(3);
+  });
+
+  test('and a lagging read that catches up counts as merged', async () => {
+    const { forge } = forgeWith([
+      { code: 0 },
+      { code: 0, stdout: stateJson('OPEN', null) },
+      { code: 0, stdout: stateJson('MERGED', 'late1') },
+    ]);
+    expect(await forge.merge(12)).toMatchObject({ merged: true, sha: 'late1' });
+  });
+
+  test('a queued merge is read ONCE, not retried', async () => {
+    // The asymmetry is deliberate: a queued merge has not happened, so waiting
+    // for it to read MERGED would be waiting for something that may take hours.
+    const { calls, forge } = forgeWith([
+      { code: 1 },
+      { code: 0 },
+      { code: 0, stdout: stateJson('OPEN', null) },
+    ]);
+    await forge.merge(12);
+    expect(calls.filter((c) => c.includes('pr view')).length).toBe(1);
+  });
+
+  test('--dry-run merges nothing and asks nothing', async () => {
+    const calls = [];
+    const forge = makeForge({
+      run: async (f, a) => (calls.push([f, ...a].join(' ')), { code: 0, stdout: '', stderr: '' }),
+      cwd: '/r',
+      dryRun: true,
+    });
+    expect(await forge.merge(12, { headSha: 'x' })).toMatchObject({
+      merged: false,
+      queued: false,
+    });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('the machine learned three states it had never reached', () => {
+  test('LAND has three outcomes, not two', () => {
+    expect(next(STAGE.LAND, { merged: true }, {})).toMatchObject({
+      stage: STAGE.HARVEST,
+      disposition: DISPOSITION.MERGED,
+    });
+    // Reddens if `merge_queued` collapses back into MERGED or into a park.
+    expect(next(STAGE.LAND, { merged: false, queued: true }, {})).toMatchObject({
+      stage: STAGE.HARVEST,
+      disposition: DISPOSITION.MERGE_QUEUED,
+      reason: REASON.MERGE_QUEUED,
+    });
+    expect(next(STAGE.LAND, { merged: false, queued: false }, {})).toMatchObject({
+      disposition: DISPOSITION.PARKED,
+      reason: REASON.MERGE_FAILED,
+    });
+  });
+
+  test('a queued merge neither counts toward the breaker nor resets it', () => {
+    // Nothing failed, so it is not a park; nothing landed, so it proves
+    // nothing. Both directions, because either mistake ends an overnight run
+    // early or never.
+    expect(countsTowardBreaker(DISPOSITION.MERGE_QUEUED)).toBe(false);
+    expect(resetsBreaker(DISPOSITION.MERGE_QUEUED, { ciGreen: true })).toBe(false);
+  });
+
+  test('a CI that ran and never finished is not a CI that never started', () => {
+    // Reddens if `timeout` folds back into `absent`. The remedies are
+    // opposites: raise ci.completeTimeoutMs versus go and look at the runner.
+    expect(next(STAGE.WATCH, { outcome: 'timeout' }, { merge: true })).toMatchObject({
+      disposition: DISPOSITION.PARKED,
+      reason: REASON.CI_TIMEOUT,
+    });
+    expect(next(STAGE.WATCH, { outcome: 'absent' }, { merge: true })).toMatchObject({
+      reason: REASON.CI_NEVER_STARTED,
+    });
+  });
+
+  test('watchCi reports a pending check that never completes as a timeout', async () => {
+    // Found = true keeps it past the `absent` branch, which is the whole
+    // distinction: the check EXISTS and is still running.
+    const forge = {
+      pollChecks: async () => ({ outcome: 'pending', found: true, anyPending: true, total: 3 }),
+    };
+    const config = { ci: { requiredContext: 'X', pollIntervalMs: 0, completeTimeoutMs: -1 } };
+    const out = await watchCi({
+      forge,
+      config,
+      sha: 'abc',
+      parts: {},
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('timeout');
+  });
+});
+
+describe('a capped BUILD resumes once, and only on progress (Cebab-qd2.11)', () => {
+  // The argument against resuming was real: the one cap ever observed was an
+  // agent LOOPING — four consecutive identical `npm run typecheck` calls — and
+  // resuming that buys a second full turn budget for the same wedge. What
+  // separates the two is whether the agent EDITED anything, which the loop
+  // already knows: the branch is fresh from main, so any dirt is its work.
+  const capped = (over) => ({ ok: false, failure: 'max_turns', sessionId: 's1', ...over });
+
+  test('progress plus a session id resumes', () => {
+    const step = next(STAGE.BUILD, capped(), { attempt: 1, maxRepairs: 2, treeChanged: true });
+    expect(step).toMatchObject({ stage: STAGE.BUILD, repair: true, capped: true });
+  });
+
+  test('no progress parks — this is the looping agent', () => {
+    // Reddens if the treeChanged guard is dropped, which is the change that
+    // turns one wasted turn budget into two.
+    const step = next(STAGE.BUILD, capped(), { attempt: 1, maxRepairs: 2, treeChanged: false });
+    expect(step).toMatchObject({ disposition: DISPOSITION.PARKED, reason: REASON.MAX_TURNS });
+  });
+
+  test('ONCE — a second cap parks however much progress it made', () => {
+    const step = next(STAGE.BUILD, capped(), { attempt: 2, maxRepairs: 2, treeChanged: true });
+    expect(step.reason).toBe(REASON.MAX_TURNS);
+  });
+
+  test('and nothing to resume parks too', () => {
+    const step = next(STAGE.BUILD, capped({ sessionId: null }), {
+      attempt: 1,
+      maxRepairs: 2,
+      treeChanged: true,
+    });
+    expect(step.reason).toBe(REASON.MAX_TURNS);
+  });
+
+  test('every other build failure still parks immediately', () => {
+    // The other direction: this must not have become "retry any failed build".
+    const step = next(
+      STAGE.BUILD,
+      { ok: false, failure: 'exit' },
+      { treeChanged: true, maxRepairs: 2 },
+    );
+    expect(step.reason).toBe(REASON.BUILD_FAILED);
+  });
+});
+
+describe('the breaker counts successes, not just failures', () => {
+  // `loop.merge` defaults to FALSE, so `guard_withheld` is how an ordinary
+  // successful iteration ends — not an edge case. It neither counted nor
+  // reset, so park / withheld / park / withheld / park halted the run
+  // reporting "3 consecutive parks" while three iterations had built, gated,
+  // opened a PR and gone green.
+  test('a withheld iteration that reached CI-green resets it', () => {
+    expect(resetsBreaker(DISPOSITION.GUARD_WITHHELD, { ciGreen: true })).toBe(true);
+  });
+
+  test('and one that did not, does not', () => {
+    // The other direction. A withheld iteration proves nothing by itself; it
+    // is the green CI that is the evidence.
+    expect(resetsBreaker(DISPOSITION.GUARD_WITHHELD, { ciGreen: false })).toBe(false);
+    expect(resetsBreaker(DISPOSITION.GUARD_WITHHELD)).toBe(false);
+  });
+
+  test('the two that always reset still do, and a park never does', () => {
+    expect(resetsBreaker(DISPOSITION.MERGED)).toBe(true);
+    expect(resetsBreaker(DISPOSITION.NO_CHANGE)).toBe(true);
+    expect(resetsBreaker(DISPOSITION.PARKED, { ciGreen: true })).toBe(false);
+    expect(countsTowardBreaker(DISPOSITION.GUARD_WITHHELD)).toBe(false);
+  });
+});
+
+describe('a merge that main never received stops the run', () => {
+  // After a merged or queued iteration, the teardown's `git pull --ff-only` is
+  // the ONLY thing that advances main — and its result was returned to three
+  // callers that all discarded it. Silently, every later bead of an `--until 8`
+  // would branch from a base missing what just landed.
+  test('landed plus a failed pull is stale', () => {
+    expect(landedOnStaleMain(DISPOSITION.MERGED, { pulled: false })).toBe(true);
+    expect(landedOnStaleMain(DISPOSITION.MERGE_QUEUED, { pulled: false })).toBe(true);
+  });
+
+  test('but a failed pull before anything landed is not', () => {
+    // The other direction, and it matters: main is simply where it was, and
+    // halting there would end a run over a transient network blip.
+    expect(landedOnStaleMain(DISPOSITION.PARKED, { pulled: false })).toBe(false);
+    expect(landedOnStaleMain(DISPOSITION.GUARD_WITHHELD, { pulled: false })).toBe(false);
+    expect(landedOnStaleMain(DISPOSITION.MERGED, { pulled: true })).toBe(false);
+    expect(landedOnStaleMain(DISPOSITION.MERGED, undefined)).toBe(false);
+  });
+
+  test('restoreToMain reports whether the pull worked', () => {
+    const replies = {
+      'git pull --ff-only -q': { code: 1, stderr: 'Not possible to fast-forward' },
+    };
+    const run = async (file, args) => {
+      const line = [file, ...args].join(' ');
+      return { code: 0, stdout: '', stderr: '', ...(replies[line] ?? {}) };
+    };
+    return makeGit({ run, cwd: '/r' })
+      .restoreToMain()
+      .then((out) => {
+        // Reddens if `restoreToMain` goes back to returning the raw result:
+        // `.pulled` is what the driver branches on.
+        expect(out.pulled).toBe(false);
+        expect(out.detail).toContain('fast-forward');
+      });
+  });
+});
+
+describe('detectUsageLimit, rebuilt on the CLI’s own strings (Cebab-qd2.8)', () => {
+  // The bead said this could not be widened without inventing fixtures. It
+  // could: the wording is a literal in the shipped binary, and every string in
+  // BOTH tables below was extracted from it (2.1.212) rather than imagined —
+  //
+  //   strings -n 6 "$(readlink -f "$(which claude)")" \
+  //     | grep -oiE '.{0,70}(hit your [a-z0-9 -]{0,20}limit|usage limit|limit reached).{0,70}'
+  //
+  // which is also why the NEGATIVE table is the more valuable half. The obvious
+  // widening — match `limit reached` — matches `Context limit reached`, which
+  // happens on ordinary long turns and would halt an overnight run on its first
+  // iteration.
+
+  const STOPS = [
+    // `You've hit your ${O0t[type]}${" · resets X"}` — the whole vocabulary.
+    ["You've hit your session limit · resets 3:45pm", 'session'],
+    ["You've hit your weekly limit · resets Monday", 'weekly'],
+    ["You've hit your Opus limit · resets 9pm", 'model'],
+    ["You've hit your Sonnet limit", 'model'],
+    ["You've hit your Fable 5 limit", 'model'],
+    ["You've hit your usage credit limit · resets 3pm", 'credit'],
+    ["You've hit your usage limit · resets 3pm", 'usage'],
+    ["You've hit your org's monthly usage limit · resets 3pm", 'usage'],
+    ["You've hit your monthly spend limit.", 'spend'],
+    // The bare `S5e('limit', …)` fallback: no name, and so no separating space.
+    ["You've hit your limit · resets 3pm", 'model'],
+    // `hvg` — the "reached your" family, which the old matcher missed whole.
+    ["You've reached your Fable 5 limit.", 'model'],
+    // The error banner, `${Cap(O0t[type] || type)} reached` — also missed whole.
+    ['Weekly limit reached', 'weekly'],
+    ['Session limit reached', 'session'],
+    ['Usage limit reached', 'usage'],
+    ['Usage credit limit reached', 'credit'],
+    ['Opus limit reached', 'model'],
+  ];
+
+  const NOT_STOPS = [
+    // Other things in this CLI that end in "limit reached". Every one of these
+    // would halt a healthy run.
+    'Context limit reached · 128000',
+    'Subagent nesting limit reached (depth 3 of 5)',
+    'Subagent spawn limit reached (5 of 5 agents spawned)',
+    'Concurrency Limit reached',
+    'Concurrent export limit reached',
+    'recursion limit reached',
+    'JIT stack limit reached',
+    'size limit reached',
+    'Dropped 5 events because eventCountLimit reached',
+    // Fast mode DEGRADES to the normal model; it stops nothing. The old
+    // matcher hit this, so it was already a live false positive.
+    "You've hit your fast limit · resets in 3m",
+    'Fast limit reached and temporarily disabled · resets in 3m',
+    // Warnings. Still allowed, by the CLI's own `allowed_warning` status.
+    'Approaching usage limit · resets 3:45pm',
+    "You've used 95% of your usage limit · resets 3:45pm",
+    "You're close to your usage limit",
+    // Prose that merely mentions the concept.
+    'Server is temporarily limiting requests (not your usage limit)',
+    "Only send this if you're running into usage limits — your admins are notified",
+    'Resuming the full session will consume a substantial portion of your usage limits.',
+    '/upgrade to increase your usage limit.',
+    "Your group's usage limit is set to $0 · run /usage-credits",
+    '',
+    'ordinary output with no limits in it at all',
+  ];
+
+  test('every real stop is detected, with its kind', () => {
+    for (const [text, kind] of STOPS) {
+      const out = detectUsageLimit(text);
+      expect(out.hit, text).toBe(true);
+      expect(out.kind, text).toBe(kind);
+    }
+  });
+
+  test('and every real non-stop is left alone', () => {
+    // The direction that matters more. Reddens the moment the matcher is
+    // widened to bare `limit reached` or stops excluding `fast`.
+    for (const text of NOT_STOPS) {
+      expect(detectUsageLimit(text).hit, text).toBe(false);
+    }
+  });
+
+  test('a stop is found among ordinary output, per line', () => {
+    // Per-line is what makes the negative table work: a whole-blob scan cannot
+    // tell `Context limit reached` on line 2 from a real stop on line 4.
+    const blob = ['starting', 'Context limit reached · 128000', 'retrying', 'Weekly limit reached'];
+    expect(detectUsageLimit(blob.join('\n'))).toMatchObject({ hit: true, kind: 'weekly' });
+    expect(detectUsageLimit(blob.slice(0, 3).join('\n')).hit).toBe(false);
+  });
+
+  test('the reset time is taken verbatim and never parsed', () => {
+    expect(detectUsageLimit("You've hit your weekly limit · resets Monday").resetsAt).toBe(
+      'monday',
+    );
+    expect(detectUsageLimit("You've hit your fast limit").resetsAt).toBeUndefined();
+    expect(detectUsageLimit("You've hit your session limit").resetsAt).toBeNull();
+  });
+
+  test('the scan does not read the agent’s own prose', () => {
+    // A bead ABOUT rate limiting whose verdict quotes one of the phrases above
+    // would otherwise halt the run — and widening the matcher widens exactly
+    // that surface. The rule: a usage limit is a reason the run FAILED.
+    const quoted = JSON.stringify({
+      structured_output: { summary: "You've hit your weekly limit" },
+    });
+    const success = { code: 0, stdout: quoted, stderr: '' };
+    const envelope = JSON.parse(quoted);
+    expect(limitScanText(success, envelope)).not.toContain('weekly limit');
+    expect(detectUsageLimit(limitScanText(success, envelope)).hit).toBe(false);
+
+    // The other direction, three ways, each of which must still read stdout:
+    // the CLI writes its own refusals there, not to stderr.
+    expect(limitScanText({ ...success, code: 1 }, envelope)).toContain('weekly limit');
+    expect(limitScanText(success, null)).toContain('weekly limit');
+    expect(limitScanText(success, { ...envelope, is_error: true })).toContain('weekly limit');
+    // And stderr is always read, success or not.
+    expect(limitScanText({ code: 0, stdout: '', stderr: 'boom' }, envelope)).toContain('boom');
+  });
+
+  test('end to end: a successful build quoting a limit is not a limit', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const nodePath = await import('node:path');
+    const url = await import('node:url');
+    const libDir = nodePath.join(
+      nodePath.dirname(url.fileURLToPath(import.meta.url)),
+      'lib',
+      'loop',
+    );
+    const loopDir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'looplimit-'));
+    const verdict = {
+      outcome: 'implemented',
+      summary: "the banner said You've hit your weekly limit, so we now show it",
+      commit_type: 'fix',
+      commit_subject: 's',
+      follow_ups: [],
+    };
+    const envelope = JSON.stringify({ session_id: 'a', num_turns: 3, structured_output: verdict });
+
+    const green = makeBuild({
+      run: async () => ({ code: 0, stdout: envelope, stderr: '', ms: 1, timedOut: false }),
+      cwd: '/repo',
+      config: DEFAULTS,
+      libDir,
+      loopDir,
+    });
+    const ok = await green.run({ bead: { id: 'X', title: 't' }, attempt: 1, maxRepairs: 2 });
+    expect(ok.usageLimit).toBeUndefined();
+    expect(ok.ok).toBe(true);
+
+    // Same text, failed run: now it IS the diagnosis.
+    const red = makeBuild({
+      run: async () => ({ code: 1, stdout: envelope, stderr: '', ms: 1, timedOut: false }),
+      cwd: '/repo',
+      config: DEFAULTS,
+      libDir,
+      loopDir,
+    });
+    const stopped = await red.run({ bead: { id: 'X', title: 't' }, attempt: 1, maxRepairs: 2 });
+    expect(stopped.usageLimit).toMatchObject({ hit: true, kind: 'weekly' });
+    fs.rmSync(loopDir, { recursive: true, force: true });
+  });
+});
+
+describe('the prompt can address a turn cap without lying about a gate', () => {
+  const template = [
+    'body',
+    '{{#if repair}}failed the gate at {{failed_step}}{{/if}}',
+    '{{#if capped}}resumed after {{max_turns}} turns{{/if}}',
+  ].join('\n');
+
+  test('two independent blocks, each resolved on its own', () => {
+    // Reddens if renderPrompt goes back to handling only `{{#if repair}}`: the
+    // second block's markers would survive into the prompt verbatim.
+    const capped = renderPrompt(template, { capped: true, max_turns: 60 });
+    expect(capped).toContain('resumed after 60 turns');
+    expect(capped).not.toContain('failed the gate');
+    expect(capped).not.toContain('{{');
+
+    const repair = renderPrompt(template, { repair: true, failed_step: 'lint' });
+    expect(repair).toContain('failed the gate at lint');
+    expect(repair).not.toContain('resumed after');
+
+    const neither = renderPrompt(template, {});
+    expect(neither.trim()).toBe('body');
+  });
+
+  test('the real template says the opposite thing in each case', () => {
+    const capped = renderPrompt(REAL_PROMPT, { capped: true, max_turns: 60, attempt: 2, max: 2 });
+    expect(capped).toContain('Continue from where you stopped');
+    expect(capped).not.toContain('failed the gate');
+    const repair = renderPrompt(REAL_PROMPT, { repair: true, failed_step: 'lint', attempt: 2 });
+    expect(repair).toContain('failed the gate');
+    expect(repair).not.toContain('Continue from where you stopped');
+  });
+});
+
+describe('four terminal states reach the bead, not two (Cebab-qd2.10)', () => {
+  // `guard_withheld` is the DEFAULT terminal disposition — `loop.merge` is
+  // false — and it wrote nothing to the bead at all. After an `--until 8` night
+  // that is eight claimed beads with open PRs and nothing on the bead side
+  // connecting them; `bd show <id>` said nothing.
+
+  const recordingBeads = (over = {}) => {
+    const calls = [];
+    const beads = {
+      close: async (id, reason) => (calls.push(['close', id, reason]), true),
+      park: async (id, evidence) => (calls.push(['park', id, evidence]), true),
+      note: async (id, text) => (calls.push(['note', id, text]), true),
+      fileFollowUp: async () => 'Cebab-new',
+      ...over,
+    };
+    return { calls, beads };
+  };
+  const partsWith = (over = {}) => ({
+    harvest: { beadClosed: false, followUps: [] },
+    pr: { number: 9, url: 'https://example.invalid/pr/9' },
+    ...over,
+  });
+  const run = async ({ beads, parts, disposition, reason, logs = [] }) => {
+    await harvest({
+      beads,
+      bead: { id: 'Cebab-x1' },
+      parts,
+      disposition,
+      reason,
+      config: DEFAULTS,
+      log: (m) => logs.push(m),
+    });
+    return logs;
+  };
+
+  test('a withheld iteration notes the PR and does NOT close the bead', async () => {
+    const { calls, beads } = recordingBeads();
+    const parts = partsWith();
+    await run({
+      beads,
+      parts,
+      disposition: DISPOSITION.GUARD_WITHHELD,
+      reason: REASON.MERGE_DISABLED,
+    });
+    const note = calls.find((c) => c[0] === 'note');
+    expect(note).toBeTruthy();
+    expect(note[2]).toContain('https://example.invalid/pr/9');
+    expect(note[2]).toContain('merging is disabled');
+    // Reddens if withheld ever starts closing: the PR is not merged.
+    expect(calls.some((c) => c[0] === 'close')).toBe(false);
+    expect(parts.harvest.noted).toBe(true);
+  });
+
+  test('and says WHICH kind of withholding it was', () => {
+    // The two have different remedies — pass --merge, versus read the guard
+    // breaches — so a single sentence covering both would be useless.
+    const { calls, beads } = recordingBeads();
+    return run({
+      beads,
+      parts: partsWith(),
+      disposition: DISPOSITION.GUARD_WITHHELD,
+      reason: REASON.GUARD_BREACH,
+    }).then(() => {
+      expect(calls.find((c) => c[0] === 'note')[2]).toContain('guard flagged');
+    });
+  });
+
+  test('a queued merge notes it and does NOT close the bead', async () => {
+    const { calls, beads } = recordingBeads();
+    await run({
+      beads,
+      parts: partsWith(),
+      disposition: DISPOSITION.MERGE_QUEUED,
+      reason: REASON.MERGE_QUEUED,
+    });
+    expect(calls.find((c) => c[0] === 'note')[2]).toContain('nothing has merged yet');
+    // THE Cebab-qd2.12 CONSEQUENCE. Reddens if merge_queued starts closing.
+    expect(calls.some((c) => c[0] === 'close')).toBe(false);
+  });
+
+  test('a real merge still closes it, with the PR as the reason', async () => {
+    const { calls, beads } = recordingBeads();
+    await run({ beads, parts: partsWith(), disposition: DISPOSITION.MERGED });
+    expect(calls).toContainEqual(['close', 'Cebab-x1', 'https://example.invalid/pr/9']);
+    expect(calls.some((c) => c[0] === 'note')).toBe(false);
+  });
+
+  test('a park that did not land is recorded and said out loud', async () => {
+    // `loop-stuck` is the loop's ONLY cross-run memory. Without it the same
+    // failing bead is selected again tomorrow night. The result was returned
+    // to a caller that dropped it, so the whole mechanism could be dead.
+    const { beads } = recordingBeads({ park: async () => false });
+    const parts = partsWith();
+    const logs = await run({
+      beads,
+      parts,
+      disposition: DISPOSITION.PARKED,
+      reason: REASON.CI_RED,
+    });
+    expect(parts.harvest.parkFailed).toBe(true);
+    expect(logs.join('\n')).toContain('loop-stuck');
+  });
+
+  test('and a park that worked records nothing', () => {
+    // The other direction: `parkFailed` must be absent, not `false`, or the
+    // triage query `jq 'select(.harvest.parkFailed)'` matches every row.
+    const { beads } = recordingBeads();
+    const parts = partsWith();
+    return run({ beads, parts, disposition: DISPOSITION.PARKED, reason: REASON.CI_RED }).then(
+      () => {
+        expect(parts.harvest.parkFailed).toBeUndefined();
+        expect(buildRecord(parts, 0).harvest.parkFailed).toBeUndefined();
+      },
+    );
+  });
+
+  test('a close that failed after a real merge is said out loud too', async () => {
+    const { beads } = recordingBeads({ close: async () => false });
+    const logs = await run({ beads, parts: partsWith(), disposition: DISPOSITION.MERGED });
+    expect(logs.join('\n')).toContain('the change IS merged');
+  });
+});
+
+describe('bd writes: the note verb, and a park that retries', () => {
+  test('noteArgv appends, and never labels', () => {
+    // Deliberately NOT --add-label loop-stuck: that label excludes the bead
+    // from every future selection, which is right for something a human must
+    // debug and wrong for something a human must merely merge.
+    expect(noteArgv('Cebab-x1', 'hello')).toEqual([
+      'update',
+      'Cebab-x1',
+      '--append-notes',
+      'hello',
+    ]);
+    expect(noteArgv('Cebab-x1', 'hello')).not.toContain('loop-stuck');
+  });
+
+  test('a park retries once and reports the outcome', async () => {
+    const codes = [1, 0];
+    let calls = 0;
+    const beads = makeBeads({
+      run: async () => ((calls += 1), { code: codes.shift() ?? 0, stdout: '', stderr: '' }),
+      bd: 'bd',
+      cwd: '/r',
+    });
+    expect(await beads.park('Cebab-x1', 'evidence')).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  test('and reports false when both attempts fail', async () => {
+    // The other direction — a retry that always returns true would satisfy the
+    // case above and hide every real failure.
+    let calls = 0;
+    const beads = makeBeads({
+      run: async () => ((calls += 1), { code: 1, stdout: '', stderr: 'locked' }),
+      bd: 'bd',
+      cwd: '/r',
+    });
+    expect(await beads.park('Cebab-x1', 'evidence')).toBe(false);
+    expect(calls).toBe(2);
+  });
+
+  test('--dry-run still writes nothing', async () => {
+    const calls = [];
+    const beads = makeBeads({
+      run: async (f, a) => (calls.push([f, ...a].join(' ')), { code: 0, stdout: '', stderr: '' }),
+      bd: 'bd',
+      cwd: '/r',
+      dryRun: true,
+    });
+    await beads.note('Cebab-x1', 'hello');
+    await beads.park('Cebab-x1', 'evidence');
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('the ledger can tell a merge from a prediction', () => {
+  test('land carries queued, state and a real sha', () => {
+    const record = buildRecord(
+      { land: { merged: true, queued: false, sha: 'abc', state: 'MERGED' } },
+      0,
+    );
+    expect(record.land).toEqual({ merged: true, queued: false, sha: 'abc', state: 'MERGED' });
+  });
+
+  test('and defaults them, because a crashed iteration still writes a row', () => {
+    expect(buildRecord({}, 0).land).toEqual({
+      merged: false,
+      queued: false,
+      sha: null,
+      state: null,
+    });
+  });
+
+  test('merge_queued is a disposition the record accepts', () => {
+    const record = buildRecord({ disposition: 'merge_queued' }, 0);
+    expect(validateRecord(record).valid).toBe(true);
+  });
+
+  test('but a row may not claim both merged and queued', () => {
+    const record = buildRecord({ land: { merged: true, queued: true } }, 0);
+    expect(validateRecord(record).valid).toBe(false);
+    expect(validateRecord(record).errors).toContain('land');
+  });
+
+  test('restore rides along only once teardown produced one', () => {
+    expect(buildRecord({}, 0).restore).toBeUndefined();
+    expect(buildRecord({ restore: { pulled: false, detail: 'x' } }, 0).restore).toEqual({
+      pulled: false,
+      detail: 'x',
+    });
+  });
+});
+
+describe('config values the code does not implement are refused (Cebab-qd2.9)', () => {
+  // Two keys were defined here and read by nothing, so an operator could set
+  // `onWeeklyLimit: 'wait'`, have it VALIDATED, and have it silently ignored —
+  // strictly worse than a typo, which at least exits 2 with the key's name.
+  test('an unimplemented limit policy is named and refused', () => {
+    expect(() => resolveConfig({ file: { limits: { onWeeklyLimit: 'wait' } } })).toThrow(
+      ConfigError,
+    );
+    try {
+      resolveConfig({ file: { limits: { onSessionLimit: 'wait' } } });
+      throw new Error('should have thrown');
+    } catch (error) {
+      expect(error.message).toContain('limits.onSessionLimit');
+      expect(error.message).toContain('halt');
+    }
+  });
+
+  test('an unrecognised playgroundTier is refused rather than defaulting to auto', () => {
+    // The sharper version: `playgroundTriggered` treats any unknown value as
+    // `auto`, so `"nver"` did not disable the tier — it enabled the default
+    // one, the exact opposite of what was asked for.
+    expect(() => resolveConfig({ file: { gate: { playgroundTier: 'nver' } } })).toThrow(
+      ConfigError,
+    );
+  });
+
+  test('and every implemented value still resolves', () => {
+    // The other direction, or the check could pass by refusing everything.
+    expect(resolveConfig({}).limits.onSessionLimit).toBe('halt');
+    for (const tier of ['auto', 'always', 'never']) {
+      expect(resolveConfig({ file: { gate: { playgroundTier: tier } } }).gate.playgroundTier).toBe(
+        tier,
+      );
+    }
   });
 });

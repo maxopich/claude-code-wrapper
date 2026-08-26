@@ -41,6 +41,7 @@ import {
   REASON,
   STAGE,
   countsTowardBreaker,
+  landedOnStaleMain,
   next,
   resetsBreaker,
 } from './lib/loop/machine.mjs';
@@ -168,6 +169,27 @@ async function preflight({ run, config, git, dryRun }) {
   const branch = await git.currentBranch();
   if (branch !== 'main') fail(`on branch '${branch}'; the loop starts from main.`);
 
+  // CLEAN AND ON MAIN IS NOT THE SAME AS CURRENT, and both directions bite.
+  // A main that is BEHIND means every bead is built, gated and merged against
+  // stale code. A main that is AHEAD — unpushed local work, which is the normal
+  // state of a checkout someone has been developing in — is worse: `newBranch`
+  // branches from it, so that unpushed work is carried into the bead's branch
+  // and pushed into the bead's PR.
+  //
+  // Checked here rather than left to the per-iteration restore, because the
+  // restore's pull runs at the END of an iteration: the first bead of every run
+  // would already have been built on whatever was lying around.
+  if (!dryRun) {
+    await git.fetchMain();
+    const synced = await git.restoreToMain();
+    if (!synced.pulled) {
+      fail(
+        `local main is not current with origin and cannot fast-forward — ${synced.detail}. ` +
+          `Push or reset it first; the loop branches every bead from main.`,
+      );
+    }
+  }
+
   if (!dryRun) {
     const auth = await run('gh', ['auth', 'status']);
     if (auth.code !== 0) fail('`gh auth status` failed — the forge is unreachable.');
@@ -202,6 +224,10 @@ async function runIteration({ ctx, deps, log }) {
   let sessionId = null;
   let drained = false;
   let repairContext = null;
+  let treeChanged = null;
+  // Assigned in the `finally`, which every path reaches — an initializer here
+  // is dead, and eslint's no-useless-assignment says so.
+  let staleMain;
 
   const halted = () => fs.existsSync(HALT_FILE);
 
@@ -266,8 +292,21 @@ async function runIteration({ ctx, deps, log }) {
             failedStep: repairContext?.failedStep,
             failureOutput: repairContext?.output,
             resumeSessionId: sessionId,
+            capped: repairContext?.capped === true,
           });
           if (built.usageLimit) {
+            // A limited attempt still SPENT. Breaking out before accounting for
+            // it let `costCeilingUsd` under-report exactly the case the
+            // operator most wants a number for.
+            sessionId = built.sessionId ?? sessionId;
+            ctx.spentUsd += built.costUsd ?? 0;
+            parts.build = {
+              sessionId,
+              numTurns: built.numTurns ?? null,
+              costUsd: built.costUsd ?? null,
+              exitCode: built.exitCode ?? null,
+              attempts: attempt,
+            };
             result = { usageLimit: true, haltReason: REASON.USAGE_LIMIT };
             parts.haltReason = REASON.USAGE_LIMIT;
             log(
@@ -302,6 +341,13 @@ async function runIteration({ ctx, deps, log }) {
               `build: FAILED (${built.failure ?? 'unknown'}) ${(built.detail ?? '').split('\n')[0]}`,
             );
           }
+          // DID THE CAPPED AGENT ACTUALLY DO ANYTHING? This is the whole input
+          // to the resume decision (`cappedBuild` in machine.mjs), and the
+          // branch is fresh from main, so any dirt in the tree is this agent's
+          // work. A capped agent that edited nothing was spinning — the one cap
+          // ever observed was four identical `npm run typecheck` calls — and
+          // resuming it buys a second full turn budget for the same wedge.
+          treeChanged = built.failure === 'max_turns' ? !(await git.isClean()) : null;
           result = built;
           break;
         }
@@ -386,9 +432,21 @@ async function runIteration({ ctx, deps, log }) {
           break;
 
         case STAGE.LAND: {
-          const merged = await forge.merge(prNumber);
-          parts.land = { merged: merged.merged, sha: merged.sha };
-          log(merged.merged ? 'land: merged' : `land: FAILED ${merged.error ?? ''}`);
+          // `headSha` is the commit WATCH actually watched go green, and the
+          // forge is told to refuse anything else — see `prMergeArgv`. `queued`
+          // and `state` are carried through rather than dropped: a queued
+          // auto-merge used to arrive here as `merged: true` and close the bead
+          // on a prediction.
+          const merged = await forge.merge(prNumber, { headSha: parts.headSha });
+          parts.land = {
+            merged: merged.merged,
+            queued: Boolean(merged.queued),
+            sha: merged.sha,
+            state: merged.state ?? null,
+          };
+          if (merged.merged) log(`land: merged ${merged.sha ?? ''}`.trim());
+          else if (merged.queued) log(`land: QUEUED — auto-merge is on, nothing has merged yet`);
+          else log(`land: FAILED ${merged.error ?? ''}`);
           result = merged;
           break;
         }
@@ -409,8 +467,13 @@ async function runIteration({ ctx, deps, log }) {
         attempt,
         maxRepairs: config.loop.maxRepairs,
         guardPassed: guardResult.passed,
+        treeChanged,
       });
       if (step.repair) attempt += 1;
+      // A resumed turn cap carries no failing step; it must not inherit the
+      // previous GATE failure's brief, and it must not be told "a previous
+      // attempt failed the gate" when none did.
+      if (step.capped) repairContext = { capped: true };
       if (step.disposition) disposition = step.disposition;
       if (step.reason) reason = step.reason;
       if (step.stage === STAGE.DONE) break;
@@ -439,14 +502,7 @@ async function runIteration({ ctx, deps, log }) {
   } finally {
     parts.disposition = disposition;
     if (reason) parts.reason = reason;
-    if (bead) {
-      const record = buildRecord(parts, Date.now());
-      appendRecord(record, { appendLine: (line) => fs.appendFileSync(LEDGER_FILE, line) });
-      if (deps.emitJson) process.stdout.write(`${JSON.stringify(record)}\n`);
-    }
-    // The ledger goes first because it is the evidence: a git failure below
-    // must not be able to swallow the record of what just happened.
-    //
+
     // Restoring per ITERATION, not only at teardown, is what stops the next
     // bead branching off this one — `newBranch` branches from whatever is
     // checked out, so bead 2's PR carried bead 1's commits and its diff
@@ -454,15 +510,39 @@ async function runIteration({ ctx, deps, log }) {
     // `reset --hard` leaves untracked files behind and a file the agent
     // created otherwise survived onto main and made the next run's preflight
     // refuse to start.
+    //
+    // THIS RUNS BEFORE THE LEDGER APPEND, and it is wrapped so it cannot throw
+    // past this point. The append is the evidence and a git failure must never
+    // swallow it — the reason the two used to be in the other order. But the
+    // restore's PULL is itself evidence: after a merged or queued iteration it
+    // is the only thing that advances `main`, so `pulled: false` is the fact
+    // that says every later bead of an `--until 8` would have branched from a
+    // base missing what just landed. A record written before it could not carry
+    // that, which is how a discarded return value stayed invisible.
     try {
-      await git.restoreToMain();
+      const restored = await git.restoreToMain();
+      parts.restore = restored;
+      if (!restored.pulled) {
+        log(`iteration teardown: git pull --ff-only failed — ${restored.detail}`);
+      }
       if (bead && !dryRun) await git.deleteBranch(bead.id);
     } catch (error) {
+      parts.restore = { pulled: false, detail: String(error?.message ?? error).slice(0, 200) };
       log(`iteration teardown: could not return to main — ${error?.message ?? error}`);
+    }
+
+    // Only after something LANDED does a failed pull mean the next bead would
+    // build on the wrong base. Before that, main is simply where it was.
+    staleMain = landedOnStaleMain(disposition, parts.restore);
+
+    if (bead) {
+      const record = buildRecord(parts, Date.now());
+      appendRecord(record, { appendLine: (line) => fs.appendFileSync(LEDGER_FILE, line) });
+      if (deps.emitJson) process.stdout.write(`${JSON.stringify(record)}\n`);
     }
   }
 
-  return { bead, disposition, drained };
+  return { bead, disposition, drained, staleMain, ciGreen: parts.ci?.conclusion === 'success' };
 }
 
 // ─── stage helpers ─────────────────────────────────────────────────────────
@@ -500,14 +580,68 @@ async function watchCi({ forge, config, sha, parts, log, halted }) {
       );
       return { outcome: 'absent' };
     }
-    if (waited > config.ci.completeTimeoutMs) return { outcome: 'absent' };
+    // NOT `absent`. A check that appeared and is still running has plainly
+    // started, and reporting it as `ci_never_started` sent the morning triage
+    // to look at the runner when the answer was `completeTimeoutMs`.
+    if (waited > config.ci.completeTimeoutMs) {
+      log(`watch: still pending after ${Math.round(waited / 1000)}s — giving up on this run`);
+      return { outcome: 'timeout' };
+    }
     await sleep(config.ci.pollIntervalMs);
   }
 }
 
+/**
+ * FOUR TERMINAL STATES REACH A BEAD, NOT TWO.
+ *
+ * `merged` and `no_change_needed` close it. `parked` labels it. The other two
+ * used to do NOTHING AT ALL, and one of them is the DEFAULT: `loop.merge` is
+ * false, so `guard_withheld` is how an ordinary successful iteration ends. The
+ * bead was left claimed with an open, green PR and nothing on the bead side
+ * connecting the two — discoverable only from the PR inward, which after an
+ * `--until 8` night is eight beads to correlate by hand.
+ *
+ * `merge_queued` is the same shape arriving from the opposite direction: the
+ * merge is real but has not happened, so closing the bead would be closing it
+ * on a prediction.
+ *
+ * BEAD WRITES ARE CHECKED NOW. `park` and `close` have always returned a
+ * boolean and every caller dropped it. A failed park is the expensive one:
+ * `loop-stuck` is the loop's ONLY cross-run memory, so without it the same
+ * failing bead is selected again tomorrow night and fails again.
+ */
 async function harvest({ beads, bead, parts, disposition, reason, config, log }) {
+  const noteFor = (headline) =>
+    [
+      headline,
+      parts.pr?.url ? `PR: ${parts.pr.url}` : '',
+      parts.ci?.runUrl ? `CI: ${parts.ci.runUrl}` : '',
+      `Left claimed deliberately — the loop has no remaining work on this one.`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
   if (disposition === DISPOSITION.MERGED) {
     parts.harvest.beadClosed = await beads.close(bead.id, parts.pr?.url ?? 'merged by the loop');
+    if (!parts.harvest.beadClosed) {
+      log(`harvest: bd close FAILED for ${bead.id} — the change IS merged; close it by hand`);
+    }
+  } else if (disposition === DISPOSITION.MERGE_QUEUED) {
+    // Deliberately NOT closed. Auto-merge is enabled and the requirements are
+    // not met yet; if it never lands, a closed bead would be the only record.
+    parts.harvest.noted = await beads.note(
+      bead.id,
+      noteFor('Autonomous loop: auto-merge is ENABLED but nothing has merged yet.'),
+    );
+  } else if (disposition === DISPOSITION.GUARD_WITHHELD) {
+    const why =
+      reason === REASON.GUARD_BREACH
+        ? 'the guard flagged the diff, so merging is a human decision'
+        : 'merging is disabled for this run (--merge was not passed)';
+    parts.harvest.noted = await beads.note(
+      bead.id,
+      noteFor(`Autonomous loop: PR opened and CI green — ${why}.`),
+    );
   } else if (disposition === DISPOSITION.PARKED) {
     const evidence = [
       `Parked by the autonomous loop: ${reason ?? 'unknown'}.`,
@@ -517,7 +651,14 @@ async function harvest({ beads, bead, parts, disposition, reason, config, log })
     ]
       .filter(Boolean)
       .join('\n');
-    await beads.park(bead.id, evidence);
+    const parked = await beads.park(bead.id, evidence);
+    if (!parked) {
+      parts.harvest.parkFailed = true;
+      log(
+        `harvest: bd park FAILED for ${bead.id} — it has no loop-stuck label, so the next ` +
+          `run will select it again`,
+      );
+    }
   } else if (disposition === DISPOSITION.NO_CHANGE) {
     parts.harvest.beadClosed = await beads.close(
       bead.id,
@@ -709,12 +850,31 @@ async function main() {
       iterations += 1;
 
       if (outcome.disposition === DISPOSITION.PARKED) ctx.parked.add(outcome.bead.id);
-      if (resetsBreaker(outcome.disposition)) ctx.consecutiveParks = 0;
-      else if (countsTowardBreaker(outcome.disposition)) ctx.consecutiveParks += 1;
+      // `ciGreen` is what makes a WITHHELD iteration count as evidence. With
+      // `merge: false` — the default — every fully successful iteration ends
+      // withheld, and a breaker that neither counted nor reset those halted
+      // runs reporting "3 consecutive parks" for parks that were interleaved
+      // with three complete successes.
+      if (resetsBreaker(outcome.disposition, { ciGreen: outcome.ciGreen })) {
+        ctx.consecutiveParks = 0;
+      } else if (countsTowardBreaker(outcome.disposition)) ctx.consecutiveParks += 1;
       writeState(ctx, iterations);
 
       if (outcome.disposition === DISPOSITION.HALTED) {
         stopBecause = 'halted mid-iteration';
+        exitCode = EXIT.HALTED;
+        break;
+      }
+      // Something landed and `main` did not move. Every later bead would branch
+      // from a base that is missing it, so the run stops rather than compounding
+      // that seven more times.
+      if (outcome.staleMain) {
+        log(
+          `${REASON.STALE_MAIN}: ${outcome.bead.id} landed but git pull --ff-only failed, so ` +
+            `main does not contain it. Stopping rather than building the next bead on a ` +
+            `stale base.`,
+        );
+        stopBecause = REASON.STALE_MAIN;
         exitCode = EXIT.HALTED;
         break;
       }
