@@ -785,7 +785,7 @@ import {
 } from './lib/loop/gate.mjs';
 import { buildArgv, detectUsageLimit, renderPrompt, resolveTier } from './lib/loop/build.mjs';
 import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
-import { parseArgs } from './loop.mjs';
+import { harvest, parseArgs, watchCi } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 import { makeGit } from './lib/loop/git.mjs';
 import { stripComments } from './lib/strip_comments.mjs';
@@ -1478,6 +1478,276 @@ describe('the single-run lock (Cebab-qd2.5)', () => {
   });
 });
 
+// A real git repo in a temp dir, driven through the REAL `makeGit`.
+//
+// WHY REAL GIT. The defect these cases exist for WAS the diff expression
+// (`git diff main...HEAD` before anything is committed). A fake `run` would
+// have to fake `git diff` too, and a fake encoding the same wrong idea agrees
+// with it — see project_measure_history_before_designing_a_check.
+//
+// NO `sh -c` ANYWHERE. These run on windows-2022, which has no `sh` on PATH
+// for a bare spawn; file edits go through node:fs so the fixture means the
+// same thing on every runner.
+async function repoFixture() {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const made = [];
+
+  const mkRepo = async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'loopgit-'));
+    made.push(dir);
+    const run = makeRunner({ cwd: dir });
+    const git = makeGit({ run, cwd: dir });
+    const g = (...args) => run('git', args);
+
+    await g('init', '-q');
+    // Not `init -b main`: this is the portable spelling on every git version.
+    await g('symbolic-ref', 'HEAD', 'refs/heads/main');
+    await g('config', 'user.email', 'loop@test');
+    await g('config', 'user.name', 'loop');
+    await g('config', 'commit.gpgsign', 'false');
+
+    const write = (rel, body) => {
+      const full = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, body);
+    };
+    const append = (rel, body) => fs.appendFileSync(path.join(dir, rel), body);
+    const read = (rel) => fs.readFileSync(path.join(dir, rel), 'utf8');
+
+    write('.gitignore', '.loop/\n');
+    write('.github/workflows/ci.yml', 'on: push\n');
+    write('server/a.ts', 'base\n');
+    await g('add', '-A');
+    await g('commit', '-q', '-m', 'base');
+    return { dir, git, write, append, read };
+  };
+
+  const cleanup = async () => {
+    for (const d of made) fs.rmSync(d, { recursive: true, force: true });
+  };
+  return { mkRepo, cleanup };
+}
+
+describe('the stages that had never run (Cebab-qd2.7)', () => {
+  // Every defect below sat in a path the loop had literally never executed:
+  // `--dry-run` returns DONE at the GATE boundary by design, so PUBLISH,
+  // WATCH, LAND and HARVEST were unreached by four merged PRs and 118 green
+  // tests. These cases exist so that stops being true.
+
+  // ── D4/D3: the guard was measuring an empty diff ────────────────────────
+  //
+  // BUILD edits the working tree and commits nothing, and CLAIM's `newBranch`
+  // leaves HEAD equal to main — so `git diff main...HEAD` compared main to
+  // itself. The guard passed unconditionally with a `.github/**` edit sitting
+  // right there, and `--merge` gates LAND on exactly that verdict.
+  //
+  // Reddens if `--cached` or the `stageAll()` call is dropped from
+  // `changedPaths` / `diffForGuard`.
+  test('the guard sees uncommitted and untracked work, before any commit', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, append, write } = await mkRepo();
+      await git.newBranch('Cebab-t1');
+      append('.github/workflows/ci.yml', 'evil\n'); // a denied path, modified
+      write('server/brand_new.ts', 'fresh\n'); // CREATED — invisible until staged
+
+      const paths = await git.changedPaths();
+      expect(paths).toContain('.github/workflows/ci.yml');
+      expect(paths).toContain('server/brand_new.ts');
+
+      const guard = evaluateGuard(await git.diffForGuard(), DEFAULTS.guard);
+      expect(guard.passed).toBe(false);
+      expect(guard.breaches.map((b) => b.rule)).toContain('denyPaths');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // `diffForGuard` must stage for ITSELF. The case above calls `changedPaths`
+  // first, which stages as a side effect — so it stayed green when
+  // `diffForGuard`'s own `stageAll()` was reverted, and a revert-check said so
+  // ("STAYED GREEN — the test does not defend this"). The driver happens to
+  // call GATE before PUBLISH today, which is exactly the kind of ordering
+  // coupling that produced D1. Nothing else touches the index here.
+  test('diffForGuard stages on its own, with no prior changedPaths call', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, write } = await mkRepo();
+      await git.newBranch('Cebab-t1b');
+      write('server/only_created.ts', 'fresh\n'); // untracked: needs the index
+      const diff = await git.diffForGuard();
+      expect(diff.files.map((f) => f.path)).toContain('server/only_created.ts');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // The other direction. Without it the case above is satisfied by a
+  // `diffForGuard` that reports every file in the repo on every call.
+  test('a branch with no work reports no change and no breach', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git } = await mkRepo();
+      await git.newBranch('Cebab-t2');
+      expect(await git.changedPaths()).toEqual([]);
+      expect(evaluateGuard(await git.diffForGuard(), DEFAULTS.guard).passed).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // ── D5/D6: teardown left the tree dirty, so the next run refused ────────
+  //
+  // `git reset --hard` does NOT remove untracked files (measured), so a file
+  // the agent CREATED survived onto main and the next run's preflight refused
+  // with "working tree is dirty". Reddens if `clean` leaves `restoreToMain`.
+  test('restoreToMain removes created files and returns to main', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, append, write } = await mkRepo();
+      await git.newBranch('Cebab-t3');
+      append('server/a.ts', 'edit\n');
+      write('server/created_by_agent.ts', 'leftover\n');
+      expect(await git.isClean()).toBe(false);
+
+      await git.restoreToMain();
+
+      expect(await git.isClean()).toBe(true);
+      expect(await git.currentBranch()).toBe('main');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // `.loop/` holds the run lock and the ledger and is gitignored. If the clean
+  // took ignored paths with it the loop would delete its own lock mid-run and
+  // a second process could start. `clean -fd` without `-x` spares them.
+  test('restoreToMain spares gitignored paths', async () => {
+    const { mkRepo, cleanup } = await repoFixture();
+    try {
+      const { git, write, read } = await mkRepo();
+      write('.loop/run.lock', 'held');
+      await git.restoreToMain();
+      expect(read('.loop/run.lock')).toBe('held');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  // ── D2: WATCH called healthy CI "never started" ─────────────────────────
+  //
+  // The required check `needs:` the ubuntu+windows matrix, and GitHub creates
+  // no check run for a gated job until its dependencies finish. Measured on
+  // PR #402: workflow at 08:12:13Z, required check at 08:23:36Z — 11m23s
+  // against a five-minute timeout. Every real run parked `ci_never_started`,
+  // which is never repaired and counts toward the breaker.
+  test('classifyChecks reports whether anything is still pending', () => {
+    const required = 'Lint, Typecheck, Test';
+    // The real shape during the matrix: the required name is absent entirely.
+    const during = classifyChecks(
+      [
+        { name: 'Lint, Typecheck, Test (ubuntu-latest)', bucket: 'pending' },
+        { name: 'semgrep', bucket: 'pass' },
+      ],
+      required,
+    );
+    expect(during.found).toBe(false);
+    expect(during.anyPending).toBe(true);
+
+    // Everything settled and the required name never showed up: the real
+    // "never started", and the only case that should ever park.
+    const settled = classifyChecks([{ name: 'semgrep', bucket: 'pass' }], required);
+    expect(settled.found).toBe(false);
+    expect(settled.anyPending).toBe(false);
+
+    // No checks at all is also not-pending, so a dead CI still parks.
+    expect(classifyChecks([], required).anyPending).toBe(false);
+  });
+
+  const pollingForge = (responses) => {
+    let i = 0;
+    return { pollChecks: async () => responses[Math.min(i++, responses.length - 1)] };
+  };
+  const watchConfig = {
+    ci: {
+      requiredContext: 'Lint, Typecheck, Test',
+      pollIntervalMs: 1,
+      appearTimeoutMs: 0, // already expired: only `anyPending` can hold it back
+      completeTimeoutMs: 60000,
+    },
+  };
+
+  // Reddens if `!status.anyPending` is dropped from the absent condition —
+  // with the timeout already expired, the first poll would return 'absent'.
+  test('a pending sibling check is not "CI never started"', async () => {
+    const forge = pollingForge([
+      { outcome: 'pending', found: false, anyPending: true, total: 3 },
+      { outcome: 'pending', found: false, anyPending: true, total: 3 },
+      { outcome: 'green', found: true, anyPending: false, total: 4 },
+    ]);
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      prNumber: 1,
+      parts: {},
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('green');
+  });
+
+  // The other direction, and it matters as much: a run where CI genuinely
+  // never starts must still park rather than poll until completeTimeoutMs.
+  test('nothing pending and the required name absent IS "CI never started"', async () => {
+    const forge = pollingForge([{ outcome: 'pending', found: false, anyPending: false, total: 2 }]);
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      prNumber: 1,
+      parts: {},
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('absent');
+  });
+
+  // ── D1: HARVEST crashed on the first follow-up ──────────────────────────
+  //
+  // `parts` was built with `harvest: {}` two hundred lines from the `.push`,
+  // so filing a follow-up threw `Cannot read properties of undefined`.
+  // `follow_ups` is a required key of the verdict schema, so this fired on
+  // essentially every run that got this far. The bare `{}` below is the
+  // point: it reddens if the `??=` is removed, independently of whatever
+  // initializer the driver happens to use today.
+  test('harvest files follow-ups even when parts.harvest arrives bare', async () => {
+    const filed = [];
+    const parts = {
+      harvest: {},
+      verdict: { follow_ups: [{ title: 'a thing noticed', type: 'task' }] },
+    };
+    await harvest({
+      beads: {
+        close: async () => true,
+        park: async () => true,
+        fileFollowUp: async (f) => {
+          filed.push(f.title);
+          return 'Cebab-new1';
+        },
+      },
+      bead: { id: 'Cebab-src' },
+      parts,
+      disposition: 'guard_withheld',
+      reason: null,
+      config: DEFAULTS,
+      log: () => {},
+    });
+    expect(filed).toEqual(['a thing noticed']);
+    expect(parts.harvest.followUps).toEqual(['Cebab-new1']);
+  });
+});
+
 describe('the circuit breaker is per-run (Cebab-qd2.6)', () => {
   // A fresh, fully successful dry-run halted on its FIRST iteration with
   // "3 consecutive parks — " and an empty bead list. `consecutiveParks` was
@@ -1525,6 +1795,56 @@ describe('the circuit breaker is per-run (Cebab-qd2.6)', () => {
     // And a source without the field at all is reported as not-found, rather
     // than silently passing as "not seeded".
     expect(seedsBreakerFromDisk('const ctx = {};').found).toBe(false);
+  });
+
+  // ── D6: iterations stacked branches on each other ──────────────────────
+  //
+  // `git.toMain()` was called only from `teardown`, which runs ONCE in the
+  // outer finally, while `git.newBranch` runs per iteration from whatever is
+  // checked out. So bead 2 branched off `loop/<bead1>` and its PR carried bead
+  // 1's commits — and `loop:night` runs `--until 8`, so the intended overnight
+  // use produced eight cumulative, contaminated PRs.
+  //
+  // A source scan for the same reason as the breaker above: the call lives in
+  // `runIteration`'s `finally`, which takes no injectable seam. Both
+  // directions are exercised so it cannot pass vacuously.
+
+  /** Does `runIteration` put the checkout back before the next bead? */
+  const restoresEachIteration = (source) => {
+    const code = stripComments(source);
+    const start = code.indexOf('async function runIteration');
+    if (start === -1) return { found: false, restores: false };
+    const end = code.indexOf('async function watchCi', start);
+    const body = code.slice(start, end === -1 ? code.length : end);
+    return { found: true, restores: body.includes('restoreToMain(') };
+  };
+
+  test('runIteration returns the checkout to main before the next bead', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const source = fs.readFileSync(path.join(here, 'loop.mjs'), 'utf8');
+
+    const verdict = restoresEachIteration(source);
+    expect(verdict.found, 'runIteration located in loop.mjs').toBe(true);
+    expect(verdict.restores, 'each iteration must restore, not just teardown').toBe(true);
+  });
+
+  test('and that scan detects the reverted form', () => {
+    const reverted =
+      'async function runIteration() {\n  try {} finally { appendRecord(r); }\n}\n' +
+      'async function watchCi() { await git.restoreToMain(); }';
+    // The restore exists in the FILE but outside runIteration — which is
+    // exactly the bug, so a naive whole-file search would have missed it.
+    expect(restoresEachIteration(reverted)).toEqual({ found: true, restores: false });
+
+    const fixed =
+      'async function runIteration() {\n  try {} finally { await git.restoreToMain(); }\n}\n' +
+      'async function watchCi() {}';
+    expect(restoresEachIteration(fixed)).toEqual({ found: true, restores: true });
+
+    expect(restoresEachIteration('const x = 1;').found).toBe(false);
   });
 
   test('cross-run memory lives in the loop-stuck label, not the counter', () => {

@@ -14,6 +14,23 @@
  * NEVER `--no-verify`. The husky pre-commit hook is lint-staged plus
  * `gitleaks protect --staged`, which is a free extra gate on every commit the
  * loop makes; skipping it is also on the guard's `forbidInDiff` list.
+ *
+ * MEASURE THE INDEX, NOT `main...HEAD`. BUILD edits the working tree and
+ * commits nothing, and CLAIM's `newBranch` leaves HEAD equal to main — so
+ * `git diff main...HEAD` at GATE or PUBLISH compares main to itself and
+ * returns EMPTY. Measured with the real helpers against a repo holding an
+ * uncommitted `.github/workflows/ci.yml` edit: `changedPaths()` was `[]` and
+ * `evaluateGuard` passed with zero breaches. That is not a cosmetic bug — the
+ * guard is the only thing deciding whether the loop may merge unattended, and
+ * it was measuring nothing. Every pre-commit reader therefore stages first and
+ * diffs the INDEX against the merge base, which is also correct AFTER a commit
+ * (the index equals HEAD then), so there is one code path rather than two.
+ *
+ * `reset --hard` DOES NOT REMOVE UNTRACKED FILES. Measured. A file the agent
+ * CREATES therefore survived teardown onto `main` and the next run's preflight
+ * refused with "working tree is dirty". `restoreToMain` cleans as well as
+ * resets; `clean -fd` spares gitignored paths, which is what keeps `.loop/`
+ * (the lock and the ledger) and `.env` intact.
  */
 import { parseDiffLines, parseDiffStat } from './guard.mjs';
 
@@ -53,6 +70,45 @@ export function makeGit({ run, cwd, dryRun = false }) {
       await restore(['checkout', '-q', 'main']);
       return restore(['pull', '--ff-only', '-q']);
     },
+    /**
+     * Put the checkout back exactly as preflight demands to find it: on main,
+     * current, with nothing left over. Called at the END OF EVERY ITERATION,
+     * not just at teardown — `newBranch` branches from whatever is checked
+     * out, so without this the second bead branched off the first bead's
+     * branch and its PR carried the first bead's commits.
+     *
+     * Order is load-bearing: discard tracked edits, remove the untracked files
+     * `reset` leaves behind, and only then checkout — `git checkout main` with
+     * uncommitted changes either refuses or carries them across.
+     */
+    async restoreToMain() {
+      await restore(['reset', '--hard', '-q']);
+      await restore(['clean', '-fdq']);
+      await restore(['checkout', '-q', 'main']);
+      return restore(['pull', '--ff-only', '-q']);
+    },
+    /**
+     * The commit this branch diverged from. Everything measured before the
+     * commit is measured against THIS, never against `main` directly, so a
+     * main that moved while the bead was being built cannot show up as a
+     * reversal inside the bead's own diff.
+     */
+    async base() {
+      const r = await git(['merge-base', 'main', 'HEAD']);
+      return r.stdout.trim() || 'main';
+    },
+    /**
+     * Stage the agent's work so the pre-commit readers can see it, INCLUDING
+     * files it created — those are invisible to `git diff` at any revision
+     * until they are in the index.
+     *
+     * Deliberately not `write`: staging is local and the teardown discards it,
+     * and a `--dry-run` has to measure the guard and the Playground trigger
+     * too, which is the entire point of a dry run.
+     */
+    async stageAll() {
+      return git(['add', '-A']);
+    },
     async resetHard() {
       return restore(['reset', '--hard', '-q']);
     },
@@ -88,11 +144,18 @@ export function makeGit({ run, cwd, dryRun = false }) {
         deletions: files.reduce((s, f) => s + f.deletions, 0),
       };
     },
-    /** Everything the guard needs, from the branch's whole diff against main. */
+    /**
+     * Everything the guard needs, from the branch's whole change against its
+     * base. Stages first: an unstaged edit and a newly created file are both
+     * invisible to a revision-to-revision diff, and this runs BEFORE the
+     * commit.
+     */
     async diffForGuard() {
-      const numstat = await git(['diff', '--numstat', 'main...HEAD']);
-      const nameStatus = await git(['diff', '--name-status', 'main...HEAD']);
-      const full = await git(['diff', 'main...HEAD']);
+      await api.stageAll();
+      const base = await api.base();
+      const numstat = await git(['diff', '--cached', '--numstat', base]);
+      const nameStatus = await git(['diff', '--cached', '--name-status', base]);
+      const full = await git(['diff', '--cached', base]);
       return {
         files: parseDiffStat(numstat.stdout, nameStatus.stdout),
         ...parseDiffLines(full.stdout),
@@ -100,7 +163,9 @@ export function makeGit({ run, cwd, dryRun = false }) {
     },
     /** Paths only — used to decide whether the Playground tier is triggered. */
     async changedPaths() {
-      const r = await git(['diff', '--name-only', 'main...HEAD']);
+      await api.stageAll();
+      const base = await api.base();
+      const r = await git(['diff', '--cached', '--name-only', base]);
       return r.stdout
         .split('\n')
         .map((l) => l.trim())
@@ -108,11 +173,13 @@ export function makeGit({ run, cwd, dryRun = false }) {
     },
     /** R4: CI runs this exact check, so failing it here saves a round trip. */
     async lockfileChanged() {
+      const base = await api.base();
       const r = await git([
         'diff',
+        '--cached',
         '--exit-code',
         '--quiet',
-        'main...HEAD',
+        base,
         '--',
         'package-lock.json',
       ]);

@@ -156,7 +156,11 @@ async function preflight({ run, config, git, dryRun }) {
 
 async function runIteration({ ctx, deps, log }) {
   const { config, beads, git, forge, gate, build, dryRun } = deps;
-  const parts = { build: {}, gate: {}, guard: {}, harvest: {} };
+  // `harvest.followUps` is an ARRAY on purpose: HARVEST pushes into it, and
+  // an absent one threw `Cannot read properties of undefined (reading 'push')`
+  // on the first follow-up any verdict carried — which is most of them,
+  // `follow_ups` being a required key of the schema.
+  const parts = { build: {}, gate: {}, guard: {}, harvest: { beadClosed: false, followUps: [] } };
   let stage = STAGE.SELECT;
   let bead = null;
   let attempt = 1;
@@ -361,6 +365,22 @@ async function runIteration({ ctx, deps, log }) {
       appendRecord(record, { appendLine: (line) => fs.appendFileSync(LEDGER_FILE, line) });
       if (deps.emitJson) process.stdout.write(`${JSON.stringify(record)}\n`);
     }
+    // The ledger goes first because it is the evidence: a git failure below
+    // must not be able to swallow the record of what just happened.
+    //
+    // Restoring per ITERATION, not only at teardown, is what stops the next
+    // bead branching off this one — `newBranch` branches from whatever is
+    // checked out, so bead 2's PR carried bead 1's commits and its diff
+    // against main showed both. `restoreToMain` also CLEANS, because
+    // `reset --hard` leaves untracked files behind and a file the agent
+    // created otherwise survived onto main and made the next run's preflight
+    // refuse to start.
+    try {
+      await git.restoreToMain();
+      if (bead && !dryRun) await git.deleteBranch(bead.id);
+    } catch (error) {
+      log(`iteration teardown: could not return to main — ${error?.message ?? error}`);
+    }
   }
 
   return { bead, disposition, drained };
@@ -387,8 +407,18 @@ async function watchCi({ forge, config, prNumber, parts, log, halted }) {
     const waited = Date.now() - startedAt;
     // Three outcomes, not two: a check that NEVER appeared is a repo or runner
     // problem, not this diff, so it is never repaired.
-    if (!everFound && waited > config.ci.appearTimeoutMs) {
-      log(`watch: no '${config.ci.requiredContext}' check after ${Math.round(waited / 1000)}s`);
+    //
+    // But "not appeared YET" is not that. Cebab's required check `needs:` the
+    // ubuntu+windows matrix, and GitHub creates no check run for a gated job
+    // until its dependencies finish — measured at 11m23s on PR #402 against a
+    // five-minute timeout, so this branch used to fire on every real run. A
+    // pending sibling is proof CI is alive, so absence is only declared once
+    // nothing at all is still moving.
+    if (!everFound && !status.anyPending && waited > config.ci.appearTimeoutMs) {
+      log(
+        `watch: no '${config.ci.requiredContext}' check after ${Math.round(waited / 1000)}s ` +
+          `and nothing else pending (${status.total ?? 0} check(s) seen)`,
+      );
       return { outcome: 'absent' };
     }
     if (waited > config.ci.completeTimeoutMs) return { outcome: 'absent' };
@@ -419,6 +449,13 @@ async function harvest({ beads, bead, parts, disposition, reason, config, log })
   // Losing a finding is the failure mode this loop exists to fix, so a
   // follow-up that cannot be filed stops the whole run rather than being
   // dropped with a warning.
+  //
+  // `??=` rather than trusting the caller's literal: this threw
+  // `Cannot read properties of undefined (reading 'push')` because `parts` was
+  // built with `harvest: {}` two hundred lines away, and the crash landed on
+  // the first follow-up any verdict carried. The initializer is fixed too, but
+  // the coupling is what made one typo reach this far.
+  parts.harvest.followUps ??= [];
   for (const followUp of parts.verdict?.follow_ups ?? []) {
     const id = await beads.fileFollowUp(followUp, bead.id, config.harvest);
     if (!id) throw new Error(`could not file follow-up "${followUp.title}" — refusing to lose it`);
@@ -539,14 +576,11 @@ async function main() {
     // either refuses or carries them across, so resetting afterwards is one
     // step too late — and under `--dry-run` there are always such changes,
     // since BUILD runs but branch creation does not.
-    if (!(await git.isClean())) {
-      log('teardown: discarding uncommitted changes');
-      await git.resetHard();
-    }
-    await git.toMain();
+    if (!(await git.isClean())) log('teardown: discarding uncommitted changes');
+    await git.restoreToMain();
     if (!(await git.isClean())) {
       log('teardown: tree still dirty after checkout — resetting (a stage leaked)');
-      await git.resetHard();
+      await git.restoreToMain();
     }
     await run('node', ['scripts/predev-server.mjs'], { cwd: REPO_ROOT, timeoutMs: 30000 }).catch(
       () => {},
@@ -690,4 +724,4 @@ if (invokedDirectly) {
     });
 }
 
-export { EXIT, main, prBody };
+export { EXIT, harvest, main, prBody, watchCi };
