@@ -303,7 +303,17 @@ async function runIteration({ ctx, deps, log }) {
             result = { lockfileDrift: true };
             break;
           }
-          await git.push(bead.id, { force: attempt > 1 });
+          // The result is CHECKED, unlike before: `commit` two lines up was
+          // checked and this was not, so a rejected push (a stale remote
+          // branch, a dropped network) fell through to `createPr`, which
+          // throws — and that throw escaped the run entirely, losing every
+          // remaining bead of an overnight `--until 8` to one transient error.
+          const pushed = await git.push(bead.id, { force: attempt > 1 });
+          if (pushed.code !== 0) {
+            log(`publish: push FAILED — ${(pushed.stderr || pushed.stdout).trim().split('\n')[0]}`);
+            result = { pushFailed: true };
+            break;
+          }
           // Captured AFTER the push: this is the commit CI will report on, and
           // asking about the PR instead is what made a repair read the previous
           // attempt's verdict 1.2 seconds later.
@@ -363,6 +373,26 @@ async function runIteration({ ctx, deps, log }) {
       if (step.reason) reason = step.reason;
       if (step.stage === STAGE.DONE) break;
       stage = step.stage;
+    }
+  } catch (error) {
+    // ONE ITERATION MUST NOT END THE RUN. Everything above is a stage that can
+    // throw — a forge call, a `gh` that could not authenticate, a bug here —
+    // and an unattended `--until 8` that loses seven good beads to the first
+    // transient failure is worse than one parked bead. The circuit breaker is
+    // what stops this becoming an infinite loop of crashes: a crash parks, and
+    // three parks halt.
+    disposition = DISPOSITION.PARKED;
+    reason = REASON.CRASHED;
+    parts.crash = String(error?.stack ?? error).slice(-600);
+    log(`iteration CRASHED — ${error?.message ?? error}`);
+    if (bead) {
+      // Park the bead too, so SELECT skips it next time. Its own failure must
+      // not replace the crash we are already reporting.
+      try {
+        await harvest({ beads, bead, parts, disposition, reason, config, log });
+      } catch (harvestError) {
+        log(`harvest after crash also failed — ${harvestError?.message ?? harvestError}`);
+      }
     }
   } finally {
     parts.disposition = disposition;

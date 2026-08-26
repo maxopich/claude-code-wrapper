@@ -132,6 +132,9 @@ export function buildRecord(parts = {}, now = 0) {
     disposition: parts.disposition ?? null,
     ...(parts.haltReason ? { haltReason: parts.haltReason } : {}),
     ...(parts.reason ? { reason: parts.reason } : {}),
+    // Present only when an iteration threw. `jq 'select(.crash)'` is the other
+    // half of the morning triage query, beside `.build.failure`.
+    ...(parts.crash ? { crash: parts.crash } : {}),
   };
 }
 

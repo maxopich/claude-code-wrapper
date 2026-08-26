@@ -133,14 +133,59 @@ export function decide(command) {
  * `npm` appears here only for `run`/`test`/`exec` — `install`/`ci` are denied
  * above and deny wins.
  */
+/**
+ * Read-only inspection. Claude Code auto-approves the simplest of these on its
+ * own, but not consistently: measured in one capped session, `bd show` was
+ * refused outright and `grep -no … | sort -u -t: -k2` was refused because ONE
+ * part of the pipeline needed approval. Every such refusal costs a turn, and
+ * turns are the budget that ends the build.
+ *
+ * These modify nothing the agent cannot already modify — it holds Edit and
+ * Write under `acceptEdits`, so file contents were never the boundary. The
+ * boundary is publication, the lockfile and blast radius, and all three stay in
+ * the deny list, which is evaluated first.
+ */
+const READ_ONLY = [
+  'grep',
+  'rg',
+  'find',
+  'cat',
+  'head',
+  'tail',
+  'wc',
+  'ls',
+  'sort',
+  'uniq',
+  'cut',
+  'awk',
+  'sed',
+  'echo',
+  'basename',
+  'dirname',
+  'realpath',
+  // `git` as a whole: its dangerous subcommands are denied above, and deny
+  // wins, so this reaches `log`/`show`/`diff`/`status` and nothing else.
+  'git',
+  // The tracker. The prompt already embeds the bead body, but the agent
+  // reaches for `bd show` anyway and paid two turns for it.
+  'bd',
+];
+
 const ALLOW = [
   (h) => base(h.head) === 'npm' && ['run', 'test', 'exec'].includes(h.args[0]),
   (h) => base(h.head) === 'npm' && h.args.includes('exec'),
   (h) => ['npx', 'node', 'tsc', 'vitest', 'eslint', 'prettier'].includes(base(h.head)),
+  (h) => READ_ONLY.includes(base(h.head)),
 ];
 
 /** Why this command should be explicitly allowed, or null to defer. */
 export function allowReason(command) {
+  // Deny is re-checked HERE as well as in the hook body. The hook already asks
+  // in the right order, but `git` is on the read-only list while `git push` is
+  // denied, so this function alone would answer "allowable" for a command the
+  // loop refuses. Belt and braces: a future refactor that reorders the two
+  // checks cannot make this fail open.
+  if (decide(command)) return null;
   const heads = commandHeads(command);
   if (heads.length === 0) return null;
   // EVERY segment must be allowable: `npm run lint && git push` must not ride

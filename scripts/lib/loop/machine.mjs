@@ -63,6 +63,8 @@ export const REASON = Object.freeze({
   BLOCKED: 'blocked',
   GATE_FAILED: 'gate_failed',
   LOCKFILE_DRIFT: 'lockfile_drift',
+  PUSH_FAILED: 'push_failed',
+  CRASHED: 'crashed',
   CI_RED: 'ci_red',
   CI_NEVER_STARTED: 'ci_never_started',
   MERGE_FAILED: 'merge_failed',
@@ -137,6 +139,10 @@ export function next(stage, result = {}, ctx = {}) {
       // A lockfile change is a hard park: CI runs `git diff --exit-code
       // package-lock.json` and would fail every time.
       if (result.lockfileDrift) return park(REASON.LOCKFILE_DRIFT);
+      // A push that failed is not a build that failed: the remedy is a stale
+      // remote branch or the network, never the diff. Recorded as
+      // `build_failed` the two were indistinguishable in the ledger.
+      if (result.pushFailed) return park(REASON.PUSH_FAILED);
       if (result.ok === false) return park(REASON.BUILD_FAILED);
       // A guard breach does NOT abort. The PR is opened and labelled; only
       // LAND is suppressed, which ctx.guardPassed carries to the LAND gate.

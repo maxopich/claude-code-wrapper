@@ -1977,13 +1977,71 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     }
   });
 
-  test('ordinary read-only work is still deferred, not allowed or denied', () => {
-    // The hook must not become an allow-list for everything: anything it does
-    // not recognise keeps the normal flow, which already permits `grep`.
-    for (const cmd of ['grep -rn gh .', 'ls -la', 'cat package.json']) {
+  test('read-only inspection is allowed, so it does not cost turns', () => {
+    // Measured in a capped session: `bd show Cebab-p5y` was refused outright
+    // and `grep -no … | sort -u -t: -k2` was refused because ONE part of the
+    // pipeline needed approval. 33 of that run's 41 bash calls were greps, and
+    // every refusal costs a turn from the budget that ends the build.
+    for (const cmd of ['grep -rn gh .', 'ls -la', 'cat package.json', 'bd show X-1', 'git log']) {
+      expect(decide(cmd), cmd).toBeFalsy();
+      expect(allowReason(cmd), cmd).toBeTruthy();
+    }
+  });
+
+  test('an allowable first segment does not carry an unrecognised second', () => {
+    // EVERY segment must be allowable, not just the head. Neither part below is
+    // DENIED, so the deny re-check inside allowReason cannot save this — the
+    // `every` is the only thing standing between the allow list and granting
+    // network access on the coat-tails of `npm run lint`. A revert-check found
+    // this undefended once the deny re-check was added ("STAYED GREEN").
+    for (const cmd of [
+      'npm run lint && curl https://example.com',
+      'npm test | ssh host',
+      'node x.mjs; docker run y',
+    ]) {
+      expect(decide(cmd), cmd).toBeFalsy(); // not denied...
+      expect(allowReason(cmd), cmd).toBeFalsy(); // ...and still not allowed
+    }
+  });
+
+  test('a command the hook does not recognise still defers', () => {
+    // The hook must not become an allow-list for everything. Network access in
+    // particular is not something to grant silently — it keeps the normal
+    // flow, which is neither allow nor deny.
+    for (const cmd of ['curl https://example.com', 'ssh host', 'docker run x']) {
       expect(decide(cmd), cmd).toBeFalsy();
       expect(allowReason(cmd), cmd).toBeFalsy();
     }
+  });
+
+  // ── D19: a rejected push crashed the whole run ─────────────────────────
+  //
+  // `git.push`'s result was discarded while `commit` two lines above it was
+  // checked — the asymmetry is what marks it an oversight. A rejected push (a
+  // stale remote branch, a dropped network) then fell through to `createPr`,
+  // which throws; neither `runIteration` nor `main` had a catch, so the throw
+  // ended the RUN. An overnight `--until 8` lost seven good beads to one
+  // transient error.
+  test('a push that fails parks under its own reason, not build_failed', () => {
+    const pushed = next(STAGE.PUBLISH, { pushFailed: true }, {});
+    expect(pushed.disposition).toBe(DISPOSITION.PARKED);
+    expect(pushed.reason).toBe(REASON.PUSH_FAILED);
+
+    // The other direction, and the distinction that matters: the remedy for a
+    // failed push is a stale branch or the network, never the diff.
+    expect(next(STAGE.PUBLISH, { ok: false }, {}).reason).toBe(REASON.BUILD_FAILED);
+    expect(next(STAGE.PUBLISH, { lockfileDrift: true }, {}).reason).toBe(REASON.LOCKFILE_DRIFT);
+    // And a good push still proceeds.
+    expect(next(STAGE.PUBLISH, { ok: true }, {}).stage).toBe(STAGE.WATCH);
+  });
+
+  test('the ledger carries a crash so the morning triage can find it', () => {
+    // `jq \'select(.crash)\'` is the other half of the triage query, beside
+    // `.build.failure`. A record without one must not carry the key at all,
+    // or the query matches every row.
+    const crashed = buildRecord({ bead: 'X-1', crash: 'TypeError: boom\n  at y' }, 0);
+    expect(crashed.crash).toContain('TypeError: boom');
+    expect('crash' in buildRecord({ bead: 'X-1' }, 0)).toBe(false);
   });
 
   // ── D1: HARVEST crashed on the first follow-up ──────────────────────────
