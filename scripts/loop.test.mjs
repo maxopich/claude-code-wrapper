@@ -1661,7 +1661,12 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
       { CEBAB_DATA_DIR: '/pg/.cebab-qa', WORKSPACE_ROOT: '/pg/agents', PORT: '4319' },
       { HOME: '/home/op', PATH: '/usr/bin' },
     );
-    expect(env.CEBAB_AUTH_TOKEN_FILE).toBe(path.join('/pg/.cebab-qa', 'auth-token'));
+    // The token file is `path.join(dataDir, 'auth-token')` where dataDir is
+    // `path.resolve`d (gate.mjs), so the expectation must resolve first too —
+    // otherwise on Windows `path.resolve` adds a drive letter the raw
+    // `path.join('/pg/.cebab-qa', …)` lacks (`D:\…` vs `\…`) and this reddens
+    // for the environment, not the behaviour. Mirrors the DATA_DIR line below.
+    expect(env.CEBAB_AUTH_TOKEN_FILE).toBe(path.join(path.resolve('/pg/.cebab-qa'), 'auth-token'));
     expect(env.CEBAB_DATA_DIR).toBe(path.resolve('/pg/.cebab-qa'));
     expect(env.WORKSPACE_ROOT).toBe('/pg/agents');
     expect(env.PATH).toBe('/usr/bin'); // the base env still comes through
