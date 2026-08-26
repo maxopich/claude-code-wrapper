@@ -788,6 +788,14 @@ import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
 import { parseArgs } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 import { makeGit } from './lib/loop/git.mjs';
+import { stripComments } from './lib/strip_comments.mjs';
+import {
+  LockHeldError,
+  acquireLock,
+  evaluateLock,
+  pidIsAlive,
+  releaseLock,
+} from './lib/loop/lock.mjs';
 
 describe('beads: the three flags the spec got wrong', () => {
   test('park uses --add-label, never --label or --set-labels', () => {
@@ -1366,5 +1374,163 @@ describe('preflight failures are ConfigError, so they exit 2 (Cebab-qd2.3)', () 
   test('a path outside the Playground root', () => {
     const readFile = () => 'CEBAB_DATA_DIR=/home/me/.cebab\nWORKSPACE_ROOT=/Playground/agents\n';
     expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile })).toThrow(ConfigError);
+  });
+});
+
+describe('the single-run lock (Cebab-qd2.5)', () => {
+  // Found on the first successful dry-run: two loop processes went at the same
+  // checkout concurrently, SELECT handed both the SAME bead, and two agents
+  // edited ONE working tree while the other's gate ran against it. Both gates
+  // passed, which was luck. The spec said "serial, one bead at a time" and
+  // nothing enforced one PROCESS.
+
+  test('a live holder is refused; a dead one is taken over', () => {
+    const held = JSON.stringify({ pid: 4242, startedAt: 'x' });
+    expect(evaluateLock(held, { isAlive: () => true, self: 1 }).action).toBe('refuse');
+    // The other direction, and it matters more than it looks: kill -9, a
+    // closed lid or a crash all leave a lock behind, and a tool that then
+    // demands a file be deleted by hand is worse than the race it prevents.
+    expect(evaluateLock(held, { isAlive: () => false, self: 1 }).action).toBe('take');
+  });
+
+  test('an absent, corrupt, or own-pid lock is takeable', () => {
+    expect(evaluateLock(null).action).toBe('take');
+    // A truncated lock is a crash artifact, not a running process.
+    expect(evaluateLock('{not json', { self: 1 }).action).toBe('take');
+    expect(evaluateLock(JSON.stringify({ pid: 7 }), { isAlive: () => true, self: 7 }).action).toBe(
+      'take',
+    );
+  });
+
+  test('pidIsAlive treats EPERM as alive and ESRCH as gone', () => {
+    // EPERM means the process exists under another user — alive for our
+    // purposes. Reading it as "gone" would let a second run stomp a live one.
+    const eperm = () => {
+      throw Object.assign(new Error('x'), { code: 'EPERM' });
+    };
+    const esrch = () => {
+      throw Object.assign(new Error('x'), { code: 'ESRCH' });
+    };
+    expect(pidIsAlive(1, eperm)).toBe(true);
+    expect(pidIsAlive(1, esrch)).toBe(false);
+    expect(pidIsAlive(1, () => true)).toBe(true);
+    expect(pidIsAlive(0)).toBe(false);
+    expect(pidIsAlive(-1)).toBe(false);
+  });
+
+  // WHY LIVENESS IS INJECTED HERE. The first version of this case wrote
+  // `pid: 1` and called it "a live holder". That is not a property of the
+  // input, it is a property of the machine: pid 1 is init on macOS and Linux
+  // and answers EPERM, so the case passed locally — and windows-2022 has no
+  // such process, so `acquireLock` correctly took over what it read as a stale
+  // lock and the case failed on the runner that gates the merge. What belongs
+  // here is the FILE-level behaviour (exclusive create, EEXIST, then evaluate);
+  // whether a given pid is alive is `pidIsAlive`'s own case above, which
+  // exercises both directions with an injected `kill`.
+
+  test('a foreign lock whose holder is alive is refused', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'looplock-'));
+    // First acquire wins and writes our own pid.
+    expect(acquireLock(dir)).toContain('run.lock');
+    // Our own pid is takeable (a resume), so simulate a DIFFERENT holder.
+    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 4242, startedAt: 'x' }));
+    expect(() => acquireLock(dir, { isAlive: () => true })).toThrow(LockHeldError);
+    // The lock still belongs to whoever holds it — refusing must not stomp it.
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'run.lock'), 'utf8')).pid).toBe(4242);
+  });
+
+  test('a foreign lock whose holder is gone is taken over', async () => {
+    // The other direction, at the same level. Without it the case above is
+    // satisfied by an `acquireLock` that refuses unconditionally, which would
+    // wedge every checkout that ever saw a `kill -9`.
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'looplock-'));
+    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 4242, startedAt: 'x' }));
+    const said = [];
+    expect(
+      acquireLock(dir, { isAlive: () => false, self: 99, log: (m) => said.push(m) }),
+    ).toContain('run.lock');
+    // Taken over, and reported rather than done silently.
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'run.lock'), 'utf8')).pid).toBe(99);
+    expect(said.join(' ')).toContain('stale');
+  });
+
+  test('release only ever removes OUR lock', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'looplock-'));
+    acquireLock(dir);
+    expect(releaseLock(dir)).toBe(true);
+    // A run that overran and lost its lock must not delete the lock of
+    // whoever legitimately took over. `releaseLock` compares pids and never
+    // probes liveness, so any not-ours pid does — but it reads 4242 rather
+    // than 1 so nobody copies a platform-dependent fixture out of here into
+    // somewhere that DOES probe (see the note above).
+    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 4242, startedAt: 'x' }));
+    expect(releaseLock(dir)).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'run.lock'))).toBe(true);
+  });
+});
+
+describe('the circuit breaker is per-run (Cebab-qd2.6)', () => {
+  // A fresh, fully successful dry-run halted on its FIRST iteration with
+  // "3 consecutive parks — " and an empty bead list. `consecutiveParks` was
+  // seeded from `.loop/state.json`, which still held 3 from an earlier failed
+  // run, and nothing but a merge or a no-change ever cleared it — so a
+  // checkout that once had three parks could never run again without someone
+  // hand-editing a JSON file.
+  //
+  // WHY THIS IS A SOURCE SCAN. The seeding happens inside `main()`, which
+  // takes no injectable seam and performs real I/O, so there is nothing to
+  // call. What is being pinned is a DECISION, and the reverted form is one
+  // token different from the correct one. Both directions are exercised below
+  // so the scan cannot pass vacuously.
+
+  /** Does this source seed the breaker from disk rather than from zero? */
+  const seedsBreakerFromDisk = (source) => {
+    const code = stripComments(source);
+    const at = code.indexOf('consecutiveParks:');
+    if (at === -1) return { found: false, seeded: false };
+    const value = code.slice(at + 'consecutiveParks:'.length, at + 120);
+    return { found: true, seeded: /readJson|STATE_FILE|stateFile/.test(value.split(',')[0]) };
+  };
+
+  test('loop.mjs starts each run at zero', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const source = fs.readFileSync(path.join(here, 'loop.mjs'), 'utf8');
+
+    const verdict = seedsBreakerFromDisk(source);
+    // Not vacuous: the field must actually be present to be checked.
+    expect(verdict.found, 'consecutiveParks assignment located in loop.mjs').toBe(true);
+    expect(verdict.seeded, 'breaker must not be seeded from state.json').toBe(false);
+  });
+
+  test('and the scan detects the reverted form', () => {
+    // The other direction. Without this the scan could be broken — a regex
+    // that never matches would report "not seeded" for any input at all.
+    const reverted =
+      'const ctx = {\n  consecutiveParks: readJson(STATE_FILE, {}).consecutiveParks ?? 0,\n};';
+    expect(seedsBreakerFromDisk(reverted)).toEqual({ found: true, seeded: true });
+    const fixed = 'const ctx = {\n  consecutiveParks: 0,\n};';
+    expect(seedsBreakerFromDisk(fixed)).toEqual({ found: true, seeded: false });
+    // And a source without the field at all is reported as not-found, rather
+    // than silently passing as "not seeded".
+    expect(seedsBreakerFromDisk('const ctx = {};').found).toBe(false);
+  });
+
+  test('cross-run memory lives in the loop-stuck label, not the counter', () => {
+    // The reason dropping persistence is safe: a parked bead is excluded from
+    // future runs by label, so the evidence is not lost — it was being counted
+    // twice.
+    expect(DEFAULTS.select.excludeLabels).toContain('loop-stuck');
   });
 });
