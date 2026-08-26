@@ -332,6 +332,32 @@ export type RouterDropReasonCode =
   | 'self_addressed';
 
 /**
+ * `Cebab-vie.33`: runtime membership for `RouterDropReasonCode`, so the R-A
+ * rehydration builder can validate a `safety_audit.reason_code` string read
+ * back off disk before it types it. Every drop row is written from a typed
+ * code today, so a miss is a corrupt or future-vocabulary row — the same
+ * "bail rather than seed an unvalidated value" posture `isControlReasonCode`
+ * takes. Kept in lockstep with the union above by the exhaustiveness fence in
+ * `protocol.controllability.test.ts`.
+ */
+export const ROUTER_DROP_REASON_CODES: ReadonlySet<RouterDropReasonCode> = new Set([
+  'forged_source',
+  'worker_to_user',
+  'worker_to_worker',
+  'unknown_source',
+  'muted_source',
+  'kicked_source',
+  'kicked_destination',
+  'unknown_destination',
+  'unauthorized_sink',
+  'self_addressed',
+]);
+
+export function isRouterDropReasonCode(v: unknown): v is RouterDropReasonCode {
+  return typeof v === 'string' && ROUTER_DROP_REASON_CODES.has(v as RouterDropReasonCode);
+}
+
+/**
  * Cluster A Phase 6 — extended §7 vocabulary (subset that has source sites
  * today). These enums document the floor so future phases can wire the rest
  * additively without protocol churn. The dispatcher's `reasonCode` field
@@ -2488,6 +2514,29 @@ export type ServerMsg =
        */
       participantControls: ParticipantControlSnapshot[];
       /**
+       * `Cebab-vie.33`: every router drop this session has recorded, rebuilt
+       * from `safety_audit` so a re-attaching browser stops discarding the
+       * `RouterDropsCounter` chip's history. Drops accumulated only from the
+       * live `router_drop` envelope, so a refresh emptied the chip while the
+       * router kept dropping — and since `Cebab-vie.6` made a restored mute
+       * VISIBLE, the empty chip beside a visible mute was actively misleading.
+       *
+       * REQUIRED for the same reason as `participantControls` above, and it is
+       * the emit-site defence rather than a style choice: an absent optional
+       * field hydrates to `[]`, indistinguishable from "no drops happened", so
+       * a site that forgot it would reproduce exactly this defect invisibly.
+       * All three `multi_agent_started` sites in `ws/server.ts` supply it, all
+       * three through one builder (`buildRouterDropSnapshots`).
+       *
+       * NOT capped — unlike controls the list is unbounded in a long session,
+       * but the chip's own count IS the signal ("eleven replies discarded")
+       * and a cap would understate it without a second total field; the
+       * `multi_agent_event` replay right beside it on this envelope is
+       * deliberately uncapped too (`Cebab-3nt`), and drops are a subset of the
+       * events it already ships.
+       */
+      routerDrops: RouterDropSnapshot[];
+      /**
        * Populated when a bus agent's turn is parked on an AskUserQuestion the
        * operator hasn't answered yet. Survives R-A re-attach (the parked
        * Promise lives in the in-process pending-questions registry and is
@@ -4620,6 +4669,37 @@ export type ParticipantControlSnapshot = {
   kickMode?: KickMode;
   kickReasonCode?: ControlReasonCode;
   kickReasonText?: string;
+};
+
+/**
+ * `Cebab-vie.33`: one router drop as it is reconstructed for a re-attaching
+ * browser from the `safety_audit` table, carried on
+ * `multi_agent_started.routerDrops`.
+ *
+ * The live `router_drop` ServerMsg is client-accumulated and lost on WS
+ * disconnect, so a browser refresh emptied the `RouterDropsCounter` chip while
+ * the router kept dropping — a restored mute's ongoing drops stayed invisible.
+ * Every drop already writes a `safety_audit` row (`auditKind: 'router.drop'`)
+ * BEFORE the live envelope ships, so the same list rebuilds off disk on attach.
+ *
+ * Field names mirror the live `router_drop` envelope so the client's
+ * `RouterDropView` reducer is one fold, not a second vocabulary — except the
+ * wire drop carries no timestamp (the client tags `Date.now()` on receipt) and
+ * the audit row does. `ts` is that authoritative row time, used as the
+ * rehydrated drop's `receivedAt`, so an old drop is not misread as a fresh
+ * burst the instant the socket re-opens.
+ */
+export type RouterDropSnapshot = {
+  /** `safety_audit.id` of the drop's row — the client's dedupe key, the same
+   *  id the live envelope's `auditRowId` carries. */
+  auditRowId: string;
+  reasonCode: RouterDropReasonCode;
+  source: string;
+  destination: string;
+  /** `BusEvent.kind` of the dropped event (`'reply'`, `'error'`, …). */
+  kind: string;
+  /** `safety_audit.ts` — authoritative wall-clock ms the drop was recorded. */
+  ts: number;
 };
 
 export type MultiAgentMutationView = {

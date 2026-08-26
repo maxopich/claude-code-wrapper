@@ -440,6 +440,7 @@ function bootstrapMulti(): AppState {
     msg: {
       type: 'multi_agent_started',
       participantControls: [],
+      routerDrops: [],
       sessionId: BUS_SID,
       mode: 'orchestrator',
       participants: [PID],

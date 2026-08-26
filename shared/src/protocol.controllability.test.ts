@@ -4,14 +4,17 @@ import {
   CONTROLLABILITY_FAILURE_CODES,
   KICK_MODES,
   PAUSE_EXPIRY_ACTIONS,
+  ROUTER_DROP_REASON_CODES,
   isControlReasonCode,
   isControllabilityFailureCode,
   isKickMode,
   isPauseExpiryAction,
+  isRouterDropReasonCode,
   type ControlReasonCode,
   type ControllabilityFailureCode,
   type KickMode,
   type PauseExpiryAction,
+  type RouterDropReasonCode,
 } from './protocol.js';
 
 // Cluster C Phase 4a: shared protocol surface for the per-agent control
@@ -55,6 +58,47 @@ describe('ControlReasonCode', () => {
       expect(CONTROL_REASON_CODES.has(c)).toBe(true);
     }
     expect(CONTROL_REASON_CODES.size).toBe(codes.length);
+  });
+});
+
+// `Cebab-vie.33`: the runtime set + guard the R-A router-drop rehydration
+// builder uses to validate a `safety_audit.reason_code` string read off disk
+// before it types it. Same dual purpose as the block above — behavioural guard
+// plus a compile-time exhaustiveness fence keeping the set in lockstep with the
+// RouterDropReasonCode union.
+describe('RouterDropReasonCode', () => {
+  test('guard accepts every member of the enum + rejects strangers', () => {
+    for (const code of ROUTER_DROP_REASON_CODES) {
+      expect(isRouterDropReasonCode(code)).toBe(true);
+    }
+    expect(isRouterDropReasonCode('from_a_future_release')).toBe(false);
+    expect(isRouterDropReasonCode('')).toBe(false);
+    expect(isRouterDropReasonCode(null)).toBe(false);
+    expect(isRouterDropReasonCode(undefined)).toBe(false);
+    expect(isRouterDropReasonCode(42)).toBe(false);
+  });
+
+  test('enum exhaustiveness: every union arm appears in the runtime set', () => {
+    const codes: RouterDropReasonCode[] = [
+      'forged_source',
+      'worker_to_user',
+      'worker_to_worker',
+      'unknown_source',
+      'muted_source',
+      'kicked_source',
+      'kicked_destination',
+      'unknown_destination',
+      'unauthorized_sink',
+      'self_addressed',
+    ];
+    for (const c of codes) {
+      // Compile-time exhaustiveness: assigning back through the union type
+      // fails to compile if `codes` drifts from RouterDropReasonCode.
+      const _assignBack: RouterDropReasonCode = c;
+      void _assignBack;
+      expect(ROUTER_DROP_REASON_CODES.has(c)).toBe(true);
+    }
+    expect(ROUTER_DROP_REASON_CODES.size).toBe(codes.length);
   });
 });
 

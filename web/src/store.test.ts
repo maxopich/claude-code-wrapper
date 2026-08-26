@@ -931,6 +931,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
       msg: {
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 'bus-1',
         mode: 'orchestrator',
         participants: [10, 20],
@@ -1130,6 +1131,7 @@ describe('store / agent_activity (ephemeral liveness)', () => {
       msg: {
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 'sess-A',
         mode: 'orchestrator',
         participants: [1, 2],
@@ -1228,6 +1230,7 @@ describe('store / hop budget', () => {
       msg: {
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 's-budget',
         mode: 'orchestrator',
         participants: [1],
@@ -1297,6 +1300,7 @@ describe('store / participant controls hydrate on attach (Cebab-vie.6, Cebab-vie
     mutations: [],
     pendingMutations: [],
     participantControls: [],
+    routerDrops: [],
   };
 
   test('an empty array leaves the map empty (fresh start is unchanged)', () => {
@@ -1424,6 +1428,7 @@ describe('store / pending retry', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
     participantControls: [],
+    routerDrops: [],
     sessionId: 's-pr',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -1581,6 +1586,7 @@ describe('store / pause-on-dangerous + mutations', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
     participantControls: [],
+    routerDrops: [],
     sessionId: 's-pom',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -1922,6 +1928,7 @@ describe('store / recoveryContext (Item #7)', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
     participantControls: [],
+    routerDrops: [],
     sessionId: 's-rec',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -2012,6 +2019,7 @@ describe('store / router_drop accumulation (Phase 6d)', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
     participantControls: [],
+    routerDrops: [],
     sessionId: 's-drop',
     mode: 'orchestrator' as const,
     participants: [1],
@@ -2027,6 +2035,84 @@ describe('store / router_drop accumulation (Phase 6d)', () => {
   test('multi_agent_started initializes routerDrops to empty', () => {
     const s = reduce(initialState, { type: 'server', msg: baseStarted });
     expect(s.multiAgent.active!.routerDrops).toEqual([]);
+  });
+
+  // Cebab-vie.33: a re-attaching browser is now told about drops it never saw
+  // live. Before this fix `multi_agent_started` reset routerDrops to [] on
+  // EVERY attach, so a refresh emptied the RouterDropsCounter chip while the
+  // router kept dropping. The envelope now carries the rehydrated list.
+  test('multi_agent_started hydrates routerDrops from the snapshot (Cebab-vie.33)', () => {
+    const s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        routerDrops: [
+          {
+            auditRowId: 'audit-rehydrate-1',
+            reasonCode: 'muted_source',
+            source: 'workerA',
+            destination: 'cebab',
+            kind: 'reply',
+            ts: 1_700_000_000_000,
+          },
+          {
+            auditRowId: 'audit-rehydrate-2',
+            reasonCode: 'muted_source',
+            source: 'workerA',
+            destination: 'cebab',
+            kind: 'reply',
+            ts: 1_700_000_060_000,
+          },
+        ],
+      },
+    });
+    const drops = s.multiAgent.active!.routerDrops;
+    expect(drops).toHaveLength(2);
+    // The authoritative audit ts becomes receivedAt — NOT Date.now() — so an
+    // old drop doesn't count as a fresh burst the instant the socket re-opens.
+    expect(drops[0]).toEqual({
+      auditRowId: 'audit-rehydrate-1',
+      reasonCode: 'muted_source',
+      source: 'workerA',
+      destination: 'cebab',
+      kind: 'reply',
+      receivedAt: 1_700_000_000_000,
+    });
+    expect(drops[1]!.receivedAt).toBe(1_700_000_060_000);
+  });
+
+  // Rehydrated drops still dedupe against live ones by auditRowId, so a live
+  // router_drop that arrives for a row already in the snapshot is not doubled.
+  test('a live router_drop matching a rehydrated auditRowId is deduped (Cebab-vie.33)', () => {
+    let s = reduce(initialState, {
+      type: 'server',
+      msg: {
+        ...baseStarted,
+        routerDrops: [
+          {
+            auditRowId: 'audit-shared',
+            reasonCode: 'muted_source',
+            source: 'workerA',
+            destination: 'cebab',
+            kind: 'reply',
+            ts: 1_700_000_000_000,
+          },
+        ],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'router_drop',
+        sessionId: 's-drop',
+        reasonCode: 'muted_source',
+        source: 'workerA',
+        destination: 'cebab',
+        kind: 'reply',
+        auditRowId: 'audit-shared',
+      },
+    });
+    expect(s.multiAgent.active!.routerDrops).toHaveLength(1);
   });
 
   test('router_drop appends a RouterDropView with client receivedAt', () => {
@@ -2129,6 +2215,7 @@ describe('store / participant control reducer cases', () => {
       msg: {
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 'bus-1',
         mode: 'orchestrator',
         participants: [PID, 42, 9, 7],
@@ -2324,6 +2411,7 @@ describe('store / countControlledParticipants', () => {
       msg: {
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 'bus-2',
         mode: 'chain',
         participants: [PID],
@@ -2348,6 +2436,7 @@ describe('store / countControlledParticipants', () => {
       msg: {
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 'bus-3',
         mode: 'orchestrator',
         participants: [PID, 1, 2, 3, 4],
@@ -2947,6 +3036,7 @@ describe('store / multi_agent_started.mock projection (Phase 2c)', () => {
   const baseStarted = {
     type: 'multi_agent_started' as const,
     participantControls: [],
+    routerDrops: [],
     sessionId: 'bus-m',
     mode: 'orchestrator' as const,
     participants: [1],

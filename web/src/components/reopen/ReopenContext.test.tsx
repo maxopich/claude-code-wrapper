@@ -179,6 +179,7 @@ describe('ReopenProvider — happy probe→confirm→commit flow', () => {
       handlerRef.current?.({
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 's-target',
         mode: 'orchestrator',
         participants: [],
@@ -331,6 +332,7 @@ describe('ReopenProvider — race safety', () => {
       handlerRef.current?.({
         type: 'multi_agent_started',
         participantControls: [],
+        routerDrops: [],
         sessionId: 's-some-other',
         mode: 'orchestrator',
         participants: [],
