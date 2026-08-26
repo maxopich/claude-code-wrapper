@@ -787,7 +787,14 @@ import {
   playgroundSmokes,
   playgroundTriggered,
 } from './lib/loop/gate.mjs';
-import { buildArgv, detectUsageLimit, renderPrompt, resolveTier } from './lib/loop/build.mjs';
+import {
+  buildArgv,
+  detectUsageLimit,
+  isMaxTurns,
+  makeBuild,
+  renderPrompt,
+  resolveTier,
+} from './lib/loop/build.mjs';
 import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
 import { harvest, parseArgs, watchCi } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
@@ -1758,6 +1765,84 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
       halted: () => false,
     });
     expect(out.outcome).toBe('absent');
+  });
+
+  // ── D11: a turn-cap exhaustion was recorded as a generic crash ──────────
+  //
+  // Found by running the loop for real: the agent used all 40 turns without a
+  // verdict. The CLI exited NON-ZERO but still emitted a complete envelope —
+  //
+  //   {"terminal_reason":"max_turns",
+  //    "errors":["Reached maximum number of turns (40)"], ...}
+  //
+  // — and `build.mjs` returned on `result.code !== 0` BEFORE parsing it. So
+  // the ledger recorded `failure: 'exit'` with a truncated JSON fragment and
+  // `sessionId: null, numTurns: null, costUsd: null`. Three consequences: the
+  // operator cannot tell "needs more turns" from "the CLI broke" (opposite
+  // remedies), nobody can resume the session, and `costCeilingUsd` silently
+  // under-counts by exactly the runs worth knowing about.
+  test('isMaxTurns reads either signal, and neither is load-bearing alone', () => {
+    const real = {
+      terminal_reason: 'max_turns',
+      errors: ['Reached maximum number of turns (40)'],
+    };
+    expect(isMaxTurns(real)).toBe(true);
+    // Each alone — `terminal_reason` is undocumented and its vocabulary is not
+    // frozen; the errors string has its own wording risk.
+    expect(isMaxTurns({ terminal_reason: 'max_turns' })).toBe(true);
+    expect(isMaxTurns({ errors: ['Reached maximum number of turns (60)'] })).toBe(true);
+    // The other direction, so it cannot pass by always returning true.
+    expect(isMaxTurns({ session_id: 'x', num_turns: 3, structured_output: {} })).toBe(false);
+    expect(isMaxTurns({ terminal_reason: 'end_turn', errors: [] })).toBe(false);
+    expect(isMaxTurns(null)).toBe(false);
+    expect(isMaxTurns('not an object')).toBe(false);
+  });
+
+  test('a capped build keeps its session, turns and cost', async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const libDir = path.join(path.dirname(url.fileURLToPath(import.meta.url)), 'lib', 'loop');
+    const loopDir = fs.mkdtempSync(path.join(os.tmpdir(), 'loopbuild-'));
+
+    // Exactly what the CLI returned, exit code and all.
+    const envelope = JSON.stringify({
+      type: 'result',
+      session_id: '56889fbe-75a6-4510-9e17-10fa0248276f',
+      num_turns: 40,
+      total_cost_usd: 0.4137,
+      terminal_reason: 'max_turns',
+      errors: ['Reached maximum number of turns (40)'],
+    });
+    const run = async () => ({ code: 1, stdout: envelope, stderr: '', ms: 10, timedOut: false });
+
+    const build = makeBuild({ run, cwd: '/repo', config: DEFAULTS, libDir, loopDir });
+    const out = await build.run({ bead: { id: 'X-1', title: 't' }, attempt: 1, maxRepairs: 2 });
+
+    expect(out.ok).toBe(false);
+    expect(out.failure).toBe('max_turns'); // not the generic 'exit'
+    // The three that were being thrown away.
+    expect(out.sessionId).toBe('56889fbe-75a6-4510-9e17-10fa0248276f');
+    expect(out.numTurns).toBe(40);
+    expect(out.costUsd).toBe(0.4137);
+    // And the detail is a sentence, not 600 chars of JSON.
+    expect(out.detail).toContain('40 turns');
+    expect(out.detail).toContain('claude --resume');
+    fs.rmSync(loopDir, { recursive: true, force: true });
+  });
+
+  test('the machine parks a capped build under its own reason', () => {
+    // The remedy is the opposite of every other build failure — raise
+    // maxTurns or split the bead, rather than debug a crash — so the two must
+    // be distinguishable in the ledger.
+    const capped = next(STAGE.BUILD, { ok: false, failure: 'max_turns' }, {});
+    expect(capped.disposition).toBe(DISPOSITION.PARKED);
+    expect(capped.reason).toBe(REASON.MAX_TURNS);
+
+    // The other direction: everything else still parks as build_failed.
+    const crashed = next(STAGE.BUILD, { ok: false, failure: 'exit' }, {});
+    expect(crashed.reason).toBe(REASON.BUILD_FAILED);
   });
 
   // ── D1: HARVEST crashed on the first follow-up ──────────────────────────

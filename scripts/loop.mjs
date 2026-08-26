@@ -246,10 +246,13 @@ async function runIteration({ ctx, deps, log }) {
             risk: built.verdict?.risk ?? null,
             attempts: attempt,
           };
+          // Accounted whatever happened. A failed build still SPENT, and
+          // counting only successes let `costCeilingUsd` under-report by
+          // exactly the runs the operator most wants to know about.
+          ctx.spentUsd += built.costUsd ?? 0;
           if (built.ok) {
             parts.verdict = built.verdict;
             parts.commandsRun = built.verdict?.tests?.commands_run ?? [];
-            ctx.spentUsd += built.costUsd ?? 0;
           } else {
             // An unattended run has to diagnose itself. Without this the ledger
             // said `build_failed exit 1` three times and nothing more, and the

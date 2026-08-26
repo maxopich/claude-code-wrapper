@@ -147,6 +147,29 @@ export function resolveTier(bead, changedPathHint, tiers = []) {
   return null;
 }
 
+/**
+ * Did this run end because it ran out of turns?
+ *
+ * TWO SIGNALS ON PURPOSE. `terminal_reason` is undocumented and its vocabulary
+ * is not frozen; the `errors` string is what a human reads and has its own
+ * wording risk. Either one alone would be a single point of silent failure,
+ * and the consequence of missing this is not cosmetic — a capped build is
+ * recorded as a generic `exit`, so the operator cannot tell "needs more turns"
+ * from "the CLI broke", and the two have opposite remedies.
+ *
+ * Measured shape:
+ *   { "terminal_reason": "max_turns",
+ *     "errors": ["Reached maximum number of turns (40)"], ... }
+ */
+export function isMaxTurns(envelope) {
+  if (!envelope || typeof envelope !== 'object') return false;
+  if (envelope.terminal_reason === 'max_turns') return true;
+  const errors = Array.isArray(envelope.errors) ? envelope.errors : [];
+  return errors.some(
+    (e) => typeof e === 'string' && e.toLowerCase().includes('maximum number of turns'),
+  );
+}
+
 export function renderPrompt(template, vars) {
   let out = template;
   // Block form first, so an unused {{#if repair}} section is removed whole
@@ -217,12 +240,54 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
       const limit = detectUsageLimit(`${result.stderr}\n${result.stdout}`);
       if (limit.hit) return { ok: false, usageLimit: limit };
 
-      if (result.timedOut) return { ok: false, failure: 'timeout', exitCode: result.code };
+      // THE ENVELOPE IS PARSED BEFORE THE EXIT CODE IS JUDGED, and that order
+      // is the whole fix. The CLI exits NON-ZERO on a turn-cap exhaustion
+      // while still emitting a complete result envelope, so returning early on
+      // `result.code !== 0` threw away everything it had just been told.
+      // Measured on a real run: the envelope carried
+      // `terminal_reason: "max_turns"` and
+      // `errors: ["Reached maximum number of turns (40)"]` alongside the
+      // session id, turn count and cost — and the ledger recorded
+      // `failure: 'exit'` with a truncated JSON fragment and three nulls.
+      let envelope = null;
+      try {
+        envelope = JSON.parse(result.stdout);
+      } catch {
+        // Left null: an unparseable stdout is itself a diagnosis, handled below.
+      }
+
+      // Facts, recorded on EVERY outcome. The session id is what lets a human
+      // (or a future repair) resume a capped build instead of redoing it, and
+      // the cost is what stops `costCeilingUsd` under-counting every failure
+      // it never saw.
+      const telemetry = {
+        sessionId: envelope?.session_id ?? null,
+        numTurns: envelope?.num_turns ?? null,
+        costUsd: envelope?.total_cost_usd ?? null,
+        exitCode: result.code,
+      };
+
+      if (result.timedOut) return { ok: false, failure: 'timeout', ...telemetry };
+
+      if (isMaxTurns(envelope)) {
+        return {
+          ok: false,
+          failure: 'max_turns',
+          ...telemetry,
+          detail:
+            `the agent used all ${envelope?.num_turns ?? config.build.maxTurns} turns without ` +
+            `producing a verdict` +
+            (telemetry.sessionId
+              ? `; inspect with \`claude --resume ${telemetry.sessionId}\``
+              : ''),
+        };
+      }
+
       if (result.code !== 0) {
         return {
           ok: false,
           failure: 'exit',
-          exitCode: result.code,
+          ...telemetry,
           // Both streams: the CLI writes its own refusals (a malformed argv,
           // a missing prompt) to stdout, not stderr, so recording only stderr
           // is what made three identical `exit 1` ledger rows say nothing.
@@ -230,25 +295,12 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
         };
       }
 
-      let envelope;
-      try {
-        envelope = JSON.parse(result.stdout);
-      } catch {
-        return { ok: false, failure: 'unparsable_envelope' };
-      }
+      if (!envelope) return { ok: false, failure: 'unparsable_envelope', ...telemetry };
       const verdict = envelope.structured_output;
       if (!verdict || typeof verdict !== 'object') {
-        return { ok: false, failure: 'no_structured_output' };
+        return { ok: false, failure: 'no_structured_output', ...telemetry };
       }
-      return {
-        ok: true,
-        verdict,
-        sessionId: envelope.session_id ?? null,
-        numTurns: envelope.num_turns ?? null,
-        costUsd: envelope.total_cost_usd ?? null,
-        isError: envelope.is_error ?? false,
-        exitCode: result.code,
-      };
+      return { ok: true, verdict, ...telemetry, isError: envelope.is_error ?? false };
     },
   };
 }

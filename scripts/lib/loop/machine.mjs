@@ -59,6 +59,7 @@ export const DISPOSITION = Object.freeze({
 export const REASON = Object.freeze({
   NEEDS_HUMAN: 'needs_human',
   BUILD_FAILED: 'build_failed',
+  MAX_TURNS: 'max_turns',
   BLOCKED: 'blocked',
   GATE_FAILED: 'gate_failed',
   LOCKFILE_DRIFT: 'lockfile_drift',
@@ -101,7 +102,14 @@ export function next(stage, result = {}, ctx = {}) {
       // Non-zero exit, schema violation or timeout: park. BUILD is not retried
       // on its own failure — repairs exist for a red GATE or a red CI, where
       // there is a specific failing step to hand back.
-      if (result.ok === false) return park(REASON.BUILD_FAILED);
+      //
+      // A turn-cap exhaustion parks too, but under its OWN reason, because the
+      // remedy is the opposite of every other build failure: raise `maxTurns`
+      // or split the bead, rather than debug a crash. Recorded as a generic
+      // `build_failed` the two were indistinguishable in the ledger.
+      if (result.ok === false) {
+        return park(result.failure === 'max_turns' ? REASON.MAX_TURNS : REASON.BUILD_FAILED);
+      }
 
       const verdict = result.verdict ?? {};
       if (verdict.needs_human === true) return park(REASON.NEEDS_HUMAN);
