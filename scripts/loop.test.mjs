@@ -786,7 +786,7 @@ import {
 import { buildArgv, detectUsageLimit, renderPrompt, resolveTier } from './lib/loop/build.mjs';
 import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
 import { parseArgs } from './loop.mjs';
-import { makeRunner } from './lib/loop/run.mjs';
+import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 
 describe('beads: the three flags the spec got wrong', () => {
   test('park uses --add-label, never --label or --set-labels', () => {
@@ -985,7 +985,7 @@ describe('build: the argv', () => {
   const base = {
     config: DEFAULTS,
     repoRoot: '/repo',
-    schemaPath: '/dev/null',
+    schemaJson: '{"type":"object"}',
     systemPromptPath: '/sys.md',
     settingsPath: '/settings.json',
   };
@@ -1182,5 +1182,54 @@ describe('driver: CLI parsing', () => {
   test('no --until leaves the default to config (one bead)', () => {
     expect(parseArgs([]).until).toEqual([]);
     expect(DEFAULTS.loop.until).toEqual(['1']);
+  });
+});
+
+describe('run: the Windows shell decision', () => {
+  // Windows CI caught this as three red cases in `run`'s own tests, and it was
+  // a REAL defect rather than a test artifact: with `shell: true` Node joins
+  // file and args into one command string with NO escaping (it warns —
+  // DEP0190) and cmd.exe re-parses it. BUILD passes `--json-schema <json>` and
+  // a multi-line prompt, so on Windows both would have arrived corrupted
+  // instead of failing loudly.
+  //
+  // `platform` is injected so the decision is pinned from any host; the bug is
+  // unreachable on macOS, which is exactly why it survived local verification.
+
+  test('the npm-family shims need a shell on win32', () => {
+    for (const shim of ['npm', 'npx', 'yarn', 'pnpm']) {
+      expect(needsWin32Shell(shim, 'win32'), shim).toBe(true);
+    }
+    // Resolved paths and the `.cmd` extension both still resolve to the shim.
+    expect(needsWin32Shell('C:\\Program Files\\nodejs\\npm.cmd', 'win32')).toBe(true);
+    expect(needsWin32Shell('/usr/local/bin/npm', 'win32')).toBe(true);
+  });
+
+  test('real binaries never do — the direction that carries the bug', () => {
+    for (const binary of ['node', 'git', 'gh', 'claude', process.execPath]) {
+      expect(needsWin32Shell(binary, 'win32'), binary).toBe(false);
+    }
+  });
+
+  test('and nothing needs one off win32', () => {
+    for (const platform of ['darwin', 'linux']) {
+      expect(needsWin32Shell('npm', platform), platform).toBe(false);
+      expect(needsWin32Shell('node', platform), platform).toBe(false);
+    }
+  });
+
+  test('an argument containing shell metacharacters survives the seam intact', () => {
+    // The property the shell decision protects. Reverting to
+    // `shell: process.platform === 'win32'` leaves this green on macOS and red
+    // on Windows, which is the whole reason the unit cases above inject the
+    // platform rather than relying on this one.
+    const run = makeRunner({ cwd: process.cwd() });
+    const hostile = 'a "quoted" $VAR; echo pwned && ok | cat';
+    return run(process.execPath, ['-e', 'process.stdout.write(process.argv[1])', hostile]).then(
+      (r) => {
+        expect(r.stdout).toBe(hostile);
+        expect(r.stdout).not.toContain('pwned\n');
+      },
+    );
   });
 });

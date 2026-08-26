@@ -7,19 +7,43 @@
  * fixtures: each takes a `run` function, and the tests hand it one that
  * returns canned output instead of spawning anything.
  *
- * WINDOWS SHELL. `shell` is set explicitly on every spawn, not omitted. On
- * Windows an npm-installed CLI (`npx`, and the `npm` shim itself) is a `.cmd`
- * file, which Node refuses to execute directly — the failure is an opaque
- * `EINVAL` naming neither the command nor the cause. The repo's semgrep rule
- * `cebab-spawn-missing-win32-shell` enforces the same thing on every spawn
- * carrying a `stdio` option, and it exempts only `process.execPath`.
+ * WINDOWS SHELL — ONLY FOR THE SHIMS, AND THE DISTINCTION IS LOAD-BEARING.
+ * On Windows an npm-installed CLI (`npm`, `npx`) is a `.cmd` file that Node
+ * refuses to execute directly, so those need `shell: true`. But `shell: true`
+ * is not free: Node then JOINS file and args into ONE command string with **no
+ * escaping** (it warns about this — DEP0190), and cmd.exe re-parses the
+ * result. Setting it unconditionally therefore trades one Windows-only failure
+ * for a worse one — BUILD passes `--json-schema <json>` and a multi-line
+ * prompt, and both would arrive corrupted rather than failing loudly.
  *
- * NO SHELL STRING INTERPOLATION, EVER. Commands are `(file, args[])` pairs.
- * With `shell: true` the arguments are still passed as a vector rather than
- * concatenated into a command line here, so a bead title carrying a quote or a
+ * Measured: `spawn(process.execPath, ['-e', 'console.log("out")'], {shell:true})`
+ * produces empty stdout and a shell syntax error; with `shell:false` it prints
+ * `out`. Windows CI caught this as three red cases in `run`'s own tests.
+ *
+ * So the shell is enabled only for the shim family, whose arguments here are
+ * all bare literals (`run`, `lint`, `--workspace`, a script path). Everything
+ * else — node, git, gh, claude — is spawned directly with a real argv vector,
+ * which is also what the repo's `cebab-spawn-missing-win32-shell` rule already
+ * assumes by exempting `process.execPath`.
+ *
+ * NO SHELL STRING INTERPOLATION, EVER. Commands are `(file, args[])` pairs;
+ * nothing here builds a command line, so a bead title carrying a quote or a
  * `;` cannot become a second command.
  */
 import { spawn } from 'node:child_process';
+
+/**
+ * The npm-family shims: `.cmd` files on Windows, which Node will not spawn
+ * without a shell. Nothing else belongs here — see the header for why adding
+ * to this set is a correctness cost, not a compatibility win.
+ */
+const WIN32_SHELL_SHIMS = new Set(['npm', 'npx', 'yarn', 'pnpm']);
+
+export function needsWin32Shell(file, platform = process.platform) {
+  if (platform !== 'win32') return false;
+  const base = file.slice(Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\')) + 1);
+  return WIN32_SHELL_SHIMS.has(base.replace(/\.(cmd|exe|bat)$/i, ''));
+}
 
 /** A step that exceeded its timeout. Distinguished so callers can say so. */
 export class RunTimeoutError extends Error {
@@ -51,7 +75,7 @@ export function makeRunner({ cwd, env = process.env, onLine } = {}) {
         child = spawn(file, args, {
           cwd: opts.cwd ?? cwd,
           env: opts.env ?? env,
-          shell: process.platform === 'win32',
+          shell: needsWin32Shell(file),
           // stdin is a pipe only when there is something to write. Commit
           // messages and PR bodies go in over stdin rather than as argv, so a
           // body containing a quote, a newline or a `$` cannot be re-parsed by
@@ -131,7 +155,7 @@ export function spawnDetached(file, args, { cwd, env = process.env } = {}) {
   const child = spawn(file, args, {
     cwd,
     env,
-    shell: process.platform === 'win32',
+    shell: needsWin32Shell(file),
     detached: process.platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });

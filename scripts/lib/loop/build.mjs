@@ -66,12 +66,17 @@ export function detectUsageLimit(text = '') {
  * settings flags are the parts most likely to be dropped by a refactor and
  * least likely to be noticed, since the loop keeps working without them and
  * only spends more / syncs a board it should not touch.
+ *
+ * Takes the schema's CONTENT, not its path, so this stays pure — `makeBuild`
+ * reads the file once. The earlier path form made the tests reach for
+ * `/dev/null`, which does not exist on Windows and turned every argv case red
+ * there for a reason that had nothing to do with the argv.
  */
 export function buildArgv({
   config,
   repoRoot,
   resumeSessionId = null,
-  schemaPath,
+  schemaJson,
   systemPromptPath,
   settingsPath,
 }) {
@@ -85,7 +90,7 @@ export function buildArgv({
     // worth more to this loop than the live event stream, and usage limits
     // are detectable after the fact from stderr.
     '--json-schema',
-    fs.readFileSync(schemaPath, 'utf8'),
+    schemaJson,
     '--model',
     config.build.model,
     '--effort',
@@ -146,7 +151,7 @@ export function renderPrompt(template, vars) {
 }
 
 export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} }) {
-  const schemaPath = path.join(libDir, 'verdict.schema.json');
+  const schemaJson = fs.readFileSync(path.join(libDir, 'verdict.schema.json'), 'utf8');
   const systemPromptPath = path.join(libDir, 'build-system.md');
   // TRACKED, and NOT under `.claude/`. The spec put this at
   // `.claude/loop-settings.json` and gitignored it. Both were wrong once it
@@ -178,7 +183,7 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
         config: effective,
         repoRoot: cwd,
         resumeSessionId,
-        schemaPath,
+        schemaJson,
         systemPromptPath,
         settingsPath,
       });
