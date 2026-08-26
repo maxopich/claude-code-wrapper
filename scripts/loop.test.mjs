@@ -800,7 +800,7 @@ import {
   renderPrompt,
   resolveTier,
 } from './lib/loop/build.mjs';
-import { allowReason, commandHeads, decide } from './lib/loop/loop-guard.mjs';
+import { allowReason, commandHeads, decide, splitSegments } from './lib/loop/loop-guard.mjs';
 import { harvest, parseArgs, watchCi } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 import { makeGit } from './lib/loop/git.mjs';
@@ -1986,6 +1986,50 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
       expect(decide(cmd), cmd).toBeFalsy();
       expect(allowReason(cmd), cmd).toBeTruthy();
     }
+  });
+
+  test('separators inside quotes are not separators', () => {
+    // A naive split treated the `|` in `grep -E 'a|b'` as a pipe. Measured:
+    // `npx vitest … | grep -E '✓|×|PASS'` became segments headed `grep -E '✓`,
+    // `×`, `PASS`, so a legitimate command was refused and a turn was spent.
+    expect(splitSegments("grep -E 'a|b' f")).toEqual(["grep -E 'a|b' f"]);
+    expect(splitSegments('grep -E "a|b" f')).toEqual(['grep -E "a|b" f']);
+    // And the deny direction, which is the sharper one: a read-only grep whose
+    // QUOTED ARGUMENT contains the words must not be denied as a push.
+    expect(decide("grep -E 'a|git push' f")).toBeFalsy();
+    expect(allowReason("grep -E 'a|git push' f")).toBeTruthy();
+    // The other direction: a real pipe still splits.
+    expect(splitSegments('a | b')).toEqual(['a ', ' b']);
+  });
+
+  test('a lone & is a redirection; && and background & are separators', () => {
+    // `2>&1` is the shape the agent actually writes, and splitting it left
+    // segments headed `1` — none allowable — so `npx vitest … 2>&1` was
+    // refused. That accounted for most of one capped session's refusals.
+    expect(splitSegments('npx vitest x 2>&1')).toEqual(['npx vitest x 2>&1']);
+    expect(splitSegments('npx vitest x &>log')).toEqual(['npx vitest x &>log']);
+    // But a real background `&` must still split, or it becomes a way past the
+    // deny list.
+    expect(splitSegments('sleep 5 & git push').length).toBe(2);
+    expect(decide('sleep 5 & git push')).toBeTruthy();
+    expect(splitSegments('a && b').length).toBe(2);
+  });
+
+  test('the exact commands one capped session was refused now pass', () => {
+    // Copied verbatim from the transcript of a build that used all 61 turns.
+    for (const cmd of [
+      'cd /repo && npx vitest run x 2>&1 | tail -30',
+      'cd /repo; npx vitest run x 2>&1 | tail -30',
+      "npx vitest run f 2>&1 | grep -E 'A|B|PASS' | head -40",
+      'pwd && npx vitest run f --reporter=dot 2>&1 | tail -15',
+      "grep -iE 'U19|passed' /tmp/vt.log | head -60",
+    ]) {
+      expect(decide(cmd), cmd).toBeFalsy();
+      expect(allowReason(cmd), cmd).toBeTruthy();
+    }
+    // Deny still wins over every one of those shapes.
+    expect(decide('npx vitest 2>&1 && gh pr merge 1')).toBeTruthy();
+    expect(decide('cd /x && git commit -m y')).toBeTruthy();
   });
 
   test('an allowable first segment does not carry an unrecognised second', () => {

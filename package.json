@@ -28,7 +28,7 @@
     "loop:stop": "mkdir -p .loop && touch .loop/HALT && echo 'HALT set \u2014 stops at the next stage boundary'",
     "loop:watch": "tmux attach -t cebab-loop",
     "loop:status": "node scripts/loop.mjs --status",
-    "loop:recover": "git checkout main && git reset --hard && (pkill -f 'tsx watch' || true) && rm -f .loop/HALT && echo recovered"
+    "loop:recover": "git reset --hard && git clean -fd && git checkout main && node scripts/predev-server.mjs && rm -f .loop/HALT && echo recovered"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

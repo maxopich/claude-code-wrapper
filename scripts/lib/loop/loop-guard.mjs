@@ -61,11 +61,76 @@
  * DENY IS EVALUATED FIRST and wins outright, so nothing below can widen it.
  */
 
+/**
+ * Split on shell separators WITHOUT breaking inside quotes.
+ *
+ * A naive `.split(/\|\||&&|[|;\n]/)` treats the `|` inside `grep -E 'a|b'` as
+ * a pipe. Measured: the agent's `npx vitest … | grep -E '✓|×|PASS|FAIL'` became
+ * segments headed `grep -E '✓`, `×`, `PASS` — none allowable — so a legitimate
+ * command was refused and a turn was spent. The deny direction is worse:
+ * `grep -E 'a|git push'` would split to a segment headed `git`, and a
+ * read-only grep would be DENIED as a push.
+ *
+ * Not a shell parser — just quote and escape awareness, which is the whole gap.
+ */
+export function splitSegments(command) {
+  const s = String(command);
+  const out = [];
+  let cur = '';
+  let quote = null;
+  for (let i = 0; i < s.length; i += 1) {
+    const ch = s[i];
+    if (quote) {
+      cur += ch;
+      // Inside double quotes a backslash escapes; inside single quotes it does not.
+      if (ch === '\\' && quote === '"' && i + 1 < s.length) {
+        cur += s[i + 1];
+        i += 1;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === '\\' && i + 1 < s.length) {
+      cur += ch + s[i + 1];
+      i += 1;
+      continue;
+    }
+    if (ch === '&' && s[i + 1] !== '&') {
+      // A LONE `&` IS USUALLY A REDIRECTION, NOT A SEPARATOR. `2>&1` and
+      // `&>log` are the shapes the agent actually writes, and splitting them
+      // left segments headed `1` — none allowable — so `npx vitest … 2>&1`
+      // was refused and the turn was spent. Measured on a real capped session:
+      // this shape accounted for most of its refusals. Only a `&` that is
+      // neither preceded nor followed by `>` backgrounds a command.
+      const prev = cur.trimEnd().slice(-1);
+      if (prev === '>' || s[i + 1] === '>') {
+        cur += ch;
+        continue;
+      }
+    }
+    if (ch === '\n' || ch === ';' || ch === '|' || ch === '&') {
+      if ((ch === '|' || ch === '&') && s[i + 1] === ch) i += 1; // `||`, `&&`
+      out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
 /** Leading token of each `|`, `;`, `&&`, `||`, newline-separated segment,
  *  skipping `FOO=bar` env prefixes and `sudo`/`command`/`env` wrappers. */
 export function commandHeads(command) {
   const heads = [];
-  for (const segment of String(command).split(/\|\||&&|[|;\n]/)) {
+  for (const segment of splitSegments(command)) {
     const tokens = segment.trim().split(/\s+/).filter(Boolean);
     let i = 0;
     while (
@@ -163,6 +228,27 @@ const READ_ONLY = [
   'basename',
   'dirname',
   'realpath',
+  'diff',
+  'jq',
+  'tr',
+  'printf',
+  'tee',
+  'xargs',
+  // Shell plumbing. `cd` was 16 of one session's 35 bash calls — the agent
+  // prefixes nearly everything with `cd <repo> && …`, and a single unallowable
+  // segment refuses the whole compound. `cp`/`mv`/`mkdir`/`touch` write, but
+  // the agent already holds Edit and Write under `acceptEdits`, so file
+  // contents were never the boundary. `rm` is deliberately absent: `rm -rf` is
+  // denied above and a bare `rm` can keep deferring.
+  'cd',
+  'pwd',
+  'true',
+  'false',
+  'test',
+  'mkdir',
+  'touch',
+  'cp',
+  'mv',
   // `git` as a whole: its dangerous subcommands are denied above, and deny
   // wins, so this reaches `log`/`show`/`diff`/`status` and nothing else.
   'git',
