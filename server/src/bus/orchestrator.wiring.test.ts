@@ -1697,4 +1697,43 @@ describe('wireOrchestratorSession — a queued delivery dies with the kick (Ceba
 
     unregisterLiveSession(SESSION_ID);
   });
+
+  // `Cebab-vie.32` [security]: the fourth leg, and the one that needs no
+  // adversary. The three cases above are all operator actions (kick, kick,
+  // kick). This one is ORDINARY COMPLETION: a delivery routed while turn 1 runs
+  // sits on the same tail, the session then ends, and nothing aborts the runner
+  // or drains its queue (`runner.stop()` is a no-op — orchestrator passes no
+  // abortController). Before the fix the queued delivery dequeued and ran a
+  // full tool-capable turn AFTER teardown — the MEASURED shape on the bead:
+  // started before teardown ["turn-1"], after ["turn-1","queued-after-end"].
+  test('a delivery queued before an ordinary completion never becomes a turn', async () => {
+    const captured: Array<{ cwd: string; prompt: string }> = [];
+    const { factory, releases } = blockingFactory(captured);
+    const { handle, deliver } = wire([worker('reviewer')], factory);
+
+    deliver('reviewer', 'turn-1');
+    await settle();
+    expect(captured.map((c) => c.prompt)).toEqual(['turn-1']);
+    deliver('reviewer', 'queued-after-end');
+    await settle();
+    expect(captured).toHaveLength(1);
+
+    // Ordinary completion while turn 1 is still running — teardown flips
+    // `ended`. The queue survives it intact.
+    await handle.stop('completed');
+
+    // Turn 1 drains.
+    releases[0]!();
+    await settle();
+
+    // The queued delivery never became a second turn: `captured` is appended by
+    // the factory itself, so its length IS the number of `claude` turns started.
+    expect(captured).toHaveLength(1);
+    // And SILENTLY — the `ended` branch of the dequeue gate writes no
+    // `cebab → user` row: the operator already has `onEnded`, and teardown is
+    // finalising the session row a refusal event would try to append into.
+    expect(errors()).toEqual([]);
+
+    unregisterLiveSession(SESSION_ID);
+  });
 });
