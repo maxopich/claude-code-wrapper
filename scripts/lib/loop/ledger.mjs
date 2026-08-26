@@ -104,6 +104,10 @@ export function buildRecord(parts = {}, now = 0) {
       outcome: build.outcome ?? null,
       risk: build.risk ?? null,
       attempts: build.attempts ?? 0,
+      // Present only on a failed BUILD; `jq 'select(.build.failure)'` is the
+      // morning triage query.
+      ...(build.failure ? { failure: build.failure } : {}),
+      ...(build.detail ? { detail: build.detail } : {}),
     },
     gate: {
       steps,

@@ -75,12 +75,27 @@ export function detectUsageLimit(text = '') {
 export function buildArgv({
   config,
   repoRoot,
+  prompt,
   resumeSessionId = null,
   schemaJson,
   systemPromptPath,
   settingsPath,
 }) {
+  // THE PROMPT GOES FIRST, and this is not style. `--disallowedTools <tools...>`
+  // is VARIADIC: commander keeps consuming bare arguments until the next
+  // option or the end of argv. Appending the prompt after it made the CLI read
+  // it as a third tool name and receive no prompt at all —
+  //
+  //   claude -p --output-format json --disallowedTools WebSearch WebFetch 'hi'
+  //     -> Error: Input must be provided either through stdin or as a prompt
+  //        argument when using --print
+  //
+  // which is how the first production run parked 3/3 beads on the circuit
+  // breaker with zero model turns. Emitting the prompt here, at index 1, means
+  // no caller can append a positional after a variadic option — the mistake is
+  // no longer expressible rather than merely fixed.
   const argv = ['-p'];
+  if (prompt !== undefined) argv.push(prompt);
   if (resumeSessionId) argv.push('--resume', resumeSessionId);
   argv.push(
     '--output-format',
@@ -182,6 +197,7 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
       const argv = buildArgv({
         config: effective,
         repoRoot: cwd,
+        prompt,
         resumeSessionId,
         schemaJson,
         systemPromptPath,
@@ -191,7 +207,7 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
       log(
         `build: ${bead.id} attempt ${attempt} (${effective.build.model}/${effective.build.effort})`,
       );
-      const result = await run('claude', [...argv, prompt], {
+      const result = await run('claude', argv, {
         cwd,
         timeoutMs: config.build.timeoutMs,
       });
@@ -201,13 +217,16 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
       const limit = detectUsageLimit(`${result.stderr}\n${result.stdout}`);
       if (limit.hit) return { ok: false, usageLimit: limit };
 
-      if (result.timedOut) return { ok: false, failure: 'timeout' };
+      if (result.timedOut) return { ok: false, failure: 'timeout', exitCode: result.code };
       if (result.code !== 0) {
         return {
           ok: false,
           failure: 'exit',
           exitCode: result.code,
-          stderr: result.stderr.slice(-2000),
+          // Both streams: the CLI writes its own refusals (a malformed argv,
+          // a missing prompt) to stdout, not stderr, so recording only stderr
+          // is what made three identical `exit 1` ledger rows say nothing.
+          detail: `${result.stdout}\n${result.stderr}`.trim().slice(-600),
         };
       }
 

@@ -1031,6 +1031,51 @@ describe('build: the argv', () => {
     expect(argv).toContain('WebSearch');
     expect(argv[argv.indexOf('--max-turns') + 1]).toBe('60');
   });
+
+  test('the prompt is argv[1], BEFORE any variadic option', () => {
+    // The first production run parked 3/3 beads on the circuit breaker with
+    // zero model turns because the prompt was appended LAST and
+    // `--disallowedTools <tools...>` is variadic — commander read the prompt
+    // as a third tool name and the CLI got no prompt at all:
+    //   Error: Input must be provided either through stdin or as a prompt
+    //   argument when using --print
+    //
+    // The case above could not have caught it: it asserts the flag and its
+    // values are PRESENT, and the prompt was not in buildArgv's output at all.
+    // Presence, not interaction.
+    const argv = buildArgv({ ...base, prompt: 'THE PROMPT' });
+    expect(argv[0]).toBe('-p');
+    expect(argv[1]).toBe('THE PROMPT');
+  });
+
+  test('no bare positional ever follows a variadic option', () => {
+    // The general form of the defect, so a future flag with `<x...>` cannot
+    // reintroduce it. Everything after the last variadic option's values must
+    // be an option or one of its values — never a stray positional.
+    const VARIADIC = ['--disallowedTools', '--allowedTools', '--tools', '--mcp-config', '--betas'];
+    for (const argv of [
+      buildArgv({ ...base, prompt: 'p' }),
+      buildArgv({ ...base, prompt: 'p', resumeSessionId: 's' }),
+      buildArgv({
+        ...base,
+        prompt: 'p',
+        config: { ...DEFAULTS, limits: { ...DEFAULTS.limits, beadCostCeilingUsd: 5 } },
+      }),
+    ]) {
+      const lastVariadic = Math.max(...VARIADIC.map((f) => argv.indexOf(f)));
+      expect(lastVariadic, 'a variadic option is present').toBeGreaterThan(-1);
+      // Walk what follows: values, then optionally more options. A positional
+      // can only appear here if someone appended one.
+      const tail = argv.slice(lastVariadic + 1);
+      const nextOption = tail.findIndex((a) => a.startsWith('--'));
+      const consumed = nextOption === -1 ? tail : tail.slice(0, nextOption);
+      expect(
+        consumed.every((a) => !a.includes(' ')),
+        `variadic swallowed: ${consumed}`,
+      ).toBe(true);
+      expect(consumed).not.toContain('p');
+    }
+  });
 });
 
 describe('build: prompt rendering and tiering', () => {
