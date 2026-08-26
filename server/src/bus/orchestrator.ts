@@ -481,6 +481,15 @@ type OrchestratorRouter = {
   /** Probe for tests + multi-agent forensic bundle (C4f follow-up). */
   isKicked: (agentName: string) => boolean;
   /**
+   * `Cebab-vie.32` [security]: has this session torn down? `teardown` flips
+   * `ended` at its top — before the DB row is finalised and before `onEnded`
+   * fires — so the runner's dequeue gate reads it to refuse a delivery that
+   * was routed just before teardown and only now reaches the head of its
+   * queue. A read, not a mutation: `handleEvent`'s own `if (ended) return`
+   * closes the routing-time door, this is the after-the-wait door.
+   */
+  isEnded: () => boolean;
+  /**
    * `Cebab-vie.9` / `.10` / `.18` [security]: the precondition check the two
    * operator replay seams (`retry`, `continueThroughMutation`) must pass before
    * starting a turn, since neither originates from a `BusEvent` and so neither
@@ -1463,6 +1472,7 @@ export function createOrchestratorRouter(params: {
     return true;
   };
   const isKicked = (agentName: string): boolean => kickedSet.has(agentName);
+  const isEnded = (): boolean => ended;
 
   /**
    * `Cebab-vie.9` / `.10` / `.18` [security]: may a turn start for `agentName`
@@ -1518,6 +1528,7 @@ export function createOrchestratorRouter(params: {
     isMuted,
     kickAgent: (agentName) => setKick(agentName, true),
     isKicked,
+    isEnded,
     checkTurnRefused,
     emitTurnRefused,
     onTurnStarted,
@@ -1832,16 +1843,36 @@ export function wireOrchestratorSession(p: {
     // waited behind another turn. Because this sits at the dequeue rather than
     // at a call site, it needs no enumeration of callers to be complete.
     //
-    // Kicked only. `ended` and `budget` are `checkTurnRefused`'s to answer and
-    // deliberately not asked here: its budget branch TEARS THE SESSION DOWN as
-    // it refuses, which is the right answer to an operator clicking Retry and
-    // the wrong one to a delivery quietly reaching the head of a queue.
+    // Kicked and ended, but NOT budget. `budget` is `checkTurnRefused`'s to
+    // answer: its branch TEARS THE SESSION DOWN as it refuses, which is the
+    // right answer to an operator clicking Retry and the wrong one to a
+    // delivery quietly reaching the head of a queue — re-entering teardown
+    // from inside the dequeue.
     //
-    // Emitting from inside a predicate is the established shape in this file
-    // (`checkTurnRefused` does the same, for the same reason): the refusal and
-    // the sentence the operator reads must not be able to drift apart. The
-    // runner's `TurnRefusedError` is therefore silent at the `.catch` below.
+    // `Cebab-vie.32` [security]: `ended` IS asked here, and it is the same
+    // dequeue-vs-routing gap `Cebab-vie.11` closed for kick. `teardown` set
+    // `ended` at ROUTING time (`handleEvent`'s `if (ended) return`), but a
+    // delivery already past that check sits on the runner's per-agent tail,
+    // and nothing re-reads `ended` when the turn actually STARTS — teardown
+    // aborts nothing and drains no queue (orchestrator passes no
+    // abortController, so `runner.stop()` is a no-op). So an ordinary
+    // completion routed just before teardown would otherwise run a full
+    // tool-capable turn for a session the operator has been told is over.
+    //
+    // The ended branch refuses SILENTLY, unlike kick: teardown flips `ended`
+    // BEFORE `endMultiAgentSession` finalises the row and BEFORE `sink.onEnded`
+    // fires, so emitting an operator-error row here would append into a session
+    // being finalised — and `onEnded` already tells the operator it is over.
+    // Checked first so a delivery that is BOTH post-teardown and kicked takes
+    // the silent path rather than writing a "removed" row into a dead session.
+    //
+    // Emitting the kick refusal from inside a predicate is the established
+    // shape in this file (`checkTurnRefused` does the same, for the same
+    // reason): the refusal and the sentence the operator reads must not be able
+    // to drift apart. The runner's `TurnRefusedError` is silent at the `.catch`
+    // below for both branches.
     canStartTurn: (agentName) => {
+      if (router.isEnded()) return false;
       if (!router.isKicked(agentName)) return true;
       router.emitTurnRefused('kicked', agentName);
       return false;
