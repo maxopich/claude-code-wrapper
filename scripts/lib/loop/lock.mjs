@@ -17,6 +17,13 @@
  * `process.kill(pid, 0)` sends no signal; it only asks whether the pid can be
  * signalled. EPERM means the process exists under another user — alive, so the
  * lock stands. Only ESRCH means gone.
+ *
+ * `isAlive` and `self` are injectable all the way down to `acquireLock` because
+ * a pid's liveness is supplied by the OS, not by the caller — and a test that
+ * hardcodes one is testing the runner. Measured: a case that wrote `pid: 1` as
+ * "a live holder" passed on macOS/Linux, where pid 1 is init and answers EPERM,
+ * and FAILED on windows-2022, where no such process exists and the lock was
+ * correctly treated as stale.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -81,13 +88,12 @@ export function evaluateLock(raw, { isAlive = pidIsAlive, self = process.pid } =
  * Only after losing that race do we look at who holds it, because that is the
  * only case where staleness matters.
  */
-export function acquireLock(loopDir, { now = Date.now(), log = () => {} } = {}) {
+export function acquireLock(
+  loopDir,
+  { now = Date.now(), log = () => {}, isAlive = pidIsAlive, self = process.pid } = {},
+) {
   const file = path.join(loopDir, LOCK_BASENAME);
-  const mine = JSON.stringify(
-    { pid: process.pid, startedAt: new Date(now).toISOString() },
-    null,
-    2,
-  );
+  const mine = JSON.stringify({ pid: self, startedAt: new Date(now).toISOString() }, null, 2);
 
   const tryCreate = () => {
     try {
@@ -107,7 +113,7 @@ export function acquireLock(loopDir, { now = Date.now(), log = () => {} } = {}) 
   } catch {
     // Vanished between EEXIST and the read — whoever held it released it.
   }
-  const verdict = evaluateLock(raw);
+  const verdict = evaluateLock(raw, { isAlive, self });
   if (verdict.action === 'refuse') throw new LockHeldError(verdict.holder);
   if (verdict.holder) log(`lock: ${verdict.reason}`);
 

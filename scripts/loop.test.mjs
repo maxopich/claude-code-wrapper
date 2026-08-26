@@ -1418,16 +1418,46 @@ describe('the single-run lock (Cebab-qd2.5)', () => {
     expect(pidIsAlive(-1)).toBe(false);
   });
 
-  test('acquire is atomic, so a second acquire in-process is refused', async () => {
+  // WHY LIVENESS IS INJECTED HERE. The first version of this case wrote
+  // `pid: 1` and called it "a live holder". That is not a property of the
+  // input, it is a property of the machine: pid 1 is init on macOS and Linux
+  // and answers EPERM, so the case passed locally — and windows-2022 has no
+  // such process, so `acquireLock` correctly took over what it read as a stale
+  // lock and the case failed on the runner that gates the merge. What belongs
+  // here is the FILE-level behaviour (exclusive create, EEXIST, then evaluate);
+  // whether a given pid is alive is `pidIsAlive`'s own case above, which
+  // exercises both directions with an injected `kill`.
+
+  test('a foreign lock whose holder is alive is refused', async () => {
     const fs = await import('node:fs');
     const os = await import('node:os');
     const path = await import('node:path');
-    const dir = fs.mkdtempSync(path.join(os.tmpdirSync?.() ?? os.tmpdir(), 'looplock-'));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'looplock-'));
     // First acquire wins and writes our own pid.
     expect(acquireLock(dir)).toContain('run.lock');
-    // Our own pid is takeable (a resume), so simulate a DIFFERENT live holder.
-    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 1, startedAt: 'x' }));
-    expect(() => acquireLock(dir)).toThrow(LockHeldError);
+    // Our own pid is takeable (a resume), so simulate a DIFFERENT holder.
+    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 4242, startedAt: 'x' }));
+    expect(() => acquireLock(dir, { isAlive: () => true })).toThrow(LockHeldError);
+    // The lock still belongs to whoever holds it — refusing must not stomp it.
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'run.lock'), 'utf8')).pid).toBe(4242);
+  });
+
+  test('a foreign lock whose holder is gone is taken over', async () => {
+    // The other direction, at the same level. Without it the case above is
+    // satisfied by an `acquireLock` that refuses unconditionally, which would
+    // wedge every checkout that ever saw a `kill -9`.
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'looplock-'));
+    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 4242, startedAt: 'x' }));
+    const said = [];
+    expect(
+      acquireLock(dir, { isAlive: () => false, self: 99, log: (m) => said.push(m) }),
+    ).toContain('run.lock');
+    // Taken over, and reported rather than done silently.
+    expect(JSON.parse(fs.readFileSync(path.join(dir, 'run.lock'), 'utf8')).pid).toBe(99);
+    expect(said.join(' ')).toContain('stale');
   });
 
   test('release only ever removes OUR lock', async () => {
@@ -1438,8 +1468,11 @@ describe('the single-run lock (Cebab-qd2.5)', () => {
     acquireLock(dir);
     expect(releaseLock(dir)).toBe(true);
     // A run that overran and lost its lock must not delete the lock of
-    // whoever legitimately took over.
-    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 1, startedAt: 'x' }));
+    // whoever legitimately took over. `releaseLock` compares pids and never
+    // probes liveness, so any not-ours pid does — but it reads 4242 rather
+    // than 1 so nobody copies a platform-dependent fixture out of here into
+    // somewhere that DOES probe (see the note above).
+    fs.writeFileSync(path.join(dir, 'run.lock'), JSON.stringify({ pid: 4242, startedAt: 'x' }));
     expect(releaseLock(dir)).toBe(false);
     expect(fs.existsSync(path.join(dir, 'run.lock'))).toBe(true);
   });
