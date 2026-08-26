@@ -101,7 +101,22 @@ export function makeGit({ run, cwd, dryRun = false }) {
       await restore(['reset', '--hard', '-q']);
       await restore(['clean', '-fdq']);
       await restore(['checkout', '-q', 'main']);
-      return restore(['pull', '--ff-only', '-q']);
+      const pulled = await restore(['pull', '--ff-only', '-q']);
+      // THE PULL RESULT IS THE POINT, not a leftover return value. After a
+      // merged iteration this pull is the ONLY thing that advances `main`, and
+      // every later bead branches from whatever it leaves behind — so a pull
+      // that fails silently makes bead 2..8 of an `--until 8` run build against
+      // a base missing everything that landed ahead of them. It used to be
+      // returned and discarded by all three callers, which is indistinguishable
+      // from not measuring it at all.
+      return {
+        pulled: pulled.code === 0,
+        detail: (pulled.stderr || pulled.stdout).trim().split('\n')[0] ?? '',
+      };
+    },
+    /** Preflight only: is local `main` current with the remote? */
+    async fetchMain() {
+      return git(['fetch', 'origin', 'main', '--quiet']);
     },
     /**
      * The commit this branch diverged from. Everything measured before the

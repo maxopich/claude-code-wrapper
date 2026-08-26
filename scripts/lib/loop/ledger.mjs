@@ -14,6 +14,7 @@
 /** §9.1. */
 export const DISPOSITIONS = Object.freeze([
   'merged',
+  'merge_queued',
   'parked',
   'guard_withheld',
   'no_change_needed',
@@ -127,8 +128,29 @@ export function buildRecord(parts = {}, now = 0) {
       waitedMs: ci.waitedMs ?? null,
       runUrl: ci.runUrl ?? null,
     },
-    land: { merged: land.merged ?? false, sha: land.sha ?? null },
-    harvest: { beadClosed: harvest.beadClosed ?? false, followUps: harvest.followUps ?? [] },
+    // `queued` and `state` are what stop a PREDICTION reading as an OUTCOME:
+    // `gh pr merge --auto` returns success without merging, and this row used
+    // to record that as `merged: true`. `sha` was hardcoded `null` on every row
+    // ever written, so no record could be checked against `main` at all.
+    land: {
+      merged: land.merged ?? false,
+      queued: land.queued ?? false,
+      sha: land.sha ?? null,
+      state: land.state ?? null,
+    },
+    harvest: {
+      beadClosed: harvest.beadClosed ?? false,
+      // Present only when the bead write FAILED. `bd update --add-label
+      // loop-stuck` is the loop's only cross-run memory, so a park that did not
+      // land means this bead is selected again tomorrow — the one thing the
+      // morning triage has to see. `jq 'select(.harvest.parkFailed)'`.
+      ...(harvest.parkFailed ? { parkFailed: true } : {}),
+      ...(harvest.noted !== undefined ? { noted: harvest.noted } : {}),
+      followUps: harvest.followUps ?? [],
+    },
+    // Present only once an iteration got as far as its teardown. `pulled:false`
+    // after a merged row is the stale-main halt's evidence.
+    ...(parts.restore ? { restore: parts.restore } : {}),
     disposition: parts.disposition ?? null,
     ...(parts.haltReason ? { haltReason: parts.haltReason } : {}),
     ...(parts.reason ? { reason: parts.reason } : {}),
@@ -152,6 +174,9 @@ export function validateRecord(record) {
   need('guard.breaches', Array.isArray(record.guard?.breaches));
   need('diffstat', record.diffstat && typeof record.diffstat === 'object');
   need('harvest.followUps', Array.isArray(record.harvest?.followUps));
+  // A row may not claim both. Cheap, and it is the exact confusion `merge_queued`
+  // exists to prevent.
+  need('land', !(record.land?.merged === true && record.land?.queued === true));
   need('disposition', record.disposition === null || DISPOSITIONS.includes(record.disposition));
   return { valid: errors.length === 0, errors };
 }

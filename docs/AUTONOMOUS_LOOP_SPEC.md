@@ -92,8 +92,8 @@ scripts/lib/loop/loop-guard.mjs     # PreToolUse deny hook for BUILD sessions (s
 
 **Also change:**
 
-- `package.json` → add the `loop`, `loop:night`, `loop:stop`, `loop:watch`, `loop:status` and
-  `loop:recover` scripts (§5.2).
+- `package.json` → add the `loop`, `loop:night`, `loop:stop`, `loop:watch`, `loop:status`,
+  `loop:rehearse` and `loop:recover` scripts (§5.2).
 - `.gitignore` → add `.loop/` (runtime state; never committed).
 
 **Tracked vs ignored — a deliberate call.** `scripts/loop.mjs`, its library and its test are
@@ -277,6 +277,7 @@ need no shell configuration:
 "loop:stop":    "mkdir -p .loop && touch .loop/HALT && echo 'HALT set — stops at the next stage boundary'",
 "loop:watch":   "tmux attach -t cebab-loop",
 "loop:status":  "node scripts/loop.mjs --status",
+"loop:rehearse":"node scripts/loop-rehearsal.mjs",
 "loop:recover": "git checkout main && git reset --hard && (pkill -f 'tsx watch' || true) && rm -f .loop/HALT && echo recovered"
 ```
 
@@ -474,11 +475,17 @@ up to `maxRepairs`. Exhausted → park.
 Poll `gh pr checks <pr> --json name,state,bucket,link` every `pollIntervalMs`, looking for the entry named
 exactly `ci.requiredContext`. Three distinct outcomes — do not collapse them:
 
-| Outcome  | Condition                                                                           | Action                                                                                                                                                            |
-| -------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `green`  | bucket `pass`                                                                       | → LAND                                                                                                                                                            |
-| `red`    | bucket `fail`                                                                       | Fetch the failing job log, re-enter BUILD with it, up to `maxRepairs`. Exhausted → park.                                                                          |
-| `absent` | no check with that name within `appearTimeoutMs` **and nothing else still pending** | Park with reason `ci_never_started`. **Counts toward the circuit breaker** — it usually means something is wrong with the repo or the runner, not with this bead. |
+| Outcome   | Condition                                                                           | Action                                                                                                                                                            |
+| --------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `green`   | bucket `pass`                                                                       | → LAND                                                                                                                                                            |
+| `red`     | bucket `fail`                                                                       | Fetch the failing job log, re-enter BUILD with it, up to `maxRepairs`. Exhausted → park.                                                                          |
+| `absent`  | no check with that name within `appearTimeoutMs` **and nothing else still pending** | Park with reason `ci_never_started`. **Counts toward the circuit breaker** — it usually means something is wrong with the repo or the runner, not with this bead. |
+| `timeout` | the check appeared but had not completed within `completeTimeoutMs`                 | Park with reason `ci_timeout`.                                                                                                                                    |
+
+**`timeout` is not `absent`.** A check that appeared and is still running has plainly started, and
+the remedies are opposites: raise `ci.completeTimeoutMs`, versus go and look at the runner. Folded
+into `ci_never_started`, as it originally was, the ledger sends the morning triage to the wrong
+place.
 
 **`absent` cannot mean "has not appeared yet."** Cebab's required check is a job with
 `needs: [quality]`, and GitHub creates no check run for a gated job until its dependencies finish —
@@ -506,15 +513,66 @@ branch (`git push --force-with-lease`). Do not open a second PR.
 Requires **all** of: `loop.merge` is true, CI green, the final GATE run green, `guard.passed`, and
 no `HALT`. Any one missing → skip to HARVEST with `disposition: "guard_withheld"` or `"parked"`.
 
-`gh pr merge <pr> --squash --delete-branch`. If it fails on branch protection, retry once with
-`--auto` and treat a queued auto-merge as success. Record the merge sha.
+`gh pr merge <pr> --squash --delete-branch --match-head-commit <headSha>`, where `headSha` is the
+commit WATCH actually watched go green. Without that flag LAND asks the forge to merge "the PR",
+which is whatever its head happens to be by then — the same mistake as polling checks by PR number
+instead of by SHA, and the same rule (§0) forbids it.
+
+**A QUEUED AUTO-MERGE IS NOT A MERGE.** This section previously said to "retry once with `--auto`
+and treat a queued auto-merge as success", and that instruction was wrong. `gh pr merge --auto`
+does not merge — its own help says it "automatically merge[s] only after necessary requirements are
+met", i.e. it ENABLES auto-merge and returns 0. Recorded as `merged`, everything downstream
+believed it: the bead was closed, the breaker reset, `git pull --ff-only` fetched a `main` that did
+not contain the change, and the next bead branched from it. If the queued merge later failed, the
+bead stayed closed with nothing merged, no park, no label and no evidence, and the ledger row said
+`land.merged: true`. **It is a prediction recorded as an outcome.**
+
+So LAND finishes by READING THE STATE BACK — `gh pr view <pr> --json state,mergeCommit,mergedAt` —
+and decides from that, never from an exit code:
+
+| Result                                     | Disposition    | Bead                                  |
+| ------------------------------------------ | -------------- | ------------------------------------- |
+| `state: MERGED`                            | `merged`       | closed, reason = the PR url           |
+| `--auto` accepted, PR still `OPEN`         | `merge_queued` | **not closed** — noted, left claimed  |
+| neither the direct merge nor `--auto` took | `parked`       | `merge_failed`, labelled `loop-stuck` |
+
+`merge_queued` neither counts toward the circuit breaker nor resets it: nothing failed, and nothing
+landed. `land.sha` is `mergeCommit.oid`, which is what makes a ledger row checkable against `main`
+at all — it was hardcoded `null` on every row ever written.
+
+The read-back **retries** (3 × 2s) after a direct merge that exited 0 and only once after a queued
+one. The asymmetry is deliberate: a direct merge has already happened, so a state that is not yet
+`MERGED` is replication lag, and calling it a failure would park a bead whose change is on `main`.
+A queued merge has not happened and may not for hours.
 
 ### 6.8 HARVEST — _driver_
 
-1. Merged → `bd close <id> --reason "<pr url>"`. Parked → `bd update <id> --status open
---add-label loop-stuck` (**`--add-label`**, not `--label` — the latter is a _filter_ flag on
-   `ready`/`list` and is rejected by `update`; `--set-labels` would replace every existing label),
-   and append the failure evidence to the bead body: failing step, CI run URL, last 40 lines.
+1. **Four terminal states reach the bead, not two.**
+
+   | Disposition        | Bead write                                                                      |
+   | ------------------ | ------------------------------------------------------------------------------- |
+   | `merged`           | `bd close <id> --reason "<pr url>"`                                             |
+   | `no_change_needed` | `bd close <id> --reason "<verdict summary>"`                                    |
+   | `parked`           | `bd update <id> --status open --add-label loop-stuck --append-notes <evidence>` |
+   | `guard_withheld`   | `bd update <id> --append-notes "PR: … — awaiting a human merge"`, left claimed  |
+   | `merge_queued`     | `bd update <id> --append-notes "auto-merge enabled, nothing merged yet"`        |
+
+   `--add-label`, **not** `--label` — the latter is a _filter_ flag on `ready`/`list` and is
+   rejected by `update`; `--set-labels` would replace every existing label. The park evidence is
+   the failing step, the CI run URL and the PR url.
+
+   The last two rows used to do **nothing at all**, and one of them is the DEFAULT: `loop.merge` is
+   false, so `guard_withheld` is how an ordinary successful iteration ends. The bead was left
+   claimed with an open, green PR and nothing on the bead side connecting them — discoverable only
+   from the PR inward, which after an `--until 8` night is eight beads to correlate by hand.
+   Neither gets `loop-stuck`: that label excludes a bead from every future selection, which is
+   right for something a human must debug and wrong for something a human must merely merge.
+
+   **The bead write is checked.** `park` and `close` return a boolean that every caller used to
+   drop. A failed park is the expensive one — `loop-stuck` is the loop's only cross-run memory, so
+   without it the same failing bead is selected again tomorrow night and fails again. It retries
+   once and records `harvest.parkFailed` either way.
+
 2. For each `verdict.follow_ups[]`, ONE call:
    `bd create --type <type> --priority 3 --labels loop-found --deps discovered-from:<source>`
    with a body carrying `why` + `evidence` + the source bead id. `--deps` creates the issue and
@@ -523,10 +581,24 @@ no `HALT`. Any one missing → skip to HARVEST with `disposition: "guard_withhel
    losing a finding is the failure mode this loop exists to fix. Fall back to a separate
    `bd dep add <new> <source> -t discovered-from` only if `--deps` is rejected.
 3. Append the ledger record.
-4. Teardown: `git checkout main && git pull --ff-only`. If the tree is dirty, `git reset --hard`
-   and record it — a dirty tree after teardown means a stage leaked.
-5. Circuit breaker: 3 consecutive parks → halt, exit 1. A merged or `no_change_needed` bead
-   resets the counter.
+4. Teardown: `git reset --hard && git clean -fd && git checkout main && git pull --ff-only`,
+   **per iteration**, not only at the end of the run. `reset --hard` does not remove untracked
+   files, so the clean is what stops a file the agent created surviving onto `main` and making the
+   next run's preflight refuse.
+
+   **THE PULL'S RESULT IS EVIDENCE, and must be recorded rather than discarded.** After a `merged`
+   or `merge_queued` iteration this pull is the only thing that advances `main`, and every later
+   bead branches from whatever it leaves behind. It is recorded as `restore.pulled`, and a failure
+   after something landed **halts the run** under `stale_main` — continuing would build bead 2..8
+   of an `--until 8` against a base missing what just landed, silently.
+
+5. Circuit breaker: 3 consecutive parks → halt, exit 1. A `merged` or `no_change_needed` bead
+   resets the counter, **and so does a `guard_withheld` iteration whose CI went green.** With
+   `merge: false` — the default — every fully successful iteration ends withheld, and a breaker
+   that neither counted nor reset those halted runs reporting "3 consecutive parks" while three
+   interleaved iterations had built, gated, opened a PR and gone green. That is exactly the
+   evidence the breaker exists to look for. A withheld iteration that did NOT reach green resets
+   nothing.
 
 ---
 
@@ -756,9 +828,31 @@ Three facts set the shape of this, and none of them is negotiable:
    remains a driver-side sum over each BUILD's `total_cost_usd`.
 2. **Remaining quota cannot be queried from a script.** `/usage` is interactive-only. The loop
    cannot look before it leaps; it can only budget in advance and react on impact.
-3. **On a subscription limit the CLI does not back off — it fails.** It writes a line of the form
-   `You've hit your session limit · resets 3:45pm` (also `weekly limit`, and per-model, e.g.
-   `Opus limit`) and exits non-zero.
+3. **On a subscription limit the CLI does not back off — it fails.** It writes a line and exits
+   non-zero. There are THREE templates, not one, and the vocabulary is a literal in the shipped
+   binary — extract it rather than guessing, and re-extract it when the CLI updates:
+
+   ```sh
+   strings -n 6 "$(readlink -f "$(which claude)")" \
+     | grep -oiE '.{0,70}(hit your [a-z0-9 -]{0,20}limit|usage limit|limit reached).{0,70}' \
+     | sort -u
+   ```
+
+   Measured on 2.1.212:
+
+   ```js
+   O0t = {
+     five_hour: 'session limit',
+     seven_day: 'weekly limit',
+     seven_day_opus: 'Opus limit',
+     seven_day_sonnet: 'Sonnet limit',
+     seven_day_overage_included: 'Fable 5 limit',
+     overage: 'usage credit limit',
+   };
+   S5e = (name, suffix) => `You've hit your ${name}${suffix}`; // " · resets 3:45pm"
+   (banner) => `${Cap(O0t[type] || type)} reached`; // "Weekly limit reached"
+   (hvg) => "You've reached your Fable 5 limit.";
+   ```
 
 **Layer 1 — budget the driver imposes. All of it ships OFF.** `limits.costCeilingUsd`,
 `limits.beadCostCeilingUsd` and `limits.cooldownMsBetweenBeads` default to null/0, and
@@ -784,15 +878,39 @@ half-built.
 beads, and sonnet/medium on docs and p2+. Note that `gate.liveSmokes` spawns _additional real
 `claude` sessions_ against the same quota — that, more than their runtime, is why they default off.
 
-**Layer 3 — react on impact.** On a non-zero BUILD exit, match stderr against
-`/hit your (session|weekly|[A-Za-z]+) limit.*resets (.+?)$/i` before anything else — a usage limit
-is not a bead failure and must never be recorded as one, nor count toward the circuit breaker.
+**Layer 3 — react on impact.** A usage limit is not a bead failure and must never be recorded as
+one, nor count toward the circuit breaker. Matched PER LINE against the vocabulary above, in two
+halves, because the obvious single pattern is wrong in both directions:
 
-| Kind                      | Action                                                                                                                                        |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Session / per-model limit | `limits.onSessionLimit`: `halt` (default), or `sleep_until_reset` — parse the reset time, sleep past it, resume the same bead via `--resume`. |
-| Weekly limit              | Always halt. A weekly reset can be days away.                                                                                                 |
-| Reset time unparseable    | Halt. Never guess a wake time.                                                                                                                |
+- **the possessive forms** (`hit your X limit`, `reached your X limit`) are about the account, so
+  any name is accepted EXCEPT `fast`;
+- **the impersonal banner** (`X limit reached`) is ambiguous, so the name must be IN the
+  vocabulary.
+
+**Widening it to a bare `limit reached` is a bug, and the same binary proves it.** These are real
+strings that must NOT stop a run: `Context limit reached` (which happens on ordinary long turns),
+`Subagent nesting limit reached`, `Subagent spawn limit reached`, `Concurrency Limit reached`,
+`recursion limit reached`, `eventCountLimit reached`, `Approaching usage limit · resets X`,
+`You've used 95% of your usage limit`, `You're close to your usage limit`, `Server is temporarily
+limiting requests (not your usage limit)`. And `You've hit your fast limit` must not either —
+fast-mode exhaustion DEGRADES to the normal model; it stops nothing. The first matcher hit that
+one, so it shipped with a live false positive.
+
+**Which streams may be scanned.** stderr always; stdout **only when the run did not succeed**
+(non-zero exit, no parseable envelope, or `is_error`). stdout is the result envelope, which carries
+the AGENT'S OWN PROSE — a bead about rate limiting whose verdict quotes one of these phrases would
+otherwise halt the run, and widening the matcher widens exactly that surface. The rule that removes
+it: **a usage limit is a reason the run FAILED.**
+
+| Kind                                | Action                                                                                        |
+| ----------------------------------- | --------------------------------------------------------------------------------------------- |
+| Any detected limit                  | Halt. `limits.onSessionLimit` / `onWeeklyLimit` accept only `halt` today.                     |
+| A value those keys do not implement | `ConfigError`, exit 2 — see §4. A setting that validates and is ignored is worse than a typo. |
+| Reset time                          | Recorded verbatim, never parsed. Never guess a wake time.                                     |
+
+`sleep_until_reset` is deliberately NOT implemented: `resetsAt` is free text taken verbatim from
+the CLI (`"3:45pm"`, `"Monday"`), so a waiting implementation would have to parse what the detector
+refuses to. Until it exists, the config value is refused rather than silently ignored.
 
 **In every case the current bead is parked cleanly first** — repo back to `main`, `dev:server`
 killed, bead status restored, ledger record written with `disposition: "halted"` and
@@ -831,14 +949,28 @@ directly with an injected `run` that returns the limit message.
   "guard": { "passed": true, "breaches": [] },
   "pr": { "number": 393, "url": "https://github.com/…/393" },
   "ci": { "conclusion": "success", "waitedMs": 512000, "runUrl": "…" },
-  "land": { "merged": true, "sha": "a91298b" },
+  "land": { "merged": true, "queued": false, "sha": "a91298b", "state": "MERGED" },
   "harvest": { "beadClosed": true, "followUps": ["Cebab-p2x"] },
+  "restore": { "pulled": true, "detail": "" },
   "disposition": "merged",
 }
 ```
 
-`disposition` ∈ `merged | parked | guard_withheld | no_change_needed | halted | dry_run`.
-Write the record even on a crash — wrap the iteration so the `finally` always appends.
+`disposition` ∈ `merged | merge_queued | parked | guard_withheld | no_change_needed | halted |
+dry_run`. Write the record even on a crash — wrap the iteration so the `finally` always appends.
+
+Four fields exist to stop a PREDICTION reading as an OUTCOME, and each answers a question the
+record could not previously be asked:
+
+| Field            | Why it is there                                                                                                                     |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `land.queued`    | `--auto` enables auto-merge and returns 0. `merged` and `queued` may never both be true (§6.7).                                     |
+| `land.sha`       | `mergeCommit.oid`. Hardcoded `null` on every row ever written, so nothing could be checked against `main`.                          |
+| `land.state`     | The forge's own word for it, printed rather than interpreted.                                                                       |
+| `restore.pulled` | Whether the teardown's `git pull --ff-only` advanced `main`. `false` after a landed row is the `stale_main` halt's evidence (§6.8). |
+
+`harvest.parkFailed` is present **only when a park failed**, so `jq 'select(.harvest.parkFailed)'`
+matches nothing on a healthy night — the same idiom as `.build.failure` and `.crash`.
 
 ### 9.2 `.loop/state.json`
 
@@ -931,8 +1063,48 @@ Required coverage — pure logic, no network, no repo, no model:
   writes its record.
 - **config.mjs** — unknown key rejected; CLI overrides file overrides defaults.
 
+- **build.mjs** — the usage-limit matcher, in BOTH directions, against strings extracted from the
+  shipped CLI rather than invented (§8.4). The negative table is the more valuable half: the
+  obvious widening matches `Context limit reached`, which happens on ordinary long turns and would
+  halt an overnight run on its first iteration.
+
 Integration behaviour (`gate`, `git`, `forge`, `beads`) is tested through the injected `run`
 seam with recorded fixtures. Do not shell out in tests.
+
+### 11.1 The rehearsal — `scripts/loop-rehearsal.mjs`
+
+Unit tests cannot reach the loop's most expensive failure mode, which is a stage that has never
+executed. Measured on `.loop/runs.jsonl` after ten real iterations: `WATCH ever green: False`,
+`LAND ever merged: False`. Everything after PUBLISH was unexercised, and `Cebab-qd2.12` was living
+there.
+
+So the rehearsal runs the **real driver** end-to-end against a scratch git repo with a local bare
+`origin`, with PATH shims for `gh`, `bd`, `npm` and `claude`. `scripts/loop.mjs` and
+`scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
+its own path — the installed copy would drive this checkout.
+
+Six scenarios, each asserting on the ledger AND on the bare repo's `main`:
+
+| Scenario             | What only it can prove                                                              |
+| -------------------- | ----------------------------------------------------------------------------------- |
+| `green-merge`        | LAND merges, the bead closes, `land.sha` IS origin/main, bead 2 branches off bead 1 |
+| `queued`             | a queued auto-merge does not close the bead and does not move `main` (§6.7)         |
+| `withheld`           | the default mode notes the PR on the bead, and bead 2 branches from `main`          |
+| `stale-main`         | a landed iteration whose pull failed HALTS instead of compounding                   |
+| `capped-then-resume` | a cap that edited files is resumed once, with `--resume`                            |
+| `capped-no-progress` | a cap that edited nothing parks, and `claude` runs exactly once                     |
+
+**What it deliberately does not prove.** The shim's merge is a fast-forward push, not a squash, so
+branch protection, a real merge queue, and `gh pr merge --delete-branch` switching the operator's
+local branch are NOT covered — those need one supervised real run. And
+`scripts/predev-server.mjs` is stubbed rather than copied: the real one kills any `tsx watch …
+src/index.ts` on the machine, and the driver invokes it every iteration, so a rehearsal would kill
+the operator's live dev server.
+
+Wired into CI through `scripts/loop-rehearsal.test.mjs`, skipped on Windows (the shims are
+`#!/usr/bin/env node` scripts, which Windows needs `.cmd` wrappers for). Where that skip would have
+left a rule unpinned — the stale-main decision — the rule is extracted into `landedOnStaleMain` and
+unit-tested on every platform.
 
 ---
 
@@ -964,6 +1136,14 @@ seam with recorded fixtures. Do not shell out in tests.
 - [ ] `npm run loop:stop` halts a detached run; `npm run loop:recover` restores a hard-killed one
       without deleting untracked files.
 - [ ] `--status` prints the cost figure labelled as a token-usage estimate, never as money spent.
+- [ ] `npm run loop:rehearse` passes all six scenarios (§11.1) — the only thing that executes the
+      green path without touching GitHub, and the only regression test LAND has.
+- [ ] A queued auto-merge is recorded as `merge_queued`, does **not** close the bead, and does not
+      reset the circuit breaker.
+- [ ] A landed iteration whose teardown `git pull --ff-only` fails halts the run under
+      `stale_main` rather than building the next bead on a stale base.
+- [ ] `Context limit reached` on stderr does **not** halt the run; `Weekly limit reached` does.
+- [ ] A run started on a `main` that is behind or ahead of `origin/main` exits 2 before SELECT.
 - [ ] `npm run lint && npm run typecheck && npm test` pass with the new files.
 
 ---
@@ -980,10 +1160,19 @@ claude --version                                             # --json-schema sup
 command -v bd                                                # and note the absolute path
 test -z "$(git status --porcelain)"                          # clean tree
 git rev-parse --abbrev-ref HEAD                              # == main
+git fetch origin main && git pull --ff-only                  # and CURRENT with the remote
 test -f .env                                                 # iff the Playground tier can run
 ```
 
-The last line is conditional on `gate.playgroundTier` resolving to anything but `"never"`: parse
+**Clean and on `main` is not the same as current, and both directions bite.** A `main` that is
+BEHIND means every bead is built, gated and merged against stale code. A `main` that is AHEAD —
+unpushed local work, the normal state of a checkout someone has been developing in — is worse:
+`newBranch` branches from it, so that unpushed work is carried into the bead's branch and pushed
+into the bead's PR. Checked here rather than left to the per-iteration teardown, whose pull runs at
+the END of an iteration: the first bead of every run would already have been built on whatever was
+lying around.
+
+The `.env` line is conditional on `gate.playgroundTier` resolving to anything but `"never"`: parse
 `.env`, resolve `CEBAB_DATA_DIR` and `WORKSPACE_ROOT`, and refuse to start unless both sit inside
 `gate.playgroundRoot`. Point the operator at `Playground/README.md`, which carries the exact
 four lines to write.

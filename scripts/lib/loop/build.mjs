@@ -34,31 +34,156 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /**
- * §8.4 Layer 3. A subscription limit is not a bead failure: the CLI does not
- * back off, it prints a line and exits non-zero. Matched linearly rather than
- * by regex — same reason as guard.mjs, and it also copes with the per-model
- * wording ("Opus limit") that a two-alternative pattern would miss.
+ * §8.4 Layer 3 — did the SUBSCRIPTION stop this run?
+ *
+ * THE STRINGS BELOW WERE EXTRACTED FROM THE SHIPPED CLI, NOT INVENTED. The
+ * previous matcher looked for the single literal `hit your … limit`, and
+ * `Cebab-qd2.8` was filed saying it could not be widened without guessing.
+ * It can — the wording is a literal in the binary:
+ *
+ *   strings -n 6 "$(readlink -f "$(which claude)")" \
+ *     | grep -oiE '.{0,70}(hit your [a-z0-9 -]{0,20}limit|usage limit|limit reached).{0,70}' \
+ *     | sort -u
+ *
+ * Re-run that when the CLI updates. Measured on 2.1.212, the vocabulary and
+ * both templates are literals:
+ *
+ *   O0t = { five_hour:"session limit", seven_day:"weekly limit",
+ *           seven_day_opus:"Opus limit", seven_day_sonnet:"Sonnet limit",
+ *           seven_day_overage_included:"Fable 5 limit",
+ *           overage:"usage credit limit" }
+ *   S5e = (name, suffix) => `You've hit your ${name}${suffix}`
+ *   banner                => `${Cap(O0t[type] || type)} reached`
+ *   hvg                   => "You've reached your Fable 5 limit."
+ *
+ * So there are THREE forms and the old matcher handled one. It missed the whole
+ * banner family (`Weekly limit reached`) and the `reached your …` family.
+ *
+ * THE NAIVE WIDENING IS WRONG, AND THE SAME BINARY PROVES IT. Matching bare
+ * `limit reached` also matches `Context limit reached` — which happens on
+ * ordinary long turns — plus `Subagent nesting limit reached`,
+ * `Concurrency Limit reached`, `recursion limit reached` and half a dozen more.
+ * Halting an overnight run on any of those is worse than the bug being fixed.
+ *
+ * AND THE OLD MATCHER ALREADY HAD A LIVE FALSE POSITIVE: `You've hit your fast
+ * limit` matched, but fast-mode exhaustion DEGRADES to the normal model. It
+ * does not stop anything.
+ *
+ * Hence the split, which is what the corpus supports rather than what reads
+ * tidiest:
+ *
+ *   - the possessive forms (`hit your X limit`, `reached your X limit`) are
+ *     about the account, so any name is accepted EXCEPT the known non-stops;
+ *   - the impersonal banner (`X limit reached`) is ambiguous, so the name must
+ *     be IN the vocabulary.
+ *
+ * Evaluated PER LINE. Every false positive above arrives on its own line, and
+ * a whole-blob scan cannot tell `Context limit reached` on line 4 from a real
+ * stop on line 9.
  */
-export function detectUsageLimit(text = '') {
-  const lower = text.toLowerCase();
-  const at = lower.indexOf('hit your ');
-  if (at === -1) return { hit: false };
-  const after = lower.slice(at + 'hit your '.length);
-  const limitAt = after.indexOf(' limit');
-  if (limitAt === -1) return { hit: false };
 
-  const word = after.slice(0, limitAt).trim().split(/\s+/).pop() ?? '';
-  const kind = word === 'weekly' ? 'weekly' : word === 'session' ? 'session' : 'model';
+/** Limit names that ARE a subscription stop, longest phrase first so
+ *  `usage credit` is never credited to `usage`. */
+const LIMIT_KINDS = Object.freeze([
+  ['usage credit', 'credit'],
+  ['monthly spend', 'spend'],
+  ['monthly usage', 'usage'],
+  ['session', 'session'],
+  ['weekly', 'weekly'],
+  ['fable 5', 'model'],
+  ['sonnet', 'model'],
+  ['opus', 'model'],
+  ['spend', 'spend'],
+  ['usage', 'usage'],
+]);
 
-  // "· resets 3:45pm" — take the remainder of that line verbatim; never guess.
-  let resetsAt = null;
-  const resetAt = after.indexOf('resets ');
-  if (resetAt !== -1) {
-    const rest = after.slice(resetAt + 'resets '.length);
-    const line = rest.split('\n')[0].trim();
-    if (line) resetsAt = line;
+/** Names that end in ` limit` and are NOT the subscription running out. */
+const NOT_A_USAGE_LIMIT = Object.freeze(['fast']);
+
+/** Real CLI lines that NAME a limit without one having been hit. A line
+ *  carrying any of these is skipped whole. */
+const NOT_A_STOP = Object.freeze([
+  'approaching',
+  '% of your',
+  'close to your',
+  'not your usage limit',
+  'running into usage limits',
+  'portion of your usage limits',
+  'upgrade to increase',
+  'is set to $0',
+]);
+
+function kindOf(name) {
+  for (const [phrase, kind] of LIMIT_KINDS) {
+    if (name.includes(phrase)) return kind;
   }
-  return { hit: true, kind, resetsAt, raw: text.slice(0, 400) };
+  return null;
+}
+
+/** "· resets 3:45pm", "· resets in 2h" — taken verbatim, never parsed. */
+function resetsIn(line) {
+  const at = line.indexOf('resets ');
+  if (at === -1) return null;
+  return line.slice(at + 'resets '.length).trim() || null;
+}
+
+function hitInLine(line) {
+  if (NOT_A_STOP.some((phrase) => line.includes(phrase))) return null;
+
+  // Possessive: `You've hit your <name> limit`, `You've reached your <name> limit`.
+  for (const lead of ['hit your ', 'reached your ']) {
+    const at = line.indexOf(lead);
+    if (at === -1) continue;
+    const after = line.slice(at + lead.length);
+    // The name is optional: `S5e('limit', …)` is a real fallback in the CLI, so
+    // `You've hit your limit · resets 3pm` has no name and no separating space.
+    const limitAt = after.startsWith('limit') ? 0 : after.indexOf(' limit');
+    if (limitAt === -1) continue;
+    // `limits`, `limiting`, `limitation` are not this. A letter after the word
+    // means it was never the word — which also independently rejects
+    // "running into usage limits", the phrase NOT_A_STOP names directly.
+    const rest = after.slice(limitAt === 0 ? 'limit'.length : limitAt + ' limit'.length);
+    if (rest && rest[0] >= 'a' && rest[0] <= 'z') continue;
+    const name = after.slice(0, limitAt).trim();
+    if (NOT_A_USAGE_LIMIT.some((word) => name.includes(word))) continue;
+    return kindOf(name) ?? 'model';
+  }
+
+  // Banner: `<Name> limit reached`. Vocabulary-only, see the header.
+  for (const [phrase, kind] of LIMIT_KINDS) {
+    if (line.includes(`${phrase} limit reached`)) return kind;
+  }
+  return null;
+}
+
+export function detectUsageLimit(text = '') {
+  for (const raw of String(text).toLowerCase().split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const kind = hitInLine(line);
+    if (kind) return { hit: true, kind, resetsAt: resetsIn(line), raw: String(text).slice(0, 400) };
+  }
+  return { hit: false };
+}
+
+/**
+ * WHICH STREAMS A LIMIT CAN HONESTLY BE FOUND IN.
+ *
+ * The scan used to read `stderr + stdout`, and stdout is the result envelope —
+ * which contains the AGENT'S OWN PROSE. A bead about rate limiting whose
+ * verdict summary quotes one of the phrases above would halt the whole run, and
+ * widening the matcher widens exactly that surface.
+ *
+ * The rule that removes it: A USAGE LIMIT IS A REASON THE RUN FAILED. If the
+ * CLI exited 0 and produced a verdict, nothing in its output is a limit that
+ * stopped it. stderr is always scanned — it carries CLI diagnostics, never the
+ * agent's text — and stdout only when the run did not succeed, which is also
+ * where the CLI writes its own refusals.
+ */
+export function limitScanText(result, envelope) {
+  const succeeded =
+    result.code === 0 && Boolean(envelope?.structured_output) && envelope?.is_error !== true;
+  return succeeded ? (result.stderr ?? '') : `${result.stderr ?? ''}\n${result.stdout ?? ''}`;
 }
 
 /**
@@ -170,17 +295,37 @@ export function isMaxTurns(envelope) {
   );
 }
 
+/**
+ * `{{#if name}}…{{/if}}` blocks, then `{{var}}` substitution.
+ *
+ * Blocks resolve FIRST so an unused section is removed whole rather than
+ * leaving its inner `{{...}}` markers behind in the prompt.
+ *
+ * ANY NUMBER OF NAMED BLOCKS, not just `repair`. A turn cap and a red gate are
+ * both "try again", but the instruction is the opposite in each — a gate repair
+ * must fix a named failing step, a resumed cap must CONTINUE and not restart —
+ * and one block that hardcodes "A previous attempt failed the gate" cannot say
+ * both. Two blocks keep the prose in the template rather than splitting it
+ * between here and a `{{repair_intro}}` variable.
+ *
+ * `indexOf` rather than a regex, matching the rest of this file: the bodies
+ * hold fenced code and braces, and the repo's `security/detect-unsafe-regex`
+ * rule rejects the tolerant patterns such a matcher grows into.
+ */
 export function renderPrompt(template, vars) {
   let out = template;
-  // Block form first, so an unused {{#if repair}} section is removed whole
-  // rather than leaving its inner {{...}} markers behind.
-  const open = '{{#if repair}}';
-  const close = '{{/if}}';
-  const start = out.indexOf(open);
-  const end = out.indexOf(close);
-  if (start !== -1 && end !== -1) {
-    const body = out.slice(start + open.length, end);
-    out = out.slice(0, start) + (vars.repair ? body : '') + out.slice(end + close.length);
+  const OPEN = '{{#if ';
+  const CLOSE = '{{/if}}';
+  for (;;) {
+    const start = out.indexOf(OPEN);
+    if (start === -1) break;
+    const nameEnd = out.indexOf('}}', start);
+    if (nameEnd === -1) break;
+    const end = out.indexOf(CLOSE, nameEnd);
+    if (end === -1) break;
+    const name = out.slice(start + OPEN.length, nameEnd).trim();
+    const body = out.slice(nameEnd + '}}'.length, end);
+    out = out.slice(0, start) + (vars[name] ? body : '') + out.slice(end + CLOSE.length);
   }
   for (const [key, value] of Object.entries(vars)) {
     out = out.split(`{{${key}}}`).join(String(value ?? ''));
@@ -202,14 +347,19 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
   const template = fs.readFileSync(path.join(libDir, 'build-prompt.md'), 'utf8');
 
   return {
-    async run({ bead, attempt, maxRepairs, failedStep, failureOutput, resumeSessionId }) {
+    async run({ bead, attempt, maxRepairs, failedStep, failureOutput, resumeSessionId, capped }) {
       const prompt = renderPrompt(template, {
         bead_id: bead.id,
         bead_title: bead.title,
         bead_body: bead.description ?? '',
-        repair: Boolean(failedStep),
+        // Mutually exclusive: a resumed turn cap has no failing step to hand
+        // back, and telling it "a previous attempt failed the gate" would send
+        // it looking for a failure that never happened.
+        repair: Boolean(failedStep) && !capped,
+        capped: Boolean(capped),
         attempt,
         max: maxRepairs,
+        max_turns: config.build.maxTurns,
         failed_step: failedStep ?? '',
         failure_output: failureOutput ?? '',
       });
@@ -234,11 +384,6 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
         cwd,
         timeoutMs: config.build.timeoutMs,
       });
-
-      // Checked BEFORE anything else — a usage limit must never be recorded as
-      // a bead failure, nor count toward the circuit breaker.
-      const limit = detectUsageLimit(`${result.stderr}\n${result.stdout}`);
-      if (limit.hit) return { ok: false, usageLimit: limit };
 
       // THE ENVELOPE IS PARSED BEFORE THE EXIT CODE IS JUDGED, and that order
       // is the whole fix. The CLI exits NON-ZERO on a turn-cap exhaustion
@@ -266,6 +411,16 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
         costUsd: envelope?.total_cost_usd ?? null,
         exitCode: result.code,
       };
+
+      // Checked before every other failure class — a usage limit must never be
+      // recorded as a bead failure, nor count toward the circuit breaker. It
+      // now runs AFTER the parse only because `limitScanText` needs the
+      // envelope to decide which streams it may honestly read; the precedence
+      // among outcomes is unchanged. Telemetry rides along because a limited
+      // attempt still SPENT, and counting only completed builds under-reported
+      // exactly the runs the operator most wants to see.
+      const limit = detectUsageLimit(limitScanText(result, envelope));
+      if (limit.hit) return { ok: false, usageLimit: limit, ...telemetry };
 
       if (result.timedOut) return { ok: false, failure: 'timeout', ...telemetry };
 

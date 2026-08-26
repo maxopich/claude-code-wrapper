@@ -210,6 +210,44 @@ export function reserveBlocks(conditions, { now }, reserveMs) {
   return null;
 }
 
+/**
+ * SETTINGS WHOSE VALUE SPACE THE CODE ACTUALLY IMPLEMENTS.
+ *
+ * The module already refuses an unknown KEY by name, and the same argument
+ * applies to a VALUE nothing reads. `limits.onSessionLimit` and
+ * `limits.onWeeklyLimit` were defined here and grepped for exactly twice — both
+ * times this file. `machine.mjs` halts on ANY usage limit regardless of kind,
+ * so today's behaviour matched the defaults by accident, and an operator could
+ * set `onWeeklyLimit: 'wait'`, have it validated, and have it silently ignored.
+ * That is strictly worse than a typo, which at least exits 2 with the key name.
+ *
+ * `gate.playgroundTier` is here for the sharper version of the same problem:
+ * `playgroundTriggered` treats every unrecognised value as `auto`, so
+ * `"nver"` does not disable the Playground tier — it enables the default one,
+ * which is the opposite of what was asked for.
+ *
+ * Implementing `wait` is the larger job and is deliberately not done: `resetsAt`
+ * is free text taken verbatim from the CLI ("3:45pm", "Monday"), never parsed,
+ * so a waiting implementation would have to parse what the detector refuses to.
+ */
+const IMPLEMENTED_VALUES = Object.freeze({
+  'limits.onSessionLimit': ['halt'],
+  'limits.onWeeklyLimit': ['halt'],
+  'gate.playgroundTier': ['auto', 'always', 'never'],
+});
+
+function unimplementedValues(config) {
+  const bad = [];
+  for (const [path, allowed] of Object.entries(IMPLEMENTED_VALUES)) {
+    const [group, key] = path.split('.');
+    const value = config[group]?.[key];
+    if (!allowed.includes(value)) {
+      bad.push(`${path}=${JSON.stringify(value)} (implemented: ${allowed.join(', ')})`);
+    }
+  }
+  return bad;
+}
+
 const isPlainObject = (value) =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -248,6 +286,15 @@ export function resolveConfig({ file = {}, cli = {} } = {}) {
   if (unknown.length > 0) {
     throw new ConfigError(
       `unknown config key${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}`,
+    );
+  }
+  // A key the defaults define but whose VALUE nothing implements. See above:
+  // silently ignoring it is worse than refusing an unknown key.
+  const unimplemented = unimplementedValues(merged);
+  if (unimplemented.length > 0) {
+    throw new ConfigError(
+      `config value${unimplemented.length > 1 ? 's' : ''} not implemented: ` +
+        `${unimplemented.join('; ')}`,
     );
   }
   return merged;

@@ -28,6 +28,7 @@
     "loop:stop": "mkdir -p .loop && touch .loop/HALT && echo 'HALT set \u2014 stops at the next stage boundary'",
     "loop:watch": "tmux attach -t cebab-loop",
     "loop:status": "node scripts/loop.mjs --status",
+    "loop:rehearse": "node scripts/loop-rehearsal.mjs",
     "loop:recover": "git reset --hard && git clean -fd && git checkout main && node scripts/predev-server.mjs && rm -f .loop/HALT && echo recovered"
   },
   "devDependencies": {

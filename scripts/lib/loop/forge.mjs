@@ -55,10 +55,42 @@ export function checkRunsArgv(sha) {
   return ['api', `repos/{owner}/{repo}/commits/${sha}/check-runs?per_page=100`];
 }
 
-export function prMergeArgv(pr, { auto = false } = {}) {
+/**
+ * `--match-head-commit` IS RULE 2 APPLIED TO THE MERGE. WATCH validated one
+ * commit; without this flag LAND asks GitHub to merge "the PR", which is
+ * whatever its head happens to be by then. The flag makes the forge refuse
+ * anything else, so the loop can only ever land the commit it actually saw go
+ * green — the same reason `pollChecks` is SHA-scoped rather than PR-scoped.
+ */
+export function prMergeArgv(pr, { auto = false, headSha = null } = {}) {
   const args = ['pr', 'merge', String(pr), '--squash', '--delete-branch'];
+  if (headSha) args.push('--match-head-commit', headSha);
   if (auto) args.push('--auto');
   return args;
+}
+
+/** What actually happened, read back from the forge. See `merge` below. */
+export function prStateArgv(pr) {
+  return ['pr', 'view', String(pr), '--json', 'state,mergeCommit,mergedAt'];
+}
+
+/**
+ * Pure half of the read-back, so both branches are testable without a network.
+ * `mergeCommit` is null until the merge exists, which is exactly the difference
+ * between a merge and a queued one.
+ */
+export function parsePrState(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { state: null, sha: null, mergedAt: null, unparsed: true };
+  }
+  return {
+    state: typeof parsed?.state === 'string' ? parsed.state : null,
+    sha: typeof parsed?.mergeCommit?.oid === 'string' ? parsed.mergeCommit.oid : null,
+    mergedAt: parsed?.mergedAt ?? null,
+  };
 }
 
 /**
@@ -110,10 +142,12 @@ export function failingSibling(payload, requiredContext) {
   );
 }
 
-export function makeForge({ run, cwd, dryRun = false }) {
+const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export function makeForge({ run, cwd, dryRun = false, sleep = defaultSleep }) {
   const gh = (args, opts = {}) => run('gh', args, { cwd, timeoutMs: 120000, ...opts });
 
-  return {
+  const api = {
     async createPr({ base, title, body }) {
       if (dryRun) return { number: null, url: null };
       const r = await gh(prCreateArgv({ base, title, body }), { input: body });
@@ -137,17 +171,74 @@ export function makeForge({ run, cwd, dryRun = false }) {
       return classifyCheckRuns(parsed, requiredContext);
     },
 
-    async merge(pr) {
-      if (dryRun) return { merged: false, sha: null };
-      let r = await gh(prMergeArgv(pr));
-      if (r.code !== 0) {
-        // Branch protection can refuse an immediate merge; queueing counts as
-        // success, since the required checks are already green.
-        r = await gh(prMergeArgv(pr, { auto: true }));
-        if (r.code !== 0) return { merged: false, sha: null, error: r.stderr.trim() };
-        return { merged: true, sha: null, queued: true };
+    /**
+     * MERGED IS A STATE READ BACK, NOT AN EXIT CODE.
+     *
+     * The previous version returned `{ merged: true, queued: true }` when the
+     * direct merge failed and `--auto` succeeded. But `gh pr merge --auto` does
+     * not merge — its own help says it "automatically merge[s] only after
+     * necessary requirements are met", i.e. it ENABLES auto-merge and returns.
+     * The comment beside it read "queueing counts as success, since the
+     * required checks are already green", which is true at the instant of
+     * queueing and stops being true immediately afterwards. That is a
+     * PREDICTION recorded as an OUTCOME, and everything downstream believed it:
+     * the bead was closed, the breaker reset, `git pull --ff-only` fetched a
+     * `main` that did not contain the change, and the next bead branched from
+     * it.
+     *
+     * So both paths now finish by asking the forge what the PR's state IS.
+     * `merged` requires `state === 'MERGED'` and carries the real
+     * `mergeCommit.oid` — the field that was hardcoded `null` on every ledger
+     * row ever written, which is why no record could be checked against `main`.
+     *
+     * THE READ-BACK RETRIES, and the asymmetry is deliberate: a direct merge
+     * that exited 0 has already happened, so a state that is not yet `MERGED`
+     * is replication lag, and reporting it as a failure would park a bead whose
+     * change is on `main`. A queued merge has NOT happened, so it is read once.
+     */
+    async merge(pr, { headSha = null } = {}) {
+      const outcome = (extra) => ({ merged: false, queued: false, sha: null, ...extra });
+      if (dryRun) return outcome({ state: null });
+
+      const direct = await gh(prMergeArgv(pr, { headSha }));
+      if (direct.code === 0) {
+        const state = await api.confirmMerged(pr);
+        if (state.state === 'MERGED') {
+          return { merged: true, queued: false, sha: state.sha, state: state.state };
+        }
+        return outcome({
+          state: state.state,
+          error: `gh pr merge exited 0 but the PR reads ${state.state ?? 'unknown'}`,
+        });
       }
-      return { merged: true, sha: null };
+
+      const auto = await gh(prMergeArgv(pr, { auto: true, headSha }));
+      if (auto.code !== 0) {
+        return outcome({ state: null, error: (auto.stderr || direct.stderr).trim() });
+      }
+      // `--auto` can still land immediately when the requirements were already
+      // met, so the state decides which of the two this was.
+      const state = await api.prState(pr);
+      if (state.state === 'MERGED') {
+        return { merged: true, queued: false, sha: state.sha, state: state.state };
+      }
+      return { merged: false, queued: true, sha: null, state: state.state };
+    },
+
+    async prState(pr) {
+      const r = await gh(prStateArgv(pr));
+      if (r.code !== 0) return { state: null, sha: null, mergedAt: null, failed: true };
+      return parsePrState(r.stdout);
+    },
+
+    /** Up to `attempts` reads for a merge that has already been accepted. */
+    async confirmMerged(pr, { attempts = 3, delayMs = 2000 } = {}) {
+      let state = await api.prState(pr);
+      for (let i = 1; i < attempts && state.state !== 'MERGED'; i += 1) {
+        await sleep(delayMs);
+        state = await api.prState(pr);
+      }
+      return state;
     },
 
     async addLabel(pr, label) {
@@ -179,4 +270,5 @@ export function makeForge({ run, cwd, dryRun = false }) {
       return log.stdout.split('\n').slice(-lines).join('\n');
     },
   };
+  return api;
 }

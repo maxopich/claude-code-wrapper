@@ -57,6 +57,24 @@ export function parkArgv(id, evidence) {
   ];
 }
 
+/**
+ * A note on a bead that is neither closed nor parked.
+ *
+ * The two terminal states that leave the bead OPEN and CLAIMED — a PR awaiting
+ * a human merge, and a merge sitting in a queue — previously wrote nothing to
+ * the bead at all. `commitSubject` puts the id in the PR title and the branch
+ * is `loop/<id>`, so the link exists, but only from the PR inward: `bd show
+ * <id>` said nothing, and after an `--until 8` run that is eight claimed beads
+ * to correlate by hand.
+ *
+ * Deliberately NOT `--add-label loop-stuck`: that label excludes a bead from
+ * every future selection, which is right for something a human must debug and
+ * wrong for something a human must merely merge.
+ */
+export function noteArgv(id, text) {
+  return ['update', id, '--append-notes', text];
+}
+
 export function closeArgv(id, reason) {
   return ['close', id, '-r', reason];
 }
@@ -139,12 +157,27 @@ export function makeBeads({ run, bd, cwd, dryRun = false }) {
       const result = await write(claimArgv(id));
       return result.code === 0;
     },
+    /**
+     * THE PARK IS THE CROSS-RUN MEMORY, so a failed one is not cosmetic.
+     * `loop-stuck` is what makes SELECT skip this bead on the NEXT run; without
+     * it the same failing bead is picked again tomorrow night, fails again, and
+     * parks again. The result used to be returned to a caller that dropped it,
+     * so the whole mechanism could be dead and nothing would say so.
+     *
+     * Retried once — the common cause is a transient `bd` lock — and the
+     * outcome is returned for the ledger either way.
+     */
     async park(id, evidence) {
-      const result = await write(parkArgv(id, evidence));
+      let result = await write(parkArgv(id, evidence));
+      if (result.code !== 0) result = await write(parkArgv(id, evidence));
       return result.code === 0;
     },
     async close(id, reason) {
       const result = await write(closeArgv(id, reason));
+      return result.code === 0;
+    },
+    async note(id, text) {
+      const result = await write(noteArgv(id, text));
       return result.code === 0;
     },
     /**
