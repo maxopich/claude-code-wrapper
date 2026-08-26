@@ -3,6 +3,7 @@
  * throw (simulating an SDK iterator that fails before yielding any messages).
  * That's intentional — the runner's retry / failure paths are what we're
  * exercising. require-yield otherwise flags every throw-only generator. */
+import { resolve } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { MockOptions, RunOptions, Runner } from '../runner/index.js';
@@ -694,7 +695,14 @@ describe('AgentRunner', () => {
             summary: expect.stringContaining('/etc/passwd'),
             cwd: '/tmp/coder',
             category: 'mutate',
-            violatedPath: '/etc/passwd',
+            // The guardrail verdict is the RESOLVED absolute target, which is
+            // platform-dependent: POSIX keeps '/etc/passwd', Windows rewrites
+            // it to the current drive ('D:\etc\passwd'). Resolve it the same
+            // way guardrail.ts does so this asserts the value on every OS
+            // rather than only where the separator happens to match — the
+            // Windows red that surfaced this test's swallowed assertions
+            // (`Cebab-7r8`) was this exact drift.
+            violatedPath: resolve('/tmp/coder', '/etc/passwd'),
             toolUseId: 'second',
             filePath: '/etc/passwd',
           },
