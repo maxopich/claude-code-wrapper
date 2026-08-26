@@ -762,3 +762,474 @@ describe('ledger', () => {
     ).toBe('disagree');
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stages, driver and the deny hook (Cebab-qd2.2).
+//
+// These modules DO perform I/O, so each takes an injected `run`. The tests
+// hand it a recorder that returns canned output and captures the argv — which
+// is the only way to assert on the three bd flags the spec got wrong, on the
+// two settings flags whose absence costs a mangled Kanban board rather than a
+// failure, and on the usage-limit path that is most likely to be reached at
+// 3am and least likely to be exercised by accident.
+// ═══════════════════════════════════════════════════════════════════════════
+
+import { claimArgv, closeArgv, followUpArgv, parkArgv } from './lib/loop/beads.mjs';
+import { branchNameFor, commitSubject } from './lib/loop/git.mjs';
+import { classifyChecks, prChecksArgv, prMergeArgv } from './lib/loop/forge.mjs';
+import {
+  assertPlaygroundEnv,
+  DETERMINISTIC_STEPS,
+  parseEnvFile,
+  playgroundTriggered,
+} from './lib/loop/gate.mjs';
+import { buildArgv, detectUsageLimit, renderPrompt, resolveTier } from './lib/loop/build.mjs';
+import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
+import { parseArgs } from './loop.mjs';
+import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
+
+describe('beads: the three flags the spec got wrong', () => {
+  test('park uses --add-label, never --label or --set-labels', () => {
+    const argv = parkArgv('Cebab-x', 'evidence');
+    expect(argv).toContain('--add-label');
+    // `--label` is a FILTER flag on ready/list; `update` rejects it outright.
+    expect(argv).not.toContain('--label');
+    // `--set-labels` is accepted and would REPLACE every existing label.
+    expect(argv).not.toContain('--set-labels');
+    expect(argv.slice(0, 4)).toEqual(['update', 'Cebab-x', '--status', 'open']);
+  });
+
+  test('follow-ups are created and wired in ONE call', () => {
+    const argv = followUpArgv({ title: 'T', type: 'bug', why: 'w', evidence: 'e' }, 'Cebab-src', {
+      followUpPriority: 3,
+      followUpLabel: 'loop-found',
+    });
+    // The label flag on `create` is `-l` / `--labels` (plural). The singular
+    // `--label` that the spec wrote does not exist on this subcommand.
+    expect(argv).toContain('-l');
+    expect(argv).not.toContain('--label');
+    expect(argv[argv.indexOf('-l') + 1]).toBe('loop-found');
+    expect(argv[argv.indexOf('-p') + 1]).toBe('3');
+    // The edge rides along, closing the window where a filed finding has no link.
+    expect(argv[argv.indexOf('--deps') + 1]).toBe('discovered-from:Cebab-src');
+    expect(argv).toContain('--silent');
+  });
+
+  test('claim is the atomic form, not two writes', () => {
+    // Two writes would leave a window where the bead is assigned but still open.
+    expect(claimArgv('X')).toEqual(['update', 'X', '--claim']);
+    expect(closeArgv('X', 'because')).toEqual(['close', 'X', '-r', 'because']);
+  });
+});
+
+describe('git: branch discipline and commit shape', () => {
+  test('branches are always loop/-prefixed so they can be bulk-deleted', () => {
+    expect(branchNameFor('Cebab-vie.15')).toBe('loop/Cebab-vie.15');
+  });
+
+  test('the commit subject matches the repo conventional-commit history', () => {
+    expect(
+      commitSubject(
+        {
+          commit_type: 'fix',
+          commit_scope: 'security',
+          commit_subject: 'a worker cannot write the string',
+        },
+        'Cebab-vie.14',
+      ),
+    ).toBe('fix(security): a worker cannot write the string (Cebab-vie.14)');
+    // An empty scope must not leave stray parentheses.
+    expect(
+      commitSubject({ commit_type: 'docs', commit_scope: '', commit_subject: 'x' }, 'B-1'),
+    ).toBe('docs: x (B-1)');
+  });
+});
+
+describe('forge: WATCH has three outcomes, not two', () => {
+  test('bucket drives the classification', () => {
+    const R = 'Lint, Typecheck, Test';
+    expect(classifyChecks([{ name: R, bucket: 'pass' }], R).outcome).toBe('green');
+    expect(classifyChecks([{ name: R, bucket: 'fail' }], R).outcome).toBe('red');
+    expect(classifyChecks([{ name: R, bucket: 'cancel' }], R).outcome).toBe('red');
+    expect(classifyChecks([{ name: R, bucket: 'pending' }], R).outcome).toBe('pending');
+    // A required check that is SKIPPED is not a failure.
+    expect(classifyChecks([{ name: R, bucket: 'skipping' }], R).outcome).toBe('green');
+  });
+
+  test('a check by another name is absent, not green', () => {
+    // The distinction the `absent` outcome exists for: some other job passing
+    // must never be read as the required context passing.
+    const verdict = classifyChecks(
+      [{ name: 'Other job', bucket: 'pass' }],
+      'Lint, Typecheck, Test',
+    );
+    expect(verdict.found).toBe(false);
+    expect(verdict.outcome).not.toBe('green');
+  });
+
+  test('argv shape', () => {
+    expect(prChecksArgv(7)).toEqual(['pr', 'checks', '7', '--json', 'name,state,bucket,link']);
+    expect(prMergeArgv(7)).toEqual(['pr', 'merge', '7', '--squash', '--delete-branch']);
+    expect(prMergeArgv(7, { auto: true })).toContain('--auto');
+  });
+});
+
+describe('gate: the Playground precondition is a hard gate', () => {
+  const gate = { ...DEFAULTS.gate, playgroundRoot: '../Playground' };
+
+  test('the deterministic tier mirrors CI, lockfile check first', () => {
+    expect(DETERMINISTIC_STEPS[0].name).toBe('lockfile');
+    const names = DETERMINISTIC_STEPS.map((s) => s.name);
+    for (const required of [
+      'lint',
+      'format:check',
+      'typecheck',
+      'test',
+      'test:security',
+      'smoke',
+      'build',
+    ]) {
+      expect(names, `CI runs ${required}`).toContain(required);
+    }
+  });
+
+  test('trigger paths decide the playground tier, and never/always override', () => {
+    expect(playgroundTriggered(['server/src/a.ts'], gate)).toBe(true);
+    expect(playgroundTriggered(['shared/src/a.ts'], gate)).toBe(true);
+    expect(playgroundTriggered(['docs/a.md'], gate)).toBe(false);
+    expect(playgroundTriggered(['docs/a.md'], { ...gate, playgroundTier: 'always' })).toBe(true);
+    expect(playgroundTriggered(['server/src/a.ts'], { ...gate, playgroundTier: 'never' })).toBe(
+      false,
+    );
+  });
+
+  test('env parsing handles comments, quotes and blank lines', () => {
+    expect(parseEnvFile('# c\n\nA=1\nB="two"\nC=\'three\'\nnonsense\n')).toEqual({
+      A: '1',
+      B: 'two',
+      C: 'three',
+    });
+  });
+
+  test('a missing .env REFUSES rather than skipping', () => {
+    // Absent .env means dev:server runs against the real ~/.cebab and
+    // ~/agents. Silence is the dangerous answer here, so it must throw.
+    const readFile = () => {
+      throw new Error('ENOENT');
+    };
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile })).toThrow(
+      /does not exist/,
+    );
+  });
+
+  test('paths inside the Playground root are accepted', () => {
+    const readFile = () =>
+      'CEBAB_DATA_DIR=/Playground/.cebab-qa\nWORKSPACE_ROOT=/Playground/agents\n';
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile })).not.toThrow();
+  });
+
+  test('a path OUTSIDE the root aborts, including the prefix look-alike', () => {
+    const outside = () => 'CEBAB_DATA_DIR=/home/me/.cebab\nWORKSPACE_ROOT=/Playground/agents\n';
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile: outside })).toThrow(
+      /OUTSIDE/,
+    );
+
+    // `/Playground-evil` STARTS WITH the root string but is not inside it —
+    // the reason containment is `path.relative`, not `startsWith`.
+    const lookalike = () =>
+      'CEBAB_DATA_DIR=/Playground-evil/.cebab\nWORKSPACE_ROOT=/Playground/agents\n';
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile: lookalike })).toThrow(
+      /OUTSIDE/,
+    );
+  });
+
+  test('a .env missing one of the two keys is refused', () => {
+    const partial = () => 'CEBAB_DATA_DIR=/Playground/.cebab-qa\n';
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile: partial })).toThrow(
+      /WORKSPACE_ROOT/,
+    );
+  });
+});
+
+describe('build: the usage-limit path', () => {
+  test('each limit kind is distinguished, and the reset time is never guessed', () => {
+    const session = detectUsageLimit("You've hit your session limit · resets 3:45pm");
+    expect(session).toMatchObject({ hit: true, kind: 'session', resetsAt: '3:45pm' });
+    expect(detectUsageLimit("You've hit your weekly limit · resets Nov 3")).toMatchObject({
+      hit: true,
+      kind: 'weekly',
+    });
+    // Per-model wording, which a two-alternative pattern would miss entirely.
+    expect(detectUsageLimit("You've hit your Opus limit · resets 9pm")).toMatchObject({
+      hit: true,
+      kind: 'model',
+    });
+    // No reset time in the message -> null, never a guessed wake time.
+    expect(detectUsageLimit("You've hit your session limit")).toMatchObject({
+      hit: true,
+      resetsAt: null,
+    });
+  });
+
+  test('an ordinary failure is NOT read as a usage limit', () => {
+    // The false-positive direction. Recording a bead failure as a usage limit
+    // would halt the run; recording a usage limit as a bead failure would park
+    // a healthy bead and count it toward the breaker.
+    for (const text of ['Error: 3 tests failed', 'rate limited', 'your limit', '']) {
+      expect(detectUsageLimit(text).hit, text).toBe(false);
+    }
+  });
+});
+
+describe('build: the argv', () => {
+  const base = {
+    config: DEFAULTS,
+    repoRoot: '/repo',
+    schemaJson: '{"type":"object"}',
+    systemPromptPath: '/sys.md',
+    settingsPath: '/settings.json',
+  };
+
+  test('carries BOTH settings flags — the measured hook-suppression mechanism', () => {
+    // MEASURED: `--settings` alone MERGES with project settings and the
+    // project SessionEnd hook still fires, which would push the Kanban board
+    // every iteration. `--setting-sources user` is what suppresses it; the
+    // merge is then what layers the loop's own deny hook back on. Dropping
+    // either flag leaves a loop that still works and quietly misbehaves.
+    const argv = buildArgv(base);
+    expect(argv[argv.indexOf('--setting-sources') + 1]).toBe('user');
+    expect(argv[argv.indexOf('--settings') + 1]).toBe('/settings.json');
+  });
+
+  test('--json-schema is paired with --output-format json', () => {
+    const argv = buildArgv(base);
+    expect(argv[argv.indexOf('--output-format') + 1]).toBe('json');
+    expect(argv).toContain('--json-schema');
+    expect(argv).not.toContain('stream-json');
+  });
+
+  test('--max-budget-usd appears only when a per-bead ceiling is set', () => {
+    // Ships OFF: a default run must apply no cost ceiling at all.
+    expect(buildArgv(base)).not.toContain('--max-budget-usd');
+    const capped = buildArgv({
+      ...base,
+      config: { ...DEFAULTS, limits: { ...DEFAULTS.limits, beadCostCeilingUsd: 5 } },
+    });
+    expect(capped[capped.indexOf('--max-budget-usd') + 1]).toBe('5');
+  });
+
+  test('a repair resumes the same session rather than starting a new one', () => {
+    const argv = buildArgv({ ...base, resumeSessionId: 'sess-1' });
+    expect(argv[argv.indexOf('--resume') + 1]).toBe('sess-1');
+    expect(buildArgv(base)).not.toContain('--resume');
+  });
+
+  test('web tools are disallowed and the turn cap is passed', () => {
+    const argv = buildArgv(base);
+    expect(argv).toContain('--disallowedTools');
+    expect(argv).toContain('WebSearch');
+    expect(argv[argv.indexOf('--max-turns') + 1]).toBe('60');
+  });
+});
+
+describe('build: prompt rendering and tiering', () => {
+  const template = 'A {{bead_id}}\n{{#if repair}}REPAIR {{failed_step}}{{/if}}\nB';
+
+  test('the repair block is removed whole when not repairing', () => {
+    const out = renderPrompt(template, { bead_id: 'X', repair: false });
+    expect(out).not.toContain('REPAIR');
+    // and leaves no orphan markers behind
+    expect(out).not.toContain('{{');
+    expect(out).toContain('A X');
+  });
+
+  test('and is kept, interpolated, when repairing', () => {
+    const out = renderPrompt(template, { bead_id: 'X', repair: true, failed_step: 'lint' });
+    expect(out).toContain('REPAIR lint');
+    expect(out).not.toContain('{{');
+  });
+
+  test('tiering is inert by default and first-match-wins when enabled', () => {
+    expect(
+      resolveTier({ priority: 0, issue_type: 'bug' }, 'server/', DEFAULTS.build.tiers),
+    ).toBeNull();
+    const tiers = [
+      { when: { type: ['docs'] }, model: 'sonnet', effort: 'medium' },
+      { when: { maxPriority: 1 }, model: 'opus', effort: 'high' },
+    ];
+    expect(resolveTier({ priority: 0, issue_type: 'docs' }, null, tiers)).toMatchObject({
+      model: 'sonnet',
+    });
+    expect(resolveTier({ priority: 0, issue_type: 'bug' }, null, tiers)).toMatchObject({
+      model: 'opus',
+    });
+    expect(resolveTier({ priority: 4, issue_type: 'bug' }, null, tiers)).toBeNull();
+  });
+});
+
+describe('the PreToolUse deny hook', () => {
+  test('denies every shape the harness owns', () => {
+    const denied = [
+      'npm install foo',
+      'npm ci',
+      'yarn add x',
+      'git commit -m x',
+      'git push',
+      'git checkout main',
+      'git reset --hard',
+      'gh pr create',
+      'rm -rf /tmp/x',
+      'git commit --no-verify -m x',
+      'ls && git push',
+      'FOO=1 gh pr list',
+      '/opt/homebrew/bin/gh pr list',
+      'sudo rm -rf x',
+    ];
+    for (const command of denied) expect(decide(command), command).toBeTruthy();
+  });
+
+  test('and allows ordinary work — the direction that decides whether it is usable', () => {
+    // A substring matcher denies `grep -rn gh .` and `git log --grep "git
+    // commit"`. Both are read-only, and an agent that cannot search the repo
+    // works around the hook rather than respecting it.
+    const allowed = [
+      'npm test',
+      'npm run lint',
+      'npm run typecheck',
+      'npx vitest run',
+      'git status',
+      'git diff main',
+      'git log --oneline',
+      'git log --grep="git push"',
+      'grep -rn gh .',
+      'grep -rn "git commit" .',
+      'rm file.txt',
+      'echo "npm install is denied"',
+    ];
+    for (const command of allowed) expect(decide(command), command).toBeNull();
+  });
+
+  test('matching is at command position across shell separators', () => {
+    expect(commandHeads('a | b; c && d || e').map((h) => h.head)).toEqual([
+      'a',
+      'b',
+      'c',
+      'd',
+      'e',
+    ]);
+    expect(commandHeads('FOO=1 BAR=2 npm test')[0].head).toBe('npm');
+    expect(commandHeads('   ')).toEqual([]);
+  });
+});
+
+describe('run: the process seam', () => {
+  test('a non-zero exit is DATA, not an exception', async () => {
+    // A red gate step and a red CI check are ordinary control flow here; a
+    // seam that threw would turn every one of them into a crashed iteration.
+    const run = makeRunner({ cwd: process.cwd() });
+    const result = await run(process.execPath, ['-e', 'process.exit(3)']);
+    expect(result.code).toBe(3);
+    expect(result.timedOut).toBe(false);
+  });
+
+  test('stdout and stderr are both captured', async () => {
+    const run = makeRunner({ cwd: process.cwd() });
+    const r = await run(process.execPath, ['-e', 'console.log("out");console.error("err")']);
+    expect(r.stdout).toContain('out');
+    expect(r.stderr).toContain('err');
+  });
+
+  test('a timeout is reported as timedOut, not as a plain failure', async () => {
+    const run = makeRunner({ cwd: process.cwd() });
+    const r = await run(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { timeoutMs: 300 });
+    expect(r.timedOut).toBe(true);
+    expect(r.code).toBe(124);
+  });
+
+  test('input is delivered on stdin, and omitted cleanly when absent', async () => {
+    // Commit messages and PR bodies go in this way rather than as argv, so a
+    // body containing a quote or a newline cannot be re-parsed by a shell.
+    const run = makeRunner({ cwd: process.cwd() });
+    const script =
+      'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(s))';
+    const withInput = await run(process.execPath, ['-e', script], { input: 'a "quoted" $line\n' });
+    expect(withInput.stdout).toBe('a "quoted" $line\n');
+    const without = await run(process.execPath, ['-e', 'process.stdout.write("ok")']);
+    expect(without.stdout).toBe('ok');
+  });
+});
+
+describe('driver: CLI parsing', () => {
+  test('flags map to the documented shape', () => {
+    const args = parseArgs([
+      '--bead',
+      'X',
+      '--until',
+      '8',
+      '--until',
+      '07:00',
+      '--merge',
+      '--dry-run',
+    ]);
+    expect(args).toMatchObject({ bead: 'X', until: ['8', '07:00'], dryRun: true });
+    expect(args.flags.merge).toBe(true);
+  });
+
+  test('an unknown option is refused rather than ignored', () => {
+    expect(() => parseArgs(['--mrege'])).toThrow(ConfigError);
+  });
+
+  test('no --until leaves the default to config (one bead)', () => {
+    expect(parseArgs([]).until).toEqual([]);
+    expect(DEFAULTS.loop.until).toEqual(['1']);
+  });
+});
+
+describe('run: the Windows shell decision', () => {
+  // Windows CI caught this as three red cases in `run`'s own tests, and it was
+  // a REAL defect rather than a test artifact: with `shell: true` Node joins
+  // file and args into one command string with NO escaping (it warns —
+  // DEP0190) and cmd.exe re-parses it. BUILD passes `--json-schema <json>` and
+  // a multi-line prompt, so on Windows both would have arrived corrupted
+  // instead of failing loudly.
+  //
+  // `platform` is injected so the decision is pinned from any host; the bug is
+  // unreachable on macOS, which is exactly why it survived local verification.
+
+  test('the npm-family shims need a shell on win32', () => {
+    for (const shim of ['npm', 'npx', 'yarn', 'pnpm']) {
+      expect(needsWin32Shell(shim, 'win32'), shim).toBe(true);
+    }
+    // Resolved paths and the `.cmd` extension both still resolve to the shim.
+    expect(needsWin32Shell('C:\\Program Files\\nodejs\\npm.cmd', 'win32')).toBe(true);
+    expect(needsWin32Shell('/usr/local/bin/npm', 'win32')).toBe(true);
+  });
+
+  test('real binaries never do — the direction that carries the bug', () => {
+    for (const binary of ['node', 'git', 'gh', 'claude', process.execPath]) {
+      expect(needsWin32Shell(binary, 'win32'), binary).toBe(false);
+    }
+  });
+
+  test('and nothing needs one off win32', () => {
+    for (const platform of ['darwin', 'linux']) {
+      expect(needsWin32Shell('npm', platform), platform).toBe(false);
+      expect(needsWin32Shell('node', platform), platform).toBe(false);
+    }
+  });
+
+  test('an argument containing shell metacharacters survives the seam intact', () => {
+    // The property the shell decision protects. Reverting to
+    // `shell: process.platform === 'win32'` leaves this green on macOS and red
+    // on Windows, which is the whole reason the unit cases above inject the
+    // platform rather than relying on this one.
+    const run = makeRunner({ cwd: process.cwd() });
+    const hostile = 'a "quoted" $VAR; echo pwned && ok | cat';
+    return run(process.execPath, ['-e', 'process.stdout.write(process.argv[1])', hostile]).then(
+      (r) => {
+        expect(r.stdout).toBe(hostile);
+        expect(r.stdout).not.toContain('pwned\n');
+      },
+    );
+  });
+});

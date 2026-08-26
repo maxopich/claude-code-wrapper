@@ -86,8 +86,8 @@ scripts/lib/loop/verdict.schema.json
 scripts/lib/loop/build-prompt.md    # the BUILD prompt template
 scripts/lib/loop/build-system.md    # appended to the BUILD agent's system prompt
 scripts/loop.test.mjs               # vitest, colocated with the other scripts/*.test.mjs
-.claude/loop-settings.json          # settings override for BUILD sessions (see R1)
-.claude/hooks/loop-guard.sh         # PreToolUse deny hook for BUILD sessions (see §7.3)
+scripts/lib/loop/loop-settings.json # settings override for BUILD sessions (see R1)
+scripts/lib/loop/loop-guard.mjs     # PreToolUse deny hook for BUILD sessions (see §7.3)
 ```
 
 **Also change:**
@@ -99,7 +99,8 @@ scripts/loop.test.mjs               # vitest, colocated with the other scripts/*
 **Tracked vs ignored — a deliberate call.** `scripts/loop.mjs`, its library and its test are
 **tracked**, so `npm test` in CI gates them. `scripts/kanban-sync.mjs` was gitignored and CI
 therefore never ran its 20 tests; that is `Cebab-8fa`, still open. Do not repeat it. Only `.loop/`
-(runtime) and `.claude/loop-settings.json` (machine-local) stay out of git.
+(runtime) stays out of git. The loop's settings file and its deny hook are tracked too — they are
+a security boundary with nothing machine-specific in them.
 
 Every module except `run.mjs`, `gate.mjs`, `git.mjs`, `forge.mjs` and `beads.mjs` must be free of
 I/O so it can be unit-tested directly. Those five take an injected `run` function.
@@ -511,9 +512,17 @@ claude -p "$(cat .loop/current-prompt.md)" \
   --max-turns "$maxTurns" \
   --permission-mode acceptEdits \
   --append-system-prompt-file scripts/lib/loop/build-system.md \
-  --settings .claude/loop-settings.json \
-  --disallowedTools "WebSearch,WebFetch"
+  --setting-sources user \
+  --settings scripts/lib/loop/loop-settings.json \
+  --disallowedTools WebSearch WebFetch \
+  ${beadCostCeilingUsd:+--max-budget-usd "$beadCostCeilingUsd"}
 ```
+
+**`--setting-sources user` is not optional** — see R1; `--settings` alone leaves the project's
+`SessionEnd` hook firing. **`--max-turns` and `--append-system-prompt-file` are real** despite being
+absent from `claude --help`'s option list; verify a flag by placing a known-bogus sentinel AFTER it
+under `-p` and reading which option commander names, because `claude --flag --version` returns 0 for
+every flag including `--frobnicate`.
 
 **`--json-schema` requires `--output-format json`; it does not work with `stream-json`.** That is a
 hard constraint, and it costs the loop live event visibility during BUILD: the `system/api_retry`
@@ -592,9 +601,16 @@ later pays full reprocessing, which is one reason `ci.completeTimeoutMs` is not 
 
 ### 7.3 Tool policy
 
-`--permission-mode acceptEdits` plus a **`PreToolUse` deny hook** in `.claude/loop-settings.json`
-pointing at `.claude/hooks/loop-guard.sh`. The hook is the hard boundary; an `--allowedTools`
-pattern list is too easy to get subtly wrong.
+`--permission-mode acceptEdits` plus a **`PreToolUse` deny hook** in
+`scripts/lib/loop/loop-settings.json` pointing at `scripts/lib/loop/loop-guard.mjs`. The hook is the
+hard boundary; an `--allowedTools` pattern list is an allow decision made in advance about strings
+nobody has seen yet, and getting it subtly wrong fails open.
+
+**Both files are TRACKED and live beside the loop's code, not under `.claude/`.** eslint ignores
+`.claude/**` wholesale (the worktrees under it shadow every file in the repo), so a deny hook placed
+there would be the one module in this design with no lint gate. Matching is at **command position**,
+not substring: a `gh` pattern applied to the whole command line denies `grep -rn gh .`, and an agent
+that cannot search the repo works around the hook rather than respecting it.
 
 The hook reads the tool call on stdin and returns
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`
@@ -809,12 +825,31 @@ Presence is the whole signal; contents are ignored but echoed into the stop mess
 
 Each of these fails silently if ignored. None produces an error naming its cause.
 
-**R1 — the SessionEnd hook must not fire per iteration.** `.claude/settings.json` runs
-`kanban-sync-on-end.sh` at `SessionEnd`, and hooks execute in `-p` mode too. Left alone, every
-BUILD pushes the Kanban board. `.claude/loop-settings.json` must define `hooks` **without** the
-`SessionEnd` entry (and without the `Stop` bus-inbox entry), and BUILD must be invoked with
-`--settings` pointing at it. The board syncs once, at the end of a whole run, when
-`harvest.syncBoardAtEnd` is true.
+**R1 — the SessionEnd hook must not fire per iteration, and `--settings` alone does NOT stop it.**
+`.claude/settings.json` runs `kanban-sync-on-end.sh` at `SessionEnd` and `bus-check-inbox.sh` at
+`Stop`, and hooks execute in `-p` mode. Left alone, every BUILD pushes the Kanban board.
+
+Measured 2026-08-25 in an isolated scratch repo, positive control first:
+
+| invocation                           | project `SessionEnd` hook              |
+| ------------------------------------ | -------------------------------------- |
+| no flags (control)                   | **fired** — so hooks do run under `-p` |
+| `--settings <file with empty hooks>` | **still fired**                        |
+| `--setting-sources user`             | suppressed                             |
+| `--setting-sources user,local`       | suppressed                             |
+
+`--settings` **merges** with project settings; it does not replace them. So this requirement's
+original mechanism — a `loop-settings.json` that simply omits the `SessionEnd` entry — would have
+pushed the board on every single iteration, invisibly, surfacing days later as a mangled board.
+
+**Use both flags.** `--setting-sources user` drops the project's `SessionEnd` and `Stop` hooks;
+`--settings` then merges the loop's OWN `PreToolUse` deny hook back on top. The merge behaviour that
+broke the original mechanism is exactly what makes the replacement work. The board syncs once, at
+the end of a whole run, when `harvest.syncBoardAtEnd` is true.
+
+Related measurement, same probe: with file tools disabled a project `CLAUDE.md` marker was **not** in
+context even under default setting sources, and auto-discovery needs a git project root at all. Do
+not assume `CLAUDE.md` reaches the agent — `build-system.md` tells it to read the file.
 
 **R2 — `.env` resolution is a hard gate, not a warning.** `.env` is gitignored and was absent
 from the checkout when this spec was written. Absent, the Playground fixtures fall back to the
