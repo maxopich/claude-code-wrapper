@@ -370,6 +370,24 @@ ledger record with `disposition: "halted"`, run teardown, exit 0.
 
 `--bead <id>` skips 3–4 but **not** 1–2, and still applies the deny-path check.
 
+**THERE IS NO AUTOMATIC SIGNAL FOR "THIS BEAD IS UNSUITABLE", AND ONE WAS MEASURED FOR.** Across
+the first three real runs, `Cebab-7r8` (20 turns, $1.84) and `Cebab-vie.32` (49 turns, $4.10)
+both landed, while `Cebab-v85` burned 61 turns twice over — $9.06 — and produced nothing,
+because its fix is a decision nobody has taken. Two heuristics were run backwards over all 242
+open beads and **both were rejected on the evidence**:
+
+- **Phrase-scanning the body** for decision markers. `'was not fixed'` flags `Cebab-7r8`, which
+  the loop COMPLETED; `'not fixed here'` flags an ordinary bug. Those phrases mark _why a bead
+  exists_ — "I found this while doing something else" — which is true of nearly every
+  well-filed bead and says nothing about cost.
+- **Description size.** Wrong direction: the bead that succeeded has the longer body (2.2k
+  chars) and the one that capped the shorter (1.5k).
+
+So the mechanism is the explicit one that already exists: **`needs-human` is in
+`select.excludeLabels`** and reaches `bd ready --exclude-label`. The second line of defence is
+the agent, the only reader that can tell a decision from a defect — `build-prompt.md` asks it
+to return `needs_human` _before_ starting work, which costs a few turns instead of sixty.
+
 ### 6.2 CLAIM — _driver_
 
 1. `bd update <id> --status in_progress`.
@@ -733,56 +751,28 @@ The agent _may_ run `npm test`, `npm run lint`, `npm run typecheck`, `npx vitest
 
 ### 7.4 Prompt template — `build-prompt.md`
 
-Interpolate `{{...}}`. Keep it this short; a long prompt invites the agent to narrate.
+**The file is the source of truth; this section states its invariants.** A verbatim copy used to
+live here and had already drifted — it never gained the `{{#if capped}}` block, so the spec
+described a prompt that had not been shipped for two PRs. A duplicated template is a
+`project_right_conclusion_stale_mechanism` generator: both copies read as authoritative and
+nothing says which is current.
 
-```markdown
-Implement exactly one tracked issue in this repository.
+Interpolate `{{...}}`. Keep it short; a long prompt invites the agent to narrate.
 
-**{{bead_id}} — {{bead_title}}**
+What it must contain, and why each part is load-bearing:
 
-{{bead_body}}
+| Part                                             | Why                                                                                                                                                                                                          |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `{{bead_id}}`, `{{bead_title}}`, `{{bead_body}}` | The whole brief. `--bead` refuses rather than building from an empty description, so this is never a stub.                                                                                                   |
+| `{{#if repair}}` block                           | Names the failing GATE or CI step and hands back its output. "Fix the cause. Do not weaken the check that caught it."                                                                                        |
+| `{{#if capped}}` block                           | A resumed turn cap. Says CONTINUE, not restart — the opposite instruction to a repair, which is why these are two blocks and not one.                                                                        |
+| Bail-out section                                 | Return `needs_human: true` **before** starting when the issue is a DECISION rather than a defect, or plainly cannot fit in `{{max_turns}}` turns. See §6.1 for the measurement that made this the mechanism. |
+| "What done means"                                | A test that fails before and passes after; `[security]` tags never removed; lint/typecheck/test green locally.                                                                                               |
+| "What you must not do"                           | No commit, push or PR — the harness does that. No `npm install`. No CI/gate/lint/test-config edits. No scope expansion.                                                                                      |
+| `follow_ups` section                             | `evidence` must name a file and what was observed. An empty array is valid and common; do not invent findings to fill it.                                                                                    |
 
-{{#if repair}}
-A previous attempt failed the gate. This is attempt {{attempt}} of {{max}}.
-Failing step: `{{failed_step}}`
-```
-
-{{failure_output}}
-
-```
-
-Fix the cause. Do not weaken the check that caught it.
-{{/if}}
-
-## What done means
-
-- The behaviour the issue describes is actually changed. A test edited so it stops
-  failing is not a fix.
-- There is a test that fails before your change and passes after it. If the issue is
-  a documentation defect, the doc change is the deliverable and no test is required.
-- Security-relevant behaviour keeps its `[security]` tag. Never remove one.
-- `npm run lint`, `npm run typecheck` and `npm test` pass locally before you finish.
-
-## What you must not do
-
-- Do not commit, push, or open a pull request. The harness does that.
-- Do not run `npm install`. The lockfile must not change; CI fails on drift.
-- Do not edit CI config, gate scripts, lint or test configuration, or `osv-scanner.toml`.
-- Do not expand scope. Anything else you notice goes in `follow_ups`, not in this diff.
-
-## follow_ups
-
-This is the part that outlives the session. If you noticed a defect, a missing test, a
-wrong claim in a doc, or a hazard adjacent to this work — record it. `evidence` must
-name a file and what you actually observed, not a hunch. An empty array is a valid and
-common answer; do not invent findings to fill it.
-
-Return only the structured verdict.
-```
-
-`build-system.md` carries the repo's non-obvious invariants — the `tsc --noEmit` trap, the
-`dev:server` orphan rule, `settingSources`/Trust. Keep it under 40 lines; `CLAUDE.md` already
-auto-loads and this is only for what the harness needs the agent to weight more heavily.
+`renderPrompt` resolves any number of named `{{#if name}}…{{/if}}` blocks before substituting
+variables, so an unused section is removed whole rather than leaving its markers in the prompt.
 
 ---
 
@@ -803,6 +793,26 @@ Pure, in `guard.mjs`, fully unit-tested.
 
 Return `{ passed, breaches: [{ rule, detail }] }`. Every breach is reported — do not stop at
 the first, the maintainer wants the whole list in the PR body.
+
+**`denyPaths` INCLUDES THE LOOP'S OWN HARNESS** — `scripts/loop.mjs`, `scripts/loop.test.mjs`,
+`scripts/loop-rehearsal*.mjs` and `scripts/lib/loop/**`. Measured 2026-08-26, before this: a
+diff editing `scripts/loop.mjs` passed the guard with zero breaches, so with `--merge` the loop
+could rewrite the driver it was running from and land it unattended.
+
+The hazard is not a mid-run crash — node has already loaded the module, so the running
+iteration is unaffected. It is that the REST of an overnight `--until 8` uses a driver no human
+read, and every safety property the loop has (this list, the circuit breaker, the usage-limit
+halt, LAND's read-back) lives in those files. The tests are denied for the same reason: a loop
+that can edit its own tests can turn a broken guard green.
+
+This costs nothing in throughput. A breach does not abort — the PR is still opened and labelled
+`loop-guard`, and only LAND is withheld, which is exactly right for a diff that changes the
+harness. It is the same argument that already put `audit-gate.mjs` and `security-test-gate.mjs`
+on the list; the omission was an oversight, since the deny list predates the loop's own files.
+
+**Verify a new deny glob in both directions.** An inert entry is invisible: it sits in the list,
+matches nothing, and the guard reports a clean pass. `matchesGlob` takes `(pattern, path)` —
+backwards, every check reads as a MISS.
 
 ### 8.2 What a breach does
 
@@ -1105,6 +1115,14 @@ Wired into CI through `scripts/loop-rehearsal.test.mjs`, skipped on Windows (the
 `#!/usr/bin/env node` scripts, which Windows needs `.cmd` wrappers for). Where that skip would have
 left a rule unpinned — the stale-main decision — the rule is extracted into `landedOnStaleMain` and
 unit-tested on every platform.
+
+**It costs the suite almost nothing, measured**: 21.9s with it present, against an 11s standalone
+harness — it runs in parallel with the other files rather than adding to them. If the suite is ever
+slow AND `session_log.pagination.test.ts` is red, look for load on the machine before suspecting
+this. That test uses 4.7s of a 5s default timeout even on an idle machine (`Cebab-502`), so it is
+the first casualty of anything competing for CPU — and it makes an external cause look convincingly
+like a local regression. Measured 2026-08-26: a 160s suite and that single red were a game running
+at 36% CPU, not the harness.
 
 ---
 

@@ -645,6 +645,13 @@ async function harvest({ beads, bead, parts, disposition, reason, config, log })
   } else if (disposition === DISPOSITION.PARKED) {
     const evidence = [
       `Parked by the autonomous loop: ${reason ?? 'unknown'}.`,
+      // `build.detail` is the ONLY evidence a park that never reached GATE
+      // has. Measured on the first real max_turns park: the ledger carried
+      // `inspect with \`claude --resume <session-id>\`` and the bead said
+      // `Parked by the autonomous loop: max_turns.` and nothing else — the one
+      // actionable fact was in the file nobody opens first. The three lines
+      // below are all empty for a cap, because it never got that far.
+      parts.build?.detail ? String(parts.build.detail).slice(0, 600) : '',
       parts.gate?.steps?.length ? `Last gate step: ${parts.gate.steps.at(-1)?.name}` : '',
       parts.ci?.runUrl ? `CI: ${parts.ci.runUrl}` : '',
       parts.pr?.url ? `PR: ${parts.pr.url}` : '',

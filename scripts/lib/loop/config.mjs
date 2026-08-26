@@ -62,6 +62,28 @@ export const DEFAULTS = Object.freeze({
   },
   guard: {
     denyPaths: [
+      // THE LOOP'S OWN HARNESS, and it is the same argument that put
+      // `audit-gate.mjs` and `security-test-gate.mjs` on this list — the
+      // omission was an oversight, since the deny list predates these files.
+      //
+      // Measured: before this, `evaluateGuard` passed a diff editing
+      // `scripts/loop.mjs` with zero breaches, so with `--merge` the loop
+      // could rewrite the driver it was running from and land it unattended.
+      // The already-loaded module is unaffected mid-run, so the hazard is not
+      // a crash — it is that the REST of an overnight `--until 8` runs a
+      // driver no human read, and every safety property the loop has (this
+      // very list, the circuit breaker, the usage-limit halt, LAND's
+      // read-back) lives in these files.
+      //
+      // The tests are denied too: a loop that can edit its own tests can turn
+      // a broken guard green. Nothing is blocked by this — a breach does not
+      // abort, it opens the PR labelled `loop-guard` and withholds LAND, which
+      // is exactly right for a diff that changes the harness.
+      'scripts/loop.mjs',
+      'scripts/loop.test.mjs',
+      'scripts/loop-rehearsal.mjs',
+      'scripts/loop-rehearsal.test.mjs',
+      'scripts/lib/loop/**',
       '.github/**',
       '.husky/**',
       '.semgrep/**',
