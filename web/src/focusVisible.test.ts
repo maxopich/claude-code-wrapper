@@ -155,3 +155,76 @@ describe('[a11y] hover-revealed controls are revealed by focus too (U19)', () =>
     expect(coarse).toContain('.session-download-btn');
   });
 });
+
+describe('[a11y] hover-styled buttons carry a focus ring at all (Cebab-p5y)', () => {
+  /**
+   * The gap U19/U20 leave open. Both ask whether a control's focus style is
+   * DISTINCT from its hover style (U20: outline not stripped) or whether a
+   * hover-REVEALED control is also focus-revealed (U19). Neither asks the prior
+   * question: does a button that restyles on `:hover` have a focus ring AT ALL?
+   * A button with a `:hover` rule and no `:focus-visible` anywhere takes Tab
+   * focus with no visible position — WCAG 2.1 AA 2.4.7 — and passes both gates
+   * above vacuously, because there is no focus rule for them to inspect.
+   *
+   * The list is closed and each entry was confirmed per case against the TSX,
+   * because the raw scan that sized this (11 classes with a `:hover` rule, no
+   * `:focus-visible`, class-name on a button) over-counts three ways, and each
+   * exclusion is a distinct failure of that heuristic:
+   *
+   *   - `.tpl-item` sits on an `<li>`, not a button; its `:hover` is a row
+   *     highlight, and an `<li>` takes no Tab focus. (The button inside it is
+   *     `.tpl-item-main`, which has no `:hover` and so was never flagged.)
+   *   - `.permission` is `.msg.permission`, the message-frame `<div>`; the
+   *     `:hover` selectors carrying that class are `.permission-allow` /
+   *     `.permission-deny` DESCENDANTS. The container is not focusable.
+   *   - `.danger` is a modifier that only ever rides `.bulk-action-btn` (three
+   *     TSX sites, all `bulk-action-btn danger`); the base class's ring covers
+   *     it, so it needs no rule of its own.
+   *
+   * Where a hover rule sits on a base class the button shares (the permission
+   * pair share `.msg.permission button`), the ring is keyed there so the whole
+   * family is covered, not just the one variant the scan happened to name.
+   */
+  const RINGED_BUTTONS: Array<{ ring: string; why: string }> = [
+    { ring: '.ask-user-option:focus-visible', why: 'AskUserQuestionCard option button' },
+    {
+      ring: '.bulk-action-btn:focus-visible',
+      why: 'ProjectList bulk-op button; covers the .danger variant',
+    },
+    { ring: '.notif-inbox-chip:focus-visible', why: 'NotificationInbox tier-filter chip button' },
+    {
+      ring: '.msg.permission button:focus-visible',
+      why: 'permission Allow + Deny (+ armed Allow) share this base',
+    },
+    { ring: '.slash-command-btn:focus-visible', why: 'SlashCommandButtons button' },
+    { ring: '.stopped-marker-skip:focus-visible', why: 'StoppedMarker Skip button' },
+    { ring: '.tpl-item-del:focus-visible', why: 'MultiAgentTab template-delete button' },
+    {
+      ring: '.trust:focus-visible',
+      why: 'ProjectList trust toggle button; fades with the rail',
+    },
+  ];
+
+  test('the curated list is non-empty and the parser can see focus rules', () => {
+    // Vacuity guard: if the parser returned [] every `.find` below is undefined
+    // and the loop would assert nothing. Anchored to the same >500 floor the
+    // U20 block uses, so a broken scan reddens here rather than passing silently.
+    expect(RINGED_BUTTONS.length).toBeGreaterThanOrEqual(8);
+    expect(RULES.length).toBeGreaterThan(500);
+    expect(focusRules.length).toBeGreaterThanOrEqual(15);
+  });
+
+  test.each(RINGED_BUTTONS.map((b) => [b.ring, b] as const))(
+    '%s exists and sets the shared accent ring',
+    (_label, { ring }) => {
+      const rule = focusRules.find((r) => r.selector.replace(/\s+/g, ' ') === ring);
+      // Fails before the fix: none of these rules existed, so `rule` is
+      // undefined. The defect is the ABSENCE of a ring, so a bare existence
+      // check would be satisfied by an empty declaration block — assert the
+      // outline is actually drawn, and in the house accent, not `none`.
+      expect(rule, `no focus ring for a hover-styled button: ${ring}`).toBeDefined();
+      expect(rule!.body).toMatch(/outline:\s*2px\s+solid\s+var\(--accent\)/);
+      expect(rule!.body).not.toMatch(/outline:\s*none/);
+    },
+  );
+});

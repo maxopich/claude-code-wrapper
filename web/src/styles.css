@@ -1538,6 +1538,15 @@ pre {
   background: var(--warn-soft);
   border-color: var(--warn-border);
 }
+/* Cebab-p5y: a hovered button with no focus ring at all (WCAG 2.1 AA 2.4.7),
+ * the class `focusVisible.test.ts` U19/U20 never asked about. `.trust` fades
+ * with the rail (the `:is(… .trust …)` dim rule above) and returns on
+ * `:focus-within`, so a keyboard user lands on it with no visible position —
+ * exactly the `.pin-btn` case from Cebab-7dk. Same shared accent ring. */
+.trust:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .session-list {
   list-style: none;
@@ -1795,6 +1804,13 @@ pre {
   color: var(--fg);
   border-color: var(--line-3);
   background: var(--bg-4);
+}
+/* Cebab-p5y: focus ring the hover state never paired with. Keyed on the base
+ * class, so the `.bulk-action-btn.danger` variant is covered by the same rule
+ * rather than needing its own. */
+.bulk-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .bulk-action-btn:disabled {
   opacity: 0.45;
@@ -2187,6 +2203,14 @@ pre {
 .msg.permission .actions .permission-deny:hover {
   background: var(--bg-4);
   border-color: var(--line-3);
+}
+/* Cebab-p5y: Allow and Deny both hover-restyle with no focus ring. Keyed on
+ * `.msg.permission button` so both — and the armed Allow state — share one
+ * ring, rather than ringing Deny alone and leaving Allow (the affirmative,
+ * two-step `dangerous` control) without a keyboard-visible position. */
+.msg.permission button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .msg.permission .permission-arm-hint {
   font-size: 11px;
@@ -3545,6 +3569,11 @@ pre {
   color: var(--fg);
   border-color: var(--line-3);
 }
+/* Cebab-p5y: focus ring the hover state never paired with. */
+.slash-command-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .slash-command-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -4187,6 +4216,11 @@ pre {
   color: var(--fg);
   background: var(--bg-3);
   border-color: var(--border);
+}
+/* Cebab-p5y: focus ring the hover state never paired with. */
+.tpl-item-del:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .tpl-preview {
   display: flex;
@@ -7774,6 +7808,11 @@ pre {
 .notif-inbox-chip:hover {
   background: var(--bg-5);
 }
+/* Cebab-p5y: focus ring the hover state never paired with. */
+.notif-inbox-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .notif-inbox-chip[data-active='true'] {
   /* Was `--bg-5`, which is also what :hover uses — so the active chip was
    * distinguishable from a hovered one only by its border, and every tier's
@@ -10136,6 +10175,14 @@ pre {
 .stopped-marker-skip:hover {
   opacity: 1;
 }
+/* Cebab-p5y: focus ring the hover state never paired with. `secondary-btn`
+ * (the class it rides on) carries none. Restore full opacity on focus too, so
+ * a keyboard user reaches a demoted-then-revealed control that is visible. */
+.stopped-marker-skip:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .stopped-marker-other {
   display: flex;
   gap: 6px;
@@ -11846,6 +11893,11 @@ pre {
 }
 .ask-user-option:hover {
   border-color: var(--accent-2);
+}
+/* Cebab-p5y: focus ring the hover state never paired with. */
+.ask-user-option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .ask-user-option.selected {
   border-color: var(--accent);
