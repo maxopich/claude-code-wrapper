@@ -48,6 +48,7 @@ import { evaluateGuard } from './lib/loop/guard.mjs';
 import { chooseBead, denyPathStems } from './lib/loop/select.mjs';
 import { appendRecord, buildRecord, compareVerdictToGate } from './lib/loop/ledger.mjs';
 import { makeRunner } from './lib/loop/run.mjs';
+import { LockHeldError, acquireLock, releaseLock } from './lib/loop/lock.mjs';
 import { makeBeads } from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject, makeGit } from './lib/loop/git.mjs';
 import { makeForge } from './lib/loop/forge.mjs';
@@ -494,6 +495,11 @@ async function main() {
 
   const { bd } = await preflight({ run, config, git, dryRun: args.dryRun });
 
+  // One run per checkout. Taken AFTER preflight (so a refusal costs nothing)
+  // and BEFORE any spawn, because the thing being protected is the working
+  // tree that BUILD is about to edit.
+  acquireLock(LOOP_DIR, { log });
+
   const deps = {
     config,
     dryRun: Boolean(args.dryRun),
@@ -508,7 +514,17 @@ async function main() {
   const ctx = {
     parked: new Set(),
     spentUsd: 0,
-    consecutiveParks: readJson(STATE_FILE, {}).consecutiveParks ?? 0,
+    // PER-RUN, deliberately. This used to be seeded from state.json, and a
+    // checkout that once had three parks could then never run again — a fresh,
+    // fully successful run halted on its first iteration against a counter
+    // left by a previous one. §9.2 wanted the breaker to survive a *restart*;
+    // it survived forever, with no reset path but hand-editing the file.
+    //
+    // Restarting the loop is itself an operator intervention, and the
+    // cross-run memory already exists elsewhere: HARVEST labels a parked bead
+    // `loop-stuck` and SELECT excludes that label. Persisting the counter as
+    // well double-counted the same evidence.
+    consecutiveParks: 0,
     forcedBead: args.bead,
     startedAt: now,
   };
@@ -536,6 +552,7 @@ async function main() {
       () => {},
     );
     writeState(ctx, iterations);
+    releaseLock(LOOP_DIR);
   };
 
   let signalled = false;
@@ -589,8 +606,12 @@ async function main() {
         break;
       }
       if (ctx.consecutiveParks >= config.loop.consecutiveParkLimit) {
+        // Naming the beads is the whole point of the message — the common
+        // cause is systemic and the operator needs to see which three.
+        const named = [...ctx.parked];
         log(
-          `circuit breaker: ${ctx.consecutiveParks} consecutive parks — ${[...ctx.parked].join(', ')}`,
+          `circuit breaker: ${ctx.consecutiveParks} consecutive parks` +
+            (named.length > 0 ? ` — ${named.join(', ')}` : ' (see .loop/runs.jsonl)'),
         );
         stopBecause = 'circuit breaker';
         exitCode = EXIT.HALTED;
@@ -660,7 +681,7 @@ if (invokedDirectly) {
   main()
     .then((code) => process.exit(code))
     .catch((error) => {
-      if (error instanceof ConfigError) {
+      if (error instanceof ConfigError || error instanceof LockHeldError) {
         process.stderr.write(`loop: ${error.message}\n`);
         process.exit(EXIT.REFUSED);
       }
