@@ -115,6 +115,37 @@ const readJson = (file, fallback) => {
   }
 };
 
+/**
+ * The config file, or a loud refusal. NOT `readJson`.
+ *
+ * `readJson(args.configPath ?? …, {})` swallowed both a missing file and a
+ * syntax error and returned `{}`, so `--config .loop/typo.json` ran on the
+ * DEFAULTS while the operator believed they had configured something else —
+ * a different model, a different turn cap, a different deny list. Nothing
+ * anywhere said otherwise.
+ *
+ * That is the same shape as the guard measuring an empty diff and `--bead`
+ * building from an empty description: it succeeds, and measures nothing. It
+ * also contradicts this module's own philosophy — `resolveConfig` refuses an
+ * unknown KEY by name and exits 2, so a file it cannot parse at all deserves
+ * at least as much.
+ *
+ * An ABSENT default path is fine; running with no config is the normal case.
+ * An absent EXPLICIT path never is.
+ */
+function readConfigFile(explicitPath) {
+  const file = explicitPath ?? path.join(LOOP_DIR, 'config.json');
+  if (!fs.existsSync(file)) {
+    if (explicitPath) throw new ConfigError(`--config ${explicitPath} does not exist.`);
+    return {};
+  }
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    throw new ConfigError(`${file} is not valid JSON — ${error?.message ?? error}`);
+  }
+}
+
 // ─── preflight (§13) ───────────────────────────────────────────────────────
 
 async function preflight({ run, config, git, dryRun }) {
@@ -344,10 +375,13 @@ async function runIteration({ ctx, deps, log }) {
         case STAGE.WATCH:
           result = await watchCi({ forge, config, sha: parts.headSha, parts, log, halted });
           if (result.outcome === 'red') {
-            repairContext = {
-              failedStep: 'CI',
-              output: await forge.failingLog(parts.headSha, config.ci.requiredContext),
-            };
+            const output = await forge.failingLog(parts.headSha, config.ci.requiredContext);
+            // An empty log is not nothing to report: the repair is about to run
+            // knowing only that "CI" failed, which is the same empty-brief
+            // shape as a bead with no description. Say so rather than let the
+            // attempt look informed.
+            if (!output) log('watch: no failing job log found — the repair goes in blind');
+            repairContext = { failedStep: 'CI', output };
           }
           break;
 
@@ -558,7 +592,7 @@ async function main() {
 
   if (args.status) return printStatus();
 
-  const fileConfig = readJson(args.configPath ?? path.join(LOOP_DIR, 'config.json'), {});
+  const fileConfig = readConfigFile(args.configPath);
   const cliConfig = {};
   if (args.flags.merge) cliConfig.loop = { merge: true };
   if (args.noPlayground) cliConfig.gate = { playgroundTier: 'never' };

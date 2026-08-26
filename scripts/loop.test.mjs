@@ -2164,6 +2164,44 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     expect(buildsABeadStub('const a = 1;').found).toBe(false);
   });
 
+  // ── D23: a mistyped --config was silently ignored ──────────────────────
+  //
+  // `readJson(args.configPath ?? …, {})` swallowed a missing file AND a syntax
+  // error, so `--config .loop/typo.json` ran on the DEFAULTS — a different
+  // model, turn cap and deny list from the one the operator asked for — and
+  // nothing said so. Same shape as the guard measuring an empty diff and
+  // `--bead` building from an empty description: it succeeds and measures
+  // nothing. It also contradicts this module's own rule, which refuses an
+  // unknown KEY by name.
+  //
+  // A source scan, because the read happens inside `main()` with no seam. Both
+  // directions are exercised so it cannot pass vacuously.
+  const swallowsConfigErrors = (source) => {
+    const code = stripComments(source);
+    const at = code.indexOf('fileConfig');
+    if (at === -1) return { found: false, swallows: false };
+    const line = code.slice(at, code.indexOf(';', at));
+    return { found: true, swallows: line.includes('readJson') };
+  };
+
+  test('an explicit --config that cannot be read is refused, not ignored', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const verdict = swallowsConfigErrors(fs.readFileSync(path.join(here, 'loop.mjs'), 'utf8'));
+    expect(verdict.found, 'fileConfig assignment located').toBe(true);
+    expect(verdict.swallows, 'config must not go through the swallowing reader').toBe(false);
+  });
+
+  test('and that scan detects the reverted form', () => {
+    const reverted = 'const fileConfig = readJson(args.configPath ?? p, {});';
+    expect(swallowsConfigErrors(reverted)).toEqual({ found: true, swallows: true });
+    const fixed = 'const fileConfig = readConfigFile(args.configPath);';
+    expect(swallowsConfigErrors(fixed)).toEqual({ found: true, swallows: false });
+    expect(swallowsConfigErrors('const a = 1;').found).toBe(false);
+  });
+
   // ── D1: HARVEST crashed on the first follow-up ──────────────────────────
   //
   // `parts` was built with `harvest: {}` two hundred lines from the `.push`,
