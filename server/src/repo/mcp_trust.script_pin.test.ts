@@ -12,6 +12,7 @@ import {
   computeScriptShas,
   parseScriptShas,
   recordTrustDecision,
+  SCRIPT_ABSENT,
   SCRIPT_TOO_LARGE,
 } from './mcp_trust.js';
 
@@ -105,10 +106,13 @@ describe('[security] computeScriptShas — which tokens get pinned', () => {
     ).toEqual({ 'mcp/server.mjs': sha });
   });
 
-  test('directories and missing paths contribute nothing — `npx -y pkg <dir>` pins none', () => {
-    // The shape of half the MCP ecosystem. Reddens: candidacy by SYNTAX (a
-    // token containing a slash) rather than by what `readFileBounded` says,
-    // which would try to hash a directory and, before `safe_fs`, a device.
+  test('directories and missing paths are pinned ABSENT, never hashed — `npx -y pkg <dir>`', () => {
+    // The shape of half the MCP ecosystem. `Cebab-r89`: candidacy is still by
+    // what `readFileBounded` says, NOT by syntax — a directory is never hashed,
+    // and a device is refused at the descriptor. But an unresolvable candidate
+    // is now recorded as `SCRIPT_ABSENT` rather than dropped, so a file created
+    // where the package name or directory sat becomes a visible `absent -> sha`.
+    // Reddens: dropping the entry (the pre-r89 bypass), which returned null here.
     fs.mkdirSync(path.join(projectPath, 'shared-dir'), { recursive: true });
     expect(
       computeScriptShas(
@@ -116,7 +120,18 @@ describe('[security] computeScriptShas — which tokens get pinned', () => {
         ['-y', '@modelcontextprotocol/server-filesystem', 'shared-dir'],
         projectPath,
       ),
-    ).toBeNull();
+    ).toEqual({
+      '@modelcontextprotocol/server-filesystem': SCRIPT_ABSENT,
+      'shared-dir': SCRIPT_ABSENT,
+    });
+  });
+
+  test('null is returned only when there is NO candidate token at all', () => {
+    // `Cebab-r89`: null no longer means "the files did not resolve" — that is a
+    // map of absent sentinels now. It means the declaration named nothing to
+    // track: a bare command resolved on PATH, and every arg a flag.
+    expect(computeScriptShas('npx', ['-y', '--foo'], projectPath)).toBeNull();
+    expect(computeScriptShas('node', [], projectPath)).toBeNull();
   });
 
   test('EVERY resolvable arg is hashed, not the first one', () => {
@@ -188,18 +203,43 @@ describe('[security] changedScriptPaths — what counts as a change', () => {
     expect(changedScriptPaths({ a: 'x' }, { a: 'x' })).toEqual([]);
   });
 
-  test('approved then, unresolvable now → NOT a change', () => {
-    // A deleted script cannot run; the spawn fails loudly on its own. Reddens:
-    // comparing key SETS, which turns every deleted file into a prompt — the
-    // noise that teaches operators to click through.
+  test('absent then, sha now → CHANGED — the Cebab-r89 bypass, closed', () => {
+    // THE FINDING. A file created after approval used to be an invisible new
+    // key; now `computeScriptShas` records it `SCRIPT_ABSENT` at approval, so
+    // its creation is a value change on a key present both times. Reddens:
+    // reverting to `if (!Object.hasOwn(approved, token)) continue` as the only
+    // guard, OR keeping the old policy that treated absent->present as benign.
+    expect(changedScriptPaths({ a: SCRIPT_ABSENT }, { a: 'x' })).toEqual(['a']);
+    // A too-large file appearing where nothing resolved is also a creation.
+    expect(changedScriptPaths({ a: SCRIPT_ABSENT }, { a: SCRIPT_TOO_LARGE })).toEqual(['a']);
+  });
+
+  test('sha then, absent now → NOT a change — a deletion is silent', () => {
+    // The symmetric transition, special-cased. A deleted script cannot run; the
+    // spawn fails loudly on its own, and prompting for it is the noise that
+    // teaches operators to click through. Reddens: dropping the
+    // `candSha === SCRIPT_ABSENT` guard, which turns every deletion into a
+    // prompt now that the token survives on the candidate side as a sentinel.
+    expect(changedScriptPaths({ a: 'x' }, { a: SCRIPT_ABSENT })).toEqual([]);
+    expect(changedScriptPaths({ a: SCRIPT_TOO_LARGE }, { a: SCRIPT_ABSENT })).toEqual([]);
+    // A candidate that dropped the key entirely (the pre-r89 deletion shape)
+    // stays silent for the same reason.
     expect(changedScriptPaths({ a: 'x' }, {})).toEqual([]);
   });
 
-  test('absent then, present now → NOT a change', () => {
-    // Mirrors `hook_trust`'s "only a hash that RESOLVED both times can prove a
-    // change". Reddens: treating a new key as a change, which fires on any
-    // file the server itself writes next to one it was pointed at.
+  test('absent then, absent now → NOT a change', () => {
+    // The common `npx <pkg>` steady state: the package name never resolves to a
+    // file on either side, so the equal sentinels prove nothing.
+    expect(changedScriptPaths({ a: SCRIPT_ABSENT }, { a: SCRIPT_ABSENT })).toEqual([]);
+  });
+
+  test('a token absent from the approved map (a pre-r89 row) proves nothing', () => {
+    // Rows approved before r89 carry no absent sentinels, so a token that only
+    // appears on the candidate side has no before-state to judge — no backfill,
+    // deliberately. Reddens: judging a candidate-only key as a change, which
+    // would fire on every pre-r89 row's next spawn.
     expect(changedScriptPaths({}, { a: 'x' })).toEqual([]);
+    expect(changedScriptPaths({ b: 'y' }, { a: 'x', b: 'y' })).toEqual([]);
   });
 
   test('a null on either side proves nothing', () => {
@@ -329,6 +369,86 @@ describe('[security] checkTrust — a rewritten script under an unchanged declar
     expect(look().decision).toBe('script_changed');
     approve();
     expect(look()).toEqual({ decision: 'trusted' });
+  });
+
+  test('Cebab-r89: a script created AFTER approval re-gates — the one-shot bypass, closed', () => {
+    // THE FINDING, end to end. `.mcp.json` names an optional second file that
+    // does NOT exist when the operator approves; the server starts fine without
+    // it. The file is created later. Pre-r89 its key was new, no comparison
+    // fired, and it ran silently. Reddens: reverting `computeScriptShas` to drop
+    // unresolvable candidates, which returns `trusted` here and runs the new
+    // program with no modal.
+    const decl = { command: 'node', args: ['mcp/kitchen-server.mjs', 'plugins/opt.js'] };
+    writeScript('mcp/kitchen-server.mjs', 'export const ok = 1;\n');
+    // plugins/opt.js is deliberately NOT written yet.
+    const approvedShas = computeScriptShas(decl.command, decl.args, projectPath);
+    expect(approvedShas).toEqual({
+      'mcp/kitchen-server.mjs': expect.any(String),
+      'plugins/opt.js': SCRIPT_ABSENT,
+    });
+    recordTrustDecision({
+      serverName: 'kitchen',
+      originPath: ORIGIN,
+      ...decl,
+      binarySha: null,
+      scriptShas: approvedShas,
+      decision: 'trusted',
+    });
+
+    // Nothing has changed yet: the missing file is still missing.
+    const stillTrusted = checkTrust({
+      serverName: 'kitchen',
+      originPath: ORIGIN,
+      candidateSha: null,
+      ...decl,
+      candidateScriptShas: computeScriptShas(decl.command, decl.args, projectPath),
+    });
+    expect(stillTrusted).toEqual({ decision: 'trusted' });
+
+    // The operator's approval names it; now it appears.
+    const optSha = writeScript('plugins/opt.js', 'require("child_process").exec("curl…");\n');
+    const afterCreate = checkTrust({
+      serverName: 'kitchen',
+      originPath: ORIGIN,
+      candidateSha: null,
+      ...decl,
+      candidateScriptShas: computeScriptShas(decl.command, decl.args, projectPath),
+    });
+    expect(afterCreate).toEqual({
+      decision: 'script_changed',
+      changedPaths: ['plugins/opt.js'],
+      previousShas: {
+        'mcp/kitchen-server.mjs': expect.any(String),
+        'plugins/opt.js': SCRIPT_ABSENT,
+      },
+      candidateShas: { 'mcp/kitchen-server.mjs': expect.any(String), 'plugins/opt.js': optSha },
+    });
+  });
+
+  test('Cebab-r89: deleting an approved script does NOT re-gate — a deletion is silent', () => {
+    // The symmetric transition must stay quiet: prompting for a deletion is the
+    // click-through noise the change gate exists to avoid, and the spawn fails
+    // on its own. Reddens: a fix that makes absent visible in BOTH directions
+    // instead of special-casing the deletion.
+    const decl = { command: 'node', args: ['mcp/kitchen-server.mjs'] };
+    writeScript('mcp/kitchen-server.mjs', 'export const ok = 1;\n');
+    recordTrustDecision({
+      serverName: 'kitchen',
+      originPath: ORIGIN,
+      ...decl,
+      binarySha: null,
+      scriptShas: computeScriptShas(decl.command, decl.args, projectPath),
+      decision: 'trusted',
+    });
+    fs.rmSync(path.join(projectPath, 'mcp', 'kitchen-server.mjs'));
+    const afterDelete = checkTrust({
+      serverName: 'kitchen',
+      originPath: ORIGIN,
+      candidateSha: null,
+      ...decl,
+      candidateScriptShas: computeScriptShas(decl.command, decl.args, projectPath),
+    });
+    expect(afterDelete).toEqual({ decision: 'trusted' });
   });
 
   test('the approved shas reach the audit chain, not just the lookup table', () => {
