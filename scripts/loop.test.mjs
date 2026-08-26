@@ -27,6 +27,8 @@
  * real path stayed broken. Label exclusion is asserted where it actually
  * lives: in the `bd ready` argv.
  */
+import path from 'node:path';
+
 import { describe, expect, test } from 'vitest';
 
 import {
@@ -781,6 +783,8 @@ import {
   assertPlaygroundEnv,
   DETERMINISTIC_STEPS,
   parseEnvFile,
+  playgroundSmokeEnv,
+  playgroundSmokes,
   playgroundTriggered,
 } from './lib/loop/gate.mjs';
 import { buildArgv, detectUsageLimit, renderPrompt, resolveTier } from './lib/loop/build.mjs';
@@ -1633,6 +1637,49 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
       expect(read('.loop/run.lock')).toBe('held');
     } finally {
       await cleanup();
+    }
+  });
+
+  // ── D8: the Playground tier had never once passed ──────────────────────
+  //
+  // Found by running the tier for the first time: `ws_smoke FAIL 240ms
+  // Unexpected server response: 401`. The server loads `../.env` itself and
+  // writes its per-launch token into the Playground data dir; the smokes were
+  // spawned with plain `process.env`, and `ws_smoke.ts` falls back to
+  // `~/.cebab/auth-token` when `CEBAB_AUTH_TOKEN_FILE` is unset. So it read
+  // the operator's REAL data dir and was refused — while also being the one
+  // thing an isolated gate must never do.
+  test('the Playground smokes inherit the Playground data dir, never ~/.cebab', () => {
+    const env = playgroundSmokeEnv(
+      { CEBAB_DATA_DIR: '/pg/.cebab-qa', WORKSPACE_ROOT: '/pg/agents', PORT: '4319' },
+      { HOME: '/home/op', PATH: '/usr/bin' },
+    );
+    expect(env.CEBAB_AUTH_TOKEN_FILE).toBe(path.join('/pg/.cebab-qa', 'auth-token'));
+    expect(env.CEBAB_DATA_DIR).toBe(path.resolve('/pg/.cebab-qa'));
+    expect(env.WORKSPACE_ROOT).toBe('/pg/agents');
+    expect(env.PATH).toBe('/usr/bin'); // the base env still comes through
+    // The whole point: nothing here can resolve to the operator's real dir.
+    expect(env.CEBAB_AUTH_TOKEN_FILE).not.toContain('/home/op');
+  });
+
+  // Reddens if `ws_smoke` is put back into the tier. It is already
+  // deterministic step 10 via `ci_smoke`, which runs it correctly — over a
+  // temp workspace it populates with the `Cebab` directory `ws_smoke.ts`
+  // requires by name, and with `MOCK=1`, without which `send_message` spawns a
+  // REAL claude turn and a green gate step quietly bills the subscription.
+  test('the Playground tier never runs ws_smoke', () => {
+    const off = playgroundSmokes({ liveSmokes: false });
+    expect(off).toEqual([]);
+
+    // The other direction: with live smokes ON the list is non-empty, so the
+    // case above cannot be satisfied by a function that always returns [].
+    const on = playgroundSmokes({ liveSmokes: true });
+    expect(on.length).toBeGreaterThan(0);
+    expect(on.map((x) => x.name)).toContain('live_smoke');
+
+    for (const list of [off, on]) {
+      expect(list.map((x) => x.name)).not.toContain('ws_smoke');
+      expect(list.map((x) => x.script)).not.toContain('src/ws_smoke.ts');
     }
   });
 

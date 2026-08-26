@@ -78,6 +78,57 @@ export function parseEnvFile(text) {
 const expandHome = (p) => (p.startsWith('~') ? path.join(process.env.HOME ?? '', p.slice(1)) : p);
 
 /**
+ * The env BOTH halves of the Playground tier run with.
+ *
+ * `ws_smoke.ts` (and its siblings) fall back to `~/.cebab/auth-token` when
+ * `CEBAB_AUTH_TOKEN_FILE` is unset. The server loads `../.env` on its own and
+ * writes its per-launch token into the Playground data dir, so a smoke spawned
+ * with plain `process.env` read the operator's REAL data dir, got a token
+ * belonging to some other server, and was refused: measured as
+ * `ws_smoke FAIL 240ms Unexpected server response: 401`, every time, which is
+ * why this tier had never once passed. Reaching into `~/.cebab` at all is the
+ * second half of it — an isolated gate touching live operator data is the
+ * outcome R2 exists to prevent, and it was doing that on the way to failing.
+ */
+export function playgroundSmokeEnv(parsedEnv, baseEnv = process.env) {
+  const dataDir = path.resolve(expandHome(parsedEnv.CEBAB_DATA_DIR ?? ''));
+  return {
+    ...baseEnv,
+    ...parsedEnv,
+    CEBAB_DATA_DIR: dataDir,
+    CEBAB_AUTH_TOKEN_FILE: path.join(dataDir, 'auth-token'),
+  };
+}
+
+/**
+ * Which smokes the tier runs. NEVER `ws_smoke`.
+ *
+ * `ci_smoke` is deterministic step 10 and already runs `ws_smoke` correctly —
+ * it spawns its own mock server over a temp workspace it populates with a
+ * `Cebab` directory, because `ws_smoke.ts` looks a project up by that exact
+ * name and exits when it is missing. Run bare against the Playground it could
+ * never pass: that workspace holds ten agent projects and none is called
+ * `Cebab`. Provisioning one would not fix it either — `ci_smoke` also sets
+ * `MOCK=1`, and without that `ws_smoke`'s `send_message` spawns a REAL
+ * `claude` turn, so a green gate step would quietly bill the subscription.
+ *
+ * What the tier contributes instead is the boot itself: that the server this
+ * bead changed comes up against a real data dir and answers /health, which is
+ * exactly what `ci_smoke`'s mock server cannot show.
+ */
+export function playgroundSmokes(gate) {
+  if (!gate.liveSmokes) return [];
+  // These spawn REAL `claude` sessions against the operator's subscription —
+  // that, more than their runtime, is why they are opt-in.
+  return [
+    { name: 'live_smoke', script: 'src/live_smoke.ts' },
+    { name: 'mcp_scope_smoke', script: 'src/mcp_scope_smoke.ts' },
+    { name: 'managed_file_smoke', script: 'src/managed_file_smoke.ts' },
+    { name: 'bus_max_turns_smoke', script: 'src/bus_max_turns_smoke.ts' },
+  ];
+}
+
+/**
  * R2. Throws unless `.env` exists and BOTH data paths resolve inside the
  * Playground root. Never returns a soft "skip" — testing against the
  * maintainer's live data is the worst outcome this design exists to prevent,
@@ -151,32 +202,65 @@ export function makeGate({ run, cwd, config, log = () => {} }) {
     return { passed: true, steps };
   }
 
+  /**
+   * The env the Playground tier runs BOTH halves with.
+   *
+   * The server loads `../.env` by itself (`server/package.json` passes
+   * `--env-file-if-exists`), so it writes its per-launch auth token into the
+   * Playground data dir. The SMOKES were spawned with plain `process.env`, and
+   * `ws_smoke.ts` falls back to `~/.cebab/auth-token` when
+   * `CEBAB_AUTH_TOKEN_FILE` is unset — so it read the operator's REAL data
+   * dir, got a token belonging to some other server, and was refused. Measured:
+   * `ws_smoke  FAIL  240ms  Unexpected server response: 401`, every time, which
+   * is why this whole tier had never passed.
+   *
+   * Reading `~/.cebab` at all is the second half of the problem: an isolated
+   * gate that reaches into live operator data is the outcome R2 exists to
+   * prevent, and it was doing it on the way to failing.
+   */
+  function playgroundEnv() {
+    const { env } = assertPlaygroundEnv({ repoRoot: cwd, gate: config.gate });
+    return playgroundSmokeEnv(env);
+  }
+
   async function runPlayground() {
     const steps = [];
     let server = null;
+    const env = playgroundEnv();
     try {
       log('gate: starting Playground dev:server');
-      server = spawnDetached('npm', ['run', 'dev:server'], { cwd });
-      const ready = await waitForHealth(config.ci.pollIntervalMs);
+      server = spawnDetached('npm', ['run', 'dev:server'], { cwd, env });
+      const ready = await waitForHealth(config.ci.pollIntervalMs, env.PORT);
       if (!ready) {
         steps.push({ name: 'dev:server', exitCode: 1, ms: 60000 });
         return { passed: false, steps, failedStep: 'dev:server', output: server.readOutput() };
       }
-      const smokes = [{ name: 'ws_smoke', script: 'src/ws_smoke.ts' }];
-      if (config.gate.liveSmokes) {
-        // These spawn REAL `claude` sessions against the operator's
-        // subscription — that, more than their runtime, is why they are off.
-        smokes.push(
-          { name: 'live_smoke', script: 'src/live_smoke.ts' },
-          { name: 'mcp_scope_smoke', script: 'src/mcp_scope_smoke.ts' },
-          { name: 'managed_file_smoke', script: 'src/managed_file_smoke.ts' },
-          { name: 'bus_max_turns_smoke', script: 'src/bus_max_turns_smoke.ts' },
-        );
-      }
+      // Booting IS the baseline signal, and it is the one thing `ci_smoke`
+      // cannot give: that the server this bead changed comes up against a real
+      // data dir and answers /health. Recorded as its own step so a tier that
+      // did nothing else is still visible in the ledger.
+      steps.push({ name: 'dev:server', exitCode: 0, ms: 0 });
+
+      // NOT `ws_smoke`. It is already covered by `ci_smoke`, which is
+      // deterministic step 10 and passes — and `ci_smoke` runs it correctly,
+      // spawning its own mock server over a temp workspace it populates with a
+      // `Cebab` directory, because `ws_smoke.ts` looks up a project by that
+      // exact name and exits if it is missing.
+      //
+      // Run bare against the Playground it could never pass: that workspace
+      // holds ten agent projects and none is called `Cebab`, so this tier
+      // failed with `Cebab project not found in workspace` on every server
+      // bead. Provisioning one would not fix it either — `ci_smoke` also sets
+      // `MOCK=1`, and without that `ws_smoke`'s `send_message` spawns a REAL
+      // `claude` turn, so a green gate step would quietly bill the operator's
+      // subscription.
+      const smokes = playgroundSmokes(config.gate);
+
       for (const smoke of smokes) {
         log(`gate: ${smoke.name}`);
         const r = await run('npm', ['--workspace', 'server', 'exec', 'tsx', smoke.script], {
           cwd,
+          env,
           timeoutMs: stepTimeout,
         });
         steps.push({ name: smoke.name, exitCode: r.code, ms: r.ms });
@@ -191,9 +275,11 @@ export function makeGate({ run, cwd, config, log = () => {} }) {
     }
   }
 
-  async function waitForHealth(intervalMs) {
+  async function waitForHealth(intervalMs, playgroundPort) {
     const deadline = Date.now() + 60000;
-    const port = process.env.PORT ?? '4319';
+    // The Playground's own PORT, not the loop process's — the loop never loads
+    // `.env`, so `process.env.PORT` here is whatever the operator's shell had.
+    const port = playgroundPort ?? process.env.PORT ?? '4319';
     while (Date.now() < deadline) {
       try {
         const res = await globalThis.fetch(`http://127.0.0.1:${port}/health`);
