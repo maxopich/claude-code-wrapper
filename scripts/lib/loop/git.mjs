@@ -28,6 +28,16 @@ export function makeGit({ run, cwd, dryRun = false }) {
   const git = (args, opts = {}) => run('git', args, { cwd, timeoutMs: 120000, ...opts });
   const write = async (args, opts) =>
     dryRun ? { code: 0, stdout: '', stderr: '' } : git(args, opts);
+  /**
+   * Restore operations run even under `--dry-run`, and that is the opposite of
+   * every other mutation here for a reason: `--dry-run` skips branch creation
+   * but NOT the BUILD stage (it runs SELECT..GATE by definition), so the
+   * agent's edits land on `main` itself. Guarding the restore would leave them
+   * there — the one outcome §12 names explicitly, "leaves the repo on main
+   * with a clean tree". A dry run has MORE to clean up than a real one, not
+   * less.
+   */
+  const restore = (args, opts) => git(args, opts);
 
   const api = {
     async currentBranch() {
@@ -40,11 +50,11 @@ export function makeGit({ run, cwd, dryRun = false }) {
     },
     async toMain() {
       // The teardown path. `-q` because a detached run tees stdout to a log.
-      await write(['checkout', '-q', 'main']);
-      return write(['pull', '--ff-only', '-q']);
+      await restore(['checkout', '-q', 'main']);
+      return restore(['pull', '--ff-only', '-q']);
     },
     async resetHard() {
-      return write(['reset', '--hard', '-q']);
+      return restore(['reset', '--hard', '-q']);
     },
     async newBranch(beadId) {
       return write(['checkout', '-q', '-b', branchNameFor(beadId)]);
