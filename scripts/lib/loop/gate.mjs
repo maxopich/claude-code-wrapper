@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { ConfigError } from './config.mjs';
 import { killTree, spawnDetached } from './run.mjs';
 
 /** §6.4, in CI's order. `npm` is resolved per-platform by the run seam. */
@@ -82,6 +83,12 @@ const expandHome = (p) => (p.startsWith('~') ? path.join(process.env.HOME ?? '',
  * maintainer's live data is the worst outcome this design exists to prevent,
  * and it is the DEFAULT when `.env` is missing, so silence is the dangerous
  * answer.
+ *
+ * Throws `ConfigError` specifically, because every one of these is something
+ * the operator fixes by editing a file. Only `ConfigError` maps to exit 2 in
+ * `loop.mjs`; a plain `Error` here exits 1 and prints a stack trace, which is
+ * how the very first thing an operator hits — `.env` is gitignored, so it is
+ * absent on a fresh clone — reported itself as an internal crash.
  */
 export function assertPlaygroundEnv({ repoRoot, gate, readFile = fs.readFileSync }) {
   const envPath = path.join(repoRoot, '.env');
@@ -89,7 +96,7 @@ export function assertPlaygroundEnv({ repoRoot, gate, readFile = fs.readFileSync
   try {
     text = readFile(envPath, 'utf8');
   } catch {
-    throw new Error(
+    throw new ConfigError(
       `the Playground gate tier needs ${envPath}, which does not exist. Without it the ` +
         `gate's dev:server runs against the real ~/.cebab and ~/agents. ` +
         `Playground/README.md carries the exact four lines to write, or set ` +
@@ -101,14 +108,14 @@ export function assertPlaygroundEnv({ repoRoot, gate, readFile = fs.readFileSync
   for (const key of ['CEBAB_DATA_DIR', 'WORKSPACE_ROOT']) {
     const value = env[key];
     if (!value)
-      throw new Error(`${envPath} does not set ${key}; refusing to run the Playground tier.`);
+      throw new ConfigError(`${envPath} does not set ${key}; refusing to run the Playground tier.`);
     const resolved = path.resolve(expandHome(value));
     // `relative` rather than `startsWith`: /a/Playground-evil starts with the
     // root string but is not inside it.
     const rel = path.relative(root, resolved);
     const inside = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
     if (!inside) {
-      throw new Error(
+      throw new ConfigError(
         `${envPath}: ${key}=${value} resolves to ${resolved}, which is OUTSIDE ${root}. ` +
           `Refusing to run — this is how a gate ends up testing against live operator data.`,
       );

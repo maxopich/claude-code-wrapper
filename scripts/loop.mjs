@@ -509,11 +509,18 @@ async function main() {
   let stopBecause;
 
   const teardown = async () => {
-    // Every terminating path lands here. `reset --hard` only if something
-    // leaked — a dirty tree after teardown means a stage did not clean up.
+    // Every terminating path lands here, and the order matters: discard
+    // first, THEN checkout. `git checkout main` with uncommitted changes
+    // either refuses or carries them across, so resetting afterwards is one
+    // step too late — and under `--dry-run` there are always such changes,
+    // since BUILD runs but branch creation does not.
+    if (!(await git.isClean())) {
+      log('teardown: discarding uncommitted changes');
+      await git.resetHard();
+    }
     await git.toMain();
     if (!(await git.isClean())) {
-      log('teardown: tree was dirty after checkout — resetting (a stage leaked)');
+      log('teardown: tree still dirty after checkout — resetting (a stage leaked)');
       await git.resetHard();
     }
     await run('node', ['scripts/predev-server.mjs'], { cwd: REPO_ROOT, timeoutMs: 30000 }).catch(

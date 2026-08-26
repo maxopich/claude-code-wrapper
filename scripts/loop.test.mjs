@@ -787,6 +787,7 @@ import { buildArgv, detectUsageLimit, renderPrompt, resolveTier } from './lib/lo
 import { commandHeads, decide } from './lib/loop/loop-guard.mjs';
 import { parseArgs } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
+import { makeGit } from './lib/loop/git.mjs';
 
 describe('beads: the three flags the spec got wrong', () => {
   test('park uses --add-label, never --label or --set-labels', () => {
@@ -1231,5 +1232,94 @@ describe('run: the Windows shell decision', () => {
         expect(r.stdout).not.toContain('pwned\n');
       },
     );
+  });
+});
+
+describe('the restore path is not dry-run guarded (Cebab-qd2.3)', () => {
+  // Found on first real use. `--dry-run` skips branch creation but NOT the
+  // BUILD stage — it runs SELECT..GATE by definition — so the agent's edits
+  // land on `main` itself. With the restore guarded too, teardown issued ZERO
+  // git commands and those edits simply stayed there, which is the one outcome
+  // §12 names explicitly: "leaves the repo on main with a clean tree".
+
+  const recorder = () => {
+    const calls = [];
+    return {
+      calls,
+      run: async (file, args) => (
+        calls.push([file, ...args].join(' ')),
+        { code: 0, stdout: '', stderr: '' }
+      ),
+    };
+  };
+
+  test('under --dry-run, teardown still restores the repo', () => {
+    const { calls, run } = recorder();
+    const git = makeGit({ run, cwd: '/r', dryRun: true });
+    return git
+      .resetHard()
+      .then(() => git.toMain())
+      .then(() => {
+        expect(calls).toEqual([
+          'git reset --hard -q',
+          'git checkout -q main',
+          'git pull --ff-only -q',
+        ]);
+      });
+  });
+
+  test('but the mutations it exists to suppress stay suppressed', () => {
+    // The other direction. A fix that simply removed the dryRun guard would
+    // pass the case above and commit, branch and push during a dry run.
+    const { calls, run } = recorder();
+    const git = makeGit({ run, cwd: '/r', dryRun: true });
+    return git
+      .newBranch('X')
+      .then(() => git.commit('m'))
+      .then(() => git.push('X'))
+      .then(() => git.deleteBranch('X'))
+      .then(() => {
+        expect(calls).toEqual([]);
+      });
+  });
+
+  test('a normal run restores exactly the same way', () => {
+    const { calls, run } = recorder();
+    const git = makeGit({ run, cwd: '/r', dryRun: false });
+    return git
+      .resetHard()
+      .then(() => git.toMain())
+      .then(() => {
+        expect(calls).toEqual([
+          'git reset --hard -q',
+          'git checkout -q main',
+          'git pull --ff-only -q',
+        ]);
+      });
+  });
+});
+
+describe('preflight failures are ConfigError, so they exit 2 (Cebab-qd2.3)', () => {
+  // `.env` is gitignored, so its absence is the FIRST thing an operator hits
+  // on a fresh clone. It threw a plain Error, which loop.mjs's catch treats as
+  // an unrecoverable internal fault: exit 1 and a stack trace, for a condition
+  // whose fix is four lines in a file. Only ConfigError maps to exit 2.
+  const gate = { ...DEFAULTS.gate, playgroundRoot: '../Playground' };
+
+  test('a missing .env', () => {
+    const readFile = () => {
+      throw new Error('ENOENT');
+    };
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile })).toThrow(ConfigError);
+  });
+
+  test('a missing key', () => {
+    const readFile = () => 'CEBAB_DATA_DIR=/Playground/.cebab-qa\n';
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile })).toThrow(ConfigError);
+  });
+
+  test('a path outside the Playground root', () => {
+    const readFile = () => 'CEBAB_DATA_DIR=/home/me/.cebab\nWORKSPACE_ROOT=/Playground/agents\n';
+    expect(() => assertPlaygroundEnv({ repoRoot: '/repo', gate, readFile })).toThrow(ConfigError);
   });
 });
