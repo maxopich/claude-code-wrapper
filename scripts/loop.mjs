@@ -180,12 +180,20 @@ async function runIteration({ ctx, deps, log }) {
       switch (stage) {
         case STAGE.SELECT: {
           if (ctx.forcedBead) {
-            const rows = await beads.ready(config.select, 200);
-            bead = rows.find((b) => b.id === ctx.forcedBead) ?? {
-              id: ctx.forcedBead,
-              title: ctx.forcedBead,
-              description: '',
-            };
+            // Fetched DIRECTLY, never looked up in the ready list. That lookup
+            // asked for 200 rows against 210 ready beads and fell back to a
+            // stub `{ id, title: id, description: '' }` on a miss — so the
+            // agent got a prompt reading `**Cebab-ouy — Cebab-ouy**` with no
+            // body and spent a full turn budget on it. Refusing is the only
+            // honest answer: building from an empty description is worse than
+            // not starting.
+            bead = await beads.show(ctx.forcedBead);
+            if (!bead) {
+              throw new ConfigError(
+                `no bead ${ctx.forcedBead} — \`bd show\` found nothing. Refusing rather ` +
+                  `than building from an empty description.`,
+              );
+            }
             // --bead skips the queue but NOT the deny-path check.
             const stems = denyPathStems(config.guard.denyPaths);
             const text = `${bead.title}\n${bead.description ?? ''}`;

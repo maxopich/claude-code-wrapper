@@ -776,7 +776,14 @@ describe('ledger', () => {
 // 3am and least likely to be exercised by accident.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { claimArgv, closeArgv, followUpArgv, parkArgv } from './lib/loop/beads.mjs';
+import {
+  claimArgv,
+  closeArgv,
+  followUpArgv,
+  makeBeads,
+  parkArgv,
+  showArgv,
+} from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject } from './lib/loop/git.mjs';
 import {
   checkRunsArgv,
@@ -2086,6 +2093,75 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     const crashed = buildRecord({ bead: 'X-1', crash: 'TypeError: boom\n  at y' }, 0);
     expect(crashed.crash).toContain('TypeError: boom');
     expect('crash' in buildRecord({ bead: 'X-1' }, 0)).toBe(false);
+  });
+
+  // ── D22: --bead silently built from an empty description ───────────────
+  //
+  // `--bead <id>` looked the id up in the READY LIST and fell back to
+  // `{ id, title: id, description: '' }` on a miss. Measured: 210 beads are
+  // ready and that lookup asked for 200, so ten of them produced a prompt
+  // reading `**Cebab-ouy — Cebab-ouy**` with no body — and an opus build spent
+  // its whole turn budget working from the id alone. A blocked, in-progress or
+  // closed bead degraded the same silent way.
+  test('bd show reports a miss by SHAPE, because the exit code is 0', async () => {
+    const calls = [];
+    const mk = (stdout) =>
+      makeBeads({
+        run: async (_bd, args) => {
+          calls.push(args);
+          return { code: 0, stdout, stderr: '', ms: 1 };
+        },
+        bd: '/bin/bd',
+        cwd: '/repo',
+      });
+
+    // The measured miss: exit 0, and an OBJECT where a hit is an array.
+    const missing = await mk('{"error":"no issues found matching the provided IDs"}').show('X-9');
+    expect(missing).toBe(null);
+    // The literal shape, and that the executor actually goes through the
+    // builder — this module keeps them apart so flag names can be pinned.
+    expect(showArgv('X-9')).toEqual(['show', 'X-9', '--json']);
+    expect(calls[0]).toEqual(showArgv('X-9'));
+
+    // The other direction, or the case above is satisfied by always returning
+    // null — which would refuse every run.
+    const hit = await mk('[{"id":"X-1","title":"t","description":"the real body"}]').show('X-1');
+    expect(hit.id).toBe('X-1');
+    expect(hit.description).toBe('the real body');
+
+    // Unparseable output is a miss, not a throw mid-run.
+    expect(await mk('not json').show('X-1')).toBe(null);
+  });
+
+  // The stub is what made the miss silent, so its absence is what must be
+  // pinned. A source scan for the same reason as the breaker: SELECT's forced
+  // branch performs I/O inside `runIteration` and has no seam.
+  const buildsABeadStub = (source) => {
+    const code = stripComments(source);
+    const at = code.indexOf('ctx.forcedBead');
+    if (at === -1) return { found: false, stubs: false };
+    const body = code.slice(at, at + 600);
+    return { found: true, stubs: /title:\s*ctx\.forcedBead/.test(body) };
+  };
+
+  test('--bead never fabricates a bead', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const verdict = buildsABeadStub(fs.readFileSync(path.join(here, 'loop.mjs'), 'utf8'));
+    expect(verdict.found, 'forced-bead branch located').toBe(true);
+    expect(verdict.stubs, 'must refuse, not fabricate a title from the id').toBe(false);
+  });
+
+  test('and that scan detects the reverted form', () => {
+    const reverted =
+      "if (ctx.forcedBead) { bead = rows.find(x) ?? { id: ctx.forcedBead, title: ctx.forcedBead, description: '' }; }";
+    expect(buildsABeadStub(reverted)).toEqual({ found: true, stubs: true });
+    const fixed =
+      'if (ctx.forcedBead) { bead = await beads.show(ctx.forcedBead); if (!bead) throw x; }';
+    expect(buildsABeadStub(fixed)).toEqual({ found: true, stubs: false });
+    expect(buildsABeadStub('const a = 1;').found).toBe(false);
   });
 
   // ── D1: HARVEST crashed on the first follow-up ──────────────────────────
