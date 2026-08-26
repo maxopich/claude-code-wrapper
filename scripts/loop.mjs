@@ -245,6 +245,15 @@ async function runIteration({ ctx, deps, log }) {
             parts.verdict = built.verdict;
             parts.commandsRun = built.verdict?.tests?.commands_run ?? [];
             ctx.spentUsd += built.costUsd ?? 0;
+          } else {
+            // An unattended run has to diagnose itself. Without this the ledger
+            // said `build_failed exit 1` three times and nothing more, and the
+            // cause had to be reproduced by hand the next morning.
+            parts.build.failure = built.failure ?? null;
+            parts.build.detail = built.detail ?? null;
+            log(
+              `build: FAILED (${built.failure ?? 'unknown'}) ${(built.detail ?? '').split('\n')[0]}`,
+            );
           }
           result = built;
           break;
