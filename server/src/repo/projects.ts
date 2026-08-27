@@ -164,11 +164,22 @@ export function findProjectByPath(path: string): ProjectRow | undefined {
   return getDb().prepare<[string], ProjectRow>('SELECT * FROM projects WHERE path = ?').get(path);
 }
 
-/** Lists only projects whose directories are still present on disk. */
+/**
+ * Lists only the operator's workspace projects whose directories are still
+ * present on disk.
+ *
+ * Cebab-8x8.1.3: `kind = 'workspace'` keeps the Cebab-owned help assistant
+ * (`kind = 'assistant'`) out of every sidebar list — all six `type:'projects'`
+ * emissions funnel through `syncWorkspaceProjects`, whose only exits return
+ * this. Read POSITIVELY so a future non-workspace kind is excluded by default.
+ * The assistant is reached by `getProject(id)` (the run path, replay and
+ * interrupt), never by this list.
+ */
 export function listProjects(): ProjectRow[] {
   return getDb()
     .prepare<[], ProjectRow>(
-      'SELECT * FROM projects WHERE missing = 0 ORDER BY last_used_at DESC NULLS LAST, name ASC',
+      "SELECT * FROM projects WHERE missing = 0 AND kind = 'workspace' " +
+        'ORDER BY last_used_at DESC NULLS LAST, name ASC',
     )
     .all();
 }
@@ -182,9 +193,19 @@ export function markProjectsMissingByPaths(paths: string[]): void {
   })();
 }
 
+/**
+ * The paths of the operator's workspace projects — the sole input to the
+ * missing sweep in `syncWorkspaceProjects`.
+ *
+ * Cebab-8x8.1.3: `kind = 'workspace'` MUST match `listProjects`' filter. The
+ * assistant's path is never in the workspace scan, so leaving it in this list
+ * would let the sweep mark it `missing = 1` — a SILENT regression, since
+ * `listProjects` already hides non-workspace rows, so nothing would look wrong
+ * until the assistant button vanished on the next reload.
+ */
 export function listProjectPaths(): string[] {
   return getDb()
-    .prepare<[], { path: string }>('SELECT path FROM projects')
+    .prepare<[], { path: string }>("SELECT path FROM projects WHERE kind = 'workspace'")
     .all()
     .map((r) => r.path);
 }

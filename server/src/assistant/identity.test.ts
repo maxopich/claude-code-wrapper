@@ -7,9 +7,12 @@ import { withTempDataDir } from '../test_support/temp_data_dir.js';
 import {
   ASSISTANT_MAX_TURNS,
   ASSISTANT_PROJECT_NAME,
+  assertWorkspaceProject,
   assistantKbRoot,
   ensureAssistantProject,
   isAssistantProject,
+  isNonWorkspaceProject,
+  WorkspaceProjectRequiredError,
 } from './identity.js';
 
 function countAssistantRows(): number {
@@ -112,6 +115,39 @@ describe('assistant identity', () => {
   test('isAssistantProject reads only the kind', () => {
     expect(isAssistantProject({ kind: 'assistant' } as ProjectRow)).toBe(true);
     expect(isAssistantProject({ kind: 'workspace' } as ProjectRow)).toBe(false);
+  });
+
+  describe('assertWorkspaceProject / isNonWorkspaceProject', () => {
+    test('the assistant row is refused; a workspace row and a missing id are not', () => {
+      const assistant = ensureAssistantProject(KB)!;
+      const workspace = upsertProject('ordinary', '/tmp/cebab-ordinary');
+
+      // The guard that matters: the assistant is non-workspace and throws.
+      expect(isNonWorkspaceProject(assistant.id)).toBe(true);
+      expect(() => assertWorkspaceProject(assistant.id)).toThrow(WorkspaceProjectRequiredError);
+
+      // A workspace project passes cleanly.
+      expect(isNonWorkspaceProject(workspace.id)).toBe(false);
+      expect(() => assertWorkspaceProject(workspace.id)).not.toThrow();
+
+      // A missing id is NOT "non-workspace" — the caller's own existence check
+      // handles absence, and the participant filter must let a deleted id reach
+      // the resolver rather than swallow it.
+      const missingId = workspace.id + 9999;
+      expect(isNonWorkspaceProject(missingId)).toBe(false);
+      expect(() => assertWorkspaceProject(missingId)).not.toThrow();
+    });
+
+    test('the thrown error carries the offending projectId', () => {
+      const assistant = ensureAssistantProject(KB)!;
+      try {
+        assertWorkspaceProject(assistant.id);
+        throw new Error('expected assertWorkspaceProject to throw');
+      } catch (err) {
+        expect(err).toBeInstanceOf(WorkspaceProjectRequiredError);
+        expect((err as WorkspaceProjectRequiredError).projectId).toBe(assistant.id);
+      }
+    });
   });
 
   test('assistantKbRoot resolves to an existing kb directory or null', () => {

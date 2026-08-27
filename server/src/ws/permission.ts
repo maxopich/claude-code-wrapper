@@ -18,10 +18,15 @@ export const FILE_EDIT_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'N
  *   trusted + `'acceptEdits'`      → auto-allows everything.
  *   untrusted + `'acceptEdits'`    → auto-allows file-edit tools only.
  *
- * The SDK's built-in `acceptEdits` handling does NOT run when a `canUseTool`
- * callback is provided — the SDK delegates all gating to the callback. So this
- * function is the ONLY place auto-allow lives for single-agent runs, and
- * `Options.permissionMode` gates nothing by itself.
+ * The SDK's built-in `acceptEdits` auto-approval does NOT fire when a
+ * `canUseTool` callback is supplied — a tool the SDK has not already settled by
+ * its own rules is routed to the callback instead. That is NOT "the SDK
+ * delegates all gating to the callback": `allowedTools`/`disallowedTools` still
+ * strip tools before the callback ever sees them, and a full-bypass permission
+ * mode skips the callback entirely (a branch single-agent runs never take).
+ * What IS true, and all this function relies on, is that acceptEdits' auto-allow
+ * is now Cebab's to implement — so this is the ONLY place auto-allow lives for
+ * single-agent runs, and `Options.permissionMode` does not grant it by itself.
  *
  * WHY `'default'` IS CHECKED FIRST (Cebab-ws0.14). This used to open with
  * `if (trusted) return true`, so Trust short-circuited the mode entirely and a

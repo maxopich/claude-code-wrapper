@@ -160,6 +160,60 @@ export function isAssistantProject(p: Pick<ProjectRow, 'kind'>): boolean {
 }
 
 /**
+ * Thrown by `assertWorkspaceProject` when a projectId-bearing verb is aimed at
+ * a row that is not one of the operator's workspace projects (today: the
+ * assistant). Caught by the WS layer's top-level / per-verb handler, which
+ * turns it into a `wrapper_error`.
+ */
+export class WorkspaceProjectRequiredError extends Error {
+  constructor(public readonly projectId: number) {
+    super(
+      `project ${projectId} is not one of your workspace projects; ` +
+        'this action is not available for it',
+    );
+    this.name = 'WorkspaceProjectRequiredError';
+  }
+}
+
+/**
+ * True iff `projectId` resolves to a row that is KNOWN and NOT a workspace
+ * project (today: the assistant). The single kind-reader behind both the
+ * `assertWorkspaceProject` guard and `start_multi_agent`'s participant filter.
+ *
+ * A missing row is NOT "non-workspace": every guarded handler resolves the row
+ * and handles absence itself, and the participant filter must let a genuinely
+ * deleted projectId reach the resolver's own error rather than silently
+ * dropping it. So the answer is fail-CLOSED only for rows that exist — an
+ * unknown id is left for the caller.
+ */
+export function isNonWorkspaceProject(projectId: number): boolean {
+  const row = getProject(projectId);
+  return row !== undefined && row.kind !== 'workspace';
+}
+
+/**
+ * Cebab-8x8.1.3: the ONE guard the projectId-bearing verbs share, instead of a
+ * hand-maintained per-verb deny list. Throws `WorkspaceProjectRequiredError`
+ * when `projectId` names a non-workspace row so the assistant can never be the
+ * target of `set_trusted`, `install_bus_integration`, `set_permission_mode`,
+ * `add_multi_agent_participant`, `start_multi_agent`, `get_project_authority`,
+ * `read_project_facts`, `open_project` or `reopen_session`.
+ *
+ * The one that actually matters is `add_multi_agent_participant`: it reaches
+ * `addWorker -> installBusForProject`, which needs only `getProject` to resolve
+ * and the path to exist, and would otherwise flip the assistant to a bus worker
+ * under the full worker posture — voiding every posture layer at once.
+ *
+ * A missing project is a no-op here (the caller's own existence check handles
+ * it); only a resolved non-workspace row is refused.
+ */
+export function assertWorkspaceProject(projectId: number): void {
+  if (isNonWorkspaceProject(projectId)) {
+    throw new WorkspaceProjectRequiredError(projectId);
+  }
+}
+
+/**
  * Ensure exactly one `kind = 'assistant'` row exists, and return it — or `null`
  * when the KB is absent.
  *

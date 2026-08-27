@@ -208,7 +208,13 @@ function querySingleAgentCandidates(
     `e.type AS type, e.subtype AS subtype, s.project_id AS project_id, p.name AS project_name ` +
     `FROM events e ` +
     `JOIN sessions s ON s.id = e.session_id ` +
-    `JOIN projects p ON p.id = s.project_id ` +
+    // Cebab-8x8.1.3: `AND p.kind = 'workspace'` keeps the Cebab help
+    // assistant's transcripts out of cross-session search. The assistant runs
+    // through the single-agent path and writes `events` rows like any project;
+    // this JOIN predicate is the one that scopes them out. `queryMultiAgentCandidates`
+    // needs no equivalent — a bus session is scoped via `multi_agent_participants`
+    // and the assistant is never a participant.
+    `JOIN projects p ON p.id = s.project_id AND p.kind = 'workspace' ` +
     `WHERE ${clauses.join(' AND ')} ` +
     `ORDER BY e.ts DESC LIMIT ?`;
   return getDb()
