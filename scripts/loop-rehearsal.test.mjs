@@ -44,7 +44,7 @@ test('every scenario is actually wired into the suite above', () => {
   // Reddens if a scenario is added to the harness and never run. The loop-level
   // version of the same idea as the single-emit-point tests: the list and the
   // thing that consumes it must not drift.
-  expect(SCENARIO_NAMES.length).toBeGreaterThanOrEqual(15);
+  expect(SCENARIO_NAMES.length).toBeGreaterThanOrEqual(16);
   expect(SCENARIO_NAMES).toContain('green-merge');
   expect(SCENARIO_NAMES).toContain('queued');
   // The three that carry a P0/P1 fix each and have no unit-test equivalent —
@@ -53,4 +53,5 @@ test('every scenario is actually wired into the suite above', () => {
   expect(SCENARIO_NAMES).toContain('driver-stale');
   expect(SCENARIO_NAMES).toContain('capped-keeps-repair');
   expect(SCENARIO_NAMES).toContain('declined');
+  expect(SCENARIO_NAMES).toContain('rollup-skipped');
 });

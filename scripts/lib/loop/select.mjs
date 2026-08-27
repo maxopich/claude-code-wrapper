@@ -149,6 +149,7 @@ export function denyPathStems(denyPaths = []) {
  */
 export function chooseBead(beads = [], { select = {}, denyStems = [], parked } = {}) {
   const parkedSet = parked instanceof Set ? parked : new Set(parked ?? []);
+  const containers = containerIds(beads);
   const maxPriority = select.maxPriority ?? Number.POSITIVE_INFINITY;
   const excludeTypes = select.excludeTypes ?? [];
   const prefixes = select.excludeIdPrefixes ?? [];
@@ -180,10 +181,57 @@ export function chooseBead(beads = [], { select = {}, denyStems = [], parked } =
     // bead about the driver filed under some other epic. Both, cheaply.
     if (excludeParents.includes(bead.parent)) continue;
 
+    // A ROLLUP IS NOT WORK, AND `issue_type` DOES NOT SAY SO.
+    //
+    // Measured 2026-08-27 against the live queue with this very function: the
+    // loop's next three picks were `Cebab-8x8.1`, `.2` and `.3` — each a
+    // feature-TYPED parent of three task beads that are themselves ready, and
+    // `Cebab-8x8.1.1` was pick number four. So iteration 1 would implement a
+    // whole feature slice and iteration 4 would implement a SUBSET of it, in a
+    // second PR, diffing against a main that already contained the first.
+    //
+    // `excludeTypes` cannot reach these: they are typed `feature`, not `epic`.
+    // Across all 232 ready rows, 20 are the parent of another ready row and 16
+    // of those are literal epics already excluded — the exclusion existed and
+    // simply had no way to see the other four.
+    //
+    // Skipping costs nothing: the child is the more specific work and is picked
+    // instead, and the parent becomes selectable again the moment its children
+    // close. `Cebab-qd2.40`.
+    if (containers.has(bead.id)) continue;
+
     const text = `${bead.title ?? ''}\n${bead.description ?? ''}`;
     if (denyStems.some((stem) => text.includes(stem))) continue;
 
     return bead;
   }
   return null;
+}
+
+/**
+ * Which rows in THIS batch contain another row in it.
+ *
+ * `parent` is present on every `bd ready --json` row — measured, and already
+ * relied on by `excludeParents` — unlike `labels`, which is not, and which is
+ * why the header forbids client-side label filtering. So this reads a real
+ * field rather than an undefined one, and cannot silently match nothing.
+ *
+ * SCOPED TO THE BATCH, AND THAT LIMIT IS THE DESIGN RATHER THAN AN OVERSIGHT.
+ * The driver asks bd for 50 rows, so a container whose children are BLOCKED —
+ * or simply sorted past the cap — is not caught here. That is the narrower half
+ * of the problem on purpose: the harm this exists to prevent is the loop doing
+ * a parent AND its child, which requires both to be selectable, and both being
+ * selectable means both are in the batch. A rollup whose children are all
+ * blocked is merely large, and the mechanism for that already exists —
+ * `select.excludeLabels` carries `epic`, so labelling it is one command.
+ * Measured example on 2026-08-27: `Cebab-8x8.4`, whose three children are
+ * blocked and which this therefore does not catch.
+ */
+export function containerIds(beads = []) {
+  const ids = new Set();
+  for (const bead of beads) {
+    const parent = bead?.parent;
+    if (typeof parent === 'string' && parent.length > 0) ids.add(parent);
+  }
+  return ids;
 }
