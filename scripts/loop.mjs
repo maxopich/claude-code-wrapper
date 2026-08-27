@@ -41,6 +41,7 @@ import {
   REASON,
   STAGE,
   countsTowardBreaker,
+  countsTowardDeclines,
   landedOnStaleMain,
   next,
   resetsBreaker,
@@ -403,7 +404,21 @@ async function runIteration({ ctx, deps, log }) {
           // asking about the PR instead is what made a repair read the previous
           // attempt's verdict 1.2 seconds later.
           parts.headSha = await git.headSha();
-          if (attempt === 1) {
+          // EXISTENCE, NOT ATTEMPT NUMBER. This read `attempt === 1`, which is
+          // right for the repair it was written for — a CI-red retry force-
+          // pushes to a branch whose PR is already open and must not open a
+          // second. But `attempt` is bumped by ANY step returning `repair`, and
+          // two of those never reach PUBLISH at all: a failed GATE
+          // (machine.mjs `case STAGE.GATE`) and a turn-capped BUILD
+          // (`cappedBuild`, Cebab-qd2.11). On both, attempt 2 is the FIRST
+          // attempt to get here, so the branch was pushed and no PR was ever
+          // opened — `prNumber` stayed null, WATCH then polled a SHA no PR
+          // referenced, and the bead parked blaming CI.
+          //
+          // Measured on the overnight run of 2026-08-26: two of three beads,
+          // $6.80 of completed gate-passing work stranded on the remote
+          // (Cebab-qd2.18).
+          if (!prNumber) {
             const pr = await forge.createPr({
               base: 'main',
               title: commitSubject(parts.verdict, bead.id),
@@ -419,7 +434,15 @@ async function runIteration({ ctx, deps, log }) {
         }
 
         case STAGE.WATCH:
-          result = await watchCi({ forge, config, sha: parts.headSha, parts, log, halted });
+          result = await watchCi({
+            forge,
+            config,
+            sha: parts.headSha,
+            parts,
+            log,
+            halted,
+            prNumber,
+          });
           if (result.outcome === 'red') {
             const output = await forge.failingLog(parts.headSha, config.ci.requiredContext);
             // An empty log is not nothing to report: the repair is about to run
@@ -542,12 +565,34 @@ async function runIteration({ ctx, deps, log }) {
     }
   }
 
-  return { bead, disposition, drained, staleMain, ciGreen: parts.ci?.conclusion === 'success' };
+  return {
+    bead,
+    disposition,
+    reason,
+    drained,
+    staleMain,
+    ciGreen: parts.ci?.conclusion === 'success',
+  };
 }
 
 // ─── stage helpers ─────────────────────────────────────────────────────────
 
-async function watchCi({ forge, config, sha, parts, log, halted }) {
+async function watchCi({ forge, config, sha, parts, log, halted, prNumber }) {
+  // REFUSE BEFORE THE FIRST POLL. Check runs belong to a pull request, so with
+  // no PR there is nothing that could ever report and `absent` is true from the
+  // first second to the last. Waiting the full window produced two 916-second
+  // silences on 2026-08-26 and then named the runner as the suspect, which is
+  // the wrong place entirely — the branch was on the remote and only
+  // `gh pr create` had not run.
+  //
+  // Independent of the PUBLISH fix above and must stay independent: any future
+  // way of reaching WATCH without a PR — a network blip, a branch-protection
+  // rule, a rate limit — lands here too. `fail loud, park quietly`, and this is
+  // the loud half.
+  if (!prNumber) {
+    log('watch: no pull request for this branch — refusing to wait for checks that cannot exist');
+    return { outcome: 'no_pr' };
+  }
   const startedAt = Date.now();
   let everFound = false;
   for (;;) {
@@ -789,6 +834,11 @@ async function main() {
     // `loop-stuck` and SELECT excludes that label. Persisting the counter as
     // well double-counted the same evidence.
     consecutiveParks: 0,
+    // Counted apart from parks — see `countsTowardDeclines`. Per-run for the
+    // same reason the park counter is: restarting the loop is itself an
+    // operator intervention.
+    consecutiveDeclines: 0,
+    declinedThisRun: new Set(),
     forcedBead: args.bead,
     startedAt: now,
   };
@@ -815,6 +865,28 @@ async function main() {
     writeState(ctx, iterations);
     releaseLock(LOOP_DIR);
   };
+
+  // A BROKEN STDOUT MUST NOT KILL THE RUN, AND IT DID.
+  //
+  // `loop:night` pipes the driver into `tee`. A signal delivered to the tmux
+  // pane goes to the whole foreground PROCESS GROUP, so `tee` — which handles
+  // nothing — dies first, and the driver's next log write lands on a closed
+  // pipe. An unhandled EPIPE on `process.stdout` surfaces as an
+  // uncaughtException while `main()` is still pending, so the process exits
+  // WITHOUT unwinding, and the teardown in the `finally` below never runs.
+  //
+  // Measured 2026-08-26: a killed run left the lock held, the tree dirty on a
+  // loop branch, no ledger row for the in-flight bead, and the
+  // `signal received` line itself lost in the dead pipe (Cebab-qd2.17).
+  //
+  // Swallowing is right here because there is nothing to report to: the sink
+  // is gone. The run continues and its durable records — the ledger, the bead,
+  // the PR — are unaffected by having no console.
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', (error) => {
+      if (error?.code !== 'EPIPE') throw error;
+    });
+  }
 
   let signalled = false;
   const onSignal = (code) => () => {
@@ -864,7 +936,18 @@ async function main() {
       // with three complete successes.
       if (resetsBreaker(outcome.disposition, { ciGreen: outcome.ciGreen })) {
         ctx.consecutiveParks = 0;
-      } else if (countsTowardBreaker(outcome.disposition)) ctx.consecutiveParks += 1;
+      } else if (countsTowardBreaker(outcome.disposition, { reason: outcome.reason })) {
+        ctx.consecutiveParks += 1;
+      }
+      // A decline neither counts toward the breaker nor resets it — it is
+      // neutral evidence about the LOOP and direct evidence about the QUEUE.
+      if (countsTowardDeclines(outcome.disposition, { reason: outcome.reason })) {
+        ctx.consecutiveDeclines += 1;
+        ctx.declinedThisRun.add(outcome.bead.id);
+      } else {
+        ctx.consecutiveDeclines = 0;
+        ctx.declinedThisRun.clear();
+      }
       writeState(ctx, iterations);
 
       if (outcome.disposition === DISPOSITION.HALTED) {
@@ -882,6 +965,23 @@ async function main() {
             `stale base.`,
         );
         stopBecause = REASON.STALE_MAIN;
+        exitCode = EXIT.HALTED;
+        break;
+      }
+      // The queue, not the loop. Everything downstream of SELECT is provably
+      // working — bd answered, the agent spawned, read each brief and judged it
+      // — so the message must not read as a malfunction, and the remedy is to
+      // label or reshape beads rather than to go looking at the runner.
+      if (ctx.consecutiveDeclines >= config.loop.consecutiveDeclineLimit) {
+        const named = [...ctx.declinedThisRun];
+        log(
+          `queue: ${ctx.consecutiveDeclines} consecutive beads declined as needs_human` +
+            (named.length > 0 ? ` — ${named.join(', ')}` : '') +
+            `. The loop is working; the ready queue is not suitable for it. ` +
+            `Label these \`needs-human\` so SELECT skips them, or give them the ` +
+            `detail an agent would need.`,
+        );
+        stopBecause = 'queue unsuitable';
         exitCode = EXIT.HALTED;
         break;
       }
@@ -918,6 +1018,7 @@ function writeState(ctx, iterations) {
     JSON.stringify(
       {
         consecutiveParks: ctx.consecutiveParks,
+        consecutiveDeclines: ctx.consecutiveDeclines,
         parkedThisRun: [...ctx.parked],
         spentUsd: ctx.spentUsd,
         iterations,

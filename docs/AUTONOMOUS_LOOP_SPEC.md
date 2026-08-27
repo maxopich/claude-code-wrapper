@@ -273,9 +273,10 @@ need no shell configuration:
 
 ```jsonc
 "loop":         "node scripts/loop.mjs",
-"loop:night":   "mkdir -p .loop && tmux new -d -s cebab-loop 'caffeinate -is node scripts/loop.mjs --merge --until 8 --until 07:00 2>&1 | tee -a .loop/console.log' && echo 'started — npm run loop:watch'",
+"loop:night":   "mkdir -p .loop && tmux new -d -s cebab-loop 'caffeinate -is node scripts/loop.mjs --merge --until 8 --until 07:00 2>&1 | tee -a .loop/console.log' && echo 'started — follow it with: npm run loop:tail'",
 "loop:stop":    "mkdir -p .loop && touch .loop/HALT && echo 'HALT set — stops at the next stage boundary'",
-"loop:watch":   "tmux attach -t cebab-loop",
+"loop:tail":    "tail -f .loop/console.log",
+"loop:watch":   "echo 'read-only: detach with Ctrl-B then D.' && tmux attach -r -t cebab-loop",
 "loop:status":  "node scripts/loop.mjs --status",
 "loop:rehearse":"node scripts/loop-rehearsal.mjs",
 "loop:recover": "git checkout main && git reset --hard && (pkill -f 'tsx watch' || true) && rm -f .loop/HALT && echo recovered"
@@ -292,6 +293,23 @@ npm run loop -- --bead Cebab-vie.15            # one bead, no merge, you watch
 npm run loop -- --dry-run --bead Cebab-vie.15  # no writes at all
 npm run loop -- --merge --until 3              # three beads, merging
 ```
+
+**Watching it is where the run gets killed.** `loop:watch` attaches to the tmux pane, and the
+obvious way to leave a full-screen log is Ctrl-C — which goes to the pane's whole foreground
+_process group_: `caffeinate`, the driver, `tee`, and the in-flight `claude` all receive it.
+Measured 2026-08-26: the operator attached, pressed Ctrl-C, and the run died three minutes into a
+BUILD without unwinding — lock still held, tree still dirty on a loop branch, no ledger row for the
+in-flight bead. So:
+
+- `loop:watch` attaches **read-only** (`tmux attach -r`), which cannot forward a signal, and prints
+  how to leave (Ctrl-B then D).
+- `loop:tail` is the one to reach for: `tail -f .loop/console.log` is the operator's own process,
+  and Ctrl-C there kills only `tail`.
+- The driver **swallows EPIPE on stdout/stderr**. `loop:night` pipes into `tee`, which handles no
+  signals and dies first; the driver's next log write then lands on a closed pipe, and an unhandled
+  EPIPE surfaces as an uncaughtException while `main()` is pending — exiting _without_ running the
+  teardown in the `finally`. The sink being gone is not a reason to abandon the run, whose durable
+  records are the ledger, the bead and the PR. `Cebab-qd2.17`.
 
 Detached, overnight — `npm run loop:night`, which expands to:
 
@@ -485,13 +503,26 @@ up to `maxRepairs`. Exhausted → park.
    `eslint --fix` and `prettier --write` on staged files, so a pre-commit diffstat is stale.
 4. Re-check the lockfile: if `package-lock.json` changed, hard-park with reason `lockfile_drift`.
 5. `git push -u origin loop/<id>`.
-6. `gh pr create --fill --base main`. Body must carry: the bead id and title, the agent's summary,
-   the gate result table, and the guard verdict. On a guard breach, add the label `loop-guard`.
+6. `gh pr create --fill --base main`, **iff no PR has been created for this iteration yet**. Body
+   must carry: the bead id and title, the agent's summary, the gate result table, and the guard
+   verdict. On a guard breach, add the label `loop-guard`.
+
+**The condition is existence, not the attempt number.** This read `attempt === 1` and was wrong in
+a way no test saw for ten iterations. That guard is correct for the repair it was written for — a
+CI-red retry force-pushes to a branch whose PR is already open and must not open a second — but
+`attempt` is incremented by **any** step returning `repair`, and two of those never reach PUBLISH
+at all: a failed GATE and a turn-capped BUILD. On both, attempt 2 is the _first_ attempt to get
+here, so the branch is pushed and no PR is ever opened.
+
+Measured on the first unattended overnight run (2026-08-26): two of three beads took that route.
+Both produced complete, gate-passing commits that reached `origin` and sat there with no pull
+request, while WATCH polled their SHAs for 916 s each and then parked blaming CI. Nothing landed
+and the run halted on the breaker. `Cebab-qd2.18`.
 
 ### 6.6 WATCH — _driver_
 
 Poll `gh pr checks <pr> --json name,state,bucket,link` every `pollIntervalMs`, looking for the entry named
-exactly `ci.requiredContext`. Three distinct outcomes — do not collapse them:
+exactly `ci.requiredContext`. Five distinct outcomes — do not collapse them:
 
 | Outcome   | Condition                                                                           | Action                                                                                                                                                            |
 | --------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -499,6 +530,18 @@ exactly `ci.requiredContext`. Three distinct outcomes — do not collapse them:
 | `red`     | bucket `fail`                                                                       | Fetch the failing job log, re-enter BUILD with it, up to `maxRepairs`. Exhausted → park.                                                                          |
 | `absent`  | no check with that name within `appearTimeoutMs` **and nothing else still pending** | Park with reason `ci_never_started`. **Counts toward the circuit breaker** — it usually means something is wrong with the repo or the runner, not with this bead. |
 | `timeout` | the check appeared but had not completed within `completeTimeoutMs`                 | Park with reason `ci_timeout`.                                                                                                                                    |
+| `no_pr`   | no pull request exists for this branch — decided **before the first poll**          | Park with reason `pr_missing`.                                                                                                                                    |
+
+**`no_pr` is decided before polling, not after waiting.** Check runs belong to a pull request, so
+with no PR there is nothing that could ever report and `absent` is true from the first second to
+the last. Waiting the window out produced two 916-second silences on 2026-08-26 and then named the
+runner as the suspect, which is the wrong place entirely: the branch was on the remote and only
+`gh pr create` had not run.
+
+Keep this **independent of** the PUBLISH fix above rather than folding the two together. Any other
+route to WATCH without a PR — a `gh pr create` that fails on a network blip, a branch-protection
+rule, a rate limit — lands here too. `fail loud, park quietly`; this is the loud half.
+`Cebab-qd2.19`.
 
 **`timeout` is not `absent`.** A check that appeared and is still running has plainly started, and
 the remedies are opposites: raise `ci.completeTimeoutMs`, versus go and look at the runner. Folded
@@ -821,10 +864,26 @@ the breach list in the body. LAND is skipped. The maintainer decides in the morn
 
 ### 8.3 Circuit breaker
 
-`consecutiveParks` increments on every park regardless of reason, resets on a merged or
-`no_change_needed` bead. At `consecutiveParkLimit` (3) the driver halts with exit 1 and a message
-naming all three parked beads and their reasons. The common cause is systemic — broken `main`,
-expired `gh` auth, CI outage — and continuing would produce a dozen identical failures.
+`consecutiveParks` increments on every park **except a decline** (below), and resets on a merged or
+`no_change_needed` bead — or on a `guard_withheld` iteration that reached CI-green, which is the
+ordinary success shape while `merge` is false. At `consecutiveParkLimit` (3) the driver halts with
+exit 1 and a message naming all three parked beads and their reasons. The common cause is systemic
+— broken `main`, expired `gh` auth, CI outage — and continuing would produce a dozen identical
+failures.
+
+**A decline is not a failure, and is counted separately.** A park with reason `needs_human` is the
+agent reading the brief and saying this one is not mine — the early bail-out `Cebab-qd2.16` added
+precisely so an unsuitable bead costs a handful of turns instead of a full budget. Measured
+2026-08-26: it cost $0.66 against the $9.06 the same lesson cost without it, and then **counted
+toward the breaker**, so the run halted reporting "3 consecutive parks" of which one was the loop
+working exactly as designed.
+
+The breaker exists to catch a run that is _systemically_ broken. A bead correctly declined is
+evidence of the opposite: bd answered, the agent spawned, read the brief and made a judgement.
+So `consecutiveDeclines` is its own counter with its own limit (`consecutiveDeclineLimit`, 5 —
+looser than the park limit, because a decline is cheap and honest) and its own message: **the queue
+is unsuitable, not the loop is broken.** The two send the operator to opposite places, and no
+outcome may feed both counters. `Cebab-qd2.20`.
 
 ### 8.4 Usage limits
 
@@ -1093,16 +1152,31 @@ So the rehearsal runs the **real driver** end-to-end against a scratch git repo 
 `scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
 its own path — the installed copy would drive this checkout.
 
-Six scenarios, each asserting on the ledger AND on the bare repo's `main`:
+Eight scenarios, each asserting on the ledger AND on the bare repo's `main`:
 
-| Scenario             | What only it can prove                                                              |
-| -------------------- | ----------------------------------------------------------------------------------- |
-| `green-merge`        | LAND merges, the bead closes, `land.sha` IS origin/main, bead 2 branches off bead 1 |
-| `queued`             | a queued auto-merge does not close the bead and does not move `main` (§6.7)         |
-| `withheld`           | the default mode notes the PR on the bead, and bead 2 branches from `main`          |
-| `stale-main`         | a landed iteration whose pull failed HALTS instead of compounding                   |
-| `capped-then-resume` | a cap that edited files is resumed once, with `--resume`                            |
-| `capped-no-progress` | a cap that edited nothing parks, and `claude` runs exactly once                     |
+| Scenario                 | What only it can prove                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------- |
+| `green-merge`            | LAND merges, the bead closes, `land.sha` IS origin/main, bead 2 branches off bead 1 |
+| `queued`                 | a queued auto-merge does not close the bead and does not move `main` (§6.7)         |
+| `withheld`               | the default mode notes the PR on the bead, and bead 2 branches from `main`          |
+| `stale-main`             | a landed iteration whose pull failed HALTS instead of compounding                   |
+| `capped-then-resume`     | a cap that edited files is resumed once, with `--resume`, **and opens the PR**      |
+| `gate-fail-then-publish` | attempt 1 dying at GATE still opens a PR on attempt 2 (§6.5)                        |
+| `ci-red-repair`          | the one path where attempt 2 must NOT open a second PR                              |
+| `capped-no-progress`     | a cap that edited nothing parks, and `claude` runs exactly once                     |
+
+**The harness was itself vacuous for `Cebab-qd2.18`, and that is the lesson worth keeping.**
+`capped-then-resume` traverses the exact path where attempt 2 reaches PUBLISH having never created
+a pull request — and it passed, for months, because the `gh` shim answered every check-runs poll
+regardless of whether a PR existed. The fake GitHub reported green checks for a PR that was not
+there, so the scenario reached its terminal and asserted nothing about the gap.
+
+Two changes fix it, and both are needed. The shim now returns `{check_runs: []}` when no PR has
+been created, because Cebab's CI triggers on `pull_request` only and modelling that is what makes
+the fake tell the truth. And the scenarios count `gh pr create` calls directly (`ctx.prCreates()`),
+in **both** directions — zero is `Cebab-qd2.18`, two is the double-PR the old `attempt === 1` guard
+existed to prevent, and `ci-red-repair` is the negative control that keeps the second from being
+traded for the first.
 
 **What it deliberately does not prove.** The shim's merge is a fast-forward push, not a squash, so
 branch protection, a real merge queue, and `gh pr merge --delete-branch` switching the operator's
@@ -1154,7 +1228,7 @@ at 36% CPU, not the harness.
 - [ ] `npm run loop:stop` halts a detached run; `npm run loop:recover` restores a hard-killed one
       without deleting untracked files.
 - [ ] `--status` prints the cost figure labelled as a token-usage estimate, never as money spent.
-- [ ] `npm run loop:rehearse` passes all six scenarios (§11.1) — the only thing that executes the
+- [ ] `npm run loop:rehearse` passes all eight scenarios (§11.1) — the only thing that executes the
       green path without touching GitHub, and the only regression test LAND has.
 - [ ] A queued auto-merge is recorded as `merge_queued`, does **not** close the bead, and does not
       reset the circuit breaker.
@@ -1162,6 +1236,19 @@ at 36% CPU, not the harness.
       `stale_main` rather than building the next bead on a stale base.
 - [ ] `Context limit reached` on stderr does **not** halt the run; `Weekly limit reached` does.
 - [ ] A run started on a `main` that is behind or ahead of `origin/main` exits 2 before SELECT.
+- [ ] A bead whose **first attempt dies at GATE** opens a pull request on attempt 2, and one whose
+      first attempt dies at the **turn cap** does too — while a **CI-red repair** opens exactly one
+      across both attempts. All three are distinct paths to PUBLISH and a test covering only the
+      third is what let `Cebab-qd2.18` stand for ten iterations.
+- [ ] WATCH with no pull request returns before its **first poll**, parking `pr_missing` rather
+      than `ci_never_started`. Asserted on the poll COUNT, not only on the outcome — a guard placed
+      after the first poll returns the same string having already asked GitHub about a commit no
+      pull request references.
+- [ ] A `needs_human` park does not increment the circuit breaker, every other park does, and no
+      outcome increments both counters. `consecutiveDeclineLimit` consecutive declines stop the run
+      with a message about the QUEUE, not about the loop.
+- [ ] `npm run loop:watch` cannot signal the run (read-only attach), and the driver survives its
+      stdout pipe closing under it.
 - [ ] `npm run lint && npm run typecheck && npm test` pass with the new files.
 
 ---
