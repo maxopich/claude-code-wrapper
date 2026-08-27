@@ -334,7 +334,14 @@ describe('S04 equivalence — the paged projector matches the pre-S04 one', () =
     expect(chunk.rows.map((r) => r.id)).toEqual(
       uncapped.slice(0, chunk.rows.length).map((r) => r.id),
     );
-  });
+    // This case is slow BY DESIGN: the byte cap only trips on a genuinely large
+    // page, so it inserts 4 MB through better-sqlite3 and reads it back. That
+    // costs ~4.7s on an idle machine, which leaves no headroom under vitest's
+    // 5s default and reddens as a spurious 'Test timed out' on any busier
+    // runner. Give it a generous explicit budget rather than shrinking the
+    // fixture, which risks tuning the row count down to where the cap stops
+    // tripping and the case asserts nothing about the byte cap at all.
+  }, 20000);
 
   test('revealSensitive still bypasses redaction on the page it returns', () => {
     seedBusCorpus({ tsBuckets: 2, perBucket: 4 });
