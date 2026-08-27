@@ -179,6 +179,35 @@ async function preflight({ run, config, git, dryRun }) {
   if (which.code !== 0) fail('`bd` is not on PATH. Set it in config or add /opt/homebrew/bin.');
   const bd = which.stdout.trim().split('\n')[0].trim();
 
+  // THE OTHER TWO BINARIES EVERY ITERATION DEPENDS ON, and neither was checked.
+  // `claude` IS the BUILD stage; `npm` is nine of the ten deterministic gate
+  // steps. Under a launchd or cron PATH — the exact reason `bd` earned its
+  // check above — preflight passed, SELECT picked a bead, CLAIM claimed it and
+  // cut a branch, and only THEN did BUILD fail. The bead parked under
+  // `build_failed`, which blames the agent for an environment problem, and
+  // three of those halt the run having claimed three beads for a cause none of
+  // their notes name. Preflight's contract is one exit 2 at second zero
+  // instead. `Cebab-qd2.34`.
+  //
+  // `--version` rather than `which`: it proves the thing RUNS. A broken symlink
+  // resolves fine and spawns not at all, and for `npm` this goes through the
+  // same runner — so the win32 shell decision (`needsWin32Shell`) is exercised
+  // here rather than discovered at the first gate step.
+  for (const [file, hint] of [
+    ['claude', 'BUILD cannot spawn without it'],
+    ['npm', 'nine of the ten gate steps are `npm run`'],
+  ]) {
+    const probe = await run(file, ['--version'], { timeoutMs: 30000 }).catch((error) => ({
+      code: 1,
+      stderr: String(error?.message ?? error),
+    }));
+    if (probe.code !== 0) {
+      fail(
+        `\`${file} --version\` failed — ${hint}. Check PATH: a launchd or cron PATH is not your shell's.`,
+      );
+    }
+  }
+
   if (fs.existsSync(HALT_FILE)) {
     const note = fs.readFileSync(HALT_FILE, 'utf8').trim();
     fail(`.loop/HALT exists${note ? ` — ${note}` : ''}. Remove it to start.`);
@@ -390,7 +419,15 @@ async function runIteration({ ctx, deps, log }) {
           // work. A capped agent that edited nothing was spinning — the one cap
           // ever observed was four identical `npm run typecheck` calls — and
           // resuming it buys a second full turn budget for the same wedge.
-          treeChanged = built.failure === 'max_turns' ? !(await git.isClean()) : null;
+          //
+          // The SAME fact answers a second question (Cebab-qd2.33): a verdict of
+          // `no_change_needed` closes the bead permanently without ever reaching
+          // GATE, and a dirty tree falsifies it outright. One `git status` covers
+          // both, so it is computed whenever either asks.
+          treeChanged =
+            built.failure === 'max_turns' || built.verdict?.outcome === 'no_change_needed'
+              ? !(await git.isClean())
+              : null;
           result = built;
           break;
         }
@@ -902,7 +939,13 @@ async function main() {
   const untilRaw = args.until.length > 0 ? args.until : config.loop.until;
   const conditions = untilRaw.map((value) => parseUntil(value, now));
 
-  const log = (message) => process.stdout.write(`[loop] ${message}\n`);
+  // Spec §5: "--json  Emit one ledger record per line on stdout INSTEAD of human
+  // output". It only ever ADDED, so a consumer reading stdout as JSONL hit
+  // `[loop] select: ...` on line one. Sending the human stream to STDERR keeps
+  // both useful: stdout becomes the clean JSONL the spec promises, and the
+  // lines stay visible in a terminal and in `2>&1 | tee`. `Cebab-qd2.28`.
+  const sink = args.json ? process.stderr : process.stdout;
+  const log = (message) => sink.write(`[loop] ${message}\n`);
   // ONE application point for the whole run — see `env.mjs`. Every subprocess
   // the loop spawns goes through this runner, so the `claude` turns cannot be
   // routed to paid billing by a stray shell export. `Cebab-qd2.29`.
@@ -978,7 +1021,9 @@ async function main() {
     await run('node', ['scripts/predev-server.mjs'], { cwd: REPO_ROOT, timeoutMs: 30000 }).catch(
       () => {},
     );
-    writeState(ctx, iterations);
+    // `exitCode` and `stopBecause` are closed over from `main` and are final by
+    // the time this runs — teardown is in main's `finally`, after every break.
+    writeState(ctx, iterations, { code: exitCode, because: stopBecause });
     releaseLock(LOOP_DIR);
   };
 
@@ -1138,7 +1183,26 @@ async function main() {
   return exitCode;
 }
 
-function writeState(ctx, iterations) {
+/**
+ * @param {object} exit  `{ code, because }` on the way out, or null mid-run.
+ *
+ * THE EXIT CODE IS RECORDED HERE BECAUSE NOTHING ELSE CAN SEE IT. `loop:night`
+ * is `... node scripts/loop.mjs ... | tee -a .loop/console.log`, and a shell
+ * pipeline exits with the status of its LAST command — always `tee`'s,
+ * effectively always 0. Measured 2026-08-26: a run stopped by `loop:stop` took
+ * the halted branch, which sets EXIT.HALTED, and the pipeline reported 0.
+ *
+ * That matters more than it looks, because exit codes are one of the loop's two
+ * fail-loud channels and recent work kept ADDING to them — the circuit breaker,
+ * the stale-main halt, the queue-unsuitable halt, and a crash before SELECT,
+ * which was changed FROM a silent exit 0 precisely because a silent exit 0 was
+ * the bug. All of it was invisible to anything invoking `loop:night`.
+ *
+ * Writing it to state.json rather than fixing the shell composes with what is
+ * already durable, survives the pane closing, and needs no `pipefail` (which
+ * `sh -c` does not guarantee). `--status` reads it back. `Cebab-qd2.27`.
+ */
+function writeState(ctx, iterations, exit = null) {
   fs.writeFileSync(
     STATE_FILE,
     JSON.stringify(
@@ -1149,6 +1213,8 @@ function writeState(ctx, iterations) {
         spentUsd: ctx.spentUsd,
         iterations,
         startedAt: new Date(ctx.startedAt).toISOString(),
+        exitCode: exit ? exit.code : null,
+        stoppedBecause: exit ? (exit.because ?? null) : null,
       },
       null,
       2,
@@ -1197,4 +1263,4 @@ if (invokedDirectly) {
     });
 }
 
-export { EXIT, harvest, main, prBody, watchCi };
+export { EXIT, harvest, main, prBody, preflight, watchCi };

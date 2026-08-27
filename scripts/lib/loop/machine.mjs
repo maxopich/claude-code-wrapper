@@ -76,6 +76,7 @@ export const REASON = Object.freeze({
   PUSH_FAILED: 'push_failed',
   PR_MISSING: 'pr_missing',
   CRASHED: 'crashed',
+  NO_CHANGE_CONTRADICTED: 'no_change_contradicted',
   CI_RED: 'ci_red',
   CI_NEVER_STARTED: 'ci_never_started',
   CI_TIMEOUT: 'ci_timeout',
@@ -146,6 +147,23 @@ export function next(stage, result = {}, ctx = {}) {
       if (verdict.needs_human === true) return park(REASON.NEEDS_HUMAN);
       if (verdict.outcome === 'blocked') return park(REASON.BLOCKED);
       if (verdict.outcome === 'no_change_needed') {
+        // THE ONE OUTCOME THAT CLOSES A BEAD PERMANENTLY IS THE ONE THAT NEVER
+        // REACHED GATE. Every other route to a closed bead runs ten checks,
+        // opens a PR and waits for CI first; this one ran nothing, which is
+        // rule 2 — "the agent's report is not evidence" — violated at the least
+        // recoverable point, since a closed bead leaves the backlog for good.
+        //
+        // Reachable rather than theoretical: a stale backlog produces genuine
+        // no-change verdicts constantly, and a bead already fixed in an open PR
+        // is exactly that case.
+        //
+        // A full GATE would cost ten checks to prove a no-op. This is the ONE
+        // check that can FALSIFY the claim, and the driver already holds the
+        // answer: the branch is fresh from main, so any dirt is this agent's
+        // work. Either it changed something (so "no change" is false) or it left
+        // debris (so the verdict is untrustworthy) — and the iteration's own
+        // teardown is about to `reset --hard` that work away. `Cebab-qd2.33`.
+        if (ctx.treeChanged === true) return park(REASON.NO_CHANGE_CONTRADICTED);
         return { stage: STAGE.HARVEST, disposition: DISPOSITION.NO_CHANGE };
       }
       return { stage: STAGE.GATE };
