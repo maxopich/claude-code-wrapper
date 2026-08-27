@@ -239,6 +239,77 @@ const SCENARIOS = {
     },
   },
 
+  'halted-mid-run': {
+    why: 'a HALT skips HARVEST, so the bead must be handed back or it leaves the queue forever',
+    // Never executed before this scenario existed: 16 ledger rows, zero
+    // `halted`. Six independent audit lenses found the same stranding, and it
+    // had already happened for real to Cebab-vie.30.
+    args: ['--until', '2'],
+    plan: {
+      beads: 2,
+      ci: 'green',
+      merge: 'direct',
+      haltDuringBuild: true,
+      build: [{ kind: 'verdict', edit: true }],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(ctx.records.length, 1, 'the run stopped after the halt, not after two beads');
+      ctx.eq(row.disposition, 'halted', 'the iteration is recorded as halted');
+      const release = ctx.calls.bd.find(
+        (c) => c[0] === 'update' && c.includes('--status') && c.includes('open'),
+      );
+      ctx.ok(release, 'the claimed bead was handed back to the queue');
+      ctx.ok(release && release[1] === 'Reh-1', 'and it was THIS bead');
+      // The other direction, and the reason `release` is not `park`: a bead
+      // that was merely interrupted must not be labelled for human debugging,
+      // because that label excludes it from every future selection.
+      ctx.ok(
+        !ctx.calls.bd.some((c) => c.includes('loop-stuck')),
+        'and NOT labelled loop-stuck — it did not fail at anything',
+      );
+      ctx.eq(ctx.exitCode, 1, 'exiting HALTED');
+    },
+  },
+
+  'branch-exists': {
+    why: 'CLAIM must not proceed when `git checkout -b` fails — every later stage would run on main',
+    args: ['--until', '1'],
+    plan: {
+      beads: 1,
+      ci: 'green',
+      merge: 'direct',
+      preexistingBranch: 'Reh-1',
+      build: [{ kind: 'verdict', edit: true }],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(row.disposition, 'parked', 'parked rather than proceeding');
+      ctx.eq(row.reason, 'claim_failed', 'under claim_failed');
+      // The consequence the check exists to prevent, asserted directly: with
+      // the exit code dropped, BUILD ran anyway — on main, since the checkout
+      // never happened.
+      ctx.eq(ctx.calls.claude.length, 0, 'and BUILD never ran on the wrong branch');
+      ctx.eq(ctx.originSha(), ctx.baseSha, 'nothing was pushed');
+    },
+  },
+
+  'bd-broken': {
+    why: 'a crash BEFORE a bead is selected must not end the night reporting success',
+    // `if (!outcome.bead)` cannot tell a crash from a drained queue, and that
+    // branch stops the run with exit 0 — so one transient bd failure ended an
+    // --until 8 night after zero iterations, silently, with no ledger row
+    // (the append is also gated on `bead`).
+    args: ['--merge', '--until', '8'],
+    plan: { beads: 2, ci: 'green', merge: 'direct', bdFail: 'ready', build: [] },
+    check: (ctx) => {
+      ctx.eq(ctx.records.length, 0, 'no iteration ran');
+      ctx.eq(ctx.exitCode, 1, 'and the run exits NON-ZERO — this is the whole finding');
+      ctx.ok(ctx.stdout.includes('crashed before'), 'saying it crashed before selecting');
+      ctx.ok(!ctx.stdout.includes('nothing ready to work'), 'and NOT claiming the queue was empty');
+    },
+  },
+
   'capped-no-progress': {
     why: 'a turn cap that edited nothing was spinning — park it, do not buy it more turns',
     args: ['--until', '1'],
@@ -286,6 +357,12 @@ function writeShims(dir) {
     'bd',
     `${SHIM_PREAMBLE}
 record('bd');
+// A transient bd failure — a lock, a corrupt index, a bad build. It exits
+// non-zero and prints nothing, which is what makes parseJson throw.
+if (plan.bdFail && argv[0] === plan.bdFail) {
+  process.stderr.write('rehearsed bd failure: ' + argv[0] + '\\n');
+  process.exit(1);
+}
 if (argv[0] === 'ready') {
   const open = plan.beadRows.filter((b) => !state.claimed.includes(b.id));
   process.stdout.write(JSON.stringify(open));
@@ -333,6 +410,11 @@ record('claude');
 const step = plan.build[Math.min(state.builds, plan.build.length - 1)];
 state.builds += 1;
 save();
+// The operator running \`npm run loop:stop\` while a BUILD is in flight. The
+// file is what the driver polls at every stage boundary.
+if (plan.haltDuringBuild) {
+  fs.writeFileSync(path.join(process.cwd(), '.loop', 'HALT'), '');
+}
 if (step.edit) {
   fs.writeFileSync(path.join(process.cwd(), 'src', 'feature-' + state.builds + '.js'),
     'export const answer = ' + (40 + state.builds) + ';\\n');
@@ -532,6 +614,13 @@ function buildScratch(name, scenario) {
       2,
     ),
   );
+  // A branch left behind by a run that was killed before its teardown could
+  // delete it — the state CLAIM has to survive. Created here rather than by a
+  // shim because it is repo state, not a tool's answer.
+  if (scenario.plan.preexistingBranch) {
+    git(repo, ['branch', `loop/${scenario.plan.preexistingBranch}`]);
+  }
+
   return { dir, repo, bin, baseSha: git(repo, ['rev-parse', 'HEAD']) };
 }
 

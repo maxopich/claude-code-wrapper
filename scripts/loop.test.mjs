@@ -3455,3 +3455,49 @@ describe('the night that landed nothing (Cebab-qd2.18, Cebab-qd2.19, Cebab-qd2.2
     );
   });
 });
+
+describe('a stop must not poison the next run (Cebab-qd2.21)', () => {
+  // `.loop/HALT` is a PREFLIGHT REFUSAL: `loop.mjs` exits 2 with
+  // "Remove it to start" while it exists. That is correct for `loop:stop`,
+  // which is `touch .loop/HALT` — a deliberate, durable operator decision.
+  //
+  // The SIGNAL handler wrote the same file, and nothing ever removed it. So one
+  // Ctrl-C left every later run refusing to start until someone deleted a file
+  // by hand. Measured 2026-08-26, twice: the operator stopped a run, and the
+  // next night's `loop:night` refused before SELECT.
+  //
+  // WHY A SOURCE SCAN. The behavioural test needs a live driver, a real signal
+  // and an inspection of the filesystem afterwards; the rehearsal harness runs
+  // scenarios with `spawnSync`, which cannot signal a child mid-run. Rather
+  // than assert nothing, this pins the one line that caused it — with a
+  // positive control, because a scan whose subject has been renamed passes for
+  // the wrong reason, which is the failure mode of every source-reading gate.
+  const DRIVER = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), 'loop.mjs'),
+    'utf8',
+  );
+
+  test('the driver still uses .loop/HALT — the positive control', () => {
+    // If this ever fails, the scan below has stopped measuring anything and
+    // must be rewritten against whatever replaced it.
+    expect(DRIVER).toContain('HALT_FILE');
+    expect(DRIVER).toContain("path.join(LOOP_DIR, 'HALT')");
+    expect(DRIVER).toContain('fs.existsSync(HALT_FILE)');
+  });
+
+  test('and never WRITES it — a signal is in-process and leaves nothing behind', () => {
+    // NOTE: this scans raw source, so prose in the driver counts. That is a
+    // feature the first run of this test demonstrated — it failed on the
+    // comment explaining the fix, which quoted the very call it describes. The
+    // comment was reworded rather than the scan loosened: a check that skips
+    // comments would also skip a write hidden in a template string.
+    expect(DRIVER).not.toContain('writeFileSync(HALT_FILE');
+  });
+
+  test('the signal flag reaches the stage-boundary check on its own', () => {
+    // Without this the fix above would be a silent behaviour change rather than
+    // a refactor: removing the file write is only safe because `halted()` reads
+    // the in-process flag too.
+    expect(DRIVER).toContain('signalled || fs.existsSync(HALT_FILE)');
+  });
+});

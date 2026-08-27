@@ -1051,6 +1051,30 @@ each boundary so a crashed run can be diagnosed and the breaker survives a resta
 Presence is the whole signal; contents are ignored but echoed into the stop message if non-empty.
 `touch .loop/HALT` stops the loop at the next stage boundary — never mid-merge.
 
+**It is a PREFLIGHT REFUSAL, not just a stop flag.** While the file exists the driver exits 2 with
+`Remove it to start`, so it outlives the run that saw it. That is right for `loop:stop`, which is a
+deliberate operator decision and should stay made.
+
+**A signal must therefore not write it, and no longer does.** The SIGINT/SIGTERM handler used to
+create the same file so the stage-boundary checks would see it, and nothing anywhere removed it —
+`teardown` does not, the iteration `finally` does not, only `loop:recover` does. One Ctrl-C
+therefore made every later run refuse to start, citing a file the operator never created. Measured
+2026-08-26/27: it happened, and then it happened again the next night.
+
+A signal is **in-process** and needs no file to reach this process. The handler sets a
+module-scoped flag and `halted()` reads `signalled || fs.existsSync(HALT_FILE)`, leaving the file
+to mean exactly one thing: a human, from another shell, deliberately. A hard kill after the first
+signal now leaves nothing behind either, which is strictly better than leaving a refusal.
+`Cebab-qd2.21`.
+
+**A halted iteration hands its bead back.** HARVEST is the only stage that writes a bead's status
+and a halt routes straight to DONE without entering it, so the claimed bead kept `in_progress` —
+and `bd ready` excludes `in_progress`, so it left the queue _permanently_, with no label and no
+note, while the same teardown deleted the branch its work was on. Measured on `Cebab-vie.30`.
+The release is `--status open` plus a note, deliberately **not** `parkArgv`: `loop-stuck` means "a
+human must debug this", and a bead interrupted mid-flight has not failed at anything.
+`Cebab-qd2.22`.
+
 ---
 
 ## 10. Repo constraints — mandatory
@@ -1152,7 +1176,7 @@ So the rehearsal runs the **real driver** end-to-end against a scratch git repo 
 `scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
 its own path — the installed copy would drive this checkout.
 
-Eight scenarios, each asserting on the ledger AND on the bare repo's `main`:
+Eleven scenarios, each asserting on the ledger AND on the bare repo's `main`:
 
 | Scenario                 | What only it can prove                                                              |
 | ------------------------ | ----------------------------------------------------------------------------------- |
@@ -1163,6 +1187,9 @@ Eight scenarios, each asserting on the ledger AND on the bare repo's `main`:
 | `capped-then-resume`     | a cap that edited files is resumed once, with `--resume`, **and opens the PR**      |
 | `gate-fail-then-publish` | attempt 1 dying at GATE still opens a PR on attempt 2 (§6.5)                        |
 | `ci-red-repair`          | the one path where attempt 2 must NOT open a second PR                              |
+| `halted-mid-run`         | a HALT hands the bead back rather than stranding it `in_progress` (§9.3)            |
+| `branch-exists`          | a failed `checkout -b` parks instead of letting every later stage run on `main`     |
+| `bd-broken`              | a crash before SELECT exits NON-ZERO instead of reporting a drained queue           |
 | `capped-no-progress`     | a cap that edited nothing parks, and `claude` runs exactly once                     |
 
 **The harness was itself vacuous for `Cebab-qd2.18`, and that is the lesson worth keeping.**
