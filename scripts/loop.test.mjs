@@ -327,10 +327,19 @@ describe('machine: the happy path and every branch off it', () => {
     });
   });
 
-  test('HALT is honoured at each of the eight stage boundaries', () => {
-    // Reverting the halt check to fire at only some boundaries reddens here
-    // with the exact stage named.
-    for (const stage of STAGE_ORDER) {
+  test('HALT is honoured at every stage boundary EXCEPT after HARVEST', () => {
+    // REWRITTEN, not weakened (Cebab-qd2.32). This asserted all eight
+    // boundaries, HARVEST included — and that was the defect described from the
+    // other side: firing after HARVEST cannot prevent anything, because the
+    // bead is already closed or parked and the PR already merged. It only
+    // relabels work that happened, and once a halt hands the bead back
+    // (Cebab-qd2.22) it would have REOPENED a bead HARVEST had just closed.
+    //
+    // The HARVEST boundary now has its own describe block asserting the
+    // opposite, in both directions. This one keeps the other seven honest:
+    // reverting the check to fire at only some of them reddens here with the
+    // exact stage named.
+    for (const stage of STAGE_ORDER.filter((s) => s !== STAGE.HARVEST)) {
       const result = next(
         stage,
         { bead: { id: 'X' }, passed: true, outcome: 'green' },
@@ -3668,5 +3677,45 @@ describe('[security] the harness owns the tracker, not just the forge (Cebab-qd2
   test('the reason names the tracker, so the agent can act on it', () => {
     // A deny the agent cannot interpret costs a turn re-trying a variant.
     expect(decide('bd close Cebab-502')).toContain('tracker');
+  });
+});
+
+describe('a halt does not relabel work that already happened (Cebab-qd2.32)', () => {
+  // `next()` opened with `if (ctx.halt) return halted(...)` before the switch,
+  // so it fired at EVERY boundary — including the one AFTER harvest. But
+  // HARVEST is the last stage: by the time it returns, the bead is closed or
+  // parked and the PR is merged. Firing there only rewrites the label on work
+  // that already happened.
+  //
+  // Found by checking an audit finding against the qd2.22 change rather than on
+  // its own: combined, the driver would have handed back a bead HARVEST had
+  // just correctly closed, on a merge that really happened.
+
+  test('a merged iteration stays merged through a halt at the harvest boundary', () => {
+    const step = next(STAGE.HARVEST, { disposition: DISPOSITION.MERGED }, { halt: true });
+    expect(step).toMatchObject({ stage: STAGE.DONE, disposition: DISPOSITION.MERGED });
+  });
+
+  test('and so does a parked one — the rule is about the BOUNDARY, not the outcome', () => {
+    const step = next(STAGE.HARVEST, { disposition: DISPOSITION.PARKED }, { halt: true });
+    expect(step.disposition).toBe(DISPOSITION.PARKED);
+  });
+
+  test('every earlier boundary still halts', () => {
+    // The direction that matters more: this must not have disabled halting.
+    // `loop:stop` is the operator's only way to stop a run mid-flight.
+    for (const stage of [STAGE.SELECT, STAGE.CLAIM, STAGE.BUILD, STAGE.GATE, STAGE.PUBLISH]) {
+      expect(next(stage, {}, { halt: true }).disposition).toBe(DISPOSITION.HALTED);
+    }
+    expect(next(STAGE.WATCH, { outcome: 'green' }, { halt: true }).disposition).toBe(
+      DISPOSITION.HALTED,
+    );
+    expect(next(STAGE.LAND, { merged: true }, { halt: true }).disposition).toBe(DISPOSITION.HALTED);
+  });
+
+  test('and the halt reason still rides along where it applies', () => {
+    expect(next(STAGE.BUILD, { haltReason: REASON.USAGE_LIMIT }, { halt: true }).reason).toBe(
+      REASON.USAGE_LIMIT,
+    );
   });
 });

@@ -606,7 +606,13 @@ async function runIteration({ ctx, deps, log }) {
     //
     // Release rather than park: `loop-stuck` means "a human must debug this",
     // and an interrupted bead has not failed at anything.
-    if (bead && !dryRun && disposition === DISPOSITION.HALTED) {
+    // `!harvested` is load-bearing, not defensive. If HARVEST ran, the bead's
+    // state is already whatever HARVEST decided — closed for a merge, parked
+    // for a failure — and handing it back would UNDO that. The machine no
+    // longer rewrites a post-HARVEST disposition to `halted`, so this cannot
+    // fire today; it is the belt to that braces, because the two live in
+    // different files and only one of them is obviously about the other.
+    if (bead && !dryRun && !harvested && disposition === DISPOSITION.HALTED) {
       try {
         const released = await beads.release(
           bead.id,
