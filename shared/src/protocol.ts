@@ -2404,6 +2404,30 @@ export type ServerMsg =
        * settings round-trip.
        */
       mockFixture?: string;
+      /**
+       * Cebab-8x8.3.1: the `projects` row id of the built-in assistant, or
+       * absent when the server has no assistant project. The assistant reuses
+       * `send_message` / `interrupt` / `load_session` byte-for-byte, so this id
+       * is the ONLY thing on the wire that tells its envelopes apart from an
+       * ordinary project's.
+       *
+       * The client needs it because the assistant is deliberately filtered out
+       * of `listProjects()`, so its id is never in a `projects` payload. Every
+       * `reduceServer` case keys session state by projectId, and `case
+       * 'projects'` wipes all of it whenever the active project isn't in the
+       * list — which is every fresh boot and every workspace switch, since the
+       * assistant is never in that list. So an assistant envelope reduced
+       * normally would corrupt AppState. The client filters on this id UPSTREAM
+       * of the reducer and routes those envelopes to its out-of-AppState side
+       * channel instead.
+       *
+       * A NUMBER, never the project's `kind`: kind is a server-side
+       * discriminator and stays off the wire. Leaking it would invite the
+       * client to filter on it and make "the assistant is not a project the UI
+       * knows about" negotiable. Optional for forward-compat — a server without
+       * an assistant omits it, and an older client ignores it.
+       */
+      assistantProjectId?: number;
     }
   | {
       /**

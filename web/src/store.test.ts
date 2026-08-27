@@ -6,6 +6,7 @@ import {
   initialState,
   isSessionPending,
   reduce,
+  routesToAssistant,
   sessionPhase,
   trustChipState,
 } from './store';
@@ -2560,6 +2561,90 @@ describe('store / settings reducer carries defaultWorkspaceRootSource (E3)', () 
       },
     });
     expect(s.settings?.defaultWorkspaceRootSource).toBeUndefined();
+  });
+});
+
+// Cebab-8x8.3.1: the assistant project id rides the `settings` ServerMsg and is
+// mapped individually (the case maps fields, never spreads `msg`), so it is
+// absent when the server omits it. `routesToAssistant` then keeps the
+// assistant's envelopes off the reducer and on the side channel.
+describe('store / assistant project id wiring (Cebab-8x8.3.1)', () => {
+  function withSettings(assistantProjectId?: number) {
+    return reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        ...(assistantProjectId !== undefined ? { assistantProjectId } : {}),
+      },
+    });
+  }
+
+  test('settings maps assistantProjectId into the SettingsView', () => {
+    expect(withSettings(99).settings?.assistantProjectId).toBe(99);
+  });
+
+  test('older server omits the field → SettingsView leaves it undefined', () => {
+    expect(withSettings().settings?.assistantProjectId).toBeUndefined();
+  });
+
+  test('routesToAssistant matches an envelope with the assistant projectId', () => {
+    const s = withSettings(99);
+    // A `session_started` envelope carrying the assistant's projectId — the
+    // exact case the guard exists for: reduced normally it would be keyed by an
+    // id absent from `state.projects`.
+    expect(
+      routesToAssistant(s, {
+        type: 'session_started',
+        sessionId: 'a-sid',
+        projectId: 99,
+        model: 'claude-opus-4-8',
+        tools: [],
+      }),
+    ).toBe(true);
+  });
+
+  test('routesToAssistant leaves an ordinary project envelope for the reducer', () => {
+    const s = withSettings(99);
+    expect(
+      routesToAssistant(s, {
+        type: 'session_started',
+        sessionId: 'b-sid',
+        projectId: 7,
+        model: 'claude-opus-4-8',
+        tools: [],
+      }),
+    ).toBe(false);
+  });
+
+  test('routesToAssistant is false when no assistant id is set', () => {
+    const s = withSettings();
+    expect(
+      routesToAssistant(s, {
+        type: 'session_started',
+        sessionId: 'c-sid',
+        projectId: 99,
+        model: 'claude-opus-4-8',
+        tools: [],
+      }),
+    ).toBe(false);
+  });
+
+  test('routesToAssistant is false for a projectId-less envelope', () => {
+    const s = withSettings(99);
+    // `assistant_message` carries only a sessionId — this slice adds no
+    // session-keyed routing, so it stays on the reducer path.
+    expect(
+      routesToAssistant(s, {
+        type: 'assistant_message',
+        sessionId: 'a-sid',
+        uuid: 'u1',
+        blocks: [],
+      }),
+    ).toBe(false);
   });
 });
 

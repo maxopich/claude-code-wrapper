@@ -22,6 +22,7 @@ import {
   initialState,
   isSessionPending,
   reduce,
+  routesToAssistant,
   sessionSelectionRequests,
   showsNewChatPreview,
 } from './store';
@@ -774,6 +775,25 @@ function AppShell({
           });
         },
         onMessage: (msg) => {
+          // Cebab-8x8.3.1: assistant envelopes never reach the reducer. The
+          // assistant is filtered out of `listProjects()`, so its id is never
+          // in `state.projects`; a `reduceServer` pass keyed on that id would
+          // corrupt AppState (and `case 'projects'` wipes the session maps on
+          // every boot/workspace switch, since the assistant is never listed).
+          // Route them to the `subscribeServerMsg` side channel ONLY — the
+          // established home for payloads that must not live in AppState — and
+          // skip dispatch and every provider bridge below. Panel state lives
+          // outside AppState.
+          if (routesToAssistant(stateRef.current, msg)) {
+            for (const fn of msgSubscribersRef.current) {
+              try {
+                fn(msg);
+              } catch (err) {
+                console.error('[ws] subscriber threw', err);
+              }
+            }
+            return;
+          }
           dispatch({ type: 'server', msg });
           // Cebab-ws0.3: the refresh spawn is done, whatever it found. Cleared
           // on ANY catalogue reply, including an empty one — a probe that came
