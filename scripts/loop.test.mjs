@@ -48,6 +48,7 @@ import {
   STAGE,
   STAGE_ORDER,
   countsTowardBreaker,
+  countsTowardDeclines,
   landedOnStaleMain,
   next,
   resetsBreaker,
@@ -2580,6 +2581,10 @@ describe('the machine learned three states it had never reached', () => {
       parts: {},
       log: () => {},
       halted: () => false,
+      // Required since Cebab-qd2.19: with no PR, WATCH refuses before the
+      // first poll, so this fixture could never reach the timeout branch it
+      // exists to pin.
+      prNumber: 77,
     });
     expect(out.outcome).toBe('timeout');
   });
@@ -3308,6 +3313,145 @@ describe('commitSubject knows both spellings of a bead id (Cebab-qd2.15)', () =>
     // `p5y` is the short form of `Cebab-p5y`, not of `Cebab-vie.32`.
     expect(subject('a change (p5y)', 'Cebab-vie.32')).toBe(
       'fix(bus): a change (p5y) (Cebab-vie.32)',
+    );
+  });
+});
+
+describe('the night that landed nothing (Cebab-qd2.18, Cebab-qd2.19, Cebab-qd2.20)', () => {
+  // The first unattended overnight run built three beads, landed none, and
+  // halted on the breaker. One root cause, one blindness downstream of it, and
+  // one miscount that made the halt message lie about which of the three was
+  // a failure.
+  //
+  // The PUBLISH half is NOT here: `if (!prNumber)` lives inside the driver's
+  // stage switch, which no unit test reaches. It is pinned end-to-end by the
+  // rehearsal's `gate-fail-then-publish` and `ci-red-repair` scenarios, and
+  // revert-checked there — restoring `attempt === 1` reddens the first and
+  // leaves the second green, which is the pair that says the fix is the right
+  // shape rather than merely a change.
+
+  const noopForge = () => {
+    let polls = 0;
+    return {
+      polls: () => polls,
+      pollChecks: async () => {
+        polls += 1;
+        return { outcome: 'green', found: true, anyPending: false, total: 4 };
+      },
+    };
+  };
+  const cfg = {
+    ci: {
+      requiredContext: 'Lint, Typecheck, Test',
+      pollIntervalMs: 1,
+      appearTimeoutMs: 900000,
+      completeTimeoutMs: 2700000,
+    },
+  };
+
+  test('WATCH refuses before the first poll when no PR exists', async () => {
+    // The measured cost of not doing this: 916 seconds, twice, and then a
+    // reason naming the runner. Asserting on the POLL COUNT rather than only
+    // on the outcome is deliberate — a guard placed after the first poll would
+    // return the same string and still have asked GitHub about a commit no
+    // pull request references.
+    const forge = noopForge();
+    const out = await watchCi({
+      forge,
+      config: cfg,
+      sha: 'deadbeef',
+      parts: {},
+      log: () => {},
+      halted: () => false,
+      prNumber: null,
+    });
+    expect(out.outcome).toBe('no_pr');
+    expect(forge.polls()).toBe(0);
+  });
+
+  test('and with a PR it polls as before', async () => {
+    // The other direction. Without this the guard above is satisfied by a
+    // watchCi that never polls at all.
+    const forge = noopForge();
+    const out = await watchCi({
+      forge,
+      config: cfg,
+      sha: 'deadbeef',
+      parts: {},
+      log: () => {},
+      halted: () => false,
+      prNumber: 412,
+    });
+    expect(out.outcome).toBe('green');
+    expect(forge.polls()).toBe(1);
+  });
+
+  test('no_pr is its own park reason, distinct from CI never starting', () => {
+    // Same disposition, different reason, and the reasons are the whole point:
+    // `pr_missing` says the branch is pushed and PUBLISH failed, while
+    // `ci_never_started` says a PR is open and the runner did not answer. A
+    // test asserting only `disposition === PARKED` would pass on either.
+    const missing = next(STAGE.WATCH, { outcome: 'no_pr' }, {});
+    expect(missing).toMatchObject({
+      disposition: DISPOSITION.PARKED,
+      reason: REASON.PR_MISSING,
+    });
+    const absent = next(STAGE.WATCH, { outcome: 'absent' }, {});
+    expect(absent.reason).toBe(REASON.CI_NEVER_STARTED);
+    expect(absent.reason).not.toBe(missing.reason);
+  });
+
+  test('a declined bead does not count toward the circuit breaker', () => {
+    // Cebab-89j: eight turns, $0.66, and the agent correctly said this one is
+    // not mine. It was one of the "3 consecutive parks" that halted the run.
+    expect(countsTowardBreaker(DISPOSITION.PARKED, { reason: REASON.NEEDS_HUMAN })).toBe(false);
+  });
+
+  test('but every other park still does', () => {
+    // The direction that matters more: the breaker must not have been turned
+    // off. A fix that returned false for all parks would pass the case above.
+    for (const reason of [
+      REASON.GATE_FAILED,
+      REASON.CI_RED,
+      REASON.CI_NEVER_STARTED,
+      REASON.PR_MISSING,
+      REASON.MAX_TURNS,
+      REASON.CRASHED,
+    ]) {
+      expect(countsTowardBreaker(DISPOSITION.PARKED, { reason })).toBe(true);
+    }
+    // And a park with no reason recorded at all is still a park.
+    expect(countsTowardBreaker(DISPOSITION.PARKED)).toBe(true);
+    expect(countsTowardBreaker(DISPOSITION.PARKED, {})).toBe(true);
+  });
+
+  test('declines are counted separately, so a useless queue still stops the run', () => {
+    // Without this the fix trades one bad halt for a worse one: a run that
+    // declines every bead would spin through the whole queue reporting nothing
+    // wrong.
+    expect(countsTowardDeclines(DISPOSITION.PARKED, { reason: REASON.NEEDS_HUMAN })).toBe(true);
+    // Both other directions.
+    expect(countsTowardDeclines(DISPOSITION.PARKED, { reason: REASON.CI_RED })).toBe(false);
+    expect(countsTowardDeclines(DISPOSITION.MERGED, { reason: REASON.NEEDS_HUMAN })).toBe(false);
+    expect(countsTowardDeclines(DISPOSITION.GUARD_WITHHELD, {})).toBe(false);
+  });
+
+  test('the two counters are disjoint — nothing feeds both', () => {
+    // They stop the run with opposite messages ("the loop is broken" versus
+    // "the queue is unsuitable"), so an outcome reaching both counters would
+    // send the operator to two places at once.
+    for (const reason of Object.values(REASON)) {
+      const breaker = countsTowardBreaker(DISPOSITION.PARKED, { reason });
+      const decline = countsTowardDeclines(DISPOSITION.PARKED, { reason });
+      expect(breaker && decline).toBe(false);
+    }
+  });
+
+  test('the decline limit is looser than the park limit, and both exist', () => {
+    // A decline is cheap and honest; a park is a failure. Equal limits would
+    // make the split pointless.
+    expect(DEFAULTS.loop.consecutiveDeclineLimit).toBeGreaterThan(
+      DEFAULTS.loop.consecutiveParkLimit,
     );
   });
 });

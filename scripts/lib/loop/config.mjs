@@ -119,6 +119,11 @@ export const DEFAULTS = Object.freeze({
     until: ['1'],
     maxRepairs: 2,
     consecutiveParkLimit: 3,
+    // Higher than the park limit ON PURPOSE. A decline costs a handful of turns
+    // and tells the truth about one bead; three of them in a row is a plausible
+    // run of unsuitable queue head, not a symptom. Five is where "this queue is
+    // not for the loop" starts being the better explanation than chance.
+    consecutiveDeclineLimit: 5,
     merge: false,
   },
   limits: {

@@ -174,6 +174,68 @@ const SCENARIOS = {
       ctx.ok(ctx.calls.claude[1].includes('--resume'), 'the second RESUMED the session');
       ctx.eq(row.build.attempts, 2, 'recorded as two attempts');
       ctx.eq(row.disposition, 'guard_withheld', 'and it got all the way to a green PR');
+      // Cebab-qd2.18. Attempt 1 died inside BUILD, so attempt 2 is the FIRST to
+      // reach PUBLISH and MUST open the PR. This assertion is the whole reason
+      // the gh shim now refuses to report checks without one: before that, this
+      // scenario passed while opening no PR at all.
+      ctx.eq(ctx.prCreates(), 1, 'the PR was created on attempt 2 (Cebab-qd2.18)');
+      ctx.ok(row.pr.number, 'and the ledger carries its number, not null');
+    },
+  },
+
+  'gate-fail-then-publish': {
+    why: 'attempt 1 dies at the GATE, so attempt 2 is the first to PUBLISH and must open a PR (Cebab-qd2.18)',
+    // The shape that broke the first unattended night. GATE failing is not a
+    // BUILD failure, so it takes a different route to the same place: attempt 2
+    // reaching PUBLISH with no PR behind it.
+    args: ['--until', '1'],
+    plan: {
+      beads: 1,
+      ci: 'green',
+      merge: 'direct',
+      gateFailOnAttempt: 1,
+      gateFailStep: 'format:check',
+      build: [
+        { kind: 'verdict', edit: true },
+        { kind: 'verdict', edit: true },
+      ],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(ctx.calls.claude.length, 2, 'the gate failure bought a second attempt');
+      ctx.eq(ctx.prCreates(), 1, 'and attempt 2 opened the PR');
+      ctx.ok(row.pr.number, 'the ledger carries the PR number');
+      ctx.ok(row.pr.url, 'and its url');
+      // The consequence, stated from the other end: without the PR this run
+      // spent 916 s polling and then parked blaming CI.
+      ctx.eq(row.ci.conclusion, 'success', 'CI reported on it');
+      ctx.eq(row.disposition, 'guard_withheld', 'and the iteration succeeded');
+      ctx.ok(!ctx.stdout.includes('ci_never_started'), 'nothing blamed the runner');
+    },
+  },
+
+  'ci-red-repair': {
+    why: 'the ONE path where attempt 2 must NOT open a PR — the repair force-pushes to the open one',
+    // The negative control for `gate-fail-then-publish`. Without it, "create a
+    // PR on attempt 2" is satisfied by a driver that opens a second PR on every
+    // repair, which is the bug the `attempt === 1` guard was written to prevent.
+    args: ['--until', '1'],
+    plan: {
+      beads: 1,
+      ci: ['red', 'green'],
+      merge: 'direct',
+      build: [
+        { kind: 'verdict', edit: true },
+        { kind: 'verdict', edit: true },
+      ],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(ctx.calls.claude.length, 2, 'CI red bought a repair');
+      ctx.eq(ctx.prCreates(), 1, 'EXACTLY ONE PR across both attempts');
+      ctx.eq(row.build.attempts, 2, 'recorded as two attempts');
+      ctx.eq(row.ci.conclusion, 'success', 'and the repair went green');
+      ctx.eq(row.disposition, 'guard_withheld', 'reaching the normal terminal');
     },
   },
 
@@ -247,6 +309,18 @@ process.exit(0);
     'npm',
     `${SHIM_PREAMBLE}
 record('npm');
+// A REHEARSED GATE FAILURE. \`state.builds\` is incremented by the claude shim,
+// so during attempt N's gate it reads N — which is how one attempt's gate is
+// failed without touching the next one's.
+if (
+  plan.gateFailOnAttempt &&
+  state.builds === plan.gateFailOnAttempt &&
+  argv[0] === 'run' &&
+  argv[1] === plan.gateFailStep
+) {
+  process.stderr.write('rehearsed gate failure: ' + argv[1] + '\\n');
+  process.exit(1);
+}
 process.exit(0);
 `,
   );
@@ -306,6 +380,19 @@ if (argv[0] === 'pr' && argv[1] === 'create') {
 if (argv[0] === 'pr' && argv[1] === 'edit') process.exit(0);
 
 if (argv[0] === 'api') {
+  // CHECKS BELONG TO A PULL REQUEST, AND THIS SHIM USED TO FORGET IT.
+  //
+  // Cebab's CI triggers on \`pull_request\` only, so a pushed branch with no PR
+  // gets no check runs at all. The shim answered every poll regardless, which
+  // made the harness VACUOUS for exactly the bug that broke the first
+  // unattended night: \`capped-then-resume\` traverses the path where attempt 2
+  // reaches PUBLISH having never created a PR (Cebab-qd2.18), and it passed,
+  // because the fake GitHub reported green checks for a pull request that did
+  // not exist.
+  //
+  // Modelling the dependency is what turns that scenario into a real
+  // revert-check: restore \`attempt === 1\` in PUBLISH and it reddens.
+  if (!state.pr) { out({ check_runs: [] }); process.exit(0); }
   // The required check is gated behind the matrix, so the FIRST poll shows a
   // pending sibling and no required check at all — the exact shape that used
   // to be misread as "CI never started".
@@ -316,7 +403,12 @@ if (argv[0] === 'api') {
     out({ check_runs: [{ name: 'quality', status: 'in_progress', conclusion: null, html_url: url }] });
     process.exit(0);
   }
-  const conclusion = plan.ci === 'green' ? 'success' : 'failure';
+  // An ARRAY is per-attempt: index by the build count so a repair can see a
+  // different answer from the attempt that provoked it.
+  const want = Array.isArray(plan.ci)
+    ? plan.ci[Math.min(Math.max(state.builds - 1, 0), plan.ci.length - 1)]
+    : plan.ci;
+  const conclusion = want === 'green' ? 'success' : 'failure';
   out({ check_runs: [
     { name: 'quality', status: 'completed', conclusion, html_url: url },
     { name: required, status: 'completed', conclusion, html_url: url },
@@ -487,6 +579,10 @@ function runScenario(name, scenario) {
     eq: (actual, expected, what) => {
       if (actual !== expected) failures.push(`${what} (got ${JSON.stringify(actual)})`);
     },
+    // How many pull requests this run actually opened. The count matters in
+    // BOTH directions: zero is Cebab-qd2.18, and two is the double-PR the
+    // `attempt === 1` guard existed to prevent.
+    prCreates: () => calls.gh.filter((c) => c[0] === 'pr' && c[1] === 'create').length,
     originSha: () => {
       const bare = path.join(scratch.dir, 'origin.git');
       if (!fs.existsSync(bare)) return null;

@@ -74,6 +74,7 @@ export const REASON = Object.freeze({
   GATE_FAILED: 'gate_failed',
   LOCKFILE_DRIFT: 'lockfile_drift',
   PUSH_FAILED: 'push_failed',
+  PR_MISSING: 'pr_missing',
   CRASHED: 'crashed',
   CI_RED: 'ci_red',
   CI_NEVER_STARTED: 'ci_never_started',
@@ -169,6 +170,14 @@ export function next(stage, result = {}, ctx = {}) {
         if (attempt <= maxRepairs) return { stage: STAGE.BUILD, repair: true };
         return park(REASON.CI_RED);
       }
+      // NOTHING COULD EVER REPORT. Checks belong to a pull request, so with no
+      // PR there is nothing to wait for and `absent` would be true forever.
+      // Reported separately because the remedies share no step: `pr_missing` is
+      // a PUBLISH failure and the branch is already on the remote, while
+      // `ci_never_started` is a repo or runner problem with a PR sitting open.
+      // Measured 2026-08-26: two beads spent 916 s each polling a SHA that no
+      // PR referenced, then blamed the runner (Cebab-qd2.18, Cebab-qd2.19).
+      if (result.outcome === 'no_pr') return park(REASON.PR_MISSING);
       // No check with the required name ever appeared. Usually the repo or the
       // runner, not this bead — so it parks AND counts toward the breaker.
       if (result.outcome === 'absent') return park(REASON.CI_NEVER_STARTED);
@@ -221,8 +230,37 @@ export function next(stage, result = {}, ctx = {}) {
  * resets on a merged or no_change_needed bead. A withheld or dry-run iteration
  * does neither: nothing failed, and nothing proved the systemic cause is gone.
  */
-export function countsTowardBreaker(disposition) {
-  return disposition === DISPOSITION.PARKED;
+export function countsTowardBreaker(disposition, { reason } = {}) {
+  if (disposition !== DISPOSITION.PARKED) return false;
+  // A DECLINE IS NOT A FAILURE, AND THE BREAKER ONLY WATCHES FAILURES.
+  //
+  // `needs_human` is the agent reading the brief and saying this one is not
+  // mine — the bail-out Cebab-qd2.16 added precisely so an unsuitable bead
+  // costs eight turns instead of a full budget. Measured 2026-08-26: it cost
+  // $0.66 against the $9.06 the same lesson cost without it.
+  //
+  // Counting it halted a run on `3 consecutive parks` of which one was the
+  // loop working exactly as designed. The breaker exists to catch a
+  // SYSTEMICALLY broken run — a dead credential, a repo that will not build —
+  // and a bead correctly declined is evidence of the opposite: bd answered,
+  // the agent spawned, read the brief and made a judgement.
+  //
+  // Declines are not free, though, and are counted separately below: a queue
+  // of two hundred unsuitable beads must not look like a healthy run forever.
+  return reason !== REASON.NEEDS_HUMAN;
+}
+
+/**
+ * A decline is its own kind of evidence, with its own limit.
+ *
+ * Without this the fix above trades one bad halt for a worse one: a run that
+ * declines every bead would spin through the whole queue reporting nothing
+ * wrong. Separate counter, separate limit, and a DIFFERENT message — "the
+ * queue is unsuitable" and "the loop is broken" send the operator to opposite
+ * places.
+ */
+export function countsTowardDeclines(disposition, { reason } = {}) {
+  return disposition === DISPOSITION.PARKED && reason === REASON.NEEDS_HUMAN;
 }
 
 export function resetsBreaker(disposition, { ciGreen = false } = {}) {
