@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDb } from '../db.js';
 import { findProjectByPath, getProject, type ProjectRow } from '../repo/projects.js';
+import type { SettingSource } from '../runner/claude.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -30,6 +31,99 @@ export const ASSISTANT_PROJECT_NAME = 'cebab/assistant';
  * assistant turn spends subscription quota with no operator watching.
  */
 export const ASSISTANT_MAX_TURNS = 12;
+
+/**
+ * The assistant's own system prompt. Cebab sets no system prompt on any other
+ * turn (Cebab-ws0.15), so this fills a blank rather than replacing a preset —
+ * measured, and the one claim `src/system_prompt_smoke.ts` keeps honest.
+ *
+ * It states the identity and the hard boundary the posture below enforces
+ * mechanically: read-only, answers from the bundled knowledge base, never
+ * touches the operator's files. The prompt is advice; `assistantSpawnPosture`
+ * is the brake.
+ */
+export const ASSISTANT_SYSTEM_PROMPT = [
+  'You are the Cebab help assistant, built in to the Cebab app.',
+  'Your job is to answer the operator’s questions about Cebab — what it does,',
+  'how its projects, Trust model, permissions, and multi-agent bus work — using',
+  'the knowledge-base files in your working directory.',
+  '',
+  'You are strictly read-only. You may Read, Glob, and Grep the knowledge base to',
+  'find answers. You cannot and must not edit, create, delete, or run anything,',
+  'and you have no access to the operator’s own projects. If a question needs an',
+  'action you cannot take, say so and explain what the operator would do instead.',
+  'If the knowledge base does not cover something, say you do not know rather than',
+  'guessing.',
+].join('\n');
+
+/**
+ * The built-in tools an assistant turn may use: read-only inspection of the KB
+ * and nothing else. Passed as SDK `Options.tools`, which is the base-set filter.
+ */
+export const ASSISTANT_TOOLS: readonly string[] = ['Read', 'Glob', 'Grep'];
+
+/**
+ * Belt to the `ASSISTANT_TOOLS` suspenders: every mutating / executing built-in
+ * named explicitly in `disallowedTools` so it is stripped from context even if a
+ * future SDK default or a stray setting would otherwise surface it. Deliberately
+ * disjoint from `ASSISTANT_TOOLS` — Read/Glob/Grep are the only survivors.
+ */
+export const ASSISTANT_DISALLOWED_TOOLS: readonly string[] = [
+  'Bash',
+  'BashOutput',
+  'KillShell',
+  'Edit',
+  'Write',
+  'MultiEdit',
+  'NotebookEdit',
+  'Task',
+  'WebFetch',
+  'WebSearch',
+  'TodoWrite',
+];
+
+/**
+ * The complete spawn posture for an assistant turn, as a plain data object so a
+ * unit test pins the values rather than reading them out of the giant
+ * `runOneTurn` switch arm. Pure: give it the `cwd` (the KB directory), get back
+ * every option that differs from an ordinary single-agent run.
+ *
+ * What the caller still owns, because it is not expressible here: forcing
+ * `trusted` false (a source-scanned line in `runOneTurn`, since
+ * `shouldAutoAllow` treats a trusted project as auto-allow-everything), gating
+ * with an empty scope set, a meta-less `registerQuery`, and skipping the
+ * session-start cache. Those touch live connection state; this object is the
+ * part that is pure.
+ */
+export type AssistantPosture = {
+  cwd: string;
+  permissionMode: 'default';
+  settingSources: SettingSource[];
+  maxTurns: number;
+  systemPrompt: string;
+  tools: string[];
+  skills: string[];
+  disallowedTools: string[];
+};
+
+export function assistantSpawnPosture(cwd: string): AssistantPosture {
+  return {
+    cwd,
+    // Never auto-allow: the assistant is not Trusted, so every tool routes
+    // through the permission gate.
+    permissionMode: 'default',
+    // Empty scope set: no ~/.claude, no project settings, no CLAUDE.md, no
+    // project-declared MCP servers or env injections layered into the turn.
+    settingSources: [],
+    maxTurns: ASSISTANT_MAX_TURNS,
+    systemPrompt: ASSISTANT_SYSTEM_PROMPT,
+    tools: [...ASSISTANT_TOOLS],
+    // `[]`, not omitted: omitting leaves the CLI's skills on (per SDK docs),
+    // and a help turn should see none.
+    skills: [],
+    disallowedTools: [...ASSISTANT_DISALLOWED_TOOLS],
+  };
+}
 
 /**
  * The KB directory the assistant reads and runs its `cwd` inside, or `null`

@@ -78,6 +78,49 @@ describe('buildSdkOptions — systemPrompt (Cebab-ws0.15)', () => {
   });
 });
 
+describe('buildSdkOptions — tools + skills (Cebab-8x8.1.2)', () => {
+  test('a run that names neither has NEITHER key — absent, not undefined', () => {
+    // The assistant is the only caller that passes these; every other spawn
+    // must stay byte-identical. `tools: opts.tools` / `skills: opts.skills` in
+    // the always-present literal above would redden here.
+    const o = buildSdkOptions(MINIMAL);
+    expect('tools' in o).toBe(false);
+    expect('skills' in o).toBe(false);
+  });
+
+  test('a tools array is passed through verbatim', () => {
+    const o = buildSdkOptions({ ...MINIMAL, tools: ['Read', 'Glob', 'Grep'] });
+    expect(o.tools).toEqual(['Read', 'Glob', 'Grep']);
+  });
+
+  test('tools: [] survives (guarded by !== undefined) — "no built-in tools"', () => {
+    // `[]` is a real value (disable every built-in), distinct from omitting the
+    // key. A truthiness guard would forward it too (arrays are truthy), but the
+    // property under test is that `[]` reaches the SDK rather than being dropped.
+    const o = buildSdkOptions({ ...MINIMAL, tools: [] });
+    expect('tools' in o).toBe(true);
+    expect(o.tools).toEqual([]);
+  });
+
+  test('the tools preset object is accepted (SDK shape, not narrowed away)', () => {
+    const o = buildSdkOptions({ ...MINIMAL, tools: { type: 'preset', preset: 'claude_code' } });
+    expect(o.tools).toEqual({ type: 'preset', preset: 'claude_code' });
+  });
+
+  test('skills: [] survives — the assistant hides every skill', () => {
+    // Omitting skills is NOT skills-off (the CLI keeps its own on); the empty
+    // array is how a caller actually turns them off, so it must reach the SDK.
+    const o = buildSdkOptions({ ...MINIMAL, skills: [] });
+    expect('skills' in o).toBe(true);
+    expect(o.skills).toEqual([]);
+  });
+
+  test('a named skills list is passed through verbatim', () => {
+    const o = buildSdkOptions({ ...MINIMAL, skills: ['pdf', 'docx'] });
+    expect(o.skills).toEqual(['pdf', 'docx']);
+  });
+});
+
 describe('buildSdkOptions — the pre-existing assembly (control)', () => {
   // These pass before this PR as well as after. They are here deliberately: the
   // extraction of `buildSdkOptions` out of `runClaude` had to be behaviour-
@@ -101,6 +144,8 @@ describe('buildSdkOptions — the pre-existing assembly (control)', () => {
       'settings',
       'allowDangerouslySkipPermissions',
       'model',
+      'tools',
+      'skills',
     ]) {
       expect({ key: k, present: k in o }).toEqual({ key: k, present: false });
     }

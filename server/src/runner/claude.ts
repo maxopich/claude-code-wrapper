@@ -51,6 +51,30 @@ export type RunOptions = {
    * for this field to be safe.
    */
   systemPrompt?: string;
+  /**
+   * The base set of built-in tools this turn may use (SDK `Options.tools`).
+   *
+   * Accepts the SDK's full shape — a `string[]` of tool names, `[]` to disable
+   * every built-in, or the `{ type: 'preset'; preset: 'claude_code' }` object.
+   * The Cebab-owned assistant passes `['Read', 'Glob', 'Grep']` so a help turn
+   * can read its knowledge base and nothing else; ordinary/bus runs omit it and
+   * inherit the CLI's default toolset unchanged.
+   *
+   * Guarded by `!== undefined`, NOT truthiness: `[]` is a meaningful value
+   * ("no built-in tools") and is truthy anyway, so a truthiness check would
+   * read as "if there are tools" and mislead. Absent unless the caller asks.
+   */
+  tools?: Options['tools'];
+  /**
+   * Which skills the SDK enables for this turn (SDK `Options.skills`).
+   *
+   * OMITTING THIS IS NOT "SKILLS OFF": per the SDK docs an omitted `skills`
+   * applies no SDK auto-configuration and the CLI's own defaults still surface
+   * skills. To actually hide every skill from the model — as the assistant
+   * does — the caller passes `[]` (enable only the listed skills; none). That
+   * empty array must survive to the SDK, so this too is guarded by `!== undefined`.
+   */
+  skills?: Options['skills'];
   /** In-process MCP servers (e.g. the multi-agent `bus_send` tool). */
   mcpServers?: Options['mcpServers'];
   /**
@@ -220,6 +244,13 @@ export function buildSdkOptions(opts: RunOptions): Options {
   // the key ABSENT, not present-and-empty. `''` is not a note, and sending it
   // would mean every healthy spawn newly carries a system-prompt override.
   if (opts.systemPrompt) options.systemPrompt = opts.systemPrompt;
+  // `!== undefined`, NOT truthiness: an empty array is a meaningful value for
+  // both (tools `[]` = no built-ins; skills `[]` = every skill hidden) and is
+  // truthy, so it survives either way — but the intent reads correctly only
+  // with the explicit undefined check, and the key stays ABSENT when the
+  // caller omits it so an ordinary spawn is byte-identical to before.
+  if (opts.tools !== undefined) options.tools = opts.tools;
+  if (opts.skills !== undefined) options.skills = opts.skills;
 
   return options;
 }
