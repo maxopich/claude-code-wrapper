@@ -23,9 +23,11 @@ import {
 } from '../repo/projects.js';
 import { scanProjects } from '../repo/project_scan.js';
 import {
+  assertWorkspaceProject,
   assistantKbRoot,
   assistantSpawnPosture,
   isAssistantProject,
+  isNonWorkspaceProject,
 } from '../assistant/identity.js';
 import { applyProjectStartPermissionMode } from '../project_start_mode.js';
 import { preflightManagedCopy, runManagedCopy } from '../managed_copy.js';
@@ -1569,7 +1571,23 @@ export async function executeReopenSessionProbe(args: {
   // listResolvedParticipants already orders by (chain_order IS NULL)
   // ASC, chain_order ASC, project_id ASC — so participants[0] is the
   // canonical "first" project for both chain and orchestrator modes.
-  const projectPath = participants[0]!.project_path;
+  const first = participants[0]!;
+  // [security] Cebab-8x8.1.3: reopening shells `git status` (computeWorkspaceDiff)
+  // in the participant's directory. The assistant is single-agent and never a
+  // bus participant, so this is defence in depth — but if a non-workspace row
+  // ever reached here, diffing its Cebab-owned tree is exactly what to refuse.
+  // No new `reason` (that needs a UI branch); `no_participant` is the closest
+  // resolvable-participant failure and the message says why.
+  if (isNonWorkspaceProject(first.project_id)) {
+    send({
+      type: 'reopen_session_failed',
+      sessionId,
+      reason: 'no_participant',
+      message: 'This session has no resolvable workspace participant to diff against.',
+    });
+    return;
+  }
+  const projectPath = first.project_path;
   const workspaceDiff = await diff(projectPath);
 
   send({
@@ -3726,6 +3744,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       return;
     }
     case 'open_project': {
+      // [security] Cebab-8x8.1.3: never open the assistant as if it were one of
+      // the operator's workspace projects. The assistant popup drives its chat
+      // with send_message/interrupt/load_session, not open_project.
+      assertWorkspaceProject(msg.projectId);
       const project = getProject(msg.projectId);
       if (!project) return;
       const sessions = listSessionsForProject(project.id).map((s) => ({
@@ -3778,6 +3800,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // This does not PREVENT an ungated flip — anything holding the auth
       // token can send this verb, and a bus agent runs as the operator's uid
       // (see server/src/auth.ts). Detection is what is achievable here.
+      //
+      // [security] Cebab-8x8.1.3: but the assistant is never trustable — its
+      // posture is Cebab-owned and forced untrusted. Refuse the verb outright
+      // rather than record a trust decision for it.
+      assertWorkspaceProject(msg.projectId);
       const beforeRow = getProject(msg.projectId);
       const auditResult = emitNotification(
         {
@@ -4111,6 +4138,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // A probe that returns nothing leaves the cache untouched: the operator
       // gets the file-scan half plus whatever was already known, which is
       // strictly better than replacing it with blanks.
+      //
+      // [security] Cebab-8x8.1.3: the assistant has no authority panel — refuse
+      // rather than spawn a probe against its Cebab-owned posture.
+      assertWorkspaceProject(msg.projectId);
       await respondWithProjectAuthority(conn, msg.projectId, msg.mode);
       return;
     }
@@ -4428,6 +4459,13 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         });
         return;
       }
+      // [security] Cebab-8x8.1.3: the assistant runs `permissionMode: 'default'`
+      // and must stay there. Gate on the session's DB-row PROJECT KIND, not on
+      // `conn.inFlight`: the `if (!f) return` below returns silently when
+      // nothing is in flight, so an inFlight-based guard would be a no-op on
+      // exactly the path a hostile flip would take.
+      const sessRow = getSession(msg.sessionId);
+      if (sessRow) assertWorkspaceProject(sessRow.project_id);
       const f = conn.inFlight.get(msg.sessionId);
       if (!f) return;
       try {
@@ -4756,6 +4794,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
     }
     case 'install_bus_integration': {
       try {
+        // [security] Cebab-8x8.1.3: never install the bus on the assistant. A
+        // bus slug plus `bus_installed=1` is the state that lets it run as a
+        // worker under the full posture; refuse before the TOFU gate.
+        assertWorkspaceProject(msg.projectId);
         // Cluster G Phase 4 (D6/D11): TOFU gate. For first-seen projects
         // this emits `bus_auto_install_pending` and blocks; the operator's
         // `bus_trust_decision` reply resolves the awaited promise. For
@@ -4854,7 +4896,24 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         });
         return;
       }
-      if (!Array.isArray(msg.participants) || msg.participants.length === 0) {
+      if (!Array.isArray(msg.participants)) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: 'a multi-agent session needs at least one participant.',
+        });
+        return;
+      }
+      // [security] Cebab-8x8.1.3: drop the assistant (any non-workspace kind)
+      // from the participant set — a bus participant runs with the full worker
+      // posture the assistant must never receive. Filter rather than reject so
+      // a legit run keeps its workspace participants; a genuinely deleted id is
+      // kept (isNonWorkspaceProject is false for unknowns) so it still reaches
+      // the resolver's own error below. Reassign so both the resolvers and the
+      // `participants:` echo in `multi_agent_started` use the filtered set. The
+      // emptiness and mode-minimum guards below then apply to what survives.
+      msg.participants = msg.participants.filter((pid) => !isNonWorkspaceProject(pid));
+      if (msg.participants.length === 0) {
         send(conn.ws, {
           type: 'wrapper_error',
           kind: 'process_crashed',
@@ -5578,6 +5637,12 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         return;
       }
       try {
+        // [security] Cebab-8x8.1.3: THE guard that matters. `addWorker` reaches
+        // `installBusForProject`, which needs only `getProject` to resolve and
+        // the path to exist — so an unguarded assistantProjectId here flips
+        // `bus_installed=1` and enrols the assistant as a full bus participant,
+        // voiding the Cebab-owned posture that keeps it read-only. Refuse first.
+        assertWorkspaceProject(msg.projectId);
         // Cluster G Phase 4 (D6/D11): TOFU gate for the auto-install
         // side effect inside addWorker. addWorker reads the bus state,
         // and if `bus_installed=0` it calls `installBusForProject` — so
@@ -6059,6 +6124,19 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // template-preview modal. Always replies (even when the project row is
       // missing or there's no CLAUDE.md) so the client can resolve its
       // pending request and render whatever data IS available.
+      //
+      // [security] Cebab-8x8.1.3: the assistant is not an inspectable workspace
+      // project. Answer like a deleted one — a resolving stub, not a facts
+      // disclosure — rather than THROWING, so the client's pending request
+      // still resolves instead of spinning, and no assistant facts leak.
+      if (isNonWorkspaceProject(msg.projectId)) {
+        send(conn.ws, {
+          type: 'project_facts',
+          projectId: msg.projectId,
+          facts: { name: `(unavailable #${msg.projectId})`, path: '' },
+        });
+        return;
+      }
       const project = getProject(msg.projectId);
       if (!project) {
         // No matching project — emit a minimal stub so the disclosure shows

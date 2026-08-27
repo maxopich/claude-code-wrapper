@@ -14,6 +14,7 @@ import {
   createMultiAgentSession,
 } from './multi_agent.js';
 import { MIN_SEARCH_QUERY_LEN, searchSessions } from './search.js';
+import { ensureAssistantProject } from '../assistant/identity.js';
 
 // Cluster I Phase C4 (UI_Findings spec §4.2): server-side coverage for the
 // tier-1 cross-session LIKE scan. We spin a real SQLite under a tmp `~/.cebab`
@@ -378,5 +379,22 @@ describe('searchSessions — limit + truncation + LIKE escaping', () => {
     // "100%" must match only the literal-percent row, not act as a wildcard.
     const { results } = searchSessions({ query: '100%', scope: 'all_projects' });
     expect(results.map((r) => r.sessionId)).toEqual(['pct']);
+  });
+});
+
+describe('searchSessions — kind scope (Cebab-8x8.1.3)', () => {
+  test("the assistant's transcripts stay out of cross-session search", () => {
+    // A workspace project's hit still surfaces...
+    const wsPid = seedProject('workspace');
+    seedSessionWithText(wsPid, 'ws-sess', 'the gamma migration touches auth');
+
+    // ...but the assistant runs through the same single-agent path and writes
+    // `events` rows too. Its help answer, matching the same query word, must be
+    // filtered by the JOIN's `p.kind = 'workspace'` predicate.
+    const assistant = ensureAssistantProject('/tmp/cebab-search-assistant-kb')!;
+    seedSessionWithText(assistant.id, 'help-sess', 'gamma is explained in the help KB');
+
+    const { results } = searchSessions({ query: 'gamma', scope: 'all_projects' });
+    expect(results.map((r) => r.sessionId)).toEqual(['ws-sess']);
   });
 });
