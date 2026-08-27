@@ -202,13 +202,16 @@ export function computeBinarySha(command: string): string | null {
 // ---- script pinning (Cebab-1af) ----
 
 /**
- * `Cebab-1af` [security]: how many files ONE declaration may make us hash.
+ * `Cebab-1af` [security]: how many candidate tokens ONE declaration may make us
+ * read.
  *
  * A backstop, not a policy. Real declarations name at most one local script
  * (`node build/index.js`); the ceiling exists because `args` is
  * project-controlled and `enrichWithTrustState` runs on every authority
  * resolve, so an args array of a thousand file paths would otherwise be a
- * read amplifier aimed at the operator's own machine.
+ * read amplifier aimed at the operator's own machine. Since `Cebab-r89` a
+ * candidate that resolves to nothing is still READ (and recorded absent), so a
+ * thousand nonexistent paths is bounded by this cap too.
  *
  * Over the cap we return `null` — no pin at all — rather than the first eight.
  * A partial pin would report "unchanged" for a declaration whose ninth file was
@@ -228,6 +231,22 @@ const MAX_HASHED_SCRIPTS = 8;
  * with a real value: every other entry is 64 lowercase hex characters.
  */
 export const SCRIPT_TOO_LARGE = 'too-large';
+
+/**
+ * `Cebab-r89` [security]: value recorded for a candidate token that did NOT name
+ * readable bytes at compute time — a missing path, a directory, a device, a
+ * short read.
+ *
+ * Not an omission, and that is the whole fix. Omitting the entry is what made a
+ * script created AFTER approval a one-shot bypass: `{ command: 'node', args:
+ * ['server.mjs', 'plugins/opt.js'] }` where `plugins/opt.js` does not exist yet
+ * contributed no key, so when the file appeared its key was new, no comparison
+ * fired, and it ran. Recording the sentinel keeps the token present on the
+ * approved side, so `absent -> sha` reads as the change it is (`changedScriptPaths`).
+ * It cannot collide with a real value — every sha is 64 lowercase hex characters —
+ * nor with `SCRIPT_TOO_LARGE`, whose file exists and simply cannot be hashed.
+ */
+export const SCRIPT_ABSENT = 'absent';
 
 /**
  * `Cebab-1af`: hash every file an MCP declaration points at.
@@ -274,11 +293,24 @@ export const SCRIPT_TOO_LARGE = 'too-large';
  *   - anything that is not a readable regular file: missing paths, directories
  *     (`npx -y @mcp/server-filesystem /Users/me/Desktop`), FIFOs and devices.
  *     `readFileBounded` refuses all of them at the descriptor, which is also
- *     what stops `/dev/zero` in an args array from parking the event loop.
+ *     what stops `/dev/zero` in an args array from parking the event loop. Such
+ *     a token is recorded as `SCRIPT_ABSENT` rather than dropped — see below.
  *
- * Returns `null` when nothing was pinned. That is the common case (`npx <pkg>`)
- * and it is not an error: a null means identity tracking without change
- * detection, exactly as it does for `binary_sha`.
+ * `Cebab-r89`: an unresolvable candidate is PINNED AS ABSENT, not omitted. A
+ * dropped token is a new key when it later resolves, and a new key is invisible
+ * to a comparison that only fires on values present both times — which made a
+ * script created after approval a one-shot bypass. So every candidate token
+ * gets exactly one entry: a sha, `SCRIPT_TOO_LARGE`, or `SCRIPT_ABSENT`. A file
+ * that does not exist at approval and appears later is now `absent -> sha`, the
+ * change it is. The cost is a false-positive direction only (a package name
+ * that later collides with a real file in the project fires a prompt); that
+ * direction was already the module's accepted trade — an entry can produce a
+ * prompt, never suppress one.
+ *
+ * Returns `null` only when there was NO candidate token at all (`node` alone,
+ * `npx` with only flags). A null means no identity to track, exactly as it does
+ * for `binary_sha`; it no longer means "the files did not resolve", which is now
+ * a map of `SCRIPT_ABSENT` entries that a later spawn is compared against.
  */
 export function computeScriptShas(
   command: string,
@@ -297,14 +329,19 @@ export function computeScriptShas(
     // participant is the project root.
     const read = readFileBounded(path.resolve(projectPath, token), MAX_HASHABLE_BINARY_BYTES);
     if (!read.ok) {
+      // `Cebab-r89`: record the token even when it names no readable bytes.
       // `unreadable` (missing / no permission), `not_a_file` (directory, FIFO,
-      // device) and `read_failed` all mean the same thing here: this token does
-      // not name bytes we can identify. No entry, no claim.
-      if (read.refusal !== 'too_large') continue;
-      out[token] = SCRIPT_TOO_LARGE;
+      // device) and `read_failed` all collapse to `SCRIPT_ABSENT` — the token
+      // resolved to nothing we could identify. Keeping the entry is what lets a
+      // file CREATED after approval surface as `absent -> sha` instead of an
+      // invisible new key. `too_large` stays its own sentinel: that file exists.
+      out[token] = read.refusal === 'too_large' ? SCRIPT_TOO_LARGE : SCRIPT_ABSENT;
     } else {
       out[token] = createHash('sha256').update(read.bytes).digest('hex');
     }
+    // Every recorded entry — sha, too-large OR absent — counts toward the cap:
+    // a hostile args array of a thousand nonexistent paths is still a read
+    // amplifier the backstop must bound, even though each read fails cheaply.
     hashed += 1;
     if (hashed > MAX_HASHED_SCRIPTS) return null;
   }
@@ -374,25 +411,33 @@ export function parseScriptShas(raw: string | null): Record<string, string> | nu
 }
 
 /**
- * Which pinned files differ from what the operator approved.
+ * Which pinned tokens differ from what the operator approved.
  *
- * ONLY A VALUE PRESENT ON BOTH SIDES CAN PROVE A CHANGE — the rule
- * `hook_trust.ts` already states for its single hash, applied per entry:
+ * A change is reported when the token was present on BOTH sides and its value
+ * moved to some readable state — `hook_trust.ts`' "only a hash that resolved
+ * both times can prove a change", widened by `Cebab-r89` so that `absent` is a
+ * value present on both sides rather than a missing key:
  *
- *   - present then, present now, different  -> CHANGED. The finding's case.
- *   - present then, absent now              -> not a change. A script that has
- *     gone away cannot run; the spawn fails loudly on its own, and prompting
- *     for a deletion is the noise that teaches operators to click through.
- *   - absent then, present now              -> not a change. Most often a file
- *     the server itself writes next to one it was pointed at. The narrower
- *     case it leaves open — approving a declaration whose script does not
- *     exist YET, then creating it — is real, and is why nothing here treats a
- *     null approval as evidence of anything.
+ *   - sha then, different sha now  -> CHANGED. The rewrite `Cebab-1af` closed.
+ *   - absent then, sha now         -> CHANGED. `Cebab-r89`: a file created after
+ *     approval. Previously this was an invisible new key — the one-shot bypass.
+ *     Now `computeScriptShas` records the token as `SCRIPT_ABSENT` at approval,
+ *     so the transition is a value change on a key present both times.
+ *   - sha then, absent now         -> NOT a change. A deletion: the script has
+ *     gone away and cannot run, the spawn fails loudly on its own, and
+ *     prompting for it is the noise that teaches operators to click through.
+ *     Special-cased explicitly rather than falling out of the comparison,
+ *     because with the absent sentinel the two transitions are no longer
+ *     symmetric — only creation is a change.
+ *   - absent then, absent now      -> not a change (equal values).
  *
- * `Object.hasOwn` rather than a bare index: the keys come from a project's own
- * declaration via `JSON.parse`, so `constructor` is a reachable key name and
- * `approved['constructor']` finds `Object.prototype`'s — a truthy value that is
- * not a sha, which would report a change on a file nobody touched.
+ * The `Object.hasOwn` guard still matters for TWO reasons: rows approved before
+ * `Cebab-r89` carry no absent sentinels, so a token missing from `approved` has
+ * no before-state and cannot be judged (no backfill, deliberately); and the
+ * keys come from a project's own declaration via `JSON.parse`, so `constructor`
+ * is a reachable key name and `approved['constructor']` would find
+ * `Object.prototype`'s — a truthy value that is not a sha, reporting a change on
+ * a file nobody touched.
  */
 export function changedScriptPaths(
   approved: Readonly<Record<string, string>> | null,
@@ -400,9 +445,14 @@ export function changedScriptPaths(
 ): string[] {
   if (!approved || !candidate) return [];
   const changed: string[] = [];
-  for (const [token, sha] of Object.entries(candidate)) {
+  for (const [token, candSha] of Object.entries(candidate)) {
     if (!Object.hasOwn(approved, token)) continue;
-    if (approved[token] !== sha) changed.push(token);
+    // A deletion (sha -> absent) is never a change; nor is a token that stayed
+    // absent. Skipping `SCRIPT_ABSENT` on the candidate side is what makes the
+    // sha->absent transition silent while leaving absent->sha (creation) to
+    // fall through as the change it is.
+    if (candSha === SCRIPT_ABSENT) continue;
+    if (approved[token] !== candSha) changed.push(token);
   }
   return changed.sort();
 }
