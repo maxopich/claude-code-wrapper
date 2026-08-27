@@ -992,6 +992,18 @@ export type ClientMsg =
        * to `>= 1`; absent on pre-PR-7 clients.
        */
       hopBudget?: number;
+      /**
+       * F15: per-participant role/goal text, keyed by `String(projectId)` —
+       * the same map shape `MultiAgentTemplate.roles` and `save_template`
+       * carry. The client mirrors the applied template's `roles` here (same
+       * pattern as `hopBudget` above) so the server does not have to look the
+       * template up. Orchestrator mode delivers each worker's role in the
+       * roster prompt (`renderRosterPrompt`) so the operator's per-role text
+       * actually reaches the router. Absent for ad-hoc runs and on pre-F15
+       * clients; unknown/stale keys (project since removed) are ignored, and
+       * an entry that trims to empty renders nothing.
+       */
+      roles?: Record<string, string>;
     }
   | {
       /**

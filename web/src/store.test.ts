@@ -2638,6 +2638,84 @@ describe('store / draftHopBudget + source (F-D9)', () => {
   });
 });
 
+// F15 — draftRoles carries the applied template's per-role text so the Start
+// flow can mirror it onto `start_multi_agent.roles`, which the server renders
+// into the orchestrator's roster prompt. Same provenance lifecycle as
+// draftTemplateId: set on apply, dropped on any manual draft edit.
+describe('store / draftRoles (F15)', () => {
+  test('starts empty', () => {
+    expect(initialState.multiAgent.draftRoles).toEqual({});
+  });
+
+  test('ma_apply_template copies the template roles map', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't1',
+        name: 'Twin',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [],
+        roles: { '7': 'Security review only', '9': 'Perf pass' },
+      },
+    });
+    expect(s.multiAgent.draftRoles).toEqual({ '7': 'Security review only', '9': 'Perf pass' });
+  });
+
+  test('the copy is not aliased to the template object', () => {
+    const template = {
+      id: 't1',
+      name: 'Twin',
+      mode: 'orchestrator' as const,
+      lifecycle: 'persistent' as const,
+      participants: [],
+      roles: { '7': 'x' },
+    };
+    let s = initialState;
+    s = reduce(s, { type: 'ma_apply_template', template });
+    // Mutating the source template must not bleed into the draft.
+    template.roles['7'] = 'MUTATED';
+    expect(s.multiAgent.draftRoles).toEqual({ '7': 'x' });
+  });
+
+  test('ma_apply_template with no roles yields {}', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't1',
+        name: 'Twin',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [],
+      },
+    });
+    expect(s.multiAgent.draftRoles).toEqual({});
+  });
+
+  test('a manual participant edit clears the applied roles', () => {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't1',
+        name: 'Twin',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [7],
+        roles: { '7': 'Security review only' },
+      },
+    });
+    expect(s.multiAgent.draftRoles).toEqual({ '7': 'Security review only' });
+    // Any manual edit dissociates the draft from the template — roles go too,
+    // just like draftTemplateId / draftHopBudget.
+    s = reduce(s, { type: 'ma_remove_participant', projectId: 7 });
+    expect(s.multiAgent.draftRoles).toEqual({});
+    expect(s.multiAgent.draftTemplateId).toBeNull();
+  });
+});
+
 // Cluster F Phase A1a — settings reducer carries defaultMaxTurns.
 // Same forward-compat pattern as defaultWorkspaceRootSource: when the
 // server omits the field (older payloads), SettingsView leaves it

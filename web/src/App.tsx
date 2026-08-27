@@ -1885,6 +1885,7 @@ function AppShell({
       draftExecuteMode,
       draftTemplateId,
       draftHopBudget,
+      draftRoles,
     } = state.multiAgent;
     if (draftPrompt.trim().length === 0) return;
     // Orchestrator mode is hub-and-spoke; even one worker is functional
@@ -1901,6 +1902,10 @@ function AppShell({
       executeMode: draftExecuteMode,
       ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
       ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
+      // F15: mirror the applied template's per-role text so it reaches the
+      // orchestrator's roster prompt. Omit entirely when there is none, so an
+      // ad-hoc run stays byte-identical on the wire to before this existed.
+      ...(Object.keys(draftRoles).length > 0 ? { roles: draftRoles } : {}),
     });
   }
   function stopMultiAgent(sessionId: string) {

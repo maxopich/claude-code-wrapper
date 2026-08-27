@@ -358,7 +358,7 @@ export function renderChainBriefing(opts: {
  * this function does not say, the orchestrator is not told.
  */
 export function renderRosterPrompt(opts: {
-  workers: Array<{ agentName: string; projectName: string }>;
+  workers: Array<{ agentName: string; projectName: string; role?: string }>;
   hopBudget: number;
   /** Execute mode (default false = consultant): when true, the relay
    *  instruction tells the orchestrator to let workers make changes within
@@ -385,9 +385,22 @@ export function renderRosterPrompt(opts: {
     `You talk to participants through the \`bus_send\` tool (recipient = an agent slug, or \`user\` for the operator-facing final answer). It is an in-process tool — there is no inbox, no shell script, no \`bus.log\`. Cebab delivers each participant reply to you as your next turn.`,
     ``,
     `Participants:`,
-    ...workers.map((w) => `- ${tagAgent(w.agentName)} — ${sanitizeForPrompt(w.projectName)}`),
+    ...workers.map((w) => {
+      const line = `- ${tagAgent(w.agentName)} — ${sanitizeForPrompt(w.projectName)}`;
+      // F15: operator-authored per-role instruction text (from the template's
+      // `roles` map). Unlike the slug and project name — the F6 threats, which
+      // are peer-controlled / filesystem-derived — this is the operator's own
+      // words, the same trust class as `initialPrompt`, which is interpolated
+      // verbatim below. So it is NOT run through `sanitizeForPrompt` (that
+      // strips newlines and truncates at 80 chars, which would shred a real
+      // multi-line instruction). It IS defanged of the bus block delimiters so
+      // a role can never forge the nonce-tagged wrapper that marks a peer
+      // message as data.
+      const role = w.role?.trim();
+      return role ? `${line}\n    Role/goal (from operator): ${defangBusDelimiters(role)}` : line;
+    }),
     ``,
-    `The bus slugs and project names above are what Cebab knows. You don't yet know what each agent is best at — that's what Step 1 is for.`,
+    `The bus slugs and project names above are what Cebab knows. Any role/goal note is the operator's own guidance for that agent — use it to inform routing; each agent's own self-description from Step 1 still governs what it can actually do.`,
     ``,
     `Step 1: call \`bus_send\` with kind=intro to each participant. Tell them they're in a multi-agent conversation, name the other participants, ask them to reply only to you, AND ask them to send back a brief (2-3 sentence) self-description so you know what kinds of tasks each one is best at. Example for ${tagAgent(firstAgent)}:`,
     ``,

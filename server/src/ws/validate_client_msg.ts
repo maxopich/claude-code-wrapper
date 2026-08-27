@@ -147,6 +147,10 @@ const SHAPES: Table = {
     executeMode: 'boolean?',
     templateId: 'string?',
     hopBudget: 'number?',
+    // F15: per-role text map (keyed by String(projectId)), same shape and
+    // validation as `save_template.roles`. The orchestrator start handler
+    // renders it into the roster prompt.
+    roles: 'object?',
   },
   stop_multi_agent: { sessionId: 'string' },
   resume_multi_agent: { sessionId: 'string' },
