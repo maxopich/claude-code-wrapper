@@ -1052,6 +1052,16 @@ export type SettingsView = {
    * undefined nor false renders the chip.
    */
   mockMode?: boolean;
+  /**
+   * Cebab-8x8.3.1: the `projects` row id of the built-in assistant, or
+   * undefined when the server has no assistant project (older payloads
+   * omit it too). Consumed by the App.tsx fan-out — `routesToAssistant`
+   * uses it to keep the assistant's envelopes out of the Redux reducer and
+   * on the `subscribeServerMsg` side channel, where panel state lives
+   * outside AppState. See the field's JSDoc on the `settings` ServerMsg for
+   * why the assistant id is never in a `projects` payload.
+   */
+  assistantProjectId?: number;
 };
 
 export const initialState: AppState = {
@@ -1175,6 +1185,31 @@ export function showsNewChatPreview(state: AppState): boolean {
   const projectId = state.activeProjectId;
   if (projectId === null) return false;
   return getActiveSessionId(state, projectId) === undefined;
+}
+
+/**
+ * Cebab-8x8.3.1: does this envelope belong to the assistant project, and so
+ * must be kept out of the Redux reducer entirely?
+ *
+ * The assistant is filtered out of `listProjects()`, so its id is never in
+ * `state.projects`. Every `reduceServer` case keys session state by projectId,
+ * and `case 'projects'` wipes every session map whenever the active project is
+ * absent from the list — which is every fresh boot and every workspace switch,
+ * because the assistant is never in that list. Reducing an assistant envelope
+ * normally would therefore corrupt AppState. The App.tsx fan-out calls this
+ * UPSTREAM of `dispatch` and, when it is true, routes the message to the
+ * `subscribeServerMsg` side channel only — where the assistant panel, whose
+ * state lives outside AppState, consumes it.
+ *
+ * Matches on the wire `projectId`, the only assistant discriminator the server
+ * exposes (the project `kind` stays server-side). Envelopes without a
+ * projectId (session-keyed messages) never match here; this slice adds no such
+ * routing, and the assistant introduces no new ClientMsg verb to produce them.
+ */
+export function routesToAssistant(state: AppState, msg: ServerMsg): boolean {
+  const assistantProjectId = state.settings?.assistantProjectId;
+  if (assistantProjectId === undefined) return false;
+  return 'projectId' in msg && msg.projectId === assistantProjectId;
 }
 
 function putSession(
@@ -2473,6 +2508,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           // mount predicate (`mockMode === true`) renders nothing in
           // that case.
           ...(msg.mockMode !== undefined ? { mockMode: msg.mockMode } : {}),
+          // Cebab-8x8.3.1: forward the assistant project id so the App.tsx
+          // fan-out can route the assistant's envelopes to the side channel
+          // instead of the reducer. Mapped individually (this case maps
+          // fields, never spreads `msg`) so it is absent when the server
+          // omits it rather than carrying a stale value from a prior payload.
+          ...(msg.assistantProjectId !== undefined
+            ? { assistantProjectId: msg.assistantProjectId }
+            : {}),
         },
       };
 
