@@ -808,6 +808,24 @@ there would be the one module in this design with no lint gate. Matching is at *
 not substring: a `gh` pattern applied to the whole command line denies `grep -rn gh .`, and an agent
 that cannot search the repo works around the hook rather than respecting it.
 
+**The harness owns the TRACKER as well as the forge, and only the forge half was enforced.** `gh`
+is denied wholesale ("the harness owns the forge") and `git`'s mutating subcommands are denied one
+by one. `bd` had neither, while sitting on the read-only allow list so the agent could `bd show` —
+measured 2026-08-27, `bd close`, `bd create` and `bd update --remove-label loop-stuck` all returned
+an explicit ALLOW.
+
+HARVEST is the only stage that writes bead state, and both governing rules rest on that. The
+reachable costs, in rising order: a follow-up filed outside HARVEST carries no `discovered-from`
+dependency and no `loop-found` label; a self-close is the agent making exactly the judgement GATE
+exists to withhold from it; and stripping `loop-stuck` disarms the loop's **only** cross-run memory
+of a failing bead, so one that parks every night is re-selected every night forever.
+
+So `bd`'s read verbs stay allowed — the allow list's own comment records that the agent reaches for
+`bd show` anyway and paid two turns for it — and everything else is denied. **Fail closed, unlike
+`git`**, and deliberately: git's verb set is stable and famous, while `bd`'s grows, and a new
+mutating verb must not become allowed by having been unknown when the list was written.
+`Cebab-qd2.31`.
+
 The hook reads the tool call on stdin and returns
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"..."}}`
 for any `Bash` command matching:

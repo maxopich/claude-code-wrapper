@@ -3627,3 +3627,46 @@ describe('[security] the loop spends the subscription, not an API key (Cebab-qd2
     expect([...SCRUBBED_ENV_VAR_NAMES].sort()).toEqual([...serverNames].sort());
   });
 });
+
+describe('[security] the harness owns the tracker, not just the forge (Cebab-qd2.31)', () => {
+  // `gh` was denied wholesale — "the harness owns the forge" — and `git`'s
+  // mutating subcommands were denied one by one. `bd` got neither, while
+  // sitting on the read-only allow list so the agent could `bd show`. Measured
+  // 2026-08-27: `bd close`, `bd create` and `bd update --remove-label
+  // loop-stuck` all returned an explicit ALLOW.
+  //
+  // HARVEST is the only stage that writes bead state, and both governing rules
+  // rest on that: the driver owns control flow, and the agent's report is not
+  // evidence.
+
+  test('the write verbs are denied', () => {
+    expect(decide('bd close Cebab-502')).toBeTruthy();
+    expect(decide('bd create --title x --type bug')).toBeTruthy();
+    // The expensive one: `loop-stuck` is the loop's only cross-run memory of a
+    // bead that failed. Stripped, that bead is re-selected every night forever.
+    expect(decide('bd update Cebab-502 --status open --remove-label loop-stuck')).toBeTruthy();
+    expect(decide('bd dolt push')).toBeTruthy();
+  });
+
+  test('and the read verbs are not — the two turns `bd show` saves are the point', () => {
+    // The other direction, and it is why this is not simply `bd` denied
+    // wholesale like `gh`: the allow list's own comment records that the agent
+    // reaches for `bd show` anyway and paid two turns for it.
+    expect(decide('bd show Cebab-502')).toBe(null);
+    expect(decide('bd list --status open')).toBe(null);
+    expect(decide('bd ready --json')).toBe(null);
+    expect(allowReason('bd show Cebab-502')).toBeTruthy();
+  });
+
+  test('an UNKNOWN verb is denied — fail closed', () => {
+    // Deliberately the opposite of how `git` is handled. git's verb set is
+    // stable; bd's grows, and a new mutating verb must not become allowed by
+    // having been unknown when the list was written.
+    expect(decide('bd frobnicate Cebab-502')).toBeTruthy();
+  });
+
+  test('the reason names the tracker, so the agent can act on it', () => {
+    // A deny the agent cannot interpret costs a turn re-trying a variant.
+    expect(decide('bd close Cebab-502')).toContain('tracker');
+  });
+});
