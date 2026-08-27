@@ -75,6 +75,25 @@ export function noteArgv(id, text) {
   return ['update', id, '--append-notes', text];
 }
 
+/**
+ * Hand a claimed bead back, un-run.
+ *
+ * A HALT — `loop:stop`, a signal, a usage limit — routes straight to DONE and
+ * never enters HARVEST, so the bead the loop was holding kept `in_progress`
+ * with the loop as assignee. `bd ready` excludes in_progress, so that bead was
+ * not merely skipped next run: it left the queue permanently, with nothing on
+ * it saying why, while the same teardown deleted the branch its work was on.
+ * Measured 2026-08-26 on Cebab-vie.30.
+ *
+ * Deliberately NOT `parkArgv`. `loop-stuck` means "a human must debug this",
+ * and an interrupted bead has not failed at anything — it was mid-flight when
+ * the operator stopped the run. It goes back exactly as it came, plus a note
+ * saying what happened to it.
+ */
+export function releaseArgv(id, evidence) {
+  return ['update', id, '--status', 'open', '--append-notes', evidence];
+}
+
 export function closeArgv(id, reason) {
   return ['close', id, '-r', reason];
 }
@@ -174,6 +193,15 @@ export function makeBeads({ run, bd, cwd, dryRun = false }) {
     },
     async close(id, reason) {
       const result = await write(closeArgv(id, reason));
+      return result.code === 0;
+    },
+    /**
+     * Retried once, for the same reason `park` is: this runs on the way out of
+     * a halted run, and a bead silently left claimed is the whole defect.
+     */
+    async release(id, evidence) {
+      let result = await write(releaseArgv(id, evidence));
+      if (result.code !== 0) result = await write(releaseArgv(id, evidence));
       return result.code === 0;
     },
     async note(id, text) {

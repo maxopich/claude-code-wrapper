@@ -147,6 +147,30 @@ export function commandHeads(command) {
 
 const base = (h) => h.slice(h.lastIndexOf('/') + 1);
 
+/**
+ * The `bd` verbs that only READ. Everything else is denied — FAIL CLOSED, which
+ * is the opposite of how `git` is handled and deliberately so: git's verb set is
+ * stable and famous, while `bd`'s grows, and a new mutating verb must not become
+ * allowed by having been unknown when this list was written.
+ */
+const BD_READ_VERBS = Object.freeze([
+  'show',
+  'list',
+  'ready',
+  'search',
+  'blocked',
+  'stats',
+  'orphans',
+  'stale',
+  'doctor',
+  'lint',
+  'memories',
+  'prime',
+  'preflight',
+  'version',
+  'help',
+]);
+
 const RULES = [
   {
     hit: (h) => base(h.head) === 'npm' && ['install', 'i', 'ci'].includes(h.args[0]),
@@ -169,6 +193,22 @@ const RULES = [
   {
     hit: (h) => base(h.head) === 'gh',
     why: 'the harness owns the forge — it opens the PR and merges it',
+  },
+  {
+    // THE HARNESS OWNS THE TRACKER TOO, and only the forge half was enforced.
+    // `bd` sits on the read-only allow list below so the agent can `bd show`,
+    // and nothing stopped `bd close`, `bd create`, or — worst —
+    // `bd update <id> --remove-label loop-stuck`, which is the loop's ONLY
+    // cross-run memory of a bead that failed. Stripped, a bead that parks every
+    // night is re-selected every night, and the mechanism that exists to stop
+    // exactly that is silently disarmed.
+    //
+    // HARVEST is the only stage that writes bead state, which is what both
+    // governing rules rest on: the driver owns control flow, and the agent's
+    // report is not evidence. Measured 2026-08-27 — `bd close`, `bd create` and
+    // the label strip all returned an explicit ALLOW. `Cebab-qd2.31`.
+    hit: (h) => base(h.head) === 'bd' && !BD_READ_VERBS.includes(h.args[0]),
+    why: 'the harness owns the tracker — HARVEST closes, parks and files, after re-running your gate',
   },
   {
     hit: (h) =>

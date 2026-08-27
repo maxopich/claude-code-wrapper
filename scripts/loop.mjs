@@ -47,6 +47,7 @@ import {
   resetsBreaker,
 } from './lib/loop/machine.mjs';
 import { evaluateGuard } from './lib/loop/guard.mjs';
+import { scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import { chooseBead, denyPathStems } from './lib/loop/select.mjs';
 import { appendRecord, buildRecord, compareVerdictToGate } from './lib/loop/ledger.mjs';
 import { makeRunner } from './lib/loop/run.mjs';
@@ -61,6 +62,23 @@ const LIB_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', '
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const LOOP_DIR = path.join(REPO_ROOT, '.loop');
 const HALT_FILE = path.join(LOOP_DIR, 'HALT');
+
+/**
+ * A SIGNAL IS IN-PROCESS, SO IT WRITES NO FILE.
+ *
+ * The handler used to write the HALT file itself, with the body `signal`, so the
+ * stage-boundary checks would see it — and nothing ever removed it. `.loop/HALT` is a PREFLIGHT
+ * REFUSAL, so one Ctrl-C left every subsequent run refusing to start with
+ * `.loop/HALT exists — signal. Remove it to start.` until someone deleted the
+ * file by hand. Measured 2026-08-26: the operator stopped a run, and the next
+ * night's `loop:night` refused before SELECT. `Cebab-qd2.21`.
+ *
+ * The file is for CROSS-process signalling (`loop:stop` is `touch .loop/HALT`,
+ * and it stays deliberate and durable). A signal delivered to this process needs
+ * no file to reach this process. Module-scoped because `runIteration`'s
+ * boundary check and `main`'s loop check both read it.
+ */
+let signalled = false;
 const LEDGER_FILE = path.join(LOOP_DIR, 'runs.jsonl');
 const STATE_FILE = path.join(LOOP_DIR, 'state.json');
 
@@ -220,6 +238,11 @@ async function runIteration({ ctx, deps, log }) {
   let attempt = 1;
   let disposition = null;
   let reason = null;
+  // Did HARVEST run to completion? The crash handler needs to tell "harvest
+  // never ran" from "harvest is what threw", and re-running the thing that just
+  // threw is the defect below.
+  let harvested = false;
+  let crashed = false;
   let prNumber = null;
   let guardResult = { passed: true, breaches: [] };
   let sessionId = null;
@@ -230,7 +253,7 @@ async function runIteration({ ctx, deps, log }) {
   // is dead, and eslint's no-useless-assignment says so.
   let staleMain;
 
-  const halted = () => fs.existsSync(HALT_FILE);
+  const halted = () => signalled || fs.existsSync(HALT_FILE);
 
   try {
     for (;;) {
@@ -280,10 +303,29 @@ async function runIteration({ ctx, deps, log }) {
           break;
         }
 
-        case STAGE.CLAIM:
-          result = { ok: await beads.claim(bead.id) };
-          if (result.ok) await git.newBranch(bead.id);
+        case STAGE.CLAIM: {
+          if (!(await beads.claim(bead.id))) {
+            result = { ok: false };
+            break;
+          }
+          // THE BRANCH RESULT IS CHECKED. `newBranch` is `git checkout -b`,
+          // which FAILS if the branch already exists — and it exists whenever a
+          // previous run on this bead was killed before its teardown deleted
+          // it, which is exactly the state a halted or crashed run leaves
+          // behind. Dropped, the failure was silent and every later stage ran
+          // on whatever was checked out: BUILD edited main, the guard diffed
+          // main against itself, and PUBLISH pushed main to a branch name.
+          // `Cebab-qd2.25`.
+          const branched = await git.newBranch(bead.id);
+          if (branched.code !== 0) {
+            const detail = (branched.stderr || branched.stdout || '').trim().split('\n')[0];
+            log(`claim: could not create branch loop/${bead.id} — ${detail}`);
+            result = { ok: false };
+            break;
+          }
+          result = { ok: true };
           break;
+        }
 
         case STAGE.BUILD: {
           const built = await build.run({
@@ -476,6 +518,7 @@ async function runIteration({ ctx, deps, log }) {
 
         case STAGE.HARVEST:
           await harvest({ beads, bead, parts, disposition, reason, config, log });
+          harvested = true;
           result = { disposition };
           break;
 
@@ -509,22 +552,79 @@ async function runIteration({ ctx, deps, log }) {
     // transient failure is worse than one parked bead. The circuit breaker is
     // what stops this becoming an infinite loop of crashes: a crash parks, and
     // three parks halt.
-    disposition = DISPOSITION.PARKED;
-    reason = REASON.CRASHED;
+    crashed = true;
     parts.crash = String(error?.stack ?? error).slice(-600);
     log(`iteration CRASHED — ${error?.message ?? error}`);
-    if (bead) {
-      // Park the bead too, so SELECT skips it next time. Its own failure must
-      // not replace the crash we are already reporting.
+
+    // A CRASH AFTER SOMETHING LANDED MUST NOT REWRITE WHAT LANDED.
+    //
+    // This used to set `disposition = PARKED` unconditionally and then call
+    // `harvest` again. HARVEST runs INSIDE the try, so the throw it is most
+    // likely to catch is harvest's own — an unfileable follow-up throws by
+    // design. The result was that a bead whose PR had merged seconds earlier
+    // got re-harvested as a park: reopened, labelled `loop-stuck`, and excluded
+    // from every future selection, with the ledger recording `parked` for an
+    // iteration that had in fact merged to main.
+    //
+    // So a terminal that already ACTED on the world is preserved, and the crash
+    // is recorded beside it rather than on top of it. The ledger then says
+    // `merged` with a crash and `beadClosed: false`, which is both true and
+    // actionable; `parked` was neither. `Cebab-qd2.23`.
+    const landed = disposition === DISPOSITION.MERGED || disposition === DISPOSITION.MERGE_QUEUED;
+    if (!landed) {
+      disposition = DISPOSITION.PARKED;
+      reason = REASON.CRASHED;
+    }
+
+    // And harvest is NOT re-run when harvest is what threw. Retrying it means
+    // repeating whichever bd write failed, against a bead the first pass may
+    // have already half-written.
+    if (bead && !harvested && !landed) {
       try {
         await harvest({ beads, bead, parts, disposition, reason, config, log });
+        harvested = true;
       } catch (harvestError) {
         log(`harvest after crash also failed — ${harvestError?.message ?? harvestError}`);
       }
+    } else if (bead && harvested) {
+      log('harvest had already run before the crash — not repeating it');
     }
   } finally {
     parts.disposition = disposition;
     if (reason) parts.reason = reason;
+
+    // A HALTED BEAD IS HANDED BACK. HARVEST is the only stage that writes a
+    // bead's status, and a halt routes straight to DONE without entering it —
+    // so the bead the loop was holding kept `in_progress` with the loop as
+    // assignee. `bd ready` excludes in_progress, so it did not merely get
+    // skipped next run: it left the queue permanently, silently, while the
+    // restore below deleted the branch its work was on.
+    //
+    // Measured 2026-08-26 on Cebab-vie.30: stopped mid-BUILD, and it has been
+    // absent from `bd ready` ever since with nothing on the bead saying why.
+    // Six independent audit lenses found this same path. `Cebab-qd2.22`.
+    //
+    // Release rather than park: `loop-stuck` means "a human must debug this",
+    // and an interrupted bead has not failed at anything.
+    // `!harvested` is load-bearing, not defensive. If HARVEST ran, the bead's
+    // state is already whatever HARVEST decided — closed for a merge, parked
+    // for a failure — and handing it back would UNDO that. The machine no
+    // longer rewrites a post-HARVEST disposition to `halted`, so this cannot
+    // fire today; it is the belt to that braces, because the two live in
+    // different files and only one of them is obviously about the other.
+    if (bead && !dryRun && !harvested && disposition === DISPOSITION.HALTED) {
+      try {
+        const released = await beads.release(
+          bead.id,
+          `Released by the autonomous loop: the run stopped (${reason ?? 'halt'}) while this ` +
+            `bead was claimed. No work was published. Nothing is wrong with the bead itself.`,
+        );
+        parts.harvest = { ...(parts.harvest ?? {}), released };
+        if (!released) log(`halt: could not hand ${bead.id} back — it is still in_progress`);
+      } catch (error) {
+        log(`halt: could not hand ${bead.id} back — ${error?.message ?? error}`);
+      }
+    }
 
     // Restoring per ITERATION, not only at teardown, is what stops the next
     // bead branching off this one — `newBranch` branches from whatever is
@@ -571,6 +671,13 @@ async function runIteration({ ctx, deps, log }) {
     reason,
     drained,
     staleMain,
+    // A crash BEFORE SELECT assigned a bead is indistinguishable from a drained
+    // queue in the caller's `if (!outcome.bead)` — and that branch stops the run
+    // with exit 0. One transient `bd` failure therefore ended an --until 8 night
+    // after zero iterations, reporting success and writing no ledger row (the
+    // append below is also gated on `bead`). The caller needs to tell them
+    // apart, so it is told. `Cebab-qd2.24`.
+    crashed: crashed && !bead,
     ciGreen: parts.ci?.conclusion === 'success',
   };
 }
@@ -796,8 +903,17 @@ async function main() {
   const conditions = untilRaw.map((value) => parseUntil(value, now));
 
   const log = (message) => process.stdout.write(`[loop] ${message}\n`);
+  // ONE application point for the whole run — see `env.mjs`. Every subprocess
+  // the loop spawns goes through this runner, so the `claude` turns cannot be
+  // routed to paid billing by a stray shell export. `Cebab-qd2.29`.
+  const scrubbed = scrubbedFrom(process.env);
+  if (scrubbed.length > 0) {
+    // NAMES only, never values.
+    log(`env: stripped ${scrubbed.join(', ')} — agent turns use the OAuth subscription`);
+  }
   const run = makeRunner({
     cwd: REPO_ROOT,
+    env: subscriptionOnlyEnv(process.env),
     onLine: args.verbose ? (c) => process.stdout.write(c) : undefined,
   });
   const git = makeGit({ run, cwd: REPO_ROOT, dryRun: args.dryRun });
@@ -888,12 +1004,10 @@ async function main() {
     });
   }
 
-  let signalled = false;
   const onSignal = (code) => () => {
     if (signalled) process.exit(code);
     signalled = true;
     log('signal received — finishing the current stage, then stopping');
-    fs.writeFileSync(HALT_FILE, 'signal');
     exitCode = code;
   };
   process.on('SIGINT', onSignal(EXIT.SIGINT));
@@ -901,7 +1015,11 @@ async function main() {
 
   try {
     for (;;) {
-      if (fs.existsSync(HALT_FILE) && !signalled) {
+      if (signalled) {
+        stopBecause = 'signal';
+        break;
+      }
+      if (fs.existsSync(HALT_FILE)) {
         stopBecause = 'HALT';
         break;
       }
@@ -923,6 +1041,14 @@ async function main() {
 
       const outcome = await runIteration({ ctx, deps, log });
       if (!outcome.bead) {
+        // `fail loud, park quietly` — and a run that ends before it ever picked
+        // up work has nothing to park, so this is the loud half.
+        if (outcome.crashed) {
+          log('crashed before a bead was selected — see the stack above. Nothing was attempted.');
+          stopBecause = 'crashed before SELECT';
+          exitCode = EXIT.HALTED;
+          break;
+        }
         stopBecause = outcome.drained ? 'nothing ready to work' : 'no bead';
         break;
       }

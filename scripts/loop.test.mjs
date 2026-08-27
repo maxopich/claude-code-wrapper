@@ -54,6 +54,7 @@ import {
   resetsBreaker,
 } from './lib/loop/machine.mjs';
 import { evaluateGuard, matchesGlob, parseDiffLines, parseDiffStat } from './lib/loop/guard.mjs';
+import { SCRUBBED_ENV_VAR_NAMES, scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import {
   chooseBead,
   denyPathStems,
@@ -326,10 +327,19 @@ describe('machine: the happy path and every branch off it', () => {
     });
   });
 
-  test('HALT is honoured at each of the eight stage boundaries', () => {
-    // Reverting the halt check to fire at only some boundaries reddens here
-    // with the exact stage named.
-    for (const stage of STAGE_ORDER) {
+  test('HALT is honoured at every stage boundary EXCEPT after HARVEST', () => {
+    // REWRITTEN, not weakened (Cebab-qd2.32). This asserted all eight
+    // boundaries, HARVEST included — and that was the defect described from the
+    // other side: firing after HARVEST cannot prevent anything, because the
+    // bead is already closed or parked and the PR already merged. It only
+    // relabels work that happened, and once a halt hands the bead back
+    // (Cebab-qd2.22) it would have REOPENED a bead HARVEST had just closed.
+    //
+    // The HARVEST boundary now has its own describe block asserting the
+    // opposite, in both directions. This one keeps the other seven honest:
+    // reverting the check to fire at only some of them reddens here with the
+    // exact stage named.
+    for (const stage of STAGE_ORDER.filter((s) => s !== STAGE.HARVEST)) {
       const result = next(
         stage,
         { bead: { id: 'X' }, passed: true, outcome: 'green' },
@@ -3452,6 +3462,260 @@ describe('the night that landed nothing (Cebab-qd2.18, Cebab-qd2.19, Cebab-qd2.2
     // make the split pointless.
     expect(DEFAULTS.loop.consecutiveDeclineLimit).toBeGreaterThan(
       DEFAULTS.loop.consecutiveParkLimit,
+    );
+  });
+});
+
+describe('a stop must not poison the next run (Cebab-qd2.21)', () => {
+  // `.loop/HALT` is a PREFLIGHT REFUSAL: `loop.mjs` exits 2 with
+  // "Remove it to start" while it exists. That is correct for `loop:stop`,
+  // which is `touch .loop/HALT` — a deliberate, durable operator decision.
+  //
+  // The SIGNAL handler wrote the same file, and nothing ever removed it. So one
+  // Ctrl-C left every later run refusing to start until someone deleted a file
+  // by hand. Measured 2026-08-26, twice: the operator stopped a run, and the
+  // next night's `loop:night` refused before SELECT.
+  //
+  // WHY A SOURCE SCAN. The behavioural test needs a live driver, a real signal
+  // and an inspection of the filesystem afterwards; the rehearsal harness runs
+  // scenarios with `spawnSync`, which cannot signal a child mid-run. Rather
+  // than assert nothing, this pins the one line that caused it — with a
+  // positive control, because a scan whose subject has been renamed passes for
+  // the wrong reason, which is the failure mode of every source-reading gate.
+  const DRIVER = readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), 'loop.mjs'),
+    'utf8',
+  );
+
+  test('the driver still uses .loop/HALT — the positive control', () => {
+    // If this ever fails, the scan below has stopped measuring anything and
+    // must be rewritten against whatever replaced it.
+    expect(DRIVER).toContain('HALT_FILE');
+    expect(DRIVER).toContain("path.join(LOOP_DIR, 'HALT')");
+    expect(DRIVER).toContain('fs.existsSync(HALT_FILE)');
+  });
+
+  test('and never WRITES it — a signal is in-process and leaves nothing behind', () => {
+    // NOTE: this scans raw source, so prose in the driver counts. That is a
+    // feature the first run of this test demonstrated — it failed on the
+    // comment explaining the fix, which quoted the very call it describes. The
+    // comment was reworded rather than the scan loosened: a check that skips
+    // comments would also skip a write hidden in a template string.
+    expect(DRIVER).not.toContain('writeFileSync(HALT_FILE');
+  });
+
+  test('the signal flag reaches the stage-boundary check on its own', () => {
+    // Without this the fix above would be a silent behaviour change rather than
+    // a refactor: removing the file write is only safe because `halted()` reads
+    // the in-process flag too.
+    expect(DRIVER).toContain('signalled || fs.existsSync(HALT_FILE)');
+  });
+});
+
+describe('a bead about the loop is skipped by PARENTAGE, not only by path text (Cebab-qd2.26)', () => {
+  // Measured live 2026-08-27, on the first real run after the PUBLISH fix
+  // merged. `Cebab-qd2.17` was correctly skipped, because its body writes
+  // `scripts/loop.mjs:824` and that is a deny stem. `Cebab-qd2.22` — a bead
+  // entirely about the driver — was SELECTED and began a full BUILD, because it
+  // names the same files by BASENAME. The guard at PUBLISH would have caught
+  // the resulting diff, but only after a whole turn budget was spent.
+  const stems = denyPathStems(DEFAULTS.guard.denyPaths);
+  const bead = (over) => ({
+    id: 'Cebab-x1',
+    parent: 'Cebab-other',
+    title: 'a title',
+    description: 'a description',
+    priority: 1,
+    issue_type: 'bug',
+    ...over,
+  });
+  const pick = (rows) =>
+    chooseBead(rows, { select: DEFAULTS.select, denyStems: stems, parked: new Set() });
+
+  test('a bead under the loop epic is skipped however it words itself', () => {
+    const loopish = bead({
+      id: 'Cebab-qd2.99',
+      parent: 'Cebab-qd2',
+      // Deliberately NO full path: this is exactly the text that got through.
+      description: 'machine.mjs and teardown and harvest() and bd ready',
+    });
+    expect(pick([loopish])).toBe(null);
+  });
+
+  test('and one under any other epic is not', () => {
+    // The direction that matters more: excluding by parent must not have
+    // emptied the queue. The select.mjs header records that an empty deny stem
+    // made `text.includes('')` true for every bead — the same shape of failure
+    // reached from a different flag.
+    const ordinary = bead({ parent: 'Cebab-vie', description: 'server/src/bus/chain.ts' });
+    expect(pick([ordinary])?.id).toBe('Cebab-x1');
+  });
+
+  test('the text scan still does its own half', () => {
+    // Parentage does not replace it: a bead about the driver filed under some
+    // other epic, or one about `.github/**`, has no loop parent at all.
+    const pathish = bead({ parent: 'Cebab-vie', description: 'edit .github/workflows/ci.yml' });
+    expect(pick([pathish])).toBe(null);
+  });
+
+  test('a bead with no parent at all is selectable', () => {
+    // `parent` is absent on a top-level bead, and `[].includes(undefined)` must
+    // not become the accidental filter that empties the queue.
+    expect(pick([bead({ parent: undefined })])?.id).toBe('Cebab-x1');
+  });
+});
+
+describe('[security] the loop spends the subscription, not an API key (Cebab-qd2.29)', () => {
+  // The `claude` CLI prefers ANTHROPIC_API_KEY over OAuth, so a stray export in
+  // a shell profile silently routes an agent turn to paid billing. Cebab's
+  // server has always stripped the five names; the loop passed `process.env`
+  // straight through, so an unattended --until 8 night would have billed eight
+  // full turns with no signal anywhere — the log says nothing about auth mode
+  // and `costUsd` is the same token proxy either way.
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+  test('the scrub removes every listed name and keeps everything else', () => {
+    const env = {
+      PATH: '/usr/bin',
+      HOME: '/home/x',
+      ANTHROPIC_API_KEY: 'sk-should-not-survive',
+      CLAUDE_CODE_USE_VERTEX: '1',
+    };
+    const out = subscriptionOnlyEnv(env);
+    expect(out.PATH).toBe('/usr/bin');
+    expect(out.HOME).toBe('/home/x');
+    expect(out).not.toHaveProperty('ANTHROPIC_API_KEY');
+    expect(out).not.toHaveProperty('CLAUDE_CODE_USE_VERTEX');
+  });
+
+  test('an env with none of them set comes through unchanged', () => {
+    // The other direction: a scrub that emptied the environment would pass the
+    // case above and break every subprocess the loop spawns.
+    const env = { PATH: '/usr/bin', HOME: '/home/x' };
+    expect(subscriptionOnlyEnv(env)).toEqual(env);
+  });
+
+  test('scrubbedFrom reports NAMES, and only the ones actually set', () => {
+    expect(scrubbedFrom({ PATH: '/x' })).toEqual([]);
+    expect(scrubbedFrom({ ANTHROPIC_API_KEY: 'sk-x', PATH: '/x' })).toEqual(['ANTHROPIC_API_KEY']);
+    // An empty string is not "set" for this purpose — it cannot override OAuth.
+    expect(scrubbedFrom({ ANTHROPIC_API_KEY: '' })).toEqual([]);
+  });
+
+  test('the log line never carries a value', () => {
+    // The names are what gets printed to a console the operator may screenshot
+    // or paste. The value is a credential.
+    const driver = readFileSync(path.join(HERE, 'loop.mjs'), 'utf8');
+    expect(driver).toContain('scrubbed.join(');
+    expect(driver).not.toContain('process.env.ANTHROPIC_API_KEY');
+  });
+
+  test("the copy matches the server's list exactly", () => {
+    // THE WHOLE REASON A COPY IS ACCEPTABLE. `scripts/*.mjs` cannot import from
+    // `server/src` — TypeScript, compiled to a dist the loop does not depend on
+    // — so the list is duplicated. Without this the copy rots the first time
+    // the server's list grows, silently, in the direction of spending money.
+    const serverSrc = readFileSync(
+      path.join(HERE, '..', 'server', 'src', 'runner', 'claude.ts'),
+      'utf8',
+    );
+    const block = serverSrc.slice(
+      serverSrc.indexOf('SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = ['),
+    );
+    const serverNames = block
+      .slice(0, block.indexOf(']'))
+      .split('\n')
+      .map((l) => l.trim().replace(/^'|',?$/g, ''))
+      .filter((l) => /^[A-Z_]+$/.test(l));
+
+    // Positive control: if the parse above ever yields nothing, the comparison
+    // below is vacuously true and this whole test measures nothing.
+    expect(serverNames.length).toBeGreaterThan(0);
+    expect(serverNames).toContain('ANTHROPIC_API_KEY');
+
+    expect([...SCRUBBED_ENV_VAR_NAMES].sort()).toEqual([...serverNames].sort());
+  });
+});
+
+describe('[security] the harness owns the tracker, not just the forge (Cebab-qd2.31)', () => {
+  // `gh` was denied wholesale — "the harness owns the forge" — and `git`'s
+  // mutating subcommands were denied one by one. `bd` got neither, while
+  // sitting on the read-only allow list so the agent could `bd show`. Measured
+  // 2026-08-27: `bd close`, `bd create` and `bd update --remove-label
+  // loop-stuck` all returned an explicit ALLOW.
+  //
+  // HARVEST is the only stage that writes bead state, and both governing rules
+  // rest on that: the driver owns control flow, and the agent's report is not
+  // evidence.
+
+  test('the write verbs are denied', () => {
+    expect(decide('bd close Cebab-502')).toBeTruthy();
+    expect(decide('bd create --title x --type bug')).toBeTruthy();
+    // The expensive one: `loop-stuck` is the loop's only cross-run memory of a
+    // bead that failed. Stripped, that bead is re-selected every night forever.
+    expect(decide('bd update Cebab-502 --status open --remove-label loop-stuck')).toBeTruthy();
+    expect(decide('bd dolt push')).toBeTruthy();
+  });
+
+  test('and the read verbs are not — the two turns `bd show` saves are the point', () => {
+    // The other direction, and it is why this is not simply `bd` denied
+    // wholesale like `gh`: the allow list's own comment records that the agent
+    // reaches for `bd show` anyway and paid two turns for it.
+    expect(decide('bd show Cebab-502')).toBe(null);
+    expect(decide('bd list --status open')).toBe(null);
+    expect(decide('bd ready --json')).toBe(null);
+    expect(allowReason('bd show Cebab-502')).toBeTruthy();
+  });
+
+  test('an UNKNOWN verb is denied — fail closed', () => {
+    // Deliberately the opposite of how `git` is handled. git's verb set is
+    // stable; bd's grows, and a new mutating verb must not become allowed by
+    // having been unknown when the list was written.
+    expect(decide('bd frobnicate Cebab-502')).toBeTruthy();
+  });
+
+  test('the reason names the tracker, so the agent can act on it', () => {
+    // A deny the agent cannot interpret costs a turn re-trying a variant.
+    expect(decide('bd close Cebab-502')).toContain('tracker');
+  });
+});
+
+describe('a halt does not relabel work that already happened (Cebab-qd2.32)', () => {
+  // `next()` opened with `if (ctx.halt) return halted(...)` before the switch,
+  // so it fired at EVERY boundary — including the one AFTER harvest. But
+  // HARVEST is the last stage: by the time it returns, the bead is closed or
+  // parked and the PR is merged. Firing there only rewrites the label on work
+  // that already happened.
+  //
+  // Found by checking an audit finding against the qd2.22 change rather than on
+  // its own: combined, the driver would have handed back a bead HARVEST had
+  // just correctly closed, on a merge that really happened.
+
+  test('a merged iteration stays merged through a halt at the harvest boundary', () => {
+    const step = next(STAGE.HARVEST, { disposition: DISPOSITION.MERGED }, { halt: true });
+    expect(step).toMatchObject({ stage: STAGE.DONE, disposition: DISPOSITION.MERGED });
+  });
+
+  test('and so does a parked one — the rule is about the BOUNDARY, not the outcome', () => {
+    const step = next(STAGE.HARVEST, { disposition: DISPOSITION.PARKED }, { halt: true });
+    expect(step.disposition).toBe(DISPOSITION.PARKED);
+  });
+
+  test('every earlier boundary still halts', () => {
+    // The direction that matters more: this must not have disabled halting.
+    // `loop:stop` is the operator's only way to stop a run mid-flight.
+    for (const stage of [STAGE.SELECT, STAGE.CLAIM, STAGE.BUILD, STAGE.GATE, STAGE.PUBLISH]) {
+      expect(next(stage, {}, { halt: true }).disposition).toBe(DISPOSITION.HALTED);
+    }
+    expect(next(STAGE.WATCH, { outcome: 'green' }, { halt: true }).disposition).toBe(
+      DISPOSITION.HALTED,
+    );
+    expect(next(STAGE.LAND, { merged: true }, { halt: true }).disposition).toBe(DISPOSITION.HALTED);
+  });
+
+  test('and the halt reason still rides along where it applies', () => {
+    expect(next(STAGE.BUILD, { haltReason: REASON.USAGE_LIMIT }, { halt: true }).reason).toBe(
+      REASON.USAGE_LIMIT,
     );
   });
 });

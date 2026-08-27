@@ -98,7 +98,21 @@ const park = (reason) => ({ stage: STAGE.HARVEST, disposition: DISPOSITION.PARKE
  * @returns {{stage: string, disposition?: string, reason?: string}}
  */
 export function next(stage, result = {}, ctx = {}) {
-  if (ctx.halt) return halted(result.haltReason);
+  // NOT AT THE HARVEST BOUNDARY. HARVEST is the last stage; by the time it
+  // returns, the bead has been closed or parked, the PR is open or merged, and
+  // there is nothing left for a halt to prevent. Firing here only REWRITES the
+  // label on work that already happened: measured, `next(HARVEST, {disposition:
+  // 'merged'}, {halt: true})` returned `halted`, so an iteration that merged to
+  // main and closed its bead was recorded as halted in the ledger.
+  //
+  // Worse once a halt does bead bookkeeping (Cebab-qd2.22): the driver would
+  // then hand back a bead HARVEST had just correctly closed. A terminal that has
+  // already acted on the world is preserved — the same rule the crash handler
+  // follows for `merged`/`merge_queued`.
+  //
+  // The run still stops: `main`'s own loop checks HALT before the next
+  // iteration. `Cebab-qd2.32`.
+  if (ctx.halt && stage !== STAGE.HARVEST) return halted(result.haltReason);
 
   switch (stage) {
     case STAGE.SELECT:

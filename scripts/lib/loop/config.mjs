@@ -42,6 +42,15 @@ export const DEFAULTS = Object.freeze({
     excludeLabels: ['loop-stuck', 'needs-human', 'epic'],
     excludeTypes: ['epic', 'decision'],
     excludeIdPrefixes: [],
+    // THE LOOP'S OWN EPIC. Every bead filed under it is about the driver, and
+    // the deny-path text scan only catches the ones that spell a full path out
+    // — measured 2026-08-27, when a bead discussing `machine.mjs` and
+    // `teardown` by basename was selected and began a full BUILD. `parent` is
+    // present on every `bd ready --json` row, so this costs nothing.
+    //
+    // Repo-specific, like `guard.denyPaths` right below it, and for the same
+    // reason: what the loop must not touch is a fact about THIS repo.
+    excludeParents: ['Cebab-qd2'],
     sortPolicy: 'hybrid',
   },
   build: {
