@@ -11,6 +11,7 @@ import { closeDb, getDb } from '../db.js';
 import {
   canReconstruct,
   checkReconstructable,
+  reconstructChainSession,
   reconstructOrchestratorSession,
   RECOVERY_BANNER,
 } from './reconstruct.js';
@@ -155,13 +156,101 @@ describe('reconstructOrchestratorSession (R-B happy path)', () => {
   });
 });
 
-describe('checkReconstructable guard matrix (every failure → caller marks crashed)', () => {
-  test('chain mode is deferred', () => {
+describe('reconstructChainSession (R-B happy path, Cebab-2t9.1)', () => {
+  test('rebuilds, registers READ-ONLY as chain, sets awaiting_continue, appends the banner', () => {
+    seedReconstructable({ mode: 'chain' });
+    const before = listMultiAgentEvents(SID).length;
+    const row = getMultiAgentSession(SID)!;
+
+    const ok = reconstructChainSession(row, cbs());
+
+    expect(ok).toBe(true);
+    expect(hasLiveSession(SID)).toBe(true);
+    expect(getLiveSession(SID)!.mode).toBe('chain');
+    // Participants come back in chain order (coder before reviewer). No
+    // orchestrator participant — chain has none.
+    expect(getLiveSession(SID)!.handle.participantAgentNames).toEqual(['coder', 'reviewer']);
+    expect(getMultiAgentSession(SID)!.awaiting_continue).toBe(1);
+    // The ONLY new event is the persisted recovery banner — nothing delivered.
+    const after = listMultiAgentEvents(SID);
+    expect(after.length).toBe(before + 1);
+    expect(after[after.length - 1]!).toMatchObject({
+      source: 'cebab',
+      destination: 'user',
+      kind: 'intro',
+      text: RECOVERY_BANNER,
+    });
+  });
+
+  test('[security] reconstruction never runs a participant without an explicit continue', () => {
     seedReconstructable({ mode: 'chain' });
     const row = getMultiAgentSession(SID)!;
-    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'not-orchestrator' });
+    const before = listMultiAgentEvents(SID).length;
+    reconstructChainSession(row, cbs());
+    // A delivered turn would forward prompt/reply events. Only the cebab→user
+    // banner was added, so an interrupted turn's side effects can't be
+    // silently re-applied. (F2/F3 chain routing filters are pinned by
+    // chain.security.test.ts — reconstruction reuses the same createChainRouter
+    // factory via the extracted wireChainSession.)
+    const added = listMultiAgentEvents(SID).slice(before);
+    expect(added).toHaveLength(1);
+    expect(added[0]!.destination).toBe('user');
+  });
+
+  test('idempotent: a second call is a no-op (no duplicate banner)', () => {
+    seedReconstructable({ mode: 'chain' });
+    const row = getMultiAgentSession(SID)!;
+    expect(reconstructChainSession(row, cbs())).toBe(true);
+    const afterFirst = listMultiAgentEvents(SID).length;
+    expect(reconstructChainSession(row, cbs())).toBe(true);
+    expect(listMultiAgentEvents(SID).length).toBe(afterFirst);
+  });
+
+  test('a chain row with no persisted agent-session map is not reconstructable', () => {
+    const workspace = path.join(tmpRoot, 'workspace');
+    const sessionFolder = path.join(workspace, `.cebab-session-${SID}`);
+    fs.mkdirSync(sessionFolder, { recursive: true });
+    const coder = upsertProject('Coder', path.join(workspace, 'coder'));
+    const reviewer = upsertProject('Reviewer', path.join(workspace, 'reviewer'));
+    setProjectBusInstalled(coder.id, true, 'coder');
+    setProjectBusInstalled(reviewer.id, true, 'reviewer');
+    createMultiAgentSession(SID, 'chain', 'iter-1', sessionFolder, 'persistent');
+    addParticipant(SID, coder.id, 'worker', 0);
+    addParticipant(SID, reviewer.id, 'worker', 1);
+    // NO upsertAgentSession — a pre-#261 chain row has no --resume checkpoints.
+    const row = getMultiAgentSession(SID)!;
+    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'no-agent-sessions' });
+    expect(reconstructChainSession(row, cbs())).toBe(false);
+    expect(hasLiveSession(SID)).toBe(false);
+  });
+
+  test('the orchestrator path refuses a chain row (mode assertion)', () => {
+    seedReconstructable({ mode: 'chain' });
+    const row = getMultiAgentSession(SID)!;
     expect(reconstructOrchestratorSession(row, cbs())).toBe(false);
     expect(hasLiveSession(SID)).toBe(false);
+  });
+});
+
+describe('checkReconstructable guard matrix (every failure → caller marks crashed)', () => {
+  // `Cebab-2t9.1`: chain mode used to be rejected outright with
+  // `reason: 'not-orchestrator'`. It is now reconstructable through its own
+  // path — the shared guard passes it, `reconstructOrchestratorSession` refuses
+  // it (mode assertion, so a chain row is never wired as an orchestrator), and
+  // `reconstructChainSession` is the one that rebuilds it. This test was
+  // rewritten (not deleted) because it was defending the deferred behaviour the
+  // issue removes.
+  test('chain mode passes the shared guard but only the chain path wires it', () => {
+    seedReconstructable({ mode: 'chain' });
+    const row = getMultiAgentSession(SID)!;
+    expect(checkReconstructable(row)).toEqual({ ok: true });
+    // The orchestrator path refuses a chain row rather than wiring it wrong.
+    expect(reconstructOrchestratorSession(row, cbs())).toBe(false);
+    expect(hasLiveSession(SID)).toBe(false);
+    // The chain path rebuilds it, read-only.
+    expect(reconstructChainSession(row, cbs())).toBe(true);
+    expect(hasLiveSession(SID)).toBe(true);
+    expect(getLiveSession(SID)!.mode).toBe('chain');
   });
 
   test('pre-007 row (null session_folder)', () => {
@@ -233,8 +322,12 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
     expect(resumed!.replayEvents.length).toBeGreaterThan(1);
   });
 
-  test('a chain row still falls back to crashed (reconstruction deferred)', async () => {
+  // `Cebab-2t9.1`: this test used to assert a chain row crashed on restart
+  // (reconstruction deferred). Chain R-B now rebuilds it read-only, the same
+  // as an orchestrated run. Rewritten to pin the new behaviour.
+  test('a chain row with no live registry entry is reconstructed, not crashed', async () => {
     seedReconstructable({ mode: 'chain' });
+    expect(hasLiveSession(SID)).toBe(false);
     const onResumeFailed = vi.fn();
 
     const resumed = await attemptResumeMultiAgent({
@@ -245,9 +338,15 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
       maxTurns: 50,
     });
 
-    expect(resumed).toBeNull();
-    expect(onResumeFailed).toHaveBeenCalledWith(SID, 'reattach-failed');
-    expect(getMultiAgentSession(SID)!.status).toBe('crashed');
+    expect(resumed).not.toBeNull();
+    expect(resumed!.mode).toBe('chain');
+    expect(resumed!.handle.sessionId).toBe(SID);
+    expect(onResumeFailed).not.toHaveBeenCalled();
+    expect(hasLiveSession(SID)).toBe(true);
+    expect(getMultiAgentSession(SID)!.status).toBe('running');
+    // Conservative: paused for the operator, with the banner in scrollback.
+    expect(getMultiAgentSession(SID)!.awaiting_continue).toBe(1);
+    expect(resumed!.replayEvents.map((e) => e.text)).toContain(RECOVERY_BANNER);
   });
 });
 

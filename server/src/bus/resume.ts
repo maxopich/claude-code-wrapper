@@ -33,7 +33,7 @@ import {
 } from '../repo/multi_agent.js';
 import { getDb } from '../db.js';
 import { getLiveSession, unregisterLiveSession, type BusSink } from './session_registry.js';
-import { reconstructOrchestratorSession } from './reconstruct.js';
+import { reconstructChainSession, reconstructOrchestratorSession } from './reconstruct.js';
 import type { ChainSessionHandle, ResumeChainOpts } from './chain.js';
 import type { OrchestratorSessionHandle } from './orchestrator.js';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
@@ -131,6 +131,50 @@ function replayFor(sessionId: string): PersistedEvent[] {
 }
 
 /**
+ * `Cebab-2t9.1`: dispatch a server-restart rebuild to the mode-specific R-B
+ * path. Both re-attach READ-ONLY (set `awaiting_continue`, deliver nothing) and
+ * return true iff the session is now live in the registry; a guard failure
+ * (either mode) returns false and the caller falls back to the crashed marker,
+ * so behavior is never worse than R-A. Chain rebuilds via
+ * `reconstructChainSession` (no orchestrator workspace, no mute/kick/pause
+ * reseed); everything else via `reconstructOrchestratorSession`. Each reconstruct
+ * function asserts its own mode, so a mis-dispatch would no-op rather than wire
+ * the wrong topology.
+ */
+function reconstructForMode(
+  row: MultiAgentSessionRow,
+  callbacks: Pick<
+    ResumeCallbacks,
+    | 'onEvent'
+    | 'onEnded'
+    | 'hopBudget'
+    | 'maxTurns'
+    | 'onPendingRetry'
+    | 'onMutation'
+    | 'onPendingMutation'
+    | 'sendNotification'
+    | 'sendRouterDrop'
+    | 'sendServerMsg'
+  >,
+): boolean {
+  const args = {
+    onEvent: callbacks.onEvent,
+    onEnded: callbacks.onEnded,
+    hopBudget: callbacks.hopBudget,
+    maxTurns: callbacks.maxTurns,
+    onPendingRetry: callbacks.onPendingRetry,
+    onMutation: callbacks.onMutation,
+    onPendingMutation: callbacks.onPendingMutation,
+    sendNotification: callbacks.sendNotification,
+    sendRouterDrop: callbacks.sendRouterDrop,
+    sendServerMsg: callbacks.sendServerMsg,
+  };
+  return row.mode === 'chain'
+    ? reconstructChainSession(row, args)
+    : reconstructOrchestratorSession(row, args);
+}
+
+/**
  * Find the active multi-agent session, re-attach if it's still live in this
  * process, else mark it (and any orphan running rows) crashed. Returns the
  * resumed session (original handle + events to replay) or null.
@@ -160,35 +204,22 @@ export async function attemptResumeMultiAgent(
   let live = getLiveSession(candidate.id);
   if (!live) {
     // The process that owned this session is gone (Cebab restarted). R-B:
-    // rebuild an orchestrated run from persisted state instead of crashing.
-    // Conservative — reconstruction re-attaches READ-ONLY and sets
-    // awaiting_continue; nothing runs until the operator continues. Chain
-    // mode / guard failures fall through to the crashed path below
-    // (behavior never worse than R-A).
-    if (
-      reconstructOrchestratorSession(candidate, {
-        onEvent: callbacks.onEvent,
-        onEnded: callbacks.onEnded,
-        hopBudget: callbacks.hopBudget,
-        maxTurns: callbacks.maxTurns,
-        onPendingRetry: callbacks.onPendingRetry,
-        onMutation: callbacks.onMutation,
-        onPendingMutation: callbacks.onPendingMutation,
-        sendNotification: callbacks.sendNotification,
-        sendRouterDrop: callbacks.sendRouterDrop,
-        sendServerMsg: callbacks.sendServerMsg,
-      })
-    ) {
+    // rebuild the run from persisted state instead of crashing. Conservative —
+    // reconstruction re-attaches READ-ONLY and sets awaiting_continue; nothing
+    // runs until the operator continues. `Cebab-2t9.1`: chain mode reconstructs
+    // now too, via its own path; guard failures (either mode) fall through to
+    // the crashed path below (behavior never worse than R-A).
+    if (reconstructForMode(candidate, callbacks)) {
       live = getLiveSession(candidate.id);
     }
   }
   if (!live) {
-    // Phase 4 (BE-11): chain mode reconstruction is deferred — surface that
-    // BEFORE the crashed marker ships so the operator dock sees the
-    // typed event ahead of `multi_agent_ended { reason: 'crashed' }`.
-    // The check is intentionally narrow to chain mode; other bail reasons
-    // (folder-missing, no-iteration, pre-007 row) stay silent for now and
-    // are subsumed by Cluster D's wider session-recovery surface.
+    // Phase 4 (BE-11): a chain row that STILL could not be rebuilt (a guard
+    // failed — no folder / iteration / agent-sessions) surfaces the typed
+    // `chain_not_reconstructed` event BEFORE the crashed marker ships, so the
+    // operator dock sees it ahead of `multi_agent_ended { reason: 'crashed' }`.
+    // Narrow to chain mode; other bail reasons stay silent (subsumed by
+    // Cluster D's wider session-recovery surface).
     if (candidate.mode === 'chain') {
       announceChainNotReconstructed(candidate.id, callbacks);
     }
@@ -257,22 +288,9 @@ export async function resumeMultiAgentTarget(
   if (!live) {
     // R-B: operator clicked Resume on a session whose owning process is
     // gone (Cebab restarted). Rebuild it read-only — same conservative
-    // contract as the auto-resume path. Chain / guard failures keep the
-    // old "reattach-failed" behavior.
-    if (
-      reconstructOrchestratorSession(row, {
-        onEvent: callbacks.onEvent,
-        onEnded: callbacks.onEnded,
-        hopBudget: callbacks.hopBudget,
-        maxTurns: callbacks.maxTurns,
-        onPendingRetry: callbacks.onPendingRetry,
-        onMutation: callbacks.onMutation,
-        onPendingMutation: callbacks.onPendingMutation,
-        sendNotification: callbacks.sendNotification,
-        sendRouterDrop: callbacks.sendRouterDrop,
-        sendServerMsg: callbacks.sendServerMsg,
-      })
-    ) {
+    // contract as the auto-resume path. `Cebab-2t9.1`: chain rebuilds too;
+    // guard failures (either mode) keep the old "reattach-failed" behavior.
+    if (reconstructForMode(row, callbacks)) {
       live = getLiveSession(sessionId);
     }
   }
@@ -495,10 +513,15 @@ function announceChainNotReconstructed(
 ): void {
   // Typed wire event for the iterations panel / inspector. Skipped if the
   // caller didn't supply the generic sender (legacy unit tests).
+  //
+  // `Cebab-2t9.1`: chain R-B is implemented now, so this no longer means "not
+  // supported" — it fires only when a specific chain row could not be rebuilt
+  // because a reconstruction guard failed (no session folder / no iteration /
+  // no persisted `--resume` checkpoints — e.g. a pre-#261 chain row).
   callbacks.sendServerMsg?.({
     type: 'chain_not_reconstructed',
     sessionId,
-    reason: 'chain mode reconstruction is not implemented (R-B covers orchestrator only)',
+    reason: 'chain session could not be rebuilt from durable state (a reconstruction guard failed)',
   });
 
   if (callbacks.sendServerMsg) {
@@ -508,7 +531,7 @@ function announceChainNotReconstructed(
         severity: 'warn',
         dedupeKey: `chain_not_reconstructed:${sessionId}`,
         title: 'Chain session could not be resumed',
-        message: `Session ${sessionId.slice(0, 8)} ran in chain mode; chain reconstruction is not yet supported across server restarts. Archive to clear it from the Iterations list.`,
+        message: `Session ${sessionId.slice(0, 8)} could not be rebuilt after the Cebab restart (its durable recovery state is incomplete). Archive to clear it from the Iterations list.`,
         sessionId,
         sticky: true,
         action: { kind: 'archive', sessionId },

@@ -60,6 +60,7 @@ import {
   endMultiAgentSession,
   getLastMultiAgentEvent,
   getPendingRetry,
+  listPendingMutations,
   recordSessionTeardown,
   setMutationPromoted,
   setPauseOnDangerous,
@@ -327,6 +328,13 @@ export function createChainRouter(params: {
   /** Hard cap on persisted hops. Required so the router enforces the
    *  ceiling; the caller resolves precedence. */
   hopBudget: number;
+  /** R-B reconstruction seed: the number of persisted hops already in the
+   *  DB for this session before this router started. Defaults to 0 (fresh
+   *  start). `wireChainSession` reads it from the persisted events table so
+   *  the budget check accounts for hops that landed in the prior process —
+   *  without it a near-cap chain resumed after a restart would silently
+   *  re-open the floodgates. Mirrors `createOrchestratorRouter`. */
+  initialHopsCount?: number;
   /** Optional pending-retry set/clear sink (Item #4). Threaded onto
    *  `BusSink.onPendingRetry` so rebind/detach honor the same plumbing. */
   onPendingRetry?: StartChainOpts['onPendingRetry'];
@@ -390,7 +398,9 @@ export function createChainRouter(params: {
   // The synthetic budget-exhausted event is persisted directly inline below
   // and intentionally does NOT bump this counter (it lives in DB/wire as
   // event N+1 but the displayed ratio matches the cap when it fires).
-  let hopsCount = 0;
+  // On R-B reconstruction this is seeded from the DB (persisted event count)
+  // so the budget check carries over from the prior process.
+  let hopsCount = params.initialHopsCount ?? 0;
   // PR-7: first error captured during this chain session for the rail.
   // Sources mirror orchestrator: synthetic budget-exhaust text + any kind=
   // 'error' bus event observed in handleEvent + worker-failed reason.
@@ -1259,7 +1269,6 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   const sessionId = crypto.randomUUID();
   const lifecycle: MultiAgentLifecycle = opts.lifecycle ?? 'persistent';
   const agentNames = opts.participants.map((p) => p.agentName);
-  const projectIds = opts.participants.map((p) => p.projectId);
   // Precedence is resolved by the caller (WS layer reads settings + env);
   // this fallback only applies when the caller didn't specify.
   const hopBudget = opts.hopBudget ?? DEFAULT_HOP_BUDGET;
@@ -1311,6 +1320,89 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
   }
 
+  return wireChainSession({
+    sessionId,
+    iterationId,
+    lifecycle,
+    paths,
+    participants: opts.participants,
+    initialPrompt: opts.initialPrompt,
+    ...(opts.mcpDenials ? { mcpDenials: opts.mcpDenials } : {}),
+    onEvent: opts.onEvent,
+    onEnded: opts.onEnded,
+    onActivity: opts.onActivity,
+    onPendingRetry: opts.onPendingRetry,
+    onMutation: opts.onMutation,
+    onPendingMutation: opts.onPendingMutation,
+    sendNotification: opts.sendNotification,
+    sendRouterDrop: opts.sendRouterDrop,
+    sendServerMsg: opts.sendServerMsg,
+    runnerFactory: opts.runnerFactory,
+    hopBudget,
+    maxTurns: opts.maxTurns,
+    pauseOnDangerous: opts.pauseOnDangerous,
+  }).handle;
+}
+
+/**
+ * Build the chain runner + router + handle and register the live session,
+ * WITHOUT the DB-row setup `startChainSession` does. Shared by the fresh-start
+ * path (`startChainSession`, which passes `initialPrompt` so the pipeline is
+ * kicked off) and by R-B reconstruction (`reconstructChainSession`, which omits
+ * it so the rebuilt session is re-attached READ-ONLY). Mirrors
+ * `wireOrchestratorSession` — the extraction exists so the two paths cannot
+ * drift on the security-critical routing/gate wiring.
+ *
+ * `initialPrompt` gates the kick: when present, the per-participant briefings
+ * and the initial prompt are forwarded as `source=cebab` events and
+ * participant[0]'s first turn is delivered. When absent (reconstruct), nothing
+ * is delivered — the caller sets `awaiting_continue` and appends the recovery
+ * banner.
+ */
+export function wireChainSession(p: {
+  sessionId: string;
+  iterationId: string;
+  lifecycle: MultiAgentLifecycle;
+  paths: SessionPaths;
+  participants: ResolvedAgent[];
+  /** Fresh-start only: forwarded briefings + first delivery. Omit on
+   *  reconstruct for a READ-ONLY re-attach. */
+  initialPrompt?: string;
+  mcpDenials?: StartChainOpts['mcpDenials'];
+  onEvent: StartChainOpts['onEvent'];
+  onEnded: StartChainOpts['onEnded'];
+  onActivity?: StartChainOpts['onActivity'];
+  onPendingRetry?: StartChainOpts['onPendingRetry'];
+  onMutation?: StartChainOpts['onMutation'];
+  onPendingMutation?: StartChainOpts['onPendingMutation'];
+  sendNotification?: StartChainOpts['sendNotification'];
+  sendRouterDrop?: StartChainOpts['sendRouterDrop'];
+  sendServerMsg?: StartChainOpts['sendServerMsg'];
+  runnerFactory?: AgentRunnerDeps['runnerFactory'];
+  overloadBackoffMs?: AgentRunnerDeps['overloadBackoffMs'];
+  hopBudget?: number;
+  maxTurns?: number;
+  /** R-B seed: persisted hop count before this wiring call so the budget
+   *  check carries over the restart. Defaults to 0 (fresh start). */
+  initialHopsCount?: number;
+  pauseOnDangerous?: boolean;
+  /** R-B seed: each participant's persisted `--resume` checkpoint so its next
+   *  turn continues its real CLI transcript. */
+  seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
+  /** R-B seed: participants that already spoke before the restart — their
+   *  resumed transcript already carries the briefing, so `deliver` must not
+   *  re-prefix it. */
+  briefedAgents?: ReadonlyArray<string>;
+}): {
+  handle: ChainSessionHandle;
+  router: ChainRouter;
+  deliver: (agentName: string, text: string, from?: string) => void;
+} {
+  const { sessionId, iterationId, lifecycle, paths } = p;
+  const agentNames = p.participants.map((part) => part.agentName);
+  const projectIds = p.participants.map((part) => part.projectId);
+  const hopBudget = p.hopBudget ?? DEFAULT_HOP_BUDGET;
+
   const onTeardown: ((reason: MultiAgentEndedReason) => Promise<void>) | undefined =
     lifecycle === 'temp'
       ? async () => {
@@ -1342,31 +1434,34 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
   const projectRules = new Map<string, ProjectRules | null>();
   /** agentName → where its hop goes. Mock replay reads it (see `mockVars`). */
   const nextHops = new Map<string, string>();
-  opts.participants.forEach((p, i) => {
+  p.participants.forEach((part, i) => {
     const nextHop =
-      i === opts.participants.length - 1 ? SINK_RECIPIENT : opts.participants[i + 1]!.agentName;
-    nextHops.set(p.agentName, nextHop);
+      i === p.participants.length - 1 ? SINK_RECIPIENT : p.participants[i + 1]!.agentName;
+    nextHops.set(part.agentName, nextHop);
     briefings.set(
-      p.agentName,
+      part.agentName,
       renderChainBriefing({
         iterationId,
         position: i + 1,
-        totalSteps: opts.participants.length,
-        selfAgent: p.agentName,
+        totalSteps: p.participants.length,
+        selfAgent: part.agentName,
         participantNames: agentNames,
         nextHop,
       }),
     );
-    projectRules.set(p.agentName, readProjectClaudeMd(p.cwd));
+    projectRules.set(part.agentName, readProjectClaudeMd(part.cwd));
   });
 
   const abortController = new AbortController();
-  const briefed = new Set<string>();
+  // R-B: a participant that already spoke in the prior process consumed its
+  // briefing (its resumed transcript still has it), so it is pre-marked here
+  // and `deliver` won't duplicate it. Empty for a fresh start.
+  const briefed = new Set<string>(p.briefedAgents ?? []);
 
   // Passive liveness tap on the existing per-turn SDKMessage stream. Pure
   // Cebab-side; no agent/prompt/DB change. `sessionId` is closed over so the
   // WS layer's `onActivity` addresses the right session even mid-first-turn.
-  const activity = createAgentActivityObserver((snap) => opts.onActivity?.(sessionId, snap));
+  const activity = createAgentActivityObserver((snap) => p.onActivity?.(sessionId, snap));
 
   // Item #5: per-agent last delivered prompt — captured by `deliver` AFTER
   // briefing/rules prefix, used by `continueThroughMutation` to replay the
@@ -1416,7 +1511,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       return;
     }
     try {
-      opts.onMutation?.(sessionId, row);
+      p.onMutation?.(sessionId, row);
     } catch (err) {
       console.error('[chain] onMutation sink threw', err);
     }
@@ -1428,7 +1523,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     // sequential topology makes a follow-on delivery rarer than in
     // orchestrator mode, not impossible — a retry or a Continue for a
     // different mutation reaches the same place.
-    applyPauseGate(row, opts.onPendingMutation, (name) => runner.holdForMutation(name));
+    applyPauseGate(row, p.onPendingMutation, (name) => runner.holdForMutation(name));
   };
 
   // Migration 012 + Phase E: tool-result tap (mirrors orchestrator.ts's
@@ -1460,7 +1555,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
 
     try {
-      opts.onMutation?.(sessionId, finalRow);
+      p.onMutation?.(sessionId, finalRow);
     } catch (err) {
       console.error('[chain] onMutation sink (confirm re-emit) threw', err);
     }
@@ -1475,7 +1570,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     questions,
   ) => {
     try {
-      opts.sendServerMsg?.({
+      p.sendServerMsg?.({
         type: 'multi_agent_ask_user_question',
         sessionId,
         agent: agentName,
@@ -1493,7 +1588,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     // per-hop snapshot. Same value every hop of this chain run.
     sessionId,
     // `Cebab-vie.17`: per-session, not per-spec — see the orchestrator twin.
-    maxTurns: opts.maxTurns,
+    maxTurns: p.maxTurns,
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);
@@ -1526,7 +1621,8 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     onToolResult: onToolResultHook,
     onAskUserQuestion: onAskUserQuestionHook,
     abortController,
-    runnerFactory: opts.runnerFactory,
+    runnerFactory: p.runnerFactory,
+    ...(p.overloadBackoffMs !== undefined ? { overloadBackoffMs: p.overloadBackoffMs } : {}),
     // Mock replay (MOCK=1). A shipped fixture cannot name the operator's
     // projects, so it addresses `${NEXT}` and the chain — which owns the
     // pipeline order — resolves it. `${KIND}` distinguishes a hand-off
@@ -1551,7 +1647,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     // that attempt.
     onAutoRetry: (info) => {
       try {
-        opts.sendServerMsg?.({
+        p.sendServerMsg?.({
           type: 'auto_retry',
           sessionId,
           attempt: info.attempt,
@@ -1596,7 +1692,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         },
         (msg) => {
           if (msg.type === 'notification') {
-            opts.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+            p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
           }
         },
       );
@@ -1616,7 +1712,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         },
         (msg) => {
           if (msg.type === 'notification') {
-            opts.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+            p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
           }
         },
       );
@@ -1625,23 +1721,51 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       }
     },
   });
-  for (const p of opts.participants) {
+  for (const part of p.participants) {
     // H04: see the orchestrator mirror — the denial has to be on the spec
     // before the first hop, not applied after the session is running.
-    const denied = opts.mcpDenials?.get(p.projectId);
+    const denied = p.mcpDenials?.get(part.projectId);
     runner.register({
-      name: p.agentName,
-      cwd: p.cwd,
+      name: part.agentName,
+      cwd: part.cwd,
       settingSources: ['user', 'project', 'local'],
       // Cluster G Phase 3 (G1): thread the participant project so the
       // lifecycle registry's per-hop snapshot can name it for the
       // active-runs sidebar dropdown.
-      projectId: p.projectId,
+      projectId: part.projectId,
       // Cebab-ws0.3: the operator's model choice for THIS participant's project.
       // Spread from one helper so all three register sites are byte-identical.
-      ...projectModelSpec(p.projectId),
+      ...projectModelSpec(part.projectId),
       ...(denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {}),
     });
+  }
+
+  // R-B: rehydrate each participant's `--resume` checkpoint from the persisted
+  // map so its next turn continues its real CLI transcript. Rows for unknown
+  // agents are ignored; a participant with no row stays fresh (correct — it
+  // never completed a turn before the restart). Empty on a fresh start.
+  // Mirrors `wireOrchestratorSession`.
+  for (const s of p.seededSessions ?? []) {
+    if (runner.has(s.agentName)) runner.seedSession(s.agentName, s.cliSessionId);
+  }
+
+  // `Cebab-vie.13`, R-B half (mirrors `wireOrchestratorSession`): the queue
+  // hold is in-memory and died with the old process, while the `pending`
+  // mutation row that justifies it is in SQLite and came back. Reseeding only
+  // the banner would show a participant held at an unapproved command whose
+  // next delegation is delivered normally. Shared path for fresh start AND
+  // reconstruct — on a fresh session id the query returns [] and nothing
+  // happens.
+  try {
+    for (const name of new Set(listPendingMutations(sessionId).map((m) => m.agentName))) {
+      if (!runner.holdForMutation(name)) {
+        console.warn(
+          `[chain] could not reinstall the mutation hold for ${sessionId}/${name}; it is shown held but its turns are NOT`,
+        );
+      }
+    }
+  } catch (err) {
+    console.error('[chain] reseeding mutation holds failed', err);
   }
 
   const deliver = (agentName: string, text: string, from?: string) => {
@@ -1742,8 +1866,8 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     agentNames,
     paths,
     isAnyGateHeld: () => runner.anyGateHeld(),
-    onEvent: opts.onEvent,
-    onEnded: opts.onEnded,
+    onEvent: p.onEvent,
+    onEnded: p.onEnded,
     onTeardown,
     onFinalize: (reason) => {
       // Interactive AskUserQuestion: drain any parked questions so a
@@ -1757,10 +1881,11 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     },
     deliver,
     hopBudget,
-    onPendingRetry: opts.onPendingRetry,
-    sendNotification: opts.sendNotification,
-    sendRouterDrop: opts.sendRouterDrop,
-    sendServerMsg: opts.sendServerMsg,
+    initialHopsCount: p.initialHopsCount,
+    onPendingRetry: p.onPendingRetry,
+    sendNotification: p.sendNotification,
+    sendRouterDrop: p.sendRouterDrop,
+    sendServerMsg: p.sendServerMsg,
   });
 
   const handle: ChainSessionHandle = {
@@ -1770,7 +1895,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     lifecycle,
     sessionFolder: paths.folder,
     hopBudget,
-    pauseOnDangerous: opts.pauseOnDangerous ?? false,
+    pauseOnDangerous: p.pauseOnDangerous ?? false,
     async stop(reason) {
       // Clear any pending-retry / pause-on-dangerous slot first so the
       // teardown leaves a clean row — otherwise a crashed-but-with-non-null-
@@ -1813,7 +1938,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
         console.error('[chain] clear pending-retry on retry failed', err);
       }
       try {
-        opts.onPendingRetry?.(sessionId, null);
+        p.onPendingRetry?.(sessionId, null);
       } catch (err) {
         console.error('[chain] retry onPendingRetry-null callback threw', err);
       }
@@ -1833,7 +1958,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
       // and its teardown clears pending mutations, and resolving it here would
       // forge a decision the operator did not get to make.
       if (router.checkTurnRefused(held.agentName)) return;
-      const pending = releasePauseForMutation(sessionId, mutationId, opts.onPendingMutation);
+      const pending = releasePauseForMutation(sessionId, mutationId, p.onPendingMutation);
       if (!pending) return;
       // `Cebab-vie.13`: release the queue hold BEFORE the replay-prompt lookup
       // — see orchestrator.ts's mirror for why the `return` below must not be
@@ -1858,41 +1983,47 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     sendServerMsg: (m) => router.sendServerMsg(m),
   });
 
-  // Briefings + initial prompt → UI scrollback + DB parity (source=cebab).
-  // The CLAUDE.md the agent actually receives is NOT echoed here (it would
-  // flood the operator's chat and is already in the on-disk iteration
-  // transcript); scrollback gets a one-line marker instead.
-  for (const p of opts.participants) {
-    router.forwardCebabEvent({
-      ts: Date.now(),
-      source: CEBAB_SOURCE,
-      destination: p.agentName,
-      kind: 'intro',
-      text: briefings.get(p.agentName)!,
-    });
-    const pr = projectRules.get(p.agentName);
-    if (pr) {
+  // Fresh-start only: kick the pipeline. On R-B reconstruct `initialPrompt` is
+  // omitted, so nothing below runs — the caller re-attaches READ-ONLY, sets
+  // `awaiting_continue`, and appends the recovery banner (mirrors the
+  // orchestrator's read-only reconstruct contract).
+  if (p.initialPrompt !== undefined) {
+    // Briefings + initial prompt → UI scrollback + DB parity (source=cebab).
+    // The CLAUDE.md the agent actually receives is NOT echoed here (it would
+    // flood the operator's chat and is already in the on-disk iteration
+    // transcript); scrollback gets a one-line marker instead.
+    for (const part of p.participants) {
       router.forwardCebabEvent({
         ts: Date.now(),
         source: CEBAB_SOURCE,
-        destination: p.agentName,
+        destination: part.agentName,
         kind: 'intro',
-        text: `Cebab injected ${p.projectName}/CLAUDE.md (${pr.sizeLabel}) into ${p.agentName}'s first turn`,
+        text: briefings.get(part.agentName)!,
       });
+      const pr = projectRules.get(part.agentName);
+      if (pr) {
+        router.forwardCebabEvent({
+          ts: Date.now(),
+          source: CEBAB_SOURCE,
+          destination: part.agentName,
+          kind: 'intro',
+          text: `Cebab injected ${part.projectName}/CLAUDE.md (${pr.sizeLabel}) into ${part.agentName}'s first turn`,
+        });
+      }
     }
+    router.forwardCebabEvent({
+      ts: Date.now(),
+      source: CEBAB_SOURCE,
+      destination: p.participants[0]!.agentName,
+      kind: 'prompt',
+      text: p.initialPrompt,
+    });
+
+    // Kick the pipeline: participant[0]'s first turn (briefing-prefixed).
+    deliver(p.participants[0]!.agentName, p.initialPrompt);
   }
-  router.forwardCebabEvent({
-    ts: Date.now(),
-    source: CEBAB_SOURCE,
-    destination: opts.participants[0]!.agentName,
-    kind: 'prompt',
-    text: opts.initialPrompt,
-  });
 
-  // Kick the pipeline: participant[0]'s first turn (briefing-prefixed).
-  deliver(opts.participants[0]!.agentName, opts.initialPrompt);
-
-  return handle;
+  return { handle, router, deliver };
 }
 
 /**
