@@ -95,7 +95,8 @@ const park = (reason) => ({ stage: STAGE.HARVEST, disposition: DISPOSITION.PARKE
 /**
  * @param {string} stage    current stage
  * @param {object} result   what the stage produced
- * @param {object} ctx      { halt, merge, dryRun, attempt, maxRepairs, guardPassed }
+ * @param {object} ctx      { halt, merge, dryRun, attempt, maxRepairs, guardPassed,
+ *                          treeChanged, capResumed }
  * @returns {{stage: string, disposition?: string, reason?: string}}
  */
 export function next(stage, result = {}, ctx = {}) {
@@ -338,15 +339,41 @@ export function landedOnStaleMain(disposition, restore) {
  *
  * `treeChanged` is what separates the two, and it is the signal the loop
  * already has: a capped agent that edited files was working, a capped agent
- * that left the tree untouched was spinning. Gated on `attempt === 1` so the
- * worst case is 2x the cap and never 3x, and on a session id, since there is
- * nothing to resume without one.
+ * that left the tree untouched was spinning. Gated on a session id, since
+ * there is nothing to resume without one.
+ *
+ * A RESUME IS A CONTINUATION, NOT A REPAIR, AND NO LONGER SPENDS AN ATTEMPT.
+ *
+ * It used to return `repair: true`, which the driver reads as "bump `attempt`",
+ * so the resume consumed one of `maxRepairs`. Measured across every iteration
+ * that has ever reached PUBLISH: the only two FEATURE beads (Cebab-2t9.1,
+ * Cebab-2t9.2) both took all three allowed attempts, in the same shape —
+ * attempt 1 capped at 61 turns, attempt 2 resumed and did the work but failed
+ * `format:check`, attempt 3 ran Prettier and passed. Both therefore merged with
+ * ZERO repairs left, and had CI then gone red — which it did on Cebab-7r8 —
+ * a complete, gate-passing change would have parked under `ci_red`.
+ *
+ * `maxRepairs` bounds how many times the loop may FIX something. A turn cap is
+ * not something the change got wrong; it is the driver interrupting a working
+ * agent. Charging the interruption to the repair budget spent the headroom
+ * before the first real failure. `Cebab-qd2.37`.
+ *
+ * THE BOUND MOVES TO ITS OWN FLAG rather than disappearing. `ctx.capResumed` is
+ * set by the driver the first time this fires and is per-ITERATION, so a second
+ * cap parks exactly as before — the old `attempt === 1` guard cannot be reused,
+ * because with the attempt no longer bumping it would read `1` forever and
+ * resume without limit. Worst case is now four `claude` invocations per bead
+ * (one capped, one resume, two repairs) against three, and that is the trade
+ * this makes deliberately: one extra capped-agent continuation against a
+ * finished change parking for want of a repair.
  */
 function cappedBuild(result, ctx) {
-  const attempt = ctx.attempt ?? 1;
   const maxRepairs = ctx.maxRepairs ?? 0;
-  if (attempt === 1 && maxRepairs >= 1 && ctx.treeChanged === true && result.sessionId) {
-    return { stage: STAGE.BUILD, repair: true, capped: true };
+  if (!ctx.capResumed && maxRepairs >= 1 && ctx.treeChanged === true && result.sessionId) {
+    // NO `repair: true`. That flag means "this costs an attempt" and is read by
+    // exactly one line in the driver; the two are separate facts and were only
+    // ever one because nothing needed them apart.
+    return { stage: STAGE.BUILD, capped: true };
   }
   return park(REASON.MAX_TURNS);
 }

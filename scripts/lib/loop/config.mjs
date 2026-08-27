@@ -39,7 +39,11 @@ export class ConfigError extends Error {
 export const DEFAULTS = Object.freeze({
   select: {
     maxPriority: 2,
-    excludeLabels: ['loop-stuck', 'needs-human', 'epic'],
+    // `loop-declined` is the second half of `loop-stuck` — see `beads.mjs`.
+    // BOTH exclude, and the exclusion is the point in both cases; the label
+    // only says WHICH kind of no this was. Omitting it here would make the new
+    // label decorative and re-select every declined bead on the next run.
+    excludeLabels: ['loop-stuck', 'loop-declined', 'needs-human', 'epic'],
     excludeTypes: ['epic', 'decision'],
     excludeIdPrefixes: [],
     // THE LOOP'S OWN EPIC. Every bead filed under it is about the driver, and
@@ -136,7 +140,18 @@ export const DEFAULTS = Object.freeze({
     merge: false,
   },
   limits: {
-    costCeilingUsd: null,
+    // THE RUN CEILING IS IN TOKENS, NOT DOLLARS, because the loop runs on a
+    // Claude subscription: a dollar figure prices a transaction that never
+    // happens, and the constraint the operator actually has is a rolling usage
+    // window. Counted as input + output + cache WRITES — `meteredTokens` in
+    // `usage.mjs` owns that definition and the reason cache reads are left out.
+    tokenCeiling: null,
+    // Still dollars, and it has to be: this is passed straight through as the
+    // CLI's own `--max-budget-usd`, which is the only per-bead budget the CLI
+    // enforces mid-turn. There is no `--max-tokens` equivalent (measured
+    // 2026-08-27 against `claude --help`), and a driver-side token sum can only
+    // notice an overrun it has already paid for. Treat the number as a proxy
+    // for tokens, not as a bill.
     beadCostCeilingUsd: null,
     cooldownMsBetweenBeads: 0,
     reserveMs: 2700000,

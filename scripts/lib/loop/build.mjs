@@ -33,6 +33,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { tokensFrom } from './usage.mjs';
+
 /**
  * §8.4 Layer 3 — did the SUBSCRIPTION stop this run?
  *
@@ -403,12 +405,23 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
 
       // Facts, recorded on EVERY outcome. The session id is what lets a human
       // (or a future repair) resume a capped build instead of redoing it, and
-      // the cost is what stops `costCeilingUsd` under-counting every failure
-      // it never saw.
+      // the consumption is what stops the run ceiling under-counting every
+      // failure it never saw.
+      //
+      // TOKENS ARE THE REPORTED UNIT, `costUsd` IS ONLY RECORDED. The loop runs
+      // on a subscription, so a dollar figure prices a transaction that never
+      // happens and says nothing about the usage window it actually spends. It
+      // is kept because it is the CLI's own number and the only free
+      // cross-model normaliser; nothing prints it. See `usage.mjs`, which also
+      // records why plan utilization itself is out of reach here.
       const telemetry = {
         sessionId: envelope?.session_id ?? null,
         numTurns: envelope?.num_turns ?? null,
         costUsd: envelope?.total_cost_usd ?? null,
+        tokens: tokensFrom(envelope),
+        // The CLI's own measurement of the turn, not the driver's wall clock:
+        // it excludes spawn and teardown, so two builds are comparable.
+        durationMs: envelope?.duration_ms ?? null,
         exitCode: result.code,
       };
 

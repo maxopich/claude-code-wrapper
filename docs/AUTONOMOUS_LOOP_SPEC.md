@@ -117,7 +117,9 @@ must not silently widen the guard.
 {
   "select": {
     "maxPriority": 2, // ignore beads with priority > this (0 = highest)
-    "excludeLabels": ["loop-stuck", "needs-human", "epic"],
+    // Both loop labels exclude. `loop-stuck` = a human must debug this;
+    // `loop-declined` = the loop read it and judged it out of scope (§6.8).
+    "excludeLabels": ["loop-stuck", "loop-declined", "needs-human", "epic"],
     "excludeTypes": ["epic", "decision"],
     "excludeIdPrefixes": [],
     "sortPolicy": "hybrid", // passed through to `bd ready`
@@ -191,8 +193,8 @@ must not silently widen the guard.
   // exception and it is inert on its own: it only applies once a time-based
   // `until` exists to reserve against. See §8.4.
   "limits": {
-    "costCeilingUsd": null, // whole-run; a token proxy, NOT a bill (§8.4)
-    "beadCostCeilingUsd": null, // abandon a single runaway bead
+    "tokenCeiling": null, // whole-run, in TOKENS (input+output+cache writes) — §8.4
+    "beadCostCeilingUsd": null, // abandon a single runaway bead; USD because the CLI flag is
     "cooldownMsBetweenBeads": 0, // paces the rolling usage window
     "reserveMs": 2700000, // 45 min — don't START a bead this close to a time deadline
     "onSessionLimit": "halt", // "halt" | "sleep_until_reset" — reactive, not a budget
@@ -353,9 +355,12 @@ No `git clean` — untracked files in this checkout include `.env` and
 ```sh
 npm run loop -- --status
 tail -f .loop/console.log
-jq -r '[.bead, .disposition, .build.costUsd, .pr.url] | @tsv' .loop/runs.jsonl
+jq -r '[.bead, .disposition, .build.numTurns, .pr.url] | @tsv' .loop/runs.jsonl
 jq -r 'select(.verdictVsGate == "disagree") | .bead' .loop/runs.jsonl   # read these first
-bd list --label loop-stuck                                             # morning queue
+bd list --label loop-stuck                                             # the loop FAILED at these
+bd list --label loop-declined                                          # it judged these out of scope
+jq -r 'select(.reason == "needs_human") | [.bead, .build.summary] | @tsv' .loop/runs.jsonl
+jq -r 'select(.driver.restarted) | .bead' .loop/runs.jsonl             # ran a self-restarted driver
 ```
 
 ---
@@ -452,7 +457,32 @@ violation, or timeout → park.
 `outcome: "no_change_needed"` is a legitimate result: skip to HARVEST, close the bead with the
 agent's summary as the reason, do not open a PR.
 
-`needs_human: true` → park immediately with reason `needs_human`, no gate, no PR.
+`needs_human: true` → park immediately with reason `needs_human`, no gate, no PR. Labelled
+`loop-declined` rather than `loop-stuck`, with the agent's own summary on the bead (§6.8).
+
+**A TURN CAP IS RESUMED ONCE, AND THE RESUME IS NOT A REPAIR.** `--max-turns` exhaustion returns a
+complete envelope with `terminal_reason: "max_turns"` and a session id. If the tree CHANGED, the
+agent was working and the driver re-enters BUILD with `--resume <sessionId>`; if it did not, the
+agent was spinning — the one cap ever observed was four consecutive identical `npm run typecheck`
+calls — and it parks under `max_turns`.
+
+The resume does **not** increment `attempt`, and that is a correction rather than a detail.
+`maxRepairs` bounds how many times the loop may FIX something; a turn cap is not something the
+change got wrong, it is the driver interrupting a working agent. Charging the interruption to the
+repair budget spent the headroom before the first real failure — measured across every iteration
+that has ever reached PUBLISH, the only two FEATURE beads (`Cebab-2t9.1`, `Cebab-2t9.2`) both took
+all three allowed attempts in an identical shape: attempt 1 capped at 61 turns, attempt 2 resumed
+and did the work but failed `format:check`, attempt 3 ran Prettier and passed. Both merged with
+ZERO repairs left, so a CI red — which happened on `Cebab-7r8` — would have parked a complete,
+gate-passing change under `ci_red`.
+
+The bound moves to its own per-iteration flag (`capResumed`) rather than disappearing: the old
+`attempt === 1` guard cannot be reused once the attempt stops incrementing, because it would read 1
+forever and resume without limit. Worst case is now four `claude` invocations per bead — one
+capped, one resume, two repairs — against three. That is the trade, taken deliberately: one extra
+continuation of a demonstrably-working agent, against a finished change parking for want of a
+repair. `capResumes` is recorded separately in the ledger so `attempts` alone no longer
+under-reports what a bead cost. `Cebab-qd2.37`.
 
 ### 6.4 GATE — _driver_
 
@@ -642,17 +672,39 @@ A queued merge has not happened and may not for hours.
 
 1. **Four terminal states reach the bead, not two.**
 
-   | Disposition        | Bead write                                                                      |
-   | ------------------ | ------------------------------------------------------------------------------- |
-   | `merged`           | `bd close <id> --reason "<pr url>"`                                             |
-   | `no_change_needed` | `bd close <id> --reason "<verdict summary>"`                                    |
-   | `parked`           | `bd update <id> --status open --add-label loop-stuck --append-notes <evidence>` |
-   | `guard_withheld`   | `bd update <id> --append-notes "PR: … — awaiting a human merge"`, left claimed  |
-   | `merge_queued`     | `bd update <id> --append-notes "auto-merge enabled, nothing merged yet"`        |
+   | Disposition        | Bead write                                                                                         |
+   | ------------------ | -------------------------------------------------------------------------------------------------- |
+   | `merged`           | `bd close <id> --reason "<pr url>"`                                                                |
+   | `no_change_needed` | `bd close <id> --reason "<verdict summary>"`                                                       |
+   | `parked`           | `bd update <id> --status open --add-label <loop-stuck \| loop-declined> --append-notes <evidence>` |
+   | `guard_withheld`   | `bd update <id> --append-notes "PR: … — awaiting a human merge"`, left claimed                     |
+   | `merge_queued`     | `bd update <id> --append-notes "auto-merge enabled, nothing merged yet"`                           |
 
    `--add-label`, **not** `--label` — the latter is a _filter_ flag on `ready`/`list` and is
    rejected by `update`; `--set-labels` would replace every existing label. The park evidence is
    the failing step, the CI run URL and the PR url.
+
+   **A PARK HAS TWO LABELS, BECAUSE IT HAS TWO MEANINGS.** `loop-stuck` means a human must debug
+   this — the build crashed, the gate would not go green, CI stayed red. `loop-declined` means the
+   loop READ the bead and said no: the agent judged it unsuitable for an unattended run, which is
+   the bail-out working exactly as designed. Both exclude the bead from every future SELECT and
+   both must (nothing should spend a second budget on either), so the label carries only the
+   distinction an operator triaging `bd list --label loop-stuck` needs and could not previously
+   make. Which reasons count as a decline is decided by **one predicate**, `countsTowardDeclines` —
+   the circuit breaker's own — so the label and the counter cannot drift apart. §8.3 split the
+   counters and stopped short of the labels; this is the other half. `Cebab-qd2.36`.
+
+   **THE PARK EVIDENCE CARRIES THE AGENT'S OWN ACCOUNT, AND FOR A DECLINE IT IS THE ONLY CONTENT.**
+   The note is composed from `build.detail`, the last gate step, the CI url and the PR url — and a
+   decline has none of them, because the build SUCCEEDED (it returned a verdict whose outcome is a
+   refusal) and no gate, CI or PR ever ran. Every optional line filtered out and only the header
+   survived: measured on Cebab-4ey.2, 43 characters reading `Parked by the autonomous loop:
+needs_human.` stood for five turns of judgement on a bead the label then retired from the
+   backlog for good. The evidence now quotes `verdict.summary`, and carries
+   `claude --resume <sessionId>` — the affordance `Cebab-qd2.14` gave a turn cap, on the park a
+   human is most likely to want to overrule. The resume line is suppressed when `build.detail`
+   already names the session, so a cap does not print it twice. `summary` also rides the ledger row
+   (§9.1), so a morning triage needs one file rather than two.
 
    The last two rows used to do **nothing at all**, and one of them is the DEFAULT: `loop.merge` is
    false, so `guard_withheld` is how an ordinary successful iteration ends. The bead was left
@@ -662,9 +714,10 @@ A queued merge has not happened and may not for hours.
    right for something a human must debug and wrong for something a human must merely merge.
 
    **The bead write is checked.** `park` and `close` return a boolean that every caller used to
-   drop. A failed park is the expensive one — `loop-stuck` is the loop's only cross-run memory, so
-   without it the same failing bead is selected again tomorrow night and fails again. It retries
-   once and records `harvest.parkFailed` either way.
+   drop. A failed park is the expensive one — the label is the loop's only cross-run memory, so
+   without it the same bead is selected again tomorrow night and lands in the same place. It
+   retries once, records `harvest.parkFailed` either way, and the log line names the label it could
+   not set rather than assuming `loop-stuck`.
 
 2. For each `verdict.follow_ups[]`, ONE call:
    `bd create --type <type> --priority 3 --labels loop-found --deps discovered-from:<source>`
@@ -943,10 +996,16 @@ Three facts set the shape of this, and none of them is negotiable:
    documented as working with `--print`, which is the loop's mode. (An earlier draft of this spec
    asserted the opposite as a non-negotiable fact; measured false on CLI 2.1.212.) It is enforced
    by the CLI mid-turn, so `limits.beadCostCeilingUsd` is passed straight through rather than
-   detected afterwards. There is still no ceiling spanning a whole RUN, so `limits.costCeilingUsd`
-   remains a driver-side sum over each BUILD's `total_cost_usd`.
-2. **Remaining quota cannot be queried from a script.** `/usage` is interactive-only. The loop
-   cannot look before it leaps; it can only budget in advance and react on impact.
+   detected afterwards. There is still no ceiling spanning a whole RUN, so `limits.tokenCeiling`
+   remains a driver-side sum over each BUILD's token counts.
+2. **Remaining quota cannot be queried from a script.** `/usage` is interactive-only, and the JSON
+   result envelope carries no rate-limit block of any kind — measured 2026-08-27 against the
+   shipped SDK types, where the fields that WOULD answer it
+   (`SDKControlGetUsageResponse.rate_limits`, with a utilization percentage and a `resetsAt` per
+   window) belong to a `get_usage` **control request** that only a streaming-input SDK session can
+   issue. BUILD is a one-shot `claude -p` and cannot. So the loop cannot look before it leaps; it
+   can only budget in advance and react on impact, and it must not invent a proxy for plan
+   utilization. `Cebab-qd2.38`.
 3. **On a subscription limit the CLI does not back off — it fails.** It writes a line and exits
    non-zero. There are THREE templates, not one, and the vocabulary is a literal in the shipped
    binary — extract it rather than guessing, and re-extract it when the CLI updates:
@@ -973,7 +1032,7 @@ Three facts set the shape of this, and none of them is negotiable:
    (hvg) => "You've reached your Fable 5 limit.";
    ```
 
-**Layer 1 — budget the driver imposes. All of it ships OFF.** `limits.costCeilingUsd`,
+**Layer 1 — budget the driver imposes. All of it ships OFF.** `limits.tokenCeiling`,
 `limits.beadCostCeilingUsd` and `limits.cooldownMsBetweenBeads` default to null/0, and
 `build.tiers` defaults to empty. Implement every one of them properly — the maintainer wants the
 knobs to exist and to be tested — but the first weeks run unconstrained so the ledger can show
@@ -982,11 +1041,24 @@ and the two runaway guards that are not budgets — `build.maxTurns: 60` and `lo
 are the only things bounding a run out of the box.
 
 `beadCostCeilingUsd`, when set, becomes `--max-budget-usd` on the BUILD invocation — the CLI stops
-the turn instead of the driver noticing an overrun it has already paid for.
-`costCeilingUsd` sums `total_cost_usd` from each BUILD envelope. On a subscription that number is
-**not a bill** — it is a local estimate computed from token counts at list rates. Treat it as a
-_proxy for tokens consumed_, which is what the usage window actually meters. Say so in `--status`
-output; do not print it as money spent.
+the turn instead of the driver noticing an overrun it has already paid for. It stays in DOLLARS
+because that is the flag the CLI offers; there is no `--max-tokens` equivalent (measured
+2026-08-27), and a driver-side token sum can only notice an overrun already paid for. Treat the
+number as a proxy for tokens, never as a bill.
+
+**THE RUN CEILING IS IN TOKENS, AND SO IS EVERY HUMAN-FACING NUMBER.** The loop runs on a Claude
+subscription, so `total_cost_usd` prices a transaction that never happens: it says nothing about
+the rolling usage window that is the operator's actual constraint. `limits.tokenCeiling` sums the
+`usage` block of each BUILD envelope and counts **input + output + cache writes**. Cache READS are
+excluded, and the exclusion is a decision rather than an omission — they are the cheapest class by
+roughly an order of magnitude and, on an agent loop that re-sends a growing transcript every turn,
+the largest by 10–40x, so a ceiling on the raw sum would fire on the discount rather than on the
+work. `meteredTokens` in `scripts/lib/loop/usage.mjs` is the single definition.
+
+`total_cost_usd` is still RECORDED on every ledger row — it is the CLI's own number and the only
+free cross-model normaliser — and is **printed nowhere**. `--status`, the per-build `usage:` line
+and the final `stopped:` line all report turns, wall time and the four token classes, never a
+summed total and never a currency.
 
 `limits.reserveMs` is the rule that matters most in practice: **do not start a bead you cannot
 finish.** Before SELECT, if less than `reserveMs` remains against the wall-clock budget or
@@ -1052,11 +1124,15 @@ directly with an injected `run` that returns the limit message.
   "build": {
     "sessionId": "…",
     "numTurns": 23,
-    "costUsd": 1.84,
+    "costUsd": 1.84, // recorded, never printed — see §8.4
+    "tokens": { "input": 1200, "output": 340, "cacheRead": 900000, "cacheCreation": 5600 },
+    "durationMs": 432000,
     "exitCode": 0,
     "outcome": "implemented",
     "risk": "medium",
+    "summary": "…", // the agent's own account; the WHOLE content of a decline (§6.8)
     "attempts": 1,
+    "capResumes": 0, // turn caps RESUMED; not an attempt, so `attempts` alone under-counts
   },
   "gate": {
     "steps": [{ "name": "lint", "exitCode": 0, "ms": 8210 }],
@@ -1071,6 +1147,7 @@ directly with an injected `run` that returns the limit message.
   "land": { "merged": true, "queued": false, "sha": "a91298b", "state": "MERGED" },
   "harvest": { "beadClosed": true, "followUps": ["Cebab-p2x"] },
   "restore": { "pulled": true, "detail": "" },
+  "driver": { "revision": "d72439b…", "restarted": false },
   "disposition": "merged",
 }
 ```
@@ -1081,12 +1158,14 @@ dry_run`. Write the record even on a crash — wrap the iteration so the `finall
 Four fields exist to stop a PREDICTION reading as an OUTCOME, and each answers a question the
 record could not previously be asked:
 
-| Field            | Why it is there                                                                                                                     |
-| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `land.queued`    | `--auto` enables auto-merge and returns 0. `merged` and `queued` may never both be true (§6.7).                                     |
-| `land.sha`       | `mergeCommit.oid`. Hardcoded `null` on every row ever written, so nothing could be checked against `main`.                          |
-| `land.state`     | The forge's own word for it, printed rather than interpreted.                                                                       |
-| `restore.pulled` | Whether the teardown's `git pull --ff-only` advanced `main`. `false` after a landed row is the `stale_main` halt's evidence (§6.8). |
+| Field             | Why it is there                                                                                                                                                                                                                                                                                                                                                                                      |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `land.queued`     | `--auto` enables auto-merge and returns 0. `merged` and `queued` may never both be true (§6.7).                                                                                                                                                                                                                                                                                                      |
+| `land.sha`        | `mergeCommit.oid`. Hardcoded `null` on every row ever written, so nothing could be checked against `main`.                                                                                                                                                                                                                                                                                           |
+| `land.state`      | The forge's own word for it, printed rather than interpreted.                                                                                                                                                                                                                                                                                                                                        |
+| `restore.pulled`  | Whether the teardown's `git pull --ff-only` advanced `main`. `false` after a landed row is the `stale_main` halt's evidence (§6.8).                                                                                                                                                                                                                                                                  |
+| `driver.revision` | WHICH driver produced this row. Node imports the driver at process start and preflight pulls `main` under it, so a run can execute a revision older than the checkout it is working in — and with nothing recorded, "the fix did not fire" and "the fix does not work" were indistinguishable afterwards. `restarted` is true on a row written by the child of a self-restart (§13). `Cebab-qd2.35`. |
+| `build.tokens`    | The four token classes, or **null** when the envelope could not say. Null rather than zeros: unknown and free are different facts, which is the lesson `land.sha` taught.                                                                                                                                                                                                                            |
 
 `harvest.parkFailed` is present **only when a park failed**, so `jq 'select(.harvest.parkFailed)'`
 matches nothing on a healthy night — the same idiom as `.build.failure` and `.crash`.
@@ -1114,8 +1193,14 @@ that routes through the same runner and so exercises the win32 shell decision. `
 
 ### 9.2 `.loop/state.json`
 
-`{ "consecutiveParks": 0, "parkedThisRun": [], "spentUsd": 0, "startedAt": "…" }` — rewritten at
-each boundary so a crashed run can be diagnosed and the breaker survives a restart.
+`{ "consecutiveParks": 0, "consecutiveDeclines": 0, "parkedThisRun": [], "tokens": { … },
+"turns": 0, "startedAt": "…" }` — rewritten at each boundary so a crashed run can be diagnosed and
+the breaker survives a restart.
+
+**`tokens` and `turns`, not `spentUsd`.** The operator is on a subscription, so a dollar total
+answers a question nobody asked. `--status` prints the four classes and the turn count and no
+currency at all; §8.4 has the reasoning and the one thing that would be better still — plan-window
+utilization — and why `claude -p` cannot supply it.
 
 **It carries the exit code, because nothing else can see it.** `loop:night` pipes the driver into
 `tee`, and a shell pipeline exits with its LAST command's status — always `tee`'s, effectively
@@ -1257,22 +1342,33 @@ So the rehearsal runs the **real driver** end-to-end against a scratch git repo 
 `scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
 its own path — the installed copy would drive this checkout.
 
-Eleven scenarios, each asserting on the ledger AND on the bare repo's `main`:
+Fifteen scenarios, each asserting on the ledger AND on the bare repo's `main`:
 
-| Scenario                 | What only it can prove                                                              |
-| ------------------------ | ----------------------------------------------------------------------------------- |
-| `green-merge`            | LAND merges, the bead closes, `land.sha` IS origin/main, bead 2 branches off bead 1 |
-| `queued`                 | a queued auto-merge does not close the bead and does not move `main` (§6.7)         |
-| `withheld`               | the default mode notes the PR on the bead, and bead 2 branches from `main`          |
-| `stale-main`             | a landed iteration whose pull failed HALTS instead of compounding                   |
-| `capped-then-resume`     | a cap that edited files is resumed once, with `--resume`, **and opens the PR**      |
-| `gate-fail-then-publish` | attempt 1 dying at GATE still opens a PR on attempt 2 (§6.5)                        |
-| `ci-red-repair`          | the one path where attempt 2 must NOT open a second PR                              |
-| `halted-mid-run`         | a HALT hands the bead back rather than stranding it `in_progress` (§9.3)            |
-| `branch-exists`          | a failed `checkout -b` parks instead of letting every later stage run on `main`     |
-| `bd-broken`              | a crash before SELECT exits NON-ZERO instead of reporting a drained queue           |
-| `json-stream`            | `--json` leaves stdout parseable as JSONL, with the human lines on stderr           |
-| `capped-no-progress`     | a cap that edited nothing parks, and `claude` runs exactly once                     |
+| Scenario                 | What only it can prove                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------ |
+| `green-merge`            | LAND merges, the bead closes, `land.sha` IS origin/main, bead 2 branches off bead 1  |
+| `queued`                 | a queued auto-merge does not close the bead and does not move `main` (§6.7)          |
+| `withheld`               | the default mode notes the PR on the bead, and bead 2 branches from `main`           |
+| `stale-main`             | a landed iteration whose pull failed HALTS instead of compounding                    |
+| `capped-then-resume`     | a cap that edited files is resumed once, with `--resume`, **and opens the PR**       |
+| `gate-fail-then-publish` | attempt 1 dying at GATE still opens a PR on attempt 2 (§6.5)                         |
+| `ci-red-repair`          | the one path where attempt 2 must NOT open a second PR                               |
+| `halted-mid-run`         | a HALT hands the bead back rather than stranding it `in_progress` (§9.3)             |
+| `branch-exists`          | a failed `checkout -b` parks instead of letting every later stage run on `main`      |
+| `bd-broken`              | a crash before SELECT exits NON-ZERO instead of reporting a drained queue            |
+| `json-stream`            | `--json` leaves stdout parseable as JSONL, with the human lines on stderr            |
+| `capped-no-progress`     | a cap that edited nothing parks, and `claude` runs exactly once                      |
+| `driver-stale`           | preflight's pull rewrites `loop.mjs` under the running process — it restarts (§13)   |
+| `capped-keeps-repair`    | a cap resume leaves a repair for a CI red instead of parking finished work (§6.3)    |
+| `declined`               | a declined bead carries the agent's reasoning and is labelled `loop-declined` (§6.8) |
+
+`driver-stale` is the one that needed a new kind of evidence. A log line saying "restarting"
+proves only that the driver said so, so the scenario pushes a commit that appends a marker
+`process.stderr.write` to the scratch repo's own `scripts/loop.mjs` and then resets the working
+clone one commit behind. That statement runs at import, so it appears exactly once and only in a
+process that loaded the PULLED copy — and never at all if the restart is removed. The shim call log
+also records `CEBAB_LOOP_REEXEC` per call, so the scenario can assert the BUILD happened in the
+child while preflight ran in both.
 
 **The harness was itself vacuous for `Cebab-qd2.18`, and that is the lesson worth keeping.**
 `capped-then-resume` traverses the exact path where attempt 2 reaches PUBLISH having never created
@@ -1333,12 +1429,16 @@ at 36% CPU, not the harness.
 - [ ] With a time-based `--until` less than `limits.reserveMs` away, the loop stops before SELECT
       rather than starting a bead it cannot finish. With a count-based `--until`, `reserveMs` is
       inert.
-- [ ] A default-config run applies no cost ceiling, no cooldown and no model tiering.
+- [ ] A default-config run applies no token ceiling, no cooldown and no model tiering.
 - [ ] `npm run loop:stop` halts a detached run; `npm run loop:recover` restores a hard-killed one
       without deleting untracked files.
-- [ ] `--status` prints the cost figure labelled as a token-usage estimate, never as money spent.
-- [ ] `npm run loop:rehearse` passes all eight scenarios (§11.1) — the only thing that executes the
-      green path without touching GitHub, and the only regression test LAND has.
+- [ ] No human-facing output carries a currency figure. `--status`, the per-build `usage:` line
+      and the final `stopped:` line report turns, wall time and the four token classes; `costUsd`
+      stays on the ledger row and is printed nowhere (§8.4).
+- [ ] A build whose envelope carries no usage block records `tokens: null` rather than zeros, and
+      the run total is unaffected rather than `NaN`.
+- [ ] `npm run loop:rehearse` passes all fifteen scenarios (§11.1) — the only thing that executes
+      the green path without touching GitHub, and the only regression test LAND has.
 - [ ] A queued auto-merge is recorded as `merge_queued`, does **not** close the bead, and does not
       reset the circuit breaker.
 - [ ] A landed iteration whose teardown `git pull --ff-only` fails halts the run under
@@ -1356,6 +1456,15 @@ at 36% CPU, not the harness.
 - [ ] A `needs_human` park does not increment the circuit breaker, every other park does, and no
       outcome increments both counters. `consecutiveDeclineLimit` consecutive declines stop the run
       with a message about the QUEUE, not about the loop.
+- [ ] A run whose preflight pull MOVES `HEAD` restarts itself once on the pulled revision before
+      claiming a bead, and a second move inside the child exits 2 rather than starting a third
+      process. Every ledger row names the driver revision that produced it (§13).
+- [ ] A turn cap that is resumed does not consume one of `maxRepairs`: a bead that is capped, then
+      fails the gate, then goes red in CI still has an attempt left for the CI failure. `attempts`
+      and `capResumes` together account for every `claude` invocation (§6.3).
+- [ ] A declined bead is labelled `loop-declined`, not `loop-stuck`; its note quotes the agent's
+      summary and carries `claude --resume <sessionId>`; and a genuine failure is still
+      `loop-stuck`. Both labels exclude the bead from SELECT (§6.8).
 - [ ] `npm run loop:watch` cannot signal the run (read-only attach), and the driver survives its
       stdout pipe closing under it.
 - [ ] `npm run lint && npm run typecheck && npm test` pass with the new files.
@@ -1385,6 +1494,25 @@ unpushed local work, the normal state of a checkout someone has been developing 
 into the bead's PR. Checked here rather than left to the per-iteration teardown, whose pull runs at
 the END of an iteration: the first bead of every run would already have been built on whatever was
 lying around.
+
+**AND THE DRIVER RESTARTS ITSELF IF THAT PULL MOVED `HEAD`.** Node imports `scripts/loop.mjs` and
+every `scripts/lib/loop/*.mjs` at process start, and the pull above rewrites those files a moment
+later — so the requirement that keeps beads off stale code is also what leaves the driver running
+a stale copy of itself. Measured 2026-08-27 from a real run's reflog and ledger, which line up to
+the second: the process started with `main` three merges behind and its own preflight advanced the
+checkout one second later, so `select.excludeParents` — merged that morning precisely to keep the
+loop off its own epic — did not exist in memory, and two beads under that epic were built and
+closed through a path a merged commit had already replaced.
+
+The restart happens HERE, in the window between preflight and `acquireLock`: no lock is held, no
+bead is claimed, nothing is in flight, so the parent has nothing to hand over. It is `spawn`
+(Node cannot replace its own image) with the same argv, `stdio: 'inherit'`, and `CEBAB_LOOP_REEXEC=1`
+in the child env; SIGINT and SIGTERM are forwarded, because a `kill` aimed at the parent alone would
+otherwise leave the child working a bead unwatched. If the child's own preflight moves `HEAD` again,
+it exits 2 rather than starting a third process — that is a repository doing something this run
+should not race, not a routine "someone merged while I was starting". Every ledger row also records
+`driver.revision` and `driver.restarted`, which is what makes a stale run diagnosable after the fact
+rather than invisible. `Cebab-qd2.35`.
 
 The `.env` line is conditional on `gate.playgroundTier` resolving to anything but `"never"`: parse
 `.env`, resolve `CEBAB_DATA_DIR` and `WORKSPACE_ROOT`, and refuse to start unless both sit inside

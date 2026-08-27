@@ -83,6 +83,19 @@ const SCENARIOS = {
       ctx.ok(ctx.mainContains(two.land.sha), 'origin/main contains iteration 2');
       ctx.eq(ctx.parentOf(two.land.sha), one.land.sha, 'bead 2 branched off bead 1, not main@0');
       ctx.eq(two.land.sha, ctx.originSha(), 'and the last merge IS what origin/main now points at');
+      // WHAT THE RUN REPORTS IT CONSUMED (Cebab-qd2.38). The operator is on a
+      // subscription, so a dollar figure prices a transaction that never
+      // happens. This is the only place the whole reporting path — envelope ->
+      // ledger -> state.json -> console — runs end to end.
+      ctx.ok(one.build.tokens, 'the ledger row carries the token classes');
+      ctx.eq(one.build.tokens?.cacheRead, 900000, 'read out of the envelope, not invented');
+      ctx.ok(ctx.state()?.tokens, 'and the run total reaches state.json');
+      ctx.eq(ctx.state()?.spentUsd, undefined, 'which no longer carries a dollar figure at all');
+      ctx.ok(ctx.stdout.includes('cache read'), 'the console says what was consumed');
+      // The assertion the operator actually asked for, stated directly.
+      ctx.ok(!ctx.stdout.includes('$'), 'and never prints a price');
+      // Both directions: the number is still RECORDED, it is only never shown.
+      ctx.eq(one.build.costUsd, 0.2, 'the CLI cost is still on the row');
     },
   },
 
@@ -177,7 +190,15 @@ const SCENARIOS = {
       ctx.eq(ctx.calls.claude.length, 2, 'claude ran twice');
       ctx.ok(!ctx.calls.claude[0].includes('--resume'), 'the first attempt was fresh');
       ctx.ok(ctx.calls.claude[1].includes('--resume'), 'the second RESUMED the session');
-      ctx.eq(row.build.attempts, 2, 'recorded as two attempts');
+      // REWRITTEN, NOT RELAXED (Cebab-qd2.37). This asserted `attempts: 2`,
+      // which encoded the accounting the bead is about: a resume charged to
+      // `maxRepairs`, so a feature bead spent two of its three attempts before
+      // the first real failure. The invocation is still counted — it moved to
+      // its own field, and `attempts + capResumes` is what the two `claude`
+      // calls now add up to. `capped-keeps-repair` is the scenario that shows
+      // why it matters.
+      ctx.eq(row.build.attempts, 1, 'still attempt ONE — a resume is not a repair');
+      ctx.eq(row.build.capResumes, 1, 'and the resume is counted in its own field');
       ctx.eq(row.disposition, 'guard_withheld', 'and it got all the way to a green PR');
       // Cebab-qd2.18. Attempt 1 died inside BUILD, so attempt 2 is the FIRST to
       // reach PUBLISH and MUST open the PR. This assertion is the whole reason
@@ -341,6 +362,119 @@ const SCENARIOS = {
     },
   },
 
+  'driver-stale': {
+    why: 'preflight pulls main UNDER the running driver — it must restart on what it pulled (Cebab-qd2.35)',
+    // The first defect where the loop's own fixes were present on disk and did
+    // not take effect. Node imports the driver at process start; preflight's
+    // `git pull --ff-only` is REQUIRED (it is what stops beads being built on a
+    // stale base) and rewrites those exact files a second later. Measured on a
+    // real run: two beads under the loop's own epic were selected by an
+    // `excludeParents` that had been merged that morning and was not in memory.
+    args: ['--until', '1'],
+    plan: {
+      beads: 1,
+      ci: 'green',
+      merge: 'direct',
+      originAhead: true,
+      build: [{ kind: 'verdict', edit: true }],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      // THE ASSERTION THAT CANNOT BE SATISFIED BY A LOG LINE. The marker is a
+      // top-level statement in the PULLED `loop.mjs`, so it runs at import and
+      // only in a process that loaded the new copy.
+      const markers = ctx.stdout.split('REHEARSED-NEW-DRIVER').length - 1;
+      ctx.eq(markers, 1, 'the pulled driver ran, exactly once');
+      ctx.ok(ctx.stdout.includes('Restarting on the pulled one'), 'and said why');
+      // And the WORK happened in the child, not in the stale parent.
+      const builds = ctx.callRows.filter((r) => r.tool === 'claude');
+      ctx.eq(builds.length, 1, 'one build');
+      ctx.eq(builds[0].reexec, '1', 'and it ran in the restarted process');
+      // The parent got as far as preflight and no further — `gh auth status`
+      // is the last thing preflight does, so it appears from both processes.
+      ctx.ok(
+        ctx.callRows.some((r) => r.tool === 'gh' && r.reexec === null),
+        'the parent did run preflight',
+      );
+      // The run still completes: this must not trade a stale driver for a
+      // refusal, which is candidate (b) and the option that trains people to
+      // ignore it.
+      ctx.eq(ctx.records.length, 1, 'the iteration ran');
+      ctx.eq(row.disposition, 'guard_withheld', 'and reached its normal terminal');
+      ctx.eq(ctx.exitCode, 0, 'exiting OK');
+      // Candidate (d), which composes with the restart rather than replacing it.
+      ctx.eq(row.driver?.restarted, true, 'the row says it came from a restarted driver');
+      ctx.eq(row.driver?.revision, ctx.originSha(), 'and names the revision it ran');
+    },
+  },
+
+  'capped-keeps-repair': {
+    why: 'a resumed turn cap must not spend a repair — the headroom is for a CI red (Cebab-qd2.37)',
+    // The shape both feature beads ever merged actually took: attempt 1 capped,
+    // attempt 2 does the work and fails `format:check`, attempt 3 runs Prettier.
+    // Both landed with ZERO repairs left, so a CI red would have parked a
+    // complete, gate-passing change. Here CI DOES go red, and the run must
+    // still have an attempt for it.
+    args: ['--until', '1'],
+    plan: {
+      beads: 1,
+      merge: 'direct',
+      gateFailOnAttempt: 2,
+      gateFailStep: 'format:check',
+      ci: ['green', 'green', 'red', 'green'],
+      build: [
+        { kind: 'max_turns', edit: true },
+        { kind: 'verdict', edit: true },
+        { kind: 'verdict', edit: true },
+        { kind: 'verdict', edit: true },
+      ],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      // FOUR invocations: capped, resume, format repair, CI repair. Under the
+      // old accounting the resume consumed a repair, so the third invocation
+      // was the last and the CI red parked the finished work.
+      ctx.eq(ctx.calls.claude.length, 4, 'four claude invocations');
+      ctx.ok(ctx.calls.claude[1].includes('--resume'), 'the second RESUMED the capped session');
+      ctx.eq(row.build.capResumes, 1, 'recorded as one cap resume');
+      ctx.eq(row.build.attempts, 3, 'and three attempts — the resume is not one of them');
+      // The consequence, from the other end.
+      ctx.eq(row.ci.conclusion, 'success', 'the CI repair went green');
+      ctx.eq(row.disposition, 'guard_withheld', 'and the bead reached its normal terminal');
+      ctx.ok(row.reason !== 'ci_red', 'rather than parking with the work complete');
+      ctx.eq(ctx.prCreates(), 1, 'still exactly one PR across all four');
+    },
+  },
+
+  declined: {
+    why: 'a bead the agent DECLINES must carry the reasoning and say it was a judgement (Cebab-qd2.36)',
+    // Measured on Cebab-4ey.2: 5 turns of judgement, and the durable record was
+    // 43 characters reading `Parked by the autonomous loop: needs_human.` on a
+    // bead the label then excluded from every future selection.
+    args: ['--until', '1'],
+    plan: { beads: 1, ci: 'green', merge: 'direct', build: [{ kind: 'decline' }] },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(ctx.calls.claude.length, 1, 'one build, and it succeeded');
+      ctx.eq(row.disposition, 'parked', 'parked');
+      ctx.eq(row.reason, 'needs_human', 'under needs_human');
+      ctx.eq(ctx.prCreates(), 0, 'nothing was published');
+      const update = ctx.calls.bd.find((c) => c.includes('--append-notes'));
+      ctx.ok(update, 'the bead got a note');
+      const note = update ? update[update.indexOf('--append-notes') + 1] : '';
+      ctx.ok(note.includes('Declined by the autonomous loop'), 'reading as a judgement');
+      ctx.ok(note.includes('deny hook blocks gh'), "quoting the agent's own account");
+      ctx.ok(note.includes('claude --resume sess-'), 'and offering the session to inspect');
+      ctx.ok(update.includes('loop-declined'), 'labelled loop-declined');
+      ctx.ok(!update.includes('loop-stuck'), 'and NOT loop-stuck — nothing failed');
+      // The reasoning is in the ledger too, so a morning triage needs one file.
+      ctx.ok(row.build.summary, 'the ledger carries the summary');
+      // Cebab-qd2.20, live: a decline is neutral evidence about the loop.
+      ctx.eq(ctx.state()?.consecutiveParks, 0, 'the breaker did not count it');
+      ctx.eq(ctx.state()?.consecutiveDeclines, 1, 'the decline counter did');
+    },
+  },
+
   'capped-no-progress': {
     why: 'a turn cap that edited nothing was spinning — park it, do not buy it more turns',
     args: ['--until', '1'],
@@ -378,8 +512,15 @@ const plan = JSON.parse(fs.readFileSync(path.join(DIR, 'plan.json'), 'utf8'));
 const statePath = path.join(DIR, 'shim-state.json');
 const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const save = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
+// \`reexec\` is what proves WHICH process made the call. The parent's preflight
+// probes run before any restart and carry null; everything the child does
+// carries '1'. Without it, "the driver restarted" and "the driver printed a
+// line about restarting" are the same assertion. (Cebab-qd2.35)
 const record = (tool) =>
-  fs.appendFileSync(path.join(DIR, 'calls.jsonl'), JSON.stringify({ tool, argv }) + '\\n');
+  fs.appendFileSync(
+    path.join(DIR, 'calls.jsonl'),
+    JSON.stringify({ tool, argv, reexec: process.env.CEBAB_LOOP_REEXEC ?? null }) + '\\n',
+  );
 // PREFLIGHT PROBES EVERY BINARY WITH \`--version\` (Cebab-qd2.34), and a shim must
 // answer that the way the real tool does: instantly, and WITHOUT side effects.
 // Answering it in the body instead cost real assertions — the probe consumed a
@@ -460,15 +601,43 @@ if (step.edit) {
     'export const answer = ' + (40 + state.builds) + ';\\n');
 }
 const sessionId = 'sess-' + (state.session ||= 'a1b2c3');
+// THE FOUR TOKEN CLASSES, IN A REALISTIC RATIO. Cache reads dominate an agent
+// loop by 10-40x, which is exactly why \`meteredTokens\` excludes them — a
+// fixture with four similar numbers would let a summed total pass every
+// assertion here. (Cebab-qd2.38)
+const usage = {
+  input_tokens: 1200, output_tokens: 340,
+  cache_read_input_tokens: 900000, cache_creation_input_tokens: 5600,
+};
 if (step.kind === 'max_turns') {
   process.stdout.write(JSON.stringify({
     type: 'result', session_id: sessionId, num_turns: 60, total_cost_usd: 0.5,
+    usage, duration_ms: 432000,
     terminal_reason: 'max_turns', errors: ['Reached maximum number of turns (60)'],
   }));
   process.exit(1);
 }
+// A DECLINE: the build SUCCEEDS and the verdict is a refusal. Every other
+// evidence line the harvest note is built from is empty for this shape, which
+// is the whole of Cebab-qd2.36.
+if (step.kind === 'decline') {
+  process.stdout.write(JSON.stringify({
+    type: 'result', session_id: sessionId, num_turns: 5, total_cost_usd: 0.5, is_error: false,
+    usage, duration_ms: 61000,
+    structured_output: {
+      outcome: 'blocked',
+      summary: 'The deny hook blocks gh outright, so this bead is not reachable by the loop.',
+      commit_type: 'fix', commit_scope: 'rehearsal', commit_subject: 'nothing was done',
+      files_changed: [],
+      tests: { added: [], commands_run: [] },
+      risk: 'low', needs_human: true, follow_ups: [],
+    },
+  }));
+  process.exit(0);
+}
 process.stdout.write(JSON.stringify({
   type: 'result', session_id: sessionId, num_turns: 7, total_cost_usd: 0.2, is_error: false,
+  usage, duration_ms: 61000,
   structured_output: {
     outcome: 'implemented',
     summary: 'rehearsal change',
@@ -622,6 +791,28 @@ function buildScratch(name, scenario) {
   git(repo, ['remote', 'add', 'origin', path.join(dir, 'origin.git')]);
   git(repo, ['push', '-q', '-u', 'origin', 'main']);
 
+  // A DRIVER FIX THAT LANDED AFTER THIS RUN'S PROCESS WOULD HAVE STARTED.
+  //
+  // The commit is pushed and then reset away locally, so the working clone is
+  // exactly one behind origin — the state preflight's `git pull --ff-only`
+  // exists to correct, and the state that rewrites `scripts/loop.mjs` under a
+  // process that already imported it.
+  //
+  // The marker goes in the DRIVER rather than in a new file on purpose: a new
+  // file would only prove the pull happened, which was never in doubt. A line
+  // at the top level of `loop.mjs` runs at import, so it appears exactly once
+  // and only in a process that loaded the PULLED copy. (Cebab-qd2.35)
+  if (scenario.plan.originAhead) {
+    fs.appendFileSync(
+      path.join(repo, 'scripts', 'loop.mjs'),
+      `\nprocess.stderr.write('REHEARSED-NEW-DRIVER\\n');\n`,
+    );
+    git(repo, ['add', 'scripts/loop.mjs']);
+    git(repo, ['commit', '-qm', 'a driver fix that landed after this run started']);
+    git(repo, ['push', '-q', 'origin', 'main']);
+    git(repo, ['reset', '--hard', '-q', 'HEAD~1']);
+  }
+
   const beadRows = Array.from({ length: scenario.plan.beads }, (_, i) => ({
     id: `Reh-${i + 1}`,
     title: `rehearsal bead ${i + 1}`,
@@ -688,16 +879,21 @@ function runScenario(name, scenario) {
         .map((l) => JSON.parse(l))
     : [];
   const calls = { bd: [], gh: [], npm: [], claude: [] };
+  const callRows = [];
   for (const line of fs.readFileSync(path.join(scratch.dir, 'calls.jsonl'), 'utf8').split('\n')) {
     if (!line) continue;
-    const { tool, argv } = JSON.parse(line);
-    calls[tool]?.push(argv);
+    const row = JSON.parse(line);
+    calls[row.tool]?.push(row.argv);
+    callRows.push(row);
   }
 
   const failures = [];
   const ctx = {
     records,
     calls,
+    // The same calls with the process they came from attached — see `record`
+    // in the shim preamble.
+    callRows,
     scratch,
     baseSha: scratch.baseSha,
     stdout: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,

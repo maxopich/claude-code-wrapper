@@ -44,17 +44,29 @@ export function claimArgv(id) {
   return ['update', id, '--claim'];
 }
 
-export function parkArgv(id, evidence) {
-  return [
-    'update',
-    id,
-    '--status',
-    'open',
-    '--add-label',
-    'loop-stuck',
-    '--append-notes',
-    evidence,
-  ];
+/**
+ * The two labels a park can leave, and why there are two.
+ *
+ * Both exclude the bead from every future SELECT (`select.excludeLabels`), and
+ * that exclusion is right in both cases — nothing should burn a second budget
+ * on a bead the loop already judged or already failed at. What differs is what
+ * a human reading the label learns.
+ *
+ * `loop-stuck` means A HUMAN MUST DEBUG THIS: the build crashed, the gate would
+ * not go green, CI stayed red, the merge was refused.
+ *
+ * `loop-declined` means THE LOOP READ IT AND SAID NO: the agent looked at the
+ * brief and judged the bead unsuitable for an unattended run. Nothing is broken
+ * — the loop working exactly as `Cebab-qd2.16` intended — and an operator
+ * scanning for what to fix should not have to open the bead to discover that.
+ * `Cebab-qd2.20` split the COUNTERS for this reason and stopped short of the
+ * labels; this is the other half. `Cebab-qd2.36`.
+ */
+export const PARK_LABEL = 'loop-stuck';
+export const DECLINE_LABEL = 'loop-declined';
+
+export function parkArgv(id, evidence, label = PARK_LABEL) {
+  return ['update', id, '--status', 'open', '--add-label', label, '--append-notes', evidence];
 }
 
 /**
@@ -186,9 +198,9 @@ export function makeBeads({ run, bd, cwd, dryRun = false }) {
      * Retried once — the common cause is a transient `bd` lock — and the
      * outcome is returned for the ledger either way.
      */
-    async park(id, evidence) {
-      let result = await write(parkArgv(id, evidence));
-      if (result.code !== 0) result = await write(parkArgv(id, evidence));
+    async park(id, evidence, label = PARK_LABEL) {
+      let result = await write(parkArgv(id, evidence, label));
+      if (result.code !== 0) result = await write(parkArgv(id, evidence, label));
       return result.code === 0;
     },
     async close(id, reason) {
