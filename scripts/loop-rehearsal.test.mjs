@@ -44,7 +44,13 @@ test('every scenario is actually wired into the suite above', () => {
   // Reddens if a scenario is added to the harness and never run. The loop-level
   // version of the same idea as the single-emit-point tests: the list and the
   // thing that consumes it must not drift.
-  expect(SCENARIO_NAMES.length).toBeGreaterThanOrEqual(6);
+  expect(SCENARIO_NAMES.length).toBeGreaterThanOrEqual(15);
   expect(SCENARIO_NAMES).toContain('green-merge');
   expect(SCENARIO_NAMES).toContain('queued');
+  // The three that carry a P0/P1 fix each and have no unit-test equivalent —
+  // a restart, a repair budget and a bead label are all end-to-end facts. A
+  // silent deletion here is exactly the vacuity this file exists to prevent.
+  expect(SCENARIO_NAMES).toContain('driver-stale');
+  expect(SCENARIO_NAMES).toContain('capped-keeps-repair');
+  expect(SCENARIO_NAMES).toContain('declined');
 });

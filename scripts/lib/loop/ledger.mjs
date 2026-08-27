@@ -100,15 +100,43 @@ export function buildRecord(parts = {}, now = 0) {
     build: {
       sessionId: build.sessionId ?? null,
       numTurns: build.numTurns ?? null,
+      // RECORDED, NEVER PRINTED. The loop runs on a Claude subscription, so this
+      // prices a transaction that never happens and says nothing about the usage
+      // window a run consumed — but it is the CLI's own number and the only free
+      // cross-model normaliser, and every row ever written carries it. `tokens`
+      // beside it is what the human-facing output reports. See `usage.mjs`.
       costUsd: build.costUsd ?? null,
+      // NULL, NOT ZEROS, when the envelope could not say — an unknown and a free
+      // turn are different facts, and `land.sha: null` on every row is what
+      // taught this loop the difference.
+      tokens: build.tokens ?? null,
+      durationMs: build.durationMs ?? null,
       exitCode: build.exitCode ?? null,
       outcome: build.outcome ?? null,
       risk: build.risk ?? null,
+      // The agent's own account of what it did or refused to do. For a DECLINE
+      // this is the only content the iteration produced (Cebab-qd2.36): the
+      // build succeeded, so `detail` is empty, and no gate, CI or PR ever ran.
+      summary: build.summary ?? null,
       attempts: build.attempts ?? 0,
+      // How many times a turn cap was RESUMED. Apart from `attempts` because a
+      // resume no longer costs one (Cebab-qd2.37), so `attempts` alone can no
+      // longer say how many `claude` invocations a bead cost.
+      capResumes: build.capResumes ?? 0,
       // Present only on a failed BUILD; `jq 'select(.build.failure)'` is the
       // morning triage query.
       ...(build.failure ? { failure: build.failure } : {}),
       ...(build.detail ? { detail: build.detail } : {}),
+    },
+    // WHICH DRIVER PRODUCED THIS ROW. Node imports the driver at process start
+    // and preflight then pulls `main` under it, so a run can execute a revision
+    // older than the checkout it is working in — and nothing recorded it, which
+    // made "the fix did not fire" indistinguishable from "the fix does not work"
+    // after the fact. `restarted` is true on a row written by the child of a
+    // self-restart. `Cebab-qd2.35`.
+    driver: {
+      revision: parts.driverRevision ?? null,
+      restarted: parts.driverRestarted ?? false,
     },
     gate: {
       steps,

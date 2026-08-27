@@ -25,6 +25,7 @@
  * clean, no surviving tsx watch"; a run that ends on a feature branch with a
  * live dev:server is the state that costs the next session an hour.
  */
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,12 +48,20 @@ import {
   resetsBreaker,
 } from './lib/loop/machine.mjs';
 import { evaluateGuard } from './lib/loop/guard.mjs';
+import { REEXEC_ENV, reexecArgv, reexecEnv, reexecPlan } from './lib/loop/self_update.mjs';
+import {
+  ZERO_TOKENS,
+  addTokens,
+  formatUsage,
+  meteredTokens,
+  withoutLegacyCost,
+} from './lib/loop/usage.mjs';
 import { scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import { chooseBead, denyPathStems } from './lib/loop/select.mjs';
 import { appendRecord, buildRecord, compareVerdictToGate } from './lib/loop/ledger.mjs';
 import { makeRunner } from './lib/loop/run.mjs';
 import { LockHeldError, acquireLock, releaseLock } from './lib/loop/lock.mjs';
-import { makeBeads } from './lib/loop/beads.mjs';
+import { DECLINE_LABEL, PARK_LABEL, makeBeads } from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject, makeGit } from './lib/loop/git.mjs';
 import { makeForge } from './lib/loop/forge.mjs';
 import { assertPlaygroundEnv, makeGate } from './lib/loop/gate.mjs';
@@ -261,10 +270,26 @@ async function runIteration({ ctx, deps, log }) {
   // an absent one threw `Cannot read properties of undefined (reading 'push')`
   // on the first follow-up any verdict carried — which is most of them,
   // `follow_ups` being a required key of the schema.
-  const parts = { build: {}, gate: {}, guard: {}, harvest: { beadClosed: false, followUps: [] } };
+  const parts = {
+    build: {},
+    gate: {},
+    guard: {},
+    harvest: { beadClosed: false, followUps: [] },
+    // Set here rather than at the append, so the row a CRASHED iteration
+    // salvages still says which driver produced it — which is the case the
+    // revision matters most for. `Cebab-qd2.35`.
+    driverRevision: deps.driverRevision ?? null,
+    driverRestarted: Boolean(deps.driverRestarted),
+  };
   let stage = STAGE.SELECT;
   let bead = null;
   let attempt = 1;
+  // How many times a turn-capped BUILD was RESUMED. Counted apart from
+  // `attempt` because a resume is a continuation, not a repair, and no longer
+  // spends one of `maxRepairs` (Cebab-qd2.37) — this is what still bounds it to
+  // one per iteration, and what keeps the ledger able to say how many `claude`
+  // invocations an iteration actually cost.
+  let capResumes = 0;
   let disposition = null;
   let reason = null;
   // Did HARVEST run to completion? The crash handler needs to tell "harvest
@@ -368,17 +393,21 @@ async function runIteration({ ctx, deps, log }) {
           });
           if (built.usageLimit) {
             // A limited attempt still SPENT. Breaking out before accounting for
-            // it let `costCeilingUsd` under-report exactly the case the
-            // operator most wants a number for.
+            // it let the run ceiling under-report exactly the case the operator
+            // most wants a number for.
             sessionId = built.sessionId ?? sessionId;
-            ctx.spentUsd += built.costUsd ?? 0;
+            account(ctx, built);
             parts.build = {
               sessionId,
               numTurns: built.numTurns ?? null,
               costUsd: built.costUsd ?? null,
+              tokens: built.tokens ?? null,
+              durationMs: built.durationMs ?? null,
               exitCode: built.exitCode ?? null,
               attempts: attempt,
+              capResumes,
             };
+            logUsage(log, bead, attempt, built);
             result = { usageLimit: true, haltReason: REASON.USAGE_LIMIT };
             parts.haltReason = REASON.USAGE_LIMIT;
             log(
@@ -391,15 +420,30 @@ async function runIteration({ ctx, deps, log }) {
             sessionId,
             numTurns: built.numTurns,
             costUsd: built.costUsd,
+            tokens: built.tokens ?? null,
+            durationMs: built.durationMs ?? null,
             exitCode: built.exitCode ?? null,
             outcome: built.verdict?.outcome ?? null,
             risk: built.verdict?.risk ?? null,
+            // THE AGENT'S OWN ACCOUNT, CARRIED INTO THE LEDGER. For a decline
+            // this is the entire content of the iteration — the build
+            // SUCCEEDED, so `detail` is empty, and no gate, CI or PR ever ran,
+            // so every other evidence line is empty too. Measured on
+            // Cebab-4ey.2: 5 turns spent reaching a judgement, and the durable
+            // record of it was the 43 characters `Parked by the autonomous
+            // loop: needs_human.` `Cebab-qd2.36`.
+            summary: built.verdict?.summary ? String(built.verdict.summary).slice(0, 600) : null,
             attempts: attempt,
+            // Separate from `attempts` on purpose: a resumed turn cap no longer
+            // costs an attempt (Cebab-qd2.37), so without this the ledger could
+            // no longer tell one `claude` invocation from two.
+            capResumes,
           };
           // Accounted whatever happened. A failed build still SPENT, and
-          // counting only successes let `costCeilingUsd` under-report by
-          // exactly the runs the operator most wants to know about.
-          ctx.spentUsd += built.costUsd ?? 0;
+          // counting only successes let the run ceiling under-report by exactly
+          // the runs the operator most wants to know about.
+          account(ctx, built);
+          logUsage(log, bead, attempt, built);
           if (built.ok) {
             parts.verdict = built.verdict;
             parts.commandsRun = built.verdict?.tests?.commands_run ?? [];
@@ -571,12 +615,19 @@ async function runIteration({ ctx, deps, log }) {
         maxRepairs: config.loop.maxRepairs,
         guardPassed: guardResult.passed,
         treeChanged,
+        capResumed: capResumes > 0,
       });
+      // `repair` and `capped` are now separate facts and are handled apart. A
+      // repair costs an attempt; a cap resume costs a `claude` invocation and
+      // nothing else. `cappedBuild` no longer returns both.
       if (step.repair) attempt += 1;
       // A resumed turn cap carries no failing step; it must not inherit the
       // previous GATE failure's brief, and it must not be told "a previous
       // attempt failed the gate" when none did.
-      if (step.capped) repairContext = { capped: true };
+      if (step.capped) {
+        capResumes += 1;
+        repairContext = { capped: true };
+      }
       if (step.disposition) disposition = step.disposition;
       if (step.reason) reason = step.reason;
       if (step.stage === STAGE.DONE) break;
@@ -832,8 +883,30 @@ async function harvest({ beads, bead, parts, disposition, reason, config, log })
       noteFor(`Autonomous loop: PR opened and CI green — ${why}.`),
     );
   } else if (disposition === DISPOSITION.PARKED) {
+    // A DECLINE IS NOT A FAILURE AND MUST NOT READ AS ONE.
+    //
+    // The predicate is the BREAKER'S OWN (`countsTowardDeclines`), shared so
+    // the label and the counter cannot disagree about what a decline is —
+    // Cebab-qd2.20 split the counters and left the labels conflated, which is
+    // how an operator scanning `loop-stuck` could not tell a bead the loop
+    // failed at from one it correctly judged out of scope.
+    const declined = countsTowardDeclines(disposition, { reason });
     const evidence = [
-      `Parked by the autonomous loop: ${reason ?? 'unknown'}.`,
+      declined
+        ? `Declined by the autonomous loop: the agent read this bead and judged it ` +
+          `unsuitable for an unattended run. Nothing failed — no branch was published ` +
+          `and no gate ran.`
+        : `Parked by the autonomous loop: ${reason ?? 'unknown'}.`,
+      // THE AGENT'S OWN REASONING, WHICH USED TO BE DROPPED HERE.
+      //
+      // Every other line below is empty for a decline: the build SUCCEEDED (it
+      // returned a verdict whose outcome is a refusal), so `detail` is empty,
+      // and no gate, CI or PR ever ran. So the note was the header and nothing
+      // else — 43 characters standing for 5 to 24 turns of judgement, on a bead
+      // the label then excludes from every future selection. `Cebab-qd2.36`.
+      parts.verdict?.summary
+        ? `The agent's account: ${String(parts.verdict.summary).slice(0, 600)}`
+        : '',
       // `build.detail` is the ONLY evidence a park that never reached GATE
       // has. Measured on the first real max_turns park: the ledger carried
       // `inspect with \`claude --resume <session-id>\`` and the bead said
@@ -841,17 +914,24 @@ async function harvest({ beads, bead, parts, disposition, reason, config, log })
       // actionable fact was in the file nobody opens first. The three lines
       // below are all empty for a cap, because it never got that far.
       parts.build?.detail ? String(parts.build.detail).slice(0, 600) : '',
+      // Cebab-qd2.14 put this on a max_turns park, where it lives inside
+      // `detail`. A decline has no detail, so it got no way in — and a decline
+      // is the park a human is most likely to want to argue with, which is
+      // exactly what resuming the session lets them do. Suppressed when
+      // `detail` already carries it rather than printed twice.
+      resumeHint(parts),
       parts.gate?.steps?.length ? `Last gate step: ${parts.gate.steps.at(-1)?.name}` : '',
       parts.ci?.runUrl ? `CI: ${parts.ci.runUrl}` : '',
       parts.pr?.url ? `PR: ${parts.pr.url}` : '',
     ]
       .filter(Boolean)
       .join('\n');
-    const parked = await beads.park(bead.id, evidence);
+    const label = declined ? DECLINE_LABEL : PARK_LABEL;
+    const parked = await beads.park(bead.id, evidence, label);
     if (!parked) {
       parts.harvest.parkFailed = true;
       log(
-        `harvest: bd park FAILED for ${bead.id} — it has no loop-stuck label, so the next ` +
+        `harvest: bd park FAILED for ${bead.id} — it has no ${label} label, so the next ` +
           `run will select it again`,
       );
     }
@@ -919,6 +999,51 @@ function prBody(parts, bead, guardResult) {
   ].join('\n');
 }
 
+/**
+ * `claude --resume <id>`, unless the evidence already carries it.
+ *
+ * The duplicate is not hypothetical: `build.mjs` puts this exact command inside
+ * a max_turns `detail`, and that detail is the line above this one in the same
+ * note. Keyed on the SESSION ID rather than on the flag, so a future wording
+ * change to either side cannot make them both print.
+ */
+function resumeHint(parts) {
+  const sessionId = parts.build?.sessionId;
+  if (!sessionId) return '';
+  if (String(parts.build?.detail ?? '').includes(sessionId)) return '';
+  return `Inspect or continue the agent's session: claude --resume ${sessionId}`;
+}
+
+/**
+ * What a BUILD consumed, added to the run's totals.
+ *
+ * TOKENS AND TURNS, NOT DOLLARS. The loop runs on a subscription: a price for a
+ * transaction that never happens says nothing about the usage window an
+ * overnight run actually spends. `costUsd` is still recorded per row in the
+ * ledger — it is the CLI's own number — and is printed nowhere.
+ *
+ * `addTokens` treats a null addend as zero, which is what keeps an unparseable
+ * envelope from poisoning the run total while still recording `null` on that
+ * bead's own row: unknown and free are different facts and the ledger keeps
+ * them apart.
+ */
+function account(ctx, built) {
+  ctx.tokens = addTokens(ctx.tokens, built.tokens);
+  ctx.turns += built.numTurns ?? 0;
+}
+
+/** One line per `claude` invocation, in the units the operator actually has. */
+function logUsage(log, bead, attempt, built) {
+  log(
+    `usage: ${bead.id} attempt ${attempt} — ` +
+      formatUsage({
+        turns: built.numTurns ?? null,
+        ms: built.durationMs ?? null,
+        tokens: built.tokens ?? null,
+      }),
+  );
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─── main ──────────────────────────────────────────────────────────────────
@@ -961,7 +1086,40 @@ async function main() {
   });
   const git = makeGit({ run, cwd: REPO_ROOT, dryRun: args.dryRun });
 
+  // READ BEFORE PREFLIGHT, WHICH IS THE THING THAT MOVES IT. Preflight's
+  // `git pull --ff-only` is required — it is what stops beads being built on a
+  // stale base — and it rewrites the very files this process imported at
+  // startup. See `self_update.mjs` for the measurement.
+  const headBefore = await git.headSha();
+
   const { bd } = await preflight({ run, config, git, dryRun: args.dryRun });
+
+  const restarted = process.env[REEXEC_ENV] === '1';
+  const plan = reexecPlan({
+    headBefore,
+    headAfter: await git.headSha(),
+    alreadyReexeced: restarted,
+  });
+  if (plan.headUnknown) {
+    log('preflight: could not read HEAD — this run cannot record which driver revision it is');
+  }
+  if (plan.action === 'refuse') {
+    // Two moves inside two consecutive preflights is not "someone merged while
+    // I was starting"; a third process would be an unbounded restart loop.
+    throw new ConfigError(
+      `main moved again during preflight (${short(plan.from)} -> ${short(plan.to)}) after this ` +
+        `driver had already restarted once. Re-run the loop.`,
+    );
+  }
+  if (plan.action === 'reexec') {
+    log(
+      `preflight pulled main ${short(plan.from)} -> ${short(plan.to)}, so this process is ` +
+        `running the OLD driver. Restarting on the pulled one — no bead has been claimed and ` +
+        `no lock is held yet.`,
+    );
+    return await reexecSelf({ log });
+  }
+  const driverRevision = plan.headUnknown ? null : headBefore;
 
   // One run per checkout. Taken AFTER preflight (so a refusal costs nothing)
   // and BEFORE any spawn, because the thing being protected is the working
@@ -972,6 +1130,10 @@ async function main() {
     config,
     dryRun: Boolean(args.dryRun),
     emitJson: Boolean(args.json),
+    // Onto every ledger row, so "the fix did not fire" and "the fix does not
+    // work" stop looking identical the next morning. `Cebab-qd2.35`.
+    driverRevision,
+    driverRestarted: restarted,
     beads: makeBeads({ run, bd, cwd: REPO_ROOT, dryRun: args.dryRun }),
     git,
     forge: makeForge({ run, cwd: REPO_ROOT, dryRun: args.dryRun }),
@@ -981,7 +1143,13 @@ async function main() {
 
   const ctx = {
     parked: new Set(),
-    spentUsd: 0,
+    // WHAT THE RUN CONSUMED, IN THE UNITS THE OPERATOR HAS. This was
+    // `spentUsd`, which prices a transaction that never happens on a
+    // subscription. `usage.mjs` carries the full reasoning, including why plan
+    // rate-limit utilization — the number that would actually answer "how much
+    // of my week did this eat" — is not reachable from `claude -p`.
+    tokens: { ...ZERO_TOKENS },
+    turns: 0,
     // PER-RUN, deliberately. This used to be seeded from state.json, and a
     // checkout that once had three parks could then never run again — a fresh,
     // fully successful run halted on its first iteration against a counter
@@ -1078,8 +1246,10 @@ async function main() {
         stopBecause = `less than ${Math.round(config.limits.reserveMs / 60000)} min before --until ${blocked.raw}`;
         break;
       }
-      if (config.limits.costCeilingUsd && ctx.spentUsd >= config.limits.costCeilingUsd) {
-        stopBecause = `cost ceiling ${config.limits.costCeilingUsd}`;
+      // Input + output + cache WRITES — `meteredTokens` owns that definition and
+      // the reason cache reads are excluded from it.
+      if (config.limits.tokenCeiling && meteredTokens(ctx.tokens) >= config.limits.tokenCeiling) {
+        stopBecause = `token ceiling ${config.limits.tokenCeiling}`;
         exitCode = EXIT.HALTED;
         break;
       }
@@ -1179,8 +1349,54 @@ async function main() {
     await teardown();
   }
 
-  log(`stopped: ${stopBecause ?? 'done'} — ${iterations} iteration(s)`);
+  log(
+    `stopped: ${stopBecause ?? 'done'} — ${iterations} iteration(s), ` +
+      `${formatUsage({ turns: ctx.turns, tokens: ctx.tokens })}`,
+  );
   return exitCode;
+}
+
+/** First seven of a sha, or the value itself when it is not one. */
+const short = (sha) => (typeof sha === 'string' ? sha.slice(0, 7) : String(sha));
+
+/**
+ * Restart this driver on the revision preflight just pulled, and hand back its
+ * exit code. `self_update.mjs` has the measurement and the reasoning.
+ *
+ * Node cannot replace its own image, so this is spawn-and-wait rather than
+ * `execve`. The parent becomes a thin shell that owns nothing: no lock, no
+ * claimed bead, no open PR — the whole reason the decision is made here, in the
+ * window between preflight and `acquireLock`.
+ */
+function reexecSelf({ log }) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, reexecArgv(process.argv), {
+      cwd: REPO_ROOT,
+      stdio: 'inherit',
+      env: reexecEnv(process.env),
+    });
+    // FORWARDED RATHER THAN ASSUMED. With `stdio: 'inherit'` a Ctrl-C in a
+    // terminal already reaches the whole foreground process group, so the child
+    // would see it anyway — but `loop:night` runs under tmux and a `kill <pid>`
+    // aimed at this process alone would otherwise leave the child running a
+    // bead with nothing watching it.
+    const forward = (signal) => () => {
+      try {
+        child.kill(signal);
+      } catch {
+        // Already gone; the exit handler below is what resolves either way.
+      }
+    };
+    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, forward(signal));
+    child.on('error', (error) => {
+      log(`restart failed — ${error?.message ?? error}. Nothing was attempted.`);
+      resolve(EXIT.HALTED);
+    });
+    child.on('exit', (code, signal) => {
+      if (signal) resolve(signal === 'SIGINT' ? EXIT.SIGINT : 143);
+      else resolve(code ?? EXIT.HALTED);
+    });
+  });
 }
 
 /**
@@ -1210,7 +1426,11 @@ function writeState(ctx, iterations, exit = null) {
         consecutiveParks: ctx.consecutiveParks,
         consecutiveDeclines: ctx.consecutiveDeclines,
         parkedThisRun: [...ctx.parked],
-        spentUsd: ctx.spentUsd,
+        // NOT `spentUsd`. See `usage.mjs`: on a subscription a dollar figure is
+        // a price for a transaction that never happens, and the operator's real
+        // constraint is a usage window measured in tokens.
+        tokens: ctx.tokens,
+        turns: ctx.turns,
         iterations,
         startedAt: new Date(ctx.startedAt).toISOString(),
         exitCode: exit ? exit.code : null,
@@ -1226,13 +1446,13 @@ function printStatus() {
   const state = readJson(STATE_FILE, null);
   if (!state) process.stdout.write('no .loop/state.json — the loop has not run here yet\n');
   else {
-    process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
-    // NOT money. On a subscription this is a local estimate from token counts
-    // at list rates — a proxy for tokens consumed, which is what the usage
-    // window actually meters.
+    process.stdout.write(`${JSON.stringify(withoutLegacyCost(state), null, 2)}\n`);
+    // The four token classes are printed apart, never summed. A cache read is
+    // roughly an order of magnitude cheaper than fresh input and dominates the
+    // raw total by 10-40x on this workload, so one number here would mostly
+    // measure the discount. `usage.mjs` owns that reasoning.
     process.stdout.write(
-      `\ntoken-usage estimate this run: ~$${(state.spentUsd ?? 0).toFixed(2)} equivalent ` +
-        `(a proxy for tokens consumed, NOT a bill)\n`,
+      `\nconsumed this run: ${formatUsage({ turns: state.turns ?? 0, tokens: state.tokens })}\n`,
     );
   }
   const lines = fs.existsSync(LEDGER_FILE)

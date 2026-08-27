@@ -124,7 +124,12 @@ describe('config: layering and unknown keys', () => {
   });
 
   test('defaults ship every budget limit OFF and merging disabled', () => {
-    expect(DEFAULTS.limits.costCeilingUsd).toBeNull();
+    // `tokenCeiling`, not `costCeilingUsd`. The run ceiling is in tokens because
+    // the loop runs on a subscription; the per-BEAD one stays in dollars because
+    // it is passed through as the CLI's own `--max-budget-usd` and the CLI has
+    // no token equivalent.
+    expect(DEFAULTS.limits.tokenCeiling).toBeNull();
+    expect(DEFAULTS.limits).not.toHaveProperty('costCeilingUsd');
     expect(DEFAULTS.limits.beadCostCeilingUsd).toBeNull();
     expect(DEFAULTS.limits.cooldownMsBetweenBeads).toBe(0);
     expect(DEFAULTS.build.tiers).toEqual([]);
@@ -590,7 +595,12 @@ describe('select: the exclusions live in the argv', () => {
     const argv = readyArgv(DEFAULTS.select, { limit: 50 });
     expect(argv.slice(0, 6)).toEqual(['ready', '--json', '-n', '50', '-s', 'hybrid']);
     expect(argv).toContain('--exclude-label');
-    expect(argv[argv.indexOf('--exclude-label') + 1]).toBe('loop-stuck,needs-human,epic');
+    // `loop-declined` rides here too. A label that names a decline but does not
+    // exclude it would be decoration, and every declined bead would be
+    // re-selected on the next run (Cebab-qd2.36).
+    expect(argv[argv.indexOf('--exclude-label') + 1]).toBe(
+      'loop-stuck,loop-declined,needs-human,epic',
+    );
     expect(argv).toContain('--exclude-type');
     expect(argv[argv.indexOf('--exclude-type') + 1]).toBe('epic,decision');
   });
@@ -798,6 +808,8 @@ describe('ledger', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 import {
+  DECLINE_LABEL,
+  PARK_LABEL,
   claimArgv,
   closeArgv,
   followUpArgv,
@@ -806,6 +818,18 @@ import {
   parkArgv,
   showArgv,
 } from './lib/loop/beads.mjs';
+import { REEXEC_ENV, reexecArgv, reexecEnv, reexecPlan } from './lib/loop/self_update.mjs';
+import {
+  ZERO_TOKENS,
+  addTokens,
+  formatCount,
+  formatDuration,
+  formatTokens,
+  formatUsage,
+  meteredTokens,
+  tokensFrom,
+  withoutLegacyCost,
+} from './lib/loop/usage.mjs';
 import { branchNameFor, commitSubject } from './lib/loop/git.mjs';
 import {
   checkRunsArgv,
@@ -1903,8 +1927,8 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
   // the ledger recorded `failure: 'exit'` with a truncated JSON fragment and
   // `sessionId: null, numTurns: null, costUsd: null`. Three consequences: the
   // operator cannot tell "needs more turns" from "the CLI broke" (opposite
-  // remedies), nobody can resume the session, and `costCeilingUsd` silently
-  // under-counts by exactly the runs worth knowing about.
+  // remedies), nobody can resume the session, and the run's consumption total
+  // silently under-counts by exactly the runs worth knowing about.
   test('isMaxTurns reads either signal, and neither is load-bearing alone', () => {
     const real = {
       terminal_reason: 'max_turns',
@@ -1944,12 +1968,53 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     const build = makeBuild({ run, cwd: '/repo', config: DEFAULTS, libDir, loopDir });
     const out = await build.run({ bead: { id: 'X-1', title: 't' }, attempt: 1, maxRepairs: 2 });
 
+    // The other direction, through the SAME real `makeBuild`: an envelope that
+    // DOES carry usage must come back with the four classes and the duration,
+    // or `tokens: null` above would pass for a build that simply never reads it.
+    const withUsage = await makeBuild({
+      run: async () => ({
+        code: 0,
+        stdout: JSON.stringify({
+          type: 'result',
+          session_id: 's',
+          num_turns: 7,
+          total_cost_usd: 0.2,
+          duration_ms: 61000,
+          usage: {
+            input_tokens: 1200,
+            output_tokens: 340,
+            cache_read_input_tokens: 900000,
+            cache_creation_input_tokens: 5600,
+          },
+          structured_output: { outcome: 'implemented' },
+        }),
+        stderr: '',
+        ms: 10,
+        timedOut: false,
+      }),
+      cwd: '/repo',
+      config: DEFAULTS,
+      libDir,
+      loopDir,
+    }).run({ bead: { id: 'X-2', title: 't' }, attempt: 1, maxRepairs: 2 });
+    expect(withUsage.tokens).toEqual({
+      input: 1200,
+      output: 340,
+      cacheRead: 900000,
+      cacheCreation: 5600,
+    });
+    expect(withUsage.durationMs).toBe(61000);
+
     expect(out.ok).toBe(false);
     expect(out.failure).toBe('max_turns'); // not the generic 'exit'
     // The three that were being thrown away.
     expect(out.sessionId).toBe('56889fbe-75a6-4510-9e17-10fa0248276f');
     expect(out.numTurns).toBe(40);
     expect(out.costUsd).toBe(0.4137);
+    // This envelope, captured before the CLI carried a usage block, has none —
+    // so the tokens are NULL. Zeros here would record a 40-turn build as free
+    // and the run total would then be silently short by it.
+    expect(out.tokens).toBeNull();
     // And the detail is a sentence, not 600 chars of JSON.
     expect(out.detail).toContain('40 turns');
     expect(out.detail).toContain('claude --resume');
@@ -2610,7 +2675,18 @@ describe('a capped BUILD resumes once, and only on progress (Cebab-qd2.11)', () 
 
   test('progress plus a session id resumes', () => {
     const step = next(STAGE.BUILD, capped(), { attempt: 1, maxRepairs: 2, treeChanged: true });
-    expect(step).toMatchObject({ stage: STAGE.BUILD, repair: true, capped: true });
+    expect(step).toMatchObject({ stage: STAGE.BUILD, capped: true });
+  });
+
+  // REWRITTEN, NOT RELAXED. It used to assert `repair: true` alongside
+  // `capped: true`, which is what made the driver bump `attempt` and charge the
+  // resume to `maxRepairs`. That is the defect Cebab-qd2.37 measured: both
+  // feature beads ever merged spent attempt 1 on a cap and landed on attempt 3
+  // with zero repairs left. The two flags mean different things now and the
+  // absence is the assertion.
+  test('and does NOT spend a repair — `repair` means "this costs an attempt"', () => {
+    const step = next(STAGE.BUILD, capped(), { attempt: 1, maxRepairs: 2, treeChanged: true });
+    expect(step.repair).toBeUndefined();
   });
 
   test('no progress parks — this is the looping agent', () => {
@@ -2620,9 +2696,27 @@ describe('a capped BUILD resumes once, and only on progress (Cebab-qd2.11)', () 
     expect(step).toMatchObject({ disposition: DISPOSITION.PARKED, reason: REASON.MAX_TURNS });
   });
 
+  // REWRITTEN for the same change, and it still tests the same bound. The bound
+  // used to be `attempt === 1`, which cannot be reused once the resume stops
+  // bumping `attempt` — it would read 1 forever and resume without limit. It
+  // moves to its own per-iteration flag, so this case now sets that.
   test('ONCE — a second cap parks however much progress it made', () => {
-    const step = next(STAGE.BUILD, capped(), { attempt: 2, maxRepairs: 2, treeChanged: true });
+    const step = next(STAGE.BUILD, capped(), {
+      attempt: 1,
+      maxRepairs: 2,
+      treeChanged: true,
+      capResumed: true,
+    });
     expect(step.reason).toBe(REASON.MAX_TURNS);
+  });
+
+  // The negative control for the case above: without it, "a second cap parks"
+  // is also satisfied by a `cappedBuild` that never resumes at all.
+  test('a LATER attempt may still resume — the bound is the resume, not the attempt', () => {
+    // A gate failure took the bead to attempt 2, and THAT attempt hit the cap.
+    // Under the old `attempt === 1` guard this parked with the work in hand.
+    const step = next(STAGE.BUILD, capped(), { attempt: 2, maxRepairs: 2, treeChanged: true });
+    expect(step).toMatchObject({ stage: STAGE.BUILD, capped: true });
   });
 
   test('and nothing to resume parks too', () => {
@@ -2915,7 +3009,7 @@ describe('four terminal states reach the bead, not two (Cebab-qd2.10)', () => {
     const calls = [];
     const beads = {
       close: async (id, reason) => (calls.push(['close', id, reason]), true),
-      park: async (id, evidence) => (calls.push(['park', id, evidence]), true),
+      park: async (id, evidence, label) => (calls.push(['park', id, evidence, label]), true),
       note: async (id, text) => (calls.push(['note', id, text]), true),
       fileFollowUp: async () => 'Cebab-new',
       ...over,
@@ -3884,5 +3978,465 @@ describe('GATE’s lockfile step can actually fail (Cebab-qd2.30)', () => {
     );
     const changed = git.slice(git.indexOf('async changedPaths()'));
     expect(changed.slice(0, changed.indexOf('},'))).toContain('stageAll()');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WHAT A RUN CONSUMED, IN THE UNITS THE OPERATOR HAS (Cebab-qd2.38)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The loop runs on a Claude subscription, so `total_cost_usd` prices a
+// transaction that never happens. It is still RECORDED on every ledger row and
+// printed nowhere; tokens, turns and wall time are the reported units.
+//
+// WHAT EACH CASE MUST REDDEN:
+//   - `tokensFrom` returning zeros instead of null   -> 'an envelope that cannot say'
+//   - dropping the `modelUsage` fallback              -> 'falls back to modelUsage'
+//   - `meteredTokens` including cache reads           -> 'cache READS are excluded'
+//   - `formatTokens` summing to one number            -> 'never a single total'
+
+describe('usage: reading what a build consumed', () => {
+  const envelope = (over) => ({
+    usage: {
+      input_tokens: 1200,
+      output_tokens: 340,
+      cache_read_input_tokens: 900000,
+      cache_creation_input_tokens: 5600,
+    },
+    ...over,
+  });
+
+  test('the four classes come out of the envelope usage block', () => {
+    expect(tokensFrom(envelope())).toEqual({
+      input: 1200,
+      output: 340,
+      cacheRead: 900000,
+      cacheCreation: 5600,
+    });
+  });
+
+  test('falls back to modelUsage when usage is absent', () => {
+    // Two different code paths in the CLI populate these, and a run with one
+    // and not the other is cheaper to tolerate than to diagnose at 3am. The
+    // per-model block is camelCase where `usage` is snake_case, which is
+    // exactly the shape that silently reads as zero if the fallback is written
+    // against the wrong casing.
+    const totals = tokensFrom({
+      modelUsage: {
+        'claude-opus-5': {
+          inputTokens: 10,
+          outputTokens: 20,
+          cacheReadInputTokens: 30,
+          cacheCreationInputTokens: 40,
+        },
+        'claude-haiku-4-5': {
+          inputTokens: 1,
+          outputTokens: 2,
+          cacheReadInputTokens: 3,
+          cacheCreationInputTokens: 4,
+        },
+      },
+    });
+    expect(totals).toEqual({ input: 11, output: 22, cacheRead: 33, cacheCreation: 44 });
+  });
+
+  test('an envelope that cannot say returns NULL, not zeros', () => {
+    // Unknown and free are different facts. Zeros here would make an
+    // unparseable envelope indistinguishable from a turn that cost nothing, in
+    // the ledger, forever — the same confusion `land.sha: null` created on
+    // every row ever written.
+    expect(tokensFrom(null)).toBeNull();
+    expect(tokensFrom({})).toBeNull();
+    expect(tokensFrom({ usage: {} })).toBeNull();
+    expect(tokensFrom({ modelUsage: {} })).toBeNull();
+  });
+
+  test('accumulating treats a null addend as nothing', () => {
+    // The run total must survive one unparseable build without becoming NaN,
+    // which is what a bare `+` on undefined produces and what would then be
+    // written to state.json for the rest of the night.
+    const one = addTokens(ZERO_TOKENS, tokensFrom(envelope()));
+    const still = addTokens(one, null);
+    expect(still).toEqual(one);
+    expect(Number.isNaN(meteredTokens(still))).toBe(false);
+  });
+
+  test('cache READS are excluded from the metered total, and that is the decision', () => {
+    // They are the cheapest class by roughly an order of magnitude AND the
+    // largest by far on an agent loop that re-sends a growing transcript every
+    // turn — 900k against 7k here, which is a real ratio from a real build. A
+    // ceiling on the raw sum would fire on the discount rather than the work.
+    const totals = tokensFrom(envelope());
+    expect(meteredTokens(totals)).toBe(1200 + 340 + 5600);
+    // The other direction: if cache reads ever creep back in, this is the
+    // number that changes, and it changes by 130x.
+    expect(meteredTokens(totals)).toBeLessThan(totals.cacheRead);
+  });
+
+  test('formatting says all four classes and never a single total', () => {
+    const line = formatTokens(tokensFrom(envelope()));
+    expect(line).toBe('1.2k in / 340 out / 5.6k cache write / 900k cache read');
+    // The whole point, asserted directly: no summed number, and no currency.
+    expect(line).not.toContain('$');
+  });
+
+  test('counts are abbreviated for a terminal, not for precision', () => {
+    expect(formatCount(0)).toBe('0');
+    expect(formatCount(999)).toBe('999');
+    expect(formatCount(1000)).toBe('1k');
+    expect(formatCount(1234)).toBe('1.2k');
+    expect(formatCount(999999)).toBe('1000k');
+    expect(formatCount(1_800_000)).toBe('1.8M');
+  });
+
+  test('durations read as durations', () => {
+    expect(formatDuration(0)).toBe('0s');
+    expect(formatDuration(48_000)).toBe('48s');
+    expect(formatDuration(432_000)).toBe('7m12s');
+    expect(formatDuration(3_900_000)).toBe('1h05m');
+    // Null in, empty out, so a caller can concatenate without guarding.
+    expect(formatDuration(null)).toBe('');
+    expect(formatDuration(undefined)).toBe('');
+  });
+
+  test('a usage line SAYS it has no token counts rather than printing zeros', () => {
+    // The failure mode this replaces: a build whose envelope did not parse
+    // reporting `0 in / 0 out`, which reads as a free turn.
+    expect(formatUsage({ turns: 3, ms: 1000, tokens: null })).toBe(
+      '3 turns, 1s, token usage unavailable',
+    );
+    // And a build that failed before any turn completed claims no turn count.
+    expect(formatUsage({ tokens: ZERO_TOKENS })).toBe(
+      '0 in / 0 out / 0 cache write / 0 cache read',
+    );
+    expect(formatUsage({ turns: 1, ms: 500, tokens: ZERO_TOKENS })).toContain('1 turn,');
+  });
+});
+
+describe('usage: the ledger records dollars and reports tokens', () => {
+  test('a build row carries BOTH, and the tokens are the new part', () => {
+    const record = buildRecord(
+      {
+        build: {
+          numTurns: 61,
+          costUsd: 1.8,
+          tokens: { input: 10, output: 20, cacheRead: 30, cacheCreation: 40 },
+          durationMs: 432_000,
+        },
+      },
+      0,
+    );
+    // Kept: it is the CLI's own number and the only free cross-model
+    // normaliser. Nothing prints it.
+    expect(record.build.costUsd).toBe(1.8);
+    expect(record.build.tokens).toEqual({
+      input: 10,
+      output: 20,
+      cacheRead: 30,
+      cacheCreation: 40,
+    });
+    expect(record.build.durationMs).toBe(432_000);
+  });
+
+  test('and records NULL tokens when the build could not say', () => {
+    const record = buildRecord({ build: { numTurns: null } }, 0);
+    expect(record.build.tokens).toBeNull();
+    expect(record.build.durationMs).toBeNull();
+  });
+
+  test('--status drops a spentUsd left by a run from before the change', () => {
+    // `--status` dumps state.json verbatim, so without this the first status
+    // after upgrading shows the old dollar total — the one number the operator
+    // asked never to see again. Dropped rather than converted: there is no
+    // honest way to turn a price back into tokens after the fact.
+    const legacy = { consecutiveParks: 0, spentUsd: 12.03, iterations: 3 };
+    expect(withoutLegacyCost(legacy)).toEqual({ consecutiveParks: 0, iterations: 3 });
+    // The other direction: a current state object is returned untouched, and
+    // identically — this must not quietly rebuild every record it is handed.
+    const current = { consecutiveParks: 0, tokens: ZERO_TOKENS, turns: 7 };
+    expect(withoutLegacyCost(current)).toBe(current);
+    expect(withoutLegacyCost(null)).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE DRIVER IS NOT IMMUNE TO THE PULL IT PERFORMS (Cebab-qd2.35)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Node imports the driver at process start; preflight then pulls `main` under
+// it. Measured 2026-08-27: a run started with `main` three merges behind, its
+// own preflight advanced the checkout one second later, and every module in
+// memory stayed at the old revision — so `select.excludeParents`, merged that
+// morning to keep the loop off its own epic, did not exist in the running copy.
+//
+// WHAT EACH CASE MUST REDDEN:
+//   - `reexecPlan` always returning 'continue'  -> 'a moved HEAD restarts'
+//   - dropping the `alreadyReexeced` guard      -> 'a SECOND move refuses'
+//   - `reexecArgv` slicing 2 instead of 1       -> 'keeps the script path'
+
+describe('self-update: a preflight pull that moves HEAD restarts the driver', () => {
+  const SHA_A = '5e2fd4a0158ce55d31a0e6ad41c3d85c2bd04be6';
+  const SHA_B = 'd72439b0000000000000000000000000000000ff';
+
+  test('an unchanged HEAD continues, and costs nothing', () => {
+    // The overwhelming majority of runs. A restart here would double every
+    // preflight for no reason.
+    expect(reexecPlan({ headBefore: SHA_A, headAfter: SHA_A })).toEqual({ action: 'continue' });
+  });
+
+  test('a moved HEAD restarts, naming both revisions', () => {
+    expect(reexecPlan({ headBefore: SHA_A, headAfter: SHA_B })).toEqual({
+      action: 'reexec',
+      from: SHA_A,
+      to: SHA_B,
+    });
+  });
+
+  test('a SECOND move refuses rather than starting a third process', () => {
+    // Without the guard this is an unbounded restart loop, and the bound has to
+    // live on the flag rather than on a counter the child cannot see.
+    expect(reexecPlan({ headBefore: SHA_A, headAfter: SHA_B, alreadyReexeced: true })).toEqual({
+      action: 'refuse',
+      from: SHA_A,
+      to: SHA_B,
+    });
+  });
+
+  test('an unreadable HEAD continues and SAYS it is unreadable', () => {
+    // Refusing would let an unrelated `git rev-parse` failure end the night;
+    // re-execing would spawn a process on no evidence. The flag is what gives
+    // a null ledger revision a stated cause.
+    expect(reexecPlan({ headBefore: '', headAfter: SHA_B })).toEqual({
+      action: 'continue',
+      headUnknown: true,
+    });
+    expect(reexecPlan({})).toEqual({ action: 'continue', headUnknown: true });
+  });
+
+  test('the child argv keeps the script path', () => {
+    // `slice(2)` would re-exec node with no program and open a REPL, which
+    // fails as a hang rather than as an error.
+    expect(
+      reexecArgv(['/usr/bin/node', '/repo/scripts/loop.mjs', '--merge', '--until', '3']),
+    ).toEqual(['/repo/scripts/loop.mjs', '--merge', '--until', '3']);
+  });
+
+  test('the child env carries the guard and nothing else changes', () => {
+    const child = reexecEnv({ PATH: '/bin', HOME: '/home/x' });
+    expect(child[REEXEC_ENV]).toBe('1');
+    expect(child.PATH).toBe('/bin');
+    expect(child.HOME).toBe('/home/x');
+  });
+
+  test('every ledger row says which driver produced it', () => {
+    // Not a fix on its own — candidate (d) on the bead — but it is what turns
+    // "the fix did not fire" and "the fix does not work" from indistinguishable
+    // into one `jq` query.
+    const record = buildRecord({ driverRevision: SHA_B, driverRestarted: true }, 0);
+    expect(record.driver).toEqual({ revision: SHA_B, restarted: true });
+  });
+
+  test('and a row from a run that never restarted says so', () => {
+    // The other direction: `restarted` must default to false rather than be
+    // absent, or the query `select(.driver.restarted)` cannot tell a
+    // non-restart from an old row.
+    expect(buildRecord({ driverRevision: SHA_A }, 0).driver).toEqual({
+      revision: SHA_A,
+      restarted: false,
+    });
+    expect(buildRecord({}, 0).driver).toEqual({ revision: null, restarted: false });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A DECLINE IS A JUDGEMENT, NOT A FAILURE, AND THE BEAD MUST SAY WHICH
+// (Cebab-qd2.36)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Measured 2026-08-27 on a run that declined two beads. Cebab-4ey.2, parked
+// `needs_human` after 5 turns, left behind exactly this:
+//
+//   bead note   "Parked by the autonomous loop: needs_human."   (43 chars, all of it)
+//   bead label  loop-stuck
+//   ledger      no verdict key at all; build.detail null
+//
+// `loop-stuck` is in `select.excludeLabels`, so the bead was retired from the
+// backlog permanently with no reason a human can act on. The evidence builder
+// is not wrong — it composes from `build.detail`, the last gate step, the CI
+// url and the PR url, and a decline has NONE of those, because the build
+// SUCCEEDED and no gate, CI or PR ever ran.
+//
+// WHAT EACH CASE MUST REDDEN:
+//   - dropping the summary line          -> 'quotes the agent's own account'
+//   - dropping the resume line           -> 'carries the resume command'
+//   - labelling a decline `loop-stuck`   -> 'a decline is labelled loop-declined'
+//   - labelling every park `loop-declined` -> 'a real failure is still loop-stuck'
+//   - printing the resume line twice     -> 'and does not print it twice'
+
+describe('harvest: what a declined bead is left holding', () => {
+  const recording = (over = {}) => {
+    const calls = [];
+    return {
+      calls,
+      beads: {
+        close: async () => true,
+        note: async () => true,
+        fileFollowUp: async () => 'Cebab-new',
+        park: async (id, evidence, label) => (calls.push({ id, evidence, label }), true),
+        ...over,
+      },
+    };
+  };
+
+  const declineParts = (over = {}) => ({
+    harvest: { beadClosed: false, followUps: [] },
+    build: { sessionId: 'sess-abc123', numTurns: 24, outcome: 'blocked' },
+    verdict: {
+      outcome: 'blocked',
+      needs_human: true,
+      summary:
+        "This bead's own notes are stale: the glued-redirect hole and the six exec-wrappers " +
+        'it lists as open were closed by Cebab-x1n.1.29 and .30.',
+      follow_ups: [],
+    },
+    ...over,
+  });
+
+  const park = async ({ beads, parts, reason }) => {
+    await harvest({
+      beads,
+      bead: { id: 'Cebab-4ey.2' },
+      parts,
+      disposition: DISPOSITION.PARKED,
+      reason,
+      config: DEFAULTS,
+      log: () => {},
+    });
+  };
+
+  test('a decline is labelled loop-declined, not loop-stuck', async () => {
+    const { calls, beads } = recording();
+    await park({ beads, parts: declineParts(), reason: REASON.NEEDS_HUMAN });
+    expect(calls[0].label).toBe(DECLINE_LABEL);
+    expect(calls[0].label).not.toBe(PARK_LABEL);
+  });
+
+  test('and reads as a judgement rather than a malfunction', async () => {
+    const { calls, beads } = recording();
+    await park({ beads, parts: declineParts(), reason: REASON.NEEDS_HUMAN });
+    expect(calls[0].evidence).toContain('Declined by the autonomous loop');
+    expect(calls[0].evidence).toContain('Nothing failed');
+  });
+
+  test("quotes the agent's own account, which is the whole content of a decline", async () => {
+    const { calls, beads } = recording();
+    await park({ beads, parts: declineParts(), reason: REASON.NEEDS_HUMAN });
+    expect(calls[0].evidence).toContain("The agent's account:");
+    expect(calls[0].evidence).toContain('Cebab-x1n.1.29');
+  });
+
+  test('carries the resume command so a human can argue with the judgement', async () => {
+    // Cebab-qd2.14 put this on a max_turns park. A decline is the park a human
+    // is most likely to want to overrule, and it had no way in.
+    const { calls, beads } = recording();
+    await park({ beads, parts: declineParts(), reason: REASON.NEEDS_HUMAN });
+    expect(calls[0].evidence).toContain('claude --resume sess-abc123');
+  });
+
+  test('and does not print it twice when build.detail already names the session', async () => {
+    // The duplicate is not hypothetical: `build.mjs` writes this exact command
+    // into a max_turns `detail`, which is the line above it in the same note.
+    const { calls, beads } = recording();
+    await park({
+      beads,
+      parts: declineParts({
+        verdict: undefined,
+        build: {
+          sessionId: 'sess-abc123',
+          detail: 'the agent used all 61 turns; inspect with `claude --resume sess-abc123`',
+        },
+      }),
+      reason: REASON.MAX_TURNS,
+    });
+    const hits = calls[0].evidence.split('claude --resume').length - 1;
+    expect(hits).toBe(1);
+  });
+
+  test('a real failure is still loop-stuck and still reads as one', async () => {
+    // The other direction. Without this, "declines are labelled differently" is
+    // also satisfied by relabelling every park.
+    const { calls, beads } = recording();
+    await park({
+      beads,
+      parts: declineParts({ verdict: undefined }),
+      reason: REASON.CI_RED,
+    });
+    expect(calls[0].label).toBe(PARK_LABEL);
+    expect(calls[0].evidence).toContain('Parked by the autonomous loop: ci_red.');
+    expect(calls[0].evidence).not.toContain('Declined');
+  });
+
+  test('the LABEL and the BREAKER agree about what a decline is, for every reason', async () => {
+    // Cebab-qd2.20 split the counters and left the labels conflated. Two
+    // hand-maintained lists of "which reasons are declines" would eventually
+    // disagree, with nothing to say which was right — so the label reads the
+    // breaker's own predicate, and this is what pins that.
+    for (const reason of Object.values(REASON)) {
+      const { calls, beads } = recording();
+      await park({ beads, parts: declineParts({ verdict: undefined }), reason });
+      const expected = countsTowardDeclines(DISPOSITION.PARKED, { reason })
+        ? DECLINE_LABEL
+        : PARK_LABEL;
+      expect(`${reason}:${calls[0].label}`).toBe(`${reason}:${expected}`);
+    }
+  });
+
+  test('a failed park names the label it could not set', async () => {
+    // The log line used to hardcode `loop-stuck`, which would now be wrong for
+    // half the parks it reports.
+    const logs = [];
+    const { beads } = recording({ park: async () => false });
+    await harvest({
+      beads,
+      bead: { id: 'Cebab-4ey.2' },
+      parts: declineParts(),
+      disposition: DISPOSITION.PARKED,
+      reason: REASON.NEEDS_HUMAN,
+      config: DEFAULTS,
+      log: (m) => logs.push(m),
+    });
+    expect(logs.join('\n')).toContain(DECLINE_LABEL);
+  });
+});
+
+describe('parkArgv: the label is a parameter, and it defaults to the failure one', () => {
+  test('the default is unchanged', () => {
+    expect(parkArgv('Cebab-x', 'why')).toEqual([
+      'update',
+      'Cebab-x',
+      '--status',
+      'open',
+      '--add-label',
+      PARK_LABEL,
+      '--append-notes',
+      'why',
+    ]);
+  });
+
+  test('and a decline swaps only the label', () => {
+    const argv = parkArgv('Cebab-x', 'why', DECLINE_LABEL);
+    expect(argv[argv.indexOf('--add-label') + 1]).toBe(DECLINE_LABEL);
+    // Still `--add-label`: `--set-labels` is accepted by bd and would REPLACE
+    // every existing label on the bead.
+    expect(argv).toContain('--add-label');
+    expect(argv).not.toContain('--set-labels');
+  });
+
+  test('both labels exclude, or the distinction is decoration', () => {
+    // A label that names a decline but does not keep SELECT off it would
+    // re-select every declined bead on the next run — the exact cost the
+    // exclusion exists to prevent.
+    expect(DEFAULTS.select.excludeLabels).toContain(PARK_LABEL);
+    expect(DEFAULTS.select.excludeLabels).toContain(DECLINE_LABEL);
   });
 });
