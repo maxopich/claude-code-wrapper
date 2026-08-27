@@ -57,6 +57,16 @@ export type ProjectRow = {
   managed_source_path: string | null;
   /** Epoch millis of the copy. NULL for every ordinary workspace project. */
   managed_copied_at: number | null;
+  /**
+   * Cebab-8x8.1.1: the fail-closed discriminator. 'workspace' for every
+   * ordinary and managed project (the DEFAULT, backfilled onto every existing
+   * row); 'assistant' for the single Cebab-owned help-assistant row. Read
+   * POSITIVELY at every call site (`WHERE kind = 'workspace'`) so a non-workspace
+   * row is excluded by default rather than by a path comparison that could
+   * normalise wrong. `projects_kind_singleton` makes a second non-workspace row
+   * impossible. `isAssistantProject` in `assistant/identity.ts` is the reader.
+   */
+  kind: string;
 };
 
 /**

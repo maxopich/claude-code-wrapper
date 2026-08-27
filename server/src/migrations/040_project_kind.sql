@@ -1,0 +1,28 @@
+-- Cebab-8x8.1.1: a fail-closed discriminator so the Cebab-owned help-assistant
+-- row can never be mistaken for an operator's workspace project.
+--
+-- WHY A COLUMN AND NOT A `path === assistantCwd()` CHECK. Path equality fails
+-- OPEN: a normalization difference — a trailing slash, a symlinked prefix, a
+-- Windows case fold — would silently answer "this is not the assistant" and
+-- restore the ordinary trust-derived posture, running the assistant's cwd with
+-- a workspace project's tool set and permission mode. `kind` fails CLOSED: it
+-- reads POSITIVELY at every call site (`WHERE kind = 'workspace'`), so a row
+-- that is anything other than a workspace project is excluded by default rather
+-- than by a comparison that has to get a path right.
+--
+-- WHY THE DEFAULT IS 'workspace' WITH A BACKFILL. Unlike 037's provenance
+-- columns, this DEFAULT is a true claim about history: every project that
+-- exists today — ordinary or managed — IS a workspace project, and must keep
+-- appearing in the sidebar and the missing-sweep exactly as before. Managed
+-- agents stay 'workspace' too; they are ordinary rows in every respect and only
+-- the assistant is ever anything else.
+--
+-- THE PARTIAL UNIQUE INDEX MAKES A SECOND ASSISTANT ROW IMPOSSIBLE. It indexes
+-- `kind` only for rows where `kind <> 'workspace'`, so the many workspace rows
+-- are unconstrained (they would otherwise all collide) while any non-workspace
+-- kind is a singleton. `ensureAssistantProject` looks up by kind first and
+-- repairs in place, but this is the structural backstop under it: even a
+-- blind second INSERT of `kind = 'assistant'` raises SQLITE_CONSTRAINT_UNIQUE
+-- rather than minting a duplicate the scope filters would then have to dedupe.
+ALTER TABLE projects ADD COLUMN kind TEXT NOT NULL DEFAULT 'workspace';
+CREATE UNIQUE INDEX projects_kind_singleton ON projects(kind) WHERE kind <> 'workspace';
