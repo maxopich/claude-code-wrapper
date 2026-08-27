@@ -834,7 +834,7 @@ import {
   resolveTier,
 } from './lib/loop/build.mjs';
 import { allowReason, commandHeads, decide, splitSegments } from './lib/loop/loop-guard.mjs';
-import { harvest, parseArgs, watchCi } from './loop.mjs';
+import { harvest, parseArgs, preflight, watchCi } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 import { makeGit } from './lib/loop/git.mjs';
 import { stripComments } from './lib/strip_comments.mjs';
@@ -3717,5 +3717,172 @@ describe('a halt does not relabel work that already happened (Cebab-qd2.32)', ()
     expect(next(STAGE.BUILD, { haltReason: REASON.USAGE_LIMIT }, { halt: true }).reason).toBe(
       REASON.USAGE_LIMIT,
     );
+  });
+});
+
+describe('the two binaries every iteration needs are checked at second zero (Cebab-qd2.34)', () => {
+  // Preflight resolved `bd` and checked `gh auth`, and never looked at `claude`
+  // or `npm` — the BUILD stage and nine of the ten gate steps. Under a launchd
+  // or cron PATH (the exact reason `bd` earned its check) preflight passed,
+  // SELECT picked a bead, CLAIM cut a branch, and only THEN did BUILD fail,
+  // parking under `build_failed` — which blames the agent for an environment
+  // problem. Three of those halt the run having claimed three beads for a cause
+  // none of their notes names.
+  const okGit = {
+    isClean: async () => true,
+    currentBranch: async () => 'main',
+    fetchMain: async () => ({ code: 0 }),
+    restoreToMain: async () => ({ pulled: true, detail: '' }),
+  };
+  // `--version` per binary, not `which`: a broken symlink resolves fine and
+  // spawns not at all, and for `npm` this routes through the same runner, so
+  // the win32 shell decision is exercised here rather than at the first gate.
+  const runner =
+    (failFor) =>
+    async (file, args = []) => {
+      if (file === 'which' || file === 'where') return { code: 0, stdout: '/usr/bin/bd\n' };
+      if (args[0] === '--version') return { code: file === failFor ? 1 : 0, stdout: '1.0.0' };
+      return { code: 0, stdout: '' };
+    };
+
+  // THESE ASSERT ON THE MESSAGE, NOT ONLY THE TYPE, and the first draft did not
+  // — which a revert-check caught. Preflight raises ConfigError for several
+  // conditions this fixture also trips (a missing Playground `.env`, among
+  // others), so `rejects.toThrow(ConfigError)` passed with the binary check
+  // deleted. A case that cannot name the mutation it catches is decoration.
+  test('a missing claude refuses, by name, before anything is claimed', async () => {
+    await expect(
+      preflight({ run: runner('claude'), config: DEFAULTS, git: okGit, dryRun: true }),
+    ).rejects.toThrow(/`claude --version`/);
+  });
+
+  test('and a missing npm does too', async () => {
+    await expect(
+      preflight({ run: runner('npm'), config: DEFAULTS, git: okGit, dryRun: true }),
+    ).rejects.toThrow(/`npm --version`/);
+  });
+
+  test('it is a ConfigError, so it exits 2 rather than printing a stack', async () => {
+    await expect(
+      preflight({ run: runner('claude'), config: DEFAULTS, git: okGit, dryRun: true }),
+    ).rejects.toThrow(ConfigError);
+  });
+
+  test('and the message names the likely cause', async () => {
+    // A refusal the operator cannot act on at 3am is barely better than the
+    // mid-run failure it replaces.
+    await expect(
+      preflight({ run: runner('claude'), config: DEFAULTS, git: okGit, dryRun: true }),
+    ).rejects.toThrow(/PATH/);
+  });
+
+  test('and with both present it gets past the binary check', async () => {
+    // The other direction, and the one that matters: a check that always
+    // refused would pass all three cases above and stop the loop running at
+    // all. `dryRun: true` skips the fetch/pull, so reaching a LATER refusal (or
+    // none) is proof this one let it through.
+    const err = await preflight({
+      run: runner(null),
+      config: DEFAULTS,
+      git: okGit,
+      dryRun: true,
+    }).catch((e) => e);
+    // It DOES still refuse here — this fixture has no Playground `.env` — which
+    // is exactly why the cases above match on the binary's own message.
+    expect(String(err?.message ?? '')).not.toMatch(/--version/);
+  });
+});
+
+describe('no_change_needed must survive one falsifying check (Cebab-qd2.33)', () => {
+  // The one outcome that closes a bead PERMANENTLY was the one that never
+  // reached GATE: `next(BUILD, no_change_needed)` returned HARVEST directly, and
+  // harvest called `beads.close`. Every other route to a closed bead runs ten
+  // checks, opens a PR and waits for CI first.
+  //
+  // Reachable, not theoretical: a stale backlog produces genuine no-change
+  // verdicts constantly — a bead already fixed in an open PR is exactly that,
+  // and the loop hit it twice in one session.
+  const verdict = { ok: true, verdict: { outcome: 'no_change_needed' } };
+
+  test('a clean tree closes the bead, as before', () => {
+    expect(next(STAGE.BUILD, verdict, { treeChanged: false })).toMatchObject({
+      stage: STAGE.HARVEST,
+      disposition: DISPOSITION.NO_CHANGE,
+    });
+  });
+
+  test('a DIRTY tree parks instead — the claim is contradicted', () => {
+    // Either the agent changed something, so "no change" is false, or it left
+    // debris, so the verdict is untrustworthy. The teardown is about to
+    // `reset --hard` that work away either way.
+    expect(next(STAGE.BUILD, verdict, { treeChanged: true })).toMatchObject({
+      disposition: DISPOSITION.PARKED,
+      reason: REASON.NO_CHANGE_CONTRADICTED,
+    });
+  });
+
+  test('and its reason is distinct from every other park', () => {
+    // `no_change_contradicted` and `build_failed` send the operator to opposite
+    // places: one is a verdict that disagrees with the tree, the other is an
+    // agent that could not finish.
+    expect(REASON.NO_CHANGE_CONTRADICTED).not.toBe(REASON.BUILD_FAILED);
+    expect(REASON.NO_CHANGE_CONTRADICTED).not.toBe(REASON.GATE_FAILED);
+  });
+
+  test('an UNCOMPUTED tree state still closes — this must not become a third outcome', () => {
+    // `treeChanged` is null on every path that does not ask for it. Treating
+    // null as dirty would park every no-change verdict the driver did not
+    // measure, which is the too-wide direction of the same fix.
+    expect(next(STAGE.BUILD, verdict, { treeChanged: null }).disposition).toBe(
+      DISPOSITION.NO_CHANGE,
+    );
+    expect(next(STAGE.BUILD, verdict, {}).disposition).toBe(DISPOSITION.NO_CHANGE);
+  });
+
+  test('the driver actually measures it for this path', () => {
+    // The machine cannot park on a fact nobody computed. `treeChanged` was
+    // previously set ONLY for a turn-capped build, so without this line the
+    // cases above are unreachable in production — vacuous in the worst way,
+    // since they would still pass.
+    const driver = readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), 'loop.mjs'),
+      'utf8',
+    );
+    expect(driver).toContain("built.verdict?.outcome === 'no_change_needed'");
+  });
+});
+
+describe('GATE’s lockfile step can actually fail (Cebab-qd2.30)', () => {
+  // It could not. `git diff --exit-code package-lock.json` compares the WORKING
+  // TREE to the INDEX, and the driver calls `git.changedPaths()` immediately
+  // before GATE — which opens with `git add -A`. Everything is staged by then.
+  // Measured in a scratch repo with the lockfile genuinely modified: exit 1
+  // before staging, exit 0 after. So it reported a pass in every ledger row
+  // ever written, while checking nothing.
+  const step = DETERMINISTIC_STEPS.find((s) => s.name === 'lockfile');
+
+  test('it compares the INDEX, not the working tree', () => {
+    expect(step.args).toContain('--cached');
+    expect(step.args).toContain('--exit-code');
+    expect(step.args).toContain('package-lock.json');
+  });
+
+  test('and it is still the FIRST step — the early exit is the point', () => {
+    // Its own reason for existing: CI runs this exact check, so failing here
+    // saves a round trip. A correct check placed after ten minutes of tests
+    // saves nothing.
+    expect(DETERMINISTIC_STEPS[0].name).toBe('lockfile');
+  });
+
+  test('the driver stages before GATE, which is WHY --cached is required', () => {
+    // The coupling that made the two drift apart, pinned so a future reorder
+    // cannot silently re-vacate the step. If `changedPaths` ever stops staging,
+    // `--cached` becomes the wrong comparison and this should be revisited.
+    const git = readFileSync(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), 'lib', 'loop', 'git.mjs'),
+      'utf8',
+    );
+    const changed = git.slice(git.indexOf('async changedPaths()'));
+    expect(changed.slice(0, changed.indexOf('},'))).toContain('stageAll()');
   });
 });

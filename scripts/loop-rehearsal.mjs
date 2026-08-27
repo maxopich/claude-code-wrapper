@@ -152,6 +152,11 @@ const SCENARIOS = {
       ctx.eq(ctx.records[0].restore.pulled, false, 'the teardown pull failed');
       ctx.ok(ctx.stdout.includes('stale_main'), 'and it said stale_main out loud');
       ctx.eq(ctx.exitCode, 1, 'exiting HALTED, not OK');
+      // Cebab-qd2.27. `loop:night` pipes through `tee`, so the process exit
+      // code an operator or a cron job can observe is always tee's. The
+      // driver's own answer has to be durable to be worth anything.
+      ctx.eq(ctx.state()?.exitCode, 1, 'and the code is recorded in state.json');
+      ctx.eq(ctx.state()?.stoppedBecause, 'stale_main', 'with the reason beside it');
     },
   },
 
@@ -310,6 +315,32 @@ const SCENARIOS = {
     },
   },
 
+  'json-stream': {
+    why: '--json promises stdout is one ledger record per line INSTEAD of human output',
+    // It only ever ADDED: `log` wrote to stdout unconditionally, so a consumer
+    // reading the documented stream hit `[loop] select: ...` on line one.
+    args: ['--json', '--until', '1'],
+    plan: { beads: 1, ci: 'green', merge: 'direct', build: [{ kind: 'verdict', edit: true }] },
+    check: (ctx) => {
+      ctx.ok(!ctx.rawStdout.includes('[loop]'), 'stdout carries no human lines');
+      const lines = ctx.rawStdout.split('\n').filter(Boolean);
+      ctx.ok(lines.length > 0, 'and it is not simply empty');
+      let parsed = 0;
+      for (const line of lines) {
+        try {
+          JSON.parse(line);
+          parsed += 1;
+        } catch {
+          /* counted by the assertion below */
+        }
+      }
+      ctx.eq(parsed, lines.length, 'every stdout line parses as JSON');
+      // The other direction: the human stream must still EXIST, or this trades
+      // an unparseable stdout for a silent run.
+      ctx.ok(ctx.rawStderr.includes('[loop]'), 'and the human lines moved to stderr');
+    },
+  },
+
   'capped-no-progress': {
     why: 'a turn cap that edited nothing was spinning — park it, do not buy it more turns',
     args: ['--until', '1'],
@@ -349,6 +380,15 @@ const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const save = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2));
 const record = (tool) =>
   fs.appendFileSync(path.join(DIR, 'calls.jsonl'), JSON.stringify({ tool, argv }) + '\\n');
+// PREFLIGHT PROBES EVERY BINARY WITH \`--version\` (Cebab-qd2.34), and a shim must
+// answer that the way the real tool does: instantly, and WITHOUT side effects.
+// Answering it in the body instead cost real assertions — the probe consumed a
+// \`plan.build\` entry and was recorded in \`calls.claude\`, so "claude ran twice"
+// read 1 and every downstream scenario failed. Before \`record\`, deliberately.
+if (argv.length === 1 && argv[0] === '--version') {
+  process.stdout.write('0.0.0-rehearsal\\n');
+  process.exit(0);
+}
 `;
 
 function writeShims(dir) {
@@ -661,7 +701,17 @@ function runScenario(name, scenario) {
     scratch,
     baseSha: scratch.baseSha,
     stdout: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,
+    // Kept APART as well as combined: `--json` promises stdout is a clean JSONL
+    // stream, and a combined buffer cannot tell you whether it is.
+    rawStdout: result.stdout ?? '',
+    rawStderr: result.stderr ?? '',
     exitCode: result.status,
+    // The durable exit code (Cebab-qd2.27). `loop:night` pipes through `tee`,
+    // so `exitCode` above is the PIPELINE's — this is the driver's own answer.
+    state: () => {
+      const p = path.join(scratch.repo, '.loop', 'state.json');
+      return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null;
+    },
     ok: (value, what) => {
       if (!value) failures.push(what);
     },

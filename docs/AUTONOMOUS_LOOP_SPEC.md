@@ -1091,10 +1091,41 @@ record could not previously be asked:
 `harvest.parkFailed` is present **only when a park failed**, so `jq 'select(.harvest.parkFailed)'`
 matches nothing on a healthy night — the same idiom as `.build.failure` and `.crash`.
 
+**A `no_change_needed` verdict is falsified before the bead is closed.** It is the only outcome
+that closes a bead permanently, and it was the only one that never reached GATE — every other route
+to a closed bead runs ten checks, opens a PR and waits for CI first. That is rule 2 at the least
+recoverable point, and it is reachable rather than theoretical: a stale backlog produces genuine
+no-change verdicts constantly, and a bead already fixed in an open PR is exactly that case.
+
+A full GATE would spend ten checks proving a no-op. Instead the driver runs the ONE check that can
+falsify the claim — `git.isClean()`, whose answer it already computes for the turn-cap decision. The
+branch is fresh from `main`, so any dirt is this agent's work: either it changed something (so "no
+change" is false) or it left debris (so the verdict is untrustworthy), and the teardown is about to
+`reset --hard` that work away either way. Dirty parks under `no_change_contradicted`. Note
+`treeChanged` is `null` wherever nobody asked, and null must NOT park — that is the too-wide
+direction of the same fix. `Cebab-qd2.33`.
+
+**Preflight resolves `claude` and `npm`, not just `bd`.** They are the BUILD stage and nine of the
+ten gate steps. Under a launchd or cron PATH — the exact reason `bd` earned its check — preflight
+passed, SELECT picked a bead, CLAIM cut a branch, and only then did BUILD fail, parking under
+`build_failed`, which blames the agent for an environment problem. Probed with `--version` rather
+than `which`, because a broken symlink resolves fine and spawns not at all, and because for `npm`
+that routes through the same runner and so exercises the win32 shell decision. `Cebab-qd2.34`.
+
 ### 9.2 `.loop/state.json`
 
 `{ "consecutiveParks": 0, "parkedThisRun": [], "spentUsd": 0, "startedAt": "…" }` — rewritten at
 each boundary so a crashed run can be diagnosed and the breaker survives a restart.
+
+**It carries the exit code, because nothing else can see it.** `loop:night` pipes the driver into
+`tee`, and a shell pipeline exits with its LAST command's status — always `tee`'s, effectively
+always 0. Measured 2026-08-26: a run stopped by `loop:stop` took the halted branch, which sets
+`EXIT.HALTED`, and the pipeline reported 0. That matters because exit codes are one of the two
+fail-loud channels and recent work kept adding to them — the breaker, the stale-main halt, the
+queue-unsuitable halt, and a crash before SELECT, which was changed FROM a silent exit 0 precisely
+because a silent exit 0 was the bug. Writing `exitCode` and `stoppedBecause` to `state.json`
+composes with what is already durable, survives the pane closing, and needs no `pipefail` (which
+`sh -c` does not guarantee). `--status` reads it back. `Cebab-qd2.27`.
 
 ### 9.3 `.loop/HALT`
 
@@ -1240,6 +1271,7 @@ Eleven scenarios, each asserting on the ledger AND on the bare repo's `main`:
 | `halted-mid-run`         | a HALT hands the bead back rather than stranding it `in_progress` (§9.3)            |
 | `branch-exists`          | a failed `checkout -b` parks instead of letting every later stage run on `main`     |
 | `bd-broken`              | a crash before SELECT exits NON-ZERO instead of reporting a drained queue           |
+| `json-stream`            | `--json` leaves stdout parseable as JSONL, with the human lines on stderr           |
 | `capped-no-progress`     | a cap that edited nothing parks, and `claude` runs exactly once                     |
 
 **The harness was itself vacuous for `Cebab-qd2.18`, and that is the lesson worth keeping.**

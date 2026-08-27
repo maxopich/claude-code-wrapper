@@ -28,7 +28,26 @@ import { killTree, spawnDetached } from './run.mjs';
 
 /** §6.4, in CI's order. `npm` is resolved per-platform by the run seam. */
 export const DETERMINISTIC_STEPS = Object.freeze([
-  { name: 'lockfile', file: 'git', args: ['diff', '--exit-code', 'package-lock.json'] },
+  // `--cached` IS THE WHOLE STEP. Without it this compares the working tree to
+  // the INDEX — and the driver calls `git.changedPaths()` immediately before
+  // GATE, which opens with `git add -A`. Everything is staged by then, so there
+  // is no unstaged diff left to find and the step could not fail. Measured:
+  // with package-lock.json genuinely modified, the un-cached form exits 1
+  // before staging and 0 after, so it reported a pass in every ledger row ever
+  // written while checking nothing.
+  //
+  // `--cached` compares the INDEX to HEAD, and the branch is fresh from main,
+  // so it sees exactly the agent's own lockfile change. Measured in both
+  // directions: 1 when the lockfile moved, 0 when only other files did.
+  //
+  // The real protection was never absent — `git.lockfileChanged()` at PUBLISH
+  // uses the same comparison against the merge base and hard-parks. What was
+  // absent is the early exit this step exists for. `Cebab-qd2.30`.
+  {
+    name: 'lockfile',
+    file: 'git',
+    args: ['diff', '--cached', '--exit-code', 'package-lock.json'],
+  },
   { name: 'lint', file: 'npm', args: ['run', 'lint'] },
   { name: 'format:check', file: 'npm', args: ['run', 'format:check'] },
   { name: 'typecheck', file: 'npm', args: ['run', 'typecheck'] },
