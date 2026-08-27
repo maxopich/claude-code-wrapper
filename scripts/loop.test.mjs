@@ -54,6 +54,7 @@ import {
   resetsBreaker,
 } from './lib/loop/machine.mjs';
 import { evaluateGuard, matchesGlob, parseDiffLines, parseDiffStat } from './lib/loop/guard.mjs';
+import { SCRUBBED_ENV_VAR_NAMES, scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import {
   chooseBead,
   denyPathStems,
@@ -3552,5 +3553,77 @@ describe('a bead about the loop is skipped by PARENTAGE, not only by path text (
     // `parent` is absent on a top-level bead, and `[].includes(undefined)` must
     // not become the accidental filter that empties the queue.
     expect(pick([bead({ parent: undefined })])?.id).toBe('Cebab-x1');
+  });
+});
+
+describe('[security] the loop spends the subscription, not an API key (Cebab-qd2.29)', () => {
+  // The `claude` CLI prefers ANTHROPIC_API_KEY over OAuth, so a stray export in
+  // a shell profile silently routes an agent turn to paid billing. Cebab's
+  // server has always stripped the five names; the loop passed `process.env`
+  // straight through, so an unattended --until 8 night would have billed eight
+  // full turns with no signal anywhere — the log says nothing about auth mode
+  // and `costUsd` is the same token proxy either way.
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+
+  test('the scrub removes every listed name and keeps everything else', () => {
+    const env = {
+      PATH: '/usr/bin',
+      HOME: '/home/x',
+      ANTHROPIC_API_KEY: 'sk-should-not-survive',
+      CLAUDE_CODE_USE_VERTEX: '1',
+    };
+    const out = subscriptionOnlyEnv(env);
+    expect(out.PATH).toBe('/usr/bin');
+    expect(out.HOME).toBe('/home/x');
+    expect(out).not.toHaveProperty('ANTHROPIC_API_KEY');
+    expect(out).not.toHaveProperty('CLAUDE_CODE_USE_VERTEX');
+  });
+
+  test('an env with none of them set comes through unchanged', () => {
+    // The other direction: a scrub that emptied the environment would pass the
+    // case above and break every subprocess the loop spawns.
+    const env = { PATH: '/usr/bin', HOME: '/home/x' };
+    expect(subscriptionOnlyEnv(env)).toEqual(env);
+  });
+
+  test('scrubbedFrom reports NAMES, and only the ones actually set', () => {
+    expect(scrubbedFrom({ PATH: '/x' })).toEqual([]);
+    expect(scrubbedFrom({ ANTHROPIC_API_KEY: 'sk-x', PATH: '/x' })).toEqual(['ANTHROPIC_API_KEY']);
+    // An empty string is not "set" for this purpose — it cannot override OAuth.
+    expect(scrubbedFrom({ ANTHROPIC_API_KEY: '' })).toEqual([]);
+  });
+
+  test('the log line never carries a value', () => {
+    // The names are what gets printed to a console the operator may screenshot
+    // or paste. The value is a credential.
+    const driver = readFileSync(path.join(HERE, 'loop.mjs'), 'utf8');
+    expect(driver).toContain('scrubbed.join(');
+    expect(driver).not.toContain('process.env.ANTHROPIC_API_KEY');
+  });
+
+  test("the copy matches the server's list exactly", () => {
+    // THE WHOLE REASON A COPY IS ACCEPTABLE. `scripts/*.mjs` cannot import from
+    // `server/src` — TypeScript, compiled to a dist the loop does not depend on
+    // — so the list is duplicated. Without this the copy rots the first time
+    // the server's list grows, silently, in the direction of spending money.
+    const serverSrc = readFileSync(
+      path.join(HERE, '..', 'server', 'src', 'runner', 'claude.ts'),
+      'utf8',
+    );
+    const block = serverSrc.slice(
+      serverSrc.indexOf('SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = ['),
+    );
+    const serverNames = block
+      .slice(0, block.indexOf(']'))
+      .split('\n')
+      .map((l) => l.trim().replace(/^'|',?$/g, ''))
+      .filter((l) => /^[A-Z_]+$/.test(l));
+
+    // Positive control: if the parse above ever yields nothing, the comparison
+    // below is vacuously true and this whole test measures nothing.
+    expect(serverNames.length).toBeGreaterThan(0);
+    expect(serverNames).toContain('ANTHROPIC_API_KEY');
+
+    expect([...SCRUBBED_ENV_VAR_NAMES].sort()).toEqual([...serverNames].sort());
   });
 });

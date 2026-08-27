@@ -369,6 +369,23 @@ separation is what makes the loop testable without a repo, a network, or a model
 Check for `.loop/HALT` **at every stage boundary**. If present: finish nothing further, write the
 ledger record with `disposition: "halted"`, run teardown, exit 0.
 
+**Every subprocess runs with a subscription-only environment.** The `claude` CLI prefers
+`ANTHROPIC_API_KEY` over OAuth, so a stray `export` in a shell profile silently routes an agent
+turn to paid API billing. Cebab's server has always stripped the five names
+(`SCRUBBED_ENV_VAR_NAMES` in `server/src/runner/claude.ts`); the loop passed `process.env` straight
+through, so an unattended `--until 8` night would have billed eight full turns with **no signal
+anywhere** — the log says nothing about auth mode and `costUsd` is the same token proxy either way.
+Measured 2026-08-27: not firing on this machine only because the var happens to be unset.
+
+Applied once, where the driver builds its single runner, so `git`/`gh`/`bd`/`npm` are covered by
+the same line and a second application point cannot be forgotten. If any of the names were set, the
+driver says so at startup — **names only, never values**, since that line lands in a console the
+operator may screenshot.
+
+`scripts/*.mjs` cannot import from `server/src`, so the list is a COPY, and a test reads both
+sources and asserts they are identical. That test is the entire reason a copy is acceptable: a
+silently rotted list fails in the direction of spending money. `Cebab-qd2.29`.
+
 ### 6.1 SELECT — _driver_
 
 1. Refuse to start unless `git status --porcelain` is empty and HEAD is `main`. Exit 2 otherwise.

@@ -47,6 +47,7 @@ import {
   resetsBreaker,
 } from './lib/loop/machine.mjs';
 import { evaluateGuard } from './lib/loop/guard.mjs';
+import { scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import { chooseBead, denyPathStems } from './lib/loop/select.mjs';
 import { appendRecord, buildRecord, compareVerdictToGate } from './lib/loop/ledger.mjs';
 import { makeRunner } from './lib/loop/run.mjs';
@@ -896,8 +897,17 @@ async function main() {
   const conditions = untilRaw.map((value) => parseUntil(value, now));
 
   const log = (message) => process.stdout.write(`[loop] ${message}\n`);
+  // ONE application point for the whole run — see `env.mjs`. Every subprocess
+  // the loop spawns goes through this runner, so the `claude` turns cannot be
+  // routed to paid billing by a stray shell export. `Cebab-qd2.29`.
+  const scrubbed = scrubbedFrom(process.env);
+  if (scrubbed.length > 0) {
+    // NAMES only, never values.
+    log(`env: stripped ${scrubbed.join(', ')} — agent turns use the OAuth subscription`);
+  }
   const run = makeRunner({
     cwd: REPO_ROOT,
+    env: subscriptionOnlyEnv(process.env),
     onLine: args.verbose ? (c) => process.stdout.write(c) : undefined,
   });
   const git = makeGit({ run, cwd: REPO_ROOT, dryRun: args.dryRun });
