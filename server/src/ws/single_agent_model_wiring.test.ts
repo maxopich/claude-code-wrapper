@@ -48,10 +48,13 @@ describe('[security] single-agent seed reads the project starting mode', () => {
   // to any real session.
   function seedCall(): string {
     const src = strippedLines(fs.readFileSync(SERVER_TS, 'utf8')).join('\n');
-    // `= seedPermissionMode(`, not `seedPermissionMode(` — the bare form
+    // `: seedPermissionMode(`, not `seedPermissionMode(` — the bare form
     // matches the function DEFINITION first, and scanning that would assert
-    // the signature rather than the call. The control below is what caught it.
-    const start = src.indexOf('= seedPermissionMode(');
+    // the signature rather than the call. Since Cebab-8x8.1.2 the call is the
+    // else-arm of the assistant-posture ternary (`... : seedPermissionMode(`),
+    // so the `: ` prefix is what still selects the call over the definition.
+    // The control below is what caught the old `= ` prefix going stale.
+    const start = src.indexOf(': seedPermissionMode(');
     if (start === -1) return '';
     const end = src.indexOf(');', start);
     return end === -1 ? '' : src.slice(start, end);
@@ -80,7 +83,10 @@ describe('[security] single-agent spawn threads the project model', () => {
     // If this fails, the scan below proves nothing — fix the locator, do not
     // delete the assertion.
     expect(block.length).toBeGreaterThan(200);
-    expect(block).toContain('cwd: project.path');
+    // Since Cebab-8x8.1.2 the cwd is `posture ? posture.cwd : project.path`
+    // (the assistant runs in its KB dir), so scan for the ordinary-project
+    // path fragment rather than the whole old literal.
+    expect(block).toContain('project.path');
     expect(block).toContain('prompt: msg.text');
   });
 

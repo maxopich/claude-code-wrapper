@@ -22,6 +22,11 @@ import {
   type ProjectRow,
 } from '../repo/projects.js';
 import { scanProjects } from '../repo/project_scan.js';
+import {
+  assistantKbRoot,
+  assistantSpawnPosture,
+  isAssistantProject,
+} from '../assistant/identity.js';
 import { applyProjectStartPermissionMode } from '../project_start_mode.js';
 import { preflightManagedCopy, runManagedCopy } from '../managed_copy.js';
 import { observeProjectHooks } from '../repo/hook_trust.js';
@@ -6195,6 +6200,16 @@ async function runOneTurn(
   if (!msg.sessionId) createSession(sessionId, project.id);
   touchProject(project.id);
 
+  // Cebab-8x8.1.2: the Cebab-owned help assistant runs through this very path
+  // as an ordinary project row, but under a hard-locked posture. One boolean
+  // selects it; there is no fork — the F5 check above, the persist/translate/
+  // send loop, `classifyError`, and the finally teardown are all shared. The
+  // pure `assistantSpawnPosture` object holds every value that differs, so a
+  // test pins them rather than a reader tracing this arm. `posture` is truthy
+  // iff `assistant`, so it narrows the branches below.
+  const assistant = isAssistantProject(project);
+  const posture = assistant ? assistantSpawnPosture(assistantKbRoot() ?? project.path) : null;
+
   // Cluster B Phase 4b (§4.4): TOFU spawn-gate. Same helper the bus
   // start-paths use, scoped to this single project. Fires per turn; when
   // every declared MCP is already 'trusted' it's a silent no-op (one
@@ -6202,20 +6217,38 @@ async function runOneTurn(
   // is prompted and the spawn awaits their decision before pickRunner.
   // H04: the return value is not optional bookkeeping — it is what makes a
   // Deny bind on this turn. Threaded into `pickRunner` below.
-  const turnDenials = await gateProjectsForSpawn(conn, [project.id]);
+  //
+  // Cebab-8x8.1.2: the assistant passes `[]` as the scope set so
+  // `resolveProjectAuthority` returns zero settings layers and all three TOFU
+  // gates short-circuit — it participates (so "every spawn is gated" stays
+  // literally true) but there is nothing under `settingSources: []` to gate.
+  const turnDenials = await gateProjectsForSpawn(conn, [project.id], assistant ? [] : undefined);
 
   const ac = new AbortController();
 
-  const trusted = project.trusted === 1;
+  // [security] The single most important line here: an assistant is NEVER
+  // trusted. `shouldAutoAllow(trusted, …)` returns true for EVERY tool —
+  // including Bash — when `trusted`, so an assistant treated as trusted would
+  // auto-run anything the model reached for. Forcing it false routes every
+  // tool through the permission gate. `assistant/posture.test.ts` source-scans
+  // this line so the `!assistant &&` guard cannot be quietly dropped.
+  const trusted = !assistant && project.trusted === 1;
   // Initial mode preserves the user's last in-session preference (persisted on
   // `sessions.permission_mode`) across turns. Falls back to the trust-derived
   // default for fresh sessions. Trust still drives `settingSources` either way.
-  const permissionMode = seedPermissionMode(
-    msg.sessionId,
-    trusted,
-    resolveStartPermissionMode(project.start_permission_mode),
-  );
-  const settingSources = trusted ? (['user', 'project', 'local'] as const) : (['user'] as const);
+  // The assistant ignores all of that: `permissionMode: 'default'`, empty scopes.
+  const permissionMode = posture
+    ? posture.permissionMode
+    : seedPermissionMode(
+        msg.sessionId,
+        trusted,
+        resolveStartPermissionMode(project.start_permission_mode),
+      );
+  const settingSources: SettingScope[] = posture
+    ? posture.settingSources
+    : trusted
+      ? ['user', 'project', 'local']
+      : ['user'];
 
   const canUseTool = async (
     toolName: string,
@@ -6297,13 +6330,18 @@ async function runOneTurn(
   // we emit on cap hit — `actor=operator` when the override was set
   // (the operator made this call themselves), `actor=system` when the
   // run fell back to the resolver's lower precedence steps.
-  const effectiveMaxTurns = resolveMaxTurns(msg.maxTurns);
+  // Cebab-8x8.1.2: the assistant uses its fixed cap and ignores msg.maxTurns
+  // entirely — so its actor is always 'system' (no operator chose the number).
+  const effectiveMaxTurns = posture ? posture.maxTurns : resolveMaxTurns(msg.maxTurns);
   const maxTurnsActor: 'operator' | 'system' =
-    typeof msg.maxTurns === 'number' && Number.isFinite(msg.maxTurns) && msg.maxTurns >= 1
+    !posture &&
+    typeof msg.maxTurns === 'number' &&
+    Number.isFinite(msg.maxTurns) &&
+    msg.maxTurns >= 1
       ? 'operator'
       : 'system';
   const runner = pickRunner({
-    cwd: project.path,
+    cwd: posture ? posture.cwd : project.path,
     prompt: msg.text,
     sessionId: msg.sessionId ? undefined : sessionId,
     resume: msg.sessionId,
@@ -6312,52 +6350,78 @@ async function runOneTurn(
     settingSources: [...settingSources],
     canUseTool,
     abortController: ac,
-    // H04: MCP servers the operator refused at the gate above. `runClaude`
-    // turns these into `settings.deniedMcpServers` (the server does not load)
-    // + `disallowedTools` (its tools are not in context). Empty in the common
-    // case, which leaves the options byte-identical to before.
-    ...(turnDenials.get(project.id)?.length
-      ? { deniedMcpServers: turnDenials.get(project.id) }
-      : {}),
     // Cluster F Phase A1a (UI-A1): resolver picks the per-turn
     // override (msg.maxTurns) over the persisted setting over the env
     // default. Re-read on every send so a SettingsModal change between
     // turns takes effect immediately.
     maxTurns: effectiveMaxTurns,
-    // Cebab-ws0.3: the project's chosen model. Same helper the three bus
-    // register sites use, and for the same reason — it returns a spreadable
-    // object rather than a `string | undefined`, so no call site can write
-    // `model: x` and send `undefined` to the SDK while looking correct.
-    // Re-read per turn, so a change between messages applies to the next one.
-    ...projectModelSpec(project.id),
-    // Cebab-ws0.15: if Cebab's last look at this project found an MCP server
-    // that loaded and never connected, say so in the system prompt. Same
-    // spreadable-object idiom as the line above, and for the same reason.
-    //
-    // The facts come from `authorityCache` — filled by the selection probe
-    // (Cebab-ws0.7) before the first message, and by every previous turn's
-    // `system/init` after that — so this costs no extra spawn and needs
-    // nothing this turn has not already got. Recomputed per turn rather than
-    // pinned at session creation: a resumed turn's system prompt does bind
-    // (measured, `system_prompt_smoke.ts`), so a server that comes up between
-    // messages stops being mentioned on the next one.
-    //
-    // A connection whose probe has not landed yet has no entry at all, and
-    // that must spawn exactly as Cebab did before this existed — hence
-    // `?.mcpServers` rather than a default.
-    ...mcpStatusNoteSpec(conn.authorityCache.get(project.id)?.mcpServers),
+    // Cebab-8x8.1.2: the two spawn shapes. The assistant carries its own
+    // system prompt, a read-only toolset (`Read`/`Glob`/`Grep`), skills `[]`
+    // (hide every skill — omitting is NOT skills-off per the SDK), and a
+    // belt-and-suspenders `disallowedTools`. Under `settingSources: []` it has
+    // no project MCP servers to deny and no model column, so none of the
+    // ordinary-run spreads below apply to it.
+    ...(posture
+      ? {
+          systemPrompt: posture.systemPrompt,
+          tools: posture.tools,
+          skills: posture.skills,
+          disallowedTools: posture.disallowedTools,
+        }
+      : {
+          // H04: MCP servers the operator refused at the gate above. `runClaude`
+          // turns these into `settings.deniedMcpServers` (the server does not
+          // load) + `disallowedTools` (its tools are not in context). Empty in
+          // the common case, which leaves the options byte-identical to before.
+          ...(turnDenials.get(project.id)?.length
+            ? { deniedMcpServers: turnDenials.get(project.id) }
+            : {}),
+          // Cebab-ws0.3: the project's chosen model. Same helper the three bus
+          // register sites use, and for the same reason — it returns a
+          // spreadable object rather than a `string | undefined`, so no call
+          // site can write `model: x` and send `undefined` to the SDK while
+          // looking correct. Re-read per turn.
+          ...projectModelSpec(project.id),
+          // Cebab-ws0.15: if Cebab's last look at this project found an MCP
+          // server that loaded and never connected, say so in the system
+          // prompt. Same spreadable-object idiom as the line above, and for the
+          // same reason.
+          //
+          // The facts come from `authorityCache` — filled by the selection
+          // probe (Cebab-ws0.7) before the first message, and by every previous
+          // turn's `system/init` after that — so this costs no extra spawn and
+          // needs nothing this turn has not already got. Recomputed per turn
+          // rather than pinned at session creation: a resumed turn's system
+          // prompt does bind (measured, `system_prompt_smoke.ts`), so a server
+          // that comes up between messages stops being mentioned on the next.
+          //
+          // A connection whose probe has not landed yet has no entry at all,
+          // and that must spawn exactly as Cebab did before this existed —
+          // hence `?.mcpServers` rather than a default.
+          ...mcpStatusNoteSpec(conn.authorityCache.get(project.id)?.mcpServers),
+        }),
   });
   // Cluster G Phase 3 (G1): tag the lifecycle entry with run metadata so
   // the dispatcher's `active_runs` snapshot can show this turn in the
   // sidebar RunsBadge / dropdown. `sessionId` here is the SINGLE-AGENT
   // session id (the value the client uses as the SessionView key) — that's
   // what the operator clicks "[Jump to session]" to land on.
-  const unregister = registerQuery(runner, {
-    sessionId,
-    projectId: project.id,
-    kind: 'single',
-    startedAt: Date.now(),
-  });
+  //
+  // Cebab-8x8.1.2: the assistant registers META-LESS (the auth_refresh
+  // precedent) so `active_runs` shows no run pointing at a project the
+  // operator's sidebar never lists. It is still tracked for shutdown — the
+  // registry closes it on SIGINT like any other query — just not surfaced.
+  const unregister = registerQuery(
+    runner,
+    assistant
+      ? undefined
+      : {
+          sessionId,
+          projectId: project.id,
+          kind: 'single',
+          startedAt: Date.now(),
+        },
+  );
 
   conn.inFlight.set(sessionId, { ac, projectId: project.id, runner, permissionMode });
   // Persist the seed so subsequent runOneTurn calls (this same session) and
@@ -6415,7 +6479,12 @@ async function runOneTurn(
       // continues to use the translated envelope verbatim.
       let out = translate(sdkMsg, project.id);
       if (out) {
-        cacheSessionStartedIfNeeded(conn, out);
+        // Cebab-8x8.1.2: skip the session-start cache for the assistant. Under
+        // `settingSources: []` there are zero settings layers, so any MCP
+        // server the SDK happened to report would be cached at scope 'unknown'
+        // and re-prompted on the NEXT assistant turn — a gate for a server the
+        // empty-scope spawn never actually loaded.
+        if (!assistant) cacheSessionStartedIfNeeded(conn, out);
         // Cluster F Phase A1b (UI-A1): decorate result envelopes with the
         // effective cap so the client doesn't have to guess (a SettingsModal
         // change mid-turn would otherwise produce a stale denominator on
