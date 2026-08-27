@@ -19,6 +19,7 @@ import type {
   ProjectScan,
   RecoveryContextView,
   RouterDropReasonCode,
+  RouterDropSnapshot,
   ServerMsg,
   SessionPermissionMode,
   SessionSummary,
@@ -593,6 +594,31 @@ export function hydrateParticipantControls(
   const out: Record<number, ParticipantControlView> = {};
   for (const snap of snapshots) out[snap.projectId] = { ...snap };
   return out;
+}
+
+/**
+ * `Cebab-vie.33`: turn the attach envelope's router-drop snapshots into the
+ * `RouterDropView[]` the live `router_drop` reducer accumulates, so a browser
+ * refresh no longer empties the `RouterDropsCounter` chip while the router
+ * keeps dropping.
+ *
+ * A straight fold with one translation: the snapshot carries the audit row's
+ * authoritative `ts`, which becomes the view's `receivedAt`. A live drop has
+ * no wire timestamp so the reducer tags `Date.now()`; a rehydrated one carries
+ * the real recording time instead, which is what keeps an old drop from
+ * counting as a fresh burst the instant the socket re-opens (the counter's
+ * burst window is a `now - receivedAt` filter) and lets the log show when the
+ * drop actually happened rather than when the tab reloaded.
+ */
+export function hydrateRouterDrops(snapshots: readonly RouterDropSnapshot[]): RouterDropView[] {
+  return snapshots.map((snap) => ({
+    auditRowId: snap.auditRowId,
+    reasonCode: snap.reasonCode,
+    source: snap.source,
+    destination: snap.destination,
+    kind: snap.kind,
+    receivedAt: snap.ts,
+  }));
 }
 
 /**
@@ -2116,10 +2142,13 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // banner that survived a restart). Null in every other case;
             // banner-bound lifetime.
             recoveryContext: msg.recoveryContext ?? null,
-            // Phase 6d: drops are client-accumulated; always empty at start.
-            // A future R-A enhancement could rehydrate from the server's
-            // safety_audit table.
-            routerDrops: [],
+            // Phase 6d: drops were client-accumulated and reset to [] on every
+            // attach, so a refresh emptied the RouterDropsCounter chip while
+            // the router kept dropping. `Cebab-vie.33` is that "future R-A
+            // enhancement": the envelope now carries every recorded drop rebuilt
+            // from the server's safety_audit table, so a reload keeps the chip's
+            // history. Empty array on a fresh start — the same [] this hardcoded.
+            routerDrops: hydrateRouterDrops(msg.routerDrops),
             // Phase 4g1: per-participant control state accumulates from the
             // three `participant_*_changed` ServerMsgs — and, since
             // `Cebab-vie.6` / `Cebab-vie.4`, STARTS from what the server knows

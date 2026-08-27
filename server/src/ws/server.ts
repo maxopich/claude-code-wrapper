@@ -227,6 +227,7 @@ import {
 } from './control_verbs.js';
 import { getPauseExpiryRegistry, type PauseExpiryEntry } from './pause_expiry.js';
 import { buildParticipantControlSnapshots } from './participant_control_snapshot.js';
+import { buildRouterDropSnapshots } from './router_drop_snapshot.js';
 import { ORCHESTRATOR_AGENT_NAME } from '../bus/orchestrator.js';
 import type {
   IterationSummary,
@@ -3205,6 +3206,10 @@ export function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // a refresh stops discarding all three. This is the attach path for R-A,
     // R-B and reopen alike, which is why the fix needs no per-caller work.
     participantControls: buildParticipantControlSnapshots(resumed.handle.sessionId),
+    // `Cebab-vie.33`: the router-drop history, rebuilt from `safety_audit`, so
+    // a refresh stops emptying the `RouterDropsCounter` chip while the router
+    // keeps dropping. Same attach-path reasoning as the controls above.
+    routerDrops: buildRouterDropSnapshots(resumed.handle.sessionId),
     ...(pendingQuestion
       ? {
           pendingQuestion: {
@@ -5135,6 +5140,9 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             // across all three sites means no site can hand-write an empty
             // array that looks right and is wrong.
             participantControls: buildParticipantControlSnapshots(handle.sessionId),
+            // `Cebab-vie.33`: likewise necessarily `[]` at a fresh start (no drop
+            // has been recorded yet), and through the builder for the same reason.
+            routerDrops: buildRouterDropSnapshots(handle.sessionId),
             ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
           });
         } catch (err) {
@@ -5235,6 +5243,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           // four control verbs, so this is empty twice over — via the builder,
           // so it stays correct if that ever changes.
           participantControls: buildParticipantControlSnapshots(handle.sessionId),
+          // `Cebab-vie.33`: router drops CAN occur in chain mode (F2 filters,
+          // unauthorized `_sink`, self-address), so this is not always empty —
+          // the builder rebuilds whatever the session recorded.
+          routerDrops: buildRouterDropSnapshots(handle.sessionId),
           ...(chainRow?.mock === 1 ? { mock: true } : {}),
         });
       } catch (err) {
