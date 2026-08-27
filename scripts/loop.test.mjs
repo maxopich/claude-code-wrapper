@@ -3501,3 +3501,56 @@ describe('a stop must not poison the next run (Cebab-qd2.21)', () => {
     expect(DRIVER).toContain('signalled || fs.existsSync(HALT_FILE)');
   });
 });
+
+describe('a bead about the loop is skipped by PARENTAGE, not only by path text (Cebab-qd2.26)', () => {
+  // Measured live 2026-08-27, on the first real run after the PUBLISH fix
+  // merged. `Cebab-qd2.17` was correctly skipped, because its body writes
+  // `scripts/loop.mjs:824` and that is a deny stem. `Cebab-qd2.22` — a bead
+  // entirely about the driver — was SELECTED and began a full BUILD, because it
+  // names the same files by BASENAME. The guard at PUBLISH would have caught
+  // the resulting diff, but only after a whole turn budget was spent.
+  const stems = denyPathStems(DEFAULTS.guard.denyPaths);
+  const bead = (over) => ({
+    id: 'Cebab-x1',
+    parent: 'Cebab-other',
+    title: 'a title',
+    description: 'a description',
+    priority: 1,
+    issue_type: 'bug',
+    ...over,
+  });
+  const pick = (rows) =>
+    chooseBead(rows, { select: DEFAULTS.select, denyStems: stems, parked: new Set() });
+
+  test('a bead under the loop epic is skipped however it words itself', () => {
+    const loopish = bead({
+      id: 'Cebab-qd2.99',
+      parent: 'Cebab-qd2',
+      // Deliberately NO full path: this is exactly the text that got through.
+      description: 'machine.mjs and teardown and harvest() and bd ready',
+    });
+    expect(pick([loopish])).toBe(null);
+  });
+
+  test('and one under any other epic is not', () => {
+    // The direction that matters more: excluding by parent must not have
+    // emptied the queue. The select.mjs header records that an empty deny stem
+    // made `text.includes('')` true for every bead — the same shape of failure
+    // reached from a different flag.
+    const ordinary = bead({ parent: 'Cebab-vie', description: 'server/src/bus/chain.ts' });
+    expect(pick([ordinary])?.id).toBe('Cebab-x1');
+  });
+
+  test('the text scan still does its own half', () => {
+    // Parentage does not replace it: a bead about the driver filed under some
+    // other epic, or one about `.github/**`, has no loop parent at all.
+    const pathish = bead({ parent: 'Cebab-vie', description: 'edit .github/workflows/ci.yml' });
+    expect(pick([pathish])).toBe(null);
+  });
+
+  test('a bead with no parent at all is selectable', () => {
+    // `parent` is absent on a top-level bead, and `[].includes(undefined)` must
+    // not become the accidental filter that empties the queue.
+    expect(pick([bead({ parent: undefined })])?.id).toBe('Cebab-x1');
+  });
+});

@@ -406,6 +406,21 @@ So the mechanism is the explicit one that already exists: **`needs-human` is in
 the agent, the only reader that can tell a decision from a defect — `build-prompt.md` asks it
 to return `needs_human` _before_ starting work, which costs a few turns instead of sixty.
 
+**A bead about the loop is excluded by PARENTAGE, not only by path text.** The deny-stem scan
+above only catches beads that spell a path out, and a bead about the driver usually does not.
+Measured live 2026-08-27: `Cebab-qd2.17` was correctly skipped because its body writes
+`scripts/loop.mjs:824`, while `Cebab-qd2.22` — entirely about the driver, discussing `machine.mjs`
+and `teardown` by basename — was SELECTED and began a full BUILD on work already fixed in an open
+PR. The guard at PUBLISH catches the diff, but only after a whole turn budget.
+
+`select.excludeParents` skips any bead whose `parent` is the loop's own epic. `parent` is present
+on every `bd ready --json` row (measured — unlike `labels`, which is why label exclusion is pushed
+down to `bd` itself), so it costs nothing. It does not replace the text scan: that one still covers
+`.github/**` and a driver bead filed under some other epic. Both, cheaply. `Cebab-qd2.26`.
+
+The measurement that sized it: with the loop's epic excluded SELECT picks `Cebab-2t9.1`, real
+work; without it, `Cebab-qd2.23` — and the first six rows of the ready queue were all loop beads.
+
 ### 6.2 CLAIM — _driver_
 
 1. `bd update <id> --status in_progress`.

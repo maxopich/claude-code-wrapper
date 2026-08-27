@@ -152,6 +152,7 @@ export function chooseBead(beads = [], { select = {}, denyStems = [], parked } =
   const maxPriority = select.maxPriority ?? Number.POSITIVE_INFINITY;
   const excludeTypes = select.excludeTypes ?? [];
   const prefixes = select.excludeIdPrefixes ?? [];
+  const excludeParents = select.excludeParents ?? [];
 
   for (const bead of beads) {
     if (!bead || typeof bead.id !== 'string') continue;
@@ -161,6 +162,23 @@ export function chooseBead(beads = [], { select = {}, denyStems = [], parked } =
     if (excludeTypes.includes(bead.issue_type)) continue;
     if (prefixes.some((prefix) => prefix && bead.id.startsWith(prefix))) continue;
     if (parkedSet.has(bead.id)) continue;
+
+    // THE TEXT SCAN BELOW ONLY CATCHES BEADS THAT SPELL A PATH OUT, and a bead
+    // about the loop usually does not. Measured live 2026-08-27: `Cebab-qd2.17`
+    // was correctly skipped because its body writes `scripts/loop.mjs:824`,
+    // while `Cebab-qd2.22` — entirely about the driver — was SELECTED and began
+    // a full BUILD, because it names the same files by BASENAME. The guard at
+    // PUBLISH would have caught the diff, but only after a whole turn budget.
+    //
+    // Parentage is the precise signal and it is FREE: `parent` is present on
+    // every `bd ready --json` row (measured — unlike `labels`, which is not,
+    // hence the header's rule that label exclusion is pushed down to bd). A
+    // bead filed under the loop's own epic is about the loop, whatever words it
+    // happens to use.
+    //
+    // Not a replacement for the text scan: that one catches `.github/**` and a
+    // bead about the driver filed under some other epic. Both, cheaply.
+    if (excludeParents.includes(bead.parent)) continue;
 
     const text = `${bead.title ?? ''}\n${bead.description ?? ''}`;
     if (denyStems.some((stem) => text.includes(stem))) continue;
