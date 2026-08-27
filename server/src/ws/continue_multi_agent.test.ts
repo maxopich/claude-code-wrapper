@@ -203,6 +203,10 @@ describe('executeContinueMultiAgent — refusals leave the recovery state intact
     expect(sent[0]).toMatchObject({ type: 'wrapper_error' });
   });
 
+  // `Cebab-2t9.1`: a chain run is now reconstructed read-only after a restart,
+  // so a chain handle (no `sendUserPrompt`) IS reachable here. Continuing the
+  // pipeline is a follow-up, so it must still refuse loudly and leave
+  // `awaiting_continue` untouched — only the message changed.
   test('a chain handle is refused loudly, and the flag is untouched', async () => {
     await executeContinueMultiAgent({
       sessionId: SID,
@@ -213,10 +217,10 @@ describe('executeContinueMultiAgent — refusals leave the recovery state intact
       send: (m) => sent.push(m),
     });
 
-    expect(sent[0]).toMatchObject({
-      type: 'wrapper_error',
-      message: 'Only orchestrator sessions can be continued.',
-    });
+    expect(sent[0]).toMatchObject({ type: 'wrapper_error', kind: 'process_crashed' });
+    expect((sent[0] as { message: string }).message).toMatch(
+      /chain session was recovered read-only/i,
+    );
     expect(isAwaiting()).toBe(true);
   });
 

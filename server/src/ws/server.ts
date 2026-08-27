@@ -1599,11 +1599,12 @@ export async function executeReopenSessionProbe(args: {
  * `resumeCallbacks` field is a Pick of `ResumeCallbacks` with
  * `hopBudget` filled in.
  *
- * Chain mode handling: `resumeMultiAgentTarget` reconstructs only
- * orchestrator sessions via R-B. A chain-mode target whose live handle
- * is gone (server restarted) is unreopenable in v1 — we surface
- * `chain_reconstruction_unsupported` so the modal can render a
- * specific message rather than a generic "failed".
+ * Chain mode handling: `Cebab-2t9.1` — `resumeMultiAgentTarget` now
+ * reconstructs chain sessions too, so a reconstructable chain target reopens
+ * like any orchestrated run. Only a chain target whose durable recovery state
+ * is incomplete (a reconstruction guard fails) still surfaces
+ * `chain_reconstruction_unsupported`, so the modal can render a specific
+ * message rather than a generic "failed".
  */
 export async function executeReopenSessionConfirmed(args: {
   sessionId: string;
@@ -1741,18 +1742,21 @@ export async function executeReopenSessionConfirmed(args: {
   }
 
   if (!result.ok) {
-    // Map TargetResumeFailure → ReopenSessionFailureReason. The two
-    // we expect here:
-    //   - 'reattach-failed' for chain mode (R-B is orchestrator-only)
-    //     OR a guard failure (folder missing, etc.). Mode-check
-    //     against the row distinguishes them.
+    // Map TargetResumeFailure → ReopenSessionFailureReason. The cases:
+    //   - 'reattach-failed' for a guard failure (folder missing, no persisted
+    //     --resume checkpoints, etc.). `Cebab-2t9.1`: chain mode is no longer a
+    //     reason on its own — a reconstructable chain target succeeds above.
+    //     A chain target that STILL fails a guard keeps the dedicated
+    //     `chain_reconstruction_unsupported` reason so the modal can render its
+    //     tailored message.
     //   - 'not-found' / 'already-running' shouldn't reach here (we
     //     guarded above), but map defensively.
     let reason: ReopenSessionFailureReason = 'reactivate_failed';
     let message = 'Failed to reactivate the session.';
     if (result.reason === 'reattach-failed' && row.mode === 'chain') {
       reason = 'chain_reconstruction_unsupported';
-      message = 'Chain-mode reconstruction across a Cebab server restart is not supported in v1.';
+      message =
+        'This chain session could not be rebuilt after the Cebab restart — its durable recovery state is incomplete (e.g. a pre-#261 run with no saved checkpoints).';
     } else if (result.reason === 'already-running') {
       reason = 'still_running';
       message = 'This session is already running.';
@@ -1866,13 +1870,18 @@ export async function executeContinueMultiAgent(args: {
     return;
   }
   if (sendUserPrompt === null) {
-    // Chain handles have no sendUserPrompt — chain reconstruction is
-    // out of scope, so this should be unreachable, but fail loud.
+    // Chain handles have no `sendUserPrompt`. `Cebab-2t9.1`: a chain run is now
+    // reconstructed read-only after a restart, so this IS reachable — the
+    // operator can click Continue on a recovered chain. Resuming the pipeline
+    // past the read-only re-attach is a follow-up (a chain has no user-prompt
+    // seam to nudge the interrupted participant with), so we refuse cleanly for
+    // now rather than half-continue.
     send({
       type: 'wrapper_error',
       sessionId,
       kind: 'process_crashed',
-      message: 'Only orchestrator sessions can be continued.',
+      message:
+        'This chain session was recovered read-only. Continuing a chain across a restart is not supported yet — archive it or start a new run.',
     });
     return;
   }

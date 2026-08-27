@@ -22,8 +22,18 @@
  * **read-only**. It sets `awaiting_continue` and delivers NOTHING — an
  * interrupted turn's side effects (files written, commands run) are not
  * rolled back, so the operator must explicitly continue (Phase 3) before any
- * agent runs again. Chain mode is intentionally NOT reconstructed yet
- * (deferred); chain rows still fall back to `crashed`.
+ * agent runs again.
+ *
+ * `Cebab-2t9.1`: chain mode is now reconstructed too, via
+ * `reconstructChainSession` + the extracted `wireChainSession`. It reuses the
+ * SAME shared guard (`checkReconstructable`) and the same read-only contract;
+ * the only chain-specific differences are that there is no orchestrator
+ * workspace and no per-agent mute/kick/pause reseed (chain exposes none of
+ * those operator controls). The prerequisite — each participant's `--resume`
+ * checkpoint — became durable in PR #261 (`chain.ts`'s `onSessionId`). Continue
+ * for a reconstructed chain is a follow-up: a chain handle has no
+ * `sendUserPrompt`, so the pipeline cannot yet be resumed past the read-only
+ * re-attach.
  */
 import fs from 'node:fs';
 import {
@@ -53,6 +63,7 @@ import {
   USER_RECIPIENT,
   type ResolvedAgent,
 } from './runtime.js';
+import { wireChainSession } from './chain.js';
 import { getLiveSession, hasLiveSession, type BusSink } from './session_registry.js';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { executeExpireParticipant } from '../ws/control_verbs.js';
@@ -74,7 +85,7 @@ export const RECOVERY_BANNER = [
 
 /** Why a row cannot be reconstructed. All reasons fall back to `crashed`. */
 export type NotReconstructable =
-  | 'not-orchestrator' // chain mode is deferred (Phase 1 scope)
+  | 'unknown-mode' // a mode neither reconstruct path handles (defensive)
   | 'no-session-folder' // pre-007 row, no folder anchor
   | 'folder-missing' // temp-cleaned or operator-deleted
   | 'no-iteration' // pre-006 row, no iteration id
@@ -103,7 +114,14 @@ export type ReconstructGuard = { ok: true } | { ok: false; reason: NotReconstruc
  * `scripts/predicateReturns.test.mjs` now keeps it that way.
  */
 export function checkReconstructable(row: MultiAgentSessionRow): ReconstructGuard {
-  if (row.mode !== 'orchestrator') return { ok: false, reason: 'not-orchestrator' };
+  // `Cebab-2t9.1`: the durable-state preconditions below are mode-agnostic —
+  // both `orchestrator` and `chain` are reconstructable now. The mode-specific
+  // wiring is chosen by the caller (`reconstructOrchestratorSession` /
+  // `reconstructChainSession`), each of which asserts its own mode; this shared
+  // guard only answers "is the durable state present to rebuild ANY run?".
+  if (row.mode !== 'orchestrator' && row.mode !== 'chain') {
+    return { ok: false, reason: 'unknown-mode' };
+  }
   if (!row.session_folder) return { ok: false, reason: 'no-session-folder' };
   if (!fs.existsSync(row.session_folder)) return { ok: false, reason: 'folder-missing' };
   if (!row.iteration_id) return { ok: false, reason: 'no-iteration' };
@@ -173,6 +191,11 @@ export function reconstructOrchestratorSession(
     sendServerMsg?: BusSink['sendServerMsg'];
   },
 ): boolean {
+  // `Cebab-2t9.1`: the shared guard is now mode-agnostic, so this function has
+  // to reject a chain row itself — wiring one through `wireOrchestratorSession`
+  // would rebuild it with an orchestrator (which a chain run has no participant
+  // for) and the wrong routing filters. `reconstructChainSession` is its twin.
+  if (row.mode !== 'orchestrator') return false;
   if (!checkReconstructable(row).ok) return false;
 
   // Idempotent / single-flight: a prior reconnect in this same post-restart
@@ -411,6 +434,169 @@ export function reconstructOrchestratorSession(
   // Best-effort: pre-Phase-6 callers (legacy unit tests) may not wire
   // `sendServerMsg`; in that case the typed event + toast are skipped and
   // the existing scrollback banner is still the source of truth.
+  if (callbacks.sendServerMsg) {
+    callbacks.sendServerMsg({
+      type: 'session_reconstructed',
+      sessionId: row.id,
+      reasonCode: 'reconstructed',
+    });
+    const result = emitNotification(
+      {
+        class: 'operational',
+        severity: 'success',
+        dedupeKey: `session_reconstructed:${row.id}`,
+        title: 'Session recovered',
+        message: `Session ${row.id.slice(0, 8)} was rebuilt after a Cebab restart — paused for review.`,
+        sessionId: row.id,
+        action: { kind: 'resume', sessionId: row.id },
+        sticky: true,
+        reasonCode: 'reconstructed',
+      },
+      callbacks.sendServerMsg,
+    );
+    if (!result.ok) {
+      console.error('[reconstruct] session_reconstructed dispatcher.emit failed', result.error);
+    }
+  }
+
+  return true;
+}
+
+/**
+ * `Cebab-2t9.1`: rebuild a CHAIN session in-process and register it live,
+ * READ-ONLY — the chain twin of `reconstructOrchestratorSession`. Returns true
+ * iff the session is now in the registry (caller re-fetches via
+ * `getLiveSession` and re-attaches its WS sink exactly like the orchestrator
+ * path). Returns false on any guard failure or rebuild error → caller falls
+ * back to `markCrashedSilent`, i.e. behavior is never worse than R-A.
+ *
+ * Simpler than the orchestrator path in two ways, both because chain exposes no
+ * per-agent operator controls: there is no orchestrator workspace to
+ * regenerate, and no mute / kick / pause-expiry reseed. The one hold chain does
+ * have — a pause-on-dangerous mutation hold — is reseeded inside
+ * `wireChainSession` (`listPendingMutations` → `runner.holdForMutation`), the
+ * same shared path a fresh start takes.
+ */
+export function reconstructChainSession(
+  row: MultiAgentSessionRow,
+  callbacks: {
+    onEvent: BusSink['onEvent'];
+    onEnded: BusSink['onEnded'];
+    /** Re-resolved hop budget for this session (read fresh from settings + env
+     *  on every reconstruct so a budget change between runs takes effect on
+     *  Continue). */
+    hopBudget: number;
+    /** `Cebab-vie.17`: re-resolved per-hop turn cap, read fresh for the same
+     *  reason `hopBudget` is. */
+    maxTurns: number;
+    onPendingRetry?: BusSink['onPendingRetry'];
+    onMutation?: BusSink['onMutation'];
+    onPendingMutation?: BusSink['onPendingMutation'];
+    sendNotification?: BusSink['sendNotification'];
+    sendRouterDrop?: BusSink['sendRouterDrop'];
+    sendServerMsg?: BusSink['sendServerMsg'];
+  },
+): boolean {
+  // Twin of `reconstructOrchestratorSession`'s mode assertion: the shared guard
+  // is mode-agnostic, so this function refuses anything but a chain row.
+  if (row.mode !== 'chain') return false;
+  if (!checkReconstructable(row).ok) return false;
+
+  // Idempotent / single-flight: a prior reconnect in this same post-restart
+  // process may already have rebuilt it — a second browser is a plain
+  // re-attach, not a second rebuild.
+  if (hasLiveSession(row.id)) return true;
+
+  const folder = row.session_folder as string;
+  const iterationId = row.iteration_id as string;
+  const paths = sessionPathsFromFolder(folder);
+
+  // Participants in CHAIN ORDER — `listResolvedParticipants` orders by
+  // `chain_order`, which is exactly the pipeline position, so the rebuilt
+  // `nextHops` / terminal-agent entitlement match the original run. A NULL
+  // `bus_agent_name` was already rejected by the shared guard.
+  const participants: ResolvedAgent[] = listResolvedParticipants(row.id)
+    .filter((r) => r.role === 'worker' && r.bus_agent_name)
+    .map((r) => ({
+      projectId: r.project_id,
+      agentName: r.bus_agent_name as string,
+      cwd: r.project_path,
+      projectName: r.project_name,
+    }));
+
+  const seededSessions = listAgentSessions(row.id).map((r) => ({
+    agentName: r.agent_name,
+    cliSessionId: r.cli_session_id,
+  }));
+
+  // A participant is "already briefed" iff it has produced at least one event:
+  // to have spoken it must have completed its briefed first turn, so its
+  // resumed transcript already contains the briefing. Same DELIBERATELY
+  // UNBOUNDED reasoning as the orchestrator path (`Cebab-3nt`): the question is
+  // "has this agent EVER spoken", so it needs every row.
+  const allEvents = listMultiAgentEvents(row.id);
+  const participantNameSet = new Set(participants.map((part) => part.agentName));
+  const briefedAgents = [
+    ...new Set(allEvents.map((e) => e.source).filter((s) => participantNameSet.has(s))),
+  ];
+  // Seed the router's hop counter from the persisted event count so budget
+  // enforcement carries across the restart — without this a session at 29/30
+  // hops pre-restart would silently re-open the gate to 30 more.
+  const initialHopsCount = allEvents.length;
+
+  try {
+    prepareIterationDir(iterationId, [...participantNameSet], paths);
+  } catch (err) {
+    console.warn(`[reconstruct] prepareIterationDir failed for ${row.id}`, err);
+  }
+
+  try {
+    wireChainSession({
+      sessionId: row.id,
+      iterationId,
+      lifecycle: row.lifecycle as MultiAgentLifecycle,
+      paths,
+      participants,
+      // NO initialPrompt → READ-ONLY: nothing is delivered until the operator
+      // continues (the conservative R-B contract).
+      onEvent: callbacks.onEvent,
+      onEnded: callbacks.onEnded,
+      onPendingRetry: callbacks.onPendingRetry,
+      onMutation: callbacks.onMutation,
+      onPendingMutation: callbacks.onPendingMutation,
+      sendNotification: callbacks.sendNotification,
+      sendRouterDrop: callbacks.sendRouterDrop,
+      sendServerMsg: callbacks.sendServerMsg,
+      seededSessions,
+      briefedAgents,
+      hopBudget: callbacks.hopBudget,
+      maxTurns: callbacks.maxTurns,
+      initialHopsCount,
+      pauseOnDangerous: row.pause_on_dangerous === 1,
+    });
+  } catch (err) {
+    console.error(`[reconstruct] wireChainSession failed for ${row.id}`, err);
+    return false;
+  }
+
+  // Conservative: paused for operator review. No turn delivered here.
+  try {
+    setAwaitingContinue(row.id, true);
+  } catch (err) {
+    console.error(`[reconstruct] setAwaitingContinue failed for ${row.id}`, err);
+  }
+
+  // Persist the banner so it replays in scrollback and survives further
+  // reconnects (same persistence path as every other bus event).
+  try {
+    appendMultiAgentEvent(row.id, CEBAB_SOURCE, USER_RECIPIENT, 'intro', RECOVERY_BANNER);
+  } catch (err) {
+    console.error(`[reconstruct] banner append failed for ${row.id}`, err);
+  }
+
+  // Typed `session_reconstructed` ServerMsg + a success toast — identical to
+  // the orchestrator path so the operator dock treats a recovered chain run
+  // the same. Best-effort: legacy callers may not wire `sendServerMsg`.
   if (callbacks.sendServerMsg) {
     callbacks.sendServerMsg({
       type: 'session_reconstructed',
