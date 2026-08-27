@@ -57,6 +57,7 @@ import { evaluateGuard, matchesGlob, parseDiffLines, parseDiffStat } from './lib
 import { SCRUBBED_ENV_VAR_NAMES, scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import {
   chooseBead,
+  containerIds,
   denyPathStems,
   readyArgv,
   readyArgvConformsToConfig,
@@ -4438,5 +4439,106 @@ describe('parkArgv: the label is a parameter, and it defaults to the failure one
     // exclusion exists to prevent.
     expect(DEFAULTS.select.excludeLabels).toContain(PARK_LABEL);
     expect(DEFAULTS.select.excludeLabels).toContain(DECLINE_LABEL);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A ROLLUP IS NOT WORK, AND `issue_type` DOES NOT SAY SO (Cebab-qd2.40)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Measured 2026-08-27 by running the shipped `readyArgv` + `chooseBead` against
+// the live queue. The loop's next four picks were:
+//
+//   1. Cebab-8x8.1    feature   (parent of .1.1, .1.2, .1.3)
+//   2. Cebab-8x8.2    feature   (parent of .2.1, .2.2, .2.3)
+//   3. Cebab-8x8.3    feature   (parent of .3.1, .3.2, .3.3)
+//   4. Cebab-8x8.1.1  task      — a SUBSET of what pick 1 was asked to do
+//
+// `excludeTypes` cannot reach them: they are typed `feature`. Of 232 ready
+// rows, 20 were the parent of another ready row and 16 were literal epics
+// already excluded.
+//
+// The fixtures below use `parent` and never `labels` — see this module's own
+// header. `parent` is measured to be present on every `bd ready --json` row;
+// `labels` is not, and a fixture carrying one describes an object bd cannot
+// produce.
+//
+// WHAT EACH CASE MUST REDDEN:
+//   - dropping the `containers.has` check     -> 'the parent is skipped'
+//   - excluding every bead that HAS a parent  -> 'a child is not excluded'
+//   - widening beyond the batch               -> 'a container whose children are absent'
+
+describe('select: a bead that contains another bead in the batch is not work', () => {
+  // The real shape, ids and types included.
+  const ROLLUP = [
+    { id: 'Cebab-8x8.1', title: 'Assistant identity', priority: 1, issue_type: 'feature' },
+    {
+      id: 'Cebab-8x8.1.1',
+      title: 'Migration 031',
+      priority: 1,
+      issue_type: 'task',
+      parent: 'Cebab-8x8.1',
+    },
+  ];
+
+  test('the parent is skipped and the child is chosen', () => {
+    const pick = chooseBead(ROLLUP, { select: DEFAULTS.select });
+    expect(pick.id).toBe('Cebab-8x8.1.1');
+  });
+
+  test('a child is not excluded merely for HAVING a parent', () => {
+    // The too-wide direction, and it would empty most of the queue: nearly
+    // every bead in this repo is filed under an epic.
+    const pick = chooseBead([ROLLUP[1]], { select: DEFAULTS.select });
+    expect(pick.id).toBe('Cebab-8x8.1.1');
+  });
+
+  test('a container whose children are ABSENT from the batch is still selectable', () => {
+    // The stated limit, asserted rather than left to be discovered. Cebab-8x8.4
+    // is exactly this: three children, all blocked, so none is in the ready
+    // batch. The remedy for that one is the `epic` label, which
+    // `select.excludeLabels` already carries.
+    const pick = chooseBead([ROLLUP[0]], { select: DEFAULTS.select });
+    expect(pick.id).toBe('Cebab-8x8.1');
+  });
+
+  test('and the whole measured queue head resolves to the leaf tasks', () => {
+    // The four picks from the live measurement, in order, with the two extra
+    // rows that made picks 2 and 3 rollups too.
+    const batch = [
+      { id: 'Cebab-8x8.1', priority: 1, issue_type: 'feature' },
+      { id: 'Cebab-8x8.2', priority: 1, issue_type: 'feature' },
+      { id: 'Cebab-8x8.3', priority: 2, issue_type: 'feature' },
+      { id: 'Cebab-8x8.1.1', priority: 1, issue_type: 'task', parent: 'Cebab-8x8.1' },
+      { id: 'Cebab-8x8.2.1', priority: 1, issue_type: 'task', parent: 'Cebab-8x8.2' },
+      { id: 'Cebab-8x8.3.1', priority: 2, issue_type: 'task', parent: 'Cebab-8x8.3' },
+    ];
+    const parked = new Set();
+    const picks = [];
+    for (let i = 0; i < 3; i += 1) {
+      const bead = chooseBead(batch, { select: DEFAULTS.select, parked });
+      parked.add(bead.id);
+      picks.push(bead.id);
+    }
+    expect(picks).toEqual(['Cebab-8x8.1.1', 'Cebab-8x8.2.1', 'Cebab-8x8.3.1']);
+  });
+
+  test('containerIds reads `parent` and tolerates the rows that have none', () => {
+    expect([...containerIds(ROLLUP)]).toEqual(['Cebab-8x8.1']);
+    expect(containerIds([]).size).toBe(0);
+    // A malformed row must not add an empty-string container, which would then
+    // match nothing but would also hide a real bug behind a passing set.
+    expect(containerIds([{ id: 'a', parent: '' }, { id: 'b', parent: null }, null]).size).toBe(0);
+  });
+
+  test('it composes with the exclusions already there rather than replacing them', () => {
+    // The loop's own epic is still excluded by parentage, and an over-priority
+    // bead is still excluded, even when neither is a container.
+    const batch = [
+      { id: 'Cebab-qd2.99', priority: 1, issue_type: 'bug', parent: 'Cebab-qd2' },
+      { id: 'Cebab-low', priority: 4, issue_type: 'bug' },
+      { id: 'Cebab-ok', priority: 2, issue_type: 'bug' },
+    ];
+    expect(chooseBead(batch, { select: DEFAULTS.select }).id).toBe('Cebab-ok');
   });
 });

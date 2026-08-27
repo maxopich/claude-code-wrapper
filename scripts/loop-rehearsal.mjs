@@ -475,6 +475,34 @@ const SCENARIOS = {
     },
   },
 
+  'rollup-skipped': {
+    why: 'a bead that CONTAINS another ready bead is a rollup — take the child (Cebab-qd2.40)',
+    // Measured on the live queue: the loop's next three picks were feature-typed
+    // parents of ready task beads, and pick four was a SUBSET of pick one. Here
+    // Reh-1 is the parent of Reh-2 and bd offers both.
+    args: ['--until', '1'],
+    plan: {
+      beads: 2,
+      ci: 'green',
+      merge: 'direct',
+      containerFirst: true,
+      build: [{ kind: 'verdict', edit: true }],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(ctx.records.length, 1, 'one iteration');
+      ctx.eq(row.bead, 'Reh-2', 'the CHILD was selected, not its parent');
+      // The other half of the finding, asserted where it actually bites: the
+      // parent must never be claimed, because doing it AND its child is the
+      // duplicate work this exists to prevent.
+      ctx.ok(
+        !ctx.calls.bd.some((c) => c[0] === 'update' && c[1] === 'Reh-1' && c.includes('--claim')),
+        'and the parent was never claimed',
+      );
+      ctx.eq(row.disposition, 'guard_withheld', 'the iteration still succeeded');
+    },
+  },
+
   'capped-no-progress': {
     why: 'a turn cap that edited nothing was spinning — park it, do not buy it more turns',
     args: ['--until', '1'],
@@ -821,6 +849,13 @@ function buildScratch(name, scenario) {
     priority: 2,
     issue_type: 'task',
   }));
+  // A ROLLUP AT THE HEAD OF THE QUEUE: Reh-1 is the parent of Reh-2, and bd
+  // returns both as ready. `issue_type` says nothing about it — measured live,
+  // the real ones were typed `feature` — so the only signal is `parent`, which
+  // is why the shim rows carry it. (Cebab-qd2.40)
+  if (scenario.plan.containerFirst && beadRows.length > 1) {
+    beadRows[1].parent = beadRows[0].id;
+  }
   fs.writeFileSync(
     path.join(dir, 'plan.json'),
     JSON.stringify({ ...scenario.plan, beadRows }, null, 2),

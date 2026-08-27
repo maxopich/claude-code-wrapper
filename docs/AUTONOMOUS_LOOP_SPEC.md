@@ -443,6 +443,27 @@ down to `bd` itself), so it costs nothing. It does not replace the text scan: th
 The measurement that sized it: with the loop's epic excluded SELECT picks `Cebab-2t9.1`, real
 work; without it, `Cebab-qd2.23` — and the first six rows of the ready queue were all loop beads.
 
+**AND A BEAD THAT CONTAINS ANOTHER READY BEAD IS A ROLLUP, NOT WORK.** `excludeTypes` skips a
+literal `epic`, and nothing else looked at containment — so a sub-epic typed `feature` reads as
+ordinary work. Measured 2026-08-27 by running this very function against the live queue: the next
+four picks were `Cebab-8x8.1`, `Cebab-8x8.2`, `Cebab-8x8.3` — each the parent of three ready task
+beads — and then `Cebab-8x8.1.1`, which is a **subset of what pick 1 was asked to do**. Two costs,
+and only the first is obvious: a sub-epic is far larger than one bead, and a parent plus its own
+child means the same work done twice, in two PRs, the second diffing against a `main` that already
+contains the first.
+
+The signal is `parent` again and is free. Across all 232 ready rows, 20 were the parent of another
+ready row; 16 were literal epics already excluded, and exactly four were not. Skipping costs
+nothing — the child is the more specific work and is taken instead, and the parent becomes
+selectable the moment its children close.
+
+**Scoped to the batch, deliberately.** The driver asks bd for 50 rows, so a container whose
+children are BLOCKED, or sorted past the cap, is not caught: `Cebab-8x8.4` is exactly that. The
+harm this prevents is doing a parent AND its child, which requires both to be selectable, which
+means both are in the batch. A rollup whose children are all blocked is merely large, and the
+mechanism for that already exists — `select.excludeLabels` carries `epic`, so labelling it is one
+command. `Cebab-qd2.40`.
+
 ### 6.2 CLAIM — _driver_
 
 1. `bd update <id> --status in_progress`.
@@ -1342,7 +1363,7 @@ So the rehearsal runs the **real driver** end-to-end against a scratch git repo 
 `scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
 its own path — the installed copy would drive this checkout.
 
-Fifteen scenarios, each asserting on the ledger AND on the bare repo's `main`:
+Sixteen scenarios, each asserting on the ledger AND on the bare repo's `main`:
 
 | Scenario                 | What only it can prove                                                               |
 | ------------------------ | ------------------------------------------------------------------------------------ |
@@ -1358,6 +1379,7 @@ Fifteen scenarios, each asserting on the ledger AND on the bare repo's `main`:
 | `bd-broken`              | a crash before SELECT exits NON-ZERO instead of reporting a drained queue            |
 | `json-stream`            | `--json` leaves stdout parseable as JSONL, with the human lines on stderr            |
 | `capped-no-progress`     | a cap that edited nothing parks, and `claude` runs exactly once                      |
+| `rollup-skipped`         | a bead that contains another ready bead is skipped for its child (§6.1)              |
 | `driver-stale`           | preflight's pull rewrites `loop.mjs` under the running process — it restarts (§13)   |
 | `capped-keeps-repair`    | a cap resume leaves a repair for a CI red instead of parking finished work (§6.3)    |
 | `declined`               | a declined bead carries the agent's reasoning and is labelled `loop-declined` (§6.8) |
@@ -1437,7 +1459,7 @@ at 36% CPU, not the harness.
       stays on the ledger row and is printed nowhere (§8.4).
 - [ ] A build whose envelope carries no usage block records `tokens: null` rather than zeros, and
       the run total is unaffected rather than `NaN`.
-- [ ] `npm run loop:rehearse` passes all fifteen scenarios (§11.1) — the only thing that executes
+- [ ] `npm run loop:rehearse` passes all sixteen scenarios (§11.1) — the only thing that executes
       the green path without touching GitHub, and the only regression test LAND has.
 - [ ] A queued auto-merge is recorded as `merge_queued`, does **not** close the bead, and does not
       reset the circuit breaker.
@@ -1462,6 +1484,10 @@ at 36% CPU, not the harness.
 - [ ] A turn cap that is resumed does not consume one of `maxRepairs`: a bead that is capped, then
       fails the gate, then goes red in CI still has an attempt left for the CI failure. `attempts`
       and `capResumes` together account for every `claude` invocation (§6.3).
+- [ ] SELECT never picks a bead that is the parent of another bead in the same ready batch: it
+      takes the child instead, and the parent is never claimed. A bead is not excluded merely for
+      HAVING a parent, and a container whose children are absent from the batch is still
+      selectable (§6.1).
 - [ ] A declined bead is labelled `loop-declined`, not `loop-stuck`; its note quotes the agent's
       summary and carries `claude --resume <sessionId>`; and a genuine failure is still
       `loop-stuck`. Both labels exclude the bead from SELECT (§6.8).
