@@ -266,6 +266,14 @@ export type StartOrchestratorOpts = {
    *  onto the row so the templates UI's "Last run" rail can SELECT by
    *  template later. Absent for ad-hoc runs. */
   templateId?: string;
+  /** F15: per-participant role/goal text keyed by `String(projectId)` — the
+   *  applied template's `roles`, mirrored onto the wire by the client. Each
+   *  worker's entry is rendered into the roster prompt (`renderRosterPrompt`)
+   *  so the operator's per-role text reaches the router. Delivered once at
+   *  start; R-B reconstruct replays the already-persisted roster event, so
+   *  the roles need no separate persistence. Absent for ad-hoc runs; stale
+   *  keys and empty entries are ignored. */
+  roles?: Record<string, string>;
 };
 
 export type ResumeOrchestratorOpts = {
@@ -2663,7 +2671,16 @@ export async function startOrchestratorSession(
   // framing must match what the router actually enforces — use the
   // resolved value from the handle, not the literal `DEFAULT_HOP_BUDGET`.
   const rosterText = renderRosterPrompt({
-    workers: opts.workers.map((w) => ({ agentName: w.agentName, projectName: w.projectName })),
+    workers: opts.workers.map((w) => {
+      // F15: look the operator's role text up by projectId. A missing key or
+      // one that trims to empty renders nothing (renderRosterPrompt guards).
+      const role = opts.roles?.[String(w.projectId)];
+      return {
+        agentName: w.agentName,
+        projectName: w.projectName,
+        ...(role !== undefined ? { role } : {}),
+      };
+    }),
     hopBudget: handle.hopBudget,
     executeMode: opts.executeMode ?? false,
   });

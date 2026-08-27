@@ -714,6 +714,15 @@ export type MultiAgentState = {
    * Reset alongside `draftHopBudget` by the same manual-edit signals.
    */
   draftHopBudgetSource: 'template' | 'user' | null;
+  /**
+   * F15: set by `ma_apply_template` to the applied template's `roles` map
+   * (per-participant role/goal text keyed by `String(projectId)`), cleared by
+   * the same manual-edit signals as `draftTemplateId`. Sent on
+   * `start_multi_agent` as `roles` (orchestrator mode) so the operator's
+   * per-role text reaches the orchestrator's roster prompt. `{}` for ad-hoc
+   * runs and for templates that never had role text.
+   */
+  draftRoles: Record<string, string>;
 };
 
 /**
@@ -1091,6 +1100,7 @@ export const initialState: AppState = {
     draftTemplateId: null,
     draftHopBudget: null,
     draftHopBudgetSource: null,
+    draftRoles: {},
   },
 };
 
@@ -1571,6 +1581,9 @@ export function reduce(state: AppState, action: Action): AppState {
           draftTemplateId: null,
           draftHopBudget: null,
           draftHopBudgetSource: null,
+          // F15: a manual edit dissociates the draft from its template, so the
+          // template's per-role text no longer applies to the next Start.
+          draftRoles: {},
         },
       };
 
@@ -1592,6 +1605,9 @@ export function reduce(state: AppState, action: Action): AppState {
           draftTemplateId: null,
           draftHopBudget: null,
           draftHopBudgetSource: null,
+          // F15: a manual edit dissociates the draft from its template, so the
+          // template's per-role text no longer applies to the next Start.
+          draftRoles: {},
         },
       };
     }
@@ -1608,6 +1624,9 @@ export function reduce(state: AppState, action: Action): AppState {
           draftTemplateId: null,
           draftHopBudget: null,
           draftHopBudgetSource: null,
+          // F15: a manual edit dissociates the draft from its template, so the
+          // template's per-role text no longer applies to the next Start.
+          draftRoles: {},
         },
       };
 
@@ -1629,6 +1648,9 @@ export function reduce(state: AppState, action: Action): AppState {
           draftTemplateId: null,
           draftHopBudget: null,
           draftHopBudgetSource: null,
+          // F15: a manual edit dissociates the draft from its template, so the
+          // template's per-role text no longer applies to the next Start.
+          draftRoles: {},
         },
       };
     }
@@ -1684,6 +1706,10 @@ export function reduce(state: AppState, action: Action): AppState {
             action.template.hopBudget >= 1
               ? 'template'
               : null,
+          // F15: stash the template's per-role text (copied, not aliased) so
+          // the next Start mirrors it onto `start_multi_agent.roles`. `{}` when
+          // the template predates the field or has no role text.
+          draftRoles: { ...(action.template.roles ?? {}) },
         },
       };
     }

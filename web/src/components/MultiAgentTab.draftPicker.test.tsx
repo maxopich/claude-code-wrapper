@@ -79,6 +79,7 @@ function multiAgent(draftParticipants: number[]): MultiAgentState {
     draftTemplateId: null,
     draftHopBudget: null,
     draftHopBudgetSource: null,
+    draftRoles: {},
   } as MultiAgentState;
 }
 

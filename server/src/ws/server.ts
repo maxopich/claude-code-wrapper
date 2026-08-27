@@ -5110,6 +5110,14 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             // PR-7: stamp template provenance onto the row so the rail can
             // SELECT by template post-teardown. Absent on ad-hoc runs.
             templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
+            // F15: the applied template's per-role text, mirrored onto the
+            // wire by the client. `startOrchestratorSession` renders each
+            // worker's entry into the roster prompt. Forward only a plain
+            // object; a non-object (hostile/garbled client) becomes absent.
+            roles:
+              msg.roles && typeof msg.roles === 'object' && !Array.isArray(msg.roles)
+                ? msg.roles
+                : undefined,
           });
           conn.multiAgent = handle;
           // Register B01: a freshly-built router's sink epoch is 0 and this
