@@ -149,10 +149,24 @@ export function AssistantProvider({ children, send, handlerRef }: AssistantProvi
       if (!trimmed) return;
       const projectId = stateRef.current.assistantProjectId;
       if (projectId === undefined) return;
+      // Read the adopted id BEFORE dispatching: `stateRef` still holds the
+      // pre-dispatch state, which is what we want — the id the server handed
+      // back on `session_started`, never the optimistic one seeded below.
+      const sid = stateRef.current.session?.id;
       dispatch({ type: 'user_send', text: trimmed });
-      // Exactly these three fields — no `maxTurns`, no `sessionId`. The server
-      // resolves the assistant's session from the projectId.
-      send({ type: 'send_message', projectId, text: trimmed });
+      // No `maxTurns` — the assistant's cap is server-side (ASSISTANT_MAX_TURNS).
+      // `sessionId` IS sent once a real one exists. `runOneTurn` does
+      // `msg.sessionId ?? randomUUID()` and passes `resume: msg.sessionId`
+      // (ws/server.ts), so omitting it mints a NEW session and spawns without
+      // `--resume`: the help agent would restart cold on every follow-up while
+      // the panel still showed one continuous transcript. PENDING_SESSION_ID is
+      // never sent — it is this component's placeholder, not a server id.
+      send({
+        type: 'send_message',
+        projectId,
+        text: trimmed,
+        ...(sid && sid !== PENDING_SESSION_ID ? { sessionId: sid } : {}),
+      });
     },
     [send],
   );
