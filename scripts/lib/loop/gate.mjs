@@ -312,6 +312,44 @@ export function makeGate({ run, cwd, config, log = () => {} }) {
   }
 
   return {
+    /**
+     * THE ONE GATE FAILURE WITH A MECHANICAL FIX.
+     *
+     * Measured 2026-08-28 across every run the loop has ever made: EVERY gate
+     * failure was `format:check` and nothing else — 6 of 6 in the console log,
+     * 5 of 8 builds in the run of 2026-08-27, with zero lint, typecheck, test,
+     * build, smoke or ci_smoke failures in that whole night. Each one cost a
+     * full repair: a second `claude -p` invocation re-establishing the entire
+     * bead context to run one command that takes two seconds.
+     *
+     * The CONSOLE LOG, not the ledger — no ledger row records a gate failure at
+     * all, because `parts.gate` is reassigned per attempt and keeps the passing
+     * retry (`Cebab-qd2.43`). The driver exempts THIS path by keeping the failing
+     * run's steps, which is what makes the claim below true rather than
+     * aspirational.
+     *
+     * WHY THIS RUNS AFTER THE FAILURE AND NOT BEFORE IT, which is the opposite
+     * of the obvious design. `Cebab-oit` proposed inserting `npm run format` as
+     * a step immediately BEFORE `format:check` — and that would make the check
+     * green by construction, since `prettier --write` followed by
+     * `prettier --check` can only disagree about a file prettier cannot parse.
+     * A gate step that can no longer fail is a gate step measuring nothing,
+     * which is the defect class this repo is least willing to add. Running it
+     * only once the check has ALREADY failed keeps the step live: the failure
+     * is real, is recorded in `gate.steps`, and is what triggers this.
+     *
+     * `prettier --write .` is repo-wide, but its blast radius is bounded by
+     * something already true: CI enforces `format:check` on every PR, so `main`
+     * is always format-clean and a branch cut from it has no pre-existing
+     * misformatted file to sweep in. Verified on this checkout.
+     *
+     * NOT a general "autofix the gate" seam, and it must not become one. Every
+     * other step fails for a reason that needs judgement; this one fails for a
+     * reason that needs a command.
+     */
+    async autofixFormat() {
+      return run('npm', ['run', 'format'], { cwd, timeoutMs: stepTimeout });
+    },
     async run({ changedPaths }) {
       const deterministic = await runDeterministic();
       if (!deterministic.passed) {

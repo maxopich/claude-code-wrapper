@@ -44,7 +44,8 @@
           "title": { "type": "string", "maxLength": 120 },
           "type": { "enum": ["bug", "task", "chore", "feature", "decision"] },
           "why": { "type": "string", "maxLength": 400 },
-          "evidence": { "type": "string", "maxLength": 600 }
+          "evidence": { "type": "string", "maxLength": 600 },
+          "already_tracked": { "type": "string", "maxLength": 40 }
         }
       }
     }

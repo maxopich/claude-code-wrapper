@@ -27,7 +27,8 @@
  * real path stayed broken. Label exclusion is asserted where it actually
  * lives: in the `bd ready` argv.
  */
-import { readFileSync } from 'node:fs';
+import fs, { readFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -52,10 +53,14 @@ import {
   landedOnStaleMain,
   next,
   resetsBreaker,
+  shouldAutofixFormat,
+  stepsAcrossAutofix,
 } from './lib/loop/machine.mjs';
 import { evaluateGuard, matchesGlob, parseDiffLines, parseDiffStat } from './lib/loop/guard.mjs';
 import { SCRUBBED_ENV_VAR_NAMES, scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import {
+  ACTIVE_STATUSES,
+  ancestorsOfActive,
   chooseBead,
   containerIds,
   denyPathStems,
@@ -814,14 +819,23 @@ import {
   claimArgv,
   closeArgv,
   followUpArgv,
+  listArgv,
   makeBeads,
   noteArgv,
   parkArgv,
   showArgv,
 } from './lib/loop/beads.mjs';
+import {
+  decideWithheld,
+  latestByBead,
+  parkedFromLedger,
+  reconcile,
+  withheldFromLedger,
+} from './lib/loop/reconcile.mjs';
 import { REEXEC_ENV, reexecArgv, reexecEnv, reexecPlan } from './lib/loop/self_update.mjs';
 import {
   ZERO_TOKENS,
+  accumulateBuild,
   addTokens,
   formatCount,
   formatDuration,
@@ -842,8 +856,9 @@ import {
   prStateArgv,
 } from './lib/loop/forge.mjs';
 import {
-  assertPlaygroundEnv,
   DETERMINISTIC_STEPS,
+  assertPlaygroundEnv,
+  makeGate,
   parseEnvFile,
   playgroundSmokeEnv,
   playgroundSmokes,
@@ -855,11 +870,12 @@ import {
   isMaxTurns,
   limitScanText,
   makeBuild,
+  renderPriorFollowUps,
   renderPrompt,
   resolveTier,
 } from './lib/loop/build.mjs';
 import { allowReason, commandHeads, decide, splitSegments } from './lib/loop/loop-guard.mjs';
-import { harvest, parseArgs, preflight, watchCi } from './loop.mjs';
+import { harvest, parseArgs, preflight, readLedger, watchCi } from './loop.mjs';
 import { makeRunner, needsWin32Shell } from './lib/loop/run.mjs';
 import { makeGit } from './lib/loop/git.mjs';
 import { stripComments } from './lib/strip_comments.mjs';
@@ -4540,5 +4556,806 @@ describe('select: a bead that contains another bead in the batch is not work', (
       { id: 'Cebab-ok', priority: 2, issue_type: 'bug' },
     ];
     expect(chooseBead(batch, { select: DEFAULTS.select }).id).toBe('Cebab-ok');
+  });
+});
+
+// ─── the four known loop flaws ─────────────────────────────────────────────
+
+describe('containment comes from the bead graph, not the ready batch (Cebab-cak)', () => {
+  // THE FAILURE THIS REPRODUCES, from the run of 2026-08-27. Iteration 5 built
+  // `Cebab-8x8.2.1`; the guard withheld the merge, so PR #422 stayed open and
+  // HARVEST left the bead `in_progress` — correctly, since a human merging it
+  // was the remaining work. Iteration 6 then selected `Cebab-8x8.2`, its DIRECT
+  // PARENT, and built it from a main that did not contain #422. Both PRs create
+  // `assistant/kb/00-index.md`; the second to merge conflicted, by hand.
+  //
+  // `containerIds` could not see it: it reads the `parent` pointers of the rows
+  // IN THE READY BATCH, and an in_progress bead is not in `bd ready` at all.
+
+  const row = (id, extra = {}) => ({ id, status: 'open', ...extra });
+
+  test('an in_progress child blocks its parent AND its grandparent', () => {
+    const graph = [
+      row('Cebab-8x8.2.1', { parent: 'Cebab-8x8.2', status: 'in_progress' }),
+      row('Cebab-8x8.2', { parent: 'Cebab-8x8' }),
+      row('Cebab-8x8'),
+    ];
+    expect([...ancestorsOfActive(graph)].sort()).toEqual(['Cebab-8x8', 'Cebab-8x8.2']);
+
+    // AND THE ASSERTION ABOVE DOES NOT PROVE TRANSITIVITY, which is why this
+    // second one is here. Caught by the revert-check: replacing the walk with a
+    // single hop leaves that expectation GREEN, because `Cebab-8x8.2` is itself
+    // active and so takes its OWN one-level hop to `Cebab-8x8`. A chain of
+    // active beads reaches the same answer either way, so the natural fixture
+    // is blind to the property it looks like it is testing.
+    //
+    // Transitivity is only observable when an intermediate is NOT active — then
+    // it takes no hop of its own, and one level stops at it.
+    const inactiveMiddle = [
+      row('Cebab-8x8.2.1', { parent: 'Cebab-8x8.2', status: 'in_progress' }),
+      row('Cebab-8x8.2', { parent: 'Cebab-8x8', status: 'closed' }),
+    ];
+    expect([...ancestorsOfActive(inactiveMiddle)].sort()).toEqual(['Cebab-8x8', 'Cebab-8x8.2']);
+  });
+
+  test('and a CLOSED child blocks nothing — the case that already worked', () => {
+    // `Cebab-8x8.1` was selected in the same run AFTER all three of its
+    // children had merged and closed, and correctly returned no_change_needed.
+    // If this direction broke, every completed epic would be permanently
+    // unselectable and the queue would look drained.
+    const graph = [
+      row('Cebab-8x8.1.1', { parent: 'Cebab-8x8.1', status: 'closed' }),
+      row('Cebab-8x8.1', { parent: 'Cebab-8x8' }),
+    ];
+    expect(ancestorsOfActive(graph).has('Cebab-8x8.1')).toBe(false);
+    // `8x8.1` is itself open, so ITS parent is still blocked. Being open is the
+    // reason, not being a container.
+    expect(ancestorsOfActive(graph).has('Cebab-8x8')).toBe(true);
+  });
+
+  test('the walk passes THROUGH a closed intermediate', () => {
+    // This is the whole reason the driver makes a second `bd list
+    // --status=closed` call. `bd list --json` returns open and in_progress ONLY
+    // (measured 2026-08-28: 249 rows, 243 + 6, no closed ones), so without the
+    // closed rows the map has no edge for `8x8.2` and the walk stops there —
+    // leaving `8x8` selectable while its grandchild is open.
+    const withClosed = [
+      row('Cebab-8x8.2.2', { parent: 'Cebab-8x8.2' }),
+      row('Cebab-8x8.2', { parent: 'Cebab-8x8', status: 'closed' }),
+    ];
+    expect([...ancestorsOfActive(withClosed)].sort()).toEqual(['Cebab-8x8', 'Cebab-8x8.2']);
+    // And the other direction, which is what proves the second call earns its
+    // 0.36s: drop the closed row and the grandparent goes free.
+    const withoutClosed = [row('Cebab-8x8.2.2', { parent: 'Cebab-8x8.2' })];
+    expect([...ancestorsOfActive(withoutClosed)]).toEqual(['Cebab-8x8.2']);
+  });
+
+  test('a cycle in the parent pointers terminates', () => {
+    const graph = [row('A', { parent: 'B' }), row('B', { parent: 'A' })];
+    expect([...ancestorsOfActive(graph)].sort()).toEqual(['A', 'B']);
+  });
+
+  test('the rule reads `status`, and says nothing when bd stops sending it', () => {
+    // NOT an aspiration — a statement of what this depends on. Every field the
+    // walk reads (`id`, `parent`, `status`) comes off a bd row, and the way
+    // this fix dies is the way select.mjs's header says `labels` would have:
+    // silently, returning an empty set, with the loop still running. The driver
+    // logs the size for exactly this reason.
+    const noStatus = [{ id: 'child', parent: 'parent' }];
+    expect(ancestorsOfActive(noStatus).size).toBe(0);
+    expect([...ACTIVE_STATUSES].sort()).toEqual(['in_progress', 'open']);
+  });
+
+  test('chooseBead UNIONS the injected set with the batch rule, never replaces it', () => {
+    // A caller that passes an empty set must get exactly the previous
+    // behaviour, so the batch rule cannot be lost by forgetting to fold it in.
+    const batch = [
+      { id: 'P', title: 'parent', status: 'open', priority: 1, issue_type: 'task' },
+      { id: 'C', title: 'child', status: 'open', priority: 1, issue_type: 'task', parent: 'P' },
+    ];
+    expect(chooseBead(batch, { select: DEFAULTS.select }).id).toBe('C');
+    expect(chooseBead(batch, { select: DEFAULTS.select, contains: new Set() }).id).toBe('C');
+    expect(containerIds(batch).has('P')).toBe(true);
+  });
+
+  test('the 2026-08-27 selection, before and after', () => {
+    // The end-to-end shape of the incident, in one assertion pair.
+    const ready = [
+      { id: 'Cebab-8x8.2', title: 'parent', status: 'open', priority: 1, issue_type: 'task' },
+      { id: 'Cebab-other', title: 'leaf', status: 'open', priority: 1, issue_type: 'task' },
+    ];
+    const graph = [
+      { id: 'Cebab-8x8.2.1', parent: 'Cebab-8x8.2', status: 'in_progress' },
+      { id: 'Cebab-8x8.2', parent: 'Cebab-8x8', status: 'open' },
+      { id: 'Cebab-other', status: 'open' },
+    ];
+    // What the loop DID: the withheld child is not in the batch, so its parent
+    // reads as a leaf and is selected.
+    expect(chooseBead(ready, { select: DEFAULTS.select }).id).toBe('Cebab-8x8.2');
+    // What it does now.
+    expect(
+      chooseBead(ready, { select: DEFAULTS.select, contains: ancestorsOfActive(graph) }).id,
+    ).toBe('Cebab-other');
+  });
+
+  test('listArgv asks for every row and every status, in one call', () => {
+    // BOTH FLAGS ARE LOAD-BEARING AND EACH FAILS THE SAME WAY — silently
+    // SHRINKING the parent map, so the rule stays green on a partial graph.
+    //
+    // `-n 0` is bd's no-limit; the default page truncates to STDERR while
+    // leaving stdout valid JSON, so nothing throws. `--all` is what makes it
+    // one call: measured 2026-08-28, `bd list --json -n 0` with no status
+    // filter returns 249 rows (243 open + 6 in_progress) and NOT ONE closed
+    // bead, while `--all` returns all 608 with all 457 parent edges. It also
+    // cannot develop the gap an explicit status list would — `blocked` and
+    // `deferred` are in bd's vocabulary and in neither of two named statuses.
+    expect(listArgv()).toEqual(['list', '--json', '-n', '0', '--all']);
+  });
+});
+
+describe('the gate repairs its one mechanical failure itself (Cebab-oit)', () => {
+  // Measured 2026-08-28: EVERY gate failure the loop has ever hit is
+  // `format:check` — 6 console lines, 5 of 8 builds in the run of 2026-08-27 —
+  // with no lint, typecheck, test, build, smoke or ci_smoke failure in that
+  // whole night. Each one spent a second `claude -p` invocation re-establishing
+  // the entire bead context in order to run one command that takes two seconds.
+  // The evidence is the console log: the ledger records no gate failure at all,
+  // because `parts.gate` keeps the passing retry (`Cebab-qd2.43`).
+
+  test('it fires on format:check, and on nothing else', () => {
+    expect(shouldAutofixFormat({ passed: false, failedStep: 'format:check' })).toBe(true);
+    // The narrowness is the design: every other step fails for a reason that
+    // needs judgement, which is what the repair path buys.
+    for (const step of ['lint', 'typecheck', 'test', 'build', 'lockfile', 'ci_smoke']) {
+      expect(shouldAutofixFormat({ passed: false, failedStep: step }), step).toBe(false);
+    }
+  });
+
+  test('it does not fire on a PASSING gate', () => {
+    // `passed !== false` rather than `!passed`, so a malformed result cannot
+    // trigger a tree-mutating command.
+    expect(shouldAutofixFormat({ passed: true, failedStep: 'format:check' })).toBe(false);
+    expect(shouldAutofixFormat(null)).toBe(false);
+    expect(shouldAutofixFormat(undefined)).toBe(false);
+    expect(shouldAutofixFormat({})).toBe(false);
+    // THE ONE INPUT THAT SEPARATES `passed !== false` FROM `!passed`, and
+    // without it the comment above is unmeasured: every other fixture here
+    // stays green under that mutation. A result with no `passed` field at all
+    // must not trigger a repo-wide `prettier --write`.
+    expect(shouldAutofixFormat({ failedStep: 'format:check' })).toBe(false);
+  });
+
+  test('once per iteration — a second failure is a real defect', () => {
+    // Prettier has already run by then, so a second format:check failure means
+    // a file prettier cannot parse. That must reach the repair path exactly as
+    // it does today rather than looping the driver on prettier.
+    const gated = { passed: false, failedStep: 'format:check' };
+    expect(shouldAutofixFormat(gated, { alreadyAutofixed: false })).toBe(true);
+    expect(shouldAutofixFormat(gated, { alreadyAutofixed: true })).toBe(false);
+  });
+
+  test('autofixFormat runs `npm run format` and nothing else', async () => {
+    const calls = [];
+    const gate = makeGate({
+      run: async (file, args) => (calls.push([file, args]), { code: 0, stdout: '', stderr: '' }),
+      cwd: '/repo',
+      config: DEFAULTS,
+    });
+    await gate.autofixFormat();
+    expect(calls).toEqual([['npm', ['run', 'format']]]);
+  });
+
+  test('the BUILD prompt names the step the gate enforces', () => {
+    // The cause, stated where the agent reads it. `format:check` is step 3 of
+    // the gate and the prompt's "what done means" list never mentioned
+    // formatting at all — so the agent wrote correct code and lost an
+    // invocation to whitespace, five times in one night.
+    //
+    // A weak test on purpose, in the same idiom as the needs_human one above:
+    // it proves the sentence is PRESENT, not that a model obeys it. The failure
+    // it catches is silent deletion during an edit.
+    //
+    // `toContain('npm run format')` is NOT enough and the revert-check proved
+    // it: that string is a substring of `npm run format:check`, which the same
+    // paragraph also names, so deleting the instruction left the assertion
+    // green. Match the sentence, not the command.
+    expect(REAL_PROMPT).toContain('`npm run format` has been run');
+    expect(REAL_PROMPT).toContain('format:check');
+    // And the gate really does enforce it, so the prompt is not describing a
+    // step that has been removed.
+    expect(DETERMINISTIC_STEPS.map((s) => s.name)).toContain('format:check');
+  });
+
+  test('the re-gate KEEPS the failing steps, so the row still shows what reddened', () => {
+    // The claim gate.mjs makes for firing after the check rather than before it
+    // is that the failure stays real and stays in `gate.steps`. The driver's
+    // first version assigned the re-gate's steps OVER the first run's, so the
+    // row showed a clean ten-step gate and `formatAutofixed` was the only trace
+    // — the justification, false as wired.
+    const failed = [
+      { name: 'lockfile', exitCode: 0, ms: 12 },
+      { name: 'lint', exitCode: 0, ms: 900 },
+      { name: 'format:check', exitCode: 1, ms: 23 },
+    ];
+    const repaired = [
+      { name: 'lockfile', exitCode: 0, ms: 11 },
+      { name: 'lint', exitCode: 0, ms: 880 },
+      { name: 'format:check', exitCode: 0, ms: 22 },
+      { name: 'test', exitCode: 0, ms: 44000 },
+    ];
+    const merged = stepsAcrossAutofix(failed, repaired);
+    expect(merged.filter((x) => x.exitCode !== 0).map((x) => x.name)).toEqual(['format:check']);
+    expect(merged).toHaveLength(7);
+    // And the consequence that matters: `verdictVsGate` can still say DISAGREE.
+    // Computed from the repaired run alone it reports agreement between the
+    // agent's claimed commands and a gate result the agent never caused.
+    expect(compareVerdictToGate(['npm run format:check'], merged)).toBe('disagree');
+    expect(compareVerdictToGate(['npm run format:check'], repaired)).toBe('agree');
+    // Degenerate inputs must not throw — a gate that never ran twice passes [].
+    expect(stepsAcrossAutofix([], repaired)).toEqual(repaired);
+    expect(stepsAcrossAutofix(undefined, undefined)).toEqual([]);
+  });
+
+  test('the ledger records the autofix only when it fired', () => {
+    // Absent is the good state, so `jq 'select(.gate.formatAutofixed)'` counts
+    // how often the prompt instruction is being ignored — the measurement that
+    // says whether the prompt half is working, now that the failure itself is
+    // repaired in place and no longer shows up as `gate: FAILED`.
+    expect(buildRecord({ gate: { steps: [] } }, 0).gate.formatAutofixed).toBeUndefined();
+    expect(
+      buildRecord({ gate: { steps: [], formatAutofixed: true } }, 0).gate.formatAutofixed,
+    ).toBe(true);
+  });
+});
+
+describe('readLedger tolerates the partial line a killed run leaves', () => {
+  // `.loop/runs.jsonl` is append-only and a run killed mid-append leaves a
+  // truncated last line. `--status` is the first thing an operator reaches for
+  // after exactly that, and it used to throw a SyntaxError into the top-level
+  // catch and exit HALTED instead of printing the last ten rows.
+  test('a truncated last line is skipped, not fatal', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-ledger-'));
+    const file = path.join(dir, 'runs.jsonl');
+    fs.writeFileSync(
+      file,
+      `${JSON.stringify({ bead: 'A', disposition: 'merged' })}\n` +
+        `${JSON.stringify({ bead: 'B', disposition: 'parked' })}\n` +
+        '{"bead":"C","dispos',
+    );
+    const rows = readLedger(file);
+    expect(rows.map((r) => r.bead)).toEqual(['A', 'B']);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('a missing file is empty, not a throw', () => {
+    // The common first-run case: `.loop/` is gitignored, so a fresh checkout
+    // has no ledger at all.
+    expect(readLedger(path.join(os.tmpdir(), 'cebab-no-such-ledger-xyz.jsonl'))).toEqual([]);
+  });
+});
+
+describe('reconcile: what the last run left behind (Cebab-qd2.42, Cebab-qd2.41)', () => {
+  const ledger = (...rows) => rows;
+  const withheldRow = (bead, pr, over = {}) => ({
+    bead,
+    disposition: 'guard_withheld',
+    pr: { number: pr, url: `https://forge.invalid/pull/${pr}` },
+    ts: '2026-08-27T20:00:00.000Z',
+    ...over,
+  });
+
+  test('only the LATEST row for a bead counts', () => {
+    // The ledger is append-only and a bead can appear many times — parked on
+    // Tuesday, withheld on Wednesday. Taking any earlier row would resurrect a
+    // state the loop has already moved past.
+    const rows = ledger(
+      { bead: 'A', disposition: 'parked', reason: 'max_turns' },
+      withheldRow('A', 10),
+    );
+    expect(latestByBead(rows).get('A').disposition).toBe('guard_withheld');
+    expect(withheldFromLedger(rows).map((w) => w.bead)).toEqual(['A']);
+    expect(parkedFromLedger(rows)).toEqual([]);
+  });
+
+  test('and the reverse — a bead withheld then parked is parked', () => {
+    const rows = ledger(withheldRow('A', 10), {
+      bead: 'A',
+      disposition: 'parked',
+      reason: 'ci_red',
+    });
+    expect(withheldFromLedger(rows)).toEqual([]);
+    expect(parkedFromLedger(rows).map((p) => p.bead)).toEqual(['A']);
+  });
+
+  test('a withheld row with no PR number is skipped, not guessed at', () => {
+    // Without one there is nothing to ask the forge about, and a bead this
+    // cannot VERIFY is a bead it must not touch.
+    const rows = ledger(
+      withheldRow('A', 10),
+      { bead: 'B', disposition: 'guard_withheld', pr: { number: null } },
+      { bead: 'C', disposition: 'guard_withheld' },
+    );
+    expect(withheldFromLedger(rows).map((w) => w.bead)).toEqual(['A']);
+  });
+
+  test('merge_queued is picked up too — same shape, opposite direction', () => {
+    // A queued merge is real but has not happened, so the bead is left claimed
+    // for exactly the same reason and goes stale exactly the same way.
+    const rows = ledger({ bead: 'Q', disposition: 'merge_queued', pr: { number: 77 } });
+    expect(withheldFromLedger(rows).map((w) => w.pr)).toEqual([77]);
+  });
+
+  // ── the decision, which is the function that authorises a write ──────────
+
+  test('a merged PR on a still-claimed bead closes it, carrying the merge sha', () => {
+    expect(
+      decideWithheld({ beadStatus: 'in_progress', prState: { state: 'MERGED', sha: 'deadbee' } }),
+    ).toEqual({ action: 'close', why: 'merged', sha: 'deadbee' });
+  });
+
+  test('a bead a human already moved is left alone', () => {
+    // Confirmation (2) of three. The ledger's row is stale the moment a person
+    // touches the bead, and undoing that is not the loop's business.
+    for (const status of ['closed', 'open', 'blocked', undefined]) {
+      expect(
+        decideWithheld({ beadStatus: status, prState: { state: 'MERGED', sha: 'deadbee' } }).action,
+        String(status),
+      ).toBe('skip');
+    }
+  });
+
+  test('MERGED with no merge commit is refused, not believed', () => {
+    // `land.sha` was null on every ledger row ever written, which is exactly
+    // how a loop ends up unable to check any of its own claims against main. A
+    // MERGED state with no commit is a contradiction, not a merge.
+    expect(
+      decideWithheld({ beadStatus: 'in_progress', prState: { state: 'MERGED', sha: null } }),
+    ).toMatchObject({ action: 'report' });
+    expect(
+      decideWithheld({ beadStatus: 'in_progress', prState: { state: 'MERGED', sha: '' } }),
+    ).toMatchObject({ action: 'report' });
+  });
+
+  test('a PR closed without merging is reported loudly, never closed', () => {
+    // A human REJECTED the work. Closing the bead would file an iteration's
+    // whole output as done.
+    const d = decideWithheld({ beadStatus: 'in_progress', prState: { state: 'CLOSED' } });
+    expect(d.action).toBe('report');
+    expect(d.why).toContain('rejected');
+  });
+
+  test('an open PR, and an unreadable one, both WAIT', () => {
+    expect(decideWithheld({ beadStatus: 'in_progress', prState: { state: 'OPEN' } }).action).toBe(
+      'wait',
+    );
+    // Unknown covers an unparseable read, a network failure, and a state this
+    // code has never seen. All three mean the same thing: do not write.
+    for (const prState of [{ state: null, failed: true }, { state: 'WEIRD' }, null, undefined]) {
+      expect(decideWithheld({ beadStatus: 'in_progress', prState }).action).toBe('wait');
+    }
+  });
+
+  // ── end to end, with fakes ───────────────────────────────────────────────
+
+  const fakes = ({ statuses = {}, prs = {}, ready = [] } = {}) => {
+    const closed = [];
+    return {
+      closed,
+      logs: [],
+      beads: {
+        show: async (id) => (statuses[id] ? { id, status: statuses[id] } : null),
+        close: async (id, reason) => (closed.push({ id, reason }), true),
+      },
+      forge: { prState: async (pr) => prs[pr] ?? { state: null, failed: true } },
+      readySet: async () => new Set(ready),
+    };
+  };
+
+  test('the whole pass: closes one, skips one, reports one, waits on one', async () => {
+    const f = fakes({
+      statuses: { M: 'in_progress', H: 'closed', R: 'in_progress', O: 'in_progress' },
+      prs: {
+        1: { state: 'MERGED', sha: 'aaa111' },
+        2: { state: 'MERGED', sha: 'bbb222' },
+        3: { state: 'CLOSED', sha: null },
+        4: { state: 'OPEN', sha: null },
+      },
+    });
+    const summary = await reconcile({
+      beads: f.beads,
+      forge: f.forge,
+      rows: ledger(
+        withheldRow('M', 1),
+        withheldRow('H', 2),
+        withheldRow('R', 3),
+        withheldRow('O', 4),
+      ),
+      log: (m) => f.logs.push(m),
+    });
+
+    expect(summary.closed.map((c) => c.bead)).toEqual(['M']);
+    expect(summary.reported.map((c) => c.bead)).toEqual(['R']);
+    expect(summary.waiting.map((c) => c.bead)).toEqual(['O']);
+    // ONE write, to ONE bead. `H` was already closed by a human and `R`'s PR was
+    // rejected; both were candidates by the ledger and neither was touched.
+    expect(f.closed).toHaveLength(1);
+    expect(f.closed[0].id).toBe('M');
+    // The bead's own history records which commit closed it — the evidence LAND
+    // keeps for a bead it closed itself, kept identical hours later.
+    expect(f.closed[0].reason).toContain('aaa111');
+    expect(f.closed[0].reason).toContain('#1');
+  });
+
+  test('a failed bd close is reported, never counted as closed', async () => {
+    const f = fakes({ statuses: { M: 'in_progress' }, prs: { 1: { state: 'MERGED', sha: 'a1' } } });
+    const summary = await reconcile({
+      beads: { ...f.beads, close: async () => false },
+      forge: f.forge,
+      rows: ledger(withheldRow('M', 1)),
+      log: (m) => f.logs.push(m),
+    });
+    expect(summary.closed).toEqual([]);
+    expect(summary.reported[0]).toMatchObject({ bead: 'M', why: 'bd close failed' });
+    expect(f.logs.join('\n')).toContain('FAILED');
+  });
+
+  test('the parked half REPORTS a still-selectable bead and filters nothing', async () => {
+    // Live positive control at the time of writing: Cebab-vie.28 and
+    // Cebab-vie.29 both have a parked ledger row and are both still returned by
+    // the loop's own readyArgv.
+    const f = fakes({ ready: ['P1', 'P3'] });
+    const summary = await reconcile({
+      beads: f.beads,
+      forge: f.forge,
+      rows: ledger(
+        { bead: 'P1', disposition: 'parked', reason: 'build_failed' },
+        { bead: 'P2', disposition: 'parked', reason: 'max_turns' },
+        { bead: 'P3', disposition: 'parked', reason: 'build_failed' },
+      ),
+      readySet: f.readySet,
+      log: (m) => f.logs.push(m),
+    });
+    // P2 parked AND was excluded, which is the mechanism working. P1 and P3
+    // parked and are still selectable, which is the gap.
+    expect(summary.reselectable.map((r) => r.bead)).toEqual(['P1', 'P3']);
+    expect(f.logs.join('\n')).toContain('still ');
+    expect(f.logs.join('\n')).toContain('P1');
+    // DELIBERATELY NOT A FILTER. The loop's cross-run memory stays the label,
+    // one mechanism rather than two — a second exclusion path would be a second
+    // definition of "skip this bead", free to drift from the first.
+    expect(f.closed).toEqual([]);
+  });
+
+  test('a selectable bead whose loop/ branch is still on the remote is reported', async () => {
+    // The other silent budget-waster `Cebab-qd2.41` names. Nothing labels such a
+    // bead, so SELECT picks it as normal and the loop spends a full turn budget
+    // on BUILD and the whole gate before `push` fails non-fast-forward — attempt
+    // 1 pushes without `--force`. Measured instance: Cebab-p5y / PR #403.
+    const logs = [];
+    const summary = await reconcile({
+      beads: { show: async () => null, close: async () => true },
+      forge: { prState: async () => ({}) },
+      rows: ledger({ bead: 'P1', disposition: 'parked', reason: 'ci_red' }),
+      readySet: async () => new Set(['P1', 'P2']),
+      // P2 has a branch and is ready; P3 has one and is NOT ready, so it must
+      // not be reported — a branch alone is not the finding.
+      remoteLoopBeads: async () => ['P2', 'P3'],
+      log: (m) => logs.push(m),
+    });
+    expect(summary.staleBranches).toEqual(['P2']);
+    expect(logs.join('\n')).toContain('already have a loop/ branch');
+    // A REPORT, never a filter — same reason as its neighbour: a stale branch is
+    // a fact about the remote, not a judgement about the bead.
+    expect(summary.reselectable.map((r) => r.bead)).toEqual(['P1']);
+  });
+
+  test('and no remote branches means no line at all', async () => {
+    const logs = [];
+    const summary = await reconcile({
+      beads: { show: async () => null, close: async () => true },
+      forge: { prState: async () => ({}) },
+      rows: ledger({ bead: 'P1', disposition: 'parked', reason: 'ci_red' }),
+      readySet: async () => new Set(['P1']),
+      remoteLoopBeads: async () => [],
+      log: (m) => logs.push(m),
+    });
+    expect(summary.staleBranches).toEqual([]);
+    expect(logs.join('\n')).not.toContain('loop/ branch');
+  });
+
+  test('a labelled park produces no report, which is the quiet direction', async () => {
+    const f = fakes({ ready: [] });
+    const summary = await reconcile({
+      beads: f.beads,
+      forge: f.forge,
+      rows: ledger({ bead: 'P', disposition: 'parked', reason: 'ci_red' }),
+      readySet: f.readySet,
+      log: (m) => f.logs.push(m),
+    });
+    expect(summary.reselectable).toEqual([]);
+    expect(f.logs).toEqual([]);
+  });
+
+  test('a DRY RUN says "would close" and closes nothing', async () => {
+    // `beads.close` routes through the `write` wrapper, which under --dry-run
+    // returns `{ code: 0 }` WITHOUT spawning bd — so `ok` is true and the
+    // success branch runs having closed nothing. An operator validating the
+    // pass would read `bead closed`, believe it, and leave the bead stranded:
+    // the exact outcome this module exists to end, with a line of output saying
+    // it was handled. A dry run must never claim an effect it did not have.
+    const logs = [];
+    const summary = await reconcile({
+      beads: {
+        show: async (id) => ({ id, status: 'in_progress' }),
+        // Exactly what `makeBeads({ dryRun: true })` does: succeeds, writes nothing.
+        close: async () => true,
+      },
+      forge: { prState: async () => ({ state: 'MERGED', sha: 'aaa111' }) },
+      rows: ledger(withheldRow('M', 1)),
+      log: (m) => logs.push(m),
+      dryRun: true,
+    });
+    expect(logs.join('\n')).toContain('WOULD close (dry run)');
+    expect(logs.join('\n')).not.toContain('bead closed');
+    expect(summary.closed[0]).toMatchObject({ bead: 'M', dryRun: true });
+  });
+
+  test('and a real run says "bead closed"', async () => {
+    // The other direction — the dry-run wording must not leak into a real pass.
+    const logs = [];
+    await reconcile({
+      beads: { show: async (id) => ({ id, status: 'in_progress' }), close: async () => true },
+      forge: { prState: async () => ({ state: 'MERGED', sha: 'aaa111' }) },
+      rows: ledger(withheldRow('M', 1)),
+      log: (m) => logs.push(m),
+    });
+    expect(logs.join('\n')).toContain('bead closed');
+    expect(logs.join('\n')).not.toContain('dry run');
+  });
+
+  test('an empty ledger asks nothing of bd or the forge', async () => {
+    // A fresh checkout has no `.loop/runs.jsonl` at all — `.loop/` is
+    // gitignored — so this is the common first-run case, not an edge one.
+    let touched = 0;
+    const summary = await reconcile({
+      beads: {
+        show: async () => ((touched += 1), null),
+        close: async () => ((touched += 1), true),
+      },
+      forge: { prState: async () => ((touched += 1), {}) },
+      rows: [],
+      readySet: async () => ((touched += 1), new Set()),
+    });
+    expect(touched).toBe(0);
+    expect(summary).toEqual({
+      closed: [],
+      reported: [],
+      waiting: [],
+      reselectable: [],
+      staleBranches: [],
+    });
+  });
+});
+
+describe('a ledger row accounts for every invocation, not the last (Cebab-qd2.39)', () => {
+  // MEASURED ACROSS A WHOLE RUN, 2026-08-28. `state.json` accumulates every
+  // invocation while the row recorded one, so the 8-iteration run of
+  // 2026-08-27 could be compared against itself: 120 turns across the 8 rows
+  // against 517 in state.json, and 9,555,591 cache reads against 50,267,470.
+  // The rows accounted for 23% of the turns and 19% of the cache reads.
+
+  const built = (numTurns, cacheRead, costUsd = 1) => ({
+    numTurns,
+    costUsd,
+    tokens: { input: 1, output: 2, cacheRead, cacheCreation: 3 },
+  });
+
+  test('three invocations accumulate rather than overwrite', () => {
+    let totals = null;
+    for (const b of [built(61, 15_000_000), built(61, 1_000_000), built(6, 1_112_928)]) {
+      totals = accumulateBuild(totals, b);
+    }
+    expect(totals.invocations).toBe(3);
+    expect(totals.numTurns).toBe(128);
+    expect(totals.costUsd).toBe(3);
+    expect(totals.tokens.cacheRead).toBe(17_112_928);
+    // The shape of the real defect: the LAST invocation is the small one, and
+    // it is the only one the row used to carry.
+    expect(totals.numTurns).toBeGreaterThan(6);
+  });
+
+  test('tokens stay NULL until an invocation reports some', () => {
+    // `null` and a free turn are different facts — the same rule `tokensFrom`
+    // states, and the reason `land.sha: null` on every early row was worth
+    // fixing. A capped build emits an envelope with no usage block.
+    const noUsage = accumulateBuild(null, { numTurns: 61, costUsd: 0 });
+    expect(noUsage.tokens).toBeNull();
+    expect(noUsage.numTurns).toBe(61);
+    // And one that DOES report starts the sum from zero, not from null.
+    const then = accumulateBuild(noUsage, built(6, 500));
+    expect(then.tokens.cacheRead).toBe(500);
+    expect(then.invocations).toBe(2);
+  });
+
+  test('the existing fields keep their meaning — totals sit ALONGSIDE', () => {
+    // The decision this bead carries. Accumulating in place is cheaper and
+    // silently re-points `numTurns` on 32 rows that already exist in an
+    // append-only corpus.
+    const record = buildRecord(
+      { build: { numTurns: 6, costUsd: 0.4, totals: { invocations: 3, numTurns: 128 } } },
+      0,
+    );
+    expect(record.build.numTurns).toBe(6);
+    expect(record.build.totals.numTurns).toBe(128);
+    // Absent totals is `null`, not zeros — a row written before this existed
+    // must not read as an iteration that spent nothing.
+    expect(buildRecord({ build: { numTurns: 6 } }, 0).build.totals).toBeNull();
+  });
+});
+
+describe('a finding already tracked is recorded, not filed twice (Cebab-7t6)', () => {
+  // The run of 2026-08-27 filed ten follow-ups, two PAIRS of which are the same
+  // finding written twice. `Cebab-2pm` decides the fix: its own TITLE reads
+  // "(already tracked as Cebab-03a)". The agent searched, found the bead, and
+  // filed anyway — so the gap was never that agents cannot see prior beads, it
+  // is that HARVEST gave them no verb for saying so.
+
+  // `known` is the set of ids `bd show` resolves. HARVEST verifies the id before
+  // honouring it, so a test that stubs `show` to always succeed would not be
+  // testing the guard.
+  const harvestWith = async (followUps, known = ['Cebab-03a']) => {
+    const filed = [];
+    const parts = { harvest: { followUps: [] }, verdict: { follow_ups: followUps } };
+    await harvest({
+      beads: {
+        park: async () => true,
+        close: async () => true,
+        note: async () => true,
+        show: async (id) => (known.includes(id) ? { id, status: 'open' } : null),
+        fileFollowUp: async (f) => (filed.push(f.title), `NEW-${filed.length}`),
+      },
+      bead: { id: 'Cebab-x1' },
+      parts,
+      disposition: DISPOSITION.NO_CHANGE,
+      config: DEFAULTS,
+      log: () => {},
+    });
+    return { filed, parts };
+  };
+
+  test('an already_tracked entry creates no bead and is recorded', async () => {
+    const { filed, parts } = await harvestWith([
+      { title: 'A real new finding', type: 'bug', why: 'w', evidence: 'e' },
+      {
+        title: 'Wire assistantSystemPrompt into runOneTurn',
+        type: 'task',
+        why: 'w',
+        evidence: 'e',
+        already_tracked: 'Cebab-03a',
+      },
+    ]);
+    expect(filed).toEqual(['A real new finding']);
+    expect(parts.harvest.followUps).toEqual(['NEW-1']);
+    // The TITLE rides along with the id: the ledger has to keep the claim, not
+    // just the pointer, or a morning `jq` cannot recover what was noticed.
+    expect(parts.harvest.alreadyTracked).toEqual([
+      { id: 'Cebab-03a', title: 'Wire assistantSystemPrompt into runOneTurn' },
+    ]);
+  });
+
+  test('an id that does not resolve FILES the finding rather than losing it', async () => {
+    // The dangerous direction, and the one the loop exists to prevent. A
+    // transposed character or a half-remembered id would otherwise let the
+    // agent DISCARD a finding — three lines above a call that throws rather
+    // than lose one. The safe answer is a duplicate bead, never a silent drop.
+    const { filed, parts } = await harvestWith(
+      [
+        {
+          title: 'A real finding',
+          type: 'bug',
+          why: 'w',
+          evidence: 'e',
+          already_tracked: 'Cebab-03z',
+        },
+      ],
+      ['Cebab-03a'],
+    );
+    expect(filed).toEqual(['A real finding']);
+    expect(parts.harvest.followUps).toEqual(['NEW-1']);
+    expect(parts.harvest.alreadyTracked).toBeUndefined();
+  });
+
+  test('an empty or whitespace already_tracked still files', async () => {
+    // The field is optional and a model may emit `""`.
+    //
+    // NOTE WHAT ACTUALLY GUARANTEES THIS NOW, because the obvious answer is no
+    // longer the real one: the `.trim()` reads like the guard, but since the id
+    // is VERIFIED against bd, `'   '` would fall through and file even without
+    // it — `beads.show('   ')` resolves to nothing. The trim is a cheap
+    // short-circuit that saves one bd call, and the verification is the
+    // property. Pinned anyway: this is the direction where being wrong loses a
+    // finding, which is the failure mode the whole loop exists to prevent.
+    const { filed, parts } = await harvestWith([
+      { title: 'F1', type: 'bug', why: 'w', evidence: 'e', already_tracked: '' },
+      { title: 'F2', type: 'bug', why: 'w', evidence: 'e', already_tracked: '   ' },
+    ]);
+    expect(filed).toEqual(['F1', 'F2']);
+    expect(parts.harvest.alreadyTracked).toBeUndefined();
+  });
+
+  test('the schema accepts the field, and the prompt tells the agent about it', () => {
+    const schema = JSON.parse(
+      readFileSync(
+        path.join(
+          path.dirname(fileURLToPath(import.meta.url)),
+          'lib',
+          'loop',
+          'verdict.schema.json',
+        ),
+        'utf8',
+      ),
+    );
+    const props = schema.properties.follow_ups.items.properties;
+    expect(props.already_tracked).toBeDefined();
+    // `additionalProperties: false` means an unadvertised field is REJECTED by
+    // the CLI's own schema validation, so the schema half is what makes the
+    // prompt half reachable at all.
+    expect(schema.properties.follow_ups.items.additionalProperties).toBe(false);
+    expect(schema.properties.follow_ups.items.required).not.toContain('already_tracked');
+    expect(REAL_PROMPT).toContain('already_tracked');
+  });
+
+  test('the run’s earlier follow-ups reach the next prompt', () => {
+    // Each iteration is a fresh `claude -p` with no memory of its siblings.
+    const rendered = renderPriorFollowUps([
+      { id: 'Cebab-dyb', title: 'Assistant run path unreachable' },
+      { id: 'Cebab-bom', title: 'emitSettings never emits assistantProjectId' },
+    ]);
+    // Newest first — the measured near-duplicates were filed within a few
+    // iterations of each other.
+    expect(rendered.split('\n')[0]).toContain('Cebab-bom');
+    expect(rendered).toContain('Cebab-dyb — Assistant run path unreachable');
+    expect(renderPriorFollowUps([])).toBe('');
+  });
+
+  test('the list is capped so it cannot crowd out the bead body', () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ id: `B-${i}`, title: `t${i}` }));
+    const lines = renderPriorFollowUps(many).split('\n');
+    expect(lines).toHaveLength(20);
+    // The cap keeps the NEWEST, which is the half that matters.
+    expect(lines[0]).toContain('B-49');
+    expect(lines.at(-1)).toContain('B-30');
+  });
+
+  test('the prompt block is absent when the run has filed nothing', () => {
+    // The first iteration of every run. An empty heading promising a list would
+    // be worse than no heading.
+    const none = renderPrompt(REAL_PROMPT, { prior_follow_ups: false, max_turns: 60 });
+    expect(none).not.toContain('Earlier iterations of THIS run');
+    const some = renderPrompt(REAL_PROMPT, {
+      prior_follow_ups: true,
+      prior_follow_up_list: '- Cebab-zzz — a sibling finding',
+      max_turns: 60,
+    });
+    expect(some).toContain('Earlier iterations of THIS run');
+    expect(some).toContain('Cebab-zzz');
+    // The specific placeholder, not a blanket `{{` check — the other vars are
+    // deliberately not supplied here, so a blanket assertion would be testing
+    // this test's own fixture rather than the template.
+    expect(some).not.toContain('{{prior_follow_up_list}}');
+    expect(none).not.toContain('{{prior_follow_up_list}}');
+  });
+
+  test('the ledger records the recognition, and omits the field otherwise', () => {
+    // `jq 'select(.harvest.alreadyTracked)'` measures whether the verb is being
+    // used at all — the number that says whether this fix works.
+    expect(buildRecord({}, 0).harvest.alreadyTracked).toBeUndefined();
+    expect(
+      buildRecord({ harvest: { alreadyTracked: [] } }, 0).harvest.alreadyTracked,
+    ).toBeUndefined();
+    expect(
+      buildRecord({ harvest: { alreadyTracked: [{ id: 'Cebab-03a', title: 't' }] } }, 0).harvest
+        .alreadyTracked,
+    ).toEqual([{ id: 'Cebab-03a', title: 't' }]);
   });
 });

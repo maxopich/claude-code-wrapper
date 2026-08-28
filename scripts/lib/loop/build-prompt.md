@@ -50,6 +50,11 @@ well-specified fix is exactly what you are here for.
   a documentation defect, the doc change is the deliverable and no test is required.
 - Security-relevant behaviour keeps its `[security]` tag. Never remove one.
 - `npm run lint`, `npm run typecheck` and `npm test` pass locally before you finish.
+- **`npm run format` has been run, after your last edit.** The gate also enforces Prettier
+  (`npm run format:check` is step 3 of its 10), and this is the one step you cannot reason
+  your way past: every gate failure this loop has ever hit was that step and nothing else
+  — 5 of 8 builds in the run of 2026-08-27 — and each one spent a whole extra invocation
+  re-establishing your entire context to run one command. It is allowed; run it.
 
 ## What you must not do
 
@@ -64,5 +69,19 @@ This is the part that outlives the session. If you noticed a defect, a missing t
 wrong claim in a doc, or a hazard adjacent to this work — record it. `evidence` must
 name a file and what you actually observed, not a hunch. An empty array is a valid and
 common answer; do not invent findings to fill it.
+
+**If a finding is already tracked, say so instead of filing it again.** Set
+`already_tracked` to the existing bead's id and keep the rest of the entry as you would
+have written it. The harness records the finding and creates nothing. This is the right
+answer, not a failure to find something new — writing the same defect twice puts noise in
+a queue that a later run will hand back as work. Do not encode it in the title.
+{{#if prior_follow_ups}}
+
+Earlier iterations of THIS run already filed the beads below. You are a fresh session and
+cannot otherwise see them, and the pairs this list exists to prevent were filed minutes
+apart:
+
+{{prior_follow_up_list}}
+{{/if}}
 
 Return only the structured verdict.

@@ -38,6 +38,38 @@ export function showArgv(id) {
   return ['show', id, '--json'];
 }
 
+/**
+ * EVERY bead bd knows about, for the containment graph.
+ *
+ * TWO FLAGS, AND BOTH ARE LOAD-BEARING IN THE SAME WAY — each one's absence
+ * silently SHRINKS the parent map, and a containment rule built on a partial
+ * map is correct only for whichever beads happened to be in it.
+ *
+ * `-n 0` is bd's no-limit. The default page truncates, and it does so to
+ * STDERR (`Showing 200 of 207 ready issues`) while leaving stdout valid JSON,
+ * so nothing throws and the caller cannot tell. That is not hypothetical here:
+ * the same trap was live in this very change, on the reconcile pass's ready
+ * set, until it was measured.
+ *
+ * `--all` is what makes this ONE call. Measured 2026-08-28, bd 1.1.2:
+ * `bd list --json -n 0` with no status filter returns 249 rows — 243 open plus
+ * 6 in_progress — and NOT ONE closed bead, so the unfiltered form is really
+ * "every active bead" under a name that suggests otherwise. `--all` returns all
+ * 608 (240 open, 6 in_progress, 362 closed) with all 457 parent edges, in
+ * 0.37s. The closed rows carry 311 of those edges and are the only way a chain
+ * passing THROUGH a closed bead is visible at all.
+ *
+ * It also covers the statuses an explicit list would forget. bd's vocabulary is
+ * open, in_progress, blocked, deferred and closed; asking for two of them by
+ * name leaves a `blocked` or `deferred` intermediate out of the map with
+ * exactly the same effect as a missing closed one. `--all` cannot develop that
+ * gap, which is why it is preferred over naming statuses even though this repo
+ * currently has none of either.
+ */
+export function listArgv() {
+  return ['list', '--json', '-n', '0', '--all'];
+}
+
 export function claimArgv(id) {
   // --claim is atomic: assignee + status=in_progress, idempotent if already
   // ours. Two writes would leave a window where the bead is assigned but open.
@@ -183,6 +215,26 @@ export function makeBeads({ run, bd, cwd, dryRun = false }) {
       }
       const row = Array.isArray(rows) ? rows[0] : null;
       return row?.id ? row : null;
+    },
+    /**
+     * Rows for the containment graph. Returns `[]` on any failure rather than
+     * throwing, and the choice is deliberate in the SAFE direction: an empty
+     * list makes `ancestorsOfActive` return an empty set, which loses the new
+     * rule and falls back on the batch rule that shipped before it. The
+     * alternative — throwing — would turn a transient bd hiccup into a crashed
+     * iteration. The caller logs the count so a persistent zero is visible
+     * rather than silently narrowing SELECT.
+     */
+    async list() {
+      const result = await call(listArgv());
+      if (result.code !== 0) return [];
+      let rows;
+      try {
+        rows = parseJson(result.stdout, 'list');
+      } catch {
+        return [];
+      }
+      return Array.isArray(rows) ? rows : [];
     },
     async claim(id) {
       const result = await write(claimArgv(id));

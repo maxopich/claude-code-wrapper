@@ -335,6 +335,23 @@ export function renderPrompt(template, vars) {
   return out;
 }
 
+/**
+ * The sibling follow-ups, as prompt lines.
+ *
+ * CAPPED AT 20, newest first. An `--until 8` night can file dozens, and a list
+ * long enough to push the bead's own body out of the agent's attention would
+ * trade one duplicate for something worse. Newest first because the near-
+ * duplicates measured on 2026-08-27 were all filed within a few iterations of
+ * each other.
+ */
+export function renderPriorFollowUps(followUps = [], limit = 20) {
+  return followUps
+    .slice(-limit)
+    .reverse()
+    .map((f) => `- ${f.id} — ${f.title}`)
+    .join('\n');
+}
+
 export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} }) {
   const schemaJson = fs.readFileSync(path.join(libDir, 'verdict.schema.json'), 'utf8');
   const systemPromptPath = path.join(libDir, 'build-system.md');
@@ -349,7 +366,16 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
   const template = fs.readFileSync(path.join(libDir, 'build-prompt.md'), 'utf8');
 
   return {
-    async run({ bead, attempt, maxRepairs, failedStep, failureOutput, resumeSessionId, capped }) {
+    async run({
+      bead,
+      attempt,
+      maxRepairs,
+      failedStep,
+      failureOutput,
+      resumeSessionId,
+      capped,
+      priorFollowUps = [],
+    }) {
       const prompt = renderPrompt(template, {
         bead_id: bead.id,
         bead_title: bead.title,
@@ -364,6 +390,17 @@ export function makeBuild({ run, cwd, config, libDir, loopDir, log = () => {} })
         max_turns: config.build.maxTurns,
         failed_step: failedStep ?? '',
         failure_output: failureOutput ?? '',
+        // WHAT THIS RUN'S EARLIER ITERATIONS ALREADY FILED.
+        //
+        // Each iteration is a fresh `claude -p` with no memory of its siblings.
+        // The run of 2026-08-27 filed ten follow-ups, two PAIRS of which were
+        // the same finding written twice — and the agent that wrote the second
+        // of one pair TITLED it "(already tracked as Cebab-03a)", so it had
+        // searched and found the bead and filed anyway. It could see the DB; it
+        // could not see what a sibling had filed minutes earlier, because
+        // nothing put that in front of it. `Cebab-7t6`.
+        prior_follow_ups: Boolean(priorFollowUps.length),
+        prior_follow_up_list: renderPriorFollowUps(priorFollowUps),
       });
       fs.writeFileSync(path.join(loopDir, 'current-prompt.md'), prompt);
 
