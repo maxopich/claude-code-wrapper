@@ -1,78 +1,102 @@
-# Cebab knowledge base index
+# Knowledge-base router
 
-This is the routing table for the Cebab help knowledge base. It does **not**
-explain any feature — it only tells you which file explains it. Read this to
-decide what to open, then open that file for the answer.
+This file is a **router, not a summary**. It does not explain any feature; it
+only tells you which file explains it. Find the row whose keywords best match
+the operator's question, then `Read` that file by its **bare filename** and
+answer from there.
 
-## How to read these files
+**Read contract.** Your working directory is this knowledge-base directory, so
+every file here is reachable by bare filename — `Read 08-safety-controls.md`,
+never `./kb/08-safety-controls.md`, never an absolute path. A `Glob` (e.g.
+`Glob 0*.md`) or a `Grep` with no path argument already searches this directory;
+do not add a `kb/` prefix or search for the directory first. If two rows look
+plausible, prefer the more specific page — "how do I start a multi-agent run"
+belongs to the running page, not the concepts page — and if it is still
+unclear, `Grep` the keyword across the files and open the closest hit.
 
-Your working directory **is** this knowledge base directory. Every page lives
-here as a flat file — there are no subdirectories. Read a page by its **bare
-filename** (for example `04-permissions-trust-and-authority.md`), and when you
-Glob or Grep for something, do it with **no path prefix** — a bare pattern
-already targets this directory. Do not guess at `./kb/`, `assistant/kb/`, or
-any other prefix; there is none to add.
+Match against the keyword lists below — they are written to be searched, not
+read as prose. Each row is `[page title](filename) — questions, nouns, synonyms
+it owns`; the link target is the bare filename to `Read`.
 
-Each row below is `filename → the questions and nouns that page owns`. Match a
-user's question against the noun lists, open the one file that fits, and answer
-from it. If two rows seem to overlap, prefer the more specific one (for
-example, a "how do I start a multi-agent run" question goes to the running
-page, not the concepts page). If nothing here matches, say the knowledge base
-does not cover it rather than guessing.
+---
 
-## The pages
+[Getting started](01-getting-started.md) — first run, install, setup, `npm run setup`, rebuild
+better-sqlite3, start the server, dev:server, port 4319, dev:web, open in
+browser, what is Cebab, what does this app do, quick tour, mock mode intro, how
+do I begin, nothing shows up on first launch, prerequisites, Claude
+subscription, credentials, no API key.
 
-- [Getting started](01-getting-started.md) — what Cebab is, install and
-  bootstrap, prerequisites, `claude` login, first launch, `npm run dev`, ports
-  4319/5173, choosing a workspace folder, mock mode, first message, where to
-  begin.
-- [Projects and sessions](02-projects-and-sessions.md) — the sidebar, the
-  workspace scan, why a project does or doesn't appear, agent projects, managed
-  agents (an independent copy inside Cebab), sessions, resuming, renaming,
-  hiding, downloading, and deleting sessions.
-- [Chat and the composer](03-chat-and-composer.md) — sending a message, Enter
-  vs Shift+Enter, the growable composer, the slash-command palette, streamed
-  assistant text, tool-call approval cards, the per-session permission pill, the
-  turn counter and max-turns override, stopping a turn.
-- [Permissions, Trust, and authority](04-permissions-trust-and-authority.md) —
-  the Trust toggle, `default` vs `acceptEdits`, `settingSources`, what trusting
-  a project loads, user-scope MCP servers and TOFU, the Authority panel, tools,
-  MCP servers, allow/deny rules, env injection, hooks, skills, sub-agents.
-- [Multi-agent concepts](05-multi-agent-concepts.md) — the bus, chain vs
-  orchestrator mode, participants and roles, `bus_send`, unspoofable identity,
-  the hop trail, the hop budget vs the per-hop turn cap, the runtime trust
-  posture, consultant vs execute mode as ideas.
-- [Running a multi-agent session](06-multi-agent-running.md) — installing bus
-  integration, building a draft, picking participants and order, Persistent vs
-  Temp lifecycle, starting, watching the scrollback, adding a worker mid-run,
-  sending input to the orchestrator, ending and resuming a run.
-- [Templates](07-templates.md) — what a saved multi-agent topology stores,
-  applying a template, saving roles back, the template preview and diagram,
-  execute vs consultant banners, the per-template hop-budget override, deleting
-  a template.
-- [Safety controls](08-safety-controls.md) — the headless runtime posture,
-  pause-on-dangerous, execute vs consultant mode as a control, muting, pausing,
-  and kicking a participant, the forensic bundle, the hash-chained audit log,
-  and the honest limits (advisory, not a sandbox).
-- [Notifications and runs](09-notifications-and-runs.md) — the notification
-  bell and inbox, operational vs safety notifications, acknowledging and muting
-  a type, the runs badge and dropdown, session banners, the rate-limit banner.
-- [Logs, artifacts, and search](10-logs-artifacts-and-search.md) — the raw-event
-  Logs inspector, filters, NDJSON export, copy row/JSON, dangerous-path and
-  redacted-field badges, artifacts and working files, cross-session search,
-  where logs live on disk, redacted vs raw exports.
-- [Recovery and errors](11-recovery-and-errors.md) — a dropped WebSocket
-  connection, expired credentials and the auth-refresh flow, reopening a closed
-  session, the recovery log, server-restart behavior for multi-agent sessions,
-  the resume-after-directory-move gotcha.
-- [Settings, storage, and data](12-settings-storage-and-data.md) — the Settings
-  modal, workspace root, default hop budget, default max turns, per-project
-  model, appearance themes, where Cebab stores its SQLite database and logs,
-  `CEBAB_DATA_DIR`, and what is safe to delete.
-- [Keyboard shortcuts and slash commands](13-shortcuts-and-commands.md) — the
-  cheatsheet, every global and composer-scoped keyboard shortcut, and the
-  Cebab-local slash commands you can type into the composer.
-- [Troubleshooting](14-troubleshooting.md) — symptom-to-fix entries for the
-  common problems: a missing project, a taken port, a 403 token fetch, an MCP
-  server with no tools, tools that always or never prompt, a session that won't
-  resume, and expired credentials.
+[Projects and sessions](02-projects-and-sessions.md) — projects, sidebar, workspace folder scan, how
+projects appear, why is my project missing / not showing up, add a project,
+there is no add-project button, managed agents, snapshot a project, project
+name, project path moved, sessions, start a conversation, new chat, resume a
+session, session history, one subprocess per message, `--resume`, switch
+project, last used, touch.
+
+[Chat and the composer](03-chat-and-composer.md) — chat area, send a message, composer, typing,
+streamed output, assistant text, tool-call cards, tool use, interrupt, stop a
+turn, empty chat / "select a project", new-chat preview, permission cards
+inline, per-session permission toggle (ask vs accept), scroll, message bubbles.
+
+[Permissions, Trust, and authority](04-permissions-trust-and-authority.md) — Trust toggle, trusted vs untrusted,
+permission mode, default vs acceptEdits, acceptEdits, bypassPermissions,
+permission request, approve / deny a tool, canUseTool, settingSources, does the
+project's `.claude/settings.json` load, `.mcp.json` not loading, MCP servers,
+why is a tool auto-allowed, authority panel, what an agent can do, starting
+permission mode, per-project model, model picker, TOFU, MCP trust prompt.
+
+[Multi-agent concepts](05-multi-agent-concepts.md) — multi-agent, the bus, what is the bus, chain
+mode, orchestrator mode, roster, workers, participants, consultant mode,
+execute mode, hops, hop budget, maxTurns per hop, `bus_send`, how agents talk to
+each other, why is there no tmux, in-process SDK, orchestrator vs worker,
+delegate-only, AskUserQuestion to the operator.
+
+[Running a multi-agent session](06-multi-agent-running.md) — start a multi-agent session, install bus
+integration, run a chain, run an orchestrator, add a participant / worker mid
+run, mute a worker, pause, kick, stopped / stranded run, "nobody working",
+activity bar, quiescence note, single active session, server restart resume
+(R-B), templates browser to launch.
+
+[Templates](07-templates.md) — templates, template browser, template preview, saved
+multi-agent setups, roster template, per-participant facts, preview modal,
+CLAUDE.md head shown in preview, launch from a template, edit a template.
+
+[Safety controls](08-safety-controls.md) — safety, security, pause-on-dangerous, dangerous tool
+gate, consultant guardrail, audit log, hash chain, forensic snapshot, install
+trust gate, TOFU, operator mute / pause / kick, Origin gate, browser origin,
+per-launch auth token, 127.0.0.1 bound, subscription-only env, is this safe,
+what stops an agent editing my files.
+
+[Notifications and runs](09-notifications-and-runs.md) — notifications, dock / OS notification, sound,
+runs badge, active runs, RunsBadge, run dropdown, jump to session, what's
+running now, rate-limit banner, rate limited, resets at, background turn done.
+
+[Logs, artifacts, and search](10-logs-artifacts-and-search.md) — logs, session log, JSONL, transcript,
+export a session, session-log endpoint, redacted vs raw export, download a
+transcript, artifacts, search sessions, search across history, find a past
+conversation, event history, replay.
+
+[Recovery and errors](11-recovery-and-errors.md) — recovery, recovery log, error, process crashed,
+turn failed, error_during_execution, max turns reached, connection lost,
+reconnect, reopen a session, retry after rate limit, what went wrong, wrapper
+error, stale server / orphaned dev:server on port 4319.
+
+[Settings, storage, and data](12-settings-storage-and-data.md) — settings, settings modal, workspace root
+folder, change workspace, max turns setting, where is my data, SQLite database,
+`~/.cebab`, cebab.sqlite, logs directory, data dir, mock mode toggle, theme /
+appearance, delete data, reset, storage location, back up.
+
+[Keyboard shortcuts and slash commands](13-shortcuts-and-commands.md) — keyboard shortcuts, hotkeys, key bindings,
+shortcut for X, slash commands, `/` commands, command palette, what can I type,
+send shortcut, navigate projects with keyboard, focus composer.
+
+[Troubleshooting](14-troubleshooting.md) — troubleshooting, it's broken, X isn't working,
+project won't appear, tool never runs, MCP server won't connect / loaded but not
+connected, permission card stuck, can't resume, blank screen, server won't
+start, port in use, mock mode not replaying, common problems, diagnostics, what
+to check first.
+
+---
+
+If no row matches, say you don't have anything on that topic in the Cebab
+knowledge base rather than guessing.

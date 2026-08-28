@@ -22,6 +22,7 @@ import {
   initialState,
   isSessionPending,
   reduce,
+  routesToAssistant,
   sessionSelectionRequests,
   showsNewChatPreview,
 } from './store';
@@ -76,6 +77,7 @@ import { RecoveryLogButton, RecoveryLogProvider } from './components/recoveryLog
 import { ForensicViewerProvider } from './components/agentControl/ForensicViewerContext';
 import { KickForensicsModal } from './components/agentControl/KickForensicsModal';
 import { RunsBadge } from './components/runs';
+import { AssistantProvider, AssistantDock } from './components/assistant';
 import {
   ConnectionLostOverlay,
   resolveFromAuthTokenResponse,
@@ -181,6 +183,11 @@ export function App() {
   // matching `get_kick_forensics` request via the provider's open
   // action; no requestRef needed.
   const forensicViewerHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  // Cebab-8x8.3.2: bridge for the AssistantProvider. App.tsx routes assistant
+  // ServerMsgs (the `settings` envelope + the assistant session's stream)
+  // through this ref into the provider's reducer — same shape as the inbox /
+  // gate handlers. No requestRef companion: the AssistantDock owns its trigger.
+  const assistantHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -223,6 +230,12 @@ export function App() {
   // Cluster C Phase 4g4: ClientMsg sink for the ForensicViewerProvider.
   // Ships `get_kick_forensics` onto the active WS — same indirection.
   const forensicViewerSend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
+  // Cebab-8x8.3.2: ClientMsg sink for the AssistantProvider. Ships the
+  // assistant's `send_message` onto the active WS — same wsRef indirection so
+  // a reconnect doesn't strand the send.
+  const assistantSend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
 
@@ -282,23 +295,35 @@ export function App() {
                     send={forensicViewerSend}
                     handlerRef={forensicViewerHandlerRef}
                   >
-                    <AppShell
-                      wsRef={wsRef}
-                      notifPushRef={notifPushRef}
-                      notifDismissRef={notifDismissRef}
-                      authTokenRef={authTokenRef}
-                      inboxHandlerRef={inboxHandlerRef}
-                      gateHandlerRef={gateHandlerRef}
-                      authorityHandlerRef={authorityHandlerRef}
-                      reopenHandlerRef={reopenHandlerRef}
-                      authRefreshHandlerRef={authRefreshHandlerRef}
-                      authRefreshRequestRef={authRefreshRequestRef}
-                      recoveryLogHandlerRef={recoveryLogHandlerRef}
-                      forensicViewerHandlerRef={forensicViewerHandlerRef}
-                      onAck={handleAck}
-                    />
-                    <NotificationStack onAction={onNotificationAction} />
-                    <KickForensicsModal />
+                    {/*
+                      Cebab-8x8.3.2: AssistantProvider is the innermost provider
+                      and AssistantDock is a SIBLING of AppShell (before
+                      NotificationStack) — outside the `.app` grid, so the popup
+                      floats over the shell and the CSS (8x8.3.3) has the DOM
+                      adjacency it needs. Same send + handlerRef pair as the
+                      inbox provider.
+                    */}
+                    <AssistantProvider send={assistantSend} handlerRef={assistantHandlerRef}>
+                      <AppShell
+                        wsRef={wsRef}
+                        notifPushRef={notifPushRef}
+                        notifDismissRef={notifDismissRef}
+                        authTokenRef={authTokenRef}
+                        inboxHandlerRef={inboxHandlerRef}
+                        gateHandlerRef={gateHandlerRef}
+                        authorityHandlerRef={authorityHandlerRef}
+                        reopenHandlerRef={reopenHandlerRef}
+                        authRefreshHandlerRef={authRefreshHandlerRef}
+                        authRefreshRequestRef={authRefreshRequestRef}
+                        recoveryLogHandlerRef={recoveryLogHandlerRef}
+                        forensicViewerHandlerRef={forensicViewerHandlerRef}
+                        assistantHandlerRef={assistantHandlerRef}
+                        onAck={handleAck}
+                      />
+                      <AssistantDock />
+                      <NotificationStack onAction={onNotificationAction} />
+                      <KickForensicsModal />
+                    </AssistantProvider>
                   </ForensicViewerProvider>
                 </RecoveryLogProvider>
               </AuthRefreshProvider>
@@ -447,6 +472,15 @@ type AppShellProps = {
    * fresh on each open.
    */
   forensicViewerHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cebab-8x8.3.2: bridge ref the AssistantProvider populates. onMessage
+   * routes EVERY ServerMsg here (the provider filters internally): the
+   * `settings` envelope carries `assistantProjectId`, and the assistant
+   * session's stream is session-keyed. Assistant-project envelopes are routed
+   * here from the `routesToAssistant` branch too, so they never touch the
+   * store's reducer.
+   */
+  assistantHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
@@ -464,6 +498,7 @@ function AppShell({
   authRefreshRequestRef,
   recoveryLogHandlerRef,
   forensicViewerHandlerRef,
+  assistantHandlerRef,
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
@@ -774,6 +809,34 @@ function AppShell({
           });
         },
         onMessage: (msg) => {
+          // Cebab-8x8.3.1: assistant envelopes never reach the reducer. The
+          // assistant is filtered out of `listProjects()`, so its id is never
+          // in `state.projects`; a `reduceServer` pass keyed on that id would
+          // corrupt AppState (and `case 'projects'` wipes the session maps on
+          // every boot/workspace switch, since the assistant is never listed).
+          // Route them to the `subscribeServerMsg` side channel ONLY — the
+          // established home for payloads that must not live in AppState — and
+          // skip dispatch and every provider bridge below. Panel state lives
+          // outside AppState.
+          if (routesToAssistant(stateRef.current, msg)) {
+            // Cebab-8x8.3.2: the assistant's projectId-carrying envelopes
+            // (`session_started` / `session_running`) reach the AssistantProvider
+            // here — the general bridge below is skipped by the early return, so
+            // this is their only path in. The provider filters internally.
+            try {
+              assistantHandlerRef.current?.(msg);
+            } catch (err) {
+              console.error('[assistant] handler threw', err);
+            }
+            for (const fn of msgSubscribersRef.current) {
+              try {
+                fn(msg);
+              } catch (err) {
+                console.error('[ws] subscriber threw', err);
+              }
+            }
+            return;
+          }
           dispatch({ type: 'server', msg });
           // Cebab-ws0.3: the refresh spawn is done, whatever it found. Cleared
           // on ANY catalogue reply, including an empty one — a probe that came
@@ -877,6 +940,18 @@ function AppShell({
           } catch (err) {
             console.error('[forensic_viewer] handler threw', err);
           }
+          // Cebab-8x8.3.2: hand to the AssistantProvider bridge. This path
+          // carries the assistant's SESSION-keyed stream (assistant_message /
+          // stream_delta / user_message / result — none carry a projectId, so
+          // `routesToAssistant` above is false for them) plus the global
+          // `settings` envelope that reports `assistantProjectId`. The provider
+          // filters internally on the adopted session id. Same narrow-filter
+          // posture as the inbox handler.
+          try {
+            assistantHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[assistant] handler threw', err);
+          }
           // Phase H side channel: after the reducer settles, fan out to any
           // out-of-Redux subscribers (e.g. the Logs modal). Wrapped in a
           // try/catch per-subscriber so a broken listener can't stop the
@@ -920,6 +995,7 @@ function AppShell({
     inboxHandlerRef,
     recoveryLogHandlerRef,
     reopenHandlerRef,
+    assistantHandlerRef,
     wsRetryNonce,
   ]);
 
