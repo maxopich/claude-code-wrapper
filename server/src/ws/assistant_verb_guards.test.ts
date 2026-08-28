@@ -4,6 +4,17 @@
  * file proves each verb is WIRED to it — the guard existing but not called is
  * exactly the leak the issue closes.
  *
+ * COVERAGE, stated honestly (Cebab-fy1). Commit 11e7b3a wired NINE sites in
+ * `server.ts`. Eight have a case here: open_project, set_trusted,
+ * get_project_authority, set_permission_mode, read_project_facts,
+ * add_multi_agent_participant, install_bus_integration (:4800) and the
+ * `start_multi_agent` participant filter (:4915). The ninth — the
+ * `reopen_session` probe at :1581 — does NOT, and this comment is the record of
+ * that rather than a claim it does. The verb list below is hand-written, so it
+ * cannot detect a NEW projectId-bearing verb going unguarded; the durable fix is
+ * a table typed against `ClientMsg` in the style of
+ * `shared/src/protocol.client_verbs.test.ts`, which is a real compile-time gate.
+ *
  * The one that matters is `add_multi_agent_participant`: unguarded it reaches
  * `addWorker -> installBusForProject` and runs the assistant as a bus worker
  * under the full posture. The positive control makes `addWorker` a spy that
@@ -220,5 +231,82 @@ describe('read_project_facts answers with a resolving stub for the assistant', (
     // Path is blanked — the assistant's real KB path is not disclosed.
     expect(facts[0]!.facts.path).toBe('');
     expect(facts[0]!.facts.name).toContain('unavailable');
+  });
+});
+
+// Cebab-fy1: both guards below were wired by 11e7b3a with no assertion anywhere,
+// so deleting either line reddened nothing. Each case pairs the assistant
+// (must be refused) with a workspace project (must get through) — a filter that
+// dropped everything would satisfy the first half alone.
+describe('start_multi_agent drops the assistant from the participant set', () => {
+  test('the assistant is filtered out, so a chain of [assistant, workspace] falls below the minimum', async () => {
+    const sent: ServerMsg[] = [];
+    await handleClientMsg(makeConn(sent), {
+      type: 'start_multi_agent',
+      mode: 'chain',
+      participants: [assistant.id, workspace.id],
+    } as never);
+
+    // Two ids in, one survives the filter — so the chain minimum is what fires.
+    // Without the filter both would survive and this message would NOT be sent.
+    const err = of(sent, 'wrapper_error');
+    expect(err).toHaveLength(1);
+    expect(err[0]!.message).toContain('at least two participants');
+    // And the assistant is never echoed back as a participant.
+    expect(of(sent, 'multi_agent_started')).toHaveLength(0);
+  });
+
+  test('workspace projects SURVIVE the filter — two of them clear the minimum', async () => {
+    const otherDir = path.join(tmpRoot, 'other-repo');
+    fs.mkdirSync(path.join(otherDir, '.claude'), { recursive: true });
+    const other = upsertProject('other-repo', otherDir);
+
+    const sent: ServerMsg[] = [];
+    await handleClientMsg(makeConn(sent), {
+      type: 'start_multi_agent',
+      mode: 'chain',
+      participants: [workspace.id, other.id],
+    } as never);
+
+    // Neither has the bus installed, so this fails LATER, in the resolver. The
+    // point is only that it got past the participant filter: a filter that
+    // dropped workspace projects too would have produced the minimum error.
+    const err = of(sent, 'wrapper_error');
+    expect(err).toHaveLength(1);
+    expect(err[0]!.message).not.toContain('at least two participants');
+  });
+});
+
+describe('install_bus_integration refuses the assistant before the TOFU gate', () => {
+  test('the assistant is refused and never reaches the trust gate', async () => {
+    const sent: ServerMsg[] = [];
+    await handleClientMsg(makeConn(sent), {
+      type: 'install_bus_integration',
+      projectId: assistant.id,
+    } as never);
+
+    const err = of(sent, 'wrapper_error');
+    expect(err).toHaveLength(1);
+    expect(err[0]!.message).toContain('not one of your workspace projects');
+    // The guard sits ABOVE awaitBusTrustDecision, so the operator is never
+    // prompted to trust a project that can never be installed.
+    expect(of(sent, 'bus_auto_install_pending')).toHaveLength(0);
+  });
+
+  test('a workspace project passes the guard and DOES reach the trust gate', async () => {
+    // A persisted `denied` makes the gate short-circuit and answer, so the
+    // observable proves the verb got past the guard without the test hanging on
+    // an un-answered TOFU prompt.
+    setProjectBusTrust(workspace.id, 'denied');
+    const sent: ServerMsg[] = [];
+    await handleClientMsg(makeConn(sent), {
+      type: 'install_bus_integration',
+      projectId: workspace.id,
+    } as never);
+
+    const err = of(sent, 'wrapper_error');
+    expect(err).toHaveLength(1);
+    expect(err[0]!.message).toContain('bus install refused');
+    expect(err[0]!.message).not.toContain('not one of your workspace projects');
   });
 });
