@@ -180,6 +180,24 @@ describe('translate', () => {
     expect(out).toBeNull();
   });
 
+  test('wrapper:assistant_prompt is dropped (returns null) — never a stray bubble', () => {
+    // Cebab-8x8.2.1: the assistant persists a
+    // `{ type: 'wrapper', subtype: 'assistant_prompt', promptSha256 }` record
+    // before its stream loop so the transcript records which prompt ran.
+    // translate() must return null for it so replay never renders it as a
+    // message in the popup.
+    const out = translate(
+      fake({
+        type: 'wrapper',
+        subtype: 'assistant_prompt',
+        uuid: 'u',
+        promptSha256: 'a'.repeat(64),
+      }),
+      PID,
+    );
+    expect(out).toBeNull();
+  });
+
   test('unknown SDK message type degrades to a system_event', () => {
     const out = translate(fake({ type: 'something_new' }), PID);
     expect(out).toMatchObject({ type: 'system_event', subtype: 'unknown:something_new' });
