@@ -91,7 +91,7 @@ export async function preflightManagedCopy(
   });
 }
 
-export type ManagedCopyOutcome = { registered: boolean };
+export type ManagedCopyResult = { registered: boolean };
 
 /**
  * Copy a project into managed space and register the copy.
@@ -109,8 +109,8 @@ export async function runManagedCopy(
    * with two arguments, so the default is what ships.
    */
   caps: Caps = DEFAULT_CAPS,
-): Promise<ManagedCopyOutcome> {
-  const fail = (error: string): ManagedCopyOutcome => {
+): Promise<ManagedCopyResult> {
+  const fail = (error: string): ManagedCopyResult => {
     send({ type: 'managed_copy_result', projectId, result: { ok: false, error } });
     return { registered: false };
   };

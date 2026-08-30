@@ -99,7 +99,7 @@ export type PendingBusTrustEntry = {
 export type BusTrustDecisionKind = 'trust' | 'deny_once' | 'deny_remember';
 
 /** What the gate returns to the install caller. */
-export type BusTrustGateOutcome =
+export type BusTrustGateResult =
   | { approved: true; reason: 'trusted' | 'just_trusted' }
   | { approved: false; reason: 'denied_remember' | 'deny_once' };
 
@@ -128,14 +128,14 @@ export type AwaitBusTrustInput = {
  * checks the per-Conn `denyOnce` set, then falls through to the
  * first-seen prompt path (emit + await).
  *
- * Returns a `BusTrustGateOutcome` describing the decision; the install
+ * Returns a `BusTrustGateResult` describing the decision; the install
  * caller only proceeds with `installBusForProject(projectId)` when
  * `approved: true`. Every denial is dual-written to `safety_audit` with
  * `kind: 'bus.install_denied'`.
  */
 export async function awaitBusTrustDecision(
   input: AwaitBusTrustInput,
-): Promise<BusTrustGateOutcome> {
+): Promise<BusTrustGateResult> {
   const persisted = getProjectBusTrust(input.projectId);
 
   if (persisted === 'trusted') {
@@ -264,7 +264,7 @@ function applyDecision(args: {
   gate: BusTrustGateState;
   decision: BusTrustDecisionKind;
   contextSessionId: string | null;
-}): BusTrustGateOutcome {
+}): BusTrustGateResult {
   switch (args.decision) {
     case 'trust':
       setProjectBusTrust(args.projectId, 'trusted');
