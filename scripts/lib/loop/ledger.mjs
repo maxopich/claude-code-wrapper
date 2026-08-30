@@ -78,6 +78,37 @@ export function compareVerdictToGate(commandsRun = [], gateSteps = []) {
 }
 
 /**
+ * One verdict-vs-gate answer for an iteration that ran the gate SEVERAL times.
+ *
+ * `compareVerdictToGate` answers for one pairing: a build's claimed commands
+ * against the gate that followed it. An iteration can gate more than once — a
+ * gate failure buys a repair, so does a CI red — and the driver assigned each
+ * answer over the last, which made `disagree` structurally unreachable for any
+ * failure that was subsequently repaired. By the time the row was written the
+ * gate was green, so "the agent claimed lint passed and the gate found it red"
+ * could not be recorded at all. That is the field's entire purpose, and the
+ * second governing rule it serves. `Cebab-qd2.43`.
+ *
+ * DISAGREEMENT IS STICKY. An agent that misreported has misreported; a later
+ * attempt getting it right does not unmake the first, and a row that forgets
+ * is exactly the reassurance the rule exists to refuse. `unknown` loses to
+ * both because it is the ABSENCE of a claim rather than a claim that held.
+ */
+const VERDICT_RANK = Object.freeze({ unknown: 0, agree: 1, disagree: 2 });
+
+export function mergeVerdictVsGate(previous, next) {
+  // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so
+  // `'constructor' in VERDICT_RANK` is TRUE and its "rank" is a function that
+  // no comparison can beat — one stray value would freeze the field for the
+  // rest of the iteration. Not reachable from `compareVerdictToGate`'s closed
+  // three-value set, and cheaper to make impossible than to reason about.
+  const known = (v) => (Object.hasOwn(VERDICT_RANK, v) ? v : 'unknown');
+  const a = known(previous);
+  const b = known(next);
+  return VERDICT_RANK[b] > VERDICT_RANK[a] ? b : a;
+}
+
+/**
  * @param {object} parts  whatever the iteration managed to produce
  * @param {number} now    epoch ms, injected
  */
@@ -147,6 +178,17 @@ export function buildRecord(parts = {}, now = 0) {
     },
     gate: {
       steps,
+      // EVERY gate run this iteration made, present only when it made more than
+      // one — `steps` above stays the LAST run's, which is what every row
+      // already written means. Absent-is-good, so `jq 'select(.gate.attempts)'`
+      // reads as "iterations whose gate ran twice", i.e. every failure that was
+      // repaired. Across the 32 rows written before this existed, rows carrying
+      // a non-zero gate step numbered ZERO while the console of one night held
+      // six `gate: FAILED at format:check` lines — the durable record said the
+      // gate had never once reddened. Added ALONGSIDE rather than folded in for
+      // the same reason `build.totals` was: re-pointing `steps` would silently
+      // change the meaning of an append-only corpus. `Cebab-qd2.43`.
+      ...(gate.attempts?.length > 1 ? { attempts: gate.attempts } : {}),
       playgroundRan: gate.playgroundRan ?? false,
       liveSmokesRan: gate.liveSmokesRan ?? false,
       // Present only when the gate's one mechanical autofix fired. Absent is
@@ -164,6 +206,13 @@ export function buildRecord(parts = {}, now = 0) {
     },
     guard: { passed: guard.passed ?? null, breaches: guard.breaches ?? [] },
     pr: { number: pr.number ?? null, url: pr.url ?? null },
+    // OTHER open loop PRs this one shares a file with, present only when there
+    // are any. `loop.merge` defaults to false, so every successful iteration
+    // leaves its PR open and the next one branches from a main without it —
+    // which makes a same-file collision the ordinary case rather than an edge
+    // one, and nothing could see it coming. `jq 'select(.fileOverlaps)'` is
+    // "which PRs of last night's run will fight each other". `Cebab-qd2.44`.
+    ...(parts.fileOverlaps?.length ? { fileOverlaps: parts.fileOverlaps } : {}),
     ci: {
       conclusion: ci.conclusion ?? null,
       waitedMs: ci.waitedMs ?? null,
@@ -219,6 +268,7 @@ export function validateRecord(record) {
   need('ts', typeof record.ts === 'string' && record.ts.length > 0);
   need('build', record.build && typeof record.build === 'object');
   need('gate.steps', Array.isArray(record.gate?.steps));
+  need('gate.attempts', record.gate?.attempts === undefined || Array.isArray(record.gate.attempts));
   need('guard.breaches', Array.isArray(record.guard?.breaches));
   need('diffstat', record.diffstat && typeof record.diffstat === 'object');
   need('harvest.followUps', Array.isArray(record.harvest?.followUps));

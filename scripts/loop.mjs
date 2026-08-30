@@ -61,13 +61,18 @@ import {
 } from './lib/loop/usage.mjs';
 import { scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
 import { ancestorsOfActive, chooseBead, denyPathStems } from './lib/loop/select.mjs';
-import { appendRecord, buildRecord, compareVerdictToGate } from './lib/loop/ledger.mjs';
+import {
+  appendRecord,
+  buildRecord,
+  compareVerdictToGate,
+  mergeVerdictVsGate,
+} from './lib/loop/ledger.mjs';
 import { makeRunner } from './lib/loop/run.mjs';
 import { LockHeldError, acquireLock, releaseLock } from './lib/loop/lock.mjs';
 import { reconcile } from './lib/loop/reconcile.mjs';
 import { DECLINE_LABEL, PARK_LABEL, makeBeads } from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject, makeGit } from './lib/loop/git.mjs';
-import { makeForge } from './lib/loop/forge.mjs';
+import { makeForge, overlappingPrs } from './lib/loop/forge.mjs';
 import { assertPlaygroundEnv, makeGate } from './lib/loop/gate.mjs';
 import { makeBuild } from './lib/loop/build.mjs';
 
@@ -331,6 +336,12 @@ async function runIteration({ ctx, deps, log }) {
   // Per-ITERATION rather than per-attempt: a repair that reintroduces a
   // formatting error should reach the operator, not loop on prettier.
   let formatAutofixed = false;
+  // One entry per pass through STAGE.GATE, in order. The gate runs again after
+  // every repair, and `parts.gate` was ASSIGNED each time — so the row a
+  // repaired iteration wrote showed a clean ten-step gate and kept no trace
+  // that anything had reddened. Accumulated here, above the single assignment
+  // below, for the same reason `buildTotals` is. `Cebab-qd2.43`.
+  const gateAttempts = [];
   // Accumulated across every `claude` invocation of this iteration — a capped
   // build, its resume, and any repair. See `accumulateBuild`.
   let buildTotals = null;
@@ -578,8 +589,24 @@ async function runIteration({ ctx, deps, log }) {
               log('gate: `npm run format` itself failed — falling through to the repair path');
             }
           }
+          const attemptSteps = stepsAcrossAutofix(preAutofixSteps, gated.steps);
+          // Against the SAME steps this attempt produced, failure included.
+          // Computing it from the repaired run alone would report agreement
+          // between the agent's claimed commands and a gate result the agent
+          // never caused — and `parts.commandsRun` is the claim of the build
+          // that immediately preceded THIS gate run, so the pairing is only
+          // correct while it is made here, before the next build replaces it.
+          const attemptVerdict = compareVerdictToGate(parts.commandsRun ?? [], attemptSteps);
+          gateAttempts.push({
+            attempt,
+            passed: gated.passed === true,
+            failedStep: gated.failedStep ?? null,
+            verdictVsGate: attemptVerdict,
+            steps: attemptSteps,
+          });
           parts.gate = {
-            steps: stepsAcrossAutofix(preAutofixSteps, gated.steps),
+            steps: attemptSteps,
+            attempts: gateAttempts,
             playgroundRan: gated.playgroundRan,
             liveSmokesRan: gated.liveSmokesRan,
             // Recorded so a run that never needed the autofix and a run that
@@ -587,10 +614,8 @@ async function runIteration({ ctx, deps, log }) {
             // is the number that says whether the prompt change is working.
             ...(formatAutofixed ? { formatAutofixed: true } : {}),
           };
-          // Against the SAME steps the row carries, failure included. Computing
-          // it from the repaired run alone would report agreement between the
-          // agent's claimed commands and a gate result the agent never caused.
-          parts.verdictVsGate = compareVerdictToGate(parts.commandsRun ?? [], parts.gate.steps);
+          // STICKY, not last-write-wins. See `mergeVerdictVsGate`.
+          parts.verdictVsGate = mergeVerdictVsGate(parts.verdictVsGate, attemptVerdict);
           if (!gated.passed) {
             log(`gate: FAILED at ${gated.failedStep}`);
             repairContext = { failedStep: gated.failedStep, output: gated.output };
@@ -633,6 +658,46 @@ async function runIteration({ ctx, deps, log }) {
           // asking about the PR instead is what made a repair read the previous
           // attempt's verdict 1.2 seconds later.
           parts.headSha = await git.headSha();
+          // WHICH OTHER OPEN LOOP PRs THIS ONE WILL FIGHT — see
+          // `overlappingPrs`. Advisory: a `gh` failure here says so and the
+          // PUBLISH continues, because an overlap warning is worth strictly
+          // less than the PR it decorates.
+          //
+          // AFTER THE COMMIT, deliberately. `changedPaths` diffs the INDEX
+          // against the merge base, which is correct both before a commit and
+          // after one (the index equals HEAD then) — and running it here rather
+          // than reusing GATE's copy is what makes it the files this PR
+          // actually carries, lint-staged's rewrites included.
+          //
+          // COMPUTED ON EVERY PUBLISH, but only the PR body of the FIRST one
+          // carries it: `createPr` runs once per iteration. So a PR opened
+          // before its rival existed is warned about on the LATER PR only,
+          // which is the direction that matters — the second one to merge is
+          // the one that has to rebase, and it is the one still being written.
+          const listed = await forge.openLoopPrs();
+          if (listed.error) {
+            log(`publish: overlap check skipped — ${listed.error}`);
+          } else {
+            const overlaps = overlappingPrs(listed.prs, await git.changedPaths(), {
+              excludeNumber: prNumber,
+              excludeBranch: branchNameFor(bead.id),
+            });
+            // ASSIGNED UNCONDITIONALLY, and only inside this branch. A
+            // repair republishes, and the rival PR may have MERGED in between
+            // — assigning only when `overlaps.length` would leave attempt 1's
+            // finding on the row after attempt 2 established it was no longer
+            // true. An empty array is dropped by `buildRecord`, so clearing it
+            // costs nothing; a `gh` that could not answer leaves the previous
+            // reading alone, because "I could not tell" is not "there is none".
+            parts.fileOverlaps = overlaps;
+            if (overlaps.length) {
+              for (const o of overlaps) {
+                log(
+                  `publish: file overlap — #${o.number} (${o.branch}) also touches ${o.files.join(', ')}`,
+                );
+              }
+            }
+          }
           // EXISTENCE, NOT ATTEMPT NUMBER. This read `attempt === 1`, which is
           // right for the repair it was written for — a CI-red retry force-
           // pushes to a branch whose PR is already open and must not open a
@@ -1119,7 +1184,35 @@ function buildCommitMessage(verdict, bead, guardResult) {
   return lines.join('\n');
 }
 
+/**
+ * The one section of the PR body that is about a DIFFERENT pull request.
+ *
+ * Empty for the overwhelming majority of iterations, which is why it is a
+ * spread rather than a conditional line: an empty heading with nothing under it
+ * reads as "checked, none" only to someone who knows the check exists.
+ *
+ * Written for the human doing the merging, so it names the ORDER problem rather
+ * than the file list alone — whichever of the two lands second is the one that
+ * conflicts, and that is the decision this note exists to inform.
+ */
+function overlapSection(parts) {
+  const overlaps = parts.fileOverlaps ?? [];
+  if (overlaps.length === 0) return [];
+  return [
+    '## Overlapping open loop PRs',
+    '',
+    'Other open `loop/*` pull requests touch files this branch also touches.',
+    'Whichever merges second will have to be rebased — merge order matters here.',
+    '',
+    ...overlaps.map(
+      (o) => `- #${o.number} (\`${o.branch}\`) — ${o.files.map((f) => `\`${f}\``).join(', ')}`,
+    ),
+    '',
+  ];
+}
+
 function prBody(parts, bead, guardResult) {
+  const reddened = (parts.gate?.attempts ?? []).filter((a) => a.passed === false);
   const steps = (parts.gate?.steps ?? [])
     .map((s) => `| ${s.name} | ${s.exitCode === 0 ? '✅' : '❌'} | ${s.ms ?? 0} ms |`)
     .join('\n');
@@ -1134,6 +1227,17 @@ function prBody(parts, bead, guardResult) {
     '|---|---|---|',
     steps,
     '',
+    // THE TABLE ABOVE IS THE LAST RUN, and without this line a reader has no
+    // way to tell a gate that passed first time from one that was repaired —
+    // which is also the only thing that explains a `disagree` verdict sitting
+    // under ten green rows. `Cebab-qd2.43`.
+    reddened.length
+      ? `Gate reddened on ${reddened
+          .map((a) => `attempt ${a.attempt} at \`${a.failedStep}\``)
+          .join(', ')}, and passed on a later run.`
+      : '',
+    '',
+    ...overlapSection(parts),
     '## Guard',
     '',
     guardResult.passed

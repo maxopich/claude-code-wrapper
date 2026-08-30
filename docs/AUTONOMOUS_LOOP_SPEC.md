@@ -637,6 +637,21 @@ then sweep any surviving `tsx watch ... --env-file-if-exists=../.env src/index.t
 `"disagree"`. **Never branch on that field** — record it and move on. It is a signal for the
 maintainer, not a control input.
 
+**The gate runs once per attempt, and the row keeps every run.** `gate.steps` is the LAST run's,
+which is what every row already written means; `gate.attempts[]` carries one `{ attempt, passed,
+failedStep, verdictVsGate, steps }` per pass and is **present only when the gate ran more than
+once**. Without it a repaired failure left no durable trace at all: measured across all 32 rows
+written before this existed, rows carrying a non-zero gate step numbered **zero**, while the
+console of a single night held six `gate: FAILED at format:check` lines and five of eight builds
+reddened there. The only evidence a gate had ever failed was terminal scrollback.
+
+`verdict_vs_gate` is therefore **sticky at `disagree`** across the attempts, not last-write-wins.
+Each attempt's answer pairs that attempt's claimed commands with the gate that immediately
+followed them — the correct pairing, and only available at that moment, since the next build
+replaces `commands_run`. An agent that misreported has misreported; a later attempt getting it
+right does not unmake the first, and the field's entire purpose is the second governing rule.
+Reduced through `mergeVerdictVsGate`, ranked `disagree > agree > unknown`. `Cebab-qd2.43`.
+
 **On failure:** re-enter BUILD with the failing step name and the last 80 lines of its output,
 up to `maxRepairs`. Exhausted → park.
 
@@ -652,9 +667,11 @@ up to `maxRepairs`. Exhausted → park.
    `eslint --fix` and `prettier --write` on staged files, so a pre-commit diffstat is stale.
 4. Re-check the lockfile: if `package-lock.json` changed, hard-park with reason `lockfile_drift`.
 5. `git push -u origin loop/<id>`.
-6. `gh pr create --fill --base main`, **iff no PR has been created for this iteration yet**. Body
-   must carry: the bead id and title, the agent's summary, the gate result table, and the guard
-   verdict. On a guard breach, add the label `loop-guard`.
+6. Ask the forge which other `loop/*` pull requests are open and which files they touch, and
+   intersect those lists with this iteration's own changed paths (§6.5.1).
+7. `gh pr create --fill --base main`, **iff no PR has been created for this iteration yet**. Body
+   must carry: the bead id and title, the agent's summary, the gate result table, the guard
+   verdict, and any overlap from step 6. On a guard breach, add the label `loop-guard`.
 
 **The condition is existence, not the attempt number.** This read `attempt === 1` and was wrong in
 a way no test saw for ten iterations. That guard is correct for the repair it was written for — a
@@ -667,6 +684,36 @@ Measured on the first unattended overnight run (2026-08-26): two of three beads 
 Both produced complete, gate-passing commits that reached `origin` and sat there with no pull
 request, while WATCH polled their SHAs for 916 s each and then parked blaming CI. Nothing landed
 and the run halted on the breaker. `Cebab-qd2.18`.
+
+#### 6.5.1 Overlapping open loop PRs
+
+**`loop.merge` is false by default, so this is the ordinary path, not an edge case.**
+`guard_withheld` is how a _successful_ iteration ends: the PR is opened and the merge left to a
+human. Every later iteration then does `git checkout main` from an `origin/main` that does not
+contain it — so after an `--until 8` night, iteration 8 is branching from a main missing up to
+seven landed-in-spirit changes. Two beads that touch one file conflict, and neither the loop nor
+either agent can see it coming. Measured on the run of 2026-08-27: PR #422 and PR #423 both create
+`assistant/kb/00-index.md`.
+
+One `gh pr list --state open --json number,url,headRefName,files` per PUBLISH; only branches under
+the loop's own prefix count; **this branch's own PR is excluded by number _and_ by branch name**,
+since a repair republishes with the PR already open and would otherwise report a 100% overlap with
+itself. Any overlap goes in the PR body naming the other PR, its branch and the shared files, and
+onto the ledger row as `fileOverlaps` — absent when there is none.
+
+**Advisory, and it says when it could not tell.** A failed `gh pr list` logs `overlap check
+skipped` and the PUBLISH continues: the warning is worth strictly less than the PR it decorates.
+It must not report a clean sheet, because "no other PR touches your files" and "I could not find
+out" are different facts and a bare empty list renders them identical.
+
+**A SELECT-side filter cannot do this job.** It would have to know which files a bead will touch
+_before_ building it, and `select.mjs`'s own header carries the measurement that kills that: beads
+name their files by basename as often as by path (`Cebab-qd2.22` was selected and fully built
+because it named driver files by basename; `Cebab-qd2.17` was correctly skipped because it wrote
+`scripts/loop.mjs:824`). Post-hoc and certain beats pre-hoc and unreliable, and it reaches the
+human at the moment they can still choose the merge order. The expensive alternative — stacking
+each iteration on the previous branch instead of branching from `origin/main` — changes the loop's
+whole isolation model and is **not** done. `Cebab-qd2.44`.
 
 ### 6.6 WATCH — _driver_
 
@@ -1248,6 +1295,19 @@ directly with an injected `run` that returns the limit message.
   },
   "gate": {
     "steps": [{ "name": "lint", "exitCode": 0, "ms": 8210 }],
+    // Present only when the gate ran MORE THAN ONCE (§6.4). `steps` above is
+    // the last run's; without this a repaired failure left no trace at all —
+    // across the 32 rows written before it, rows with a non-zero gate step
+    // numbered zero. `jq 'select(.gate.attempts)'` is every repaired gate.
+    "attempts": [
+      {
+        "attempt": 1,
+        "passed": false,
+        "failedStep": "format:check",
+        "verdictVsGate": "disagree",
+        "steps": [{ "name": "format:check", "exitCode": 1, "ms": 2100 }],
+      },
+    ],
     "playgroundRan": true,
     "liveSmokesRan": false,
     // Present only when the gate repaired a `format:check` failure itself
@@ -1259,6 +1319,17 @@ directly with an injected `run` that returns the limit message.
   "diffstat": { "files": 4, "insertions": 118, "deletions": 12 },
   "guard": { "passed": true, "breaches": [] },
   "pr": { "number": 393, "url": "https://github.com/…/393" },
+  // Present only when another OPEN loop PR touches a file this one touches
+  // (§6.5.1) — which is the ordinary case once `merge` is false, since every
+  // successful iteration leaves its PR open for a human.
+  "fileOverlaps": [
+    {
+      "number": 422,
+      "url": "https://github.com/…/422",
+      "branch": "loop/Cebab-8x8.2.1",
+      "files": ["assistant/kb/00-index.md"],
+    },
+  ],
   "ci": { "conclusion": "success", "waitedMs": 512000, "runUrl": "…" },
   "land": { "merged": true, "queued": false, "sha": "a91298b", "state": "MERGED" },
   // `alreadyTracked` is present only when the agent used the `already_tracked`
@@ -1286,7 +1357,9 @@ record could not previously be asked:
 | `build.tokens`    | The four token classes, or **null** when the envelope could not say. Null rather than zeros: unknown and free are different facts, which is the lesson `land.sha` taught.                                                                                                                                                                                                                            |
 
 `harvest.parkFailed` is present **only when a park failed**, so `jq 'select(.harvest.parkFailed)'`
-matches nothing on a healthy night — the same idiom as `.build.failure` and `.crash`.
+matches nothing on a healthy night — the same idiom as `.build.failure` and `.crash`. `gate.attempts`
+(§6.4) and `fileOverlaps` (§6.5.1) follow it: absent is the good state, so each one's presence _is_
+the query.
 
 **A `no_change_needed` verdict is falsified before the bead is closed.** It is the only outcome
 that closes a bead permanently, and it was the only one that never reached GATE — every other route
@@ -1460,7 +1533,7 @@ So the rehearsal runs the **real driver** end-to-end against a scratch git repo 
 `scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
 its own path — the installed copy would drive this checkout.
 
-Sixteen scenarios, each asserting on the ledger AND on the bare repo's `main`:
+Twenty scenarios, each asserting on the ledger AND on the bare repo's `main`:
 
 | Scenario                 | What only it can prove                                                               |
 | ------------------------ | ------------------------------------------------------------------------------------ |
@@ -1480,6 +1553,10 @@ Sixteen scenarios, each asserting on the ledger AND on the bare repo's `main`:
 | `driver-stale`           | preflight's pull rewrites `loop.mjs` under the running process — it restarts (§13)   |
 | `capped-keeps-repair`    | a cap resume leaves a repair for a CI red instead of parking finished work (§6.3)    |
 | `declined`               | a declined bead carries the agent's reasoning and is labelled `loop-declined` (§6.8) |
+| `rollup-withheld-child`  | a bead whose child is `in_progress` behind an unmerged PR is skipped for it (§6.1)   |
+| `file-overlap`           | two beads writing one file warn the human choosing the merge order (§6.5.1)          |
+| `overlap-check-broken`   | a `gh pr list` that fails SAYS so instead of reporting a clean sheet (§6.5.1)        |
+| `overlap-cleared`        | a rival PR that lands mid-iteration CLEARS the finding rather than stranding it      |
 
 `driver-stale` is the one that needed a new kind of evidence. A log line saying "restarting"
 proves only that the driver said so, so the scenario pushes a commit that appends a marker

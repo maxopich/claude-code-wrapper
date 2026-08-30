@@ -28,8 +28,88 @@
  * ever showing up, is the real "never started".
  */
 
+import { LOOP_BRANCH_PREFIX } from './git.mjs';
+
 export function prCreateArgv({ base, title }) {
   return ['pr', 'create', '--base', base, '--title', title, '--body-file', '-'];
+}
+
+/**
+ * Every open PR and the files it touches — the input to the overlap report.
+ *
+ * `files` is a real `gh pr list --json` field, so this costs ONE call rather
+ * than one per PR. 100 is far past the handful of branches an overnight run
+ * leaves open; a repo that exceeded it would need pagination here, and the
+ * report would under-state rather than mislead.
+ */
+export function prListArgv({ limit = 100 } = {}) {
+  return [
+    'pr',
+    'list',
+    '--state',
+    'open',
+    '--limit',
+    String(limit),
+    '--json',
+    'number,url,headRefName,files',
+  ];
+}
+
+/**
+ * Which OTHER open loop PRs touch a file this branch also touches.
+ *
+ * WHY THIS IS A REPORT AND NOT A FILTER. `loop.merge` defaults to false, so
+ * `guard_withheld` is how an ordinary SUCCESSFUL iteration ends: the PR is
+ * opened and the merge left to a human. Every later iteration then branches
+ * from an `origin/main` that does not contain it, so after an `--until 8`
+ * night iteration 8 is building on a main missing up to seven landed-in-spirit
+ * changes. Two beads touching one file conflict, and neither the loop nor
+ * either agent can see it coming — measured on the run of 2026-08-27, where
+ * two PRs both created `assistant/kb/00-index.md`. `Cebab-qd2.44`.
+ *
+ * The SELECT-side version of this cannot work: it would need to know which
+ * files a bead will touch BEFORE building it, and `select.mjs`'s own header
+ * carries the measurement that kills it — beads name their files by basename
+ * as often as by path. Post-hoc and certain beats pre-hoc and unreliable, and
+ * it reaches the human at the moment they can still choose the merge order.
+ *
+ * EXCLUDED BY BRANCH AS WELL AS BY NUMBER. `excludeNumber` covers a repair,
+ * where this branch's PR is already open and would otherwise report a 100%
+ * overlap with itself; `excludeBranch` covers the case that has actually
+ * happened — a PREVIOUS run left a PR open for this same bead (`branch-exists`),
+ * so the self-match exists before `prNumber` is known.
+ */
+export function overlappingPrs(
+  prs = [],
+  changedPaths = [],
+  { excludeNumber = null, excludeBranch = null, prefix = LOOP_BRANCH_PREFIX } = {},
+) {
+  // NO `if (mine.size === 0) return []` FAST PATH. It was here, and a
+  // revert-check proved it unfalsifiable: with an empty set every candidate
+  // file fails `mine.has`, so the loop returns `[]` on its own and no mutation
+  // of the guard can change an answer. A line that looks like it handles a case
+  // but cannot is worse than its absence — it is what makes a reader believe
+  // the case is covered. The BEHAVIOUR is still pinned by a test.
+  const mine = new Set(changedPaths);
+  const out = [];
+  for (const pr of prs ?? []) {
+    if (!pr || typeof pr !== 'object') continue;
+    const branch = String(pr.headRefName ?? '');
+    if (!branch.startsWith(prefix)) continue;
+    if (excludeBranch && branch === excludeBranch) continue;
+    if (excludeNumber != null && pr.number === excludeNumber) continue;
+    const files = (pr.files ?? [])
+      .map((f) => (typeof f === 'string' ? f : f?.path))
+      .filter((f) => f && mine.has(f));
+    if (files.length === 0) continue;
+    out.push({
+      number: pr.number ?? null,
+      url: pr.url ?? null,
+      branch,
+      files: [...new Set(files)].sort(),
+    });
+  }
+  return out.sort((a, b) => (a.number ?? 0) - (b.number ?? 0));
 }
 
 /**
@@ -155,6 +235,29 @@ export function makeForge({ run, cwd, dryRun = false, sleep = defaultSleep }) {
       const url = r.stdout.trim().split('\n').filter(Boolean).pop() ?? '';
       const number = Number(url.split('/').pop());
       return { number: Number.isFinite(number) ? number : null, url };
+    },
+
+    /**
+     * `{ prs, error }` RATHER THAN AN ARRAY, because the two answers this can
+     * give are "no other PR touches your files" and "I could not find out", and
+     * a bare `[]` renders them identical — which is the exact shape of a report
+     * that runs, succeeds and measures nothing. Not `dryRun`-gated: this is a
+     * read, like `pollChecks` and `prState`, and gating it would leave the
+     * rehearsal unable to exercise the path.
+     */
+    async openLoopPrs() {
+      const r = await gh(prListArgv());
+      if (r.code !== 0) {
+        const said = (r.stderr || r.stdout).trim().split('\n')[0];
+        return { prs: [], error: said || `gh pr list exited ${r.code}` };
+      }
+      try {
+        const parsed = JSON.parse(r.stdout);
+        if (!Array.isArray(parsed)) return { prs: [], error: 'gh pr list returned a non-array' };
+        return { prs: parsed, error: null };
+      } catch {
+        return { prs: [], error: 'gh pr list returned unparseable JSON' };
+      }
     },
 
     async pollChecks(sha, requiredContext) {
