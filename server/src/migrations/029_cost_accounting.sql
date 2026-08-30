@@ -19,7 +19,7 @@
 -- one transaction).
 --
 -- NOT INCLUDED: any rewrite of the existing single-agent `sessions.total_cost_usd`.
--- The accounting bug there is fixed forward in `runner/orchestrator.ts` (it
+-- The accounting bug there is fixed forward in `runner/persist.ts` (it
 -- assigned the latest turn's cost instead of adding it), but historical rows
 -- are left alone — see that file's comment for why the observed data does not
 -- match what the code would have produced, which is a discrepancy worth
