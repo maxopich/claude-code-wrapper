@@ -56,7 +56,7 @@ export function RecoveryDisclosure(props: { recovery: RecoveryContextView }) {
                 {interruptedAgents.map((a) => (
                   <li key={a.agentName}>
                     <code>{a.agentName}</code> — last activity{' '}
-                    <code>{formatTime(a.lastEventTs)}</code>, last successful checkpoint{' '}
+                    <code>{formatTime(a.lastEventAt)}</code>, last successful checkpoint{' '}
                     <code>
                       {a.lastCheckpointTs !== null ? formatTime(a.lastCheckpointTs) : 'never'}
                     </code>

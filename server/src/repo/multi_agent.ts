@@ -1532,13 +1532,13 @@ export function computeRecoveryContext(sessionId: string): RecoveryContextView |
   }
   const reconstructedAtTs = Date.now();
   const interruptedAgents: RecoveryAgentEntry[] = [];
-  for (const [agentName, lastEventTs] of lastEventBy) {
+  for (const [agentName, lastEventAt] of lastEventBy) {
     const lastCheckpointTs = checkpointBy.get(agentName) ?? null;
-    if (lastEventTs > (lastCheckpointTs ?? 0)) {
-      interruptedAgents.push({ agentName, lastEventTs, lastCheckpointTs });
+    if (lastEventAt > (lastCheckpointTs ?? 0)) {
+      interruptedAgents.push({ agentName, lastEventAt, lastCheckpointTs });
     }
   }
-  interruptedAgents.sort((a, b) => b.lastEventTs - a.lastEventTs);
+  interruptedAgents.sort((a, b) => b.lastEventAt - a.lastEventAt);
   return { staleSinceTs, reconstructedAtTs, interruptedAgents };
 }
 

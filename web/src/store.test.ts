@@ -1957,7 +1957,7 @@ describe('store / recoveryContext (Item #7)', () => {
           staleSinceTs: 1700000000500,
           reconstructedAtTs: 1700000001000,
           interruptedAgents: [
-            { agentName: 'coder', lastEventTs: 1700000000500, lastCheckpointTs: 1700000000300 },
+            { agentName: 'coder', lastEventAt: 1700000000500, lastCheckpointTs: 1700000000300 },
           ],
         },
       },
@@ -1966,7 +1966,7 @@ describe('store / recoveryContext (Item #7)', () => {
       staleSinceTs: 1700000000500,
       reconstructedAtTs: 1700000001000,
       interruptedAgents: [
-        { agentName: 'coder', lastEventTs: 1700000000500, lastCheckpointTs: 1700000000300 },
+        { agentName: 'coder', lastEventAt: 1700000000500, lastCheckpointTs: 1700000000300 },
       ],
     });
   });
@@ -2001,7 +2001,7 @@ describe('store / recoveryContext (Item #7)', () => {
         recoveryContext: {
           staleSinceTs: 100,
           reconstructedAtTs: 200,
-          interruptedAgents: [{ agentName: 'coder', lastEventTs: 100, lastCheckpointTs: null }],
+          interruptedAgents: [{ agentName: 'coder', lastEventAt: 100, lastCheckpointTs: null }],
         },
       },
     });
