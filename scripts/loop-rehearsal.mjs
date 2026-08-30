@@ -72,6 +72,14 @@ const SCENARIOS = {
       ctx.ok(one.land.sha, 'land.sha is a real commit, not null');
       ctx.eq(one.harvest.beadClosed, true, 'the bead was closed');
       ctx.eq(one.restore.pulled, true, 'the teardown pull advanced main');
+      // THE END-OF-RUN REPORT, on the happy path. It runs after teardown and
+      // checks each row against git, gh and bd — so a clean run has to SAY it
+      // checked, or a report that prints nothing is indistinguishable from one
+      // that never ran.
+      ctx.ok(ctx.stdout.includes('loop run —'), 'the run printed a report');
+      ctx.ok(ctx.stdout.includes('MERGED'), 'naming what merged');
+      ctx.ok(ctx.stdout.includes('no discrepancies'), 'and saying the rows were verified');
+      ctx.ok(!ctx.stdout.includes('NEEDS YOU'), 'with nothing owed to a human');
       ctx.ok(
         ctx.calls.bd.some((c) => c[0] === 'close'),
         'bd close ran',
@@ -296,6 +304,10 @@ const SCENARIOS = {
         0,
         'and no CI re-run either — the diff is not what is wrong',
       );
+      // And the report has to SURFACE it. A park whose only trace is a ledger
+      // row is the silence this whole report exists to end.
+      ctx.ok(ctx.stdout.includes('PARKED'), 'the report names the park');
+      ctx.ok(ctx.stdout.includes('ci_blocked'), 'with the reason attached');
     },
   },
 
@@ -839,13 +851,32 @@ if (argv[0] === 'ready') {
   process.stdout.write(JSON.stringify(rows));
 } else if (argv[0] === 'show') {
   const hit = plan.beadRows.find((b) => b.id === argv[1]);
+  // THE FAKE HAS TO MODEL WHAT THE WRITES DID, not just the shape of a row.
+  // It did not, so every bead looked permanently open, with no labels — and
+  // the end-of-run verifier, whose whole job is asking bd whether a claimed
+  // close really happened, reported two false discrepancies on a run where
+  // nothing was wrong. A fake that cannot represent success makes any check
+  // against it useless in the direction that matters.
+  const live = hit
+    ? {
+        ...hit,
+        status: (state.closed || []).includes(argv[1]) ? 'closed' : hit.status,
+        labels: [...(hit.labels || []), ...((state.labels || {})[argv[1]] || [])],
+      }
+    : null;
   // The real bd exits 0 on a miss and prints an OBJECT where a hit is an array.
-  process.stdout.write(JSON.stringify(hit ? [hit] : { error: 'no issues found' }));
+  process.stdout.write(JSON.stringify(live ? [live] : { error: 'no issues found' }));
 } else if (argv[0] === 'update' && argv.includes('--claim')) {
   state.claimed.push(argv[1]);
   save();
+} else if (argv[0] === 'update' && argv.includes('--add-label')) {
+  const label = argv[argv.indexOf('--add-label') + 1];
+  state.labels = state.labels || {};
+  (state.labels[argv[1]] = state.labels[argv[1]] || []).push(label);
+  save();
 } else if (argv[0] === 'close') {
   state.claimed.push(argv[1]);
+  (state.closed = state.closed || []).push(argv[1]);
   save();
 }
 process.exit(0);
@@ -1209,6 +1240,8 @@ function buildScratch(name, scenario) {
     path.join(dir, 'shim-state.json'),
     JSON.stringify({
       claimed: [],
+      closed: [],
+      labels: {},
       builds: 0,
       polls: 0,
       reruns: 0,

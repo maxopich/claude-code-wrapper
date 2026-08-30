@@ -70,6 +70,7 @@ import {
 import { makeRunner } from './lib/loop/run.mjs';
 import { LockHeldError, acquireLock, releaseLock } from './lib/loop/lock.mjs';
 import { reconcile } from './lib/loop/reconcile.mjs';
+import { renderReport, rowsSince, verifyRun } from './lib/loop/report.mjs';
 import { DECLINE_LABEL, PARK_LABEL, makeBeads } from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject, makeGit } from './lib/loop/git.mjs';
 import { makeForge, overlappingPrs } from './lib/loop/forge.mjs';
@@ -1720,6 +1721,54 @@ async function main() {
     `stopped: ${stopBecause ?? 'done'} — ${iterations} iteration(s), ` +
       `${formatUsage({ turns: ctx.turns, tokens: ctx.tokens })}`,
   );
+
+  // ── the run's own report, and the verification behind it ────────────────
+  //
+  // AFTER teardown, deliberately. Two of the sweeps ask whether the repository
+  // was left on main with a clean tree, and running before teardown would
+  // measure the state teardown exists to fix — a check that reports the
+  // problem it is about to not have.
+  //
+  // WRAPPED WHOLE. This is the last thing a run does and it is a REPORT: a
+  // throw here would turn eight merged beads into a non-zero exit and a stack
+  // trace, which is worse than the silence it replaces. `report.mjs` already
+  // guards every individual lookup; this is the backstop for the rest.
+  try {
+    const runRows = rowsSince(readLedger(), new Date(ctx.startedAt).toISOString());
+    const { findings, blocked } = await verifyRun({
+      rows: runRows,
+      git,
+      forge: deps.forge,
+      beads: deps.beads,
+      log,
+    });
+    sink.write(
+      `${renderReport({
+        rows: runRows,
+        findings,
+        usageLine: formatUsage({ turns: ctx.turns, tokens: ctx.tokens }),
+        stopBecause: stopBecause ?? 'done',
+        elapsedMs: Date.now() - ctx.startedAt,
+      })}\n`,
+    );
+    // THE ONE ESCALATION. A row claiming a merge whose commit is not in main
+    // means the loop's picture of the codebase is wrong, and every later bead
+    // branches from main — so the NEXT run must not start until a human looks.
+    // Reuses `.loop/HALT`, which preflight already refuses to start on and
+    // `npm run loop:recover` already clears; a second mechanism would be a
+    // second thing to remember.
+    if (blocked && !fs.existsSync(HALT_FILE)) {
+      fs.writeFileSync(
+        HALT_FILE,
+        'the end-of-run check found a merge recorded in the ledger that is NOT in ' +
+          'origin/main. See the report above. Remove this file to start again.\n',
+      );
+      log('verify: wrote .loop/HALT — the next run will refuse to start until you clear it');
+    }
+  } catch (error) {
+    log(`report: could not be produced — ${error?.message ?? error}`);
+  }
+
   return exitCode;
 }
 

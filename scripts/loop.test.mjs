@@ -848,6 +848,13 @@ import {
 } from './lib/loop/usage.mjs';
 import { LOOP_BRANCH_PREFIX, branchNameFor, commitSubject } from './lib/loop/git.mjs';
 import {
+  formatElapsed,
+  renderReport,
+  rowsSince,
+  summarise,
+  verifyRun,
+} from './lib/loop/report.mjs';
+import {
   checkRunsArgv,
   classifyCheckRuns,
   failingSibling,
@@ -5842,5 +5849,312 @@ describe('WATCH distinguishes killed, blocked and failed (Cebab-qd2.45, Cebab-qd
     expect(parts.ci.outcome).toBeUndefined();
     expect(parts.ci.rerun).toBeUndefined();
     expect(parts.ci.failedChecks).toBeUndefined();
+  });
+});
+
+// ── the end-of-run report, and the verification behind it ──────────────────
+//
+// Until now a run ended with ONE line and nothing had ever checked a ledger row
+// against the world. Measured on the run of 2026-08-30: a row said
+// `merge_queued` for PR #432, which was in fact BLOCKED by a required check and
+// could never merge — the bead sat open behind a row reading "will land
+// shortly", and only a human going to look found it.
+describe('report: rowsSince / summarise / formatElapsed', () => {
+  test('rowsSince keeps this run and drops the previous ones', () => {
+    const rows = [
+      { ts: '2026-08-29T10:00:00.000Z', bead: 'old' },
+      { ts: '2026-08-30T13:57:17.000Z', bead: 'a' },
+      { ts: '2026-08-30T16:52:00.000Z', bead: 'b' },
+    ];
+    expect(rowsSince(rows, '2026-08-30T13:57:00.000Z').map((r) => r.bead)).toEqual(['a', 'b']);
+    // No start time means "everything" — a report over the whole file is a
+    // worse report, never a wrong one.
+    expect(rowsSince(rows, null)).toHaveLength(3);
+    // A row with no ts cannot be placed, so it is excluded rather than guessed.
+    expect(rowsSince([{ bead: 'x' }], '2026-08-30T00:00:00.000Z')).toEqual([]);
+  });
+
+  test('summarise groups by disposition rather than scoring', () => {
+    const s = summarise([
+      { disposition: 'merged' },
+      { disposition: 'merged' },
+      { disposition: 'parked' },
+    ]);
+    expect(s.total).toBe(3);
+    expect(s.byDisposition.get('merged')).toHaveLength(2);
+    expect(s.byDisposition.get('parked')).toHaveLength(1);
+  });
+
+  test('formatElapsed is readable at every scale', () => {
+    expect(formatElapsed(41_000)).toBe('41s');
+    expect(formatElapsed(12 * 60_000)).toBe('12m');
+    expect(formatElapsed(2 * 3600_000 + 55 * 60_000)).toBe('2h55m');
+    expect(formatElapsed(NaN)).toBe('?');
+    expect(formatElapsed(-1)).toBe('?');
+  });
+});
+
+describe('report: renderReport says what happened', () => {
+  const rows = [
+    { bead: 'A', disposition: 'merged', pr: { number: 1 } },
+    { bead: 'B', disposition: 'parked', reason: 'needs_human' },
+    { bead: 'C', disposition: 'merge_queued', reason: 'merge_queued', pr: { number: 2 } },
+  ];
+
+  test('a clean run SAYS it was verified, out loud', () => {
+    // A verifier that prints nothing when it finds nothing cannot be told from
+    // a verifier that did not run. That sentence is the whole point.
+    const out = renderReport({ rows, findings: [] });
+    expect(out).toContain('no discrepancies');
+    expect(out).not.toContain('NEEDS YOU');
+  });
+
+  test('each disposition is named with its beads and reasons', () => {
+    const out = renderReport({ rows, findings: [] });
+    expect(out).toContain('MERGED');
+    expect(out).toContain('PARKED');
+    expect(out).toContain('needs_human');
+    expect(out).toContain('#1');
+  });
+
+  test('a reason that merely repeats the disposition is suppressed', () => {
+    // `merge_queued` carries `reason: 'merge_queued'`, which rendered as
+    // `MERGE_QUEUED  C (merge_queued)` — the same word twice.
+    const out = renderReport({ rows, findings: [] });
+    expect(out).toContain('MERGE_QUEUED');
+    expect(out).not.toContain('(merge_queued)');
+  });
+
+  test('findings become a NEEDS YOU list carrying the action', () => {
+    const out = renderReport({
+      rows,
+      findings: [
+        {
+          severity: 'attention',
+          bead: 'C',
+          title: 'PR #2 is still OPEN',
+          action: 'Merge it by hand.',
+        },
+      ],
+    });
+    expect(out).toContain('NEEDS YOU (1)');
+    expect(out).toContain('PR #2 is still OPEN');
+    expect(out).toContain('Merge it by hand.');
+    expect(out).not.toContain('no discrepancies');
+  });
+
+  test('a blocker is labelled as one, and notes are kept apart from actions', () => {
+    const out = renderReport({
+      rows,
+      findings: [
+        { severity: 'blocker', bead: 'A', title: 'not in main', action: 'Stop.' },
+        { severity: 'note', bead: null, title: 'could not reach the network', action: null },
+      ],
+    });
+    expect(out).toContain('BLOCKER:');
+    // The note must NOT inflate the count of things owing action.
+    expect(out).toContain('NEEDS YOU (1)');
+    expect(out).toContain('notes (1)');
+  });
+
+  test('a run that did nothing says so rather than rendering an empty frame', () => {
+    expect(renderReport({ rows: [], findings: [] })).toContain('nothing ran');
+  });
+});
+
+describe('report: verifyRun checks claims against the world', () => {
+  const deps = ({
+    inMain = true,
+    beadStatus = 'closed',
+    labels = ['loop-stuck'],
+    prState = 'MERGED',
+    branch = 'main',
+    clean = true,
+    branches = [],
+    prs = [],
+  } = {}) => ({
+    git: {
+      fetchMain: async () => ({ code: 0 }),
+      shaInMain: async () => inMain,
+      currentBranch: async () => branch,
+      isClean: async () => clean,
+      remoteLoopBeads: async () => branches,
+    },
+    forge: {
+      prState: async () => ({ state: prState, sha: 'abc', mergedAt: null }),
+      openLoopPrs: async () => ({ prs, error: null }),
+    },
+    beads: { show: async (id) => ({ id, status: beadStatus, labels }) },
+  });
+
+  const mergedRow = {
+    bead: 'A',
+    disposition: 'merged',
+    land: { merged: true, sha: 'aaaaaaaaaaaa' },
+    harvest: { beadClosed: true },
+    pr: { number: 1 },
+  };
+
+  test('a genuinely clean run produces NO findings', async () => {
+    // The control. Without it every assertion below is satisfied by a verifier
+    // that reports everything as broken.
+    const r = await verifyRun({ rows: [mergedRow], ...deps() });
+    expect(r.findings).toEqual([]);
+    expect(r.blocked).toBe(false);
+  });
+
+  test('a merge whose commit is NOT in main is a BLOCKER', async () => {
+    const r = await verifyRun({ rows: [mergedRow], ...deps({ inMain: false }) });
+    expect(r.blocked).toBe(true);
+    expect(r.findings[0].severity).toBe('blocker');
+    expect(r.findings[0].title).toContain('NOT in origin/main');
+  });
+
+  test('"could not tell" is a note, NEVER a blocker', async () => {
+    // THE NEGATIVE THAT MATTERS. `shaInMain` returns null for a bad sha or a
+    // missing ref, and treating that as a negative would halt the next run over
+    // a typo. Same for a throw.
+    const r = await verifyRun({ rows: [mergedRow], ...deps({ inMain: null }) });
+    expect(r.blocked).toBe(false);
+    expect(r.findings.every((f) => f.severity === 'note')).toBe(true);
+
+    const thrown = deps();
+    thrown.git.shaInMain = async () => {
+      throw new Error('git exploded');
+    };
+    const r2 = await verifyRun({ rows: [mergedRow], ...thrown });
+    expect(r2.blocked).toBe(false);
+  });
+
+  test('a bead recorded as closed that is still open is flagged', async () => {
+    const r = await verifyRun({ rows: [mergedRow], ...deps({ beadStatus: 'open' }) });
+    expect(r.findings.map((f) => f.title).join(' ')).toContain('bd still reports status "open"');
+    // Handed to reconcile rather than closed here — see the module header.
+    expect(r.findings[0].action).toContain('reconcile');
+  });
+
+  test('a queued merge that never landed is flagged; one that landed is not', async () => {
+    const queued = {
+      bead: 'C',
+      disposition: 'merge_queued',
+      pr: { number: 432 },
+      ci: { failedChecks: [{ name: 'Fixture review gate' }] },
+    };
+    const open = await verifyRun({ rows: [queued], ...deps({ prState: 'OPEN' }) });
+    expect(open.findings[0].title).toContain('#432 is still OPEN');
+    expect(open.findings[0].title).toContain('Fixture review gate');
+
+    const landed = await verifyRun({ rows: [queued], ...deps({ prState: 'MERGED' }) });
+    expect(landed.findings).toEqual([]);
+  });
+
+  test('a parked bead that lost its label is flagged; one that kept it is not', async () => {
+    const parked = { bead: 'P', disposition: 'parked', reason: 'ci_red' };
+    const lost = await verifyRun({ rows: [parked], ...deps({ labels: [] }) });
+    expect(lost.findings[0].title).toContain('neither loop-stuck nor loop-declined');
+
+    const kept = await verifyRun({ rows: [parked], ...deps({ labels: ['loop-stuck'] }) });
+    expect(kept.findings).toEqual([]);
+    // A decline carries the other label and is equally fine.
+    const declined = await verifyRun({ rows: [parked], ...deps({ labels: ['loop-declined'] }) });
+    expect(declined.findings).toEqual([]);
+  });
+
+  test('a teardown that left the repo on a branch or dirty is flagged', async () => {
+    const onBranch = await verifyRun({ rows: [], ...deps({ branch: 'loop/x' }) });
+    expect(onBranch.findings.map((f) => f.title).join(' ')).toContain('left on branch "loop/x"');
+
+    const dirty = await verifyRun({ rows: [], ...deps({ clean: false }) });
+    expect(dirty.findings.map((f) => f.title).join(' ')).toContain('left dirty');
+  });
+
+  test('a pushed loop branch with no pull request is a note', async () => {
+    const r = await verifyRun({ rows: [], ...deps({ branches: ['Cebab-orphan'], prs: [] }) });
+    expect(r.findings.map((f) => f.title).join(' ')).toContain('no open pull request');
+    // And the other direction: a branch that DOES have a PR is not reported.
+    const paired = await verifyRun({
+      rows: [],
+      ...deps({ branches: ['Cebab-ok'], prs: [{ headRefName: 'loop/Cebab-ok' }] }),
+    });
+    expect(paired.findings).toEqual([]);
+  });
+
+  test('a branch this run MERGED is not an orphan, though its PR is no longer open', async () => {
+    // FOUND BY THE REHEARSAL, not by reading. The check first asked only about
+    // OPEN pull requests — so every bead that merged successfully, whose PR is
+    // then MERGED and whose branch survives until `--delete-branch` removes it,
+    // was reported. That fires on the happy path, which is the one place the
+    // report has to be silent.
+    const merged = {
+      bead: 'Cebab-done',
+      disposition: 'merged',
+      land: { sha: 'a'.repeat(40) },
+      pr: { number: 7 },
+    };
+    const r = await verifyRun({
+      rows: [merged],
+      ...deps({ branches: ['Cebab-done'], prs: [] }),
+    });
+    expect(r.findings).toEqual([]);
+  });
+
+  test('a dependency that throws produces a report, not a crash', async () => {
+    // This runs LAST in a night. A throw here would turn eight merged beads
+    // into a stack trace.
+    const broken = deps();
+    broken.beads.show = async () => {
+      throw new Error('bd is down');
+    };
+    broken.forge.prState = async () => {
+      throw new Error('gh is down');
+    };
+    const r = await verifyRun({ rows: [mergedRow], ...broken });
+    expect(r.blocked).toBe(false);
+    expect(Array.isArray(r.findings)).toBe(true);
+  });
+});
+
+describe('git.shaInMain answers three ways, not two', () => {
+  // `merge-base --is-ancestor` communicates by EXIT CODE: 0 yes, 1 no, and
+  // anything else is an error (a bad sha, a missing ref). Collapsing that third
+  // case into "no" would manufacture a BLOCKER — and a halted next run — out of
+  // a typo, which is why the verifier reports null as a note.
+  const gitWith = (result) => {
+    const calls = [];
+    const run = async (file, args) => {
+      calls.push([file, ...args].join(' '));
+      return { code: 0, stdout: '', stderr: '', ...result };
+    };
+    return { git: makeGit({ run, cwd: '/r', dryRun: false }), calls };
+  };
+
+  test('exit 0 is yes', async () => {
+    const { git, calls } = gitWith({ code: 0 });
+    expect(await git.shaInMain('a'.repeat(40))).toBe(true);
+    // Against origin/main, never the local ref, which is only as fresh as the
+    // last pull.
+    expect(calls.at(-1)).toContain('merge-base --is-ancestor');
+    expect(calls.at(-1)).toContain('origin/main');
+  });
+
+  test('a clean exit 1 is no', async () => {
+    const { git } = gitWith({ code: 1, stderr: '' });
+    expect(await git.shaInMain('a'.repeat(40))).toBe(false);
+  });
+
+  test('exit 1 WITH stderr, and any other code, is "could not tell"', async () => {
+    // git reports a bad object as exit 1 plus a message on stderr, which is not
+    // the same statement as "this commit is not an ancestor".
+    const noisy = gitWith({ code: 1, stderr: 'fatal: Not a valid object name' });
+    expect(await noisy.git.shaInMain('a'.repeat(40))).toBe(null);
+    const other = gitWith({ code: 128, stderr: 'fatal: bad revision' });
+    expect(await other.git.shaInMain('a'.repeat(40))).toBe(null);
+  });
+
+  test('a missing or too-short sha never reaches git', async () => {
+    const { git, calls } = gitWith({ code: 0 });
+    expect(await git.shaInMain(null)).toBe(null);
+    expect(await git.shaInMain('abc')).toBe(null);
+    expect(calls).toEqual([]);
   });
 });

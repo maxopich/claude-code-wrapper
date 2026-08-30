@@ -139,6 +139,34 @@ export function makeGit({ run, cwd, dryRun = false }) {
     async fetchMain() {
       return git(['fetch', 'origin', 'main', '--quiet']);
     },
+
+    /**
+     * Is this commit an ancestor of `origin/main` — i.e. did it really land?
+     *
+     * `merge-base --is-ancestor` and not `git branch --contains` or a log grep:
+     * it answers with an EXIT CODE (0 yes, 1 no) rather than with text, so
+     * there is no output to parse and no locale to get wrong. It also answers
+     * correctly for a squash merge, where the branch commit itself never
+     * appears in main but the RECORDED merge commit does — and the recorded
+     * merge commit is what `land.sha` holds.
+     *
+     * Against `origin/main`, never the local `main`: the local ref is whatever
+     * the last pull left, and a stale one would report a real merge as missing.
+     * Callers fetch first.
+     *
+     * A non-zero exit is a real "no"; anything else (a bad sha, a missing ref)
+     * is `null` for "could not tell", because the caller reports those two
+     * differently and collapsing them would manufacture a blocker out of a typo.
+     */
+    async shaInMain(sha) {
+      if (typeof sha !== 'string' || sha.length < 7) return null;
+      const r = await git(['merge-base', '--is-ancestor', sha, 'origin/main']);
+      if (r.code === 0) return true;
+      // `--is-ancestor` uses exit 1 for "no" and reserves other codes for
+      // errors, so only 1 is a trustworthy negative.
+      if (r.code === 1 && !r.stderr.trim()) return false;
+      return null;
+    },
     /**
      * The commit this branch diverged from. Everything measured before the
      * commit is measured against THIS, never against `main` directly, so a
