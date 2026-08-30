@@ -151,6 +151,16 @@ export type ExportFormat = 'redacted' | 'raw';
  * lookup wired), we fall back to `Date.now()` so the export still proceeds
  * — better a slightly-misleading filename than a 500.
  *
+ * The stamp is the operator's **LOCAL** wall-clock, not UTC (`Cebab-x1n.3.19`).
+ * "Show me the session from Tuesday morning" is a question asked in the
+ * operator's own timezone: a session started at 21:00 local in a western
+ * zone is 05:00 UTC the *next* calendar day, so a UTC stamp filed it under
+ * Wednesday and defeated the whole point. Cebab is single-user and bound to
+ * 127.0.0.1, so "local" is unambiguously the one operator's clock. We
+ * deliberately do NOT append a `Z`: that marker would honestly label a UTC
+ * stamp but leave it filed under the wrong day — the disambiguation the
+ * forensic use-case needs is the right day, not a units label on the wrong one.
+ *
  * The short id is the first 8 chars of `sessionId` (matches the existing
  * ChatHeader `{props.sessionId.slice(0, 8)}` convention).
  */
@@ -160,8 +170,8 @@ export function exportFilename(sessionId: string, sessionStartMs: number | null)
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, '0');
   const stamp =
-    `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-` +
-    `${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
+    `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-` +
+    `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   return `cebab-${short}-${stamp}.jsonl`;
 }
 

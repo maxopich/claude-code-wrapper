@@ -71,10 +71,31 @@ describe('buildSessionLogExportUrl', () => {
 });
 
 describe('pickExportFilename', () => {
-  test('uses the start time in UTC', () => {
-    // 2024-01-15 09:30:45 UTC = 1705311045000
+  // `Cebab-x1n.3.19`: mirrors the server's `exportFilename` — the stamp is the
+  // operator's LOCAL wall-clock. Pin a fixed timezone so the runner's own TZ
+  // can neither mask a regression (a UTC runner) nor break a hardcoded expected
+  // value (a non-UTC runner). LA is UTC-8, no DST on these January dates.
+  // `vi.stubEnv` rather than touching `process` directly — web's tsconfig runs
+  // with `types: []`, so `process` is untyped here.
+  beforeEach(() => {
+    vi.stubEnv('TZ', 'America/Los_Angeles');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  test('uses the start time in local time', () => {
+    // 2024-01-15 09:30:45 UTC = 1705311045000 = 2024-01-15 01:30:45 in LA.
     const filename = pickExportFilename('abcd1234-cafe-beef-0000-000000000000', 1705311045000);
-    expect(filename).toBe('cebab-abcd1234-20240115-093045.jsonl');
+    expect(filename).toBe('cebab-abcd1234-20240115-013045.jsonl');
+  });
+
+  test('stamps LOCAL time, so a late-evening session files under the local day', () => {
+    // 2024-01-16 05:00:00 UTC = 2024-01-15 21:00:00 in LA. UTC would file this
+    // under the 16th; local files it under the 15th.
+    const ts = Date.UTC(2024, 0, 16, 5, 0, 0);
+    const filename = pickExportFilename('abcd1234', ts);
+    expect(filename).toBe('cebab-abcd1234-20240115-210000.jsonl');
   });
 
   test('falls back to Date.now() when start is null', () => {
@@ -85,14 +106,15 @@ describe('pickExportFilename', () => {
     expect(m).not.toBeNull();
     if (!m) return;
     const [, ymd, hms] = m;
-    const stampMs = Date.UTC(
+    // The stamp is LOCAL wall-clock, so reconstruct it as a local Date.
+    const stampMs = new Date(
       Number(ymd!.slice(0, 4)),
       Number(ymd!.slice(4, 6)) - 1,
       Number(ymd!.slice(6, 8)),
       Number(hms!.slice(0, 2)),
       Number(hms!.slice(2, 4)),
       Number(hms!.slice(4, 6)),
-    );
+    ).getTime();
     expect(stampMs).toBeGreaterThanOrEqual(before - 1000);
     expect(stampMs).toBeLessThanOrEqual(after + 1000);
   });
