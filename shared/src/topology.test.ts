@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import type { CustomLayout, MultiAgentTemplate } from './protocol.js';
+import type { TopologyViolation } from './topology.js';
 import { validateCustomTopology, validateTemplateTopology } from './topology.js';
 
 /**
@@ -78,6 +79,47 @@ describe('validateCustomTopology', () => {
     expect(r.violations.length).toBeGreaterThanOrEqual(3);
     expect(r.violations).toContainEqual({ code: 'self_loop', from: 1, to: 1 });
     expect(r.violations).toContainEqual({ code: 'unknown_endpoint', from: 2, to: 99 });
+  });
+});
+
+/**
+ * Register N08 — every declared `TopologyViolation` variant must have a
+ * producing branch in the validator. The `worker_to_user` variant did not: a
+ * `CustomLayout` edge has two participant-`projectId` endpoints and no `'user'`
+ * sentinel, so a worker→user edge is inexpressible and could never be emitted.
+ *
+ * This fence pins the invariant from both sides:
+ *   - COMPILE TIME: `PRODUCIBLE_CODES` is typed `Record<TopologyViolation['code'],
+ *     true>`, so it must name EXACTLY the codes the union declares. A variant
+ *     added to the union with no entry here fails `tsc` (missing key); a stray
+ *     entry fails as an excess property. Removing the never-constructed
+ *     `worker_to_user` variant is what makes this literal typecheck.
+ *   - RUN TIME: the assertion below proves each named code is actually emitted
+ *     by some input, so the compile-time map cannot be satisfied by a phantom
+ *     key for a variant the validator never produces.
+ */
+const PRODUCIBLE_CODES: Record<TopologyViolation['code'], true> = {
+  self_loop: true,
+  worker_to_worker: true,
+  unknown_endpoint: true,
+  unreachable_participant: true,
+};
+
+describe('TopologyViolation variants are all producible (register N08)', () => {
+  test('the validator emits every declared code and no other', () => {
+    // Inputs chosen to exercise each producing branch at least once.
+    const scenarios: CustomLayout[] = [
+      customLayout([[1, 1]]), // self_loop
+      customLayout([[1, 2]]), // worker_to_worker (+ unreachable pid=3)
+      customLayout([[1, 99]]), // unknown_endpoint
+    ];
+    const emitted = new Set<string>();
+    for (const layout of scenarios) {
+      for (const v of validateCustomTopology(mkTemplate([1, 2, 3]), layout).violations) {
+        emitted.add(v.code);
+      }
+    }
+    expect([...emitted].sort()).toEqual(Object.keys(PRODUCIBLE_CODES).sort());
   });
 });
 

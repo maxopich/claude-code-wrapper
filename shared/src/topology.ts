@@ -8,8 +8,6 @@
  *
  *   - **No worker → worker edges.** Orchestrator workers can only send
  *     to the orchestrator; F2 drops worker→worker silently.
- *   - **No worker → user edges.** Only the orchestrator may reply to
- *     the user; F2 drops worker→user silently.
  *   - **No self-loops.** A worker addressing itself is meaningless under
  *     the orchestrator routing model.
  *   - **No edges to/from non-participants.** F2 round-2 drops any source
@@ -32,6 +30,17 @@
  * is abandoned rather than deferred, delete this module WITH that decision, not
  * because a grep found no callers.
  *
+ * **Why no worker→user rule here (register N08):** the F2 worker→user drop is
+ * real, but it is a RUNTIME routing rule (`RouterDropReasonCode.worker_to_user`
+ * in `orchestrator.ts` / `chain.ts`), not a topology one. A `CustomLayout` edge
+ * has two participant `projectId` endpoints and no `'user'` sentinel — so a
+ * worker→user edge is inexpressible in this schema and the validator can never
+ * see one. A `worker_to_user` variant of `TopologyViolation` therefore had no
+ * producing branch; it was declared, never constructed, and is removed. If the
+ * future editor ever adds a `'user'` edge endpoint, add the rule AND its variant
+ * together, not one without the other. `topology.test.ts` fences this: the
+ * declared `code` union must match the set the validator can actually emit.
+ *
  * **Why no `broadcast` edge kind:** broadcast is a runtime policy
  * (orchestrator decides addressees per turn from capabilities + prompt
  * content) — not a topology fact. Adding it to the schema would invite
@@ -44,7 +53,6 @@ import type { CustomLayout, MultiAgentTemplate } from './protocol.js';
 export type TopologyViolation =
   | { code: 'self_loop'; from: number; to: number }
   | { code: 'worker_to_worker'; from: number; to: number }
-  | { code: 'worker_to_user'; from: number }
   | { code: 'unknown_endpoint'; from: number | 'hub' | 'user'; to: number | 'hub' | 'user' }
   | { code: 'unreachable_participant'; pid: number };
 

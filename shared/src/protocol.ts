@@ -4892,7 +4892,6 @@ export type RecoveryContextView = {
  *
  * Topology constraints (enforced by the future editor, NOT by this type):
  *  - No worker→worker edges (F2 drops them in `orchestrator.ts`)
- *  - No worker→user edges (F2)
  *  - No self-loops
  *  - No edges to/from non-participants (F2)
  *  - No disconnected components
