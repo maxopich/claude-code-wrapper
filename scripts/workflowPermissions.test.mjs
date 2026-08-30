@@ -369,3 +369,41 @@ function collectWorkflows() {
   }
   return out;
 }
+
+// ── ci.yml's two matrix jobs must install dependencies identically ─────────
+//
+// `checks` and `tests` are two jobs ONLY because of a wall-clock budget
+// (Cebab-zyu), so any difference in how they install dependencies would make a
+// red on one of them mean something different from a red on the other.
+//
+// The obvious fix is a local composite action, and rule 3 above forbids it:
+// every `uses:` must be SHA-pinned, and GitHub has no syntax that pins a `./`
+// local action. Weakening a supply-chain rule to tidy a workflow is the wrong
+// trade, so the steps are duplicated and pinned HERE instead — which is the
+// stronger guarantee, because drift fails loudly rather than the two jobs
+// silently agreeing on whatever the shared copy happens to say.
+describe('ci_setup_steps_match', () => {
+  const src = fs.readFileSync(path.join(repoRoot, WORKFLOW_DIR, 'ci.yml'), 'utf8');
+  const blocks = [
+    ...src.matchAll(/ {6}- name: Setup Node\.js\n[\s\S]*?--ignore-scripts=false\n/g),
+  ].map((m) => m[0]);
+
+  test('exactly two setup blocks, byte-identical, and non-empty', () => {
+    // THE FLOOR IS NOT DECORATION. A regex that stopped matching would yield
+    // two empty strings, which are equal — the comparison alone would pass on
+    // nothing at all. Measured length today is ~1.1k chars per block.
+    expect(blocks.length).toBe(2);
+    expect(blocks[0].length).toBeGreaterThan(600);
+    expect(blocks[1]).toBe(blocks[0]);
+  });
+
+  test('both blocks actually carry the three steps they claim to', () => {
+    // Names the content, so shortening a block to a stub cannot satisfy the
+    // length floor above by padding a comment.
+    for (const b of blocks) {
+      expect(b).toContain('actions/setup-node@');
+      expect(b).toContain('npm ci --ignore-scripts');
+      expect(b).toContain('npm rebuild better-sqlite3');
+    }
+  });
+});
