@@ -37,7 +37,7 @@ export type MockOptions = RunOptions & {
    * `${NAME}` substitutions applied to the raw fixture text before it is
    * parsed. Lets one shipped script serve a topology whose agent slugs are
    * the operator's own project names — a chain fixture says
-   * `"recipient": "${NEXT}"` and the router supplies the value.
+   * `"destination": "${NEXT}"` and the router supplies the value.
    */
   mockVars?: Record<string, string>;
 };
@@ -293,7 +293,7 @@ export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & {
       if (!parsed.success) {
         // The real MCP server rejects the same way. Surfacing it keeps a
         // fixture that violates a tool's schema (an empty `text`, a missing
-        // `recipient`) visible instead of silently sending nothing.
+        // `destination`) visible instead of silently sending nothing.
         const detail = (parsed.error?.issues ?? [])
           .map((i) => `${(i.path ?? []).join('.') || '(root)'}: ${i.message ?? 'invalid'}`)
           .join('; ');

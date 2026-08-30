@@ -28,7 +28,7 @@ import {
 describe('handleBusSend', () => {
   test('valid send stamps the caller-supplied source and forwards the event', () => {
     const events: BusEvent[] = [];
-    const res = handleBusSend('alpha', { recipient: 'beta', kind: 'reply', text: 'hi' }, (e) =>
+    const res = handleBusSend('alpha', { destination: 'beta', kind: 'reply', text: 'hi' }, (e) =>
       events.push(e),
     );
     expect(res.isError).toBeFalsy();
@@ -42,22 +42,39 @@ describe('handleBusSend', () => {
     expect(typeof events[0]!.ts).toBe('number');
   });
 
-  test('accepts the user and _sink sentinels as recipients', () => {
+  test('N20: the tool arg and the wire event use the one word `destination`', () => {
+    // The agent supplies `destination` — the same word the BusEvent field, the
+    // router comparisons, the DB column and the WS protocol use. Before N20 the
+    // tool schema called this arg `recipient` and only the wire said
+    // `destination`, so grepping either word found half the routing code. This
+    // pins them together: the value the agent sends under `destination` is the
+    // value that lands on `BusEvent.destination`. On the pre-N20 handler (which
+    // read `args.recipient`) this same input stamped `destination: undefined`.
     const events: BusEvent[] = [];
-    handleBusSend('orchestrator', { recipient: 'user', kind: 'final', text: 'done' }, (e) =>
+    const ok = handleBusSend('alpha', { destination: 'beta', kind: 'reply', text: 'hi' }, (e) =>
       events.push(e),
     );
-    handleBusSend('last', { recipient: '_sink', kind: 'final', text: 'end' }, (e) =>
+    expect(ok.isError).toBeFalsy();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.destination).toBe('beta');
+  });
+
+  test('accepts the user and _sink sentinels as destinations', () => {
+    const events: BusEvent[] = [];
+    handleBusSend('orchestrator', { destination: 'user', kind: 'final', text: 'done' }, (e) =>
+      events.push(e),
+    );
+    handleBusSend('last', { destination: '_sink', kind: 'final', text: 'end' }, (e) =>
       events.push(e),
     );
     expect(events.map((e) => e.destination)).toEqual(['user', '_sink']);
   });
 
-  test('rejects invalid recipient without forwarding', () => {
+  test('rejects invalid destination without forwarding', () => {
     const onEvent = vi.fn();
     const res = handleBusSend(
       'alpha',
-      { recipient: '../../etc', kind: 'reply', text: 'x' },
+      { destination: '../../etc', kind: 'reply', text: 'x' },
       onEvent,
     );
     expect(res.isError).toBe(true);
@@ -66,10 +83,10 @@ describe('handleBusSend', () => {
 
   test('rejects unknown kind and empty text without forwarding', () => {
     const onEvent = vi.fn();
-    expect(handleBusSend('a', { recipient: 'b', kind: 'gossip', text: 'x' }, onEvent).isError).toBe(
-      true,
-    );
-    expect(handleBusSend('a', { recipient: 'b', kind: 'reply', text: '' }, onEvent).isError).toBe(
+    expect(
+      handleBusSend('a', { destination: 'b', kind: 'gossip', text: 'x' }, onEvent).isError,
+    ).toBe(true);
+    expect(handleBusSend('a', { destination: 'b', kind: 'reply', text: '' }, onEvent).isError).toBe(
       true,
     );
     expect(onEvent).not.toHaveBeenCalled();
@@ -79,13 +96,13 @@ describe('handleBusSend', () => {
     const onEvent = vi.fn();
     const justUnder = 'a'.repeat(BUS_SEND_TEXT_MAX_BYTES);
     expect(
-      handleBusSend('a', { recipient: 'b', kind: 'reply', text: justUnder }, onEvent).isError,
+      handleBusSend('a', { destination: 'b', kind: 'reply', text: justUnder }, onEvent).isError,
     ).toBeFalsy();
     expect(onEvent).toHaveBeenCalledTimes(1);
 
     onEvent.mockClear();
     const over = 'a'.repeat(BUS_SEND_TEXT_MAX_BYTES + 1);
-    const res = handleBusSend('a', { recipient: 'b', kind: 'reply', text: over }, onEvent);
+    const res = handleBusSend('a', { destination: 'b', kind: 'reply', text: over }, onEvent);
     expect(res.isError).toBe(true);
     // Rejected outright — a truncated body would reach the peer looking
     // complete, so the router must never see the event at all.
@@ -104,21 +121,21 @@ describe('handleBusSend', () => {
     expect(Buffer.byteLength(fourByteChar, 'utf8')).toBe(4);
     const over = fourByteChar.repeat(BUS_SEND_TEXT_MAX_BYTES / 4 + 1);
     expect(over.length).toBeLessThan(BUS_SEND_TEXT_MAX_BYTES);
-    expect(handleBusSend('a', { recipient: 'b', kind: 'reply', text: over }, onEvent).isError).toBe(
-      true,
-    );
+    expect(
+      handleBusSend('a', { destination: 'b', kind: 'reply', text: over }, onEvent).isError,
+    ).toBe(true);
     expect(onEvent).not.toHaveBeenCalled();
   });
 
   test('[security] an agent cannot forge its source identity', () => {
-    // The agent only controls recipient/kind/text. Even if it injects a
+    // The agent only controls destination/kind/text. Even if it injects a
     // `source` (or `from`) field, the signature drops it — the stamped
     // source is the per-agent closure value, never agent-controlled.
     const events: BusEvent[] = [];
     handleBusSend(
       'worker-trusted',
-      { recipient: 'user', kind: 'final', text: 'pwn', source: 'orchestrator' } as unknown as {
-        recipient: string;
+      { destination: 'user', kind: 'final', text: 'pwn', source: 'orchestrator' } as unknown as {
+        destination: string;
         kind: string;
         text: string;
       },

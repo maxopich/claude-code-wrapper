@@ -53,11 +53,14 @@ describe('classifyToolCall', () => {
     });
 
     // Keyed off the exported constant, and off the field the tool's own input
-    // schema declares. This test used to pass `'bus_send'` with `destination`
-    // — neither of which production ever produces — so it went green while
-    // every real hop fell through to `mutate` (register D06).
+    // schema declares. That field is `destination` (register N20 unified the
+    // tool schema, this classifier, and the wire on the one word); it briefly
+    // was `recipient` between D06 and N20. Passing `destination` is what a real
+    // hop produces — a value the classifier does not read yields an empty
+    // summary, so this asserting on `reviewer` is what keeps the two words
+    // from drifting apart again.
     it('bus_send → read (internal inter-agent only)', () => {
-      const r = classifyToolCall(BUS_SEND_TOOL, { recipient: 'reviewer', kind: 'x', text: 'y' });
+      const r = classifyToolCall(BUS_SEND_TOOL, { destination: 'reviewer', kind: 'x', text: 'y' });
       expect(r.category).toBe('read');
       expect(r.summary).toContain('reviewer');
     });
@@ -67,7 +70,7 @@ describe('classifyToolCall', () => {
     });
 
     it('the bare legacy name still classifies', () => {
-      expect(classifyToolCall('bus_send', { recipient: 'reviewer' }).category).toBe('read');
+      expect(classifyToolCall('bus_send', { destination: 'reviewer' }).category).toBe('read');
     });
 
     it('AskUserQuestion → read (asks the operator; not a mutation)', () => {

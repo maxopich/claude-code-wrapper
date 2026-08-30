@@ -26,7 +26,7 @@ import { config } from '../config.js';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
 import { registerQuery } from '../runner/lifecycle.js';
-import { isValidBusRecipient } from './paths.js';
+import { isValidBusDestination } from './paths.js';
 import { classifyMutationScope } from './guardrail.js';
 import {
   isBusControlSignal,
@@ -187,18 +187,23 @@ export const BUS_SEND_TEXT_MAX_BYTES = 128 * 1024;
  *
  * `source` is supplied by the caller (pinned per-agent in `makeBusToolServer`),
  * never by the agent: that is what makes identity unspoofable. The agent only
- * controls `recipient` / `kind` / `text`, all validated here before the event
+ * controls `destination` / `kind` / `text`, all validated here before the event
  * is handed to the router. Invalid input returns an error result the agent can
  * read and correct, rather than throwing (a thrown tool error would abort the
  * turn).
+ *
+ * `destination` is the SAME word the `BusEvent` field, the router comparisons,
+ * the DB column, and the WS protocol use (register N20): the tool schema, this
+ * handler, and the wire no longer disagree, so grepping one word finds all of
+ * the routing code.
  */
 export function handleBusSend(
   source: string,
-  args: { recipient: string; kind: string; text: string },
+  args: { destination: string; kind: string; text: string },
   onEvent: (ev: BusEvent) => void,
 ): ToolResult {
-  if (!isValidBusRecipient(args.recipient)) {
-    return toolError(`bus_send rejected: invalid recipient ${JSON.stringify(args.recipient)}`);
+  if (!isValidBusDestination(args.destination)) {
+    return toolError(`bus_send rejected: invalid destination ${JSON.stringify(args.destination)}`);
   }
   if (!(BUS_KINDS as readonly string[]).includes(args.kind)) {
     return toolError(
@@ -219,12 +224,12 @@ export function handleBusSend(
   const ev: BusEvent = {
     ts: Date.now(),
     source,
-    destination: args.recipient,
+    destination: args.destination,
     kind: args.kind,
     text: args.text,
   };
   onEvent(ev);
-  return { content: [{ type: 'text', text: `delivered to ${args.recipient}` }] };
+  return { content: [{ type: 'text', text: `delivered to ${args.destination}` }] };
 }
 
 /**
@@ -247,9 +252,9 @@ export function makeBusToolServer(agentName: string, onEvent: (ev: BusEvent) => 
         'bus_send',
         'Send a message to another participant on the multi-agent bus. ' +
           'Use this to reply, forward work, or deliver a final answer. ' +
-          "recipient is an agent slug, or 'user' (operator-facing final) / '_sink' (chain end).",
+          "destination is an agent slug, or 'user' (operator-facing final) / '_sink' (chain end).",
         {
-          recipient: z.string().describe("destination: an agent slug, or 'user' / '_sink'"),
+          destination: z.string().describe("destination: an agent slug, or 'user' / '_sink'"),
           kind: z
             .enum(BUS_KINDS)
             .describe('reply = hand off / answer a peer; final = terminal answer'),
@@ -601,7 +606,7 @@ export type AgentRunnerDeps = {
   /**
    * MOCK MODE ONLY — `${NAME}` values for the agent's fixture text. A shipped
    * scenario cannot name the operator's projects, so it writes
-   * `"recipient": "${NEXT}"` and the router (which owns the topology) fills
+   * `"destination": "${NEXT}"` and the router (which owns the topology) fills
    * in the slug. Called once per turn.
    */
   mockVars?: (agentName: string) => Record<string, string>;

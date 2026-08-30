@@ -275,11 +275,13 @@ export function classifyToolCall(toolName: string, input: unknown): ToolClassifi
       // mutation row per message (register D06). The bare name is kept only
       // so a hand-written call site or an older fixture still classifies.
       //
-      // The field is `recipient`: that is what the tool's own input schema
-      // declares (see `makeBusToolServer`). `destination` is the name the same
-      // value takes on the WIRE, one layer later — reading it here silently
-      // produced an empty summary (register N20 tracks the split itself).
-      const dest = stringField(inp, 'recipient') ?? stringField(inp, 'destination') ?? '';
+      // The field is `destination`: the tool's own input schema (see
+      // `makeBusToolServer`), this classifier, the `BusEvent` field, the
+      // router comparisons, the DB column, and the WS protocol all use the
+      // ONE word since register N20 closed the split — the schema used to
+      // declare `recipient` here while the wire used `destination`, and this
+      // classifier had to read both to see either.
+      const dest = stringField(inp, 'destination') ?? '';
       return { category: 'read', summary: `bus_send → ${dest}` };
     }
 

@@ -326,7 +326,7 @@ export function renderChainBriefing(opts: {
       ? `You are the last step. When you finish, send your final reply to the sink so Cebab can archive the iteration:`
       : `When you finish your work, send your reply to the next step:`,
     ``,
-    `    bus_send(recipient="${sanitizeForPrompt(nextHop)}", kind="${
+    `    bus_send(destination="${sanitizeForPrompt(nextHop)}", kind="${
       isLast ? 'final' : 'reply'
     }", text="<your ${isLast ? 'final ' : ''}reply>")`,
     ``,
@@ -382,7 +382,7 @@ export function renderRosterPrompt(opts: {
   return [
     `You are the orchestrator for a new multi-agent session. The participants below are managed in-process by Cebab and have been briefed on the bus protocol; they're waiting for you to introduce them to the conversation.`,
     ``,
-    `You talk to participants through the \`bus_send\` tool (recipient = an agent slug, or \`user\` for the operator-facing final answer). It is an in-process tool — there is no inbox, no shell script, no \`bus.log\`. Cebab delivers each participant reply to you as your next turn.`,
+    `You talk to participants through the \`bus_send\` tool (destination = an agent slug, or \`user\` for the operator-facing final answer). It is an in-process tool — there is no inbox, no shell script, no \`bus.log\`. Cebab delivers each participant reply to you as your next turn.`,
     ``,
     `Participants:`,
     ...workers.map((w) => {
@@ -404,7 +404,7 @@ export function renderRosterPrompt(opts: {
     ``,
     `Step 1: call \`bus_send\` with kind=intro to each participant. Tell them they're in a multi-agent conversation, name the other participants, ask them to reply only to you, AND ask them to send back a brief (2-3 sentence) self-description so you know what kinds of tasks each one is best at. Example for ${tagAgent(firstAgent)}:`,
     ``,
-    `    bus_send(recipient="${firstAgentSafe}", kind="intro", text="You are part of a multi-agent conversation. Other participants: ${otherAgents}. Reply only to me (orchestrator). Before we start: please send me a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at. I'll use this to route user prompts to whoever fits best.")`,
+    `    bus_send(destination="${firstAgentSafe}", kind="intro", text="You are part of a multi-agent conversation. Other participants: ${otherAgents}. Reply only to me (orchestrator). Before we start: please send me a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at. I'll use this to route user prompts to whoever fits best.")`,
     ``,
     `Step 2: wait for each worker's \`reply\` with their self-description before routing the first user prompt. The user's first prompt arrives as your next turn after this one — but route it only after you've collected capability replies from every participant. Use those descriptions to inform routing.`,
     ``,
@@ -429,7 +429,7 @@ export function renderRosterPrompt(opts: {
     ``,
     `Hop budget: ${hopBudget} hops total for this session (Cebab will hard-stop when reached — do a periodic progress self-check; the intro handshake counts toward the total).`,
     ``,
-    `When you have a complete answer for the user, call \`bus_send\` with kind=final to recipient \`user\` — Cebab forwards that to the operator's chat UI.`,
+    `When you have a complete answer for the user, call \`bus_send\` with kind=final to destination \`user\` — Cebab forwards that to the operator's chat UI.`,
   ].join('\n');
 }
 
@@ -463,7 +463,7 @@ export function renderRosterUpdate(opts: {
     ``,
     `Call \`bus_send\` with kind=intro to the new participant and collect their capability self-description, same as Step 1 of the original roster. Example:`,
     ``,
-    `    bus_send(recipient="${newAgentSafe}", kind="intro", text="You are joining a multi-agent conversation already in progress. Reply only to me (orchestrator). Please send a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at.")`,
+    `    bus_send(destination="${newAgentSafe}", kind="intro", text="You are joining a multi-agent conversation already in progress. Reply only to me (orchestrator). Please send a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at.")`,
     ``,
     executeMode
       ? `You are still delegation-only — route via \`bus_send\`, never act yourself. Execute mode still applies for workers: keep relaying that the new participant may implement changes within its own project folder but must not touch files in any other directory.`
@@ -504,7 +504,7 @@ export function renderWorkerBriefing(opts: { selfAgent: string; executeMode?: bo
     `To send your reply (the orchestrator is the ONLY recipient you may`,
     `address):`,
     ``,
-    `    bus_send(recipient="orchestrator", kind="reply", text="<your reply>")`,
+    `    bus_send(destination="orchestrator", kind="reply", text="<your reply>")`,
     ``,
     `Critical: anything you write in your normal turn output is INVISIBLE —`,
     `only a \`bus_send\` call is delivered. Always finish a turn by sending`,

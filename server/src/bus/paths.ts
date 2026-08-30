@@ -185,7 +185,7 @@ export function computeSessionPaths(sessionId: string): SessionPaths {
  *
  * This is the name the operator sees in the transcript UI and the iteration
  * artifact dirs, and what the orchestrator uses to address workers via
- * `bus_send(recipient="reviewer", ...)`. Keep it human-readable.
+ * `bus_send(destination="reviewer", ...)`. Keep it human-readable.
  */
 export function slugifyAgentName(rawName: string): string {
   return rawName
@@ -208,16 +208,21 @@ export function isValidAgentName(s: string): boolean {
 }
 
 /**
- * True iff `s` is a valid bus message recipient — either an agent slug
+ * True iff `s` is a valid bus message destination — either an agent slug
  * (per `isValidAgentName`) or one of the two protocol sentinels (`user`
  * for orchestrator → operator finals, `_sink` for chain terminations).
  *
+ * `destination` is the one word this value goes by everywhere (the tool
+ * schema, the `BusEvent` field, the router comparisons, the DB column, the
+ * WS protocol) since register N20 — this validator used to be the `recipient`
+ * half of that split.
+ *
  * Used by the `bus_send` tool handler (runner.ts) to reject a bogus
- * recipient before the event is routed. Sentinels are hardcoded here
+ * destination before the event is routed. Sentinels are hardcoded here
  * rather than imported from `runtime.ts` to keep this file free of
  * cycles — `runtime.ts` imports from us.
  */
-export function isValidBusRecipient(s: string): boolean {
+export function isValidBusDestination(s: string): boolean {
   return s === 'user' || s === '_sink' || isValidAgentName(s);
 }
 
