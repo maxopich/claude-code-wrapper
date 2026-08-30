@@ -718,12 +718,14 @@ whole isolation model and is **not** done. `Cebab-qd2.44`.
 ### 6.6 WATCH — _driver_
 
 Poll `gh pr checks <pr> --json name,state,bucket,link` every `pollIntervalMs`, looking for the entry named
-exactly `ci.requiredContext`. Five distinct outcomes — do not collapse them:
+exactly `ci.requiredContext`. Seven distinct outcomes — do not collapse them:
 
 | Outcome   | Condition                                                                           | Action                                                                                                                                                            |
 | --------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `green`   | bucket `pass`                                                                       | → LAND                                                                                                                                                            |
 | `red`     | bucket `fail`                                                                       | Fetch the failing job log, re-enter BUILD with it, up to `maxRepairs`. Exhausted → park.                                                                          |
+| `blocked` | the required context is green, but another **completed** check is not               | Park with reason `ci_blocked`, naming the check. **No repair** — the diff is not what is wrong.                                                                   |
+| `infra`   | CI was **killed** rather than failed (`cancelled` / `timed_out` / `stale`)          | Re-run the failed jobs **once**, then keep polling. Still killed → park with reason `ci_infra`. **No repair.**                                                    |
 | `absent`  | no check with that name within `appearTimeoutMs` **and nothing else still pending** | Park with reason `ci_never_started`. **Counts toward the circuit breaker** — it usually means something is wrong with the repo or the runner, not with this bead. |
 | `timeout` | the check appeared but had not completed within `completeTimeoutMs`                 | Park with reason `ci_timeout`.                                                                                                                                    |
 | `no_pr`   | no pull request exists for this branch — decided **before the first poll**          | Park with reason `pr_missing`.                                                                                                                                    |
@@ -743,6 +745,37 @@ rule, a rate limit — lands here too. `fail loud, park quietly`; this is the lo
 the remedies are opposites: raise `ci.completeTimeoutMs`, versus go and look at the runner. Folded
 into `ci_never_started`, as it originally was, the ledger sends the morning triage to the wrong
 place.
+
+**A green required context is not a green pull request.** `Cebab-qd2.45`. The required context is
+one check among many, and branch protection requires seven. Measured 2026-08-30 on PR #432: the
+required context passed while `Fixture review gate` — red by design until a CODEOWNER clears a
+label — did not. The loop reported green, attempted a direct merge, was refused by branch
+protection, fell back to `--auto` and recorded `merge_queued`. Nothing bad merged, because branch
+protection is the real gate; the damage was to the SIGNAL, since `merge_queued` reads as "will land
+shortly" and here meant "stuck until a human acts". `blocked` is a separate outcome from `red`
+because the remedies share no step: a repair attempt cannot clear a review label. Only a
+**completed** non-green sibling blocks — an in-flight one leaves the verdict alone, or every PR
+would park on its slowest check.
+
+**A killed job is not a failed job.** `Cebab-qd2.46`. Measured 2026-08-30 on PR #434: the
+`windows-2022` leg exceeded `timeout-minutes: 15` and was killed at 902s with every emitted test
+line a tick or a skip; the `ubuntu-latest` leg passed the same SHA in 7m2s and a plain re-run of
+the identical commit went green. Folded into `red`, that spent a 12-turn repair attempt on a cause
+that did not exist and then parked correct work as `build_failed`.
+
+The aggregator's own conclusion is `failure` either way — it exits 1 on
+`needs.<job>.result != success` — so the evidence is in the **siblings**: the required context is
+red, at least one sibling was killed, and **no** sibling genuinely failed. If any sibling reports a
+real `failure`, the outcome stays `red`; otherwise one cancelled leg would convert a broken diff
+into a free re-run.
+
+The re-run happens **at most once per iteration**, and the flag lives in the driver rather than in
+`forge` because the budget being protected is the iteration's. `INFRA_CONCLUSIONS` is deliberately
+small and closed for the same reason `GREEN_CONCLUSIONS` is an allow-list: an unknown conclusion
+must keep falling through to `red`, since widening the set is how a real failure becomes a retry.
+After a re-run GitHub keeps serving the superseded check runs briefly, so an `infra` verdict is
+ignored for `RERUN_GRACE_POLLS` further polls — counted in **polls, not wall clock**, so a test's
+scripted sequence behaves exactly as the live endpoint does.
 
 **`absent` cannot mean "has not appeared yet."** Cebab's required check is a job with
 `needs: [quality]`, and GitHub creates no check run for a gated job until its dependencies finish —
@@ -1330,6 +1363,12 @@ directly with an injected `run` that returns the limit message.
       "files": ["assistant/kb/00-index.md"],
     },
   ],
+  // `outcome`, `failedChecks` and `rerun` are present only when CI said
+  // something other than a plain yes or no (§6.6). `conclusion` keeps its
+  // original success/failure vocabulary — the finer answer is recorded
+  // ALONGSIDE it, never folded into it, because 32 rows already carry it.
+  //   jq 'select(.ci.outcome == "blocked")'  -> green signal, PR could not merge
+  //   jq 'select(.ci.outcome == "infra")'    -> CI was killed, not failed
   "ci": { "conclusion": "success", "waitedMs": 512000, "runUrl": "…" },
   "land": { "merged": true, "queued": false, "sha": "a91298b", "state": "MERGED" },
   // `alreadyTracked` is present only when the agent used the `already_tracked`
@@ -1533,7 +1572,7 @@ So the rehearsal runs the **real driver** end-to-end against a scratch git repo 
 `scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
 its own path — the installed copy would drive this checkout.
 
-Twenty scenarios, each asserting on the ledger AND on the bare repo's `main`:
+Twenty-three scenarios, each asserting on the ledger AND on the bare repo's `main`:
 
 | Scenario                 | What only it can prove                                                               |
 | ------------------------ | ------------------------------------------------------------------------------------ |
@@ -1557,6 +1596,9 @@ Twenty scenarios, each asserting on the ledger AND on the bare repo's `main`:
 | `file-overlap`           | two beads writing one file warn the human choosing the merge order (§6.5.1)          |
 | `overlap-check-broken`   | a `gh pr list` that fails SAYS so instead of reporting a clean sheet (§6.5.1)        |
 | `overlap-cleared`        | a rival PR that lands mid-iteration CLEARS the finding rather than stranding it      |
+| `ci-blocked`             | a green required context with another check red parks, unmerged, unrepaired (§6.6)   |
+| `ci-infra-recovers`      | a KILLED CI run is re-run once and lands, spending no repair attempt (§6.6)          |
+| `ci-infra-persists`      | a second cancellation parks `ci_infra`, and the re-run happens ONCE, not per poll    |
 
 `driver-stale` is the one that needed a new kind of evidence. A log line saying "restarting"
 proves only that the driver said so, so the scenario pushes a commit that appends a marker

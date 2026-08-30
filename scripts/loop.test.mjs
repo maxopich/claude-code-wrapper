@@ -857,6 +857,8 @@ import {
   prListArgv,
   prMergeArgv,
   prStateArgv,
+  rerunFailedArgv,
+  runIdFromCheckUrl,
 } from './lib/loop/forge.mjs';
 import {
   DETERMINISTIC_STEPS,
@@ -980,10 +982,20 @@ describe('forge: WATCH has three outcomes, not two', () => {
     expect(
       classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'failure' }]), R).outcome,
     ).toBe('red');
+    // WAS `red`, and that was the defect. `cancelled` means the runner STOPPED
+    // the job, not that the job decided anything about the code — measured
+    // 2026-08-30 on CI run 33312182698, where the windows-2022 leg was killed
+    // at 902s against a 900s cap with every emitted test line a tick or a skip,
+    // the ubuntu leg passed the same SHA, and a plain re-run went green. Folded
+    // into `red`, it cost a correct change a repair attempt and a park.
     expect(
       classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'cancelled' }]), R)
         .outcome,
-    ).toBe('red');
+    ).toBe('infra');
+    expect(
+      classifyCheckRuns(runs([{ name: R, status: 'completed', conclusion: 'timed_out' }]), R)
+        .outcome,
+    ).toBe('infra');
     expect(
       classifyCheckRuns(runs([{ name: R, status: 'in_progress', conclusion: null }]), R).outcome,
     ).toBe('pending');
@@ -5582,5 +5594,253 @@ describe('a PR that will fight another PR says so (Cebab-qd2.44)', () => {
     // PRs will fight each other" rather than a match on every row.
     expect(buildRecord({}, 0).fileOverlaps).toBeUndefined();
     expect(buildRecord({ fileOverlaps: [] }, 0).fileOverlaps).toBeUndefined();
+  });
+});
+
+// ── Cebab-qd2.45 / Cebab-qd2.46: CI says more than yes and no ──────────────
+//
+// Both measured on the unattended run of 2026-08-30.
+//
+// qd2.45: PR #432's required context was GREEN while `Fixture review gate` — a
+// separate REQUIRED check, red by design pending a CODEOWNER — was red. The
+// loop reported green, tried to merge, was refused by branch protection, fell
+// back to `--auto`, and recorded `merge_queued`: a disposition that reads as
+// "will land shortly" for a PR that could never land without a human.
+//
+// qd2.46: PR #434's windows-2022 leg was KILLED by `timeout-minutes: 15` at
+// 902s with no assertion having failed. Folded into `red`, that spent a 12-turn
+// repair attempt on a cause that does not exist and parked correct work.
+describe('WATCH distinguishes killed, blocked and failed (Cebab-qd2.45, Cebab-qd2.46)', () => {
+  const R = 'Lint, Typecheck, Test';
+  const runs = (list) => ({ check_runs: list });
+  const done = (name, conclusion, url = 'x/runs/9/job/1') => ({
+    name,
+    status: 'completed',
+    conclusion,
+    html_url: url,
+  });
+
+  test('a red sibling with a GREEN required context is blocked, not green', () => {
+    const v = classifyCheckRuns(
+      runs([done(R, 'success'), done('Fixture review gate', 'failure')]),
+      R,
+    );
+    expect(v.outcome).toBe('blocked');
+    expect(v.failedSiblings.map((f) => f.name)).toEqual(['Fixture review gate']);
+  });
+
+  test('a green required context with nothing else red is still plain green', () => {
+    // The control. Without it, "blocked" could be returned unconditionally and
+    // the case above would still pass.
+    expect(
+      classifyCheckRuns(runs([done(R, 'success'), done('semgrep', 'success')]), R).outcome,
+    ).toBe('green');
+  });
+
+  test('a sibling that is still RUNNING does not block', () => {
+    // Only a COMPLETED non-green sibling is a verdict. Treating an in-flight one
+    // as blocking would park every PR whose slowest check has not landed yet.
+    const v = classifyCheckRuns(
+      runs([done(R, 'success'), { name: 'CodeQL', status: 'in_progress', conclusion: null }]),
+      R,
+    );
+    expect(v.outcome).toBe('green');
+    expect(v.failedSiblings).toEqual([]);
+  });
+
+  test('a killed leg under a red aggregator is infra, not red', () => {
+    // The aggregator's own conclusion is `failure` either way — it exits 1 on
+    // `needs.<job>.result != success` — so the answer is in the siblings.
+    const v = classifyCheckRuns(
+      runs([done(R, 'failure'), done(`${R} (windows-2022)`, 'cancelled')]),
+      R,
+    );
+    expect(v.outcome).toBe('infra');
+  });
+
+  test('a GENUINE failure alongside a killed leg stays red', () => {
+    // THE NEGATIVE THAT MATTERS. If `every` were `some`, one cancelled leg
+    // would convert a real test failure into a free re-run, and the loop would
+    // retry its way past a broken diff.
+    const v = classifyCheckRuns(
+      runs([
+        done(R, 'failure'),
+        done(`${R} (windows-2022)`, 'cancelled'),
+        done(`${R} (ubuntu-latest)`, 'failure'),
+      ]),
+      R,
+    );
+    expect(v.outcome).toBe('red');
+  });
+
+  test('a red required context with NO sibling detail stays red', () => {
+    // `[].every(...)` is true, so without the explicit `length > 0` guard an
+    // unexplained red would read as infrastructure and be retried forever.
+    expect(classifyCheckRuns(runs([done(R, 'failure')]), R).outcome).toBe('red');
+  });
+
+  test('runIdFromCheckUrl takes the run id, not the job id, and refuses junk', () => {
+    expect(
+      runIdFromCheckUrl('https://github.com/o/r/actions/runs/33312182698/job/99259125054'),
+    ).toBe('33312182698');
+    expect(runIdFromCheckUrl('https://github.com/o/r/actions/runs/abc/job/1')).toBe(null);
+    expect(runIdFromCheckUrl('nonsense')).toBe(null);
+    expect(runIdFromCheckUrl(undefined)).toBe(null);
+  });
+
+  test('rerunFailedArgv re-runs only the failed jobs', () => {
+    // `--failed` and not a bare rerun: a whole-run rerun would also re-execute
+    // the legs that already passed, doubling the cost of every recovery.
+    expect(rerunFailedArgv('123')).toEqual(['run', 'rerun', '123', '--failed']);
+  });
+
+  test('the machine parks blocked and infra WITHOUT spending a repair', () => {
+    // Repairs are budgeted, and neither of these is fixable by editing code.
+    // `attempt: 1, maxRepairs: 2` is the state in which a `red` WOULD repair,
+    // so this is the discriminating input rather than a vacuous one.
+    const ctx = { attempt: 1, maxRepairs: 2, merge: true };
+    expect(next(STAGE.WATCH, { outcome: 'red' }, ctx)).toMatchObject({ stage: STAGE.BUILD });
+    expect(next(STAGE.WATCH, { outcome: 'blocked' }, ctx)).toMatchObject({
+      stage: STAGE.HARVEST,
+      reason: REASON.CI_BLOCKED,
+    });
+    expect(next(STAGE.WATCH, { outcome: 'infra' }, ctx)).toMatchObject({
+      stage: STAGE.HARVEST,
+      reason: REASON.CI_INFRA,
+    });
+  });
+
+  // ── watchCi integration ──────────────────────────────────────────────────
+  const watchConfig = {
+    ci: {
+      requiredContext: 'Lint, Typecheck, Test',
+      pollIntervalMs: 1,
+      appearTimeoutMs: 600000,
+      completeTimeoutMs: 600000,
+    },
+  };
+  const infraPoll = {
+    outcome: 'infra',
+    found: true,
+    anyPending: false,
+    total: 2,
+    link: 'x/runs/7/job/1',
+    failedSiblings: [{ name: 'q (windows-2022)', conclusion: 'cancelled', link: 'x/runs/7/job/2' }],
+  };
+  const rerunForge = (responses, rerun = async () => ({ ok: true, error: null })) => {
+    let i = 0;
+    const calls = [];
+    return {
+      calls,
+      pollChecks: async () => responses[Math.min(i++, responses.length - 1)],
+      rerunFailedChecks: async (...a) => {
+        calls.push(a);
+        return rerun();
+      },
+    };
+  };
+
+  test('an infra verdict triggers exactly one re-run, and green after it wins', async () => {
+    const forge = rerunForge([
+      infraPoll,
+      { outcome: 'green', found: true, anyPending: false, total: 2 },
+    ]);
+    const parts = {};
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      sha: 'abc',
+      parts,
+      prNumber: 1,
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('green');
+    expect(forge.calls.length).toBe(1);
+    expect(parts.ci.rerun).toBe(true);
+    expect(parts.ci.conclusion).toBe('success');
+  });
+
+  test('an infra verdict that survives the re-run parks, and re-runs only ONCE', async () => {
+    // The last response repeats forever, so a missing `rerunTried` guard would
+    // re-run on every poll until completeTimeoutMs.
+    const forge = rerunForge([infraPoll]);
+    const parts = {};
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      sha: 'abc',
+      parts,
+      prNumber: 1,
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('infra');
+    expect(forge.calls.length).toBe(1);
+    expect(parts.ci.outcome).toBe('infra');
+    expect(parts.ci.failedChecks).toHaveLength(1);
+  });
+
+  test('a re-run that cannot be started is reported, not retried', async () => {
+    const forge = rerunForge([infraPoll], async () => ({ ok: false, error: 'gh exploded' }));
+    const parts = {};
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      sha: 'abc',
+      parts,
+      prNumber: 1,
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('infra');
+    expect(forge.calls.length).toBe(1);
+  });
+
+  test('a blocked verdict terminates immediately and never re-runs', async () => {
+    // A re-run cannot clear a review label, so spending one would be pure cost.
+    const forge = rerunForge([
+      {
+        outcome: 'blocked',
+        found: true,
+        anyPending: false,
+        total: 3,
+        link: 'x/runs/7/job/1',
+        failedSiblings: [{ name: 'Fixture review gate', conclusion: 'failure', link: null }],
+      },
+    ]);
+    const parts = {};
+    const out = await watchCi({
+      forge,
+      config: watchConfig,
+      sha: 'abc',
+      parts,
+      prNumber: 1,
+      log: () => {},
+      halted: () => false,
+    });
+    expect(out.outcome).toBe('blocked');
+    expect(forge.calls.length).toBe(0);
+    expect(parts.ci.outcome).toBe('blocked');
+    expect(parts.ci.failedChecks[0].name).toBe('Fixture review gate');
+  });
+
+  test('an ordinary green carries NO outcome or rerun field', async () => {
+    // The absent-is-good idiom: `jq 'select(.ci.outcome)'` must select only the
+    // rows where CI said something other than yes or no.
+    const forge = rerunForge([{ outcome: 'green', found: true, anyPending: false, total: 2 }]);
+    const parts = {};
+    await watchCi({
+      forge,
+      config: watchConfig,
+      sha: 'abc',
+      parts,
+      prNumber: 1,
+      log: () => {},
+      halted: () => false,
+    });
+    expect(parts.ci.outcome).toBeUndefined();
+    expect(parts.ci.rerun).toBeUndefined();
+    expect(parts.ci.failedChecks).toBeUndefined();
   });
 });

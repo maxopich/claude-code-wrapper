@@ -945,6 +945,24 @@ async function runIteration({ ctx, deps, log }) {
 
 // ─── stage helpers ─────────────────────────────────────────────────────────
 
+/**
+ * WATCH outcomes that END the poll. `pending` is the only one that does not,
+ * and `absent`/`timeout` are decided by the give-up branches further down.
+ *
+ * A SET rather than a chain of `||`, because it is the list the next outcome
+ * has to be added to — the previous form named two of them inline and a third
+ * (`blocked`) would have looked like an unrelated `if` several lines away.
+ */
+const TERMINAL_CI_OUTCOMES = new Set(['green', 'red', 'blocked', 'infra']);
+
+/**
+ * How many further polls an `infra` verdict is ignored for after the one
+ * re-run. GitHub keeps serving the superseded check runs briefly, so without
+ * this the loop reads its own stale payload as a second cancellation and parks
+ * on the run it just asked for.
+ */
+const RERUN_GRACE_POLLS = 2;
+
 async function watchCi({ forge, config, sha, parts, log, halted, prNumber }) {
   // REFUSE BEFORE THE FIRST POLL. Check runs belong to a pull request, so with
   // no PR there is nothing that could ever report and `absent` is true from the
@@ -963,17 +981,70 @@ async function watchCi({ forge, config, sha, parts, log, halted, prNumber }) {
   }
   const startedAt = Date.now();
   let everFound = false;
+  // ONE re-run per iteration, for an infrastructure cancellation only. The flag
+  // lives here rather than in `forge` because the budget it protects is the
+  // ITERATION's; a stateless helper would have to invent state to hold it.
+  let rerunTried = false;
+  let pollsSinceRerun = 0;
   for (;;) {
     if (halted()) return { outcome: 'pending', halted: true };
     const status = await forge.pollChecks(sha, config.ci.requiredContext);
     if (status.found) everFound = true;
-    if (status.outcome === 'green' || status.outcome === 'red') {
+    if (rerunTried) pollsSinceRerun += 1;
+
+    if (status.outcome === 'infra') {
+      const named = (status.failedSiblings ?? [])
+        .map((f) => `${f.name} (${f.conclusion})`)
+        .join(', ');
+      if (!rerunTried) {
+        rerunTried = true;
+        pollsSinceRerun = 0;
+        log(
+          `watch: CI was killed rather than failed${named ? ` — ${named}` : ''}; re-running once`,
+        );
+        const again = await forge.rerunFailedChecks(sha, config.ci.requiredContext);
+        if (again.ok) {
+          await sleep(config.ci.pollIntervalMs);
+          continue;
+        }
+        // Falls through to the terminal branch below: a re-run that could not
+        // be started is reported, not retried.
+        log(`watch: could not start a re-run — ${again.error}`);
+      } else if (pollsSinceRerun <= RERUN_GRACE_POLLS) {
+        // GitHub keeps serving the OLD completed check runs for a few seconds
+        // after a re-run is queued, so an immediate second `infra` is the stale
+        // payload rather than a second timeout. Counted in POLLS, not wall
+        // clock, so the behaviour is the same under a test's scripted sequence
+        // as it is against the live endpoint.
+        await sleep(config.ci.pollIntervalMs);
+        continue;
+      }
+    }
+
+    if (TERMINAL_CI_OUTCOMES.has(status.outcome)) {
       parts.ci = {
+        // UNCHANGED VOCABULARY. `conclusion` stays success/failure because 32
+        // ledger rows already carry it; the finer answer is added ALONGSIDE, the
+        // same call `build.totals` made rather than re-pointing what was there.
         conclusion: status.outcome === 'green' ? 'success' : 'failure',
         waitedMs: Date.now() - startedAt,
         runUrl: status.link ?? null,
+        // Absent on an ordinary green or red, so `jq 'select(.ci.outcome)'` is
+        // the query for "CI said something other than yes or no".
+        ...(status.outcome === 'blocked' || status.outcome === 'infra'
+          ? { outcome: status.outcome }
+          : {}),
+        ...(status.failedSiblings?.length ? { failedChecks: status.failedSiblings } : {}),
+        ...(rerunTried ? { rerun: true } : {}),
       };
-      log(`watch: ${status.outcome}`);
+      if (status.outcome === 'blocked') {
+        const named = (status.failedSiblings ?? [])
+          .map((f) => `${f.name} (${f.conclusion})`)
+          .join(', ');
+        log(`watch: required context green, but another check is red — ${named}`);
+      } else {
+        log(`watch: ${status.outcome}`);
+      }
       return { outcome: status.outcome };
     }
     const waited = Date.now() - startedAt;
