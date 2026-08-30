@@ -12,11 +12,36 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# WHY THIS IS TWO JOBS AND NOT ONE, AND WHY THE BUDGETS DIFFER.
+#
+# It was one `quality` job with `timeout-minutes: 15` for every step. Measured
+# 2026-08-30 across the 24 most recent runs, the windows-2022 leg took 546-797s
+# against that 900s cap — 61-89% of budget, median 607.5s, and the worst
+# PASSING run left 103s of headroom. Run 33312182698 then drew a slow runner and
+# was killed at 902s with no assertion having failed: the annotation reads "The
+# job has exceeded the maximum execution time of 15m0s" and the last line inside
+# the step is a Windows `Terminate batch job (Y/N)?` prompt. The ubuntu leg
+# passed the same SHA in 7m2s, and a plain re-run of the identical commit went
+# green in 10m20s. So the red was the budget, not the diff — and it reached a PR
+# that changed five files by two net lines.
+#
+# Raising the single cap would only move that cliff. The split targets where the
+# time actually goes on Windows: setup ~120s, the static checks ~60s, `npm test`
+# ~265s and `npm run test:security` ~171s — i.e. the two test steps are ~70% of
+# the job. Separating them means the static checks report in ~3 minutes instead
+# of queueing behind a 10-minute test run, and each job gets a budget sized to
+# its own measured distribution rather than one cap sized to the sum.
+#
+# Budgets are set against MEASURED worst-case, not median: `checks` ~200s under
+# 12 min, `tests` ~555s under 25 min. Both still catch a genuine hang, which is
+# what a timeout is for; neither is close enough to its own median for ordinary
+# runner variance to reach it. Re-measure with:
+#   gh api repos/<owner>/<repo>/actions/jobs/<id> --jq '.steps[]|[.name,.started_at,.completed_at]|@tsv'
 jobs:
-  quality:
-    name: Lint, Typecheck, Test (${{ matrix.os }})
+  checks:
+    name: Checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 12
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +52,7 @@ jobs:
         # fallback at the "Rebuild native modules" step, before any test runs.
         # VS 2022 on windows-2022 is node-gyp-recognised. Revert to
         # windows-latest once node-gyp/the image stabilise. The `required`
-        # aggregate below keys off the matrix result, not per-OS names, so this
+        # aggregate below keys off the matrix results, not per-OS names, so this
         # rename needs no branch-protection change.
         os: [ubuntu-latest, windows-2022]
     permissions:
@@ -39,25 +64,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Install dependencies
-        # `.npmrc` sets ignore-scripts=true; the explicit flag is belt-and-
-        # braces. A malicious transitive postinstall must not execute on CI.
-        run: npm ci --ignore-scripts
-
-      - name: Rebuild native modules
-        # better-sqlite3 is the only legitimate native dep. `.npmrc` sets
-        # ignore-scripts=true which suppresses install lifecycle scripts
-        # for `npm rebuild` too, so we opt back in explicitly here.
-        # prebuild-install pulls a prebuilt binary on both Linux and
-        # Windows x64 (no compiler toolchain needed) — this is also the
-        # documented cross-platform `npm run setup` step.
-        run: npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false
+      - name: Set up Node and dependencies
+        uses: ./.github/actions/setup
 
       - name: Lockfile drift check
         # Catches the case where a contributor ran `npm install` locally
@@ -97,16 +105,6 @@ jobs:
         # has lapsed fails the job.
         run: node scripts/audit-gate.mjs
 
-      - name: Test
-        run: npm test
-
-      - name: Security regression tests
-        # All security cases are Vitest unit tests tagged [security]. The
-        # old F6/R3 bats shell tests were deleted with the bus scripts in
-        # the pure-SDK rewrite, so there is no longer a bats dependency —
-        # this step runs identically on Linux and Windows.
-        run: npm run test:security
-
       - name: DB migration smoke
         # Verifies migrations apply cleanly on a fresh DB. The runner is
         # ephemeral so the sqlite file is always brand new.
@@ -127,32 +125,82 @@ jobs:
         # being true when the matrix repins.
         run: npm --workspace server exec tsx src/ci_smoke.ts
 
+  tests:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The slow half — see the header. ~555s measured on windows-2022 against a
+    # 1500s cap. Deliberately generous: the failure this replaces was a correct
+    # change parked because a runner ran ~1.4x slow.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node and dependencies
+        uses: ./.github/actions/setup
+
+      - name: Test
+        run: npm test
+
+      - name: Security regression tests
+        # All security cases are Vitest unit tests tagged [security]. The
+        # old F6/R3 bats shell tests were deleted with the bus scripts in
+        # the pure-SDK rewrite, so there is no longer a bats dependency —
+        # this step runs identically on Linux and Windows.
+        #
+        # It re-runs the whole suite to execute a tagged SUBSET of it, which
+        # is why it costs ~171s on Windows on top of `npm test`. Kept as its
+        # own step deliberately: a named, separately-reportable security
+        # signal is worth the duplicate compute, and collapsing it into
+        # `npm test` would remove the only place that proves the [security]
+        # tag still selects anything.
+        run: npm run test:security
+
   # Stable required-status-check context. Branch protection on `main`
   # requires the bare context "Lint, Typecheck, Test", but the matrix
-  # above reports one context per matrix VALUE ("... (ubuntu-latest)" /
-  # "... (windows-2022)"), so the bare name is never produced and the
+  # jobs above report one context per matrix VALUE ("Checks (ubuntu-latest)"
+  # / "Tests (windows-2022)"), so the bare name is never produced and the
   # required check hangs forever in "Expected — waiting for status".
   # This 1-step aggregator emits exactly that context and is green iff
-  # every matrix leg passed — so the gate keeps working even if the
-  # matrix gains/renames OSes later, with no branch-protection edits.
+  # every leg of BOTH matrix jobs passed — so the gate keeps working even if
+  # the matrix gains/renames OSes later, with no branch-protection edits.
   #
   # Register X12: the example above named the rolling image until 2026-08-15.
   # Context names are generated from the matrix VALUES, so pinning the matrix
   # silently falsified the one sentence that explains why this job exists —
   # and the "gains/renames OSes later" line is precisely the case that had
   # already happened. Keep the example in step with the matrix.
+  #
+  # BOTH jobs are named here and both are compared. `needs` alone does not
+  # gate: with `if: always()` this job runs whatever its dependencies did, so
+  # a job missing from the comparison below would be a job nothing enforces.
   required:
     name: Lint, Typecheck, Test
-    needs: [quality]
+    needs: [checks, tests]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
-      - name: Require every matrix leg to have passed
+      - name: Require every matrix leg of every job to have passed
         run: |
-          if [ "${{ needs.quality.result }}" != "success" ]; then
-            echo "quality matrix did not succeed (result=${{ needs.quality.result }})"
-            exit 1
+          failed=0
+          if [ "${{ needs.checks.result }}" != "success" ]; then
+            echo "checks matrix did not succeed (result=${{ needs.checks.result }})"
+            failed=1
           fi
+          if [ "${{ needs.tests.result }}" != "success" ]; then
+            echo "tests matrix did not succeed (result=${{ needs.tests.result }})"
+            failed=1
+          fi
+          if [ "$failed" -ne 0 ]; then exit 1; fi
           echo "All matrix legs passed."
