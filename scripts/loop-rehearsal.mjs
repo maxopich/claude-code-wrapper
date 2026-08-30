@@ -221,6 +221,11 @@ const SCENARIOS = {
       merge: 'direct',
       gateFailOnAttempt: 1,
       gateFailStep: 'format:check',
+      // THE AGENT CLAIMS THE STEP THE GATE IS ABOUT TO REDDEN ON. This is the
+      // 2026-08-27 shape — five of eight builds skipped formatting and said
+      // otherwise — and it is the only configuration in which `disagree` is
+      // reachable at all. (Cebab-qd2.43)
+      claimedCommands: ['npm run format:check', 'npm run lint'],
       build: [
         { kind: 'verdict', edit: true },
         { kind: 'verdict', edit: true },
@@ -229,6 +234,27 @@ const SCENARIOS = {
     check: (ctx) => {
       const [row] = ctx.records;
       ctx.eq(ctx.calls.claude.length, 2, 'the gate failure bought a second attempt');
+      // WHAT THE DURABLE RECORD SAYS ABOUT THE FAILURE (Cebab-qd2.43). Across
+      // the 32 rows written before this, rows carrying a non-zero gate step
+      // numbered ZERO — the repaired run's steps were assigned over the failing
+      // one's, so the only evidence a gate had ever reddened was scrollback.
+      ctx.eq(row.gate.attempts?.length, 2, 'both gate runs are on the row');
+      ctx.eq(row.gate.attempts?.[0]?.passed, false, 'and the first one FAILED');
+      ctx.eq(row.gate.attempts?.[0]?.failedStep, 'format:check', 'naming the step');
+      ctx.ok(
+        (row.gate.attempts?.[0]?.steps ?? []).some((st) => st.exitCode !== 0),
+        'and keeping the failing step itself, not just its name',
+      );
+      ctx.eq(row.gate.attempts?.[1]?.passed, true, 'the second run passed');
+      ctx.ok(
+        (row.gate.steps ?? []).every((st) => st.exitCode === 0),
+        'while `gate.steps` still means the LAST run, as 32 existing rows do',
+      );
+      // The consequence the field exists for: the agent claimed format:check
+      // and the gate found it red. Last-write-wins made this unreachable.
+      ctx.eq(row.verdictVsGate, 'disagree', 'the row records the disagreement');
+      ctx.eq(row.gate.attempts?.[1]?.verdictVsGate, 'agree', 'though the repair itself agreed');
+      ctx.ok(ctx.prBody(1).includes('Gate reddened'), 'and the PR body says the gate reddened');
       ctx.eq(ctx.prCreates(), 1, 'and attempt 2 opened the PR');
       ctx.ok(row.pr.number, 'the ledger carries the PR number');
       ctx.ok(row.pr.url, 'and its url');
@@ -262,6 +288,13 @@ const SCENARIOS = {
       ctx.eq(row.build.attempts, 2, 'recorded as two attempts');
       ctx.eq(row.ci.conclusion, 'success', 'and the repair went green');
       ctx.eq(row.disposition, 'guard_withheld', 'reaching the normal terminal');
+      // THE ONLY PATH ON WHICH A PR CAN SEE ITSELF (Cebab-qd2.44). The second
+      // PUBLISH runs with this branch's PR already open and 100% of its files
+      // in common, so an overlap report without an exclusion warns the operator
+      // that a PR conflicts with itself. `file-overlap` cannot show this: there
+      // the PR is created AFTER the check, so nothing is there to match.
+      ctx.eq(row.fileOverlaps, undefined, 'and the PR never reported overlapping ITSELF');
+      ctx.ok(!ctx.stdout.includes('file overlap'), 'nothing was said about an overlap');
     },
   },
 
@@ -516,6 +549,101 @@ const SCENARIOS = {
     },
   },
 
+  'file-overlap': {
+    why: 'two beads that write ONE file must warn the human choosing the merge order (Cebab-qd2.44)',
+    // NO `--merge`, which is the point rather than a convenience. `merge:false`
+    // is the default, so `guard_withheld` is how an ordinary successful
+    // iteration ends: PR 1 stays open, iteration 2 branches from an
+    // `origin/main` that does not contain it, and neither agent can see the
+    // collision coming. This is the 2026-08-27 shape — #422 and #423 both
+    // created `assistant/kb/00-index.md`.
+    args: ['--until', '2'],
+    plan: {
+      beads: 2,
+      ci: 'green',
+      merge: 'direct',
+      // One entry, so BOTH iterations take it and write the same path.
+      build: [{ kind: 'verdict', edit: true, file: 'src/shared.js' }],
+    },
+    check: (ctx) => {
+      const [one, two] = ctx.records;
+      ctx.eq(ctx.records.length, 2, 'two iterations');
+      ctx.eq(ctx.originSha(), ctx.baseSha, 'and nothing merged, so main never moved');
+      // BOTH DIRECTIONS. The first PR has nothing open to collide with, so an
+      // implementation that reported an overlap for every PR would pass the
+      // second assertion alone.
+      ctx.eq(one.fileOverlaps, undefined, 'the first PR has nothing to overlap yet');
+      ctx.eq(two.fileOverlaps?.length, 1, 'the second names exactly one');
+      ctx.eq(two.fileOverlaps?.[0]?.number, 1, 'and it is PR #1');
+      ctx.eq(two.fileOverlaps?.[0]?.branch, 'loop/Reh-1', 'named by its branch too');
+      ctx.eq(
+        (two.fileOverlaps?.[0]?.files ?? []).join(','),
+        'src/shared.js',
+        'and the shared file is named',
+      );
+      // NOT ASSERTED HERE that a PR never matches itself: PR 2 is created
+      // AFTER this check runs, so nothing could match and the assertion would
+      // pass against an implementation with no exclusion at all. It lives in
+      // `ci-red-repair`, the one path where the PR already exists.
+      const body = ctx.prBody(2);
+      ctx.ok(body.includes('Overlapping open loop PRs'), 'the PR body carries the section');
+      ctx.ok(body.includes('#1'), 'naming the other PR');
+      ctx.ok(body.includes('src/shared.js'), 'and the file they share');
+      ctx.ok(!ctx.prBody(1).includes('Overlapping'), 'while PR 1 has no such section');
+      ctx.ok(ctx.stdout.includes('file overlap'), 'and the run said so out loud');
+    },
+  },
+
+  'overlap-cleared': {
+    why: 'a rival PR that lands mid-iteration must CLEAR the finding, not leave it on the row',
+    // The staleness half of Cebab-qd2.44, and it is only reachable across two
+    // PUBLISHes of one iteration: a CI red republishes, and by then the PR that
+    // was going to conflict has merged. Recording the overlap only when there
+    // is one leaves attempt 1's finding standing after attempt 2 established it
+    // was no longer true.
+    args: ['--until', '2'],
+    plan: {
+      beads: 2,
+      // Per-build: iteration 1 green, iteration 2 red, its repair green.
+      ci: ['green', 'red', 'green'],
+      merge: 'direct',
+      hidePr: 1,
+      hidePrAfterBuild: 3,
+      build: [{ kind: 'verdict', edit: true, file: 'src/shared.js' }],
+    },
+    check: (ctx) => {
+      ctx.eq(ctx.records.length, 2, 'two iterations');
+      ctx.eq(ctx.calls.claude.length, 3, 'iteration 2 needed a repair');
+      // It WAS found, at the moment it was true — otherwise the assertion below
+      // passes against a loop that never looks.
+      ctx.ok(ctx.stdout.includes('file overlap'), 'the overlap was found and reported');
+      ctx.eq(ctx.prCreates(), 2, 'and only two PRs were opened');
+      // And then unfound. This is the whole case.
+      ctx.eq(ctx.records[1].fileOverlaps, undefined, 'a later clean check CLEARED it');
+    },
+  },
+
+  'overlap-check-broken': {
+    why: 'a `gh pr list` that fails must SAY so, not report a clean sheet (Cebab-qd2.44)',
+    args: ['--until', '2'],
+    plan: {
+      beads: 2,
+      ci: 'green',
+      merge: 'direct',
+      prListFail: true,
+      build: [{ kind: 'verdict', edit: true, file: 'src/shared.js' }],
+    },
+    check: (ctx) => {
+      ctx.eq(ctx.records.length, 2, 'the run finished anyway — the report is advisory');
+      ctx.eq(ctx.records[1].disposition, 'guard_withheld', 'and iteration 2 still succeeded');
+      ctx.eq(ctx.records[1].fileOverlaps, undefined, 'nothing was recorded');
+      // The whole difference between this and `file-overlap`'s first row: one
+      // is "no overlap", the other is "could not tell", and a bare [] renders
+      // them identical.
+      ctx.ok(ctx.stdout.includes('overlap check skipped'), 'but the run said it could not tell');
+    },
+  },
+
   'rollup-skipped': {
     why: 'a bead that CONTAINS another ready bead is a rollup — take the child (Cebab-qd2.40)',
     // Measured on the live queue: the loop's next three picks were feature-typed
@@ -681,8 +809,13 @@ if (plan.haltDuringBuild) {
   fs.writeFileSync(path.join(process.cwd(), '.loop', 'HALT'), '');
 }
 if (step.edit) {
-  fs.writeFileSync(path.join(process.cwd(), 'src', 'feature-' + state.builds + '.js'),
-    'export const answer = ' + (40 + state.builds) + ';\\n');
+  // NAMED BY THE STEP when a scenario needs two iterations to collide on ONE
+  // file (Cebab-qd2.44); otherwise per-build, so every other scenario keeps a
+  // diff that cannot conflict with its neighbour by accident.
+  const rel = step.file || ('src/feature-' + state.builds + '.js');
+  const abs = path.join(process.cwd(), rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, 'export const answer = ' + (40 + state.builds) + ';\\n');
 }
 const sessionId = 'sess-' + (state.session ||= 'a1b2c3');
 // THE FOUR TOKEN CLASSES, IN A REALISTIC RATIO. Cache reads dominate an agent
@@ -727,7 +860,11 @@ process.stdout.write(JSON.stringify({
     summary: 'rehearsal change',
     commit_type: 'fix', commit_scope: 'rehearsal', commit_subject: 'a rehearsed change',
     files_changed: ['src/feature.js'],
-    tests: { added: [], commands_run: ['npm run lint', 'npm test'] },
+    // WHAT THE AGENT CLAIMS IT RAN. Per-scenario because verdictVsGate is a
+    // comparison between this list and the gate's own result, and with a list
+    // that never names the step the gate reddens on, 'disagree' is unreachable
+    // and the field is untested in both directions. (Cebab-qd2.43)
+    tests: { added: [], commands_run: plan.claimedCommands || ['npm run lint', 'npm test'] },
     risk: 'low', needs_human: false, follow_ups: [],
   },
 }));
@@ -747,8 +884,37 @@ const runGit = (args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).tr
 if (argv[0] === 'auth') process.exit(0);
 
 if (argv[0] === 'pr' && argv[1] === 'create') {
-  state.pr += 1; save();
-  out('https://github.invalid/o/r/pull/' + state.pr + '\\n');
+  state.pr += 1;
+  // The body arrives on stdin (\`--body-file -\`). Read rather than ignored:
+  // the note Cebab-qd2.44 asks for is IN it, and an unread pipe is also the
+  // only thing between the driver and an EPIPE.
+  let body = '';
+  try { body = fs.readFileSync(0, 'utf8'); } catch { body = ''; }
+  const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const files = runGit(['diff', '--name-only', 'main...HEAD'])
+    .split('\\n').map((l) => l.trim()).filter(Boolean);
+  const url = 'https://github.invalid/o/r/pull/' + state.pr;
+  state.prs.push({
+    number: state.pr, url, headRefName: branch, files: files.map((f) => ({ path: f })),
+  });
+  state.bodies[String(state.pr)] = body;
+  save();
+  out(url + '\\n');
+  process.exit(0);
+}
+
+if (argv[0] === 'pr' && argv[1] === 'list') {
+  // A \`gh\` that answers, versus one that cannot — the overlap report has to
+  // tell those apart, and a shim that only ever succeeds cannot show it does.
+  if (plan.prListFail) { process.stderr.write('rehearsed gh pr list failure\\n'); process.exit(1); }
+  // A RIVAL PR THAT LANDS MID-ITERATION. From build N onward the named PR is
+  // gone from the open list — the only way to ask whether a later clean check
+  // CLEARS an earlier finding, rather than leaving a stale one on the row.
+  const hide = plan.hidePr && state.builds >= plan.hidePrAfterBuild ? plan.hidePr : null;
+  // Only the ones still OPEN: a merged PR cannot conflict with anything.
+  out(
+    state.prs.filter((p) => !(state.mergedPrs || []).includes(p.number) && p.number !== hide),
+  );
   process.exit(0);
 }
 
@@ -800,7 +966,11 @@ if (argv[0] === 'pr' && argv[1] === 'merge') {
   if (plan.merge === 'queued' && auto) { state.queued = true; save(); process.exit(0); }
   // A fast-forward push IS the merge here — main has not moved. See the header.
   runGit(['push', 'origin', 'HEAD:main']);
-  state.merged = runGit(['rev-parse', 'HEAD']); save();
+  state.merged = runGit(['rev-parse', 'HEAD']);
+  // \`gh pr list --state open\` must stop serving what has been merged, or the
+  // overlap report would warn about a PR that is already on main.
+  (state.mergedPrs = state.mergedPrs || []).push(state.pr);
+  save();
   if (plan.breakRemoteAfterMerge) {
     fs.renameSync(path.join(DIR, 'origin.git'), path.join(DIR, 'origin.git.gone'));
   }
@@ -925,7 +1095,22 @@ function buildScratch(name, scenario) {
   );
   fs.writeFileSync(
     path.join(dir, 'shim-state.json'),
-    JSON.stringify({ claimed: [], builds: 0, polls: 0, pr: 0, merged: null, queued: false }),
+    JSON.stringify({
+      claimed: [],
+      builds: 0,
+      polls: 0,
+      pr: 0,
+      merged: null,
+      queued: false,
+      // Every PR the run opened, with the file list read off the REAL diff at
+      // create time — so `gh pr list` answers with what this run actually did
+      // rather than with a fixture. That is what makes the overlap report's
+      // input the driver's own behaviour. `Cebab-qd2.44`.
+      prs: [],
+      // Keyed by PR number. `--body-file -` means the body arrives on stdin and
+      // is otherwise unobservable, and the note the bead asks for lives there.
+      bodies: {},
+    }),
   );
   fs.writeFileSync(path.join(dir, 'calls.jsonl'), '');
   writeShims(bin);
@@ -1016,6 +1201,14 @@ function runScenario(name, scenario) {
     // BOTH directions: zero is Cebab-qd2.18, and two is the double-PR the
     // `attempt === 1` guard existed to prevent.
     prCreates: () => calls.gh.filter((c) => c[0] === 'pr' && c[1] === 'create').length,
+    // What the driver actually WROTE into a PR. `--body-file -` puts it on
+    // stdin, so `calls.gh` — which records argv only — cannot see it, and an
+    // assertion about a note in the body has nowhere else to look.
+    prBody: (number) => {
+      const p = path.join(scratch.dir, 'shim-state.json');
+      if (!fs.existsSync(p)) return '';
+      return JSON.parse(fs.readFileSync(p, 'utf8')).bodies?.[String(number)] ?? '';
+    },
     originSha: () => {
       const bare = path.join(scratch.dir, 'origin.git');
       if (!fs.existsSync(bare)) return null;

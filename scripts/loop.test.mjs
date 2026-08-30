@@ -71,6 +71,7 @@ import {
   appendRecord,
   buildRecord,
   compareVerdictToGate,
+  mergeVerdictVsGate,
   validateRecord,
 } from './lib/loop/ledger.mjs';
 
@@ -845,13 +846,15 @@ import {
   tokensFrom,
   withoutLegacyCost,
 } from './lib/loop/usage.mjs';
-import { branchNameFor, commitSubject } from './lib/loop/git.mjs';
+import { LOOP_BRANCH_PREFIX, branchNameFor, commitSubject } from './lib/loop/git.mjs';
 import {
   checkRunsArgv,
   classifyCheckRuns,
   failingSibling,
   makeForge,
+  overlappingPrs,
   parsePrState,
+  prListArgv,
   prMergeArgv,
   prStateArgv,
 } from './lib/loop/forge.mjs';
@@ -5357,5 +5360,227 @@ describe('a finding already tracked is recorded, not filed twice (Cebab-7t6)', (
       buildRecord({ harvest: { alreadyTracked: [{ id: 'Cebab-03a', title: 't' }] } }, 0).harvest
         .alreadyTracked,
     ).toEqual([{ id: 'Cebab-03a', title: 't' }]);
+  });
+});
+
+describe('a repaired gate failure survives into the row (Cebab-qd2.43)', () => {
+  // MEASURED, across all 32 rows of `.loop/runs.jsonl`:
+  //
+  //     rows with a non-zero gate step : 0
+  //     rows with reason=gate_failed   : 0
+  //
+  // while the console of ONE night carried six `gate: FAILED at format:check`
+  // lines and five of eight builds reddened there. `runIteration` assigned
+  // `parts.gate` wholesale on every pass through STAGE.GATE, and a failure
+  // routes to a repair that comes back through GATE — so the second, passing
+  // run's steps replaced the first's. The durable record said the gate had
+  // never once failed. Same overwrite `Cebab-qd2.39` found one field over.
+
+  const step = (name, exitCode) => ({ name, exitCode, ms: 1 });
+  const failing = [step('lint', 0), step('format:check', 1)];
+  const passing = [step('lint', 0), step('format:check', 0)];
+
+  test('mergeVerdictVsGate keeps a disagreement a later attempt cannot unmake', () => {
+    // The ranking, from both ends. Reddens if the merge is last-write-wins,
+    // which is exactly what the driver did.
+    expect(mergeVerdictVsGate('disagree', 'agree')).toBe('disagree');
+    expect(mergeVerdictVsGate('agree', 'disagree')).toBe('disagree');
+    // `unknown` is the ABSENCE of a claim, so it never displaces one.
+    expect(mergeVerdictVsGate('agree', 'unknown')).toBe('agree');
+    expect(mergeVerdictVsGate('unknown', 'agree')).toBe('agree');
+    expect(mergeVerdictVsGate('unknown', 'unknown')).toBe('unknown');
+    // The first call of an iteration has nothing to merge against.
+    expect(mergeVerdictVsGate(undefined, 'disagree')).toBe('disagree');
+    expect(mergeVerdictVsGate(undefined, 'unknown')).toBe('unknown');
+    // A value from neither vocabulary is treated as no claim rather than
+    // ranked above one, so a future third verdict cannot silently win.
+    expect(mergeVerdictVsGate('agree', 'weird')).toBe('agree');
+    // AND FROM THE OTHER SIDE, which is the half a revert-check caught missing:
+    // without normalising `previous`, an unranked value compares as `undefined`
+    // and NOTHING outranks it, so one stray verdict would freeze the field for
+    // the rest of the iteration. Dropping the normalisation only reddens here.
+    expect(mergeVerdictVsGate('weird', 'agree')).toBe('agree');
+    expect(mergeVerdictVsGate('weird', 'disagree')).toBe('disagree');
+    // And a name off `Object.prototype`, which `in` would have said IS in the
+    // table — with a function for a rank, so nothing could ever outrank it.
+    expect(mergeVerdictVsGate('constructor', 'agree')).toBe('agree');
+    expect(mergeVerdictVsGate('agree', 'toString')).toBe('agree');
+  });
+
+  test('a second gate run is recorded ALONGSIDE, never over, the first', () => {
+    const record = buildRecord(
+      {
+        gate: {
+          steps: passing,
+          attempts: [
+            {
+              attempt: 1,
+              passed: false,
+              failedStep: 'format:check',
+              verdictVsGate: 'disagree',
+              steps: failing,
+            },
+            { attempt: 2, passed: true, failedStep: null, verdictVsGate: 'agree', steps: passing },
+          ],
+        },
+      },
+      0,
+    );
+    // `steps` still means the LAST run — 32 rows already written say that, and
+    // re-pointing it in an append-only corpus is the option qd2.39 refused.
+    expect(record.gate.steps).toEqual(passing);
+    // And the failure is recoverable, which is the whole acceptance.
+    expect(record.gate.attempts).toHaveLength(2);
+    expect(record.gate.attempts[0].failedStep).toBe('format:check');
+    expect(record.gate.attempts[0].steps.some((s) => s.exitCode !== 0)).toBe(true);
+    expect(validateRecord(record).valid).toBe(true);
+  });
+
+  test('one gate run adds nothing — absent is the good state', () => {
+    // Absent-by-default, like `formatAutofixed` and `crash`, so
+    // `jq 'select(.gate.attempts)'` reads as "the gate ran twice" rather than
+    // matching every row ever written. Reddens if the field is emitted
+    // unconditionally.
+    const record = buildRecord(
+      { gate: { steps: passing, attempts: [{ attempt: 1, passed: true, steps: passing }] } },
+      0,
+    );
+    expect(record.gate.attempts).toBeUndefined();
+    expect(record.gate.steps).toEqual(passing);
+    expect(validateRecord(record).valid).toBe(true);
+    // The other direction: a shape check that accepts anything is not one.
+    const bad = buildRecord({}, 0);
+    bad.gate.attempts = 'nope';
+    expect(validateRecord(bad).errors).toContain('gate.attempts');
+  });
+
+  test('compareVerdictToGate still answers for ONE pairing', () => {
+    // The per-attempt half is unchanged, and has to be: a build's claim is
+    // paired with the gate that immediately followed it. This is the input
+    // `mergeVerdictVsGate` reduces, not a replacement for it.
+    expect(compareVerdictToGate(['npm run format:check'], failing)).toBe('disagree');
+    expect(compareVerdictToGate(['npm run format:check'], passing)).toBe('agree');
+    // A claim about a check the gate never reddened is not a disagreement.
+    expect(compareVerdictToGate(['npm test'], failing)).toBe('agree');
+  });
+});
+
+describe('a PR that will fight another PR says so (Cebab-qd2.44)', () => {
+  // `loop.merge` defaults to false, so `guard_withheld` is how an ORDINARY
+  // successful iteration ends: the PR is opened and the merge left to a human.
+  // Every later iteration then branches from an `origin/main` that does not
+  // contain it, so after an `--until 8` night iteration 8 is building on a main
+  // missing up to seven landed-in-spirit changes. Measured instance, run of
+  // 2026-08-27: PRs #422 and #423 both created `assistant/kb/00-index.md`.
+  //
+  // A REPORT, NOT A FILTER. The SELECT-side version needs to know which files a
+  // bead will touch BEFORE building it, and `select.mjs`'s header carries the
+  // measurement that kills that: beads name their files by basename as often as
+  // by path.
+
+  const pr = (number, branch, ...paths) => ({
+    number,
+    url: `https://github.com/o/r/pull/${number}`,
+    headRefName: branch,
+    files: paths.map((path) => ({ path })),
+  });
+  const MINE = ['assistant/kb/00-index.md', 'web/src/App.tsx'];
+
+  test('the argv asks for the file lists in ONE call', () => {
+    const argv = prListArgv();
+    expect(argv.slice(0, 4)).toEqual(['pr', 'list', '--state', 'open']);
+    // Reddens if `files` is dropped: without it the report has nothing to
+    // intersect and would need one `gh pr view` per open PR.
+    expect(argv.at(-1)).toContain('files');
+    expect(argv.at(-1)).toContain('headRefName');
+    expect(argv.at(-1)).toContain('number');
+  });
+
+  test('an overlap is reported with the files that cause it', () => {
+    const found = overlappingPrs(
+      [pr(422, 'loop/Cebab-8x8.2.1', 'assistant/kb/00-index.md', 'assistant/PROMPT.md')],
+      MINE,
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]).toMatchObject({ number: 422, branch: 'loop/Cebab-8x8.2.1' });
+    // ONLY the shared files, not the other PR's whole diff — the operator is
+    // being told what will conflict, not what the other branch contains.
+    expect(found[0].files).toEqual(['assistant/kb/00-index.md']);
+  });
+
+  test('a PR touching none of these files is not an overlap', () => {
+    // The negative half. Without it, an implementation that returns every open
+    // PR passes the case above.
+    expect(overlappingPrs([pr(1, 'loop/Cebab-x', 'server/src/other.ts')], MINE)).toEqual([]);
+    // And an iteration whose diff is empty cannot overlap anything.
+    expect(overlappingPrs([pr(1, 'loop/Cebab-x', 'web/src/App.tsx')], [])).toEqual([]);
+  });
+
+  test('a branch outside the loop’s own prefix is left alone', () => {
+    // The operator's hand-written branches are not the loop's business, and
+    // reporting them would make the note noise on every PR.
+    expect(overlappingPrs([pr(9, 'feat/by-hand', 'web/src/App.tsx')], MINE)).toEqual([]);
+    // Derived from `branchNameFor`, not spelled again — this is the assertion
+    // that keeps the two in step if the prefix ever changes.
+    expect(branchNameFor('Cebab-x').startsWith(LOOP_BRANCH_PREFIX)).toBe(true);
+    expect(
+      overlappingPrs([pr(9, `${LOOP_BRANCH_PREFIX}Cebab-x`, 'web/src/App.tsx')], MINE),
+    ).toHaveLength(1);
+  });
+
+  test('a PR never reports overlapping itself, by number OR by branch', () => {
+    // THE REPAIR PATH. Attempt 1 opens the PR; attempt 2 force-pushes and
+    // publishes again, so this branch's own PR is in the open list with 100%
+    // of its files in common. Without the exclusion the operator is warned
+    // that a PR conflicts with itself, on every repair the loop ever runs.
+    const own = pr(500, 'loop/Cebab-x', 'web/src/App.tsx');
+    expect(overlappingPrs([own], MINE, { excludeNumber: 500 })).toEqual([]);
+    // AND by branch, because `prNumber` is null on the first PUBLISH of a run
+    // that a PREVIOUS run left a PR open for (the `branch-exists` shape) — the
+    // number is unknown exactly when the branch is not.
+    expect(overlappingPrs([own], MINE, { excludeBranch: 'loop/Cebab-x' })).toEqual([]);
+    // Both exclusions off: it IS found, so neither case above passes vacuously.
+    expect(overlappingPrs([own], MINE)).toHaveLength(1);
+  });
+
+  test('openLoopPrs distinguishes “none” from “could not tell”', () => {
+    const forgeWith = (reply) =>
+      makeForge({ run: async () => reply, cwd: '/r', sleep: async () => {} });
+    // A bare [] would render these three identical, which is the exact shape of
+    // a report that runs, succeeds and measures nothing.
+    return Promise.all([
+      forgeWith({ code: 0, stdout: '[]', stderr: '' })
+        .openLoopPrs()
+        .then((r) => {
+          expect(r).toEqual({ prs: [], error: null });
+        }),
+      forgeWith({ code: 1, stdout: '', stderr: 'gh: not authenticated\nmore' })
+        .openLoopPrs()
+        .then((r) => {
+          expect(r.prs).toEqual([]);
+          expect(r.error).toBe('gh: not authenticated');
+        }),
+      forgeWith({ code: 0, stdout: 'not json', stderr: '' })
+        .openLoopPrs()
+        .then((r) => {
+          expect(r.error).toContain('unparseable');
+        }),
+      forgeWith({ code: 0, stdout: '{"message":"x"}', stderr: '' })
+        .openLoopPrs()
+        .then((r) => {
+          expect(r.error).toContain('non-array');
+        }),
+    ]);
+  });
+
+  test('the row carries the overlap only when there is one', () => {
+    const overlaps = [
+      { number: 422, url: 'u', branch: 'loop/Cebab-8x8.2.1', files: ['assistant/kb/00-index.md'] },
+    ];
+    expect(buildRecord({ fileOverlaps: overlaps }, 0).fileOverlaps).toEqual(overlaps);
+    // Absent-is-good, so `jq 'select(.fileOverlaps)'` is "which of last night's
+    // PRs will fight each other" rather than a match on every row.
+    expect(buildRecord({}, 0).fileOverlaps).toBeUndefined();
+    expect(buildRecord({ fileOverlaps: [] }, 0).fileOverlaps).toBeUndefined();
   });
 });

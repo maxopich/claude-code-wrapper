@@ -34,7 +34,15 @@
  */
 import { parseDiffLines, parseDiffStat } from './guard.mjs';
 
-export const branchNameFor = (beadId) => `loop/${beadId}`;
+/**
+ * The prefix `branchNameFor` builds on, named so the two other places that need
+ * to recognise a loop branch — the remote sweep below and the PR overlap report
+ * in `forge.mjs` — derive it rather than spell it again. The header's claim
+ * that the prefix is decided in one place was not true of its own module.
+ */
+export const LOOP_BRANCH_PREFIX = 'loop/';
+
+export const branchNameFor = (beadId) => `${LOOP_BRANCH_PREFIX}${beadId}`;
 
 /**
  * The bead id is appended only when it is not already there.
@@ -196,11 +204,11 @@ export function makeGit({ run, cwd, dryRun = false }) {
      * REPORT, and a network hiccup must not be able to stop a run.
      */
     async remoteLoopBeads() {
-      const r = await git(['ls-remote', '--heads', 'origin', 'refs/heads/loop/*']);
+      const r = await git(['ls-remote', '--heads', 'origin', `refs/heads/${LOOP_BRANCH_PREFIX}*`]);
       if (r.code !== 0) return [];
       return r.stdout
         .split('\n')
-        .map((line) => line.split('refs/heads/loop/')[1]?.trim())
+        .map((line) => line.split(`refs/heads/${LOOP_BRANCH_PREFIX}`)[1]?.trim())
         .filter(Boolean);
     },
 
