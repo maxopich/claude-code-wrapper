@@ -26,7 +26,7 @@
  *   - **Redact at display, not at write.** Storage retains raw bytes and the
  *     export never modifies the file. Default `format=redacted`; raw is opt-in.
  *   - **The redacted artifact's corpus is the DURABLE message classes** — the
- *     same set `runner/orchestrator.ts` writes to the `events` table, via the
+ *     same set `runner/persist.ts` writes to the `events` table, via the
  *     shared `isStreamPartial` predicate in `runner/message_classes.ts`.
  *     Streaming partials are excluded, and the reason is structural rather
  *     than a missing pattern: `redactSensitive` masks values under sensitive

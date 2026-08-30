@@ -10,7 +10,7 @@ vi.mock('../repo/sessions.js', () => ({ bumpSession: vi.fn() }));
 import { logEvent } from './logger.js';
 import { insertEvent } from '../repo/events.js';
 import { bumpSession } from '../repo/sessions.js';
-import { persistMessage } from './orchestrator.js';
+import { persistMessage } from './persist.js';
 
 const mockLogEvent = vi.mocked(logEvent);
 const mockInsertEvent = vi.mocked(insertEvent);

@@ -3,7 +3,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pickRunner } from './index.js';
-import { persistMessage } from './orchestrator.js';
+import { persistMessage } from './persist.js';
 import { config } from '../config.js';
 import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
