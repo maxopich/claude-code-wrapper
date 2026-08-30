@@ -506,7 +506,7 @@ describe('computeRecoveryContext (Item #7)', () => {
     expect(computeRecoveryContext('s1')).toBeNull();
   });
 
-  test('flags agent as interrupted when lastEventTs > lastCheckpointTs', () => {
+  test('flags agent as interrupted when lastEventAt > lastCheckpointTs', () => {
     createMultiAgentSession('s1', 'orchestrator', '001');
     upsertAgentAt('s1', 'workerA', 150);
     insertEventAt('s1', 'workerA', 200);
@@ -514,7 +514,7 @@ describe('computeRecoveryContext (Item #7)', () => {
     const ctx = computeRecoveryContext('s1');
     expect(ctx).not.toBeNull();
     expect(ctx!.interruptedAgents).toEqual([
-      { agentName: 'workerA', lastEventTs: 200, lastCheckpointTs: 150 },
+      { agentName: 'workerA', lastEventAt: 200, lastCheckpointTs: 150 },
     ]);
   });
 
@@ -526,11 +526,11 @@ describe('computeRecoveryContext (Item #7)', () => {
     const ctx = computeRecoveryContext('s1');
     expect(ctx).not.toBeNull();
     expect(ctx!.interruptedAgents).toEqual([
-      { agentName: 'workerB', lastEventTs: 300, lastCheckpointTs: null },
+      { agentName: 'workerB', lastEventAt: 300, lastCheckpointTs: null },
     ]);
   });
 
-  test('does NOT flag clean-completed agent (lastCheckpointTs >= lastEventTs)', () => {
+  test('does NOT flag clean-completed agent (lastCheckpointTs >= lastEventAt)', () => {
     createMultiAgentSession('s1', 'orchestrator', '001');
     insertEventAt('s1', 'workerC', 100);
     upsertAgentAt('s1', 'workerC', 150);
@@ -557,9 +557,9 @@ describe('computeRecoveryContext (Item #7)', () => {
     expect(ctx!.staleSinceTs).toBe(500);
   });
 
-  test('sorts interruptedAgents by lastEventTs descending (most recent first)', () => {
+  test('sorts interruptedAgents by lastEventAt descending (most recent first)', () => {
     createMultiAgentSession('s1', 'orchestrator', '001');
-    // Three never-checkpointed agents, varying lastEventTs.
+    // Three never-checkpointed agents, varying lastEventAt.
     insertEventAt('s1', 'alpha', 100);
     insertEventAt('s1', 'beta', 200);
     insertEventAt('s1', 'gamma', 150);
@@ -600,7 +600,7 @@ describe('computeRecoveryContext (Item #7)', () => {
     const ctx = computeRecoveryContext('s1');
     expect(ctx).not.toBeNull();
     expect(ctx!.interruptedAgents).toEqual([
-      { agentName: 'quiet', lastEventTs: 1, lastCheckpointTs: null },
+      { agentName: 'quiet', lastEventAt: 1, lastCheckpointTs: null },
     ]);
     expect(ctx!.staleSinceTs).toBe(5999);
   });
@@ -616,7 +616,7 @@ describe('computeRecoveryContext (Item #7)', () => {
     const ctx = computeRecoveryContext('s1');
     expect(ctx!.staleSinceTs).toBe(900);
     expect(ctx!.interruptedAgents).toEqual([
-      { agentName: 'workerX', lastEventTs: 900, lastCheckpointTs: null },
+      { agentName: 'workerX', lastEventAt: 900, lastCheckpointTs: null },
     ]);
   });
 
@@ -643,7 +643,7 @@ describe('computeRecoveryContext (Item #7)', () => {
     const ctx = computeRecoveryContext('s1');
     // workerF's MAX(ts)=300 > checkpoint=250 → flagged.
     expect(ctx!.interruptedAgents).toEqual([
-      { agentName: 'workerF', lastEventTs: 300, lastCheckpointTs: 250 },
+      { agentName: 'workerF', lastEventAt: 300, lastCheckpointTs: 250 },
     ]);
   });
 
@@ -656,7 +656,7 @@ describe('computeRecoveryContext (Item #7)', () => {
 
     const ctx = computeRecoveryContext('s1');
     expect(ctx!.interruptedAgents).toEqual([
-      { agentName: 'dirty', lastEventTs: 300, lastCheckpointTs: 250 },
+      { agentName: 'dirty', lastEventAt: 300, lastCheckpointTs: 250 },
     ]);
   });
 });

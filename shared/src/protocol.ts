@@ -4854,8 +4854,10 @@ export type MultiAgentMutationView = {
  */
 export type RecoveryAgentEntry = {
   agentName: string;
-  /** Wall-clock of the most recent `multi_agent_events` row where source=agentName. */
-  lastEventTs: number;
+  /** Wall-clock of the most recent `multi_agent_events` row where source=agentName.
+   *  Same `…At` suffix as `SessionSummary.lastEventAt`, which names the same
+   *  epoch-millisecond concept — the two must not diverge again. */
+  lastEventAt: number;
   /** `updated_at` from `multi_agent_agent_sessions` for this agent, or null if
    *  the agent never reached a successful `result` (e.g. crashed during intro). */
   lastCheckpointTs: number | null;
@@ -4874,8 +4876,8 @@ export type RecoveryContextView = {
   /** Server "now" at emit time. Reserved for future "stale for N seconds"
    *  hints; v1 clients may ignore. */
   reconstructedAtTs: number;
-  /** Agents flagged as possibly interrupted (`lastEventTs > lastCheckpointTs`).
-   *  Empty when all agents checkpointed cleanly. Sorted by `lastEventTs`
+  /** Agents flagged as possibly interrupted (`lastEventAt > lastCheckpointTs`).
+   *  Empty when all agents checkpointed cleanly. Sorted by `lastEventAt`
    *  descending (most-recently-active first). */
   interruptedAgents: RecoveryAgentEntry[];
 };
