@@ -27,7 +27,9 @@
  * Filename convention mirrors the server's `exportFilename()` in
  * `server/src/session_log_export.ts`: `cebab-<shortid>-<YYYYMMDD-
  * HHMMSS>.jsonl` where the stamp is the session **start** time (NOT
- * the export time) so a folder of exports sorts by run order. The
+ * the export time) so a folder of exports sorts by run order, in the
+ * operator's LOCAL timezone (`Cebab-x1n.3.19` — see that server function's
+ * header for why UTC filed a late-evening session under the wrong day). The
  * server already stamps the Content-Disposition header with this
  * filename, so the client only computes a fallback for the rare case
  * where the response lacks one (offline test fixture, error paths).
@@ -113,8 +115,8 @@ export function pickExportFilename(sessionId: string, sessionStartMs: number | n
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, '0');
   const stamp =
-    `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-` +
-    `${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
+    `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-` +
+    `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
   return `cebab-${short}-${stamp}.jsonl`;
 }
 

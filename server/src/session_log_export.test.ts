@@ -40,15 +40,43 @@ import { isStreamPartial } from './runner/message_classes.js';
 // ── Pure-function tests ──────────────────────────────────────────────
 
 describe('exportFilename', () => {
+  // `Cebab-x1n.3.19`: the stamp is the operator's LOCAL wall-clock, so these
+  // assertions must pin a known timezone rather than trust the runner's — a
+  // UTC runner would otherwise pass a UTC-stamped filename by coincidence and
+  // hide a regression, and a non-UTC runner would fail a UTC-hardcoded expected
+  // value. America/Los_Angeles is UTC-8 with no DST on the January dates below,
+  // so the offset is a fixed -8h. Node re-reads process.env.TZ per Date op, so
+  // setting it here (after import) takes effect for these calls.
+  const realTz = process.env.TZ;
+  beforeEach(() => {
+    process.env.TZ = 'America/Los_Angeles';
+  });
+  afterEach(() => {
+    if (realTz === undefined) delete process.env.TZ;
+    else process.env.TZ = realTz;
+  });
+
   test('uses session start time, not Date.now()', () => {
-    // 2024-01-15 09:30:45 UTC = 1705311045000
+    // 2024-01-15 09:30:45 UTC = 1705311045000 = 2024-01-15 01:30:45 in LA.
     const filename = exportFilename('abcd1234-cafe-beef-0000-000000000000', 1705311045000);
-    expect(filename).toBe('cebab-abcd1234-20240115-093045.jsonl');
+    expect(filename).toBe('cebab-abcd1234-20240115-013045.jsonl');
   });
 
   test('truncates session id to 8 chars', () => {
+    // Same instant, local: 2024-01-15 01:30:45.
     const filename = exportFilename('s', 1705311045000);
-    expect(filename).toBe('cebab-s-20240115-093045.jsonl');
+    expect(filename).toBe('cebab-s-20240115-013045.jsonl');
+  });
+
+  test('stamps LOCAL time, so a late-evening session files under the local day', () => {
+    // The `Cebab-x1n.3.19` case: 2024-01-16 05:00:00 UTC is 2024-01-15
+    // 21:00:00 in LA. A UTC stamp files this under the 16th (the wrong day for
+    // an operator asking "show me the session from Monday evening"); a local
+    // stamp files it under the 15th. Before the fix this returned
+    // `...-20240116-050000...`.
+    const ts = Date.UTC(2024, 0, 16, 5, 0, 0);
+    const filename = exportFilename('abcd1234', ts);
+    expect(filename).toBe('cebab-abcd1234-20240115-210000.jsonl');
   });
 
   test('falls back to Date.now() when session start is null', () => {
@@ -59,14 +87,16 @@ describe('exportFilename', () => {
     expect(m).not.toBeNull();
     if (!m) return;
     const [, ymd, hms] = m;
-    const stampMs = Date.UTC(
+    // The stamp is LOCAL wall-clock, so reconstruct it as a local Date (not
+    // Date.UTC) to compare against the wall-clock `Date.now()` bounds.
+    const stampMs = new Date(
       Number(ymd!.slice(0, 4)),
       Number(ymd!.slice(4, 6)) - 1,
       Number(ymd!.slice(6, 8)),
       Number(hms!.slice(0, 2)),
       Number(hms!.slice(2, 4)),
       Number(hms!.slice(4, 6)),
-    );
+    ).getTime();
     // Allow up to a second of slop for the second-precision stamp.
     expect(stampMs).toBeGreaterThanOrEqual(before - 1000);
     expect(stampMs).toBeLessThanOrEqual(after + 1000);
@@ -431,8 +461,13 @@ describe('/session-log :: redacted format (default)', () => {
       origin: DECLARED_WEB_ORIGIN,
       hostHeader: defaultHostHeader(),
     });
+    // Derive the expected filename from `exportFilename` rather than hardcoding
+    // a stamp: the stamp is LOCAL wall-clock (`Cebab-x1n.3.19`), so a literal
+    // would be timezone-dependent. The local-vs-UTC contract itself is pinned
+    // by the pure `exportFilename` tests above; here we assert only that the
+    // endpoint stamps the filename from the resolved session start time.
     expect(String(res.headers['content-disposition'])).toContain(
-      'filename="cebab-sess-kno-20240115-093045.jsonl"',
+      `filename="${exportFilename('sess-known', 1705311045000)}"`,
     );
   });
 });
