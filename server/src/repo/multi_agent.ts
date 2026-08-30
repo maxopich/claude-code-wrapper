@@ -313,7 +313,7 @@ export type MultiAgentEventRow = {
 // ---- sessions ----
 
 export function createMultiAgentSession(
-  id: string,
+  sessionId: string,
   mode: MultiAgentMode,
   iterationId: string | null = null,
   sessionFolder: string | null = null,
@@ -341,7 +341,7 @@ export function createMultiAgentSession(
        VALUES (?, ?, ?, NULL, 'running', ?, ?, ?, ?, ?, ?)`,
     )
     .run(
-      id,
+      sessionId,
       mode,
       now,
       iterationId,
@@ -351,7 +351,7 @@ export function createMultiAgentSession(
       opts.hopBudget ?? null,
       mock,
     );
-  return getMultiAgentSession(id)!;
+  return getMultiAgentSession(sessionId)!;
 }
 
 /**
@@ -365,7 +365,7 @@ export function createMultiAgentSession(
  * pathological "first error" string from bloating the row.
  */
 export function recordSessionTeardown(
-  id: string,
+  sessionId: string,
   opts: { hopsUsed: number; firstError?: string | null },
 ): void {
   const trimmedError =
@@ -378,7 +378,7 @@ export function recordSessionTeardown(
           SET hops_used = ?, first_error = ?
         WHERE id = ?`,
     )
-    .run(opts.hopsUsed, trimmedError, id);
+    .run(opts.hopsUsed, trimmedError, sessionId);
 }
 
 /**
@@ -429,10 +429,10 @@ export function getLastRunForTemplate(templateId: string): MultiAgentSessionRow 
     .get(templateId);
 }
 
-export function endMultiAgentSession(id: string, status: MultiAgentStatus): void {
+export function endMultiAgentSession(sessionId: string, status: MultiAgentStatus): void {
   getDb()
     .prepare(`UPDATE multi_agent_sessions SET status = ?, ended_at = ? WHERE id = ?`)
-    .run(status, Date.now(), id);
+    .run(status, Date.now(), sessionId);
 }
 
 /**
@@ -442,10 +442,10 @@ export function endMultiAgentSession(id: string, status: MultiAgentStatus): void
  * restores the prior terminal status so the `resumeOnConnect` sweep stays
  * consistent.
  */
-export function reactivateMultiAgentSession(id: string): void {
+export function reactivateMultiAgentSession(sessionId: string): void {
   getDb()
     .prepare(`UPDATE multi_agent_sessions SET status = 'running', ended_at = NULL WHERE id = ?`)
-    .run(id);
+    .run(sessionId);
 }
 
 /**
@@ -456,8 +456,13 @@ export function reactivateMultiAgentSession(id: string): void {
  * row update is what lets a `resumeOrchestratorSession` after Cebab
  * restart pick up the latest value.
  */
-export function setMultiAgentSessionLifecycle(id: string, lifecycle: MultiAgentLifecycle): void {
-  getDb().prepare(`UPDATE multi_agent_sessions SET lifecycle = ? WHERE id = ?`).run(lifecycle, id);
+export function setMultiAgentSessionLifecycle(
+  sessionId: string,
+  lifecycle: MultiAgentLifecycle,
+): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET lifecycle = ? WHERE id = ?`)
+    .run(lifecycle, sessionId);
 }
 
 /**
@@ -467,10 +472,10 @@ export function setMultiAgentSessionLifecycle(id: string, lifecycle: MultiAgentL
  * moment the operator continues (or whenever a fresh turn is delivered), so
  * the iterations UI / a second reconnect see it as a normal live session.
  */
-export function setAwaitingContinue(id: string, awaiting: boolean): void {
+export function setAwaitingContinue(sessionId: string, awaiting: boolean): void {
   getDb()
     .prepare(`UPDATE multi_agent_sessions SET awaiting_continue = ? WHERE id = ?`)
-    .run(awaiting ? 1 : 0, id);
+    .run(awaiting ? 1 : 0, sessionId);
 }
 
 /**
@@ -483,7 +488,7 @@ export function setAwaitingContinue(id: string, awaiting: boolean): void {
  *     the empty slot and no-ops.
  *   - `handle.stop` / `abandon_session` to keep the row clean on teardown.
  */
-export function setPendingRetry(id: string, p: PendingRetry | null): void {
+export function setPendingRetry(sessionId: string, p: PendingRetry | null): void {
   if (p === null) {
     getDb()
       .prepare(
@@ -495,7 +500,7 @@ export function setPendingRetry(id: string, p: PendingRetry | null): void {
                 pending_retry_error_event_id = NULL
           WHERE id = ?`,
       )
-      .run(id);
+      .run(sessionId);
     return;
   }
   getDb()
@@ -508,7 +513,7 @@ export function setPendingRetry(id: string, p: PendingRetry | null): void {
               pending_retry_error_event_id = ?
         WHERE id = ?`,
     )
-    .run(p.agentName, p.prompt, p.reason, p.ts, p.errorEventId, id);
+    .run(p.agentName, p.prompt, p.reason, p.ts, p.errorEventId, sessionId);
 }
 
 /**
@@ -522,7 +527,7 @@ export function setPendingRetry(id: string, p: PendingRetry | null): void {
  * principle by `setPendingRetry`; this getter treats any NULL as "no slot"
  * to be defensive about pre-010 rows that lack the columns entirely.
  */
-export function getPendingRetry(id: string): PendingRetry | null {
+export function getPendingRetry(sessionId: string): PendingRetry | null {
   const row = getDb()
     .prepare<
       [string],
@@ -538,7 +543,7 @@ export function getPendingRetry(id: string): PendingRetry | null {
               pending_retry_ts, pending_retry_error_event_id
          FROM multi_agent_sessions WHERE id = ?`,
     )
-    .get(id);
+    .get(sessionId);
   if (!row) return null;
   if (
     row.pending_retry_agent === null ||
@@ -1004,10 +1009,10 @@ export function clearPendingMutations(sessionId: string): void {
     .run(sessionId);
 }
 
-export function getMultiAgentSession(id: string): MultiAgentSessionRow | undefined {
+export function getMultiAgentSession(sessionId: string): MultiAgentSessionRow | undefined {
   return getDb()
     .prepare<[string], MultiAgentSessionRow>('SELECT * FROM multi_agent_sessions WHERE id = ?')
-    .get(id);
+    .get(sessionId);
 }
 
 /**
@@ -1091,12 +1096,12 @@ export function listMultiAgentSessionsWithIteration(opts?: {
  * Returns true if the update flipped a 0→1; false when the row was
  * already archived or doesn't exist.
  */
-export function archiveMultiAgentSession(id: string): boolean {
+export function archiveMultiAgentSession(sessionId: string): boolean {
   const result = getDb()
     .prepare<[string], unknown>(
       'UPDATE multi_agent_sessions SET archived = 1 WHERE id = ? AND archived = 0',
     )
-    .run(id);
+    .run(sessionId);
   return result.changes > 0;
 }
 
@@ -1105,12 +1110,12 @@ export function archiveMultiAgentSession(id: string): boolean {
  * "unarchive" affordance (not in v1 scope; the spec ships archive as
  * one-way for simplicity, but the data model supports reversal).
  */
-export function unarchiveMultiAgentSession(id: string): boolean {
+export function unarchiveMultiAgentSession(sessionId: string): boolean {
   const result = getDb()
     .prepare<[string], unknown>(
       'UPDATE multi_agent_sessions SET archived = 0 WHERE id = ? AND archived = 1',
     )
-    .run(id);
+    .run(sessionId);
   return result.changes > 0;
 }
 

@@ -18,7 +18,9 @@ import {
   endMultiAgentSession,
   getLastMultiAgentEvent,
   getLastRunForTemplate,
+  getMultiAgentMutation,
   getMultiAgentSession,
+  getPendingRetry,
   listMultiAgentEvents,
   listMultiAgentMutations,
   listMultiAgentSessions,
@@ -27,7 +29,11 @@ import {
   listResolvedParticipants,
   reactivateMultiAgentSession,
   recordSessionTeardown,
+  setAwaitingContinue,
   setMultiAgentSessionLifecycle,
+  setMutationPauseState,
+  setMutationPromoted,
+  setPendingRetry,
   setProjectBusInstalled,
   unarchiveMultiAgentSession,
 } from './multi_agent.js';
@@ -51,6 +57,51 @@ afterEach(() => {
   closeDb();
   config.dataDir = originalDataDir;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
+});
+
+describe('session-id parameter naming (register N21)', () => {
+  // The first declared parameter of a function, read from its source. Vitest
+  // transpiles TS→JS without minifying, so parameter names survive in
+  // `Function.prototype.toString()`; the returned name is the transpiled
+  // identifier, which for these functions equals the source identifier.
+  function firstParamName(fn: (...args: never[]) => unknown): string {
+    const src = fn.toString();
+    const open = src.indexOf('(');
+    const close = src.indexOf(')', open);
+    const params = src.slice(open + 1, close);
+    const first = params.split(',')[0] ?? '';
+    // Strip a default-value clause (`x = ...`) and any destructuring noise.
+    return first.split('=')[0]!.trim();
+  }
+
+  // A bare `id` at a call site reads as a numeric row id, and some functions in
+  // this module really do take one. Every function keyed on a *session* id must
+  // therefore say `sessionId`, not `id`.
+  test.each([
+    ['createMultiAgentSession', createMultiAgentSession],
+    ['recordSessionTeardown', recordSessionTeardown],
+    ['endMultiAgentSession', endMultiAgentSession],
+    ['reactivateMultiAgentSession', reactivateMultiAgentSession],
+    ['setMultiAgentSessionLifecycle', setMultiAgentSessionLifecycle],
+    ['setAwaitingContinue', setAwaitingContinue],
+    ['setPendingRetry', setPendingRetry],
+    ['getPendingRetry', getPendingRetry],
+    ['getMultiAgentSession', getMultiAgentSession],
+    ['archiveMultiAgentSession', archiveMultiAgentSession],
+    ['unarchiveMultiAgentSession', unarchiveMultiAgentSession],
+  ] as const)('%s names its session-id parameter `sessionId`', (_name, fn) => {
+    expect(firstParamName(fn as (...args: never[]) => unknown)).toBe('sessionId');
+  });
+
+  // Negative control: the functions that genuinely take a numeric mutation-row
+  // id keep `id`, so the rename above is targeted rather than blanket.
+  test.each([
+    ['setMutationPromoted', setMutationPromoted],
+    ['getMultiAgentMutation', getMultiAgentMutation],
+    ['setMutationPauseState', setMutationPauseState],
+  ] as const)('%s keeps its row-id parameter named `id`', (_name, fn) => {
+    expect(firstParamName(fn as (...args: never[]) => unknown)).toBe('id');
+  });
 });
 
 describe('createMultiAgentSession + iteration_id', () => {
