@@ -217,6 +217,17 @@ export function buildRecord(parts = {}, now = 0) {
       conclusion: ci.conclusion ?? null,
       waitedMs: ci.waitedMs ?? null,
       runUrl: ci.runUrl ?? null,
+      // ADDED ALONGSIDE `conclusion`, never folded into it — 32 rows already
+      // carry success/failure and re-pointing that would change what every one
+      // of them means. Present only when CI said something other than yes or
+      // no, so `jq 'select(.ci.outcome)'` is the query for "the loop's own
+      // signal was green and the PR still could not merge", and for "CI was
+      // killed rather than failed". `Cebab-qd2.45`, `Cebab-qd2.46`.
+      ...(ci.outcome ? { outcome: ci.outcome } : {}),
+      // Which check, by name. The whole cost of the qd2.45 defect was that the
+      // operator could not see WHAT was blocking without opening the PR.
+      ...(ci.failedChecks?.length ? { failedChecks: ci.failedChecks } : {}),
+      ...(ci.rerun ? { rerun: true } : {}),
     },
     // `queued` and `state` are what stop a PREDICTION reading as an OUTCOME:
     // `gh pr merge --auto` returns success without merging, and this row used

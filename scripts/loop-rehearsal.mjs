@@ -266,6 +266,84 @@ const SCENARIOS = {
     },
   },
 
+  // ── Cebab-qd2.45 / Cebab-qd2.46 ────────────────────────────────────────
+  //
+  // Both from the unattended run of 2026-08-30, and both are cases where CI
+  // said something other than yes or no while the driver could only hear two
+  // answers.
+  'ci-blocked': {
+    why: 'the required context is green but ANOTHER required check is red — merging is impossible',
+    // PR #432: the fixture-review gate is red by design until a CODEOWNER
+    // clears a label. The driver reported green, tried to merge, was refused by
+    // branch protection, fell back to --auto and recorded `merge_queued` — a
+    // disposition that reads as "will land shortly" for a PR needing a human.
+    args: ['--merge', '--until', '1'],
+    plan: { beads: 1, ci: 'blocked', merge: 'direct', build: [{ kind: 'verdict', edit: true }] },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(row.disposition, 'parked', 'a blocked PR parks');
+      ctx.eq(row.reason, 'ci_blocked', 'under its OWN reason, not ci_red');
+      ctx.eq(row.ci.outcome, 'blocked', 'and the row says which');
+      ctx.eq(row.ci.failedChecks[0].name, 'Fixture review gate', 'naming the check that blocks');
+      ctx.eq(ctx.calls.gh.filter((c) => c[1] === 'merge').length, 0, 'no merge was attempted');
+      ctx.eq(row.land.queued, false, 'and nothing was queued');
+      // THE REPAIR BUDGET IS NOT SPENT. A repair cannot clear a review label,
+      // so a driver that fell through to the `red` branch would burn an
+      // attempt and force-push an identical tree.
+      ctx.eq(ctx.calls.claude.length, 1, 'no repair attempt was bought');
+      ctx.eq(
+        ctx.calls.gh.filter((c) => c[0] === 'run' && c[1] === 'rerun').length,
+        0,
+        'and no CI re-run either — the diff is not what is wrong',
+      );
+    },
+  },
+
+  'ci-infra-recovers': {
+    why: 'CI was KILLED, not failed — one re-run recovers it and the bead lands',
+    // PR #434: the windows leg hit `timeout-minutes: 15` at 902s with no
+    // assertion having failed. A plain re-run of the identical commit went
+    // green. Before this the driver had no re-run path at all, so its only
+    // available response was a code repair, which cannot help by construction.
+    args: ['--merge', '--until', '1'],
+    plan: {
+      beads: 1,
+      ci: 'infra',
+      ciAfterRerun: 'green',
+      merge: 'direct',
+      build: [{ kind: 'verdict', edit: true }],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      const reruns = ctx.calls.gh.filter((c) => c[0] === 'run' && c[1] === 'rerun');
+      ctx.eq(reruns.length, 1, 'exactly one re-run');
+      ctx.ok(reruns[0].includes('--failed'), 'of only the failed jobs');
+      ctx.eq(row.disposition, 'merged', 'and the bead then merged');
+      ctx.eq(row.ci.rerun, true, 'the row records that a re-run happened');
+      ctx.eq(row.ci.conclusion, 'success', 'ending green');
+      // The whole point: no repair was bought for a cause that did not exist.
+      ctx.eq(ctx.calls.claude.length, 1, 'no repair attempt was spent on a runner timeout');
+    },
+  },
+
+  'ci-infra-persists': {
+    why: 'a second cancellation after the re-run parks under ci_infra, and never re-runs twice',
+    args: ['--merge', '--until', '1'],
+    plan: { beads: 1, ci: 'infra', merge: 'direct', build: [{ kind: 'verdict', edit: true }] },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(
+        ctx.calls.gh.filter((c) => c[0] === 'run' && c[1] === 'rerun').length,
+        1,
+        'ONE re-run, not one per poll',
+      );
+      ctx.eq(row.disposition, 'parked', 'it parks');
+      ctx.eq(row.reason, 'ci_infra', 'as infrastructure, not as a build failure');
+      ctx.eq(row.ci.outcome, 'infra', 'and the row keeps the distinction');
+      ctx.eq(ctx.calls.claude.length, 1, 'still no repair attempt');
+    },
+  },
+
   'ci-red-repair': {
     why: 'the ONE path where attempt 2 must NOT open a PR — the repair force-pushes to the open one',
     // The negative control for `gate-fail-then-publish`. Without it, "create a
@@ -946,14 +1024,48 @@ if (argv[0] === 'api') {
   }
   // An ARRAY is per-attempt: index by the build count so a repair can see a
   // different answer from the attempt that provoked it.
-  const want = Array.isArray(plan.ci)
-    ? plan.ci[Math.min(Math.max(state.builds - 1, 0), plan.ci.length - 1)]
-    : plan.ci;
+  const want = plan.ciAfterRerun && (state.reruns || 0) > 0
+    ? plan.ciAfterRerun
+    : Array.isArray(plan.ci)
+      ? plan.ci[Math.min(Math.max(state.builds - 1, 0), plan.ci.length - 1)]
+      : plan.ci;
+  // FOUR SHAPES, because the driver now distinguishes four. A shim that could
+  // only say success-or-failure made the harness unable to see the blocked and
+  // infra paths at all, which is the same vacuity the no-PR case above records.
+  if (want === 'blocked') {
+    // The required context passes and a DIFFERENT required check does not.
+    // Modelled on PR #432, where a fixture-review gate is red by design until a
+    // human clears a label.
+    out({ check_runs: [
+      { name: 'quality', status: 'completed', conclusion: 'success', html_url: url },
+      { name: required, status: 'completed', conclusion: 'success', html_url: url },
+      { name: 'Fixture review gate', status: 'completed', conclusion: 'failure', html_url: url },
+    ] });
+    process.exit(0);
+  }
+  if (want === 'infra') {
+    // A matrix leg KILLED by a job timeout. The aggregator reports plain
+    // failure either way, so the cancelled sibling is the only evidence.
+    out({ check_runs: [
+      { name: 'quality (windows-2022)', status: 'completed', conclusion: 'cancelled', html_url: url },
+      { name: required, status: 'completed', conclusion: 'failure', html_url: url },
+    ] });
+    process.exit(0);
+  }
   const conclusion = want === 'green' ? 'success' : 'failure';
   out({ check_runs: [
     { name: 'quality', status: 'completed', conclusion, html_url: url },
     { name: required, status: 'completed', conclusion, html_url: url },
   ] });
+  process.exit(0);
+}
+
+if (argv[0] === 'run' && argv[1] === 'rerun') {
+  state.reruns = (state.reruns || 0) + 1;
+  // The driver's grace window after a re-run is counted in POLLS, so the poll
+  // counter has to move too or the next answer served is the stale one.
+  state.polls = 1;
+  save();
   process.exit(0);
 }
 
@@ -1099,6 +1211,7 @@ function buildScratch(name, scenario) {
       claimed: [],
       builds: 0,
       polls: 0,
+      reruns: 0,
       pr: 0,
       merged: null,
       queued: false,

@@ -185,6 +185,52 @@ export function parsePrState(stdout) {
 const GREEN_CONCLUSIONS = new Set(['success', 'neutral', 'skipped']);
 
 /**
+ * Conclusions that mean the RUNNER STOPPED THE JOB, rather than the job having
+ * decided anything about the code.
+ *
+ * Measured 2026-08-30, CI run 33312182698: the windows-2022 leg exceeded
+ * `timeout-minutes: 15` and was killed at 902s with every emitted vitest line a
+ * tick or a skip; the ubuntu leg passed the same SHA in 7m2s and a plain re-run
+ * of the identical commit went green. Folded into `red`, that cost a correct
+ * five-file rename a 12-turn repair attempt against a cause that did not exist,
+ * and then parked it `build_failed`.
+ *
+ * `stale` is here because GitHub reports it for a check whose run was
+ * superseded — also not a verdict on the diff. This set is deliberately SMALL
+ * and closed: an unknown conclusion must keep falling through to `red`, for the
+ * same reason `GREEN_CONCLUSIONS` is an allow-list. Widening it is how a real
+ * failure becomes a retry.
+ */
+const INFRA_CONCLUSIONS = new Set(['cancelled', 'timed_out', 'stale']);
+
+/** `.../actions/runs/<runId>/job/<jobId>` -> `<runId>`, or null. */
+export function runIdFromCheckUrl(url) {
+  const id = String(url ?? '')
+    .split('/runs/')[1]
+    ?.split('/')[0];
+  return /^\d+$/.test(id ?? '') ? id : null;
+}
+
+/** One re-run of only the failed jobs of a workflow run. */
+export function rerunFailedArgv(runId) {
+  return ['run', 'rerun', String(runId), '--failed'];
+}
+
+/**
+ * A COMPLETED, non-green check run that is not the aggregator itself.
+ *
+ * ONE definition, used by both `classifyCheckRuns` (which needs the whole list,
+ * because a red sibling changes what a verdict means) and `failingSibling`
+ * (which needs one, for a repair log). They were written out separately and the
+ * revert-check caught it: an anchor that matched twice. Two copies of a
+ * predicate that decides whether CI counts as failed is the shape this repo
+ * keeps being bitten by — `status: 'completed'` is easy to drop from one of
+ * them, and dropping it makes an in-flight check read as a failure.
+ */
+const isFailedSibling = (r, requiredContext) =>
+  r.status === 'completed' && !GREEN_CONCLUSIONS.has(r.conclusion) && r.name !== requiredContext;
+
+/**
  * Classify one poll of the SHA-scoped payload. Pure, so every branch is
  * testable without a network.
  *
@@ -199,12 +245,51 @@ export function classifyCheckRuns(payload, requiredContext) {
   // Is anything still moving? This is what separates "the required job is
   // queued behind its `needs:`" from "no CI is running at all".
   const anyPending = runs.some((r) => r.status !== 'completed');
+  // EVERY completed, non-green run that is not the aggregator itself. This used
+  // to be computed only on demand by `failingSibling`, for a repair log; it is
+  // part of the verdict now because a red sibling changes what the verdict
+  // MEANS in two different directions, below.
+  const failedSiblings = runs
+    .filter((r) => isFailedSibling(r, requiredContext))
+    .map((r) => ({ name: r.name, conclusion: r.conclusion ?? null, link: r.html_url ?? null }));
   const match = runs.find((r) => r.name === requiredContext);
-  if (!match) return { outcome: 'pending', found: false, anyPending, total: runs.length };
-  const base = { found: true, link: match.html_url, anyPending, total: runs.length };
+  if (!match) {
+    return { outcome: 'pending', found: false, anyPending, total: runs.length, failedSiblings };
+  }
+  const base = {
+    found: true,
+    link: match.html_url,
+    anyPending,
+    total: runs.length,
+    failedSiblings,
+  };
   if (match.status !== 'completed') return { outcome: 'pending', ...base };
-  if (GREEN_CONCLUSIONS.has(match.conclusion)) return { outcome: 'green', ...base };
-  return { outcome: 'red', ...base };
+  if (GREEN_CONCLUSIONS.has(match.conclusion)) {
+    // A GREEN REQUIRED CONTEXT IS NOT A GREEN PULL REQUEST, and this loop used
+    // to assume it was. Measured 2026-08-30 on PR #432: the required context
+    // passed, `Fixture review gate` — a separate REQUIRED check, red by design
+    // until a CODEOWNER clears a label — did not. The loop reported green,
+    // tried to merge, was refused by branch protection, fell back to
+    // `--auto` and recorded `merge_queued`, which reads as "will land shortly"
+    // for a PR that could never land without a human.
+    //
+    // `blocked` rather than `red` because the remedies share no step: a repair
+    // attempt cannot remove a review label, and nothing about the diff is
+    // wrong. Note this fires only on a COMPLETED non-green sibling, so a
+    // still-running one leaves the outcome alone.
+    return { outcome: failedSiblings.length > 0 ? 'blocked' : 'green', ...base };
+  }
+  // The required context is red. Did something FAIL, or was something KILLED?
+  // The aggregator's own conclusion is `failure` either way — it exits 1 on
+  // `needs.<job>.result != success` — so the answer is in the siblings.
+  //
+  // `.length > 0` guards the `.every`: on an empty array `every` is true, which
+  // would make a red context with no sibling detail read as infrastructure and
+  // silently convert every unexplained failure into a retry.
+  const killed =
+    INFRA_CONCLUSIONS.has(match.conclusion) ||
+    (failedSiblings.length > 0 && failedSiblings.every((s) => INFRA_CONCLUSIONS.has(s.conclusion)));
+  return { outcome: killed ? 'infra' : 'red', ...base };
 }
 
 /** The failing sibling job, whose log is worth handing to a repair. The
@@ -212,14 +297,7 @@ export function classifyCheckRuns(payload, requiredContext) {
  *  leg failed, never which line. */
 export function failingSibling(payload, requiredContext) {
   const runs = Array.isArray(payload?.check_runs) ? payload.check_runs : [];
-  return (
-    runs.find(
-      (r) =>
-        r.status === 'completed' &&
-        !GREEN_CONCLUSIONS.has(r.conclusion) &&
-        r.name !== requiredContext,
-    ) ?? null
-  );
+  return runs.find((r) => isFailedSibling(r, requiredContext)) ?? null;
 }
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -371,6 +449,41 @@ export function makeForge({ run, cwd, dryRun = false, sleep = defaultSleep }) {
       if (!runId) return '';
       const log = await gh(['run', 'view', runId, '--log-failed'], { timeoutMs: 180000 });
       return log.stdout.split('\n').slice(-lines).join('\n');
+    },
+
+    /**
+     * Re-run only the failed jobs of the workflow run that produced this SHA's
+     * checks. The ONLY response that can help an infrastructure cancellation,
+     * and before this the loop had none — so its only available reaction to a
+     * runner timeout was a code repair, which cannot help by construction.
+     *
+     * NOT GUARDED HERE. The caller owns "at most once per iteration", because
+     * the budget being protected is the iteration's, not the forge's, and a
+     * limit enforced inside a stateless helper would have to invent state to
+     * hold it. `watchCi` is the single call site and it carries the flag.
+     */
+    async rerunFailedChecks(sha, requiredContext) {
+      if (dryRun) return { ok: false, error: 'dry run' };
+      const r = await gh(checkRunsArgv(sha));
+      let parsed;
+      try {
+        parsed = JSON.parse(r.stdout);
+      } catch {
+        return { ok: false, error: 'check-runs payload was not JSON' };
+      }
+      // The run id can come from ANY check run of that workflow — they share
+      // one — so fall back to the aggregator when no sibling carries a url.
+      const verdict = classifyCheckRuns(parsed, requiredContext);
+      const runId =
+        verdict.failedSiblings.map((f) => runIdFromCheckUrl(f.link)).find(Boolean) ??
+        runIdFromCheckUrl(verdict.link);
+      if (!runId) return { ok: false, error: 'no workflow run id in the check payload' };
+      const out = await gh(rerunFailedArgv(runId), { timeoutMs: 120000 });
+      if (out.code !== 0) {
+        const said = (out.stderr || out.stdout).trim().split('\n')[0];
+        return { ok: false, error: said || `gh run rerun exited ${out.code}` };
+      }
+      return { ok: true, error: null, runId };
     },
   };
   return api;

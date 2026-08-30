@@ -80,6 +80,14 @@ export const REASON = Object.freeze({
   CI_RED: 'ci_red',
   CI_NEVER_STARTED: 'ci_never_started',
   CI_TIMEOUT: 'ci_timeout',
+  // A check OUTSIDE the required context completed red, so the PR cannot merge
+  // however green the loop's own signal is. Separate from CI_RED because the
+  // remedies share no step: there is nothing wrong with the diff and a repair
+  // attempt cannot clear, say, a review label.
+  CI_BLOCKED: 'ci_blocked',
+  // CI was KILLED, not failed — a runner timeout or a cancelled leg. Separate
+  // from CI_RED because a repair cannot help and a re-run can.
+  CI_INFRA: 'ci_infra',
   MERGE_FAILED: 'merge_failed',
   MERGE_QUEUED: 'merge_queued',
   STALE_MAIN: 'stale_main',
@@ -197,6 +205,21 @@ export function next(stage, result = {}, ctx = {}) {
       return { stage: STAGE.WATCH };
 
     case STAGE.WATCH: {
+      // BEFORE the `red` branch, and the order is load-bearing: both of these
+      // are non-green outcomes that a repair attempt cannot fix, so falling
+      // through to `red` would spend the repair budget on them.
+      //
+      // `blocked` — the required context is green but another required check is
+      // red. Measured 2026-08-30 on PR #432, where `Fixture review gate` was
+      // red by design pending a CODEOWNER: the loop merged nothing (branch
+      // protection refused), but recorded `merge_queued`, which reads as "will
+      // land shortly" for a PR that needed a human. Parks so the morning triage
+      // sees it, and NEVER repairs — the diff is not what is wrong.
+      if (result.outcome === 'blocked') return park(REASON.CI_BLOCKED);
+      // `infra` — CI was killed rather than failing. The driver has already
+      // spent its one re-run by the time this is reached (see `watchCi`),
+      // so there is nothing left to try automatically.
+      if (result.outcome === 'infra') return park(REASON.CI_INFRA);
       if (result.outcome === 'red') {
         const attempt = ctx.attempt ?? 1;
         const maxRepairs = ctx.maxRepairs ?? 0;
