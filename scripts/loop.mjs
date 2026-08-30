@@ -46,21 +46,25 @@ import {
   landedOnStaleMain,
   next,
   resetsBreaker,
+  shouldAutofixFormat,
+  stepsAcrossAutofix,
 } from './lib/loop/machine.mjs';
 import { evaluateGuard } from './lib/loop/guard.mjs';
 import { REEXEC_ENV, reexecArgv, reexecEnv, reexecPlan } from './lib/loop/self_update.mjs';
 import {
   ZERO_TOKENS,
+  accumulateBuild,
   addTokens,
   formatUsage,
   meteredTokens,
   withoutLegacyCost,
 } from './lib/loop/usage.mjs';
 import { scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
-import { chooseBead, denyPathStems } from './lib/loop/select.mjs';
+import { ancestorsOfActive, chooseBead, denyPathStems } from './lib/loop/select.mjs';
 import { appendRecord, buildRecord, compareVerdictToGate } from './lib/loop/ledger.mjs';
 import { makeRunner } from './lib/loop/run.mjs';
 import { LockHeldError, acquireLock, releaseLock } from './lib/loop/lock.mjs';
+import { reconcile } from './lib/loop/reconcile.mjs';
 import { DECLINE_LABEL, PARK_LABEL, makeBeads } from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject, makeGit } from './lib/loop/git.mjs';
 import { makeForge } from './lib/loop/forge.mjs';
@@ -135,6 +139,26 @@ export function parseArgs(argv) {
   }
   return out;
 }
+
+/**
+ * The ledger, parsed, or `[]`. A malformed LINE is skipped rather than throwing
+ * the whole file away: `runs.jsonl` is append-only and a run killed mid-write
+ * can leave a partial last line, which must not cost the reader the good rows
+ * above it.
+ */
+const readLedger = (file = LEDGER_FILE) => {
+  if (!fs.existsSync(file)) return [];
+  const rows = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      rows.push(JSON.parse(line));
+    } catch {
+      // A partial line from a killed run. Skipped, not fatal.
+    }
+  }
+  return rows;
+};
 
 const readJson = (file, fallback) => {
   try {
@@ -303,6 +327,13 @@ async function runIteration({ ctx, deps, log }) {
   let drained = false;
   let repairContext = null;
   let treeChanged = null;
+  // Has the gate's one mechanical autofix already been spent this iteration?
+  // Per-ITERATION rather than per-attempt: a repair that reintroduces a
+  // formatting error should reach the operator, not loop on prettier.
+  let formatAutofixed = false;
+  // Accumulated across every `claude` invocation of this iteration — a capped
+  // build, its resume, and any repair. See `accumulateBuild`.
+  let buildTotals = null;
   // Assigned in the `finally`, which every path reaches — an initializer here
   // is dead, and eslint's no-useless-assignment says so.
   let staleMain;
@@ -339,10 +370,30 @@ async function runIteration({ ctx, deps, log }) {
             }
           } else {
             const rows = await beads.ready(config.select, 50);
+            // CONTAINMENT IS COMPUTED FRESH EVERY ITERATION, and it has to be:
+            // the state it reads is one the RUN ITSELF creates. Iteration 5
+            // leaves a guard-withheld bead `in_progress`, and iteration 6 is
+            // the one that must see it. A set gathered once at startup would
+            // be correct for the first bead and stale for every bead after.
+            //
+            // ONE call, ~0.37s against a multi-minute iteration. `--all` is
+            // what makes it one: the closed rows hold 311 of the 457 parent
+            // edges and without them the walk stops at the first closed
+            // ancestor. See `ancestorsOfActive`.
+            const graph = await beads.list();
+            const contains = ancestorsOfActive(graph);
+            // COUNTED OUT LOUD, because the way this fails is by being empty.
+            // Every field it reads (`id`, `parent`, `status`) comes off a bd
+            // row, and a bd that stopped returning one of them would leave the
+            // rule running, reporting nothing, and measuring nothing — the
+            // exact failure the header of `select.mjs` describes for `labels`.
+            // A zero here on a repo with parents is the tell.
+            log(`select: ${graph.length} beads in the graph, ${contains.size} contain other work`);
             bead = chooseBead(rows, {
               select: config.select,
               denyStems: denyPathStems(config.guard.denyPaths),
               parked: ctx.parked,
+              contains,
             });
           }
           if (bead) {
@@ -390,7 +441,15 @@ async function runIteration({ ctx, deps, log }) {
             failureOutput: repairContext?.output,
             resumeSessionId: sessionId,
             capped: repairContext?.capped === true,
+            priorFollowUps: ctx.followUpsThisRun,
           });
+          // ONE SITE, ABOVE BOTH ASSIGNMENTS, and that placement IS the fix.
+          // There are two `parts.build = { ... }` literals below — the usage
+          // limit branch and the ordinary one — and each overwrote the previous
+          // attempt's telemetry wholesale. Accumulating here, before either can
+          // run, is what makes a three-invocation bead impossible to record as
+          // a one-invocation bead. `Cebab-qd2.39`.
+          buildTotals = accumulateBuild(buildTotals, built);
           if (built.usageLimit) {
             // A limited attempt still SPENT. Breaking out before accounting for
             // it let the run ceiling under-report exactly the case the operator
@@ -406,6 +465,7 @@ async function runIteration({ ctx, deps, log }) {
               exitCode: built.exitCode ?? null,
               attempts: attempt,
               capResumes,
+              totals: buildTotals,
             };
             logUsage(log, bead, attempt, built);
             result = { usageLimit: true, haltReason: REASON.USAGE_LIMIT };
@@ -438,6 +498,10 @@ async function runIteration({ ctx, deps, log }) {
             // costs an attempt (Cebab-qd2.37), so without this the ledger could
             // no longer tell one `claude` invocation from two.
             capResumes,
+            // EVERY invocation this iteration made, not just this one. The
+            // fields above stay last-invocation so 32 existing rows keep their
+            // meaning. `Cebab-qd2.39`.
+            totals: buildTotals,
           };
           // Accounted whatever happened. A failed build still SPENT, and
           // counting only successes let the run ceiling under-report by exactly
@@ -478,13 +542,55 @@ async function runIteration({ ctx, deps, log }) {
 
         case STAGE.GATE: {
           const changedPaths = await git.changedPaths();
-          const gated = await gate.run({ changedPaths });
+          let gated = await gate.run({ changedPaths });
+          // A FORMATTING FAILURE COSTS A WHOLE INVOCATION, AND IT NEED NOT.
+          //
+          // The repair path re-spawns `claude` to re-read the bead, the diff
+          // and the failure, so that it can run one deterministic command. This
+          // runs the command instead and re-gates, spending no attempt: the
+          // driver owns control flow, and `npm run format` requires none of the
+          // judgement a repair exists to buy.
+          //
+          // ONCE PER ITERATION, and the flag is what bounds it. A second
+          // format:check failure after prettier has already run means prettier
+          // could not fix it — an unparseable file — which is a real defect and
+          // must reach the repair path exactly as it does today.
+          //
+          // The re-gate is a FULL one, from step 1. format:check is step 3 of
+          // 10, so steps 4-10 never ran and there is nothing to resume from;
+          // re-running is what a repair would have done anyway, minus the
+          // model turn.
+          // KEPT, BECAUSE THE RE-GATE'S STEPS ALL PASS AND WOULD ERASE THE
+          // FAILURE. `gate.autofixFormat`'s whole justification for firing
+          // AFTER the check rather than before it is that the failure stays
+          // real and stays in `gate.steps` — and assigning the second run's
+          // steps over the first made that claim false, leaving a boolean as
+          // the only trace of a ten-step gate that had reddened.
+          let preAutofixSteps = [];
+          if (shouldAutofixFormat(gated, { alreadyAutofixed: formatAutofixed })) {
+            formatAutofixed = true;
+            log('gate: format:check failed — running `npm run format`, then re-gating');
+            const fixed = await gate.autofixFormat();
+            if (fixed.code === 0) {
+              preAutofixSteps = gated.steps ?? [];
+              gated = await gate.run({ changedPaths });
+            } else {
+              log('gate: `npm run format` itself failed — falling through to the repair path');
+            }
+          }
           parts.gate = {
-            steps: gated.steps,
+            steps: stepsAcrossAutofix(preAutofixSteps, gated.steps),
             playgroundRan: gated.playgroundRan,
             liveSmokesRan: gated.liveSmokesRan,
+            // Recorded so a run that never needed the autofix and a run that
+            // needed it every time are distinguishable the next morning. This
+            // is the number that says whether the prompt change is working.
+            ...(formatAutofixed ? { formatAutofixed: true } : {}),
           };
-          parts.verdictVsGate = compareVerdictToGate(parts.commandsRun ?? [], gated.steps);
+          // Against the SAME steps the row carries, failure included. Computing
+          // it from the repaired run alone would report agreement between the
+          // agent's claimed commands and a gate result the agent never caused.
+          parts.verdictVsGate = compareVerdictToGate(parts.commandsRun ?? [], parts.gate.steps);
           if (!gated.passed) {
             log(`gate: FAILED at ${gated.failedStep}`);
             repairContext = { failedStep: gated.failedStep, output: gated.output };
@@ -767,6 +873,8 @@ async function runIteration({ ctx, deps, log }) {
     // apart, so it is told. `Cebab-qd2.24`.
     crashed: crashed && !bead,
     ciGreen: parts.ci?.conclusion === 'success',
+    // What THIS iteration filed, for the next one's prompt. `Cebab-7t6`.
+    filed: parts.harvest?.filed ?? [],
   };
 }
 
@@ -953,9 +1061,50 @@ async function harvest({ beads, bead, parts, disposition, reason, config, log })
   // the coupling is what made one typo reach this far.
   parts.harvest.followUps ??= [];
   for (const followUp of parts.verdict?.follow_ups ?? []) {
+    // ALREADY TRACKED IS AN OUTCOME, NOT A FAILURE TO SEARCH.
+    //
+    // The run of 2026-08-27 filed ten follow-ups, two PAIRS of which are the
+    // same finding written twice. `Cebab-2pm` is the one that decides the fix:
+    // its own title reads "Wire assistantSystemPrompt into runOneTurn (already
+    // tracked as Cebab-03a)". The agent searched, FOUND the existing bead, and
+    // filed anyway — so the gap was never that agents cannot see prior beads,
+    // it is that HARVEST gave them no way to say so. It had to force the fact
+    // into a title, where it becomes queue noise a later SELECT hands back as
+    // work.
+    //
+    // Recorded rather than dropped: the ledger still says the agent noticed
+    // something, and says which bead already covers it.
+    const claimed = followUp.already_tracked?.trim?.() ?? '';
+    if (claimed) {
+      // THE ID IS VERIFIED, AND AN UNRESOLVABLE ONE FILES ANYWAY.
+      //
+      // Taking the string on trust would let the agent DISCARD a finding by
+      // naming a bead that does not exist — a transposed character, or an id
+      // half-remembered from the body it just read — three lines above a call
+      // that THROWS rather than lose one. The whole reason this loop exists is
+      // that findings get lost, so the safe direction is a duplicate bead, never
+      // a silent drop. `beads.show` already returns null on a miss (bd exits 0
+      // and prints an error OBJECT, which `show` handles by shape).
+      const existing = await beads.show(claimed);
+      if (existing) {
+        // Title alongside the id: the ledger has to keep the claim, not just
+        // the pointer, or a morning `jq` cannot recover what was noticed.
+        (parts.harvest.alreadyTracked ??= []).push({ id: claimed, title: followUp.title });
+        log(`harvest: "${followUp.title}" is already tracked as ${claimed} — not filed`);
+        continue;
+      }
+      log(
+        `harvest: "${followUp.title}" claims to be tracked as ${claimed}, which does not ` +
+          `exist — filing it rather than losing it`,
+      );
+    }
     const id = await beads.fileFollowUp(followUp, bead.id, config.harvest);
     if (!id) throw new Error(`could not file follow-up "${followUp.title}" — refusing to lose it`);
     parts.harvest.followUps.push(id);
+    // Title alongside the id: the next iteration's agent is a fresh process
+    // that has never seen this bead, and `Cebab-8x8.4.1` on its own is not
+    // something it can compare a finding against.
+    (parts.harvest.filed ??= []).push({ id, title: followUp.title });
     log(`harvest: filed ${id}`);
   }
 }
@@ -1141,6 +1290,40 @@ async function main() {
     build: makeBuild({ run, cwd: REPO_ROOT, config, libDir: LIB_DIR, loopDir: LOOP_DIR, log }),
   };
 
+  // WHAT THE LAST RUN LEFT BEHIND, before this one reads the queue.
+  //
+  // Here rather than inside `preflight` for a mechanical reason: preflight runs
+  // before `acquireLock` and before `deps` exists, and it must — a refusal has
+  // to cost nothing and take no lock. This needs `beads` and `forge`, so it is
+  // the first thing after both, and after the lock, because it WRITES.
+  //
+  // Failure is swallowed on purpose. Reconciling is housekeeping about previous
+  // runs; a bd or gh hiccup here must not stop this run doing its actual work,
+  // and everything it would have done stays true for the next attempt.
+  try {
+    await reconcile({
+      beads: deps.beads,
+      forge: deps.forge,
+      rows: readLedger(),
+      // `0` IS bd's NO-LIMIT, and 200 made this whole half report nothing.
+      // Measured 2026-08-28 with the real DEFAULTS.select: `-n 200` returns
+      // exactly 200 of 207 ready rows and drops `Cebab-vie.28` and
+      // `Cebab-vie.29` — which are this module's own documented positive
+      // controls, the two beads that parked without their label landing. bd
+      // prints `Showing 200 of 207 ready issues` to STDERR and leaves stdout
+      // valid JSON, so nothing threw and the pass reported a clean empty set.
+      // Worse than a constant wrong answer: `hybrid` mixes priority and age, so
+      // whether a parked bead falls inside the cap changes run to run.
+      readySet: async () =>
+        new Set((await deps.beads.ready(config.select, 0)).map((row) => row.id)),
+      remoteLoopBeads: () => git.remoteLoopBeads(),
+      log,
+      dryRun: Boolean(args.dryRun),
+    });
+  } catch (error) {
+    log(`reconcile: skipped — ${error?.message ?? error}`);
+  }
+
   const ctx = {
     parked: new Set(),
     // WHAT THE RUN CONSUMED, IN THE UNITS THE OPERATOR HAS. This was
@@ -1166,6 +1349,11 @@ async function main() {
     // operator intervention.
     consecutiveDeclines: 0,
     declinedThisRun: new Set(),
+    // WHAT THIS RUN HAS ALREADY FILED. Each iteration is a fresh `claude -p`
+    // with no memory of its siblings, so a bead a sibling filed minutes earlier
+    // is in the DB and nothing prompts a search against it. Carried into the
+    // BUILD prompt so the agent can see them. `Cebab-7t6`.
+    followUpsThisRun: [],
     forcedBead: args.bead,
     startedAt: now,
   };
@@ -1268,6 +1456,10 @@ async function main() {
         break;
       }
       iterations += 1;
+      // Accumulated across the run so each later BUILD prompt can name what its
+      // siblings already filed. Bounded below at render time, not here — the
+      // whole list is worth keeping for the ledger's sake.
+      ctx.followUpsThisRun.push(...(outcome.filed ?? []));
 
       if (outcome.disposition === DISPOSITION.PARKED) ctx.parked.add(outcome.bead.id);
       // `ciGreen` is what makes a WITHHELD iteration count as evidence. With
@@ -1455,12 +1647,13 @@ function printStatus() {
       `\nconsumed this run: ${formatUsage({ turns: state.turns ?? 0, tokens: state.tokens })}\n`,
     );
   }
-  const lines = fs.existsSync(LEDGER_FILE)
-    ? fs.readFileSync(LEDGER_FILE, 'utf8').trim().split('\n').filter(Boolean).slice(-10)
-    : [];
-  if (lines.length > 0) process.stdout.write('\nlast iterations:\n');
-  for (const line of lines) {
-    const r = JSON.parse(line);
+  // `readLedger`, not a second bare `JSON.parse` loop: a run killed mid-append
+  // leaves a partial last line, and `--status` is the first thing an operator
+  // reaches for after exactly that. It used to throw a SyntaxError into the
+  // top-level catch and exit HALTED instead of printing the last ten rows.
+  const rows = readLedger().slice(-10);
+  if (rows.length > 0) process.stdout.write('\nlast iterations:\n');
+  for (const r of rows) {
     process.stdout.write(
       `  ${r.ts}  ${r.bead ?? '-'}  ${r.disposition ?? '-'}  ${r.pr?.url ?? ''}\n`,
     );
@@ -1483,4 +1676,4 @@ if (invokedDirectly) {
     });
 }
 
-export { EXIT, harvest, main, prBody, preflight, watchCi };
+export { EXIT, harvest, main, prBody, preflight, readLedger, watchCi };

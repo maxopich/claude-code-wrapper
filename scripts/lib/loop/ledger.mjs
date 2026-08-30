@@ -119,6 +119,13 @@ export function buildRecord(parts = {}, now = 0) {
       // build succeeded, so `detail` is empty, and no gate, CI or PR ever ran.
       summary: build.summary ?? null,
       attempts: build.attempts ?? 0,
+      // EVERY invocation of this iteration, where the fields above are the LAST
+      // one's. Added alongside rather than folded in: accumulating in place
+      // would silently re-point the meaning of `numTurns`/`costUsd`/`tokens` on
+      // every row already written, in an append-only corpus. Measured gap on
+      // the run of 2026-08-27 — the rows accounted for 23% of its turns and 19%
+      // of its cache reads. `Cebab-qd2.39`.
+      totals: build.totals ?? null,
       // How many times a turn cap was RESUMED. Apart from `attempts` because a
       // resume no longer costs one (Cebab-qd2.37), so `attempts` alone can no
       // longer say how many `claude` invocations a bead cost.
@@ -142,6 +149,12 @@ export function buildRecord(parts = {}, now = 0) {
       steps,
       playgroundRan: gate.playgroundRan ?? false,
       liveSmokesRan: gate.liveSmokesRan ?? false,
+      // Present only when the gate's one mechanical autofix fired. Absent is
+      // the good state, so this is `jq 'select(.gate.formatAutofixed)'` for
+      // "how often is the BUILD prompt's formatting instruction being ignored"
+      // — the measurement that says whether that instruction is working, which
+      // the failure itself no longer records now that it is repaired in place.
+      ...(gate.formatAutofixed ? { formatAutofixed: true } : {}),
     },
     verdictVsGate: parts.verdictVsGate ?? compareVerdictToGate(parts.commandsRun ?? [], steps),
     diffstat: {
@@ -175,6 +188,13 @@ export function buildRecord(parts = {}, now = 0) {
       ...(harvest.parkFailed ? { parkFailed: true } : {}),
       ...(harvest.noted !== undefined ? { noted: harvest.noted } : {}),
       followUps: harvest.followUps ?? [],
+      // Findings the agent recognised as already tracked, as `{ id, title }` —
+      // the TITLE too, so the row keeps the claim rather than only the pointer.
+      // Present only when the verb was used AND the id resolved, so
+      // `jq 'select(.harvest.alreadyTracked)'` measures whether it is being
+      // used at all — the number that says whether the duplicate-filing fix is
+      // working. `Cebab-7t6`.
+      ...(harvest.alreadyTracked?.length ? { alreadyTracked: harvest.alreadyTracked } : {}),
     },
     // Present only once an iteration got as far as its teardown. `pulled:false`
     // after a merged row is the stale-main halt's evidence.

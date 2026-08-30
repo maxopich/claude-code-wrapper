@@ -397,18 +397,59 @@ silently rotted list fails in the direction of spending money. `Cebab-qd2.29`.
 2. `git checkout main && git pull --ff-only`.
 3. `bd ready --json -n 50 -s <sortPolicy> --exclude-label <excludeLabels> --exclude-type
 <excludeTypes>`. **The label and type exclusions MUST be passed to `bd`, not applied to the
-   result.** Measured 2026-08-25: no bd JSON output — `ready`, `list` or `show` — carries a
-   `labels` field, so a driver-side `bead.labels` filter reads `undefined`, treats it as "no
-   labels", and excludes nothing. It would run on every bead, report success and measure nothing,
-   while silently disabling the loop's own memory: HARVEST labels a parked bead `loop-stuck`
-   exactly so SELECT skips it next run. Positive controls: `--exclude-type epic` 223 → 207 (16
-   epics), `--exclude-label security` 223 → 211 (`security` is on exactly 12 beads).
+   result.** Measured 2026-08-25: no bd JSON output — `ready`, `list` or `show` — carried a
+   `labels` field, so a driver-side `bead.labels` filter read `undefined`, treated it as "no
+   labels", and excluded nothing. It would have run on every bead, reported success and measured
+   nothing, while silently disabling the loop's own memory: HARVEST labels a parked bead
+   `loop-stuck` exactly so SELECT skips it next run. Positive controls: `--exclude-type epic`
+   223 → 207 (16 epics), `--exclude-label security` 223 → 211 (`security` is on exactly 12 beads).
+
+   **Re-measured 2026-08-28 on bd 1.1.2 and the field is BACK** — 99 of 240 `bd ready --json`
+   rows carry a populated `labels` array, `loop-stuck` among them. The paragraph above is
+   history, not a live constraint, and the rule it justified is unchanged: bd decides what a
+   label means, and a client-side re-implementation would be a second definition free to drift.
+   Recorded here because the stale wording read as a standing fact about bd, so the next person
+   to check would have found `labels` present and concluded the rule was wrong.
+
    Then filter the returned rows on the fields bd DOES return: priority > `maxPriority`, any type
    in `excludeTypes`, any id matching `excludeIdPrefixes`, any bead in this run's in-memory
    `parked` set, any bead whose title or body names a path in `guard.denyPaths`.
-4. Take the first survivor. None → clean stop, exit 0.
 
-`--bead <id>` skips 3–4 but **not** 1–2, and still applies the deny-path check.
+4. **Skip any bead that CONTAINS other unfinished work**, computed from the bead graph:
+   `bd list --json -n 0` (every ACTIVE bead — measured 2026-08-28: 249 rows, 243 open + 6
+   in_progress, and no closed ones) plus `bd list --status=closed --json -n 0`, then block every
+   ANCESTOR of every open-or-in_progress bead. ~0.7s per iteration, recomputed every iteration
+   because the state it reads is one the run itself creates.
+
+   Batch-derived containment is not enough and the run of 2026-08-27 is why. Iteration 5 built
+   `Cebab-8x8.2.1`; the guard withheld the merge, so PR #422 stayed open and HARVEST left the
+   bead `in_progress` — correctly, since a human merging it was the remaining work. That takes
+   it out of `bd ready`, so its parent had no child in the batch, read as a leaf, and iteration 6
+   selected `Cebab-8x8.2` and built it from a main without #422. Both PRs create
+   `assistant/kb/00-index.md`; the second to merge conflicted and a human resolved it by hand.
+   The rule itself is sound — `Cebab-8x8.1` was selected in the same run after all three children
+   had merged and closed, and correctly returned `no_change_needed`.
+
+   TRANSITIVE, and the closed rows are what make it so. `8x8.2.1 → 8x8.2 → 8x8` is two levels, and
+   a chain may pass THROUGH a closed bead: if `8x8.2` is closed while its child `8x8.2.2` is open,
+   `8x8` still contains unfinished work and only the closed row's own `parent` says so. The batch
+   rule is UNIONED with this, never replaced, so a caller that passes nothing gets the previous
+   behaviour exactly. One `bd list --json -n 0 --all` supplies the whole graph — `--all` because
+   the unfiltered form returns open and in_progress ONLY (249 of 608 rows) and `-n 0` because the
+   default page truncates to STDERR while leaving stdout valid JSON, so a caller cannot tell.
+
+   **NOT fixed by this, and the distinction matters.** Every iteration branches from `origin/main`
+   and `loop.merge` is false by default, so a withheld PR's files are invisible to every LATER
+   iteration of the same run — related or not. #422 and #423 collided on one file and happened to
+   be parent and child, which is the only reason ancestry caught them; two unrelated beads collide
+   identically and share no ancestor. The SELECT-side version cannot work: it needs a bead's files
+   before building it, and item 3 already records that beads name files by basename as often as by
+   path. The workable shape is a post-PUBLISH REPORT intersecting `changedPaths` with the files of
+   open `loop/*` PRs — certain, where a pre-build guess is not. `Cebab-qd2.44`.
+
+5. Take the first survivor. None → clean stop, exit 0.
+
+`--bead <id>` skips 3–5 but **not** 1–2, and still applies the deny-path check.
 
 **THERE IS NO AUTOMATIC SIGNAL FOR "THIS BEAD IS UNSUITABLE", AND ONE WAS MEASURED FOR.** Across
 the first three real runs, `Cebab-7r8` (20 turns, $1.84) and `Cebab-vie.32` (49 turns, $4.10)
@@ -524,6 +565,31 @@ catching a failure here saves a full CI round trip.
 | 8   | `npm run smoke`                                   |                                                                              |
 | 9   | `npm run build`                                   |                                                                              |
 | 10  | `npm --workspace server exec tsx src/ci_smoke.ts` | Hermetic mock WS smoke                                                       |
+
+**A `format:check` failure is repaired in place, once per iteration, and costs no attempt.**
+Measured 2026-08-28 across every run the loop has made: EVERY gate failure in its history is step
+3 and nothing else — 6 `gate: FAILED at format:check` lines in the console log, 5 of 8 builds in
+the run of 2026-08-27, with no lint, typecheck, test, build, smoke or ci_smoke failure that whole
+night. Each one spent a full `claude -p` repair to re-establish the bead's entire context and run
+one command that takes two seconds. So the driver runs `npm run format` itself and re-gates from
+step 1, **keeping the failing run's steps** so the row still shows what reddened.
+
+That the evidence is the CONSOLE LOG rather than the ledger is itself a defect: all 32 rows carry
+zero non-zero gate steps, because `parts.gate` is reassigned per attempt and the row keeps the
+passing retry — `parts.build`'s overwrite (`Cebab-qd2.39`) one field over. `Cebab-qd2.43`.
+
+**It fires AFTER the failure, never before it,** which is the opposite of the obvious design.
+Inserting `npm run format` as a step ahead of `format:check` makes that check green by
+construction — `prettier --write` then `prettier --check` can only disagree about a file prettier
+cannot parse — and a gate step that can no longer fail is a gate step measuring nothing. Firing
+only on a real failure keeps the step live and keeps the failure in `gate.steps`.
+
+Bounded to ONE per iteration: a second `format:check` failure means prettier could not fix it,
+which is a real defect and must reach the repair path. `prettier --write .` is repo-wide but its
+blast radius is bounded by CI enforcing `format:check` on every PR, so `main` is always
+format-clean and a branch cut from it has no pre-existing misformatted file to sweep in. The cause
+is fixed at source too — `build-prompt.md` now names the step, which it never did — and
+`gate.formatAutofixed` on the ledger row is what measures whether that instruction is obeyed.
 
 **Playground tier — when `playgroundTier` is `"always"`, or `"auto"` and the diff touches
 `playgroundTriggerPaths`:**
@@ -690,6 +756,21 @@ one. The asymmetry is deliberate: a direct merge has already happened, so a stat
 A queued merge has not happened and may not for hours.
 
 ### 6.8 HARVEST — _driver_
+
+**A follow-up the agent recognises as already tracked is RECORDED, not filed.** Set
+`already_tracked` to the existing bead's id and HARVEST logs it, puts it on the ledger row as
+`harvest.alreadyTracked`, and creates nothing. The run of 2026-08-27 filed ten follow-ups, two
+PAIRS of which were the same finding written twice — and `Cebab-2pm`'s own TITLE reads "(already
+tracked as Cebab-03a)", so that agent had searched, found the bead, and filed anyway. The gap was
+never that agents cannot see prior beads; it is that they had no verb for saying so and had to
+force the fact into a title, where it becomes queue noise a later SELECT hands back as work.
+An empty or whitespace value still FILES — treating `""` as "tracked" would silently drop a
+finding, which is the failure mode this loop exists to prevent, in the opposite direction.
+
+The other half is that each iteration is a fresh `claude -p` with no memory of its siblings, so
+the driver accumulates what the run has filed and renders the newest 20 into each later BUILD
+prompt. Capped because an `--until 8` night can file dozens and a list long enough to crowd out
+the bead's own body would trade one duplicate for something worse. `Cebab-7t6`.
 
 1. **Four terminal states reach the bead, not two.**
 
@@ -1154,11 +1235,25 @@ directly with an injected `run` that returns the limit message.
     "summary": "…", // the agent's own account; the WHOLE content of a decline (§6.8)
     "attempts": 1,
     "capResumes": 0, // turn caps RESUMED; not an attempt, so `attempts` alone under-counts
+    // EVERY invocation of the iteration; the fields above are the LAST one's.
+    // Added alongside rather than folded in — accumulating in place would
+    // re-point the meaning of rows already written. Measured gap on the run of
+    // 2026-08-27: the rows carried 23% of its turns, 19% of its cache reads.
+    "totals": {
+      "invocations": 3,
+      "numTurns": 128,
+      "costUsd": 5.4,
+      "tokens": { "input": 3600, "output": 82399, "cacheRead": 15251472, "cacheCreation": 943523 },
+    },
   },
   "gate": {
     "steps": [{ "name": "lint", "exitCode": 0, "ms": 8210 }],
     "playgroundRan": true,
     "liveSmokesRan": false,
+    // Present only when the gate repaired a `format:check` failure itself
+    // (§6.4). Absent is the good state, so `jq 'select(.gate.formatAutofixed)'`
+    // counts how often the prompt's formatting instruction was ignored.
+    "formatAutofixed": true,
   },
   "verdictVsGate": "agree",
   "diffstat": { "files": 4, "insertions": 118, "deletions": 12 },
@@ -1166,7 +1261,9 @@ directly with an injected `run` that returns the limit message.
   "pr": { "number": 393, "url": "https://github.com/…/393" },
   "ci": { "conclusion": "success", "waitedMs": 512000, "runUrl": "…" },
   "land": { "merged": true, "queued": false, "sha": "a91298b", "state": "MERGED" },
-  "harvest": { "beadClosed": true, "followUps": ["Cebab-p2x"] },
+  // `alreadyTracked` is present only when the agent used the `already_tracked`
+  // verb on a follow-up (§6.8) — the finding is recorded and no bead created.
+  "harvest": { "beadClosed": true, "followUps": ["Cebab-p2x"], "alreadyTracked": ["Cebab-03a"] },
   "restore": { "pulled": true, "detail": "" },
   "driver": { "revision": "d72439b…", "restarted": false },
   "disposition": "merged",
@@ -1546,6 +1643,64 @@ The `.env` line is conditional on `gate.playgroundTier` resolving to anything bu
 four lines to write.
 
 ---
+
+## 13.1 RECONCILE — _driver_, after preflight and before the first SELECT
+
+**What the LAST run left behind.** Every other stage acts on a bead the loop is holding; this one
+acts on beads a previous run put down deliberately and then never looked at again. It runs once,
+after the lock is taken and `beads`/`forge` exist, and before the loop body. A bd or gh failure
+here is swallowed — reconciling is housekeeping, and everything it would have done stays true for
+the next attempt.
+
+**The withheld half (`Cebab-qd2.42`), which is the destructive one.** `loop.merge` is false by
+default, so `guard_withheld` is how an ordinary successful iteration ends, and HARVEST correctly
+leaves the bead `in_progress` because a human merging it is the remaining work. Then nothing runs
+again: the operator merges the PR and the bead stays `in_progress` forever — not in `bd ready`, so
+the loop never re-selects it; not closed, so its epic never completes. Measured on the run of
+2026-08-27: 3 of 8 iterations withheld (`Cebab-8x8.2.1`/#422, `Cebab-8x8.2`/#423,
+`Cebab-8x8.3.2`/#425), all three merged, all three still `in_progress` the next morning, all
+closed by hand. A fourth (`Cebab-qd2.40`) surfaced days later with its work shipped in #418. At
+that rate an unattended week strands the majority of what it ships.
+
+**THREE INDEPENDENT CONFIRMATIONS BEFORE ANY BEAD IS CLOSED**, because this is the only place the
+loop writes to a bead nobody is holding:
+
+1. the LEDGER's latest row for the bead is `guard_withheld` or `merge_queued` and names a PR;
+2. `bd` says the bead is STILL `in_progress` — a human who closed, reopened or reassigned it is
+   left alone, silently;
+3. the FORGE says `state: MERGED` **and** hands back a `mergeCommit.oid`.
+
+Any one disagreeing means no write. A `MERGED` state with no merge commit is a contradiction and
+is reported, not believed. A PR `CLOSED` without merging is reported LOUDLY — the human rejected
+the work, and closing the bead would file an iteration's whole output as done. `OPEN`, unreadable,
+and any state this code has never seen all mean WAIT. This is LAND's own discipline — verify,
+never predict — applied to a bead the loop put down hours ago.
+
+**The ledger is the source, not the bead's note.** Parsing the PR number out of `bd`'s notes works
+and is the wrong input: it is prose, written for a human, and a regex over it would also match a
+bead whose description quotes a PR url, a note a person edited, or the same sentence reworded by a
+later change to HARVEST — with CLOSING THE WRONG BEAD as the failure mode. The ledger already
+carries `{ bead, disposition, pr: { number } }` structurally because the driver wrote it, verified
+across all 32 rows. The cost of that choice, stated rather than discovered: `.loop/` is gitignored,
+so a bead withheld on one machine is invisible on another.
+
+**The parked half (`Cebab-qd2.41`) only ever REPORTS.** For each bead whose latest ledger row is
+`parked`, ask whether it is still returned by the loop's own `readyArgv` and print the set. It
+does **not** filter: the loop's cross-run memory stays the `loop-stuck` LABEL, one mechanism
+rather than two, because a second exclusion path would be a second definition of "skip this bead",
+free to drift from the first and to disagree in the direction that silently drains the queue.
+Live positive control at the time of writing: `Cebab-vie.28` and `Cebab-vie.29` both have a parked
+row and are both still selectable. **The ready set is fetched with `-n 0`**, and that is not a
+detail: with the default 200 it returned 200 of 207 rows and dropped both of those beads, so this
+half reported nothing at all on the only data it had — bd prints `Showing 200 of 207` to STDERR and
+leaves stdout valid JSON, so nothing threw.
+
+**One `git ls-remote` covers the other silent budget-waster.** A bead whose `loop/<id>` branch is
+still on the remote is re-selected as normal — nothing labels it — and the loop spends a full turn
+budget on BUILD and the whole gate before `push` fails non-fast-forward at PUBLISH, since attempt 1
+pushes without `--force`. Measured instance: `Cebab-p5y`, whose PR #403 sat on `loop/Cebab-p5y`
+while the bead stayed selectable. Reported alongside the parked set, and a report for the same
+reason: a stale branch is a fact about the remote, not a judgement about the bead.
 
 ## 14. Deferred — do not implement
 

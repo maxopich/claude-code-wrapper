@@ -6,20 +6,27 @@
  * ────────────────────────────────────────────────────────────────────────────
  * WHY LABEL FILTERING IS NOT DONE HERE, AND MUST NOT BE MOVED HERE.
  *
- * MEASURED, 2026-08-25, bd against this repo's `.beads/`: NO bd JSON output
- * carries a `labels` field. `bd ready --json`, `bd list --json` and
- * `bd show --json` all return exactly
- *
- *   id, title, description, design, acceptance_criteria, notes, status,
- *   priority, issue_type, owner, created_at, created_by, updated_at,
- *   external_ref, dependency_count, dependent_count, comment_count
- *
- * so a client-side `bead.labels.includes(...)` reads `undefined`, treats it as
- * "this bead has no labels", and excludes NOTHING. It would run on every bead,
- * report success, and measure nothing — and the thing it silently stops
+ * MEASURED, 2026-08-25: NO bd JSON output carried a `labels` field, so a
+ * client-side `bead.labels.includes(...)` read `undefined`, treated it as "this
+ * bead has no labels", and excluded NOTHING. It would have run on every bead,
+ * reported success, and measured nothing — and the thing it silently stops
  * measuring is the loop's own memory: HARVEST labels a parked bead
  * `loop-stuck` precisely so SELECT skips it next run. Inert, the loop re-picks
  * last night's stuck bead every single night.
+ *
+ * RE-MEASURED 2026-08-28 on bd 1.1.2, AND THE FIELD IS THERE NOW: 99 of 240
+ * `bd ready --json` rows carry a populated `labels` array, `loop-stuck` among
+ * them. So the sentence above is history, not a live constraint — but the
+ * DECISION it justified is unchanged and must not be revisited on the strength
+ * of the field reappearing. Server-side exclusion is still correct because it
+ * is bd that decides what a label means, and a client-side re-implementation
+ * would be a second definition free to drift from the first. What the field's
+ * return DOES buy is a cheap assertion: a test can now confirm the rows bd
+ * hands back really are label-free, instead of taking the flag on trust.
+ *
+ * The reason this paragraph exists at all is that the stale version read as a
+ * measured fact about bd rather than a dated one, and the next author to check
+ * would have found `labels` present and concluded the rule was wrong.
  *
  * So label and type exclusion are pushed down to `bd ready`, which does both
  * natively and server-side. Positive controls, same day:
@@ -147,9 +154,15 @@ export function denyPathStems(denyPaths = []) {
  * @param {Array<object>} beads    rows from `bd ready --json`
  * @param {{select: object, denyStems?: string[], parked?: Set<string>}} opts
  */
-export function chooseBead(beads = [], { select = {}, denyStems = [], parked } = {}) {
+export function chooseBead(beads = [], { select = {}, denyStems = [], parked, contains } = {}) {
   const parkedSet = parked instanceof Set ? parked : new Set(parked ?? []);
+  // UNION, NEVER REPLACEMENT. The batch rule below is computed unconditionally
+  // and the injected set is added to it, so a caller that passes nothing gets
+  // exactly the previous behaviour and a caller that passes a graph-derived set
+  // cannot silently LOSE the batch rule by forgetting to fold it in. The two
+  // catch different things — see `ancestorsOfActive`.
   const containers = containerIds(beads);
+  for (const id of contains ?? []) containers.add(id);
   const maxPriority = select.maxPriority ?? Number.POSITIVE_INFINITY;
   const excludeTypes = select.excludeTypes ?? [];
   const prefixes = select.excludeIdPrefixes ?? [];
@@ -234,4 +247,92 @@ export function containerIds(beads = []) {
     if (typeof parent === 'string' && parent.length > 0) ids.add(parent);
   }
   return ids;
+}
+
+/**
+ * A bead is ACTIVE while it still represents work nobody has finished. bd's own
+ * two non-terminal statuses, named here rather than inlined because both the
+ * containment walk and its test have to agree on the set.
+ */
+export const ACTIVE_STATUSES = Object.freeze(new Set(['open', 'in_progress']));
+
+/**
+ * Every ancestor of every ACTIVE bead — containment computed from the bead
+ * GRAPH rather than from the ready batch.
+ *
+ * WHY THE BATCH RULE ABOVE IS NOT ENOUGH, measured on the run of 2026-08-27.
+ * `containerIds` derives containment from the `parent` pointers of the rows IN
+ * THE READY BATCH, so it is correct only while every child is either open or
+ * closed — and a guard-withheld bead is neither. HARVEST deliberately leaves it
+ * `in_progress` (a human merging its PR is the remaining work), which takes it
+ * out of `bd ready`; with no child in the batch its parent has no pointer aimed
+ * at it and reads as a leaf.
+ *
+ * That is not hypothetical. Iteration 5 built `Cebab-8x8.2.1`, the guard
+ * withheld the merge, and PR #422 was left open with the bead in_progress.
+ * Iteration 6 then selected `Cebab-8x8.2` — its DIRECT PARENT — and built it
+ * from a main that did not contain #422. Both PRs create
+ * `assistant/kb/00-index.md`; the second to merge conflicted and a human
+ * resolved it by hand. The rule itself is sound, and the same run proves it:
+ * `Cebab-8x8.1` was selected after all three of its children had merged and
+ * closed, and correctly returned `no_change_needed`.
+ *
+ * TRANSITIVE, BECAUSE THE CHAINS ARE. `Cebab-8x8.2.1` -> `Cebab-8x8.2` ->
+ * `Cebab-8x8` is two levels, so blocking only the direct parent would leave the
+ * grandparent selectable while its grandchild is mid-flight — the same defect
+ * one level up.
+ *
+ * PASS EVERY BEAD bd KNOWS ABOUT, INCLUDING THE CLOSED ONES. `status` is read
+ * here rather than by the caller, so a half-filtered list cannot silently
+ * narrow the rule — but the parent MAP still needs the closed rows, because a
+ * chain may pass THROUGH a closed bead: if `8x8.2` is closed while its child
+ * `8x8.2.2` is open, `8x8` still contains unfinished work and the walk can only
+ * find that out by reading the closed row's own `parent`. Measured 2026-08-28
+ * across all 608 beads: 457 parent edges, of which 311 are on closed rows, and
+ * zero active chains currently pass through one. Zero occurrences is the reason
+ * to include them cheaply now rather than the reason to leave them out — the
+ * omission would be invisible until the day it fired.
+ *
+ * Pass every bead bd knows about — `listArgv` uses `--all` for exactly this,
+ * and its header records why the unfiltered form is not enough.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT FIX, recorded because it is the same hazard
+ * one level out and the fix above makes it easy to think it is covered. Every
+ * iteration branches from `origin/main`, and `loop.merge` is false by default,
+ * so a withheld PR's files are invisible to every LATER iteration of the same
+ * run — related or not. #422 and #423 collided on `assistant/kb/00-index.md`
+ * and happened to be parent and child, which is the only reason ancestry could
+ * catch them; two unrelated beads under different epics collide identically and
+ * share no ancestor.
+ *
+ * It is not fixed HERE because the SELECT-side version cannot work: it needs to
+ * know which files a bead will touch before building it, and this file's own
+ * header records the measurement that kills that — beads name their files by
+ * BASENAME as often as by path. The workable shape is a post-PUBLISH REPORT
+ * intersecting `changedPaths` with the files of open `loop/*` PRs, which is
+ * certain where a pre-build guess is not. `Cebab-qd2.44`.
+ */
+export function ancestorsOfActive(rows = []) {
+  const parentOf = new Map();
+  for (const row of rows) {
+    if (typeof row?.id !== 'string') continue;
+    if (typeof row.parent === 'string' && row.parent.length > 0) parentOf.set(row.id, row.parent);
+  }
+  const blocked = new Set();
+  for (const row of rows) {
+    if (typeof row?.id !== 'string') continue;
+    if (!ACTIVE_STATUSES.has(row.status)) continue;
+    let cursor = row.id;
+    // A cycle in the parent pointers would otherwise spin forever. bd should
+    // not produce one; `seen` costs nothing and the alternative is a hung run.
+    const seen = new Set([cursor]);
+    for (;;) {
+      const parent = parentOf.get(cursor);
+      if (!parent || seen.has(parent)) break;
+      blocked.add(parent);
+      seen.add(parent);
+      cursor = parent;
+    }
+  }
+  return blocked;
 }

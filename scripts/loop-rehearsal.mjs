@@ -475,6 +475,47 @@ const SCENARIOS = {
     },
   },
 
+  'rollup-withheld-child': {
+    why: 'a child left in_progress behind an unmerged PR still blocks its parent (Cebab-cak)',
+    // THE 2026-08-27 INCIDENT, REHEARSED. Iteration 5 built Cebab-8x8.2.1, the
+    // guard withheld the merge, PR #422 stayed open and HARVEST left the bead
+    // in_progress — which takes it out of `bd ready`. Iteration 6 then selected
+    // its DIRECT PARENT Cebab-8x8.2 and built it from a main without #422; both
+    // create assistant/kb/00-index.md and the second to merge conflicted.
+    //
+    // `rollup-skipped` cannot catch this: it needs BOTH parent and child in the
+    // ready batch, and the whole point here is that the child is not in it. So
+    // this is the scenario that exercises `ancestorsOfActive` rather than the
+    // older batch rule — and until the bd shim learned `list`, the graph was
+    // empty in every scenario and this could not have been written at all.
+    args: ['--until', '1'],
+    plan: {
+      beads: 3,
+      ci: 'green',
+      merge: 'direct',
+      withheldChild: true,
+      build: [{ kind: 'verdict', edit: true }],
+    },
+    check: (ctx) => {
+      const [row] = ctx.records;
+      ctx.eq(ctx.records.length, 1, 'one iteration');
+      // Reh-2 is in_progress and is Reh-1's child, so Reh-1 contains unfinished
+      // work and Reh-3 is the only real leaf.
+      ctx.eq(row.bead, 'Reh-3', 'the unrelated leaf was selected, not the container');
+      ctx.ok(
+        !ctx.calls.bd.some((c) => c[0] === 'update' && c[1] === 'Reh-1' && c.includes('--claim')),
+        'and the parent was never claimed',
+      );
+      // THE BELT AGAINST THIS GOING QUIET AGAIN. The driver logs the graph size
+      // for exactly this reason: an empty graph is how the rule dies, and it
+      // died that way here for the whole of its first day.
+      ctx.ok(
+        /select: [1-9]\d* beads in the graph, [1-9]\d* contain other work/.test(ctx.stdout),
+        'the driver reports a NON-EMPTY containment graph',
+      );
+    },
+  },
+
   'rollup-skipped': {
     why: 'a bead that CONTAINS another ready bead is a rollup — take the child (Cebab-qd2.40)',
     // Measured on the live queue: the loop's next three picks were feature-typed
@@ -573,8 +614,23 @@ if (plan.bdFail && argv[0] === plan.bdFail) {
   process.exit(1);
 }
 if (argv[0] === 'ready') {
-  const open = plan.beadRows.filter((b) => !state.claimed.includes(b.id));
+  // STATUS IS HONOURED, and it has to be: the whole of Cebab-cak is that an
+  // in_progress bead is ABSENT from \`bd ready\` while still containing work.
+  // A shim that returned it anyway could not express the bug.
+  const open = plan.beadRows.filter(
+    (b) => b.status === 'open' && !state.claimed.includes(b.id),
+  );
   process.stdout.write(JSON.stringify(open));
+} else if (argv[0] === 'list') {
+  // \`--all\` is every bead of every status — the containment graph's input.
+  // Without this branch the shim exited 0 with EMPTY stdout, \`parseJson\` threw,
+  // \`beads.list\` caught and returned [], and \`ancestorsOfActive\` was handed
+  // nothing: the graph rule ran, reported success and measured NOTHING in every
+  // scenario. \`rollup-skipped\` still passed, on the older batch rule alone.
+  const rows = plan.beadRows.map((b) =>
+    state.claimed.includes(b.id) ? { ...b, status: 'in_progress' } : b,
+  );
+  process.stdout.write(JSON.stringify(rows));
 } else if (argv[0] === 'show') {
   const hit = plan.beadRows.find((b) => b.id === argv[1]);
   // The real bd exits 0 on a miss and prints an OBJECT where a hit is an array.
@@ -853,6 +909,13 @@ function buildScratch(name, scenario) {
   // returns both as ready. `issue_type` says nothing about it — measured live,
   // the real ones were typed `feature` — so the only signal is `parent`, which
   // is why the shim rows carry it. (Cebab-qd2.40)
+  // The 2026-08-27 incident, expressible: Reh-2 is Reh-1's child AND is already
+  // in_progress, so `bd ready` never mentions it and only the GRAPH says Reh-1
+  // contains unfinished work.
+  if (scenario.plan.withheldChild && beadRows.length > 1) {
+    beadRows[1].parent = beadRows[0].id;
+    beadRows[1].status = 'in_progress';
+  }
   if (scenario.plan.containerFirst && beadRows.length > 1) {
     beadRows[1].parent = beadRows[0].id;
   }

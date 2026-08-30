@@ -81,6 +81,80 @@ export function tokensFrom(envelope) {
 }
 
 /** Accumulate. A null addend is "this build could not say", and adds nothing. */
+/**
+ * A whole ITERATION's build cost, across every `claude` invocation it made.
+ *
+ * `numTurns`, `costUsd` and `tokens` on a ledger row have always been the LAST
+ * invocation's, because `runIteration` assigns `parts.build = { ... }` wholesale
+ * on every pass through BUILD and each attempt overwrote the previous one's
+ * telemetry. `attempts` survived only because it is a counter rather than a
+ * measurement.
+ *
+ * MEASURED ACROSS A WHOLE RUN, 2026-08-28. `state.json` accumulates every
+ * invocation while the ledger row still recorded one, so the 8-iteration run of
+ * 2026-08-27 can be compared against itself:
+ *
+ *   sum of the 8 ledger rows      state.json (every invocation)
+ *   turns              120                                  517
+ *   cache read   9,555,591                           50,267,470
+ *
+ * The rows accounted for 23% of the turns and 19% of the cache reads. The gap is
+ * the run's shape: four of eight builds hit the 60-turn cap and resumed, five
+ * needed a format repair, so most iterations ran two or three invocations and
+ * only the shortest — the final one — was recorded.
+ *
+ * ADDED ALONGSIDE rather than folded into the existing fields, and that is the
+ * decision this carries. Accumulating in place is cheaper and silently
+ * reinterprets 32 rows that already exist in an append-only corpus: every
+ * historical `numTurns` would start reading as an iteration total while still
+ * being a last-invocation figure. Two similar fields is the honest cost of not
+ * rewriting the meaning of history.
+ *
+ * `tokens` STAYS NULL until an invocation actually reports some — `null` and a
+ * free turn are different facts, which is the same rule `tokensFrom` states and
+ * the reason `land.sha: null` on every early row was worth fixing.
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ * SUMMING THESE IS ONLY SAFE IF THE ENVELOPE'S `usage` IS PER-INVOCATION, AND
+ * `Cebab-qd2.39` LEFT THAT UNMEASURED. It matters in the expensive direction:
+ * were `usage` session-CUMULATIVE, this and the existing `account()` would both
+ * multiply a resumed bead instead of adding it up.
+ *
+ * MEASURED 2026-08-28, and it is per-invocation. `Cebab-8x8.1.1` is the clean
+ * case — `attempts: 1`, `capResumes: 0`, and its transcript holds exactly ONE
+ * top-level BUILD prompt and zero sidechain messages, so the whole file is one
+ * invocation. Its envelope reported 2,767,166 cache-read tokens.
+ *
+ * The trap on the way to that number is worth writing down, because it produced
+ * a confident wrong answer first. Summing `cache_read_input_tokens` over the 88
+ * assistant LINES in that file gives 7,350,280 — 2.7x the envelope — which
+ * reads exactly like the envelope under-reporting. It is not: the CLI writes one
+ * API response as SEVERAL assistant lines, each repeating the same `usage`
+ * block. Deduplicated by `message.id` there are 31 responses summing to
+ * 2,767,166 — the envelope's figure, to the token.
+ *
+ * So the envelope is per-invocation AND exact, `account()`'s run total was
+ * always right, and accumulating here is addition rather than multiplication.
+ * Re-derive it the same way if the CLI's accounting ever looks wrong, and
+ * dedupe by `message.id` before believing a transcript sum.
+ */
+export const ZERO_BUILD_TOTALS = Object.freeze({
+  invocations: 0,
+  numTurns: 0,
+  costUsd: 0,
+  tokens: null,
+});
+
+export function accumulateBuild(totals, built) {
+  const base = totals ?? ZERO_BUILD_TOTALS;
+  return {
+    invocations: base.invocations + 1,
+    numTurns: base.numTurns + (built?.numTurns ?? 0),
+    costUsd: base.costUsd + (built?.costUsd ?? 0),
+    tokens: built?.tokens ? addTokens(base.tokens, built.tokens) : base.tokens,
+  };
+}
+
 export function addTokens(base, extra) {
   const a = base ?? ZERO_TOKENS;
   const b = extra ?? ZERO_TOKENS;

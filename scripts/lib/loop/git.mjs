@@ -180,6 +180,30 @@ export function makeGit({ run, cwd, dryRun = false }) {
     /** The commit WATCH must ask about. Polling by PR number reads whatever
      *  GitHub currently associates with the PR, which after a repair
      *  force-push is still the previous commit. */
+    /**
+     * Which `loop/<bead-id>` branches already exist on the remote.
+     *
+     * ONE call for the whole set, which is what makes it worth doing at all.
+     * A bead whose earlier attempt left its branch on the remote is re-selected
+     * as normal — nothing labels it — and the loop then spends a full turn
+     * budget on BUILD and the entire gate before `push` fails non-fast-forward
+     * at PUBLISH, because attempt 1 pushes without `--force`. Measured instance:
+     * `Cebab-p5y`, whose PR #403 sat on `loop/Cebab-p5y` while the bead stayed
+     * selectable.
+     *
+     * Returns bead IDS, not refs, so the caller can intersect with a ready set
+     * without knowing the naming convention. `[]` on any failure — this feeds a
+     * REPORT, and a network hiccup must not be able to stop a run.
+     */
+    async remoteLoopBeads() {
+      const r = await git(['ls-remote', '--heads', 'origin', 'refs/heads/loop/*']);
+      if (r.code !== 0) return [];
+      return r.stdout
+        .split('\n')
+        .map((line) => line.split('refs/heads/loop/')[1]?.trim())
+        .filter(Boolean);
+    },
+
     async headSha() {
       const r = await git(['rev-parse', 'HEAD']);
       return r.stdout.trim();

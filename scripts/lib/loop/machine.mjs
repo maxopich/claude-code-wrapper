@@ -296,6 +296,70 @@ export function countsTowardDeclines(disposition, { reason } = {}) {
   return disposition === DISPOSITION.PARKED && reason === REASON.NEEDS_HUMAN;
 }
 
+/**
+ * THE ONE GATE FAILURE THE DRIVER REPAIRS ITSELF.
+ *
+ * A predicate rather than an `if` inside the driver, for the reason every other
+ * predicate in this file is one: `runIteration` is not exported, so a branch
+ * written inline there is unreachable from a test, and the fix most in need of
+ * one is the fix nobody can observe.
+ *
+ * `format:check` is the ONLY step named. It is the only gate failure whose
+ * remedy is a command rather than a judgement, and it is the only one the loop
+ * has ever hit: 6 `gate: FAILED at format:check` lines in the console log and
+ * nothing else, 5 of 8 builds on 2026-08-27, with no lint, typecheck, test,
+ * build, smoke or ci_smoke failure in that entire run. Each cost a full
+ * `claude -p` repair to re-establish the bead's whole context and run
+ * `npm run format`.
+ *
+ * THE EVIDENCE IS THE CONSOLE LOG, NOT THE LEDGER, and the difference is itself
+ * a defect. All 32 ledger rows carry ZERO non-zero gate steps and zero
+ * `reason: gate_failed`, because `parts.gate` is reassigned on each attempt and
+ * the row keeps the PASSING retry — the same overwrite `Cebab-qd2.39` found in
+ * `parts.build`. So a gate failure that reaches a repair is invisible in the
+ * durable record. `Cebab-qd2.43` tracks it; the autofix path above is exempted by
+ * hand, since it keeps the failing steps rather than replacing them.
+ *
+ * ONCE PER ITERATION. A SECOND format:check failure after prettier has already
+ * run means prettier could not fix it — an unparseable file — and that is a
+ * real defect that must reach the repair path exactly as it does today. The
+ * bound is what stops the driver looping on prettier instead of parking.
+ *
+ * NOT GENERALISABLE, and the narrowness is the design. `Cebab-oit` proposed
+ * running `npm run format` as a step BEFORE `format:check`, which would make
+ * that check green by construction — `prettier --write` then `prettier --check`
+ * can only disagree about a file prettier cannot parse — and a gate step that
+ * can no longer fail is a gate step measuring nothing. Firing only AFTER a real
+ * failure keeps the step live and keeps the failure in `gate.steps`.
+ */
+export function shouldAutofixFormat(gated, { alreadyAutofixed = false } = {}) {
+  if (alreadyAutofixed) return false;
+  if (!gated || gated.passed !== false) return false;
+  return gated.failedStep === 'format:check';
+}
+
+/**
+ * The steps a ledger row carries when the gate ran TWICE for one attempt.
+ *
+ * Both runs, failed one first. `gate.autofixFormat`'s entire justification for
+ * firing after the check rather than before it is that the failure stays real
+ * and stays in `gate.steps` — and the driver's first version assigned the
+ * re-gate's steps over the first run's, so the row showed a clean ten-step gate
+ * and a boolean was the only trace that anything had reddened. That made the
+ * justification false as wired.
+ *
+ * A function rather than an inline spread for the reason `shouldAutofixFormat`
+ * is one: `runIteration` is not exported, so the property would otherwise be
+ * unreachable from a test — and this property was already violated once.
+ *
+ * `verdictVsGate` must be computed from THIS, not from the repaired run alone,
+ * or it reports agreement between the agent's claimed commands and a gate
+ * result the agent never caused.
+ */
+export function stepsAcrossAutofix(failedRun, repairedRun) {
+  return [...(failedRun ?? []), ...(repairedRun ?? [])];
+}
+
 export function resetsBreaker(disposition, { ciGreen = false } = {}) {
   if (disposition === DISPOSITION.MERGED || disposition === DISPOSITION.NO_CHANGE) return true;
   // A WITHHELD ITERATION THAT REACHED CI-GREEN IS EVIDENCE, and `merge: false`
