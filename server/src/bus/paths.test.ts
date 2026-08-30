@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import {
   computeSessionPaths,
   isValidAgentName,
-  isValidBusRecipient,
+  isValidBusDestination,
   sessionPathsFromFolder,
   sessionsRoot,
 } from './paths.js';
@@ -118,10 +118,10 @@ describe('sessionPathsFromFolder', () => {
   });
 });
 
-describe('isValidAgentName / isValidBusRecipient', () => {
+describe('isValidAgentName / isValidBusDestination', () => {
   test.each([['reviewer'], ['my-agent'], ['a1b2c3'], ['x']])('accepts canonical slug %j', (s) => {
     expect(isValidAgentName(s)).toBe(true);
-    expect(isValidBusRecipient(s)).toBe(true);
+    expect(isValidBusDestination(s)).toBe(true);
   });
 
   test.each([
@@ -139,21 +139,21 @@ describe('isValidAgentName / isValidBusRecipient', () => {
     expect(isValidAgentName(s)).toBe(false);
   });
 
-  test('isValidBusRecipient accepts the protocol sentinels', () => {
+  test('isValidBusDestination accepts the protocol sentinels', () => {
     // user and _sink are NOT valid agent slugs (underscore disallowed),
     // but they're legal recipients in the bus protocol.
     expect(isValidAgentName('user')).toBe(true); // happens to look like a slug
     expect(isValidAgentName('_sink')).toBe(false);
-    expect(isValidBusRecipient('user')).toBe(true);
-    expect(isValidBusRecipient('_sink')).toBe(true);
+    expect(isValidBusDestination('user')).toBe(true);
+    expect(isValidBusDestination('_sink')).toBe(true);
   });
 
-  test('isValidBusRecipient rejects path traversal and empty input', () => {
+  test('isValidBusDestination rejects path traversal and empty input', () => {
     // Same exclusions as isValidAgentName, plus the sentinels are the
     // only underscore-bearing strings accepted.
-    expect(isValidBusRecipient('')).toBe(false);
-    expect(isValidBusRecipient('../etc')).toBe(false);
-    expect(isValidBusRecipient('reviewer/../etc')).toBe(false);
-    expect(isValidBusRecipient('_other_sentinel')).toBe(false);
+    expect(isValidBusDestination('')).toBe(false);
+    expect(isValidBusDestination('../etc')).toBe(false);
+    expect(isValidBusDestination('reviewer/../etc')).toBe(false);
+    expect(isValidBusDestination('_other_sentinel')).toBe(false);
   });
 });

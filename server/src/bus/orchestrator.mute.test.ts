@@ -184,7 +184,7 @@ describe('[security] bus_send oracle suppression (AE-3)', () => {
     const routerSawEvent = { observed: false };
     const result = handleBusSend(
       'reviewer',
-      { recipient: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'hello' },
+      { destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'hello' },
       () => {
         // Simulate the router silently dropping (e.g. because reviewer is muted)
         // by NOT recording anything. The tool result should still report success.
@@ -207,7 +207,7 @@ describe('[security] bus_send oracle suppression (AE-3)', () => {
     expect(() =>
       handleBusSend(
         'reviewer',
-        { recipient: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'hi' },
+        { destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'hi' },
         () => {
           throw new Error('router internal');
         },
@@ -225,12 +225,12 @@ describe('[security] bus_send oracle suppression (AE-3)', () => {
     // has zero side-channel signal.
     const acceptResult = handleBusSend(
       'reviewer',
-      { recipient: 'editor', kind: 'reply', text: 'msg' },
+      { destination: 'editor', kind: 'reply', text: 'msg' },
       () => undefined,
     );
     const dropResult = handleBusSend(
       'reviewer',
-      { recipient: 'editor', kind: 'reply', text: 'msg' },
+      { destination: 'editor', kind: 'reply', text: 'msg' },
       () => undefined, // could be a drop branch — onEvent is the same shape
     );
     expect(acceptResult).toEqual(dropResult);

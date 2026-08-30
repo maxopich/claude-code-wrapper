@@ -63,7 +63,7 @@ describe('renderChainBriefing', () => {
     // The non-last guidance.
     expect(text).toContain('send your reply to the next step');
     // The exact bus_send tool call, with the right kind.
-    expect(text).toMatch(/bus_send\(recipient="coder", kind="reply"/);
+    expect(text).toMatch(/bus_send\(destination="coder", kind="reply"/);
   });
 
   test('flags the last step and routes to _sink', () => {
@@ -77,7 +77,7 @@ describe('renderChainBriefing', () => {
     });
     expect(text).toContain('step 3 of 3');
     expect(text).toContain('You are the last step');
-    expect(text).toMatch(/bus_send\(recipient="_sink", kind="final"/);
+    expect(text).toMatch(/bus_send\(destination="_sink", kind="final"/);
   });
 });
 
@@ -181,7 +181,7 @@ describe('renderRosterPrompt', () => {
     });
     // Example targets the first worker (reviewer) — "Other participants"
     // should list everyone EXCEPT reviewer.
-    expect(text).toMatch(/bus_send\(recipient="reviewer", kind="intro"/);
+    expect(text).toMatch(/bus_send\(destination="reviewer", kind="intro"/);
     expect(text).toContain('Other participants: evaluator, coder');
   });
 
@@ -359,7 +359,7 @@ describe('renderWorkerBriefing', () => {
     // F6 wrap of the agent's own slug.
     expect(text).toContain('<participant>reviewer</participant>');
     // The concrete tool call: reply to the orchestrator.
-    expect(text).toMatch(/bus_send\(recipient="orchestrator", kind="reply"/);
+    expect(text).toMatch(/bus_send\(destination="orchestrator", kind="reply"/);
     // The load-bearing warning — without bus_send the reply is lost (this
     // is the exact bug the briefing fixes).
     expect(text).toContain('INVISIBLE');
@@ -393,7 +393,7 @@ describe('renderWorkerBriefing', () => {
       'Do NOT modify, create, or delete files outside your own project folder',
     );
     // The bus-protocol wiring is unaffected.
-    expect(text).toMatch(/bus_send\(recipient="orchestrator", kind="reply"/);
+    expect(text).toMatch(/bus_send\(destination="orchestrator", kind="reply"/);
   });
 });
 

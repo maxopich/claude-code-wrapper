@@ -268,7 +268,7 @@ describe('[security] a relayed bus message is delivered as inert, fenced data', 
     await new Promise((r) => setImmediate(r));
     expect(coderBusSend).not.toBeNull();
 
-    await coderBusSend!({ recipient: 'reviewer', kind: 'reply', text: HOSTILE });
+    await coderBusSend!({ destination: 'reviewer', kind: 'reply', text: HOSTILE });
     await new Promise((r) => setImmediate(r));
 
     // The chain router archives each hop as the sender's `reply.md`.

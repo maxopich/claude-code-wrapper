@@ -3489,7 +3489,7 @@ export function buildContinueNudge(sessionId: string): string {
     'Continue the task from where you left off. If you had already dispatched',
     'work to a participant, wait for or re-request their reply as appropriate.',
     'Anything you wrote in the interrupted turn was not delivered — re-send it',
-    'via bus_send. When you have the complete answer, bus_send(recipient="user",',
+    'via bus_send. When you have the complete answer, bus_send(destination="user",',
     'kind="final", ...).',
   ].join('\n');
 }

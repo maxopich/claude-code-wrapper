@@ -122,14 +122,14 @@ describe('substituteMockVars', () => {
   });
 
   test('[security] a value escapes into the JSON string it lands in', () => {
-    const line = '{"recipient":"${NEXT}"}';
+    const line = '{"destination":"${NEXT}"}';
     const hostile = { NEXT: 'beta","kind":"final' };
     const out = substituteMockVars(line, hostile);
     // Substitution happens before parse, so an unescaped value would inject a
     // second field. The parsed object must have exactly the one key.
     const parsed = JSON.parse(out) as Record<string, unknown>;
-    expect(Object.keys(parsed)).toEqual(['recipient']);
-    expect(parsed.recipient).toBe('beta","kind":"final');
+    expect(Object.keys(parsed)).toEqual(['destination']);
+    expect(parsed.destination).toBe('beta","kind":"final');
   });
 });
 
@@ -294,7 +294,7 @@ describe('runMock — canUseTool', () => {
         chainRun({
           canUseTool: async (_name, input) => ({
             behavior: 'allow' as const,
-            updatedInput: { ...input, recipient: 'rewritten' },
+            updatedInput: { ...input, destination: 'rewritten' },
           }),
           mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => events.push(ev)) },
         }),

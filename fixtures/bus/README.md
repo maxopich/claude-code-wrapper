@@ -44,7 +44,7 @@ its own participant names and can therefore script an individual agent.
 
 ## Placeholders
 
-A shipped fixture cannot hardcode a recipient, so it writes `${NAME}` and the
+A shipped fixture cannot hardcode a destination, so it writes `${NAME}` and the
 router fills it in. Substitution happens on the raw text before it is parsed,
 and values are escaped for the JSON string they land in. An unknown `${...}` is
 left alone, so fixture prose containing `${HOME}` still replays.
@@ -68,7 +68,7 @@ Two rules the replay enforces:
 
 - A `bus_send` whose input fails the tool's schema comes back as an error
   `tool_result`, exactly as the real MCP server would answer. An empty `text`
-  or a missing `recipient` shows up as a failed call, not as silence.
+  or a missing `destination` shows up as a failed call, not as silence.
 - The mock writes the follow-up `tool_result` only for calls it executed or
   denied. A fixture that replays an allowed built-in — `Read`, `Bash` — still
   supplies its own `tool_result` line, which is what captured transcripts
