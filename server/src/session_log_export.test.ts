@@ -83,23 +83,29 @@ describe('exportFilename', () => {
     const before = Date.now();
     const filename = exportFilename('xx', null);
     const after = Date.now();
-    const m = filename.match(/^cebab-xx-(\d{8})-(\d{6})\.jsonl$/);
-    expect(m).not.toBeNull();
-    if (!m) return;
-    const [, ymd, hms] = m;
-    // The stamp is LOCAL wall-clock, so reconstruct it as a local Date (not
-    // Date.UTC) to compare against the wall-clock `Date.now()` bounds.
-    const stampMs = new Date(
-      Number(ymd!.slice(0, 4)),
-      Number(ymd!.slice(4, 6)) - 1,
-      Number(ymd!.slice(6, 8)),
-      Number(hms!.slice(0, 2)),
-      Number(hms!.slice(2, 4)),
-      Number(hms!.slice(4, 6)),
-    ).getTime();
-    // Allow up to a second of slop for the second-precision stamp.
-    expect(stampMs).toBeGreaterThanOrEqual(before - 1000);
-    expect(stampMs).toBeLessThanOrEqual(after + 1000);
+
+    // DO NOT RECONSTRUCT AN INSTANT FROM THE STAMP. The stamp is LOCAL
+    // wall-clock, and `new Date(y, m, d, h, mi, s)` is AMBIGUOUS during the
+    // repeated hour of a DST fall-back — ECMAScript resolves it with the
+    // offset BEFORE the transition. This test pins America/Los_Angeles, so
+    // between 09:00 and 10:00 UTC on the US fall-back Sunday the round trip
+    // lands exactly one hour early and the lower bound below failed by
+    // 3,600,000 ms. Measured; once a year, deterministic, and NOT masked by a
+    // UTC runner, because the test supplies the timezone itself.
+    //
+    // Instead, use the function under test as its own formatting oracle: an
+    // explicit timestamp takes the same code path as the fallback, so a stamp
+    // the fallback produced must equal one that some instant in [before,
+    // after] produces. Sampling every 1000 ms cannot skip a whole second, and
+    // `after` is added explicitly so a sub-second window is still covered.
+    // The FORMAT itself is pinned by the fixed-timestamp test above, so this
+    // is not circular — it tests only that the fallback reads the clock.
+    const acceptable = new Set<string>();
+    for (let t = before; t < after; t += 1000) acceptable.add(exportFilename('xx', t));
+    acceptable.add(exportFilename('xx', after));
+
+    expect(filename).toMatch(/^cebab-xx-\d{8}-\d{6}\.jsonl$/);
+    expect([...acceptable]).toContain(filename);
   });
 });
 
