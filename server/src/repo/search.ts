@@ -48,7 +48,7 @@ export type SearchSessionsQuery = {
   limit?: number;
 };
 
-export type SearchSessionsOutcome = {
+export type SearchSessionsResult = {
   results: SearchResult[];
   /** True when the server-side limit capped the scan — UI shows "narrow scope". */
   truncated: boolean;
@@ -255,7 +255,7 @@ function queryMultiAgentCandidates(
  * invariant. Returns up to `limit` hits, newest-first, merged across the
  * single-agent and multi-agent streams.
  */
-export function searchSessions(q: SearchSessionsQuery): SearchSessionsOutcome {
+export function searchSessions(q: SearchSessionsQuery): SearchSessionsResult {
   const query = q.query.trim();
   if (query.length < MIN_SEARCH_QUERY_LEN) return { results: [], truncated: false };
 

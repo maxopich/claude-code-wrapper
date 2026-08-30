@@ -116,7 +116,7 @@ export function denyOnceKey(projectId: number, serverName: string, originPath: s
  * structured logging; tests assert on it. Empty fields are fine — a project
  * with all-trusted MCPs returns `{ approvals: 0, persistedDenials: 0, refused: [] }`.
  */
-export type GateOutcome = {
+export type GateResult = {
   /** Number of `mcp_trust` rows the operator wrote during this gate
    *  (trust + trust_pinned + deny_remember). deny_once is in-memory and
    *  doesn't count here. */
@@ -146,7 +146,7 @@ export type AwaitGateInput = {
  * deny_once) we still record a `mcp.trust_silent_refusal` safety_audit row so
  * the forensic trail captures every spawn that proceeded past a denial.
  *
- * Returns a `GateOutcome` summarizing the pass (for logging / tests).
+ * Returns a `GateResult` summarizing the pass (for logging / tests).
  *
  * No exception path: if the operator never replies, the promise hangs. The
  * caller (ws/server.ts) holds the await inside its `try/catch` for
@@ -155,8 +155,8 @@ export type AwaitGateInput = {
  * gate-and-block contract is "the spawn does not happen until the operator
  * decides," not "timeout after N seconds and proceed."
  */
-export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<GateOutcome> {
-  const outcome: GateOutcome = { approvals: 0, persistedDenials: 0, refused: [] };
+export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<GateResult> {
+  const outcome: GateResult = { approvals: 0, persistedDenials: 0, refused: [] };
   const promises: Promise<void>[] = [];
 
   for (const server of input.servers) {
@@ -390,7 +390,7 @@ function applyDecision(args: {
   server: McpServerView;
   originPath: string;
   decision: TrustGateOutcome;
-  outcome: GateOutcome;
+  outcome: GateResult;
   sessionKey: string;
 }): void {
   switch (args.decision.kind) {

@@ -50,7 +50,7 @@ const MAX_REDACTED_FIELDS = 100;
  *  intentionally duplicated and kept in sync.) */
 const REDACTED_TOKEN = '<redacted>';
 
-export type ArtifactContentOutcome = {
+export type ArtifactContentResult = {
   /** Redacted body (empty string on error). */
   content: string;
   /** File mtime, ms epoch (0 on error / unknown). */
@@ -123,8 +123,8 @@ export function redactArtifactContent(
  * is asking to preview. Redaction — not path confinement — is the privacy
  * boundary here.
  */
-export function readArtifactContent(mutationId: number): ArtifactContentOutcome {
-  const fail = (error: ArtifactContentError): ArtifactContentOutcome => ({
+export function readArtifactContent(mutationId: number): ArtifactContentResult {
+  const fail = (error: ArtifactContentError): ArtifactContentResult => ({
     content: '',
     mtime: 0,
     size: 0,
