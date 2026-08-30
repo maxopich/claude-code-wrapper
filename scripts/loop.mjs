@@ -1757,13 +1757,37 @@ async function main() {
     // Reuses `.loop/HALT`, which preflight already refuses to start on and
     // `npm run loop:recover` already clears; a second mechanism would be a
     // second thing to remember.
-    if (blocked && !fs.existsSync(HALT_FILE)) {
-      fs.writeFileSync(
-        HALT_FILE,
-        'the end-of-run check found a merge recorded in the ledger that is NOT in ' +
-          'origin/main. See the report above. Remove this file to start again.\n',
-      );
-      log('verify: wrote .loop/HALT — the next run will refuse to start until you clear it');
+    if (blocked) {
+      // `wx` — CREATE EXCLUSIVELY, not `existsSync` then write. The check-then-
+      // write form was flagged by CodeQL as `js/file-system-race`, and it is a
+      // real one on this file: `npm run loop:stop` is a bare `touch
+      // .loop/HALT`, so an operator stopping the run in the window between the
+      // check and the write would have their reason silently replaced by this
+      // one. `wx` makes "create only if absent" a single syscall, which is what
+      // the two-step was trying and failing to express.
+      //
+      // EEXIST is the SUCCESS case here: a HALT that already exists is already
+      // stopping the next run, and whatever it says is at least as informative
+      // as this. Any other error is reported, never swallowed — a blocker whose
+      // halt did not land is the one thing this branch exists to prevent.
+      try {
+        fs.writeFileSync(
+          HALT_FILE,
+          'the end-of-run check found a merge recorded in the ledger that is NOT in ' +
+            'origin/main. See the report above. Remove this file to start again.\n',
+          { flag: 'wx' },
+        );
+        log('verify: wrote .loop/HALT — the next run will refuse to start until you clear it');
+      } catch (error) {
+        if (error?.code === 'EEXIST') {
+          log('verify: .loop/HALT already exists — the next run is already blocked');
+        } else {
+          log(
+            `verify: COULD NOT write .loop/HALT (${error?.code ?? error}) — the next run will ` +
+              `NOT be stopped, and a recorded merge is missing from main. Stop it by hand.`,
+          );
+        }
+      }
     }
   } catch (error) {
     log(`report: could not be produced — ${error?.message ?? error}`);
