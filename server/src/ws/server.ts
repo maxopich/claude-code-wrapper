@@ -41,7 +41,7 @@ import {
   setSessionTitle,
 } from '../repo/sessions.js';
 import { listEvents, listEventsTail } from '../repo/events.js';
-import { persistMessage } from '../runner/orchestrator.js';
+import { persistMessage } from '../runner/persist.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { readManagedFile, writeManagedFile } from '../managed_file.js';

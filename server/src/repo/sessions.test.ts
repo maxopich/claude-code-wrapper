@@ -24,7 +24,7 @@ import { createMultiAgentSession } from './multi_agent.js';
  * The gap mattered most for the cost invariant migration 029 exists to repair.
  *
  * Register C05 is the other half: the only test that touched session cost
- * (`runner/orchestrator.test.ts`) mocks `bumpSession` out entirely, then sums
+ * (`runner/persist.test.ts`) mocks `bumpSession` out entirely, then sums
  * the mock's own recorded arguments and asserts that sum — so the accumulation
  * these tests exercise, which lives in un-mocked SQL, ran nowhere. Reverting
  * `total_cost_usd = total_cost_usd + ?` to `= ?` left the suite green.

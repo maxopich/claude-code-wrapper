@@ -17,7 +17,7 @@ import {
 //
 // The migration deliberately does NOT rewrite historical single-agent
 // `sessions.total_cost_usd`; that bug is fixed forward in
-// `runner/orchestrator.ts`. See the SQL header for the reasoning.
+// `runner/persist.ts`. See the SQL header for the reasoning.
 
 let tmpRoot: string;
 let originalDataDir: string;

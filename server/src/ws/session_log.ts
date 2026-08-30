@@ -298,7 +298,7 @@ function approxByteLength(row: LogRow): number {
 //
 // Per spec §4.1: when the LogsModal opens against a non-bus session, the
 // server reads rows from the single-agent `events` table (the same table
-// `persistMessage()` writes into; see `runner/orchestrator.ts`) and
+// `persistMessage()` writes into; see `runner/persist.ts`) and
 // classifies each row into the existing `LogRowKind` enum without joining
 // multi_agent_events / multi_agent_mutations (those are bus-only).
 //
@@ -313,8 +313,8 @@ function approxByteLength(row: LogRow): number {
 //   - type === 'assistant' | 'user' | 'result' | 'system' (everything else)
 //                                          → 'llm'
 //
-// Rows of `type === 'stream_event'` never reach `events` (see
-// orchestrator.ts:24); no special-case needed.
+// Rows of `type === 'stream_event'` never reach `events` (see the
+// `isStreamPartial` guard in `runner/persist.ts`); no special-case needed.
 //
 // The byte budget, sort, and `redactSensitive` machinery are reused
 // verbatim — single-agent rows route through the same chunk slicer as the

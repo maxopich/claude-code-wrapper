@@ -4,7 +4,7 @@ import { withTempDataDir } from '../test_support/temp_data_dir.js';
 import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
 import { listEvents } from '../repo/events.js';
-import { persistMessage } from '../runner/orchestrator.js';
+import { persistMessage } from '../runner/persist.js';
 import {
   cleanupPendingPermissionsForSession,
   drainAllPendingPermissions,

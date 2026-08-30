@@ -3,7 +3,7 @@
  *
  * One rule, two consumers, because they have to agree:
  *
- *   - `runner/orchestrator.ts` skips partials when writing the `events` table —
+ *   - `runner/persist.ts` skips partials when writing the `events` table —
  *     they are high-volume and the durable message that follows carries the
  *     final text anyway.
  *   - `session_log_export.ts` skips them when building a `format=redacted`
@@ -33,7 +33,7 @@
  * Is `type` a streaming partial — a fragment of a message rather than a
  * message?
  *
- * Today that is exactly `stream_event`. `runner/orchestrator.ts`'s own comment
+ * Today that is exactly `stream_event`. `runner/persist.ts`'s own comment
  * anticipated more ("other high-volume types in the future should also be
  * excluded here"); when one arrives it goes HERE, and both consumers follow.
  */
