@@ -298,10 +298,17 @@ describe('nearestExpiry', () => {
 
 // Register C01 [security]. The entry guard was `if (import.meta.main) main()`.
 // `import.meta.main` arrived in Node 22.18 and is `undefined` on Node 20 —
-// which is what ci.yml pins. So on CI the guard was always falsy: the `Audit
-// dependencies` step ran this file, printed nothing, exited 0, and audited
-// nothing. Every PR merged since had a green audit check that never looked at
-// a single advisory.
+// which is what ci.yml pinned AT THE TIME. So on CI the guard was always
+// falsy: the `Audit dependencies` step ran this file, printed nothing, exited
+// 0, and audited nothing. Every PR merged in that era had a green audit check
+// that never looked at a single advisory.
+//
+// `Cebab-mfvu` MOVED CI TO NODE 24, which means the Node version that made
+// this bug bite is no longer reachable from any of our runners. That does not
+// make the guard unnecessary — it makes the END-TO-END case below unable to
+// see a regression, so the version-independent cases have to carry it. See
+// the note on that case for what was done instead of leaving a comment
+// claiming a protection that had quietly expired.
 //
 // These cases pin the replacement predicate directly, so they are meaningful
 // on every Node version rather than only on the one where the bug bites.
@@ -357,9 +364,20 @@ describe('[security] isDirectInvocation — the entry guard', () => {
 describe('[security] the audit gate actually runs when invoked', () => {
   it('emits a verdict on stdout instead of exiting silently', () => {
     // The end-to-end shape of C01: before the fix this produced EMPTY output
-    // and exit 0 on Node 20. Honest caveat — on Node >= 22.18 the old code
-    // also passed this, so locally it is a smoke test; on CI's Node 20 it is
-    // the regression guard, and CI is where the bug lived.
+    // and exit 0 on Node 20.
+    //
+    // `Cebab-mfvu`: this case is now a SMOKE TEST EVERYWHERE, and saying so is
+    // the point. Its old caveat read "on CI's Node 20 it is the regression
+    // guard, and CI is where the bug lived" — true when written, and made
+    // false by moving CI to Node 24, where `import.meta.main` exists and the
+    // reverted code would pass this case too. A comment claiming a protection
+    // that has silently expired is worse than no comment, because the next
+    // reader budgets for a guard that is not there.
+    //
+    // What guards C01 now: the `isDirectInvocation` cases above (which pin the
+    // predicate on every Node), plus `the entry point still uses the tested
+    // predicate` below — a source-derived check that is version-independent by
+    // construction and is what actually reddens on a revert.
     const out = execFileSync(process.execPath, [join(REPO_ROOT, 'scripts', 'audit-gate.mjs')], {
       cwd: REPO_ROOT,
       encoding: 'utf8',
@@ -369,5 +387,29 @@ describe('[security] the audit gate actually runs when invoked', () => {
     });
     expect(out.trim()).not.toBe('');
     expect(out).toMatch(/Audit gate passed/);
+  });
+
+  it('the entry point still uses the tested predicate, not `import.meta.main`', () => {
+    // THE REPLACEMENT GUARD FOR C01, and it exists because the old one expired
+    // silently. The unit cases above prove `isDirectInvocation` is correct; the
+    // end-to-end case above can no longer prove the script CALLS it, because on
+    // Node >= 22.18 the reverted `import.meta.main` form works too. Between
+    // those two there was a gap exactly the shape of the original bug: a
+    // correct, well-tested predicate that nothing was obliged to use.
+    //
+    // Derived from the source, in the same idiom as
+    // `errors.control_signal_registry.test.ts` and `ci_setup_steps_match`:
+    // asking the file rather than asking the reader to remember. Reddens on a
+    // revert to `import.meta.main` on EVERY Node version, which is the property
+    // the version-dependent case never had.
+    const src = readFileSync(join(REPO_ROOT, 'scripts', 'audit-gate.mjs'), 'utf8');
+    // Premise first — an empty or unreadable file would satisfy the negative
+    // assertion below for entirely the wrong reason.
+    expect(src.length).toBeGreaterThan(1000);
+    expect(src).toMatch(
+      /^if \(isDirectInvocation\(import\.meta\.url, process\.argv\[1\]\)\) main\(\);$/m,
+    );
+    // `import.meta.main` must not be the thing being branched on anywhere.
+    expect(src).not.toMatch(/if\s*\(\s*import\.meta\.main/);
   });
 });
