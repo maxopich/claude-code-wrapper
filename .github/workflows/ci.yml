@@ -77,9 +77,20 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
+        # Cebab-mfvu: kept in lockstep with the root package.json
+        # `engines.node` floor, which `.npmrc`'s engine-strict=true enforces.
+        # Node 20 was left behind because it reached end-of-life 2026-04-30 AND
+        # two dependency majors this repo wants (jsdom 30, better-sqlite3 13)
+        # exclude it in their own `engines` — npm installed them anyway, as a
+        # warning, and the failure surfaced as runtime TypeErrors instead.
+        # 24 over 22 (EOL 2027-04-30) and over 26 (dev's version; a small
+        # CI/dev skew catches works-on-my-newest-Node). better-sqlite3 12.11.1
+        # publishes NODE_MODULE_VERSION 137 prebuilds for linux-x64 and
+        # win32-x64, so the rebuild step below does not fall through to
+        # node-gyp on the pinned windows-2022 runner.
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
@@ -175,9 +186,20 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
+        # Cebab-mfvu: kept in lockstep with the root package.json
+        # `engines.node` floor, which `.npmrc`'s engine-strict=true enforces.
+        # Node 20 was left behind because it reached end-of-life 2026-04-30 AND
+        # two dependency majors this repo wants (jsdom 30, better-sqlite3 13)
+        # exclude it in their own `engines` — npm installed them anyway, as a
+        # warning, and the failure surfaced as runtime TypeErrors instead.
+        # 24 over 22 (EOL 2027-04-30) and over 26 (dev's version; a small
+        # CI/dev skew catches works-on-my-newest-Node). better-sqlite3 12.11.1
+        # publishes NODE_MODULE_VERSION 137 prebuilds for linux-x64 and
+        # win32-x64, so the rebuild step below does not fall through to
+        # node-gyp on the pinned windows-2022 runner.
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
