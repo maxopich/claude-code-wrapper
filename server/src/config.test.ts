@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { config, parseAutoReclaimDays, parseIntEnv, readAliasedEnv } from './config.js';
+import {
+  config,
+  parseAutoReclaimDays,
+  parseIntEnv,
+  readAliasedEnv,
+  resolvePath,
+} from './config.js';
 
 // P0-C part 2b: CEBAB_AUTO_RECLAIM_DAYS parsing. The feature is destructive
 // (soft-delete), so anything that isn't a clear positive integer resolves to
@@ -217,7 +223,13 @@ describe('the three env-backed numbers go through parseIntEnv', () => {
 
   test('CEBAB_WORKSPACE_ROOT sets the workspace root and marks its source env', async () => {
     const c = await freshConfig({ CEBAB_WORKSPACE_ROOT: '/tmp/cebab-agents' });
-    expect(c.workspaceRootDefault).toBe('/tmp/cebab-agents');
+    // `path.resolve` prepends a drive letter and flips the separators on
+    // Windows, so a POSIX literal here is a path-separator environment
+    // dependency (project_crlf_breaks_css_parsing_tests). Compare against the
+    // same resolution the config runs; the `.not` case keeps it non-vacuous by
+    // proving the env value — not the `~/agents` default — is what landed.
+    expect(c.workspaceRootDefault).toBe(resolvePath('/tmp/cebab-agents'));
+    expect(c.workspaceRootDefault).not.toBe(resolvePath('~/agents'));
     expect(c.workspaceRootDefaultSource).toBe('env');
   });
 
