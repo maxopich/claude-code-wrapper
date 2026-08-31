@@ -63,14 +63,68 @@ export function parseIntEnv(
   return n;
 }
 
+/**
+ * Register N26: resolve an env var that now carries the `CEBAB_` project
+ * prefix, honouring its legacy bare name for backward compatibility.
+ *
+ * Six of Cebab's ten env vars shipped bare — `PORT`, `WORKSPACE_ROOT`, `MOCK`,
+ * `MOCK_SCENARIO`, `MOCK_INTERVAL_MS`, `MAX_TURNS` — while `CEBAB_DATA_DIR`,
+ * `CEBAB_ALLOWED_ORIGINS`, `CEBAB_AUTO_RECLAIM_DAYS` and `CEBAB_AUTH_TOKEN_FILE`
+ * all carry the prefix. A bare `PORT` or `MAX_TURNS` collides with anything else
+ * in the operator's shell — the exact class of bug this file already guards for
+ * the API-key vars in `runner/claude.ts`. The prefixed spelling is now the
+ * canonical one; the bare name still works but warns once, so an existing
+ * `.env` keeps running while the operator migrates.
+ *
+ * The prefixed value wins whenever it is meaningfully set; an unset or blank
+ * one falls through to the bare name (and only then does the deprecation fire).
+ * When neither is meaningfully set the prefixed raw is returned unchanged, so a
+ * downstream parser sees the same empty-vs-undefined it saw before.
+ *
+ * Both names are passed in as literal environment reads at each call site on
+ * purpose: that is what keeps them visible to the static env-var scan in
+ * `scripts/configSurfaceClaims.test.mjs`, which requires each to be documented
+ * in `.env.example`.
+ */
+export function readAliasedEnv(
+  prefixedName: string,
+  prefixedValue: string | undefined,
+  bareName: string,
+  bareValue: string | undefined,
+  warn: (msg: string) => void = console.warn,
+): string | undefined {
+  if (prefixedValue != null && prefixedValue.trim() !== '') return prefixedValue;
+  if (bareValue != null && bareValue.trim() !== '') {
+    warn(`[cebab] ${bareName} is deprecated; rename it to ${prefixedName}`);
+    return bareValue;
+  }
+  return prefixedValue ?? bareValue;
+}
+
+/**
+ * Register N26: the workspace-root raw is read once here because
+ * `workspaceRootDefault` and `workspaceRootDefaultSource` both derive from it,
+ * and reading it twice would fire the deprecation warning twice.
+ */
+const workspaceRootRaw = readAliasedEnv(
+  'CEBAB_WORKSPACE_ROOT',
+  process.env.CEBAB_WORKSPACE_ROOT,
+  'WORKSPACE_ROOT',
+  process.env.WORKSPACE_ROOT,
+);
+
 export const config = {
-  port: parseIntEnv('PORT', process.env.PORT, { fallback: 4319, min: 1, max: 65535 }),
+  port: parseIntEnv(
+    'CEBAB_PORT',
+    readAliasedEnv('CEBAB_PORT', process.env.CEBAB_PORT, 'PORT', process.env.PORT),
+    { fallback: 4319, min: 1, max: 65535 },
+  ),
   host: '127.0.0.1' as const,
   /** Fallback workspace root when nothing is stored in the settings table.
    * `~/agents` is a placeholder — first-run UX prompts the user to set this
    * via the Settings modal, and the resolved value is overridable via the
-   * WORKSPACE_ROOT env var. */
-  workspaceRootDefault: resolvePath(process.env.WORKSPACE_ROOT ?? '~/agents'),
+   * CEBAB_WORKSPACE_ROOT env var (or the deprecated bare WORKSPACE_ROOT). */
+  workspaceRootDefault: resolvePath(workspaceRootRaw ?? '~/agents'),
   /**
    * Cluster E Phase 3 (A4): provenance of `workspaceRootDefault`. Surfaced
    * on the `settings` ServerMsg so the operator's SettingsModal can label
@@ -79,24 +133,36 @@ export const config = {
    * because the env path may have been set in a stray .zshrc the operator
    * has forgotten about.
    */
-  workspaceRootDefaultSource: (process.env.WORKSPACE_ROOT ? 'env' : 'builtin') as 'env' | 'builtin',
-  mock: process.env.MOCK === '1',
+  workspaceRootDefaultSource: (workspaceRootRaw ? 'env' : 'builtin') as 'env' | 'builtin',
+  mock: readAliasedEnv('CEBAB_MOCK', process.env.CEBAB_MOCK, 'MOCK', process.env.MOCK) === '1',
   /**
    * Bus replay scenario directory under `fixtures/bus/` (`MOCK_SCENARIO`).
    * null → each router uses its own built-in default (`chain` /
    * `orchestrator`), which is what an operator running plain `MOCK=1` wants.
    * Set it to replay a hand-written scenario instead. Ignored outside mock.
    */
-  mockScenario: process.env.MOCK_SCENARIO || null,
+  mockScenario:
+    readAliasedEnv(
+      'CEBAB_MOCK_SCENARIO',
+      process.env.CEBAB_MOCK_SCENARIO,
+      'MOCK_SCENARIO',
+      process.env.MOCK_SCENARIO,
+    ) || null,
   /**
    * Delay between replayed fixture events (`MOCK_INTERVAL_MS`). The 50 ms
    * default paces a single-agent replay so the UI streams visibly; a bus
    * session multiplies it by every hop, and tests set it to 0.
    */
-  mockIntervalMs: parseIntEnv('MOCK_INTERVAL_MS', process.env.MOCK_INTERVAL_MS, {
-    fallback: 50,
-    min: 0,
-  }),
+  mockIntervalMs: parseIntEnv(
+    'CEBAB_MOCK_INTERVAL_MS',
+    readAliasedEnv(
+      'CEBAB_MOCK_INTERVAL_MS',
+      process.env.CEBAB_MOCK_INTERVAL_MS,
+      'MOCK_INTERVAL_MS',
+      process.env.MOCK_INTERVAL_MS,
+    ),
+    { fallback: 50, min: 0 },
+  ),
   /**
    * Where Cebab keeps its database, logs and auth token.
    *
@@ -115,7 +181,16 @@ export const config = {
    */
   dataDir: resolvePath(process.env.CEBAB_DATA_DIR ?? '~/.cebab'),
   /** Hard cap on agent turns per user message. Prevents runaway loops. */
-  maxTurns: parseIntEnv('MAX_TURNS', process.env.MAX_TURNS, { fallback: 50, min: 1 }),
+  maxTurns: parseIntEnv(
+    'CEBAB_MAX_TURNS',
+    readAliasedEnv(
+      'CEBAB_MAX_TURNS',
+      process.env.CEBAB_MAX_TURNS,
+      'MAX_TURNS',
+      process.env.MAX_TURNS,
+    ),
+    { fallback: 50, min: 1 },
+  ),
   /**
    * P0-C part 2b: opt-in idle-session auto-reclamation cutoff, in days, from
    * `CEBAB_AUTO_RECLAIM_DAYS`. null = OFF (the default). When set, the purge

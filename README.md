@@ -62,7 +62,7 @@ one re-enabled native build via `prebuild-install` (a prebuilt binary on
 macOS/Linux/Windows x64, no compiler toolchain needed), then git hooks. The
 older `npm install` && `npm run setup` two-step still works.
 
-The repo-root `.env` is loaded automatically by both server (`--env-file-if-exists`) and web (Vite `envDir`). If you don't create one, the defaults from `.env.example` apply: `WORKSPACE_ROOT=~/agents`, `PORT=4319`, mock mode off.
+The repo-root `.env` is loaded automatically by both server (`--env-file-if-exists`) and web (Vite `envDir`). If you don't create one, the defaults from `.env.example` apply: `CEBAB_WORKSPACE_ROOT=~/agents`, `CEBAB_PORT=4319`, mock mode off. (Cebab's own knobs carry the `CEBAB_` prefix; the older bare names — `WORKSPACE_ROOT`, `PORT`, `MOCK`, `MOCK_SCENARIO`, `MOCK_INTERVAL_MS`, `MAX_TURNS` — still work but are deprecated and warn once at startup.)
 
 Requires `claude` installed and logged in (verify with `claude auth status`).
 
@@ -96,15 +96,15 @@ Replays `fixtures/*.jsonl` instead of spawning real `claude` — UI iteration wi
 zero quota burn:
 
 ```sh
-MOCK=1 npm run dev:server
+CEBAB_MOCK=1 npm run dev:server
 ```
 
-The inline `MOCK=1 …` form is POSIX-shell syntax (macOS/Linux, Git Bash). In
-**PowerShell** that won't set the variable — put `MOCK=1` in your `.env`
+The inline `CEBAB_MOCK=1 …` form is POSIX-shell syntax (macOS/Linux, Git Bash).
+In **PowerShell** that won't set the variable — put `CEBAB_MOCK=1` in your `.env`
 instead (it's read by the server on every start) and just run
-`npm run dev:server`.
+`npm run dev:server`. (The bare `MOCK=1` still works but is deprecated.)
 
-`MOCK=1` in `.env` also drives the one-line `npm run dev`: its server child
+`CEBAB_MOCK=1` in `.env` also drives the one-line `npm run dev`: its server child
 reads the repo-root `.env` exactly like `npm run dev:server`, so the whole
 stack runs mock on every OS with no shell-specific syntax.
 
@@ -121,11 +121,11 @@ claude -p "<prompt>" --output-format stream-json --verbose --include-partial-mes
 # DB migration
 npm run smoke
 
-# WS protocol against mock server (start `MOCK=1 npm run dev:server` first)
+# WS protocol against mock server (start `CEBAB_MOCK=1 npm run dev:server` first)
 npm --workspace server exec tsx src/ws_smoke.ts
 
 # Live integration: spawns real claude, exercises permission + resume flows
-# (start `MOCK=0 npm run dev:server` first)
+# (start `CEBAB_MOCK=0 npm run dev:server` first)
 PROJECT=Cebab npm --workspace server exec tsx src/live_smoke.ts
 ```
 
@@ -134,8 +134,8 @@ PROJECT=Cebab npm --workspace server exec tsx src/live_smoke.ts
 On first run the chat pane shows a **Choose a folder** prompt. Click it (or the
 workspace button at the bottom of the sidebar) and enter an absolute or
 `~`-prefixed path. The setting is persisted in `~/.cebab/cebab.sqlite` and
-survives restarts. `WORKSPACE_ROOT` from the env stays as a fallback for fresh
-installs and scripted launches.
+survives restarts. `CEBAB_WORKSPACE_ROOT` from the env (or the deprecated bare
+`WORKSPACE_ROOT`) stays as a fallback for fresh installs and scripted launches.
 
 ## Switching projects
 
