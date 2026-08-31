@@ -1473,6 +1473,61 @@ human must debug this", and a bead interrupted mid-flight has not failed at anyt
 
 ---
 
+### 9.4 The end-of-run report, and the verification behind it
+
+A run used to end with one line — `stopped: --until 8 — 8 iteration(s), …` — and nothing had ever
+checked a ledger row against the world. It now ends with a digest, and the digest is produced by
+going and looking.
+
+```
+────────────────────────────────────────────────────────────────────────
+ loop run — 8 beads in 2h55m, stopped: --until 8
+────────────────────────────────────────────────────────────────────────
+  MERGED              5   Cebab-x1n.3.19 #429  Cebab-x1n.8.2 #430  …
+  MERGE_QUEUED        1   Cebab-x1n.8.20 #432
+  PARKED              2   Cebab-x1n.1.12 (needs_human)  Cebab-x1n.8.22 (build_failed) #434
+
+ cost: 321 turns, 514 in / 185.3k out / 863.9k cache write / 26M cache read
+
+ NEEDS YOU (1)
+  [1] Cebab-x1n.8.20 — queued PR #432 is still OPEN, blocked by Fixture review gate
+      -> It will not merge on its own. Clear the blocking check or merge it by hand.
+────────────────────────────────────────────────────────────────────────
+```
+
+**Never check the ledger with the ledger.** Every claim is tested against a source the driver does
+not write: `git merge-base --is-ancestor` for what is really in `main`, `gh pr view` for what a PR
+really is, `bd show` for what a bead really says. A verifier fed from the same place as the claim
+would agree with it by construction — which is this repo's primary defect class wearing a new hat.
+
+| Claim in the row           | Checked against                                                    |
+| -------------------------- | ------------------------------------------------------------------ |
+| `merged`, with `land.sha`  | is that commit an ancestor of `origin/main`?                       |
+| `harvest.beadClosed: true` | does `bd` report the bead closed?                                  |
+| `merge_queued`             | did the PR actually reach `MERGED`?                                |
+| `parked`                   | does the bead carry `loop-stuck` or `loop-declined`?               |
+| — (sweeps)                 | left on `main`, tree clean, no loop branch that nothing references |
+
+**It reports; it does not repair.** The safe repairs already exist — `reconcile` (§6.0) runs at the
+START of the next run and closes a bead only behind three independent confirmations, so a finding
+here is handed to a mechanism that is already careful rather than duplicated by a less careful one.
+And the most valuable finding of 2026-08-30 was a **security gate correctly refusing to let
+something through** (`Fixture review gate`, pending a CODEOWNER); anything that "helpfully" resolved
+that would have done real damage.
+
+**One escalation.** A row claiming a merge whose commit is _not_ in `main` is different in kind:
+every later bead branches from `main`, so if `main` is not what the loop believes, everything after
+it was built on a false base. That finding writes `.loop/HALT` (§9.3), which preflight already
+refuses to start on and `npm run loop:recover` already clears — an existing mechanism, not a new one.
+
+**"Could not tell" is never a negative.** `shaInMain` answers true / false / null, and `null` — a bad
+sha, a missing ref, a network failure — is reported as a note. Collapsing it into "no" would halt
+the next run over a typo. Every lookup is wrapped for the same reason: a verifier that throws would
+turn eight merged beads into a stack trace at the last step.
+
+**A clean run says so out loud** (`no discrepancies`). A verifier that prints nothing when it finds
+nothing cannot be told from one that never ran.
+
 ## 10. Repo constraints — mandatory
 
 Each of these fails silently if ignored. None produces an error naming its cause.

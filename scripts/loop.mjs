@@ -70,6 +70,7 @@ import {
 import { makeRunner } from './lib/loop/run.mjs';
 import { LockHeldError, acquireLock, releaseLock } from './lib/loop/lock.mjs';
 import { reconcile } from './lib/loop/reconcile.mjs';
+import { renderReport, rowsSince, verifyRun } from './lib/loop/report.mjs';
 import { DECLINE_LABEL, PARK_LABEL, makeBeads } from './lib/loop/beads.mjs';
 import { branchNameFor, commitSubject, makeGit } from './lib/loop/git.mjs';
 import { makeForge, overlappingPrs } from './lib/loop/forge.mjs';
@@ -1720,6 +1721,78 @@ async function main() {
     `stopped: ${stopBecause ?? 'done'} — ${iterations} iteration(s), ` +
       `${formatUsage({ turns: ctx.turns, tokens: ctx.tokens })}`,
   );
+
+  // ── the run's own report, and the verification behind it ────────────────
+  //
+  // AFTER teardown, deliberately. Two of the sweeps ask whether the repository
+  // was left on main with a clean tree, and running before teardown would
+  // measure the state teardown exists to fix — a check that reports the
+  // problem it is about to not have.
+  //
+  // WRAPPED WHOLE. This is the last thing a run does and it is a REPORT: a
+  // throw here would turn eight merged beads into a non-zero exit and a stack
+  // trace, which is worse than the silence it replaces. `report.mjs` already
+  // guards every individual lookup; this is the backstop for the rest.
+  try {
+    const runRows = rowsSince(readLedger(), new Date(ctx.startedAt).toISOString());
+    const { findings, blocked } = await verifyRun({
+      rows: runRows,
+      git,
+      forge: deps.forge,
+      beads: deps.beads,
+      log,
+    });
+    sink.write(
+      `${renderReport({
+        rows: runRows,
+        findings,
+        usageLine: formatUsage({ turns: ctx.turns, tokens: ctx.tokens }),
+        stopBecause: stopBecause ?? 'done',
+        elapsedMs: Date.now() - ctx.startedAt,
+      })}\n`,
+    );
+    // THE ONE ESCALATION. A row claiming a merge whose commit is not in main
+    // means the loop's picture of the codebase is wrong, and every later bead
+    // branches from main — so the NEXT run must not start until a human looks.
+    // Reuses `.loop/HALT`, which preflight already refuses to start on and
+    // `npm run loop:recover` already clears; a second mechanism would be a
+    // second thing to remember.
+    if (blocked) {
+      // `wx` — CREATE EXCLUSIVELY, not `existsSync` then write. The check-then-
+      // write form was flagged by CodeQL as `js/file-system-race`, and it is a
+      // real one on this file: `npm run loop:stop` is a bare `touch
+      // .loop/HALT`, so an operator stopping the run in the window between the
+      // check and the write would have their reason silently replaced by this
+      // one. `wx` makes "create only if absent" a single syscall, which is what
+      // the two-step was trying and failing to express.
+      //
+      // EEXIST is the SUCCESS case here: a HALT that already exists is already
+      // stopping the next run, and whatever it says is at least as informative
+      // as this. Any other error is reported, never swallowed — a blocker whose
+      // halt did not land is the one thing this branch exists to prevent.
+      try {
+        fs.writeFileSync(
+          HALT_FILE,
+          'the end-of-run check found a merge recorded in the ledger that is NOT in ' +
+            'origin/main. See the report above. Remove this file to start again.\n',
+          { flag: 'wx' },
+        );
+        log('verify: wrote .loop/HALT — the next run will refuse to start until you clear it');
+      } catch (error) {
+        if (error?.code === 'EEXIST') {
+          log('verify: .loop/HALT already exists — the next run is already blocked');
+        } else {
+          log(
+            `verify: COULD NOT write .loop/HALT (${error?.code ?? error}) — the next run will ` +
+              `NOT be stopped, and a recorded merge is missing from main. Stop it by hand.`,
+          );
+        }
+      }
+    }
+  } catch (error) {
+    log(`report: could not be produced — ${error?.message ?? error}`);
+  }
+
   return exitCode;
 }
 
