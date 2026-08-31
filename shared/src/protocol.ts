@@ -4938,6 +4938,17 @@ export type RecoveryContextView = {
  * tested against the custom-mode editor that has not shipped; until that editor
  * calls it, the rules above are enforced by nothing, and a `CustomLayout`
  * arriving over the wire is accepted as-is.
+ *
+ * `Cebab-x1n.1.12`: AND IT COULD NOT APPROVE ONE IF IT WERE CALLED. Every edge
+ * this type can express has two participant `projectId` endpoints, so it is a
+ * worker→worker edge, so it is a violation — `validateCustomTopology` reduces
+ * to `ok === (edges.length === 0)`, which `topology.test.ts` now pins. The two
+ * obvious repairs were enumerated and both fail: a `'hub'` endpoint makes
+ * exactly ONE non-empty layout approvable (the star `participants` already
+ * describes), and rereading an edge as hub-anchored makes 3861 approvable for
+ * four participants — all of which depict a constraint orchestrator routing
+ * does not enforce. `topology.ts`'s header carries the numbers. Whoever ships
+ * the editor decides what `edges` is FOR before this type is worth widening.
  */
 export type CustomLayout = {
   kind: 'custom';

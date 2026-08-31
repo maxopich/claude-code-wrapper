@@ -121,6 +121,95 @@ describe('TopologyViolation variants are all producible (register N08)', () => {
     }
     expect([...emitted].sort()).toEqual(Object.keys(PRODUCIBLE_CODES).sort());
   });
+
+  test('and every declared PAYLOAD arm is producible too (Cebab-x1n.1.12)', () => {
+    // N08's rule applied one level down. The code-level check above passes
+    // happily while a variant carries an arm nothing can construct:
+    // `unknown_endpoint` was typed `from: number | 'hub' | 'user'` and this
+    // branch reads endpoints straight off a `CustomLayout` edge, which are
+    // `number`. That dead arm is what let the module's header advertise a
+    // `'user'` endpoint rule the schema cannot express.
+    //
+    // Asserted on the VALUES rather than on the type, because a type-level
+    // claim is what was already wrong. If someone widens the arm again
+    // without widening `CustomLayout.edges`, this reddens.
+    const emitted = [
+      customLayout([[1, 99]]),
+      customLayout([[99, 1]]),
+      customLayout([[98, 99]]),
+    ].flatMap((l) => validateCustomTopology(mkTemplate([1, 2, 3]), l).violations);
+    const unknowns = emitted.filter((v) => v.code === 'unknown_endpoint');
+    expect(unknowns.length).toBeGreaterThan(0);
+    for (const v of unknowns) {
+      expect(typeof (v as { from: unknown }).from).toBe('number');
+      expect(typeof (v as { to: unknown }).to).toBe('number');
+    }
+  });
+});
+
+/**
+ * `Cebab-x1n.1.12` / register D12 — the validator cannot approve any non-empty
+ * layout, and the test file never said so.
+ *
+ * The twelve cases above assert two "empty edges -> valid" results and ten
+ * violations. NONE of them can distinguish this implementation from
+ * `return { ok: edges.length === 0, violations: [] }` — there was no case for a
+ * non-empty VALID layout because none can exist. A suite that cannot tell the
+ * real module from a one-liner is not testing the module.
+ *
+ * These cases pin the reduction itself. They are deliberately written to FAIL
+ * the day the schema gains a way to express a legal edge — at which point the
+ * reduction stops holding and someone has to come back here and decide what
+ * the rules are, which is the outcome this bead wants.
+ */
+describe('the reduction: ok <-> edges.length === 0 (Cebab-x1n.1.12)', () => {
+  const PARTICIPANTS = [1, 2, 3];
+
+  // Every edge set over a small pid space, including unknown endpoints and
+  // self-loops. Enumerated rather than hand-picked: a hand-picked list is how
+  // a suite ends up unable to see its own tautology.
+  const universe = [1, 2, 3, 99];
+  const pairs: Array<[number, number]> = [];
+  for (const a of universe) for (const b of universe) pairs.push([a, b]);
+  const edgeSets: Array<Array<[number, number]>> = [];
+  for (let mask = 0; mask < 1 << 6; mask++) {
+    const set: Array<[number, number]> = [];
+    for (let i = 0; i < 6; i++) if (mask & (1 << i)) set.push(pairs[i]!);
+    edgeSets.push(set);
+  }
+
+  test('the enumeration is real', () => {
+    // Guards the vacuous pass: an empty or all-empty corpus satisfies every
+    // assertion below for the wrong reason.
+    expect(edgeSets.length).toBe(64);
+    expect(edgeSets.filter((e) => e.length > 0).length).toBe(63);
+  });
+
+  test('no non-empty layout is ever approved', () => {
+    const approvedNonEmpty = edgeSets
+      .filter((e) => e.length > 0)
+      .filter((e) => validateCustomTopology(mkTemplate(PARTICIPANTS), customLayout(e)).ok);
+    expect(approvedNonEmpty).toEqual([]);
+  });
+
+  test('every empty layout IS approved, so `ok` is exactly the edge count', () => {
+    // The other half. Without it "nothing is ever ok" would also pass the
+    // case above, and that is a different (worse) module.
+    const r = validateCustomTopology(mkTemplate(PARTICIPANTS), customLayout([]));
+    expect(r.ok).toBe(true);
+    expect(r.violations).toEqual([]);
+  });
+
+  test('the suite would not notice if the implementation were the one-liner', () => {
+    // Stated as an executable claim rather than a comment, because this is the
+    // finding: over the whole enumeration, the real validator and
+    // `edges.length === 0` agree on every input. THIS is what a future editor
+    // has to break.
+    for (const e of edgeSets) {
+      const real = validateCustomTopology(mkTemplate(PARTICIPANTS), customLayout(e)).ok;
+      expect(real).toBe(e.length === 0);
+    }
+  });
 });
 
 describe('validateTemplateTopology', () => {
