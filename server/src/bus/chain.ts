@@ -61,6 +61,7 @@ import {
   getLastMultiAgentEvent,
   getPendingRetry,
   listPendingMutations,
+  recordSessionHops,
   recordSessionTeardown,
   setMutationPromoted,
   setPauseOnDangerous,
@@ -144,7 +145,15 @@ export type StartChainOpts = {
   /** Per-event callback → `multi_agent_event` ServerMsg. `sessionId` is
    *  passed explicitly so callbacks firing during the awaited start (the
    *  first turn) still address the right session. */
-  onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
+  /**
+   * `Cebab-v85`: `hopsUsed` is the router's hop counter immediately AFTER this
+   * event — the same number the budget brake enforces on. It is a parameter
+   * rather than something the sink derives from its own event history
+   * precisely because those two quantities are NOT the same: five row classes
+   * reach this callback without ever bumping the counter (see the field's
+   * JSDoc on `multi_agent_started`). Passing it keeps one definition.
+   */
+  onEvent: (sessionId: string, ev: BusEvent, dbEventId: number, hopsUsed: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
   /** Injectable for tests; threaded into the AgentRunner. Defaults to the
    *  real (mock-aware) `pickRunner` when omitted. */
@@ -212,7 +221,7 @@ export type ChainSessionHandle = {
   sessionFolder: string;
   /** Resolved hop budget for this session (caller-provided or default).
    *  Surfaced on the handle so the WS layer can put it on the wire in
-   *  `multi_agent_started`; the UI reads `events.length / hopBudget` for
+   *  `multi_agent_started`; the UI reads `hopsUsed / hopBudget` for
    *  the activity-bar chip. */
   hopBudget: number;
   /** Item #5: resolved pause-on-dangerous flag for this session. */
@@ -394,13 +403,40 @@ export function createChainRouter(params: {
   let lastDrop: StrandedCause | null = null;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Incremented on every successful append (handleEvent + forwardCebabEvent)
-  // so it stays in lockstep with what the UI sees as `run.events.length`.
+  // `Cebab-v85`: NOT in lockstep with `run.events.length` — see `bumpHops`.
   // The synthetic budget-exhausted event is persisted directly inline below
   // and intentionally does NOT bump this counter (it lives in DB/wire as
   // event N+1 but the displayed ratio matches the cap when it fires).
   // On R-B reconstruction this is seeded from the DB (persisted event count)
   // so the budget check carries over from the prior process.
   let hopsCount = params.initialHopsCount ?? 0;
+
+  /**
+   * `Cebab-v85`: advance the hop counter AND persist it.
+   *
+   * Every bump goes through here so `multi_agent_sessions.hops_used` tracks
+   * the live counter instead of being written once at teardown. What that
+   * buys is not bookkeeping: `reconstruct` re-seeds this same counter after
+   * an R-B restart, and with nothing persisted its only available substitute
+   * was the `multi_agent_events` row count — a strictly larger number,
+   * because Cebab's own rows are in it. The brake therefore came back from a
+   * restart with less budget than it had enforced before it.
+   *
+   * The in-memory bump happens FIRST and unconditionally, for the same
+   * reason register B25 moved it out of the persist `try`: a database that
+   * cannot be written must not be able to stall the brake. A failed persist
+   * costs accuracy across a restart, which is recoverable; a stalled brake
+   * is an unbounded run, which is not.
+   */
+  const bumpHops = () => {
+    hopsCount += 1;
+    try {
+      recordSessionHops(sessionId, hopsCount);
+    } catch (err) {
+      console.error('[chain] persist hops_used failed', err);
+    }
+  };
+
   // PR-7: first error captured during this chain session for the rail.
   // Sources mirror orchestrator: synthetic budget-exhaust text + any kind=
   // 'error' bus event observed in handleEvent + worker-failed reason.
@@ -601,6 +637,7 @@ export function createChainRouter(params: {
             text: reasonText,
           },
           row.id,
+          hopsCount,
         );
       } catch (sinkErr) {
         console.error('[chain] stalled-drop onEvent threw', sinkErr);
@@ -669,6 +706,7 @@ export function createChainRouter(params: {
             text: reasonText,
           },
           row.id,
+          hopsCount,
         );
       } catch (sinkErr) {
         console.error('[chain] operator-error onEvent threw', sinkErr);
@@ -716,6 +754,7 @@ export function createChainRouter(params: {
           text: reasonText,
         },
         row.id,
+        hopsCount,
       );
     } catch (err) {
       console.error('[chain] persist budget-exhausted event failed', err);
@@ -870,17 +909,17 @@ export function createChainRouter(params: {
     // — the event below is forwarded and delivered whether or not the row
     // landed, so a session with a sick database used to run unbounded.
     //
-    // This does mean the displayed ratio can exceed `events.length` while
+    // This does mean the counter can exceed the persisted row count while
     // persistence is failing. That divergence is true information (events ARE
-    // missing); under healthy persistence the two stay in lockstep exactly as
-    // before, which is what the UI test asserts.
-    hopsCount += 1;
+    // missing). `Cebab-v85`: it is no longer the only way the two differ, and the
+    // UI no longer counts rows — see the orchestrator's twin of this comment.
+    bumpHops();
     // PR-7: capture kind='error' events as the run's first_error for the rail.
     if (ev.kind === 'error') {
       captureError(ev.text);
     }
     try {
-      sink.onEvent(sessionId, ev, dbId);
+      sink.onEvent(sessionId, ev, dbId, hopsCount);
     } catch (err) {
       console.error('[chain] onEvent callback threw', err);
     }
@@ -986,8 +1025,7 @@ export function createChainRouter(params: {
   // Cebab-originated events (briefings, initial prompt): persist + forward so
   // the operator's scrollback + DB transcript include them. No routing — the
   // briefing/prompt is delivered as the agent's actual turn separately.
-  // Bumps `hopsCount` so the counter stays in lockstep with
-  // `run.events.length` as the UI sees it — register B25 moved the bump out
+  // Bumps `hopsCount` — register B25 moved the bump out
   // of the persist `try` so a failed write can no longer stall the brake;
   // see `handleEvent` for the reasoning.
   const forwardCebabEvent = (ev: BusEvent) => {
@@ -1005,9 +1043,9 @@ export function createChainRouter(params: {
     } catch (err) {
       console.error('[chain] persist cebab event failed', err);
     }
-    hopsCount += 1;
+    bumpHops();
     try {
-      sink.onEvent(sessionId, ev, dbId);
+      sink.onEvent(sessionId, ev, dbId, hopsCount);
     } catch (err) {
       console.error('[chain] cebab onEvent threw', err);
     }
@@ -1116,6 +1154,7 @@ export function createChainRouter(params: {
           sessionId,
           { ts: row.ts, source: CEBAB_SOURCE, destination: USER_RECIPIENT, kind: 'error', text },
           row.id,
+          hopsCount,
         );
       } catch (sinkErr) {
         console.error('[chain] stranded-run onEvent threw', sinkErr);
@@ -1162,6 +1201,7 @@ export function createChainRouter(params: {
             text: reasonText,
           },
           row.id,
+          hopsCount,
         );
       } catch (sinkErr) {
         console.error('[chain] worker-failed onEvent threw', sinkErr);

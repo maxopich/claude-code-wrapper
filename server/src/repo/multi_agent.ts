@@ -382,6 +382,36 @@ export function recordSessionTeardown(
 }
 
 /**
+ * `Cebab-v85`: record the router's hop counter as the run ADVANCES, not only
+ * at teardown.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM `recordSessionTeardown`. `hops_used` was a
+ * teardown-only column, so while a session was live the only persisted answer
+ * to "how many hops has this taken" was NULL — and both readers filled that
+ * hole with the same wrong substitute, `multi_agent_events` row count. The UI
+ * derived the chip from it, and (worse) `reconstruct` re-seeded the ROUTER's
+ * enforcement counter from it after a restart, so the brake silently adopted
+ * a number inflated by every row Cebab itself had written. Writing the real
+ * counter as it moves is what lets both read one definition.
+ *
+ * Deliberately NOT batched or debounced. Every hop already does an INSERT
+ * into `multi_agent_events`; one more UPDATE on a single indexed row is not
+ * the cost worth optimising, and a debounce would reintroduce exactly the
+ * hole this closes — a window where the persisted count lags the enforced
+ * one, which is the window an R-B restart lands in.
+ *
+ * A failed write is the CALLER's problem to swallow: the router bumps its
+ * in-memory counter outside this call for the same reason `handleEvent` bumps
+ * outside its persist `try` (register B25) — a sick database must not stall
+ * the brake.
+ */
+export function recordSessionHops(sessionId: string, hopsUsed: number): void {
+  getDb()
+    .prepare(`UPDATE multi_agent_sessions SET hops_used = ? WHERE id = ?`)
+    .run(hopsUsed, sessionId);
+}
+
+/**
  * PR-7: SELECT the most-recent session row started from the given template
  * id, or `undefined` when no such row exists. Used by the templates UI's
  * "Last run" rail; the iteration directory + status enum are derived from

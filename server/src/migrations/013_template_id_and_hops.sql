@@ -31,6 +31,33 @@
 --                      display AND to derive the "ok" vs "at cap" label
 --                      (`hops_used === hop_budget` → yellow chip). NULL
 --                      until teardown lands; NULL on pre-013 rows.
+--
+--                      CORRECTED 2026-08-31 (Cebab-v85). Two claims above
+--                      are wrong about the shipped code, and the second was
+--                      load-bearing:
+--
+--                      (a) it is NOT a "count of persisted
+--                          `multi_agent_events` rows". `teardown()` writes
+--                          the ROUTER's `hopsCount`, and five row classes
+--                          are persisted without ever bumping it (Cebab's
+--                          own explanatory rows: worker-failed,
+--                          budget-exhausted, chain's terminal note, the
+--                          stranded-run note, and the operator's ask-user
+--                          answer). The column is the smaller number, and
+--                          always was — the comment described the wrong one.
+--
+--                      (b) it is no longer NULL until teardown.
+--                          `recordSessionHops` writes it on every bump, so
+--                          it is live for the whole run. That is what lets
+--                          `reconstruct` re-seed the brake from it after an
+--                          R-B restart; it previously substituted the event
+--                          row count, i.e. (a)'s larger number, so a
+--                          restarted session came back with less budget than
+--                          it had been enforcing.
+--
+--                      SQL deliberately untouched — this is a comment-only
+--                      correction (see `migration_integrity.ts` on why that
+--                      is safe and why byte hashing was rejected).
 --   4. first_error   — the FIRST operator-facing error text observed
 --                      during the run, truncated to ~200 chars at write
 --                      time. Captures the synthetic budget-exhausted

@@ -448,6 +448,7 @@ function bootstrapMulti(): AppState {
       lifecycle: 'persistent',
       sessionFolder: '/tmp/bus',
       hopBudget: 30,
+      hopsUsed: 0,
       pauseOnDangerous: false,
       mutations: [],
       pendingMutations: [],

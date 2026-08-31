@@ -11,6 +11,7 @@ import {
   trustChipState,
 } from './store';
 import type { MultiAgentEventView, MultiAgentRun } from './store';
+import type { ServerMsg } from '@cebab/shared';
 
 const PID = 1;
 
@@ -940,6 +941,7 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/bus-1',
         hopBudget: 30,
+        hopsUsed: 0,
         pauseOnDangerous: false,
         mutations: [],
         pendingMutations: [],
@@ -1037,6 +1039,7 @@ describe('store / eventDefaultCollapsed', () => {
       awaitingContinue: false,
       activity: null,
       hopBudget: 30,
+      hopsUsed: 0,
       pendingRetry: null,
       pauseOnDangerous: false,
       executeMode: false,
@@ -1140,6 +1143,7 @@ describe('store / agent_activity (ephemeral liveness)', () => {
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/sess-A',
         hopBudget: 30,
+        hopsUsed: 0,
         pauseOnDangerous: false,
         mutations: [],
         pendingMutations: [],
@@ -1239,12 +1243,105 @@ describe('store / hop budget', () => {
         lifecycle: 'persistent',
         sessionFolder: '/ws/.cebab/s-budget',
         hopBudget: 42,
+        hopsUsed: 0,
         pauseOnDangerous: false,
         mutations: [],
         pendingMutations: [],
       },
     });
     expect(s.multiAgent.active!.hopBudget).toBe(42);
+  });
+
+  // `Cebab-v85`: the chip's NUMERATOR now comes from the server too.
+  //
+  // It was `events.length`, which counts five row classes the router never
+  // charges to the budget — Cebab's own explanatory rows. So the chip climbed
+  // faster than the brake and "25 / 70 HOPS" reconciled with nothing on the
+  // server. Every case below therefore sets `hopsUsed` and `events.length` to
+  // DIFFERENT values; a fixture where they agree passes on the old code.
+  describe('hopsUsed comes from the wire, never from events.length', () => {
+    type Started = Extract<ServerMsg, { type: 'multi_agent_started' }>;
+    type Event = Extract<ServerMsg, { type: 'multi_agent_event' }>;
+
+    const started = (over: Partial<Started> = {}): Started =>
+      ({
+        type: 'multi_agent_started',
+        participantControls: [],
+        routerDrops: [],
+        sessionId: 's-hops',
+        mode: 'orchestrator',
+        participants: [1],
+        participantAgentNames: ['orchestrator', 'coder'],
+        lifecycle: 'persistent',
+        sessionFolder: '/ws/.cebab/s-hops',
+        hopBudget: 30,
+        hopsUsed: 0,
+        pauseOnDangerous: false,
+        mutations: [],
+        pendingMutations: [],
+        ...over,
+      }) as Started;
+
+    const event = (over: Partial<Event> = {}): Event =>
+      ({
+        type: 'multi_agent_event',
+        sessionId: 's-hops',
+        eventId: 1,
+        ts: 1,
+        source: 'orchestrator',
+        destination: 'coder',
+        kind: 'prompt',
+        text: 'go',
+        ...over,
+      }) as Event;
+
+    test('multi_agent_started seeds it (R-B reconstruct lands mid-run)', () => {
+      // A reconstructed session starts at whatever the brake resumed on, not
+      // at zero — and its event list is empty until the replay arrives, so
+      // deriving from `events.length` would show 0 / 30 on a run at 17.
+      const s = reduce(initialState, { type: 'server', msg: started({ hopsUsed: 17 }) });
+      expect(s.multiAgent.active!.hopsUsed).toBe(17);
+      expect(s.multiAgent.active!.events).toHaveLength(0);
+    });
+
+    test('a live event advances it to the value the server sent', () => {
+      let s = reduce(initialState, { type: 'server', msg: started({ hopsUsed: 4 }) });
+      s = reduce(s, { type: 'server', msg: event({ eventId: 9, hopsUsed: 5 }) });
+      expect(s.multiAgent.active!.hopsUsed).toBe(5);
+      // PREMISE: one event arrived, and 5 is not that count.
+      expect(s.multiAgent.active!.events).toHaveLength(1);
+    });
+
+    test('an event with NO hopsUsed leaves the count alone', () => {
+      // Two senders omit it deliberately: the resume replay (no per-row hop
+      // count was ever persisted) and any row the WS layer persists without
+      // the router — the operator's ask-user answer today. Treating absent as
+      // 0 would blank the chip on every reconnect; treating it as "+1" would
+      // rebuild the very conflation this removed.
+      let s = reduce(initialState, { type: 'server', msg: started({ hopsUsed: 6 }) });
+      s = reduce(s, { type: 'server', msg: event({ eventId: 1 }) });
+      s = reduce(s, { type: 'server', msg: event({ eventId: 2 }) });
+      s = reduce(s, { type: 'server', msg: event({ eventId: 3 }) });
+      expect(s.multiAgent.active!.hopsUsed).toBe(6);
+      expect(s.multiAgent.active!.events).toHaveLength(3);
+    });
+
+    test('the two numbers are allowed to disagree, and the chip follows the server', () => {
+      // The whole defect in one assertion: five rows on screen, three hops
+      // charged. Reddens the moment anything re-derives the numerator.
+      let s = reduce(initialState, { type: 'server', msg: started({ hopsUsed: 0 }) });
+      for (const id of [1, 2, 3]) {
+        s = reduce(s, { type: 'server', msg: event({ eventId: id, hopsUsed: id }) });
+      }
+      for (const id of [4, 5]) {
+        s = reduce(s, {
+          type: 'server',
+          msg: event({ eventId: id, source: 'cebab', destination: 'user', kind: 'error' }),
+        });
+      }
+      expect(s.multiAgent.active!.events).toHaveLength(5);
+      expect(s.multiAgent.active!.hopsUsed).toBe(3);
+    });
   });
 
   test('settings reducer copies defaultHopBudget into SettingsView', () => {
@@ -1297,6 +1394,7 @@ describe('store / participant controls hydrate on attach (Cebab-vie.6, Cebab-vie
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-ctrl',
     hopBudget: 30,
+    hopsUsed: 0,
     pauseOnDangerous: false,
     mutations: [],
     pendingMutations: [],
@@ -1437,6 +1535,7 @@ describe('store / pending retry', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-pr',
     hopBudget: 30,
+    hopsUsed: 0,
     pauseOnDangerous: false,
     mutations: [],
     pendingMutations: [],
@@ -1595,6 +1694,7 @@ describe('store / pause-on-dangerous + mutations', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-pom',
     hopBudget: 30,
+    hopsUsed: 0,
     pauseOnDangerous: false,
     mutations: [],
     pendingMutations: [],
@@ -1937,6 +2037,7 @@ describe('store / recoveryContext (Item #7)', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-rec',
     hopBudget: 30,
+    hopsUsed: 0,
     pauseOnDangerous: false,
     mutations: [],
     pendingMutations: [],
@@ -2028,6 +2129,7 @@ describe('store / router_drop accumulation (Phase 6d)', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/s-drop',
     hopBudget: 30,
+    hopsUsed: 0,
     pauseOnDangerous: false,
     mutations: [],
     pendingMutations: [],
@@ -2224,6 +2326,7 @@ describe('store / participant control reducer cases', () => {
         lifecycle: 'persistent',
         sessionFolder: '/tmp/.cebab/bus-1',
         hopBudget: 30,
+        hopsUsed: 0,
         pauseOnDangerous: false,
         mutations: [],
         pendingMutations: [],
@@ -2420,6 +2523,7 @@ describe('store / countControlledParticipants', () => {
         lifecycle: 'persistent',
         sessionFolder: '/tmp/.cebab/bus-2',
         hopBudget: 30,
+        hopsUsed: 0,
         pauseOnDangerous: false,
         mutations: [],
         pendingMutations: [],
@@ -2445,6 +2549,7 @@ describe('store / countControlledParticipants', () => {
         lifecycle: 'persistent',
         sessionFolder: '/tmp/.cebab/bus-3',
         hopBudget: 30,
+        hopsUsed: 0,
         pauseOnDangerous: false,
         mutations: [],
         pendingMutations: [],
@@ -3207,6 +3312,7 @@ describe('store / multi_agent_started.mock projection (Phase 2c)', () => {
     lifecycle: 'persistent' as const,
     sessionFolder: '/ws/.cebab/bus-m',
     hopBudget: 30,
+    hopsUsed: 0,
     pauseOnDangerous: false,
     mutations: [],
     pendingMutations: [],

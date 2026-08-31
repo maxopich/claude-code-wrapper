@@ -349,6 +349,18 @@ export type MultiAgentRun = {
    *  hopBudget` and the "Hop budget" row in Session info; the actual
    *  enforcement happens in the router. */
   hopBudget: number;
+  /** `Cebab-v85`: hops the ROUTER has counted — the numerator of the
+   *  activity-bar chip and the "Hop budget" row in Session info.
+   *
+   *  DO NOT go back to `events.length`. That was the bug: five row classes
+   *  are persisted without ever bumping the router's counter (Cebab's own
+   *  explanatory rows — worker-failed, budget-exhausted, chain's terminal
+   *  note, the stranded-run note, and the operator's ask-user answer), so
+   *  the chip climbed faster than the brake and the two became
+   *  un-reconcilable. Seeded from `multi_agent_started.hopsUsed` and
+   *  advanced by `multi_agent_event.hopsUsed`, which live routers send and
+   *  replay deliberately omits. */
+  hopsUsed: number;
   /** Item #4 pending-retry slot. Populated when a worker's deliverTurn
    *  failed and the operator hasn't yet retried or abandoned. Drives the
    *  Retry/Abandon banner above the prompt input and gates the
@@ -2184,6 +2196,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             awaitingContinue: msg.awaitingContinue ?? false,
             activity: null,
             hopBudget: msg.hopBudget,
+            hopsUsed: msg.hopsUsed,
             pendingRetry: msg.pendingRetry ?? null,
             // Item #5: hydrate pause-on-dangerous overlay state from
             // `multi_agent_started`. Always populated (server resolves and
@@ -2245,6 +2258,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
           ...state.multiAgent,
           active: {
             ...active,
+            // `Cebab-v85`: absent means "the count did not move", NOT zero.
+            // Replayed rows omit it (no per-row hop count was ever
+            // persisted), and so does any row the WS layer persists without
+            // the router — the operator's ask-user answer today. Keeping the
+            // previous value is what makes both of those render correctly.
+            hopsUsed: typeof msg.hopsUsed === 'number' ? msg.hopsUsed : active.hopsUsed,
             events: [
               ...active.events,
               {

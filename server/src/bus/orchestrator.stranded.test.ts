@@ -192,10 +192,11 @@ describe('a muted worker mid-delegation (Cebab-vie.8)', () => {
     // explanation of the resulting silence is not a hop the run took either.
     // Reddens if the note is routed through `forwardCebabEvent`.
     //
-    // Read via `teardown`, because `hops_used` is the router's in-memory
-    // counter and only reaches the column at teardown — which is also the
-    // number the templates rail renders, so this is the operator-visible one
-    // rather than a proxy for it.
+    // Read after `teardown`, which is the operator-visible number the
+    // templates rail renders rather than a proxy for it. `Cebab-v85`: the
+    // column is no longer teardown-only — `recordSessionHops` keeps it live
+    // for the whole run — so this reads the same value it would mid-run.
+    // `hop_counter.test.ts` covers the mid-run half directly.
     const wired = runWedge({ workers: ['coder'], hopBudget: 50 });
     wired.deliver(ORCHESTRATOR_AGENT_NAME, 'plan the round');
     await flush(16);

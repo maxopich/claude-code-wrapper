@@ -63,6 +63,7 @@ function seedBusRun(): AppState {
       lifecycle: 'persistent',
       sessionFolder: '/ws/.cebab/bus-sess-1',
       hopBudget: 30,
+      hopsUsed: 0,
       pauseOnDangerous: false,
       mutations: [],
       pendingMutations: [],
