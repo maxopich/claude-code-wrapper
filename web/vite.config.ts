@@ -1,10 +1,11 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import { DEFAULT_PORT } from '@cebab/shared/net';
 
 export default defineConfig(({ mode }) => {
   // Pull env from the repo root so a single .env file feeds both server and web.
   const env = loadEnv(mode, '..', '');
-  const serverPort = env.VITE_SERVER_PORT ?? env.PORT ?? '4319';
+  const serverPort = env.VITE_SERVER_PORT ?? env.PORT ?? String(DEFAULT_PORT);
   return {
     envDir: '..',
     plugins: [react()],

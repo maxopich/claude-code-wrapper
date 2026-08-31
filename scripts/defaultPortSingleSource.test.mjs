@@ -1,0 +1,98 @@
+/**
+ * Register N27: the default server port has ONE source of truth.
+ *
+ * `4319` used to be repeated as a literal fallback in six files — the client
+ * (`web/src/App.tsx`), the server config (`server/src/config.ts`), three smoke
+ * scripts (`ci_smoke.ts`, `ws_smoke.ts`, `live_smoke.ts`) and the Vite config
+ * (`web/vite.config.ts`). Changing the default meant finding all six, and a
+ * missed one silently targeted the old port. `DEFAULT_PORT` in
+ * `shared/src/net.ts` is now the single definition; this gate keeps it that
+ * way.
+ *
+ * WHY A GATE. The failure this fixes is exactly the one a lint pass cannot see:
+ * a seventh copy, or one of the six drifting back to a bare literal, typechecks
+ * and runs fine while re-opening the maintenance hazard. Same shape as
+ * `scripts/configSurfaceClaims.test.mjs` — read the files, assert a structural
+ * property, keep a parser out of it.
+ *
+ * ANTI-VACUITY. Both checkers are exercised against verbatim pre-fix strings
+ * that they MUST flag and post-fix strings they must NOT, independently of the
+ * tree — so scanning the corrected tree cannot pass just because the checkers
+ * measure nothing.
+ */
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, test } from 'vitest';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** The single definition and its canonical value. */
+const NET_FILE = 'shared/src/net.ts';
+
+/**
+ * Files that must derive their port fallback from `DEFAULT_PORT` rather than
+ * repeat the literal. `hasComment` is true only where a bare `4319` legitimately
+ * survives in prose (config.ts's parser docstring), so those files are checked
+ * for the import + a clean assignment line rather than for zero occurrences.
+ */
+const CONSUMERS = [
+  { file: 'server/src/config.ts', hasComment: true },
+  { file: 'web/src/App.tsx', hasComment: false },
+  { file: 'web/vite.config.ts', hasComment: false },
+  { file: 'server/src/ci_smoke.ts', hasComment: false },
+  { file: 'server/src/ws_smoke.ts', hasComment: false },
+  { file: 'server/src/live_smoke.ts', hasComment: false },
+];
+
+function read(rel) {
+  return fs.readFileSync(path.join(repoRoot, rel), 'utf8');
+}
+
+/** A consumer must import the shared constant. */
+function importsDefaultPort(src) {
+  return /import\s*\{[^}]*\bDEFAULT_PORT\b[^}]*\}\s*from\s*['"]@cebab\/shared(?:\/net)?['"]/.test(
+    src,
+  );
+}
+
+/** Strip line and block comments so a literal in prose is not mistaken for code. */
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
+describe('register N27: default port single source', () => {
+  test('shared/src/net.ts is the one definition of DEFAULT_PORT = 4319', () => {
+    const src = read(NET_FILE);
+    expect(src).toMatch(/export const DEFAULT_PORT = 4319;/);
+  });
+
+  for (const { file, hasComment } of CONSUMERS) {
+    test(`${file} derives its port from DEFAULT_PORT`, () => {
+      const src = read(file);
+      expect(importsDefaultPort(src), `${file} should import DEFAULT_PORT`).toBe(true);
+      // No bare 4319 literal survives in code (comments are stripped first).
+      expect(stripComments(src)).not.toMatch(/4319/);
+      if (!hasComment) {
+        // Files with no legitimate prose mention carry no 4319 at all.
+        expect(src).not.toMatch(/4319/);
+      }
+    });
+  }
+
+  describe('anti-vacuity: the checkers actually reject the pre-fix shapes', () => {
+    test('importsDefaultPort flags a file missing the import', () => {
+      expect(importsDefaultPort(`const base = 'ws://127.0.0.1:4319';`)).toBe(false);
+      expect(importsDefaultPort(`import { DEFAULT_PORT } from '@cebab/shared/net';`)).toBe(true);
+      expect(importsDefaultPort(`import { DEFAULT_PORT } from '@cebab/shared';`)).toBe(true);
+    });
+
+    test('stripComments leaves code literals but removes prose ones', () => {
+      expect(stripComments(`const PORT = process.env.PORT ?? '4319';`)).toMatch(/4319/);
+      expect(stripComments(`// Number(process.env.PORT ?? 4319) was the shape`)).not.toMatch(
+        /4319/,
+      );
+      expect(stripComments(`/** ... ?? 4319 ... */`)).not.toMatch(/4319/);
+    });
+  });
+});
