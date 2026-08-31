@@ -1003,14 +1003,42 @@ export function describeLiveSessionConflict(): string | null {
  * Exported for direct testing, like its neighbours in this file.
  */
 export function handlePauseExpiry(entry: PauseExpiryEntry): void {
-  // The fire-time orchestrator handle may differ from the
-  // schedule-time one (R-A reattach swapped the live session
-  // between bind and fire) — re-read at fire time.
+  // The fire-time handle may differ from the schedule-time one (R-A reattach
+  // swapped the live session between bind and fire) — re-read at fire time.
+  //
+  // `Cebab-x1n.2.27`: resolve for BOTH modes. Orchestrator handles satisfy the
+  // expire executor's shape directly. Chain handles expose `resumeAgent` /
+  // `getPendingDeliveries` but no `kickAgent` — and never need one here,
+  // because a chain pause can only ever arm `auto_resume`
+  // (`executePauseParticipant` refuses the `auto_kick` choice for chain, and
+  // no chain pause row could predate that rule since chain pauses were
+  // rejected wholesale before). The chain wrapper's `kickAgent` is therefore
+  // an unreachable defensive no-op.
   const liveAtFire = getLiveSession(entry.sessionId);
-  const handleAtFire =
-    liveAtFire?.mode === 'orchestrator'
-      ? (liveAtFire.handle as unknown as OrchestratorSessionHandle)
-      : undefined;
+  let handleAtFire:
+    | {
+        resumeAgent: (agentName: string) => boolean;
+        kickAgent: (agentName: string) => boolean;
+        getPendingDeliveries: (agentName: string) => number;
+      }
+    | undefined;
+  if (liveAtFire?.mode === 'orchestrator') {
+    handleAtFire = liveAtFire.handle as unknown as OrchestratorSessionHandle;
+  } else if (liveAtFire?.mode === 'chain') {
+    const chainHandle = liveAtFire.handle as unknown as ChainSessionHandle;
+    handleAtFire = {
+      resumeAgent: (name) => chainHandle.resumeAgent(name),
+      getPendingDeliveries: (name) => chainHandle.getPendingDeliveries(name),
+      kickAgent: () => {
+        console.error(
+          `[ws] pause-expiry: unexpected auto_kick for chain session ${entry.sessionId} — chain pauses cannot arm auto_kick; ignoring`,
+        );
+        return false;
+      },
+    };
+  } else {
+    handleAtFire = undefined;
+  }
   // Register B17: and so must the SINK. `liveAtFire.sendServerMsg`
   // resolves the router's current sink on every call, so a window
   // that re-attached after the pause was armed receives the envelope
@@ -4653,12 +4681,18 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       return;
     }
     case 'pause_participant': {
-      // Cluster C Phase 4c (spec §5.2 + §5.6 + AE-4/5/6): orchestrator-mode
-      // per-agent pause. Same orchestration shape as mute (validate → DB
-      // flip → AgentRunner gate install → safety_audit dual-write →
-      // state-change echo) but the echo carries `queuedDeliveries` so the
-      // operator sees the pending-queue size growing while the agent is
-      // paused (AE-5 [security] observability for runaway buildup).
+      // Cluster C Phase 4c (spec §5.2 + §5.6 + AE-4/5/6): per-agent pause.
+      // Same orchestration shape as mute (validate → DB flip → AgentRunner
+      // gate install → safety_audit dual-write → state-change echo) but the
+      // echo carries `queuedDeliveries` so the operator sees the pending-queue
+      // size growing while the agent is paused (AE-5 [security] observability
+      // for runaway buildup).
+      //
+      // `Cebab-x1n.2.27`: chain sessions are honored too now — the chain
+      // handle exposes the same pause surface, so we pass whichever handle the
+      // live session holds. `executePauseParticipant` refuses only the
+      // `auto_kick` expiry choice for chain (a chain kick orphans downstream
+      // hops).
       //
       // Cluster C Phase 4c2: after a successful pause, schedule the
       // expiry timer in the process-wide registry. Timer's fire
@@ -4668,13 +4702,15 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // `participant_kicked` envelope so the operator's UI reconciles
       // without needing a fresh round-trip.
       const live = getLiveSession(msg.sessionId);
-      const orchestratorHandle =
+      const runnerHandle =
         live?.mode === 'orchestrator'
           ? (live.handle as unknown as OrchestratorSessionHandle)
-          : undefined;
+          : live?.mode === 'chain'
+            ? (live.handle as unknown as ChainSessionHandle)
+            : undefined;
       const result = executePauseParticipant({
         msg,
-        orchestratorHandle,
+        orchestratorHandle: runnerHandle,
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
@@ -4744,13 +4780,15 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // (e.g. resume without prior pause, or pause already expired)
       // — either is fine.
       const live = getLiveSession(msg.sessionId);
-      const orchestratorHandle =
+      const runnerHandle =
         live?.mode === 'orchestrator'
           ? (live.handle as unknown as OrchestratorSessionHandle)
-          : undefined;
+          : live?.mode === 'chain'
+            ? (live.handle as unknown as ChainSessionHandle)
+            : undefined;
       const result = executeResumeParticipant({
         msg,
-        orchestratorHandle,
+        orchestratorHandle: runnerHandle,
         sessionMode: live?.mode ?? null,
       });
       if (!result.ok) {
