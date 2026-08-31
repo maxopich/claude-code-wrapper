@@ -6283,6 +6283,40 @@ pre {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Cebab-p5y: the rest of the class `Cebab-7dk` was one instance of.
+ *
+ * MEASURED, not guessed. Every class carrying a `:hover` rule, crossed with
+ * every class literally present on a `<button>` in the TSX, minus those that
+ * already reach a ring — through a rule of their own or through another class
+ * on the same element. Fifteen classes came out of that; thirteen are here.
+ * The remaining two reach a ring without their own rule and are listed as
+ * `CONTAINER_RINGED` / covered in `focusVisible.test.ts`, where the claim is
+ * checked rather than asserted.
+ *
+ * WHY THE HOVER RULE IS WHAT MAKES THIS A DEFECT rather than a gap. A control
+ * that visibly answers the mouse and stays silent for the keyboard is not
+ * merely unstyled — it demonstrates that a pointer state was designed for it
+ * and the focus state was forgotten. WCAG 2.1 AA 2.4.7 is about the second.
+ *
+ * Grouped into one block on purpose: thirteen separate rules would drift, and
+ * the ring is a single house decision, not a per-control one. */
+.ask-user-option:focus-visible,
+.bulk-action-btn:focus-visible,
+.managed-file-tab:focus-visible,
+.notif-inbox-chip:focus-visible,
+.permission-allow:focus-visible,
+.permission-deny:focus-visible,
+.session-select-toggle:focus-visible,
+.slash-command-btn:focus-visible,
+.spine-chip:focus-visible,
+.stopped-marker-skip:focus-visible,
+.tpl-apply:focus-visible,
+.tpl-item-del:focus-visible,
+.workspace-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 /* `.primary-btn` already has a :disabled rule; ghost/icon were missing one. */
 .ghost-btn:disabled,
 .icon-btn:disabled {
