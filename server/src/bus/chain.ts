@@ -245,6 +245,28 @@ export type ChainSessionHandle = {
    *  replayed turn spends) and re-delivers the paused worker's last captured
    *  prompt. No-op when `mutationId` isn't currently pending. */
   continueThroughMutation: (mutationId: number) => Promise<void>;
+  /**
+   * `Cebab-x1n.2.27`: the per-agent pause gate, exposed the same way
+   * `OrchestratorSessionHandle` does so the `pause_participant` /
+   * `resume_participant` WS verbs can drive a chain participant. Chain mode
+   * already builds its own `AgentRunner` (`runner.pause/resume/has/
+   * getPendingDeliveries` all exist), so this is pure surface: the gate
+   * mechanics need no new work.
+   *
+   * Spec §5.3 permits a chain pause in principle ("chain stalls at the paused
+   * hop") — the paused participant's next turn parks on the runner gate and
+   * nothing downstream advances until `resumeAgent` (or an `auto_resume`
+   * expiry) releases it. `auto_kick` expiry is the one thing refused, and NOT
+   * here: `control_verbs.ts` rejects that CHOICE at pause time, because a
+   * chain kick orphans every downstream hop (see `chain_topology_broken` in
+   * `executeKickParticipant`). Returns mirror the orchestrator's: true iff the
+   * gate state changed; `hasAgent` is the runner-roster probe the executor
+   * consults before writing anything.
+   */
+  pauseAgent: (agentName: string) => boolean;
+  resumeAgent: (agentName: string) => boolean;
+  hasAgent: (agentName: string) => boolean;
+  getPendingDeliveries: (agentName: string) => number;
 };
 
 type ChainRouter = {
@@ -2013,6 +2035,13 @@ export function wireChainSession(p: {
       }
       deliver(pending.agentName, replayPrompt);
     },
+    // `Cebab-x1n.2.27`: pause gate surface. Chain's `runner` is a full
+    // AgentRunner, so these forward straight through — same bodies the
+    // orchestrator handle uses.
+    pauseAgent: (agentName) => runner.pause(agentName),
+    resumeAgent: (agentName) => runner.resume(agentName),
+    hasAgent: (agentName) => runner.has(agentName),
+    getPendingDeliveries: (agentName) => runner.getPendingDeliveries(agentName),
   };
 
   registerLiveSession({

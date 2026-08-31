@@ -527,11 +527,14 @@ export function isPauseExpiryAction(v: unknown): v is PauseExpiryAction {
  * audit `reasonCode`s — they're operator-facing diagnostic codes.
  *
  *   - chain_mute_unsupported    — Mute requested in chain mode (spec §5.3)
- *   - chain_pause_unsupported   — Pause/resume requested in chain mode.
- *     Register B03: this used to report SUCCESS in chain mode — the DB
- *     flipped, an expiry timer was scheduled and safety_audit recorded
- *     `agent_control.paused`, while the chain worker kept taking turns,
- *     because only orchestrator handles expose the pause wire.
+ *   - chain_pause_unsupported   — `expiryAction='auto_kick'` requested for a
+ *     chain pause (`Cebab-x1n.2.27`). A chain pause itself is now honored —
+ *     the chain handle exposes the runner pause gate — but arming an auto-kick
+ *     expiry is refused, because a chain kick orphans every downstream hop
+ *     (kick itself is rejected with `chain_topology_broken`). Only
+ *     `auto_resume` is offered for chain pauses. (Register B03: pause used to
+ *     be rejected wholesale in chain mode; before that it reported a false
+ *     SUCCESS while the chain worker kept taking turns.)
  *   - chain_topology_broken     — Kick of a chain-middle participant
  *   - hard_kill_unsupported_v1  — Kick mode='hard' before AbortController refactor
  *   - already_in_state          — Mute on muted / pause on paused / etc.
@@ -1848,7 +1851,8 @@ export type ClientMsg =
    * Topology guards (Phase 4b enforces, codes defined in
    * `ControllabilityFailureCode` above):
    *   - Mute in chain mode → `chain_mute_unsupported`
-   *   - Pause/resume in chain mode → `chain_pause_unsupported`
+   *   - Chain pause with `expiryAction='auto_kick'` → `chain_pause_unsupported`
+   *     (a plain chain pause / resume is supported — `Cebab-x1n.2.27`)
    *   - Kick of chain-middle participant → `chain_topology_broken`
    *   - Kick mode='hard' (v1) → `hard_kill_unsupported_v1`
    *   - Kick of orchestrator row → `orchestrator_cannot_kick`

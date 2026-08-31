@@ -427,39 +427,57 @@ describe('executePauseParticipant — happy path', () => {
   });
 });
 
-// Register B03 [security]. `executePauseParticipant` accepted `sessionMode`
-// and never read it. In chain mode `orchestratorHandle` is simply undefined,
-// so the code fell through: DB column flipped, expiry timer scheduled by the
-// caller, an `agent_control.paused` audit row written, `ok` echoed — and the
-// chain worker kept taking turns, because only orchestrator handles expose
-// the pause wire. Mute (`chain_mute_unsupported`) and kick
-// (`chain_topology_broken`) already refused chain; pause now does too.
+// `Cebab-x1n.2.27`. Chain pause/resume are now WIRED through the chain handle
+// (which exposes the same pause surface the orchestrator handle does), so a
+// chain pause parks the participant on the runner gate ("chain stalls at the
+// paused hop", spec §5.3) instead of the old `chain_pause_unsupported`
+// short-circuit that reported nothing was paused. The ONE thing still refused
+// is `expiryAction='auto_kick'` for a chain pause: a chain kick orphans every
+// downstream hop, so arming an auto-kick would promise an expiry the system
+// could only honor by breaking the pipeline.
 //
-// The assertions below are as much about the RESIDUE as the return value: a
-// rejection that still flipped the column or wrote the audit row would leave
-// durable state claiming a pause that was never in force — which is what R-B
-// reconstruction and the operator's UI both read back.
-describe('executePauseParticipant — chain mode is refused [security]', () => {
-  test('chain pause returns chain_pause_unsupported', () => {
+// The `auto_kick`-refused case is [security]: its assertions are as much about
+// the RESIDUE as the return value — a rejection that still flipped the column
+// or wrote the audit row would leave durable state claiming a pause that was
+// never in force, which is what R-B reconstruction and the operator's UI both
+// read back (register B03's no-residue discipline).
+describe('executePauseParticipant — chain mode', () => {
+  test('chain pause with auto_resume is honored through the handle', () => {
     const { workerId } = seedSession();
+    const handle = makeFakePauseHandle();
     const result = executePauseParticipant({
-      msg: pauseMsg({ projectId: workerId }),
-      orchestratorHandle: undefined, // exactly what a chain session yields
+      msg: pauseMsg({ projectId: workerId, expiryAction: 'auto_resume' }),
+      orchestratorHandle: handle, // exactly what a chain session yields now
+      sessionMode: 'chain',
+      now: () => 1_700_000_000_000,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return; // type guard
+    expect(result.pausedUntil).toBe(1_700_000_000_000 + 60_000);
+    expect(handle.pauseAgent).toHaveBeenCalledWith('worker-slug');
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBe(1_700_000_000_000 + 60_000);
+    const audit = getDb()
+      .prepare<[], { n: number }>(
+        "SELECT COUNT(*) AS n FROM safety_audit WHERE kind = 'agent_control.paused'",
+      )
+      .get();
+    expect(audit?.n).toBe(1);
+  });
+
+  test('chain pause with auto_kick returns chain_pause_unsupported [security]', () => {
+    const { workerId } = seedSession();
+    const handle = makeFakePauseHandle();
+    const result = executePauseParticipant({
+      msg: pauseMsg({ projectId: workerId, expiryAction: 'auto_kick' }),
+      orchestratorHandle: handle,
       sessionMode: 'chain',
     });
     expect(result.ok).toBe(false);
     if (result.ok) return; // type guard
     expect(result.failureCode).toBe('chain_pause_unsupported');
-  });
-
-  test('chain pause writes NO pause column and NO audit row', () => {
-    const { workerId } = seedSession();
-    executePauseParticipant({
-      msg: pauseMsg({ projectId: workerId }),
-      orchestratorHandle: undefined,
-      sessionMode: 'chain',
-    });
-
+    // No residue: the refusal runs before the DB flip, the gate install and
+    // the audit write.
+    expect(handle.pauseAgent).not.toHaveBeenCalled();
     expect(getControlState('sess-1', workerId)?.pausedUntil ?? null).toBeNull();
     const audit = getDb()
       .prepare<[], { n: number }>(
@@ -469,29 +487,19 @@ describe('executePauseParticipant — chain mode is refused [security]', () => {
     expect(audit?.n).toBe(0);
   });
 
-  test('chain resume is refused too — nothing is ever held there to release', () => {
+  test('chain resume is honored — the chain pause gate is released', () => {
     const { workerId } = seedSession();
+    setParticipantPause('sess-1', workerId, Date.now() + 10_000, 'auto_resume');
+    const handle = makeFakePauseHandle();
+    handle.pauseAgent('worker-slug'); // pre-sync the fake to "paused"
     const result = executeResumeParticipant({
       msg: resumeMsgFor({ projectId: workerId }),
-      orchestratorHandle: undefined,
+      orchestratorHandle: handle,
       sessionMode: 'chain',
     });
-    expect(result.ok).toBe(false);
-    if (result.ok) return; // type guard
-    expect(result.failureCode).toBe('chain_pause_unsupported');
-  });
-
-  test('the refusal is decided on sessionMode, not on the handle being absent', () => {
-    // A torn-down ORCHESTRATOR session also has no handle, but that is a
-    // different condition and keeps its own code — the operator's intent is
-    // still recorded there. Conflating the two would lose that distinction.
-    const { workerId } = seedSession();
-    const result = executePauseParticipant({
-      msg: pauseMsg({ projectId: workerId }),
-      orchestratorHandle: undefined,
-      sessionMode: 'orchestrator',
-    });
     expect(result.ok).toBe(true);
+    expect(handle.resumeAgent).toHaveBeenCalledWith('worker-slug');
+    expect(getControlState('sess-1', workerId)?.pausedUntil).toBeNull();
   });
 
   test('orchestrator mode is unaffected', () => {

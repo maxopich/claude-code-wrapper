@@ -363,19 +363,28 @@ export function buildParticipantMuteChangedMsg(args: {
 //     classifies the pause itself as operational; only the expiry timer's
 //     `pause.expired_without_resume` event is safety class (lands with the
 //     C4c2 expiry timer slice).
-//   - Chain mode is REJECTED with `chain_pause_unsupported`, mirroring how
-//     mute (`chain_mute_unsupported`) and kick (`chain_topology_broken`)
-//     already refuse it. Spec §5.3 does allow a chain pause in principle
-//     ("chain stalls at paused hop"), but only orchestrator handles expose
-//     the pause wire, so nothing would actually be paused.
+//   - Chain mode is now SUPPORTED (`Cebab-x1n.2.27`). `ChainSessionHandle`
+//     exposes `pauseAgent`/`resumeAgent`/`hasAgent`/`getPendingDeliveries`
+//     the same way the orchestrator handle does, and the WS layer passes a
+//     chain handle in `orchestratorHandle`, so a chain pause parks the
+//     participant's next turn on the runner gate ("chain stalls at paused
+//     hop", spec §5.3). The ONE thing refused is `expiryAction='auto_kick'`
+//     for a chain pause: a chain kick orphans every downstream hop (kicks
+//     are rejected wholesale with `chain_topology_broken` in
+//     `executeKickParticipant`), so arming an auto-kick would promise an
+//     expiry the system could only honor by breaking the pipeline. That
+//     choice is rejected with `chain_pause_unsupported` — the code stays in
+//     the union for exactly this narrower use. Only `auto_resume` is offered
+//     for chain pauses.
 //
-//     Register B03: this comment used to claim chain attempts "return
-//     `participant_not_found`". They did not. `orchestratorHandle` was
-//     merely `undefined`, so the code flipped the DB, scheduled an expiry
-//     timer, wrote an `agent_control.paused` audit row and echoed `ok` —
-//     while the chain worker kept taking turns. The short-circuit below
-//     runs BEFORE the DB flip precisely so none of that residue is left
-//     behind claiming a pause that was never in force.
+//     Register B03 (superseded here): the short-circuit that used to reject
+//     ALL chain pauses replaced an even older bug where `orchestratorHandle`
+//     was merely `undefined`, so the code flipped the DB, scheduled an expiry
+//     timer, wrote an `agent_control.paused` audit row and echoed `ok` while
+//     the chain worker kept taking turns. The no-residue discipline B03
+//     established still holds: the `auto_kick` rejection below runs BEFORE the
+//     DB flip and the audit write, so a refused chain pause leaves nothing
+//     durable claiming a pause was in force.
 //   - State-change echo carries `queuedDeliveries` (AE-5) so the operator
 //     can see the pending-queue size growing while the agent is paused.
 
@@ -385,11 +394,12 @@ const HARD_TIMEOUT_CEILING_MS = 24 * 60 * 60 * 1000; // 24h — past this is cle
 export type ExecutePauseInput = {
   msg: Extract<ClientMsg, { type: 'pause_participant' }>;
   /**
-   * Live orchestrator handle. Pause is orchestrator-only on the wire; chain
-   * sessions are rejected up front with `chain_pause_unsupported` (register
-   * B03) and never reach the handle. `undefined` here therefore means "the
-   * session is torn down", which returns `participant_not_found` — the same
-   * code mute uses for "no live target" so the client reducer folds both.
+   * The live session's runner handle — an `OrchestratorSessionHandle` OR a
+   * `ChainSessionHandle` (`Cebab-x1n.2.27`); both expose the identical pause
+   * surface, so the executor is mode-agnostic and the field is named for its
+   * historical orchestrator-only origin. `undefined` here means "the session
+   * is torn down", which returns `participant_not_found` — the same code mute
+   * uses for "no live target" so the client reducer folds both.
    */
   orchestratorHandle:
     | {
@@ -407,6 +417,8 @@ export type ExecutePauseInput = {
 
 export type ExecuteResumeInput = {
   msg: Extract<ClientMsg, { type: 'resume_participant' }>;
+  /** The live session's runner handle — orchestrator OR chain
+   *  (`Cebab-x1n.2.27`); both expose `resumeAgent`/`getPendingDeliveries`. */
   orchestratorHandle:
     | {
         resumeAgent: (agentName: string) => boolean;
@@ -497,15 +509,21 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
       message: `unknown multi-agent session ${msg.sessionId}`,
     };
   }
-  // Register B03: BEFORE the DB flip, the timer and the audit write. Only
-  // orchestrator handles expose the pause wire, so a chain pause would
-  // report success and pause nothing.
-  if (input.sessionMode === 'chain') {
+  // `Cebab-x1n.2.27`: a chain pause is honored (the chain handle now exposes
+  // the pause gate), but `auto_kick` expiry is refused for it. A chain kick
+  // orphans every downstream hop — `executeKickParticipant` rejects all chain
+  // kicks with `chain_topology_broken` — so arming an auto-kick would promise
+  // an expiry the system could only honor by breaking the pipeline. Reject the
+  // CHOICE here, BEFORE the DB flip / timer / audit write, so no residue is
+  // left claiming a pause that was never in force (register B03's discipline).
+  // `expiryAction` is already validated above, so this narrows to the two
+  // known actions.
+  if (input.sessionMode === 'chain' && msg.expiryAction === 'auto_kick') {
     return {
       ok: false,
       failureCode: 'chain_pause_unsupported',
       message:
-        'pause is not supported in chain mode (the chain handle has no pause wire, so nothing would actually stop)',
+        "expiryAction='auto_kick' is not supported for a chain pause (an auto-kick would orphan every downstream hop); use 'auto_resume'",
     };
   }
 
@@ -618,10 +636,10 @@ export function executePauseParticipant(input: ExecutePauseInput): ExecutePauseR
   }
 
   // Sync the AgentRunner pause gate. Missing handle: log + keep the DB row, so
-  // the operator's intent survives. Chain sessions no longer reach here —
-  // they're rejected up front with `chain_pause_unsupported` (register B03) —
-  // so `undefined` means the session was torn down between the lookup and here,
-  // and the DB row is the surviving record of intent.
+  // the operator's intent survives. Both orchestrator AND chain sessions reach
+  // here now (`Cebab-x1n.2.27`); `undefined` means the session was torn down
+  // between the lookup and here, and the DB row is the surviving record of
+  // intent.
   if (input.orchestratorHandle) {
     // Register B19: this return value used to be discarded. `AgentRunner.
     // pause()` returns false in two cases, and the first is the dangerous
@@ -697,18 +715,12 @@ export function executeResumeParticipant(input: ExecuteResumeInput): ExecuteResu
       message: `unknown multi-agent session ${msg.sessionId}`,
     };
   }
-  // Register B03: symmetric with pause. A chain session can never hold a
-  // Cebab-installed pause, so "resume" has nothing to release — accepting it
-  // would clear a `paused_until` column that no gate was ever built from.
-  if (input.sessionMode === 'chain') {
-    return {
-      ok: false,
-      failureCode: 'chain_pause_unsupported',
-      message:
-        'resume is not supported in chain mode (pause is rejected there, so nothing is held)',
-    };
-  }
-
+  // `Cebab-x1n.2.27`: resume is honored in chain mode too — symmetric with
+  // pause, which now installs a real chain pause gate. A chain session CAN
+  // hold a Cebab-installed pause (via `ChainSessionHandle.pauseAgent`), so
+  // resume has something to release. The `already_in_state` guard below still
+  // rejects a resume of an unpaused participant, so a stray resume clears
+  // nothing it should not.
   const participants = listResolvedParticipants(msg.sessionId);
   const participant = participants.find((p) => p.project_id === msg.projectId);
   if (!participant) {
