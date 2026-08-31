@@ -58,14 +58,18 @@ describe('exportFilename', () => {
 
   test('uses session start time, not Date.now()', () => {
     // 2024-01-15 09:30:45 UTC = 1705311045000 = 2024-01-15 01:30:45 in LA.
-    const filename = exportFilename('abcd1234-cafe-beef-0000-000000000000', 1705311045000);
-    expect(filename).toBe('cebab-abcd1234-20240115-013045.jsonl');
+    const filename = exportFilename(
+      'abcd1234-cafe-beef-0000-000000000000',
+      1705311045000,
+      'redacted',
+    );
+    expect(filename).toBe('cebab-abcd1234-20240115-013045-redacted.jsonl');
   });
 
   test('truncates session id to 8 chars', () => {
     // Same instant, local: 2024-01-15 01:30:45.
-    const filename = exportFilename('s', 1705311045000);
-    expect(filename).toBe('cebab-s-20240115-013045.jsonl');
+    const filename = exportFilename('s', 1705311045000, 'redacted');
+    expect(filename).toBe('cebab-s-20240115-013045-redacted.jsonl');
   });
 
   test('stamps LOCAL time, so a late-evening session files under the local day', () => {
@@ -75,13 +79,31 @@ describe('exportFilename', () => {
     // stamp files it under the 15th. Before the fix this returned
     // `...-20240116-050000...`.
     const ts = Date.UTC(2024, 0, 16, 5, 0, 0);
-    const filename = exportFilename('abcd1234', ts);
-    expect(filename).toBe('cebab-abcd1234-20240115-210000.jsonl');
+    const filename = exportFilename('abcd1234', ts, 'redacted');
+    expect(filename).toBe('cebab-abcd1234-20240115-210000-redacted.jsonl');
+  });
+
+  test('the format is in the name, so raw and redacted cannot collide (Cebab-89j)', () => {
+    // THE WHOLE POINT. A raw and a redacted export of the same session used to
+    // produce a byte-identical filename — two files in a Downloads folder, one
+    // safe to share and one not, indistinguishable. `Cebab-ygu.47` was exactly
+    // this failure one layer in (an artifact asserting `exported_redacted`
+    // while the file held plaintext); the audit row knew which was which and
+    // the file did not.
+    const ts = Date.UTC(2024, 0, 16, 5, 0, 0);
+    const red = exportFilename('abcd1234', ts, 'redacted');
+    const raw = exportFilename('abcd1234', ts, 'raw');
+    expect(red).not.toBe(raw);
+    expect(red.endsWith('-redacted.jsonl')).toBe(true);
+    expect(raw.endsWith('-raw.jsonl')).toBe(true);
+    // Same session, same instant — ONLY the format differs. Without this a
+    // change that varied some other segment would also satisfy `not.toBe`.
+    expect(red.replace('-redacted.jsonl', '')).toBe(raw.replace('-raw.jsonl', ''));
   });
 
   test('falls back to Date.now() when session start is null', () => {
     const before = Date.now();
-    const filename = exportFilename('xx', null);
+    const filename = exportFilename('xx', null, 'redacted');
     const after = Date.now();
 
     // DO NOT RECONSTRUCT AN INSTANT FROM THE STAMP. The stamp is LOCAL
@@ -101,10 +123,10 @@ describe('exportFilename', () => {
     // The FORMAT itself is pinned by the fixed-timestamp test above, so this
     // is not circular — it tests only that the fallback reads the clock.
     const acceptable = new Set<string>();
-    for (let t = before; t < after; t += 1000) acceptable.add(exportFilename('xx', t));
-    acceptable.add(exportFilename('xx', after));
+    for (let t = before; t < after; t += 1000) acceptable.add(exportFilename('xx', t, 'redacted'));
+    acceptable.add(exportFilename('xx', after, 'redacted'));
 
-    expect(filename).toMatch(/^cebab-xx-\d{8}-\d{6}\.jsonl$/);
+    expect(filename).toMatch(/^cebab-xx-\d{8}-\d{6}-redacted\.jsonl$/);
     expect([...acceptable]).toContain(filename);
   });
 });
@@ -473,7 +495,7 @@ describe('/session-log :: redacted format (default)', () => {
     // by the pure `exportFilename` tests above; here we assert only that the
     // endpoint stamps the filename from the resolved session start time.
     expect(String(res.headers['content-disposition'])).toContain(
-      `filename="${exportFilename('sess-known', 1705311045000)}"`,
+      `filename="${exportFilename('sess-known', 1705311045000, 'redacted')}"`,
     );
   });
 });

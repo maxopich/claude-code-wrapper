@@ -50,6 +50,8 @@
  * button produces.
  */
 
+import { sessionLogExportFilename, type SessionLogExportFormat } from '@cebab/shared';
+
 /** Mirror of the server's `X-Cebab-Acknowledge-Raw` header name. */
 export const RAW_ACK_HEADER = 'X-Cebab-Acknowledge-Raw';
 /** Literal value the server checks for. */
@@ -104,20 +106,22 @@ export function buildSessionLogExportUrl(opts: {
 }
 
 /**
- * Default filename: `cebab-<shortid>-<YYYYMMDD-HHMMSS>.jsonl`. Mirrors
- * the server's `exportFilename()`. Used when the response is missing a
- * Content-Disposition (offline fixtures, error paths) — production
- * downloads should pick up the server-stamped filename instead.
+ * Fallback filename, used when the response is missing a Content-Disposition
+ * (offline fixtures, error paths) — production downloads pick up the
+ * server-stamped one instead.
+ *
+ * `Cebab-89j`: this WAS a hand-written copy of the server's `exportFilename`,
+ * and its own comment said so ("Mirrors the server's `exportFilename()`") — a
+ * claim nothing checked. Both are now one definition in `@cebab/shared`, which
+ * both packages already import runtime values from. The wrapper survives only
+ * to keep this module's public surface stable for its callers and tests.
  */
-export function pickExportFilename(sessionId: string, sessionStartMs: number | null): string {
-  const short = sessionId.slice(0, 8);
-  const ts = sessionStartMs ?? Date.now();
-  const d = new Date(ts);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const stamp =
-    `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-` +
-    `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-  return `cebab-${short}-${stamp}.jsonl`;
+export function pickExportFilename(
+  sessionId: string,
+  sessionStartMs: number | null,
+  format: SessionLogExportFormat,
+): string {
+  return sessionLogExportFilename(sessionId, sessionStartMs, format);
 }
 
 /**
@@ -218,7 +222,12 @@ export async function downloadSessionLog(opts: {
     res.headers.get('content-disposition'),
   );
   const filename =
-    dispositionFilename ?? opts.filenameHint ?? pickExportFilename(opts.sessionId, null);
+    dispositionFilename ??
+    opts.filenameHint ??
+    // `Cebab-89j`: the format the caller ASKED for. `opts.format` is what went
+    // on the query string, so the fallback name matches the bytes requested
+    // rather than guessing. Absent means the server default, which is redacted.
+    pickExportFilename(opts.sessionId, null, opts.format ?? 'redacted');
 
   const buf = await res.arrayBuffer();
   triggerBlobDownload({

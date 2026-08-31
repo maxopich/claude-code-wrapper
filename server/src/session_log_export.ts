@@ -76,7 +76,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { pipeline } from 'node:stream';
 import type { Express, Request, Response } from 'express';
-import { redactSensitive } from '@cebab/shared';
+import { redactSensitive, sessionLogExportFilename } from '@cebab/shared';
 import { config } from './config.js';
 import { verifyToken } from './auth.js';
 import { buildAllowedOrigins, isAllowedHost } from './origin.js';
@@ -163,17 +163,18 @@ export type ExportFormat = 'redacted' | 'raw';
  *
  * The short id is the first 8 chars of `sessionId` (matches the existing
  * ChatHeader `{props.sessionId.slice(0, 8)}` convention).
+ *
+ * `Cebab-89j`: RE-EXPORTED, not defined here, and now carrying the format.
+ *
+ * The definition moved to `@cebab/shared` because `web/src/exports.ts` held a
+ * second hand-written copy whose own comment claimed to mirror this one, with
+ * nothing checking that it did. The `-<format>` segment is new: a raw and a
+ * redacted export of the SAME session used to produce a byte-identical
+ * filename, so the one part of a saved artifact that travels with it did not
+ * say which policy produced the bytes. See the shared module's header for why
+ * that is a name and not an assurance about the contents.
  */
-export function exportFilename(sessionId: string, sessionStartMs: number | null): string {
-  const short = sessionId.slice(0, 8);
-  const ts = sessionStartMs ?? Date.now();
-  const d = new Date(ts);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const stamp =
-    `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-` +
-    `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-  return `cebab-${short}-${stamp}.jsonl`;
-}
+export const exportFilename = sessionLogExportFilename;
 
 /**
  * The whole per-line decision for a `format=redacted` export. **Returns `null`
@@ -424,7 +425,7 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     }
     const startMs = deps.getSessionStartMs?.(sid) ?? null;
-    const filename = exportFilename(sid, startMs);
+    const filename = exportFilename(sid, startMs, format);
     res.setHeader('Content-Type', 'application/x-ndjson');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 

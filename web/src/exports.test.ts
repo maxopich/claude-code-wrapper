@@ -16,6 +16,7 @@
  *     Content-Disposition, fallback to `pickExportFilename`, and the
  *     three error shapes (`http`, `network`, JSON-typed).
  */
+import { sessionLogExportFilename } from '@cebab/shared';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import {
   buildSessionLogExportUrl,
@@ -86,21 +87,43 @@ describe('pickExportFilename', () => {
 
   test('uses the start time in local time', () => {
     // 2024-01-15 09:30:45 UTC = 1705311045000 = 2024-01-15 01:30:45 in LA.
-    const filename = pickExportFilename('abcd1234-cafe-beef-0000-000000000000', 1705311045000);
-    expect(filename).toBe('cebab-abcd1234-20240115-013045.jsonl');
+    const filename = pickExportFilename(
+      'abcd1234-cafe-beef-0000-000000000000',
+      1705311045000,
+      'redacted',
+    );
+    expect(filename).toBe('cebab-abcd1234-20240115-013045-redacted.jsonl');
   });
 
   test('stamps LOCAL time, so a late-evening session files under the local day', () => {
     // 2024-01-16 05:00:00 UTC = 2024-01-15 21:00:00 in LA. UTC would file this
     // under the 16th; local files it under the 15th.
     const ts = Date.UTC(2024, 0, 16, 5, 0, 0);
-    const filename = pickExportFilename('abcd1234', ts);
-    expect(filename).toBe('cebab-abcd1234-20240115-210000.jsonl');
+    const filename = pickExportFilename('abcd1234', ts, 'redacted');
+    expect(filename).toBe('cebab-abcd1234-20240115-210000-redacted.jsonl');
+  });
+
+  test('it IS the server definition now, not a copy of it (Cebab-89j)', () => {
+    // The old comment on `pickExportFilename` claimed it "mirrors the server's
+    // `exportFilename()`", and nothing checked that claim — two hand-written
+    // copies with two hand-written test suites asserting the same shape.
+    // They are one definition in `@cebab/shared` now, so this asserts the
+    // wrapper actually delegates rather than re-implementing.
+    const ts = Date.UTC(2024, 0, 16, 5, 0, 0);
+    for (const fmt of ['redacted', 'raw'] as const) {
+      expect(pickExportFilename('abcd1234', ts, fmt)).toBe(
+        sessionLogExportFilename('abcd1234', ts, fmt),
+      );
+    }
+    // And the property the name exists for: the two formats cannot collide.
+    expect(pickExportFilename('abcd1234', ts, 'raw')).not.toBe(
+      pickExportFilename('abcd1234', ts, 'redacted'),
+    );
   });
 
   test('falls back to Date.now() when start is null', () => {
     const before = Date.now();
-    const filename = pickExportFilename('xx', null);
+    const filename = pickExportFilename('xx', null, 'redacted');
     const after = Date.now();
 
     // DO NOT RECONSTRUCT AN INSTANT FROM THE STAMP. The stamp is LOCAL
@@ -120,10 +143,11 @@ describe('pickExportFilename', () => {
     // The FORMAT itself is pinned by the fixed-timestamp test above, so this
     // is not circular — it tests only that the fallback reads the clock.
     const acceptable = new Set<string>();
-    for (let t = before; t < after; t += 1000) acceptable.add(pickExportFilename('xx', t));
-    acceptable.add(pickExportFilename('xx', after));
+    for (let t = before; t < after; t += 1000)
+      acceptable.add(pickExportFilename('xx', t, 'redacted'));
+    acceptable.add(pickExportFilename('xx', after, 'redacted'));
 
-    expect(filename).toMatch(/^cebab-xx-\d{8}-\d{6}\.jsonl$/);
+    expect(filename).toMatch(/^cebab-xx-\d{8}-\d{6}-redacted\.jsonl$/);
     expect([...acceptable]).toContain(filename);
   });
 });
@@ -318,8 +342,12 @@ describe('downloadSessionLog', () => {
       token: 'tok',
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
-    // Shape only — Date.now() varies. `sess-fall` is the first 8 chars.
-    expect(result.filename).toMatch(/^cebab-sess-fal-\d{8}-\d{6}\.jsonl$/);
+    // Shape only — Date.now() varies. `sess-fal` is the first 8 chars.
+    // `Cebab-89j`: the fallback now names the format too. No `format` was
+    // requested here, so it is the server default, `redacted` — asserted
+    // explicitly rather than with a wildcard, because "which policy produced
+    // these bytes" is the entire reason the segment exists.
+    expect(result.filename).toMatch(/^cebab-sess-fal-\d{8}-\d{6}-redacted\.jsonl$/);
   });
 
   test('throws DownloadSessionLogError on non-OK status', async () => {
