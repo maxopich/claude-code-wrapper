@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { config, parseAutoReclaimDays, parseIntEnv } from './config.js';
+import { config, parseAutoReclaimDays, parseIntEnv, readAliasedEnv } from './config.js';
 
 // P0-C part 2b: CEBAB_AUTO_RECLAIM_DAYS parsing. The feature is destructive
 // (soft-delete), so anything that isn't a clear positive integer resolves to
@@ -94,6 +94,51 @@ describe('parseIntEnv', () => {
   });
 });
 
+// Register N26: six env vars (PORT, WORKSPACE_ROOT, MOCK, MOCK_SCENARIO,
+// MOCK_INTERVAL_MS, MAX_TURNS) shipped without the `CEBAB_` prefix the other
+// four carry, so a bare `PORT`/`MAX_TURNS` collides with whatever else is in the
+// operator's shell. `readAliasedEnv` prefers the prefixed spelling and keeps the
+// bare name working-but-deprecated.
+describe('readAliasedEnv', () => {
+  test('the prefixed value wins when both are set, with nothing to warn about', () => {
+    const warned: string[] = [];
+    const got = readAliasedEnv('CEBAB_PORT', '8085', 'PORT', '9000', (m) => void warned.push(m));
+    expect(got).toBe('8085');
+    // Using the canonical name is not a deprecation event.
+    expect(warned).toEqual([]);
+  });
+
+  test('the bare value is used when the prefixed one is unset, AND warns', () => {
+    const warned: string[] = [];
+    const got = readAliasedEnv('CEBAB_PORT', undefined, 'PORT', '9000', (m) => void warned.push(m));
+    expect(got).toBe('9000');
+    // The deprecation notice is the whole point — silence would let the bare
+    // name live forever unremarked.
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('PORT');
+    expect(warned[0]).toContain('CEBAB_PORT');
+  });
+
+  test('a blank prefixed value falls through to the bare name', () => {
+    const warned: string[] = [];
+    // `CEBAB_PORT=` in a `.env` is not a choice; it should not shadow a real
+    // bare value.
+    const got = readAliasedEnv('CEBAB_PORT', '  ', 'PORT', '9000', (m) => void warned.push(m));
+    expect(got).toBe('9000');
+    expect(warned).toHaveLength(1);
+  });
+
+  test('neither set → undefined, and nothing is deprecated', () => {
+    const warned: string[] = [];
+    expect(
+      readAliasedEnv('CEBAB_PORT', undefined, 'PORT', undefined, (m) => void warned.push(m)),
+    ).toBeUndefined();
+    // A blank bare value is not "in use" either — no warning.
+    expect(readAliasedEnv('CEBAB_PORT', undefined, 'PORT', '', () => {})).toBe('');
+    expect(warned).toEqual([]);
+  });
+});
+
 /**
  * A helper with its own tests proves nothing about the CALL SITES — putting
  * `Number(process.env.PORT ?? 4319)` back would leave every case above green,
@@ -145,5 +190,50 @@ describe('the three env-backed numbers go through parseIntEnv', () => {
     // streams its whole fixture in one frame instead of pacing it.
     const c = await freshConfig({ MOCK_INTERVAL_MS: 'fast' });
     expect(c.mockIntervalMs).toBe(50);
+  });
+
+  // Register N26: the prefixed spellings must actually reach the config, or the
+  // alias is inert. Each of these fails against the pre-N26 config that read
+  // only the bare name.
+  test('CEBAB_PORT is honoured', async () => {
+    const c = await freshConfig({ CEBAB_PORT: '8086' });
+    expect(c.port).toBe(8086);
+  });
+
+  test('CEBAB_PORT wins over the deprecated bare PORT', async () => {
+    const c = await freshConfig({ CEBAB_PORT: '8087', PORT: '9001' });
+    expect(c.port).toBe(8087);
+  });
+
+  test('CEBAB_MAX_TURNS is honoured', async () => {
+    const c = await freshConfig({ CEBAB_MAX_TURNS: '7' });
+    expect(c.maxTurns).toBe(7);
+  });
+
+  test('CEBAB_MOCK turns on mock mode', async () => {
+    const c = await freshConfig({ CEBAB_MOCK: '1' });
+    expect(c.mock).toBe(true);
+  });
+
+  test('CEBAB_WORKSPACE_ROOT sets the workspace root and marks its source env', async () => {
+    const c = await freshConfig({ CEBAB_WORKSPACE_ROOT: '/tmp/cebab-agents' });
+    expect(c.workspaceRootDefault).toBe('/tmp/cebab-agents');
+    expect(c.workspaceRootDefaultSource).toBe('env');
+  });
+
+  test('CEBAB_MOCK_SCENARIO and CEBAB_MOCK_INTERVAL_MS are honoured', async () => {
+    const c = await freshConfig({
+      CEBAB_MOCK_SCENARIO: 'orchestrator',
+      CEBAB_MOCK_INTERVAL_MS: '0',
+    });
+    expect(c.mockScenario).toBe('orchestrator');
+    expect(c.mockIntervalMs).toBe(0);
+  });
+
+  test('the deprecated bare names still work', async () => {
+    // Backward compatibility: an existing `.env` keeps running.
+    const c = await freshConfig({ PORT: '8088', MAX_TURNS: '9' });
+    expect(c.port).toBe(8088);
+    expect(c.maxTurns).toBe(9);
   });
 });
