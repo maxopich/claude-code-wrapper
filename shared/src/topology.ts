@@ -7,7 +7,11 @@
  * [server/src/bus/orchestrator.ts](../../server/src/bus/orchestrator.ts):
  *
  *   - **No worker → worker edges.** Orchestrator workers can only send
- *     to the orchestrator; F2 drops worker→worker silently.
+ *     to the orchestrator; F2 drops worker→worker silently. NOTE, and see
+ *     the block below: every edge this schema can express has two
+ *     participant endpoints, so this rule fires on ALL of them. It is not
+ *     one constraint among four — it is the one that makes the validator
+ *     total.
  *   - **No self-loops.** A worker addressing itself is meaningless under
  *     the orchestrator routing model.
  *   - **No edges to/from non-participants.** F2 round-2 drops any source
@@ -15,11 +19,58 @@
  *   - **No disconnected components.** Every participant must be
  *     reachable from the orchestrator (treated as the implicit hub),
  *     otherwise the diagram depicts a worker the bus will never wake.
+ *     Checked only when `edges` is non-empty: a zero-edge layout is the
+ *     default star, where every participant is hub-connected by
+ *     construction.
  *
  * The custom-mode editor (NOT shipped in PR-6) MUST call this before
  * persisting. The renderer does NOT call it — invalid layouts still
  * render (they just look wrong), so the failure surface is "the editor
  * refuses to save," not "the modal crashes." Tests pin the rules.
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * READ THIS BEFORE SHIPPING THE EDITOR (`Cebab-x1n.1.12`, register D12).
+ *
+ * **This validator cannot approve any non-empty layout, and that is a
+ * property of the SCHEMA rather than a bug in the code below.** Work the
+ * branches through: `ok` reduces to exactly `edges.length === 0`. Every edge
+ * `CustomLayout` can express has two participant `projectId` endpoints, so it
+ * is a worker→worker edge, so it is a violation. `topology.test.ts` pins the
+ * reduction directly rather than leaving it to be rediscovered.
+ *
+ * TWO REPAIRS SUGGEST THEMSELVES AND BOTH WERE MEASURED AND REJECTED. Neither
+ * is written here, so that whoever ships the editor starts from the numbers
+ * instead of re-deriving them.
+ *
+ *   1. ADD A `'hub'` EDGE ENDPOINT so a layout can say worker↔hub. Then the
+ *      only approvable non-empty layout is the one where every participant is
+ *      hub-incident — i.e. the star that `participants` alone already
+ *      describes. Enumerated over 4 participants: exactly **1** approvable
+ *      non-empty layout. The field would be able to express one thing, and
+ *      that thing is already derivable without it.
+ *
+ *   2. REREAD AN EDGE AS HUB-ANCHORED (`from → hub → to`), which the
+ *      connectivity comment below already half-assumes and which the
+ *      renderer stub's "derive flowPaths per hub-anchored edge" appears to
+ *      support. Then `worker_to_worker` becomes unconstructible and many
+ *      layouts approve — enumerated over 4 participants: **3861**. But under
+ *      orchestrator routing every worker reaches every other worker via the
+ *      hub, so all 3861 depict a constraint the bus does not enforce. That is
+ *      the same "misleading mental model" the `broadcast` paragraph below
+ *      refuses the schema for, arrived at from the other direction.
+ *
+ * So the honest statement is: `CustomLayout.edges` cannot currently express a
+ * topology that is both LEGAL and INFORMATIVE. Fixing that is a decision about
+ * what custom mode is FOR — not a patch — and it belongs with the editor's
+ * owner. `protocol.ts` says `'custom'` is presentation-only and that the
+ * runtime follows orchestrator routing; if that stays true, a hand-authored
+ * edge set has nothing to say that `participants` does not.
+ *
+ * What was done instead, deliberately: the code is left alone, the claims
+ * above it are made true, and the tautology is pinned. A validator that
+ * silently refuses everything while its header advertises four rules is worse
+ * than one that says so.
+ * ─────────────────────────────────────────────────────────────────────────
  *
  * SO ITS ONLY CONSUMER TODAY IS `topology.test.ts`, and that is expected until
  * the editor lands. Register N07 read that as dead code and proposed deleting
@@ -53,7 +104,22 @@ import type { CustomLayout, MultiAgentTemplate } from './protocol.js';
 export type TopologyViolation =
   | { code: 'self_loop'; from: number; to: number }
   | { code: 'worker_to_worker'; from: number; to: number }
-  | { code: 'unknown_endpoint'; from: number | 'hub' | 'user'; to: number | 'hub' | 'user' }
+  /**
+   * `Cebab-x1n.1.12`: `from`/`to` are `number`, not `number | 'hub' | 'user'`.
+   *
+   * Applying N08's own rule one level down, to the PAYLOAD rather than to the
+   * `code`. The sentinel arms were declared and could never be constructed:
+   * this branch reads `e.from` / `e.to` straight off a `CustomLayout` edge,
+   * whose endpoints are typed `number`. N08 removed a whole variant for
+   * exactly this reason ("declared, never constructed, and is removed"); a
+   * dead arm inside a live variant is the same defect wearing a smaller hat,
+   * and it is what let the header claim a `'user'` endpoint rule the schema
+   * cannot express.
+   *
+   * If the future editor adds sentinel endpoints, widen this AND the edge
+   * type AND the rule together — the trio, not one of the three.
+   */
+  | { code: 'unknown_endpoint'; from: number; to: number }
   | { code: 'unreachable_participant'; pid: number };
 
 export type TopologyValidation = {
@@ -86,13 +152,22 @@ export function validateCustomTopology(
   const participantSet = new Set(template.participants);
   const edges = layout.edges ?? [];
 
-  // Connectivity: every participant must be incident to ≥1 edge that
-  // also touches the hub. The simplest hub-anchored check is "the
-  // participant appears as an edge endpoint and the other end is the
-  // hub" — but `CustomLayout.edges` uses numeric pids, not the 'hub'
-  // sentinel (the hub has no pid). Until the editor adds an explicit
-  // hub sentinel, treat ANY edge incident to a pid as connecting it to
-  // the implicit hub. The other rules below cover the F2 drops.
+  // Connectivity: every participant must be incident to >=1 edge.
+  //
+  // `Cebab-x1n.1.12` — READ THIS WITH THE LOOP BELOW, because the two used to
+  // contradict each other and the contradiction is the bead. This comment
+  // said "treat ANY edge incident to a pid as connecting it to the implicit
+  // hub", i.e. an edge means "both endpoints are attached to the hub". The
+  // loop below reads the SAME edge as "from sends to to" and flags
+  // `worker_to_worker`. One edge cannot mean both, and the module shipped
+  // asserting both.
+  //
+  // Which one is true is not decidable here — it is what custom mode is FOR,
+  // and the header block explains why neither reading yields a field worth
+  // having. So the code is left as it is (the routing reading, which is what
+  // it has always DONE) and this comment is corrected to describe it: the
+  // incidence set below is bookkeeping for the connectivity rule and asserts
+  // nothing about the hub.
   const incident = new Set<number>();
 
   for (const e of edges) {
