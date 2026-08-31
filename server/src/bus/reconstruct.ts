@@ -70,6 +70,45 @@ import { executeExpireParticipant } from '../ws/control_verbs.js';
 import { getPauseExpiryRegistry } from '../ws/pause_expiry.js';
 
 /**
+ * `Cebab-v85`: how many hops has this session already taken, as the ROUTER
+ * counts them?
+ *
+ * WHAT WAS WRONG. Both reconstruct paths seeded the router's enforcement
+ * counter with `allEvents.length`, and that is a different quantity from the
+ * one the router enforces. Five row classes are persisted directly, bypassing
+ * `forwardCebabEvent`, and so never bump `hopsCount` — `onWorkerFailed`'s
+ * error row, `checkBudgetExhausted`'s `cebab → _sink` error, chain's terminal
+ * explanatory row, the stranded-run note, and the operator's
+ * `multi_agent_ask_user_answer` reply. Every one of them is in
+ * `multi_agent_events`. So a session that had taken N hops and accumulated C
+ * Cebab-authored rows came back from a restart seeded at N+C: the brake
+ * adopted, at exactly the moment it was reconstructed, the inflated count the
+ * activity bar had been showing all along. A run stopped earlier than its
+ * configured budget, and nothing anywhere said why.
+ *
+ * `hops_used` is now written as the run advances (`recordSessionHops`), so
+ * the honest answer is on the row. Prefer it.
+ *
+ * THE FALLBACK IS DELIBERATELY THE OLD, WRONG NUMBER. Rows that were live
+ * before this shipped have `hops_used = NULL` — the column was teardown-only
+ * — and there is no way to recover the router's count for them, because the
+ * bypassing rows are indistinguishable from counted ones after the fact
+ * (`source = 'cebab'` is true of counted rows too; `forwardCebabEvent` writes
+ * them). Between two wrong answers for those rows, take the LARGER: it
+ * under-grants budget, which stops a run early, rather than over-granting and
+ * letting a restart extend a run past the cap the operator set. Fail toward
+ * the smaller blast radius.
+ */
+export function resolveInitialHopsCount(
+  persistedHopsUsed: number | null | undefined,
+  eventRowCount: number,
+): number {
+  return typeof persistedHopsUsed === 'number' && Number.isFinite(persistedHopsUsed)
+    ? persistedHopsUsed
+    : eventRowCount;
+}
+
+/**
  * Persisted, operator-facing notice prepended to the replayed scrollback
  * when a session is recovered. Spells out the conservative contract +
  * the one real hazard (an interrupted turn's side effects are not undone).
@@ -245,11 +284,12 @@ export function reconstructOrchestratorSession(
   const briefedAgents = [
     ...new Set(allEvents.map((e) => e.source).filter((s) => workerNameSet.has(s))),
   ];
-  // Seed the router's hop counter from the persisted event count so
-  // budget enforcement carries across the restart. Without this, a
-  // session that was at 29/30 hops pre-restart would silently re-open
-  // the gate to 30 more hops.
-  const initialHopsCount = allEvents.length;
+  // Seed the router's hop counter so budget enforcement carries across the
+  // restart. Without this, a session that was at 29/30 hops pre-restart would
+  // silently re-open the gate to 30 more hops. `Cebab-v85`: the seed is the
+  // PERSISTED counter, not the event-row count — see `resolveInitialHopsCount`
+  // for why those two differ and why the fallback is the larger of them.
+  const initialHopsCount = resolveInitialHopsCount(row.hops_used, allEvents.length);
 
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...workers.map((w) => w.agentName)];
   try {
@@ -539,10 +579,11 @@ export function reconstructChainSession(
   const briefedAgents = [
     ...new Set(allEvents.map((e) => e.source).filter((s) => participantNameSet.has(s))),
   ];
-  // Seed the router's hop counter from the persisted event count so budget
-  // enforcement carries across the restart — without this a session at 29/30
-  // hops pre-restart would silently re-open the gate to 30 more.
-  const initialHopsCount = allEvents.length;
+  // Seed the router's hop counter so budget enforcement carries across the
+  // restart — without this a session at 29/30 hops pre-restart would silently
+  // re-open the gate to 30 more. `Cebab-v85`: the seed is the PERSISTED
+  // counter, not the event-row count — see `resolveInitialHopsCount`.
+  const initialHopsCount = resolveInitialHopsCount(row.hops_used, allEvents.length);
 
   try {
     prepareIterationDir(iterationId, [...participantNameSet], paths);

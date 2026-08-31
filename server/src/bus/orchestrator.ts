@@ -44,6 +44,7 @@ import {
   getPendingRetry,
   getProjectBusState,
   listPendingMutations,
+  recordSessionHops,
   recordSessionTeardown,
   setMultiAgentSessionLifecycle,
   setExecuteMode,
@@ -127,7 +128,7 @@ export const ORCHESTRATOR_AGENT_NAME = 'orchestrator';
 
 /**
  * Hard cap on total persisted hops (`multi_agent_events` rows) per session,
- * cumulative across user prompts. When `events.length` reaches the budget
+ * cumulative across user prompts. When the router's hop count reaches the budget
  * inside `createOrchestratorRouter` / `createChainRouter`, the router
  * appends a synthetic `cebab → _sink kind=error` event explaining the
  * stop and tears down with `reason='stopped'`. The orchestrator's roster
@@ -185,7 +186,15 @@ export type StartOrchestratorOpts = {
    */
   mcpDenials?: ReadonlyMap<number, readonly string[]>;
   lifecycle?: MultiAgentLifecycle;
-  onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
+  /**
+   * `Cebab-v85`: `hopsUsed` is the router's hop counter immediately AFTER this
+   * event — the same number the budget brake enforces on. It is a parameter
+   * rather than something the sink derives from its own event history
+   * precisely because those two quantities are NOT the same: five row classes
+   * reach this callback without ever bumping the counter (see the field's
+   * JSDoc on `multi_agent_started`). Passing it keeps one definition.
+   */
+  onEvent: (sessionId: string, ev: BusEvent, dbEventId: number, hopsUsed: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
   /** Ephemeral per-turn liveness tick → `agent_activity` ServerMsg.
    *  `sessionId` explicit (same convention as `onEvent`). Optional: the
@@ -300,8 +309,8 @@ export type OrchestratorSessionHandle = {
   lifecycle: MultiAgentLifecycle;
   sessionFolder: string;
   /** Resolved hop budget for this session. Surfaced so the WS layer can put
-   *  it on the wire in `multi_agent_started`; UI reads `events.length /
-   *  hopBudget` for the activity-bar chip. */
+   *  it on the wire in `multi_agent_started`; UI reads `hopsUsed /
+   *  hopBudget` (`Cebab-v85` — the numerator is this counter, NOT a row count) for the activity-bar chip. */
   hopBudget: number;
   /** Item #5: resolved pause-on-dangerous flag for this session. */
   pauseOnDangerous: boolean;
@@ -696,7 +705,7 @@ export function createOrchestratorRouter(params: {
   let ended = false;
   // Cumulative count of persisted `multi_agent_events` rows for this session.
   // Bumped on every successful append (both `handleEvent` and
-  // `forwardCebabEvent`) so it stays in lockstep with `run.events.length` as
+  // `forwardCebabEvent`). `Cebab-v85`: NOT in lockstep with `run.events.length` as
   // the UI sees it. The synthetic budget-exhausted event is written inline
   // below and intentionally does NOT bump this counter (it lives in DB/wire
   // as event N+1 while the displayed ratio reads `hopBudget/hopBudget` at
@@ -705,6 +714,33 @@ export function createOrchestratorRouter(params: {
   // that, a near-cap session resumed after a server restart would silently
   // re-open the floodgates.
   let hopsCount = initialHopsCount ?? 0;
+
+  /**
+   * `Cebab-v85`: advance the hop counter AND persist it.
+   *
+   * Every bump goes through here so `multi_agent_sessions.hops_used` tracks
+   * the live counter instead of being written once at teardown. What that
+   * buys is not bookkeeping: `reconstruct` re-seeds this same counter after
+   * an R-B restart, and with nothing persisted its only available substitute
+   * was the `multi_agent_events` row count — a strictly larger number,
+   * because Cebab's own rows are in it. The brake therefore came back from a
+   * restart with less budget than it had enforced before it.
+   *
+   * The in-memory bump happens FIRST and unconditionally, for the same
+   * reason register B25 moved it out of the persist `try`: a database that
+   * cannot be written must not be able to stall the brake. A failed persist
+   * costs accuracy across a restart, which is recoverable; a stalled brake
+   * is an unbounded run, which is not.
+   */
+  const bumpHops = () => {
+    hopsCount += 1;
+    try {
+      recordSessionHops(sessionId, hopsCount);
+    } catch (err) {
+      console.error('[orchestrator] persist hops_used failed', err);
+    }
+  };
+
   // PR-7: first error captured during this session, surfaced post-teardown
   // on the "Last run" rail (red chip + excerpt). Sources: (a) the synthetic
   // budget-exhausted error appended in `checkBudgetExhausted`, (b) any
@@ -748,6 +784,7 @@ export function createOrchestratorRouter(params: {
             text: reasonText,
           },
           row.id,
+          hopsCount,
         );
       } catch (sinkErr) {
         console.error('[orchestrator] operator-error onEvent threw', sinkErr);
@@ -829,6 +866,7 @@ export function createOrchestratorRouter(params: {
           text: reasonText,
         },
         row.id,
+        hopsCount,
       );
     } catch (err) {
       console.error('[orchestrator] persist budget-exhausted event failed', err);
@@ -1117,11 +1155,15 @@ export function createOrchestratorRouter(params: {
     // — everything below runs whether or not the row landed, so a session with
     // a sick database used to run unbounded.
     //
-    // This does mean the displayed ratio can exceed `events.length` while
+    // This does mean the counter can exceed the persisted row count while
     // persistence is failing. That divergence is true information (events ARE
-    // missing); under healthy persistence the two stay in lockstep exactly as
-    // before.
-    hopsCount += 1;
+    // missing).
+    //
+    // `Cebab-v85`: it is no longer the ONLY way the two differ, and the UI no
+    // longer counts rows at all — five row classes bypass this function
+    // entirely, so the numbers routinely disagree under perfectly healthy
+    // persistence. The chip renders this counter, forwarded on the wire.
+    bumpHops();
     // PR-7: capture kind='error' events as the run's first_error. F2/F3
     // filters above have already dropped forged source=cebab and bad
     // routing — anything reaching this point is a legitimate participant
@@ -1130,7 +1172,7 @@ export function createOrchestratorRouter(params: {
       captureError(ev.text);
     }
     try {
-      sink.onEvent(sessionId, ev, dbId);
+      sink.onEvent(sessionId, ev, dbId, hopsCount);
     } catch (err) {
       console.error('[orchestrator] onEvent callback threw', err);
     }
@@ -1197,9 +1239,11 @@ export function createOrchestratorRouter(params: {
   };
 
   // Cebab-originated events (briefings, roster prompts, user prompts):
-  // persist + forward. Bumps `hopsCount` so the counter stays in lockstep
-  // with `run.events.length` — register B25 moved the bump out of the persist
-  // `try` so a failed write can no longer stall the brake; see `handleEvent`.
+  // persist + forward. Bumps `hopsCount` — register B25 moved the bump out of
+  // the persist `try` so a failed write can no longer stall the brake; see
+  // `handleEvent`. `Cebab-v85`: it does NOT keep the counter in lockstep with
+  // `run.events.length`, and never did — the four sites that persist a row
+  // without calling this are exactly the gap the chip used to render.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -1216,9 +1260,9 @@ export function createOrchestratorRouter(params: {
       console.error('[orchestrator] persist cebab event failed', err);
     }
     // Register B25: outside the persist try — see `handleEvent`.
-    hopsCount += 1;
+    bumpHops();
     try {
-      sink.onEvent(sessionId, ev, dbId);
+      sink.onEvent(sessionId, ev, dbId, hopsCount);
     } catch (err) {
       console.error('[orchestrator] cebab onEvent threw', err);
     }
@@ -1338,6 +1382,7 @@ export function createOrchestratorRouter(params: {
             text,
           },
           row.id,
+          hopsCount,
         );
       } catch (sinkErr) {
         console.error('[orchestrator] stranded-run onEvent threw', sinkErr);
@@ -1392,6 +1437,7 @@ export function createOrchestratorRouter(params: {
             text: reasonText,
           },
           row.id,
+          hopsCount,
         );
       } catch (sinkErr) {
         console.error('[orchestrator] worker-failed onEvent threw', sinkErr);

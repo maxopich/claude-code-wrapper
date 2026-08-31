@@ -35,7 +35,15 @@ import type {
  *  let test sinks and pre-feature callers stay slim — the routers always
  *  null-check before invoking. */
 export type BusSink = {
-  onEvent: (sessionId: string, ev: BusEvent, dbEventId: number) => void;
+  /**
+   * `Cebab-v85`: `hopsUsed` is the router's hop counter immediately AFTER this
+   * event — the same number the budget brake enforces on. It is a parameter
+   * rather than something the sink derives from its own event history
+   * precisely because those two quantities are NOT the same: five row classes
+   * reach this callback without ever bumping the counter (see the field's
+   * JSDoc on `multi_agent_started`). Passing it keeps one definition.
+   */
+  onEvent: (sessionId: string, ev: BusEvent, dbEventId: number, hopsUsed: number) => void;
   onEnded: (sessionId: string, reason: MultiAgentEndedReason, iterationId: string | null) => void;
   onPendingRetry?: (sessionId: string, pending: PendingRetryDescriptor | null) => void;
   /** Item #5: a new mutation row appended to `multi_agent_mutations`. Live

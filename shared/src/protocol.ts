@@ -2468,12 +2468,31 @@ export type ServerMsg =
        * `multi_agent_events` rows). Server-resolved at start time from DB
        * setting > `CEBAB_HOP_BUDGET` env > `DEFAULT_HOP_BUDGET`; R-B
        * reconstruction re-resolves the same precedence on reconnect. The
-       * UI reads `events.length / hopBudget` for the activity-bar chip
-       * and the "Hop budget" row in Session info; the router emits a
-       * synthetic `cebab → _sink kind=error` event when it trips and
-       * tears down with `reason='stopped'`.
+       * UI renders it as the denominator of `hopsUsed / hopBudget`; the
+       * router emits a synthetic `cebab → _sink kind=error` event when it
+       * trips and tears down with `reason='stopped'`.
        */
       hopBudget: number;
+      /**
+       * `Cebab-v85`: hops the ROUTER has counted for this session so far —
+       * the same number the budget brake enforces on, not a count of rows.
+       *
+       * WHY IT IS ON THE WIRE AT ALL. The UI used to derive the numerator
+       * as `events.length`, and that is a different quantity: five row
+       * classes are persisted directly, bypassing `forwardCebabEvent`, and
+       * so never bump the router's counter — `onWorkerFailed`'s error row,
+       * `checkBudgetExhausted`'s `cebab → _sink` error, chain's terminal
+       * explanatory row, the stranded-run note, and the operator's
+       * `multi_agent_ask_user_answer` reply. Each bypass is individually
+       * correct (Cebab explaining why a run stopped is not a hop the run
+       * took), so the fix is not to make them count — it is to stop the
+       * client deriving a number the server already owns.
+       *
+       * Seeded from `multi_agent_sessions.hops_used`, which the router now
+       * writes as the run advances rather than only at teardown, so this
+       * survives an R-B restart with the same value the brake resumes on.
+       */
+      hopsUsed: number;
       /**
        * True iff this session was reconstructed after a Cebab server
        * restart (R-B) and is re-attached READ-ONLY: nothing runs until the
@@ -2624,6 +2643,20 @@ export type ServerMsg =
       destination: string;
       kind: MultiAgentEventKind;
       text: string;
+      /**
+       * `Cebab-v85`: the router's hop counter immediately AFTER this event,
+       * when this event came from a live router. See `multi_agent_started`
+       * for why the client must not derive this.
+       *
+       * ABSENT ON REPLAY, deliberately. Replayed rows are read back from
+       * `multi_agent_events` and no per-row hop count was ever persisted,
+       * so there is no honest value to send for them — and none is needed:
+       * `multi_agent_started` carries the session's current count and the
+       * replay does not change it. The client treats absent as "no update"
+       * rather than as zero, which is why this is optional rather than
+       * nullable.
+       */
+      hopsUsed?: number;
     }
   | {
       /**

@@ -571,8 +571,10 @@ describe('resumeChainSession (registry-based, R-A)', () => {
 
     expect(resumed).toBe(originalHandle);
     expect(bound).not.toBeNull();
-    bound!.onEvent('s', { ts: 1, source: 'a', destination: 'b', kind: 'reply', text: 't' }, 9);
-    expect(onEvent).toHaveBeenCalledWith('s', expect.objectContaining({ source: 'a' }), 9);
+    // `Cebab-v85`: the sink forwards the router's hop counter as a 4th arg;
+    // assert it travels rather than letting the rebind drop it silently.
+    bound!.onEvent('s', { ts: 1, source: 'a', destination: 'b', kind: 'reply', text: 't' }, 9, 4);
+    expect(onEvent).toHaveBeenCalledWith('s', expect.objectContaining({ source: 'a' }), 9, 4);
     expect(hasLiveSession(SESSION_ID)).toBe(true);
     expect(getLiveSession(SESSION_ID)!.mode).toBe('chain');
   });

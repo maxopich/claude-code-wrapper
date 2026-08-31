@@ -2391,8 +2391,11 @@ function SessionSettingsPanel(props: {
 
         <dt>Hop budget</dt>
         <dd>
-          {run.events.length} / {run.hopBudget} hops
-          {run.hopBudget > 0 && run.events.length / run.hopBudget >= 0.8 && (
+          {/* `Cebab-v85`: the ROUTER's counter, not `events.length` — the two
+              differ by every row Cebab wrote to explain itself, and this row
+              has to reconcile with the brake that actually stops the run. */}
+          {run.hopsUsed} / {run.hopBudget} hops
+          {run.hopBudget > 0 && run.hopsUsed / run.hopBudget >= 0.8 && (
             <span className="settings-grid-warn"> · ≥80% of cap</span>
           )}
         </dd>
@@ -2490,8 +2493,13 @@ function SessionSettingsPanel(props: {
                 onClick={() => setRoutingOpen((open) => !open)}
                 title="The full ordered hop trail (who routed to whom, verified-by-construction). Collapsed by default — expand to inspect or jump to a hop in the scrollback."
               >
+                {/* `Cebab-v85`: rows, not hops. This counts what the spine
+                    below actually lists, which includes the rows Cebab wrote
+                    itself and the budget never charged for. Calling them hops
+                    put a third number on screen that agreed with neither the
+                    chip nor the brake. */}
                 {routingOpen ? '▾' : '▸'} Routing trail · {run.events.length}{' '}
-                {run.events.length === 1 ? 'hop' : 'hops'}
+                {run.events.length === 1 ? 'row' : 'rows'}
               </button>
               {routingOpen && (
                 <RoutingSpine
@@ -2824,10 +2832,17 @@ export function MultiAgentActivityBar(props: {
   const agentName = act?.agentName ?? fallbackAgent ?? '';
   const stalled = act?.phase === 'stalled';
   const tool = act?.currentTool;
-  // Hop-budget chip: shows cumulative `events.length / hopBudget` with a
-  // warn tint at ≥80% so the operator sees the cap approaching well before
-  // the synthetic `cebab → _sink error` event lands.
-  const hops = run.events.length;
+  // Hop-budget chip: shows cumulative `hopsUsed / hopBudget` with a warn tint
+  // at ≥80% so the operator sees the cap approaching well before the synthetic
+  // `cebab → _sink error` event lands.
+  //
+  // `Cebab-v85`: `hopsUsed` is the router's own counter, carried on the wire.
+  // It was `run.events.length`, which counts five row classes the router
+  // deliberately does not — so the chip read high by a GROWING amount and
+  // could not be reconciled with anything on the server. The chip reading high
+  // is the safe direction, but this number is an input to the operator's
+  // decision about raising the budget, and a wrong input is a wrong decision.
+  const hops = run.hopsUsed;
   const budget = run.hopBudget;
   const budgetWarn = budget > 0 && hops / budget >= 0.8;
 

@@ -2948,7 +2948,7 @@ function resumeCallbacks(
   | 'sendServerMsg'
 > {
   return {
-    onEvent: (sessionId, ev, dbEventId) => {
+    onEvent: (sessionId, ev, dbEventId, hopsUsed) => {
       const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
       send(conn.ws, {
         type: 'multi_agent_event',
@@ -2959,6 +2959,10 @@ function resumeCallbacks(
         destination: ev.destination,
         kind,
         text: ev.text,
+        // `Cebab-v85`: the router's own counter travels with the hop, so the
+        // chip never has to count rows. Live path only — the replay below
+        // deliberately omits it.
+        hopsUsed,
       });
       // Cluster H D12 backend (site 1/4): re-attach + live bus events on a
       // resumed session. The same hop projects into the merged log; emit the
@@ -3228,6 +3232,7 @@ export function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // R-B: the resume path re-resolved the budget at reconstruct time and
     // the rebuilt handle carries it; both paths land here on the same field.
     hopBudget: resumed.handle.hopBudget,
+    hopsUsed: currentHopsUsed(resumed.handle.sessionId),
     awaitingContinue,
     ...(pendingRetry ? { pendingRetry } : {}),
     pauseOnDangerous,
@@ -3260,6 +3265,11 @@ export function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
     // a minimal wire envelope (additive-optional contract).
     ...(sessionRow?.mock === 1 ? { mock: true } : {}),
   });
+  // `Cebab-v85`: these carry NO `hopsUsed`. They are rows read back out of
+  // `multi_agent_events`, and no per-row hop count was ever persisted, so
+  // there is no honest number to attach — the envelope above already carried
+  // the session's current count and a replay does not change it. Sending
+  // `events.length` here would reintroduce the exact conflation this fixes.
   for (const ev of resumed.replayEvents) {
     const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
     send(conn.ws, {
@@ -3567,6 +3577,34 @@ export function rosterAgentNames(sessionId: string, mode: 'chain' | 'orchestrato
     .map((p) => p.bus_agent_name)
     .filter((n): n is string => n !== null);
   return mode === 'orchestrator' ? [ORCHESTRATOR_AGENT_NAME, ...workerNames] : workerNames;
+}
+
+/**
+ * `Cebab-v85`: the hop count to put on a `multi_agent_started` envelope.
+ *
+ * ONE ANSWER, for the same reason `rosterAgentNames` above is one answer. The
+ * client used to derive the activity-bar numerator as `events.length`, which
+ * counts five row classes the router deliberately does not (Cebab explaining
+ * why a run stopped is not a hop the run took), so the chip and the brake
+ * disagreed by a growing amount and "25 / 70 HOPS" reconciled with nothing on
+ * the server.
+ *
+ * Reads the persisted column rather than a live handle, and that is the point
+ * rather than a shortcut: `recordSessionHops` now writes it on every bump, so
+ * the column is what the router enforces on, what `reconstruct` re-seeds from
+ * after a restart, and what the rail already showed post-teardown. A handle
+ * getter would be a fourth reader of a third definition.
+ *
+ * `null` means no hop has landed yet (the column is NULL until the first
+ * bump), which is 0 — not "unknown". A missing row cannot happen on these
+ * paths (all three sites have just created or resumed the session) and is
+ * likewise reported as 0 rather than thrown: a wrong-by-zero chip on an
+ * envelope that is about to be followed by live events is not worth failing
+ * a session start over.
+ */
+export function currentHopsUsed(sessionId: string): number {
+  const row = getMultiAgentSession(sessionId);
+  return typeof row?.hops_used === 'number' && Number.isFinite(row.hops_used) ? row.hops_used : 0;
 }
 
 /**
@@ -4942,6 +4980,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         sessionId: string,
         ev: { ts: number; source: string; destination: string; kind: string; text: string },
         dbEventId: number,
+        hopsUsed: number,
       ) => {
         const kind: MultiAgentEventKind = isMultiAgentEventKind(ev.kind) ? ev.kind : 'reply';
         send(conn.ws, {
@@ -4953,6 +4992,8 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           destination: ev.destination,
           kind,
           text: ev.text,
+          // `Cebab-v85`: see the re-attach forwarder above.
+          hopsUsed,
         });
         // Cluster H D12 backend (site 3/4): fresh-start bus event. Same
         // hop landed in `multi_agent_events`; project it into a LogRow
@@ -5209,6 +5250,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             lifecycle: handle.lifecycle,
             sessionFolder: handle.sessionFolder,
             hopBudget: handle.hopBudget,
+            hopsUsed: currentHopsUsed(handle.sessionId),
             // Item #5: fresh start — no mutations recorded yet and nothing
             // held by the gate. `pauseOnDangerous` echoes the operator's
             // choice so the UI mirrors its own setup checkbox.
@@ -5314,6 +5356,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           lifecycle: handle.lifecycle,
           sessionFolder: handle.sessionFolder,
           hopBudget: handle.hopBudget,
+          hopsUsed: currentHopsUsed(handle.sessionId),
           pauseOnDangerous: handle.pauseOnDangerous,
           // Execute mode is orchestrator-only (chain briefings have no
           // consultant clause to relax) — always false for chain sessions.
@@ -5571,6 +5614,12 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             destination: row.destination,
             kind: isMultiAgentEventKind(row.kind) ? row.kind : 'prompt',
             text: row.text,
+            // `Cebab-v85`: NO `hopsUsed`. This row is persisted here, by the
+            // WS layer, not by the router — it never reaches
+            // `forwardCebabEvent` and so never bumps the hop counter. That is
+            // correct (answering Cebab's own question is not a hop the run
+            // took), and it is the fifth such bypass; omitting the field says
+            // "the count did not move" rather than restating a stale one.
           });
         } catch (err) {
           console.error('[ws] persist/emit ask-user answer event failed', err);
