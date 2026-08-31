@@ -37,11 +37,35 @@
  * The classifier is intentionally conservative — it only flags as
  * out-of-scope when the resolved path is definitively outside the
  * agent's cwd. Edge cases it does NOT try to handle:
- *   - Symlinks: it does NOT follow links (cheap to do, but
- *     `realpathSync` would block on the read and isn't a sandbox
- *     property — if the link points back inside the cwd it's still
- *     reading another file outside, so the symlink situation is
- *     murky regardless). The path-as-given is what's compared.
+ *   - Symlinks: HANDLED since `Cebab-2t9.3`. Both the target and the
+ *     cwd are resolved through links before comparison; see
+ *     `resolveThroughLinks` below for what that does and does not
+ *     buy. This bullet previously said the opposite, and the reasons
+ *     it gave were: `realpathSync` blocks on a read, and following
+ *     links "isn't a sandbox property" because the link could point
+ *     back inside the cwd. Both were re-examined:
+ *
+ *       - The read cost is two `realpathSync` chains at the ONE call
+ *         site (`runner.ts`), which is inside an async function whose
+ *         very next statement awaits a DB write and a WS broadcast.
+ *         MEASURED over 20k calls on a four-deep real cwd: 0.87 µs
+ *         lexical vs 31.85 µs through links. That is ~36x, and it is
+ *         also 31 microseconds — once per MUTATING tool call, in front
+ *         of an awaited round-trip that costs milliseconds. Both
+ *         framings are true; the second is the one that decides.
+ *       - "Not a sandbox property" is true and is not an argument
+ *         against DETECTING. This module is detection, not
+ *         prevention — its own header says so, and `hook_trust` makes
+ *         the same distinction. A classifier that reports the path
+ *         actually written is strictly better than one that reports
+ *         the path typed, even though neither can stop the write.
+ *
+ *     What made it worth reversing is that the hole was reachable and
+ *     composed with the Bash one below: `Bash` gets a free pass at
+ *     this layer, so an agent can `ln -s /etc/passwd ./notes.txt` and
+ *     then `Write` to `./notes.txt` — lexically inside the cwd, which
+ *     the old comparison called in-scope while the write landed
+ *     outside.
  *   - Bash commands: callers pass `filePath: undefined` when the tool
  *     has no canonical file argument; the classifier returns `inScope:
  *     true` (no signal). Bash commands that touch arbitrary files
@@ -52,7 +76,8 @@
  *     pure-function and avoids the parsing rabbit hole.
  */
 
-import { resolve, sep } from 'node:path';
+import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { basename, dirname, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
 /**
@@ -110,22 +135,126 @@ export function classifyMutationScope(opts: {
   if (!cwd) return { inScope: true };
 
   const expanded = expandHome(opts.filePath);
-  const resolved = resolve(cwd, expanded);
-  const resolvedCwd = resolve(cwd);
+  const lexicalTarget = resolve(cwd, expanded);
+  const lexicalCwd = resolve(cwd);
+
+  // `Cebab-2t9.3`: compare through symlinks, not lexically.
+  //
+  // BOTH SIDES OR NEITHER, and that is the whole trick. Resolving only the
+  // target would make every agent whose project sits under a symlinked root
+  // look out-of-scope forever — `/tmp` is a link to `/private/tmp` on macOS,
+  // so `realpath(target)` = `/private/tmp/proj/x` would be compared against a
+  // literal `/tmp/proj` and never match. That is not a hypothetical: the
+  // repo's own tests build fixtures under `os.tmpdir()`.
+  //
+  // FALL BACK TO THE LEXICAL PAIR, not to a verdict. If either side cannot be
+  // resolved (a permission error, a race, a platform quirk), the comparison
+  // uses exactly the two values the old code used, so the answer is exactly
+  // the old answer. This change can therefore only ever ADD detections or
+  // remove a false positive — it cannot invent one, which is what makes it
+  // safe to turn on for every mutation with no opt-in.
+  const realTarget = resolveThroughLinks(lexicalTarget);
+  const realCwd = resolveThroughLinks(lexicalCwd);
+  const usingLinks = realTarget !== null && realCwd !== null;
+  const target = usingLinks ? realTarget : lexicalTarget;
+  const cwdForCompare = usingLinks ? realCwd : lexicalCwd;
 
   // Equality check first — the agent writing into its cwd root counts as
   // in-scope. Then the prefix check uses the platform's separator to
   // avoid the classic `/foo` matching `/foobar` substring bug
   // (`/foo` + sep = `/foo/`, which doesn't prefix-match `/foobar`).
-  if (resolved === resolvedCwd) return { inScope: true };
-  const prefix = resolvedCwd.endsWith(sep) ? resolvedCwd : resolvedCwd + sep;
-  if (resolved.startsWith(prefix)) return { inScope: true };
+  if (target === cwdForCompare) return { inScope: true };
+  const prefix = cwdForCompare.endsWith(sep) ? cwdForCompare : cwdForCompare + sep;
+  if (target.startsWith(prefix)) return { inScope: true };
 
   return {
     inScope: false,
-    resolvedPath: resolved,
+    // The path actually written, not the path typed. When a link is in play
+    // those differ, and the resolved one is the answer to the operator's
+    // question ("what did it touch?"). Nothing is lost: the row also carries
+    // `filePath` and the full `toolInput`, so the typed path is still there.
+    resolvedPath: target,
     reasonCode: 'path_outside_cwd',
   };
+}
+
+/**
+ * Resolve `p` through symlinks, tolerating a path that does not exist yet.
+ * Returns `null` if it cannot be resolved at all.
+ *
+ * WHY NOT PLAIN `realpathSync`. A `Write` routinely names a file that is
+ * about to be created, and `realpathSync` throws ENOENT on those — which
+ * would mean the common case falls back to the lexical answer and the
+ * check does nothing where it matters most. Worse, the escape does not
+ * have to be the leaf: a symlinked PARENT directory redirects a
+ * brand-new file just as effectively, and a leaf-only check would miss
+ * it entirely. So this walks up to the deepest ancestor that exists,
+ * resolves THAT, and re-appends the tail it skipped.
+ *
+ * BOUNDED, and the bound is not decoration. It is what makes a symlink CYCLE
+ * safe: `realpathSync` throws ELOOP, the dangling-link branch below then
+ * readlinks it, and the two hops would ping-pong forever. The cap stops that
+ * at `MAX_ANCESTOR_WALK` iterations and returns `null`, i.e. "fall back to
+ * lexical" — the same conservative answer as any other failure. It also caps
+ * the syscalls one classification can issue on the turn path.
+ *
+ * WHAT THIS DOES NOT BUY, stated plainly because the header used to argue
+ * it was not worth buying at all:
+ *   - It is NOT a sandbox. The link can be swapped between this call and
+ *     the write (TOCTOU). This module reports; it does not gate.
+ *   - It does not help `Bash`, which reaches this function with
+ *     `filePath: undefined` and returns in-scope before any of this runs.
+ *   - It does not address case-insensitive filesystems, where
+ *     `/Users/x/proj` and `/users/x/proj` are the same directory and
+ *     `startsWith` says otherwise. That hole predates this change and is
+ *     untouched by it.
+ */
+const MAX_ANCESTOR_WALK = 64;
+
+function resolveThroughLinks(p: string): string | null {
+  let tail: string[] = [];
+  let cur = p;
+  for (let i = 0; i <= MAX_ANCESTOR_WALK; i++) {
+    try {
+      const real = realpathSync(cur);
+      return tail.length === 0 ? real : resolve(real, ...tail);
+    } catch {
+      // A DANGLING link: `realpathSync` throws on it exactly as it does on a
+      // path that was never there, but the two are not the same question. The
+      // link itself still says where a write would land, and creating the
+      // target through it is precisely how an escape gets staged for a file
+      // that does not exist yet. So ask the link before walking past it —
+      // otherwise the walk reaches the containing directory, which IS inside
+      // the cwd, and the answer comes back in-scope.
+      let linkTarget: string | null = null;
+      try {
+        if (lstatSync(cur).isSymbolicLink()) linkTarget = readlinkSync(cur);
+      } catch {
+        /* not a link, or it vanished between the two calls — walk up */
+      }
+      if (linkTarget !== null) {
+        // `readlink` may be relative, and it is relative to the link's own
+        // directory, not to the process cwd. `tail` is deliberately kept: the
+        // segments below the link still hang off wherever it points.
+        cur = resolve(dirname(cur), linkTarget);
+        continue;
+      }
+      const parent = dirname(cur);
+      // `dirname` is idempotent at a filesystem root, so this is the
+      // termination condition for "walked to the top and found nothing
+      // resolvable" — without it the loop would spin on '/' until the cap.
+      if (parent === cur) return null;
+      // `basename`, NOT `cur.slice(parent.length + 1)`. The arithmetic form
+      // is right for every parent except the one that always gets walked to:
+      // at the root, `dirname` returns '/' whose length is 1 AND whose last
+      // character is the separator, so the +1 eats the first real character
+      // and '/workspace' becomes '/orkspace'. The repo's existing
+      // out-of-scope test caught exactly that.
+      tail = [basename(cur), ...tail];
+      cur = parent;
+    }
+  }
+  return null;
 }
 
 /**

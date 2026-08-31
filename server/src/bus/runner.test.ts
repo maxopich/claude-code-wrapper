@@ -3,6 +3,7 @@
  * throw (simulating an SDK iterator that fails before yielding any messages).
  * That's intentional — the runner's retry / failure paths are what we're
  * exercising. require-yield otherwise flags every throw-only generator. */
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -713,13 +714,31 @@ describe('AgentRunner', () => {
             cwd: '/tmp/coder',
             category: 'mutate',
             // The guardrail verdict is the RESOLVED absolute target, which is
-            // platform-dependent: POSIX keeps '/etc/passwd', Windows rewrites
-            // it to the current drive ('D:\etc\passwd'). Resolve it the same
-            // way guardrail.ts does so this asserts the value on every OS
-            // rather than only where the separator happens to match — the
-            // Windows red that surfaced this test's swallowed assertions
-            // (`Cebab-7r8`) was this exact drift.
-            violatedPath: resolve('/tmp/coder', '/etc/passwd'),
+            // platform-dependent TWICE OVER, so it is derived rather than
+            // written down:
+            //
+            //  1. separator/drive — POSIX keeps '/etc/passwd', Windows
+            //     rewrites it to the current drive ('D:\etc\passwd'). The
+            //     Windows red that surfaced this test's swallowed assertions
+            //     (`Cebab-7r8`) was this exact drift.
+            //  2. `Cebab-2t9.3` — the classifier now reports the path
+            //     actually written, and '/etc' is a symlink to '/private/etc'
+            //     on macOS but a real directory on Linux. A hardcoded value is
+            //     therefore right on one developer machine and wrong on the
+            //     runner that gates the merge; this one failed locally and
+            //     would have passed CI.
+            //
+            // `realpathSync` here is Node's own primitive, deliberately NOT a
+            // reimplementation of guardrail.ts's ancestor walk — a fixture
+            // that ports the implementation agrees with its bugs.
+            violatedPath: (() => {
+              const lexical = resolve('/tmp/coder', '/etc/passwd');
+              try {
+                return realpathSync(lexical);
+              } catch {
+                return lexical;
+              }
+            })(),
             toolUseId: 'second',
             filePath: '/etc/passwd',
           },
