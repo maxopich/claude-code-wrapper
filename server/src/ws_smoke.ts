@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
+import { DEFAULT_PORT } from '@cebab/shared/net';
 import { formatVerdict, judgeSmokeRun, type SmokeObservation } from './smoke_assertions.js';
 
 // F4: read the per-launch token from the server's data dir. The same uid
@@ -13,7 +14,7 @@ import { formatVerdict, judgeSmokeRun, type SmokeObservation } from './smoke_ass
 //     callers (CI on another user) can override via $CEBAB_AUTH_TOKEN.
 const tokenPath = process.env.CEBAB_AUTH_TOKEN_FILE ?? path.join(os.homedir(), '.cebab/auth-token');
 const token = process.env.CEBAB_AUTH_TOKEN ?? fs.readFileSync(tokenPath, 'utf8').trim();
-const base = process.env.WS_URL ?? 'ws://127.0.0.1:4319';
+const base = process.env.WS_URL ?? `ws://127.0.0.1:${DEFAULT_PORT}`;
 const url = `${base}/?token=${encodeURIComponent(token)}`;
 const ws = new WebSocket(url);
 

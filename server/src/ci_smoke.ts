@@ -23,12 +23,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_PORT } from '@cebab/shared/net';
 
 const require = createRequire(import.meta.url);
 const tsxCli = require.resolve('tsx/cli'); // node_modules/tsx/dist/cli.mjs
 const serverDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const PORT = process.env.PORT ?? '4319';
+const PORT = process.env.PORT ?? String(DEFAULT_PORT);
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-ci-home-'));
 const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-ci-ws-'));
 fs.mkdirSync(path.join(tmpWs, 'Cebab'), { recursive: true }); // ws_smoke needs a "Cebab" project

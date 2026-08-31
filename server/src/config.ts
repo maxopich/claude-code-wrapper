@@ -1,5 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
+import { DEFAULT_PORT } from '@cebab/shared/net';
 
 function expandHome(p: string): string {
   if (p.startsWith('~')) return path.join(os.homedir(), p.slice(1));
@@ -117,7 +118,7 @@ export const config = {
   port: parseIntEnv(
     'CEBAB_PORT',
     readAliasedEnv('CEBAB_PORT', process.env.CEBAB_PORT, 'PORT', process.env.PORT),
-    { fallback: 4319, min: 1, max: 65535 },
+    { fallback: DEFAULT_PORT, min: 1, max: 65535 },
   ),
   host: '127.0.0.1' as const,
   /** Fallback workspace root when nothing is stored in the settings table.

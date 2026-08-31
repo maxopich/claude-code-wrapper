@@ -15,6 +15,7 @@ import type {
   SessionPermissionMode,
   StopReasonCode,
 } from '@cebab/shared/protocol';
+import { DEFAULT_PORT } from '@cebab/shared/net';
 import { SHELL } from './breakpoints';
 import { connectWs, type WsHandle } from './ws';
 import {
@@ -89,7 +90,7 @@ import { downloadSessionLog, isDownloadError } from './exports';
 import { readStored, writeStored } from './prefs';
 import { applyTheme, readStoredTheme, type Theme } from './theme';
 
-const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? '4319';
+const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? String(DEFAULT_PORT);
 const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
 const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
 
