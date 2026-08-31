@@ -49,16 +49,16 @@ describe('validateCustomTopology', () => {
     expect(r.violations).toContainEqual({ code: 'unknown_endpoint', from: 1, to: 99 });
   });
 
-  test('unreachable participant → flagged when other edges exist but pid has none', () => {
-    // Edge 1↔2 (still worker-to-worker so already flagged), pid=3 has no edge
-    // → also unreachable. Both violations appear.
+  test('unreachable participant → flagged when other edges exist but participant has none', () => {
+    // Edge 1↔2 (still worker-to-worker so already flagged), participant 3 has no
+    // edge → also unreachable. Both violations appear.
     const r = validateCustomTopology(mkTemplate([1, 2, 3]), customLayout([[1, 2]]));
     expect(r.ok).toBe(false);
-    expect(r.violations).toContainEqual({ code: 'unreachable_participant', pid: 3 });
+    expect(r.violations).toContainEqual({ code: 'unreachable_participant', participantId: 3 });
   });
 
   test('positions are not validated (visual only)', () => {
-    // Wildly out-of-range / negative coords + stale key for pid=99 → still ok.
+    // Wildly out-of-range / negative coords + stale key for participant 99 → still ok.
     const layout: CustomLayout = {
       kind: 'custom',
       positions: { '1': { x: -10000, y: 99999 }, '99': { x: 0, y: 0 } },
@@ -75,7 +75,7 @@ describe('validateCustomTopology', () => {
         [2, 99], // unknown endpoint
       ]),
     );
-    // self-loop + unknown + (pid=3 unreachable since edges exist)
+    // self-loop + unknown + (participant 3 unreachable since edges exist)
     expect(r.violations.length).toBeGreaterThanOrEqual(3);
     expect(r.violations).toContainEqual({ code: 'self_loop', from: 1, to: 1 });
     expect(r.violations).toContainEqual({ code: 'unknown_endpoint', from: 2, to: 99 });
@@ -110,7 +110,7 @@ describe('TopologyViolation variants are all producible (register N08)', () => {
     // Inputs chosen to exercise each producing branch at least once.
     const scenarios: CustomLayout[] = [
       customLayout([[1, 1]]), // self_loop
-      customLayout([[1, 2]]), // worker_to_worker (+ unreachable pid=3)
+      customLayout([[1, 2]]), // worker_to_worker (+ unreachable participant 3)
       customLayout([[1, 99]]), // unknown_endpoint
     ];
     const emitted = new Set<string>();
@@ -165,7 +165,7 @@ describe('TopologyViolation variants are all producible (register N08)', () => {
 describe('the reduction: ok <-> edges.length === 0 (Cebab-x1n.1.12)', () => {
   const PARTICIPANTS = [1, 2, 3];
 
-  // Every edge set over a small pid space, including unknown endpoints and
+  // Every edge set over a small participant-id space, including unknown endpoints and
   // self-loops. Enumerated rather than hand-picked: a hand-picked list is how
   // a suite ends up unable to see its own tautology.
   const universe = [1, 2, 3, 99];

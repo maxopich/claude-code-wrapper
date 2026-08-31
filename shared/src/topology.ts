@@ -120,7 +120,7 @@ export type TopologyViolation =
    * type AND the rule together — the trio, not one of the three.
    */
   | { code: 'unknown_endpoint'; from: number; to: number }
-  | { code: 'unreachable_participant'; pid: number };
+  | { code: 'unreachable_participant'; participantId: number };
 
 export type TopologyValidation = {
   ok: boolean;
@@ -156,7 +156,7 @@ export function validateCustomTopology(
   //
   // `Cebab-x1n.1.12` — READ THIS WITH THE LOOP BELOW, because the two used to
   // contradict each other and the contradiction is the bead. This comment
-  // said "treat ANY edge incident to a pid as connecting it to the implicit
+  // said "treat ANY edge incident to a participant as connecting it to the implicit
   // hub", i.e. an edge means "both endpoints are attached to the hub". The
   // loop below reads the SAME edge as "from sends to to" and flags
   // `worker_to_worker`. One edge cannot mean both, and the module shipped
@@ -195,9 +195,9 @@ export function validateCustomTopology(
   // default orchestrator star). Empty-edge layouts therefore always
   // pass connectivity.
   if (edges.length > 0) {
-    for (const pid of template.participants) {
-      if (!incident.has(pid)) {
-        violations.push({ code: 'unreachable_participant', pid });
+    for (const participantId of template.participants) {
+      if (!incident.has(participantId)) {
+        violations.push({ code: 'unreachable_participant', participantId });
       }
     }
   }
