@@ -7447,6 +7447,19 @@ pre {
   flex-direction: column;
   gap: var(--s-2);
   pointer-events: none;
+  /* Cebab-git: bound the dock and scroll it internally. Safety toasts default
+   * sticky and NON_EVICTABLE (correct — a security notice must not vanish), so
+   * a project with several new hooks used to pile a full-height column of
+   * non-dismissing cards up the right edge, permanently over the transcript
+   * where the streaming reply lands. Capping the height keeps the top of the
+   * viewport clear no matter how many pile up: the overflow scrolls within the
+   * dock instead of climbing the column. The container stays
+   * `pointer-events: none` so the gaps between cards still click through to the
+   * content beneath; the cards (`> .notif`, auto) carry the wheel to this
+   * scroller. */
+  max-height: min(50dvh, calc(100dvh - var(--s-4) * 2));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .notif-stack > .notif {
   pointer-events: auto;
