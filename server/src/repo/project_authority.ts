@@ -1074,6 +1074,50 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // Cebab-pinned servers).
   enrichWithTrustState(declaredMcp, project.path);
 
+  // Cebab-66y: what this project declares in scopes the current scope set does
+  // NOT load. For a trusted single-agent project (and every bus participant)
+  // the scope set is all three, so these stay empty. For an UNTRUSTED project
+  // (scopes = ['user']) they are where the project's own `.claude/settings.json`
+  // hooks and `.mcp.json` servers live — declared, real, and inert until Trust
+  // is turned on. The panel renders them as "declared but not loaded" rather
+  // than asserting "none declared", the exact contradiction with the sidebar
+  // tier (`repo/project_scan.ts`) this bead was filed to remove.
+  //
+  // These feed NO gate. Only the LOADED lists above (`declaredMcp`, and the
+  // hook/env scans below, all resolved against `scopes`) reach
+  // `refuseUnapprovedForProbe` / `awaitMcpTrustDecisions` / `awaitEnvInjectionAck`.
+  // Surfacing an inert declaration to a gate would make it prompt about a
+  // server or hook the spawn never starts — the mirror of the bug this fixes.
+  const unloadedScopes = trustDerivedScopes(true).filter((s) => !scopes.includes(s));
+  const unloadedHooks: HookView[] =
+    unloadedScopes.length > 0 ? detectHooks(loadSettingsLayers(project.path, unloadedScopes)) : [];
+
+  // Only the two files whose servers the CLI actually loads can be "declared
+  // but not loaded": `.mcp.json` (loads iff 'project' is read) and
+  // `~/.claude.json`'s per-project block (loads iff 'local' is read). A
+  // settings-layer `mcpServers` key never loads at any scope, so its absence
+  // from the loaded list is not a Trust artifact and it is not surfaced here as
+  // if Trust would make it load. A name already in the loaded list is not
+  // repeated.
+  const unloadedMcpServers: McpServerView[] = [];
+  const loadedMcpNames = new Set(declaredMcp.map((d) => d.name));
+  if (!scopes.includes('project')) {
+    for (const s of readMcpJsonServers(project.path, ['project'])) {
+      if (!loadedMcpNames.has(s.name)) unloadedMcpServers.push(s);
+    }
+  }
+  if (!scopes.includes('local')) {
+    // `['user', 'local']` returns the always-loading top-level block (already
+    // in `declaredMcp`) plus the per-project block that needs 'local'; the
+    // name filters below keep only the latter.
+    for (const s of readClaudeJsonServers(project.path, ['user', 'local'])) {
+      if (!loadedMcpNames.has(s.name) && !unloadedMcpServers.some((u) => u.name === s.name)) {
+        unloadedMcpServers.push(s);
+      }
+    }
+  }
+  if (unloadedMcpServers.length > 0) enrichWithTrustState(unloadedMcpServers, project.path);
+
   // Tools: every tool name the SDK reported, attributed against layers +
   // MCP availability. When the cache is empty, no tools are resolved
   // (operator opens an empty Tools section).
@@ -1129,6 +1173,8 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
     plugins: input.latestSessionStarted?.plugins ?? [],
     hooks: detectHooks(layers),
     detectedEnvInjections: detectEnvInjections(layers),
+    unloadedHooks,
+    unloadedMcpServers,
   };
   // Pick-through cached single-value fields.
   if (input.latestSessionStarted?.model !== undefined) {

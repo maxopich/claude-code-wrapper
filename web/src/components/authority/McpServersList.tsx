@@ -102,9 +102,23 @@ function statusDotClass(status: string): string {
  * consolidation the comment described was never true. Deleted here, along
  * with the hand-rolled copied-state pair, in favour of `useCopyFeedback`. */
 
-export function McpServersList(props: { servers: McpServerView[]; projectScopeRead?: boolean }) {
+export function McpServersList(props: {
+  servers: McpServerView[];
+  projectScopeRead?: boolean;
+  unloaded?: McpServerView[];
+}) {
   const { servers, projectScopeRead = true } = props;
+  const unloaded = props.unloaded ?? [];
   if (servers.length === 0) {
+    // Cebab-66y: when the project's own files DO declare a server that this
+    // (untrusted) scope set will not load, name it — the whole failure the
+    // bead reports is the panel asserting a server does not exist when it
+    // exists and merely will not load. This supersedes the older Cebab-ys9
+    // "Not checked" copy below, which described the same servers as things
+    // that "would not appear here": now they do.
+    if (unloaded.length > 0) {
+      return <UnloadedMcpServers unloaded={unloaded} />;
+    }
     // Cebab-ys9: this used to read "No MCP servers declared in this project."
     // — a claim about the PROJECT from a scan that, on an untrusted project,
     // never opened the file that would declare them. A project-scoped
@@ -134,11 +148,43 @@ export function McpServersList(props: { servers: McpServerView[]; projectScopeRe
     return a.name.localeCompare(b.name);
   });
   return (
-    <ul className="mcp-servers-list" aria-label="Declared MCP servers">
-      {sorted.map((s) => (
-        <McpServerCard key={`${s.scope}:${s.name}`} server={s} />
-      ))}
-    </ul>
+    <div className="mcp-servers-block">
+      <ul className="mcp-servers-list" aria-label="Declared MCP servers">
+        {sorted.map((s) => (
+          <McpServerCard key={`${s.scope}:${s.name}`} server={s} />
+        ))}
+      </ul>
+      {unloaded.length > 0 && <UnloadedMcpServers unloaded={unloaded} />}
+    </div>
+  );
+}
+
+/**
+ * Cebab-66y: MCP servers a project declares in a file its next run will NOT
+ * load — the project-root `.mcp.json` (or `~/.claude.json`'s per-project block)
+ * on an untrusted project. They are declared and inert; turning Trust on loads
+ * them. Named explicitly so the panel never reports "none declared" for a
+ * server that plainly is.
+ */
+function UnloadedMcpServers(props: { unloaded: McpServerView[] }) {
+  const { unloaded } = props;
+  const sorted = [...unloaded].sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <section className="mcp-servers-unloaded">
+      <div className="mcp-servers-unloaded-note">
+        {unloaded.length} {unloaded.length === 1 ? 'server is' : 'servers are'} declared in this
+        project&apos;s own files but will <strong>not load</strong> while Trust is off. Turn Trust
+        on in the sidebar to load {unloaded.length === 1 ? 'it' : 'them'}.
+      </div>
+      <ul
+        className="mcp-servers-list mcp-servers-unloaded-list"
+        aria-label="Declared but unloaded MCP servers"
+      >
+        {sorted.map((s) => (
+          <McpServerCard key={`unloaded:${s.scope}:${s.name}`} server={s} />
+        ))}
+      </ul>
+    </section>
   );
 }
 
