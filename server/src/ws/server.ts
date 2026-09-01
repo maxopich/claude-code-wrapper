@@ -46,7 +46,12 @@ import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { readManagedFile, writeManagedFile } from '../managed_file.js';
 import { mcpStatusNoteSpec } from '../runner/mcp_status_note.js';
-import { onInFlightChange, registerQuery, snapshotInFlight } from '../runner/lifecycle.js';
+import {
+  onInFlightChange,
+  registerQuery,
+  snapshotInFlight,
+  type InFlightMeta,
+} from '../runner/lifecycle.js';
 import { buildActiveRunsMsg } from '../notifications/active_runs.js';
 import { getSetting, setSetting } from '../repo/settings.js';
 import { listTemplates, saveTemplate, deleteTemplate } from '../repo/templates.js';
@@ -1119,6 +1124,41 @@ export function describeTurnInFlight(
 ): string | null {
   if (!inFlight.has(sessionId)) return null;
   return 'that session already has a turn running; wait for it to finish or stop it first.';
+}
+
+/**
+ * Register S02b [security]: the PROCESS-WIDE half of one-turn-per-session.
+ *
+ * `describeTurnInFlight` above reads `conn.inFlight`, a per-CONNECTION map, so
+ * it only sees turns THIS socket started. Two browser tabs are two connections:
+ * tab A's running turn is absent from tab B's `conn.inFlight`, so tab B's
+ * `send_message` sails through the per-connection guard and spawns a SECOND
+ * `claude --resume <sid>` against the same session. The two SDK turns interleave
+ * into one transcript, bill subscription quota twice, and neither tab can Stop
+ * the other's turn — `executeInterrupt` is per-connection too, returning
+ * silently when the passed `conn.inFlight` entry is absent. This is exactly the
+ * cross-window hazard the bus already closed with `describeLiveSessionConflict`.
+ *
+ * Every non-assistant single-agent turn is already in the process-wide
+ * lifecycle registry — `registerQuery(runner, { kind: 'single', sessionId, … })`
+ * — the same source the `active_runs` badge reads. So the answer exists; the
+ * guard just wasn't consulting it. Pure over the snapshot for the same
+ * testability reason as its sibling.
+ *
+ * Filtered on `kind: 'single'`: the bus runs its own process-wide guard
+ * (`describeLiveSessionConflict`), and a bus/assistant entry sharing an id with
+ * a single-agent session is not a case this path should refuse on.
+ *
+ * Returns the operator-facing refusal, or `null` when it is safe to start.
+ * Exported for direct testing, like its neighbours in this file.
+ */
+export function describeConcurrentSingleTurn(
+  snapshot: readonly InFlightMeta[],
+  sessionId: string,
+): string | null {
+  const live = snapshot.some((m) => m.kind === 'single' && m.sessionId === sessionId);
+  if (!live) return null;
+  return 'that session already has a turn running in this Cebab — possibly in another browser window; wait for it to finish, or stop it there first.';
 }
 
 export async function executeArchiveSession(args: {
@@ -6363,6 +6403,23 @@ async function runOneTurn(
       sessionId,
       kind: 'process_crashed',
       message: inFlightConflict,
+    });
+    return;
+  }
+  // Register S02b: the per-connection guard above only sees turns THIS socket
+  // started. A second browser tab is a second connection whose `conn.inFlight`
+  // is empty for a session tab A is actively running — so also consult the
+  // process-wide lifecycle registry, which carries every live single-agent
+  // turn regardless of the connection that started it. A brand-new session
+  // (fresh `randomUUID`) can never collide here either, so only a genuine
+  // cross-window resume is ever refused.
+  const concurrentConflict = describeConcurrentSingleTurn(snapshotInFlight(), sessionId);
+  if (concurrentConflict) {
+    send(conn.ws, {
+      type: 'wrapper_error',
+      sessionId,
+      kind: 'process_crashed',
+      message: concurrentConflict,
     });
     return;
   }
