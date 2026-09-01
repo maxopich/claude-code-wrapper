@@ -144,11 +144,19 @@ project's `cwd` is set to its directory when the agent spawns. Whether the
 project's own configuration is _loaded_ from that directory depends on the
 Trust toggle below — it is not automatic.
 
-The "asks" / "trusted" toggle per project controls **two** things, and the
-second one is the security-relevant half:
+The "asks" / "trusted" toggle per project controls **two** things, and both
+halves are security-relevant:
 
 - **`permissionMode`** — `"default"` (every restricted tool prompts) or
-  `"acceptEdits"` (file edits + common filesystem commands auto-approve).
+  `"acceptEdits"`. What `"acceptEdits"` auto-approves depends on Trust: on a
+  **trusted** project it auto-allows _every_ tool call — Bash, WebFetch, MCP
+  calls, all of it, not just edits — while on an **untrusted** project it
+  auto-allows only the file-edit tools (`Edit`, `Write`, `NotebookEdit`) and
+  everything else still prompts. It never singles out "filesystem commands":
+  `Bash` is either fully auto-allowed (trusted) or fully prompting (untrusted).
+  A fresh session on a trusted project seeds `"acceptEdits"`, so the trusted
+  behaviour is the default one. See
+  [`server/src/ws/permission.ts`](server/src/ws/permission.ts).
 - **`settingSources`** — `['user']` when untrusted, and all three scopes when
   trusted. Only a trusted project loads its own `CLAUDE.md`, `.claude/skills/`,
   `.claude/settings*.json` (hooks, env injectors, MCP servers) and project-root
