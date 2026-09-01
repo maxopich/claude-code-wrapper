@@ -194,6 +194,33 @@ export function markProjectsMissingByPaths(paths: string[]): void {
 }
 
 /**
+ * The inverse of `markProjectsMissingByPaths`: clear `missing` on any of these
+ * paths whose row is currently marked missing (Cebab-ygu.12).
+ *
+ * An ordinary workspace project un-misses for free: a present directory is
+ * re-seen by the scan and sent back through `upsertProject`, whose existing-row
+ * branch runs the only other `SET missing = 0` (above). A managed agent never
+ * reaches `upsertProject` on a plain sidebar refresh — the workspace scan
+ * cannot see its path, so `syncWorkspaceProjects` exempts it from the sweep
+ * instead — which left nothing to clear a managed row a *previous* scan had
+ * marked missing. A managed directory that vanished for one scan (moved aside
+ * by hand, or on an unmounted volume) therefore stayed filtered out of
+ * `listProjects()` even after it was restored. This is what the exemption loop
+ * now calls so both kinds recover symmetrically.
+ *
+ * The `AND missing = 1` guard keeps the common case (nothing was missing) from
+ * writing to every present managed row on every scan.
+ */
+export function clearProjectsMissingByPaths(paths: string[]): void {
+  if (paths.length === 0) return;
+  const db = getDb();
+  const stmt = db.prepare('UPDATE projects SET missing = 0 WHERE path = ? AND missing = 1');
+  db.transaction(() => {
+    for (const p of paths) stmt.run(p);
+  })();
+}
+
+/**
  * The paths of the operator's workspace projects — the sole input to the
  * missing sweep in `syncWorkspaceProjects`.
  *

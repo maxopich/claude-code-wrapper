@@ -359,6 +359,26 @@ describe('managed agents survive the missing-sweep (ws0.9)', () => {
     expect(listProjects().map((p) => p.id)).not.toContain(managed.id);
   });
 
+  test('a managed agent comes back when its directory is restored (ygu.12)', async () => {
+    // The un-missing direction the two sweep-direction cases above never
+    // exercised. The exemption spared a PRESENT managed path from the sweep but
+    // never cleared `missing` on a row a prior scan had already set — so a
+    // managed directory that vanished for one scan (moved aside by hand, or on
+    // a volume unmounted at boot) stayed filtered out of the sidebar forever,
+    // while an identically deleted-and-restored ordinary project recovers.
+    const managed = managedProject('flaps');
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).toContain(managed.id);
+
+    fs.rmSync(managed.dir, { recursive: true, force: true });
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).not.toContain(managed.id);
+
+    fs.mkdirSync(managed.dir, { recursive: true });
+    await syncWorkspaceProjects();
+    expect(listProjects().map((p) => p.id)).toContain(managed.id);
+  });
+
   test('[security] a hand-edited provenance column buys a workspace project no exemption', async () => {
     // The row is OUTSIDE the workspace root and its directory still EXISTS —
     // the ordinary state of a project left behind when the operator repoints

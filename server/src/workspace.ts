@@ -8,6 +8,7 @@ import { canonical, isInside } from './path_containment.js';
 import { ensureDataDir } from './data_perms.js';
 import { getSetting, setSetting } from './repo/settings.js';
 import {
+  clearProjectsMissingByPaths,
   listProjectPaths,
   listProjects,
   markProjectsMissingByPaths,
@@ -159,10 +160,23 @@ export async function syncWorkspaceProjects(): Promise<ProjectRow[]> {
   // does; the sweep is right about it, it just has no scan to learn it from. So
   // each managed row answers for itself, and the two directions are separately
   // tested because getting either wrong looks like the feature working.
+  //
+  // Cebab-ygu.12: adding a present managed path to `seen` only spares it from
+  // the sweep below; it does not UN-mark a row a prior scan already marked
+  // missing, and nothing else on a sidebar-refresh path does either (the only
+  // other `SET missing = 0` lives in `upsertProject`, which the scan never
+  // reaches for a managed path). So a managed directory that vanished for one
+  // scan and was then restored stayed invisible forever. Clear the flag here,
+  // symmetrically with how an ordinary project un-misses through `upsertProject`.
+  const restoredManaged: string[] = [];
   for (const p of listProjectPaths()) {
     if (!isManagedProjectPath(p)) continue;
-    if (fs.existsSync(p)) seen.add(p);
+    if (fs.existsSync(p)) {
+      seen.add(p);
+      restoredManaged.push(p);
+    }
   }
+  clearProjectsMissingByPaths(restoredManaged);
   // Mark any DB rows whose directory has vanished.
   const missing = listProjectPaths().filter((p) => !seen.has(p));
   markProjectsMissingByPaths(missing);
