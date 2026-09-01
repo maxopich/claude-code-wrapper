@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   BUS_SEND_TOOL,
   COMMAND_WRAPPERS,
+  bashCommandPathArguments,
   classifyBashCommand,
   classifyToolCall,
 } from './mutation.js';
@@ -1189,5 +1190,38 @@ describe('classifyBashCommand — register D02b/D04b/D21 laundering holes [secur
     it('a dangerous first token still wins over a duplicated fd', () => {
       expect(classifyBashCommand('rm -rf /x 2>&1').category).toBe('dangerous');
     });
+  });
+});
+
+describe('bashCommandPathArguments (Cebab-5j1)', () => {
+  it('returns the plain arguments after the command name', () => {
+    expect(bashCommandPathArguments('cat .env')).toContain('.env');
+  });
+
+  it('reaches a token in every top-level piece', () => {
+    const args = bashCommandPathArguments('cat .env | tee copy.txt');
+    expect(args).toContain('.env');
+    expect(args).toContain('copy.txt');
+  });
+
+  it('unquotes a quoted path so pathLooksSensitive can match it', () => {
+    expect(bashCommandPathArguments("cp '/home/me/.aws/credentials' /tmp/x")).toContain(
+      '/home/me/.aws/credentials',
+    );
+  });
+
+  it('peels an exec-wrapper and a leading env assignment', () => {
+    const args = bashCommandPathArguments('env FOO=1 timeout 5 cat ~/.ssh/id_rsa');
+    expect(args).toContain('~/.ssh/id_rsa');
+  });
+
+  it('strips a redirect operator glued to its target', () => {
+    expect(bashCommandPathArguments('echo hi >>~/.zshrc')).toContain('~/.zshrc');
+    expect(bashCommandPathArguments('cat x >"/etc/passwd"')).toContain('/etc/passwd');
+  });
+
+  it('returns [] for an empty command', () => {
+    expect(bashCommandPathArguments('')).toEqual([]);
+    expect(bashCommandPathArguments('   ')).toEqual([]);
   });
 });

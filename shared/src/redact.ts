@@ -37,6 +37,8 @@
  * key order, which we don't depend on). Browser-safe.
  */
 
+import { bashCommandPathArguments } from './mutation.js';
+
 export type RedactResult = {
   /** Deep-cloned payload with sensitive values replaced by '<redacted>'. */
   redacted: unknown;
@@ -750,14 +752,43 @@ function walk(
  */
 function collectSensitiveSiblings(obj: Record<string, unknown>): Set<string> {
   const out = new Set<string>();
+  let sensitive = false;
   for (const key of Object.keys(obj)) {
     if (!PATH_FIELD_NAMES.has(key)) continue;
     const v = obj[key];
     if (typeof v !== 'string') continue;
-    if (!pathLooksSensitive(v)) continue;
+    if (pathLooksSensitive(v)) sensitive = true;
+  }
+  // Register Cebab-5j1. A Bash mutation names its file in the COMMAND string,
+  // not in a `file_path` field — `mutationToLogRow` projects it as
+  // `{toolName:'Bash', toolInput:{command}, toolResult}` with `filePath: null`,
+  // so the path-field loop above finds nothing and `toolResult` (the command's
+  // captured output, which may be the whole body of a `.env`) ships unmasked.
+  // `bashCommandPathArguments` extracts the path-looking tokens; if any is
+  // sensitive, the `toolInput`/`toolResult` siblings mask exactly as a
+  // `Write('.env')` row's already do.
+  if (!sensitive && bashCommandTouchesSensitivePath(obj)) sensitive = true;
+  if (sensitive) {
     for (const sib of Object.keys(obj)) {
       if (SIBLING_VALUE_FIELDS.has(sib)) out.add(sib);
     }
   }
   return out;
+}
+
+/**
+ * Register Cebab-5j1. Does this object represent a Bash tool call whose command
+ * names a sensitive file? Keyed on the `mutationToLogRow` row shape (`toolName`
+ * + `toolInput.command`) — the one place `toolInput` and `toolResult` sit as
+ * siblings, so it is the one place the sibling rule can act on the answer. The
+ * SDK `events` shape puts a Bash `tool_use` and its `tool_result` in SEPARATE
+ * events, which this correlation cannot reach and which is a distinct problem.
+ */
+function bashCommandTouchesSensitivePath(obj: Record<string, unknown>): boolean {
+  if (obj.toolName !== 'Bash') return false;
+  const toolInput = obj.toolInput;
+  if (toolInput === null || typeof toolInput !== 'object') return false;
+  const command = (toolInput as Record<string, unknown>).command;
+  if (typeof command !== 'string') return false;
+  return bashCommandPathArguments(command).some(pathLooksSensitive);
 }
