@@ -108,6 +108,29 @@ describe('searchSessions — single-agent LIKE scan', () => {
     expect(searchSessions({ query: 'migration', scope: 'all_projects' }).results).toHaveLength(1);
   });
 
+  test('a run of key-name-only candidates does not starve an older value match out of the budget', () => {
+    // Cebab-ygu.10. The SQL LIMIT used to cap the coarse LIKE scan, so a page
+    // of candidates matching only on a JSON KEY name consumed the whole default
+    // budget and an older genuine VALUE match was never fetched.
+    const pid = seedProject('p');
+    createSession('s1', pid);
+    // Oldest event carries the genuine value match.
+    insertEvent('s1', nextSeq('s1'), 'assistant', null, assistantRaw('the content of the file'));
+    // 35 newer events whose TEXT lacks the word, but whose raw envelope contains
+    // the JSON key "content" (message.content[]) — so `raw LIKE '%content%'`
+    // matches them and, newest-first, they fill the default 30-row budget.
+    for (let i = 0; i < 35; i++) {
+      insertEvent('s1', nextSeq('s1'), 'assistant', null, assistantRaw(`filler line ${i}`));
+    }
+    // Pin distinct ascending timestamps so the value match is strictly oldest.
+    getDb().prepare('UPDATE events SET ts = 1000 + seq WHERE session_id = ?').run('s1');
+
+    const { results } = searchSessions({ query: 'content', scope: 'all_projects' });
+    expect(results).toHaveLength(1);
+    expect(results[0]!.sessionId).toBe('s1');
+    expect(results[0]!.snippet.toLowerCase()).toContain('content');
+  });
+
   test('no match returns an empty, non-truncated result set', () => {
     const pid = seedProject('p');
     seedSessionWithText(pid, 's1', 'nothing relevant here');
