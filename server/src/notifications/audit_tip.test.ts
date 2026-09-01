@@ -100,6 +100,36 @@ describe('[security] tail truncation is detected', () => {
     expect(after.reason).toBe('tail_truncated');
   });
 
+  test('a fresh migration anchor above the mirrored tip is not truncation', () => {
+    // The false-alarm-in-the-other-direction that the raw `!rows.some(...)`
+    // check produced. Any future migration that ALTERs safety_audit inserts a
+    // fresh `audit.chain_reset` anchor at the tip (mandatory per this module's
+    // contract). On the first boot after it `verifyChain()` walks only rows
+    // AFTER the new anchor — an empty set — so the mirrored pre-migration tip is
+    // not among them. It must NOT read as tamper: the tip row still exists in
+    // the DB, just below the new anchor, and the mirror re-commits at the next
+    // append. Left unfixed this fires a non-dismissible `danger` alarm once per
+    // such migration on every healthy install.
+    appendRows(5);
+    expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 5 });
+
+    // Simulate the migration's fresh marker: re-anchor above the current tip.
+    // INSERT OR REPLACE deletes the old anchor row and inserts a new one at a
+    // higher rowid — exactly what a migration's fresh marker does relative to
+    // the rows already present. (This is the reproduction the finding's probe
+    // used.)
+    getDb()
+      .prepare(
+        `INSERT OR REPLACE INTO safety_audit
+           (id, ts, kind, reason_code, payload_json, hash_prev, hash_self, mode)
+         VALUES ('chain-reset-023', 0, 'audit.chain_reset', 'migration_023', '{}', NULL, X'00', 'live')`,
+      )
+      .run();
+
+    // Before the fix this returned { ok:false, reason:'tail_truncated' }.
+    expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 0 });
+  });
+
   test('a genuinely fresh database stays clean — no false alarm', () => {
     // The failure mode in the other direction. A new install has an anchor,
     // zero rows and no mirror; crying tamper there would train operators to

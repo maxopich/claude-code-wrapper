@@ -51,6 +51,10 @@ const CHAIN_RESET_KIND = 'audit.chain_reset';
  *   1. insert a fresh `audit.chain_reset` marker (see 015's header), and
  *   2. append that marker's id here.
  * Skipping (2) makes every boot after that migration report `forged_anchor`.
+ *
+ * The tip mirror (`audit_tip.ts`) tolerates that fresh anchor: it sits above
+ * the pre-migration tip, which still exists, so `checkAgainstTipMirror` reports
+ * clean rather than a false `tail_truncated`. See that function.
  */
 const KNOWN_CHAIN_RESET_IDS: ReadonlySet<string> = new Set([
   'chain-reset-015', // 015_safety_audit.sql — genesis
@@ -159,7 +163,10 @@ export type SafetyAuditRow = {
  *                       no longer holds. `brokenAt` names the last row the
  *                       mirror saw. This is the reason a blanket
  *                       `DELETE FROM safety_audit` now produces instead of a
- *                       clean `{ ok: true, rowsChecked: 0 }`.
+ *                       clean `{ ok: true, rowsChecked: 0 }`. NOT produced when
+ *                       the mirrored tip merely fell BELOW a freshly-inserted
+ *                       migration anchor (it still exists) — see
+ *                       `checkAgainstTipMirror`.
  *   - `tip_mirror_missing` — the DB records that mirroring was established but
  *                       the mirror file is gone. Half of the two-step erasure
  *                       described in `audit_tip.ts`; on its own it is also
@@ -429,7 +436,7 @@ export function verifyChain(): VerifyChainResult {
 
   // H14: the rows that ARE here all verify. That says nothing about rows that
   // are not — which is the whole point of the external mirror.
-  const truncation = checkAgainstTipMirror(rows, rowsChecked);
+  const truncation = checkAgainstTipMirror(rows, rowsChecked, lastMarker.rowid);
   if (truncation) return truncation;
 
   return { ok: true, rowsChecked };
@@ -445,10 +452,16 @@ export function verifyChain(): VerifyChainResult {
  * truncated and mutated still reports `row_mismatch` first. That is the more
  * specific finding — it names the offending row — and the operator needs the
  * row id more than they need to know the tail is also short.
+ *
+ * `anchorRowid` is the newest chain-reset marker's rowid — the lower bound of
+ * the verified window — and is needed to tell a truncated tail apart from a
+ * fresh migration anchor inserted ABOVE the mirrored tip (see the not-in-window
+ * branch below).
  */
 function checkAgainstTipMirror(
   rows: SafetyAuditRow[],
   rowsChecked: number,
+  anchorRowid: number,
 ): VerifyChainResult | null {
   const tip = readLatestAuditTip();
 
@@ -462,9 +475,32 @@ function checkAgainstTipMirror(
     return null;
   }
 
-  // The mirrored tip row is gone from the chain: the clearest signal, and the
-  // one a blanket `DELETE FROM safety_audit` produces.
+  // The mirrored tip row is not in the verified window (rows after the anchor).
+  // Two structurally different causes, and they must not be conflated:
+  //
+  //   (a) TRUNCATION — a blanket `DELETE FROM safety_audit` erased the tail, so
+  //       the tip row is GONE from the database entirely. This is the attack the
+  //       mirror exists to catch.
+  //   (b) A FRESH ANCHOR above the tip — a migration that ALTERs safety_audit
+  //       inserts a new `audit.chain_reset` marker (mandatory, per this module's
+  //       contract at KNOWN_CHAIN_RESET_IDS). On the first boot after it the
+  //       verified window (rowid > new anchor) is empty and the pre-migration
+  //       tip now sits BELOW the anchor — still present, nothing erased. Reading
+  //       that as tamper would fire a non-dismissible `danger` alarm on a
+  //       healthy install once per such migration. It self-heals at the next
+  //       append, which re-mirrors against the new anchor.
+  //
+  // The database itself is the discriminator: the tip row still existing
+  // (necessarily at rowid <= anchor, or it would be in `rows`) is (b); its
+  // absence is (a). Existence proves no tail data was deleted — the mirror's
+  // whole job.
   if (!rows.some((r) => r.id === tip.rowId)) {
+    const tipRow = getDb()
+      .prepare<[string], { rowid: number }>(`SELECT rowid FROM safety_audit WHERE id = ?`)
+      .get(tip.rowId);
+    if (tipRow && tipRow.rowid <= anchorRowid) {
+      return null;
+    }
     return { ok: false, reason: 'tail_truncated', brokenAt: tip.rowId };
   }
 
