@@ -436,27 +436,27 @@ export type MultiAgentRun = {
    */
   participantControls: Record<number, ParticipantControlView>;
   /**
-   * Register W13: `modelsByProject` used to live here — per-participant
-   * models for `TopRunBar`'s ModelChip, filled from `session_started`.
+   * `Cebab-ut7`: per-participant SDK-reported model, keyed by bus agent
+   * name — the summary source for `TopRunBar`'s ModelChip
+   * (`summarizeBusModel`: all-equal → that model, mixed → 'various',
+   * empty → undefined).
    *
-   * It could never fill. `session_started` is produced by `translate()`,
-   * which has two call sites and both are the single-agent turn path;
-   * `server/src/bus/` never calls it. So the map was permanently `{}` and
-   * the chip permanently read `model: default`, over a tooltip saying
-   * "not yet reported (waiting on session_started)" — a message that
-   * could not arrive.
+   * Register W13 removed the predecessor `modelsByProject` because it was
+   * filled from `session_started`, which `translate()` produces only on
+   * the single-agent turn path — so it was permanently `{}` and worse,
+   * mis-attributed a participant chat's model to the run. This is the
+   * "typed to the real source" replacement W13 anticipated: the source is
+   * `agent_activity.model`, which the server harvests from each
+   * participant's own `system/init`. Keyed by agent name because that is
+   * the key `agent_activity` carries; the summary only reads the values.
    *
-   * Worse than empty: the branch keyed on `projectId` → `busAgentName`
-   * only, never on which SESSION the message described. Every
-   * `session_started` describes a single-agent session by construction,
-   * so opening a chat on a participant project during a bus run
-   * attributed that chat's model to the run.
-   *
-   * Removed rather than repaired, because there is nothing to repair on
-   * this side: the bus would first have to carry a model signal at all.
-   * That is a wire change and it is filed separately. When it lands, the
-   * field comes back typed to the real source instead of this one.
+   * `{}` on session start; harvested last-writer-wins in the
+   * `agent_activity` case. NOT replayed across a WS reconnect — same R-A
+   * caveat as `participantControls` and `activity` — so it re-fills from
+   * the next hop's `system/init`. `session_started` still must NOT write
+   * here (see the reducer's `session_started` note + `store.test.ts`).
    */
+  modelsByAgent: Record<string, string>;
   /**
    * Cluster D Phase 4d (B2 / spec §4.2): the bus's most recent in-flight
    * auto-retry attempt. Populated by `auto_retry` ServerMsg fired from
@@ -2232,6 +2232,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // the server keeps enforcing them. Empty array on a fresh start,
             // which is the same `{}` this used to hardcode.
             participantControls: hydrateParticipantControls(msg.participantControls),
+            // `Cebab-ut7`: per-agent model map. Empty on every start and
+            // reconstruct — `agent_activity` is not replayed, so the map
+            // re-fills from the next hop's `system/init`; there is no
+            // server-side snapshot to hydrate from (yet).
+            modelsByAgent: {},
             // Cluster G Phase 2c (UI-A3): per-session MOCK posture, projected
             // from `multi_agent_sessions.mock` server-side. Spread-omit when
             // the wire field is absent (pre-G2c server, or a live session)
@@ -2296,9 +2301,22 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
               lastActivityTs: msg.lastActivityTs,
               turnStartedAt: msg.turnStartedAt,
             };
+      // `Cebab-ut7`: harvest the participant's model into the persistent
+      // per-agent map. Unlike `activity` (cleared on idle), this survives
+      // the turn — the ModelChip must keep answering "what ran on" between
+      // hops. Only overwrite when the tick actually carries a non-empty
+      // model, so a tick before the turn's `system/init` (or a pre-`ut7`
+      // server) never blanks a value a prior hop established.
+      const modelsByAgent =
+        msg.model && msg.model.length > 0 && active.modelsByAgent[msg.agentName] !== msg.model
+          ? { ...active.modelsByAgent, [msg.agentName]: msg.model }
+          : active.modelsByAgent;
       return {
         ...state,
-        multiAgent: { ...state.multiAgent, active: { ...active, activity } },
+        multiAgent: {
+          ...state.multiAgent,
+          active: { ...active, activity, modelsByAgent },
+        },
       };
     }
 

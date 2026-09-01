@@ -5077,6 +5077,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           currentTool: snap.currentTool,
           lastActivityTs: snap.lastActivityTs,
           turnStartedAt: snap.turnStartedAt,
+          // `Cebab-ut7`: the participant's model, harvested by the observer
+          // from this turn's `system/init`. Spread-omit so a tick before the
+          // init (undefined) matches the additive-optional wire contract.
+          ...(snap.model !== undefined ? { model: snap.model } : {}),
         });
       };
       // Item #4: pending-retry set/clear → wire. Fresh starts never carry a

@@ -56,6 +56,7 @@ function buildRun(overrides: Partial<MultiAgentRun> = {}): MultiAgentRun {
     recoveryContext: null,
     routerDrops: [],
     participantControls: {},
+    modelsByAgent: {},
     ...overrides,
   };
 }
@@ -128,29 +129,49 @@ describe('TopRunBar — MockBadge mount predicate', () => {
     expect(container.querySelector('.mock-badge')).not.toBeNull();
   });
 
-  // Register W13: TopRunBar must NOT mount a ModelChip.
+  // `Cebab-ut7`: TopRunBar mounts a ModelChip again, now on a real signal.
   //
-  // It did, from #160 until W13, and it could only ever read "model:
-  // default" — the map it summarized was filled from `session_started`,
-  // which `translate()` emits only on the single-agent path, so no bus run
-  // ever produced one. Worse, the chip's tooltip told the operator the value
-  // was "not yet reported (waiting on session_started)", i.e. to wait for a
-  // message that cannot arrive.
-  //
-  // Asserting an ABSENCE, so each case pairs it with a positive control in
-  // the SAME render. Without one, this passes just as happily on a TopRunBar
-  // that throws, renders nothing, or was deleted outright — which is the
-  // failure mode an absence assertion is most prone to.
+  // W13 unmounted it because its only source was `session_started`, which the
+  // bus never emits — so it read "model: default" forever. The chip is back,
+  // summarizing `run.modelsByAgent` (harvested from `agent_activity.model`).
+  // The chip is ALWAYS present now (it degrades to "default" when the map is
+  // empty, exactly like the single-agent header), so the assertion flips from
+  // absence to presence — and the label reflects the map's contents.
   test.each([
     ['orchestrator', undefined],
     ['orchestrator', true],
     ['chain', undefined],
-  ] as const)('%s run (mock=%s) renders no ModelChip', (mode, mock) => {
+  ] as const)('%s run (mock=%s) mounts the ModelChip', (mode, mock) => {
     const run = buildRun(mock === undefined ? { mode } : { mode, mock });
     act(() => root.render(<TopRunBar run={run} {...stubProps} />));
     // Positive control: the bar really did render.
     expect(container.querySelector('.run-status')).not.toBeNull();
-    expect(container.querySelector('.model-chip')).toBeNull();
+    // Empty map → "default" (never blank), same fallback as single-agent.
+    const chip = container.querySelector('.model-chip');
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toContain('default');
+  });
+
+  test('the chip summarizes a populated per-agent model map', () => {
+    const run = buildRun({
+      modelsByAgent: {
+        orchestrator: 'claude-sonnet-4-5-20250929',
+        'worker-a': 'claude-sonnet-4-5-20250929',
+      },
+    });
+    act(() => root.render(<TopRunBar run={run} {...stubProps} />));
+    expect(container.querySelector('.model-chip')?.textContent).toContain('sonnet 4-5');
+  });
+
+  test('mixed participant models render the "various" sentinel', () => {
+    const run = buildRun({
+      modelsByAgent: {
+        orchestrator: 'claude-opus-4-1',
+        'worker-a': 'claude-sonnet-4-5-20250929',
+      },
+    });
+    act(() => root.render(<TopRunBar run={run} {...stubProps} />));
+    expect(container.querySelector('.model-chip')?.textContent).toContain('various');
   });
 });
 
