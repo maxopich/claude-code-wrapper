@@ -44,7 +44,7 @@ test('every scenario is actually wired into the suite above', () => {
   // Reddens if a scenario is added to the harness and never run. The loop-level
   // version of the same idea as the single-emit-point tests: the list and the
   // thing that consumes it must not drift.
-  expect(SCENARIO_NAMES.length).toBeGreaterThanOrEqual(17);
+  expect(SCENARIO_NAMES.length).toBeGreaterThanOrEqual(18);
   expect(SCENARIO_NAMES).toContain('green-merge');
   expect(SCENARIO_NAMES).toContain('queued');
   // The three that carry a P0/P1 fix each and have no unit-test equivalent —
@@ -59,4 +59,9 @@ test('every scenario is actually wired into the suite above', () => {
   // array in EVERY scenario and `rollup-skipped` passed on the older batch rule
   // alone — the rule running, reporting success, and measuring nothing.
   expect(SCENARIO_NAMES).toContain('rollup-withheld-child');
+  // The only case that can see a truncated ready window at all — it needs the
+  // bd shim to honour `-n`, which it did not until Cebab-qd2.48. Without this
+  // the cap could come back and every other scenario would stay green, because
+  // none of them has more rows than the smallest plausible page.
+  expect(SCENARIO_NAMES).toContain('select-window');
 });

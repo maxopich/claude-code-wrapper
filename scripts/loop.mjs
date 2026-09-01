@@ -60,7 +60,7 @@ import {
   withoutLegacyCost,
 } from './lib/loop/usage.mjs';
 import { scrubbedFrom, subscriptionOnlyEnv } from './lib/loop/env.mjs';
-import { ancestorsOfActive, chooseBead, denyPathStems } from './lib/loop/select.mjs';
+import { ancestorsOfActive, denyPathStems, eligibleBeads } from './lib/loop/select.mjs';
 import {
   appendRecord,
   buildRecord,
@@ -381,7 +381,37 @@ async function runIteration({ ctx, deps, log }) {
               );
             }
           } else {
-            const rows = await beads.ready(config.select, 50);
+            // `-n 0` — NO WINDOW, and the cap it replaces is the whole bug.
+            //
+            // bd applies `--exclude-label` / `--exclude-type` and the
+            // `sortPolicy` ordering server-side, THEN truncates. Everything
+            // else — `maxPriority`, `excludeIdPrefixes`, `excludeParents`,
+            // containment, the deny-path text scan — is applied below, over
+            // whatever survived the truncation. So the window was chosen by a
+            // sort that knows nothing about the filters that empty it.
+            //
+            // Measured 2026-09-01, the morning the overnight run halted at
+            // second nine reporting `nothing ready to work`: 201 rows survived
+            // bd's exclusions and 71 were within `maxPriority: 2`, but the
+            // hybrid ordering put only NINE of those 71 inside the first 50 —
+            // and all nine were excluded (four by id prefix, four by a deny
+            // stem, one by `.npmrc`). The first eligible bead sat at position
+            // 63. Sixty-one eligible beads, zero visible.
+            //
+            // Self-reinforcing, which is why it surfaced only after four good
+            // iterations: the beads the run completes are the eligible ones
+            // near the top, so every success empties the window further.
+            //
+            // NOT FIXED BY PUSHING `maxPriority` DOWN TO bd the way the label
+            // and type exclusions are pushed down — measured the same morning:
+            // `bd ready -p N` is an EXACT match, not a ceiling. `-p 2` returns
+            // 58 rows, all P2, silently dropping all 24 ready P1s. That is a
+            // worse defect wearing the shape of the fix.
+            //
+            // Cost of the unbounded form, measured: 0.23s for all 201 rows,
+            // against a multi-minute iteration. `reconcile` below has asked for
+            // `0` all along. `Cebab-qd2.48`.
+            const rows = await beads.ready(config.select, 0);
             // CONTAINMENT IS COMPUTED FRESH EVERY ITERATION, and it has to be:
             // the state it reads is one the RUN ITSELF creates. Iteration 5
             // leaves a guard-withheld bead `in_progress`, and iteration 6 is
@@ -401,12 +431,21 @@ async function runIteration({ ctx, deps, log }) {
             // exact failure the header of `select.mjs` describes for `labels`.
             // A zero here on a repo with parents is the tell.
             log(`select: ${graph.length} beads in the graph, ${contains.size} contain other work`);
-            bead = chooseBead(rows, {
+            const eligible = eligibleBeads(rows, {
               select: config.select,
               denyStems: denyPathStems(config.guard.denyPaths),
               parked: ctx.parked,
               contains,
             });
+            // COUNTED OUT LOUD FOR THE SAME REASON THE LINE ABOVE IS, and this
+            // is the half that was missing. `bead` alone cannot distinguish
+            // "bd had nothing" from "bd had 201 and the filters took all of
+            // them" — both are a falsy pick and both stopped the run under
+            // `nothing ready to work`. Two numbers, and the pair is the signal:
+            // `0 ready` is a drained queue, `201 ready, 0 eligible` is a
+            // filter to go and look at. `Cebab-qd2.48`.
+            log(`select: ${rows.length} ready, ${eligible.length} eligible after filters`);
+            bead = eligible[0] ?? null;
           }
           if (bead) {
             parts.bead = bead.id;

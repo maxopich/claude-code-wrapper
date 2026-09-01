@@ -84,8 +84,17 @@ export const SORT_POLICIES = Object.freeze(['priority', 'hybrid', 'oldest']);
 /**
  * argv for `bd ready`. `--json` is a bd GLOBAL flag, inherited rather than
  * declared on the subcommand, but it is passed the same way.
+ *
+ * THE DEFAULT IS bd's NO-LIMIT, and it is a default rather than a constant
+ * because a caller may legitimately want a page. It was `50`, which is the
+ * value that produced `Cebab-qd2.48`: bd truncates AFTER its own sort and
+ * BEFORE `eligibleBeads` runs, so a capped window is filtered by rules the cap
+ * could not see, and the loop read an entirely-excluded window as an empty
+ * queue. A cap is safe only where nothing filters the rows afterwards, which is
+ * true of no caller today — so the safe value is the default and a page has to
+ * be asked for by name. Same reasoning, same flag, as `listArgv`'s `-n 0`.
  */
-export function readyArgv(select, { limit = 50 } = {}) {
+export function readyArgv(select, { limit = 0 } = {}) {
   const sort = select.sortPolicy ?? 'priority';
   if (!SORT_POLICIES.includes(sort)) {
     throw new ConfigError(`select.sortPolicy '${sort}' is not one of ${SORT_POLICIES.join(', ')}`);
@@ -147,14 +156,21 @@ export function denyPathStems(denyPaths = []) {
 }
 
 /**
- * First survivor of bd's own ordering. bd has already sorted by `sortPolicy`
- * and applied the label/type exclusions, so this re-filters only on fields
- * that are actually present in the response, and never re-sorts.
+ * EVERY survivor of bd's own ordering, in that order. bd has already sorted by
+ * `sortPolicy` and applied the label/type exclusions, so this re-filters only
+ * on fields that are actually present in the response, and never re-sorts.
+ *
+ * RETURNS THE WHOLE LIST RATHER THAN THE FIRST HIT, so the driver can say how
+ * many beads survived. It used to stop at the first, which meant an empty
+ * result and a full-but-entirely-filtered batch were the same value — `null` —
+ * and the loop reported the second as `nothing ready to work`. See
+ * `Cebab-qd2.48`; the cost is a text scan over rows the old form skipped,
+ * measured at under a millisecond for 201 rows.
  *
  * @param {Array<object>} beads    rows from `bd ready --json`
  * @param {{select: object, denyStems?: string[], parked?: Set<string>}} opts
  */
-export function chooseBead(beads = [], { select = {}, denyStems = [], parked, contains } = {}) {
+export function eligibleBeads(beads = [], { select = {}, denyStems = [], parked, contains } = {}) {
   const parkedSet = parked instanceof Set ? parked : new Set(parked ?? []);
   // UNION, NEVER REPLACEMENT. The batch rule below is computed unconditionally
   // and the injected set is added to it, so a caller that passes nothing gets
@@ -168,6 +184,7 @@ export function chooseBead(beads = [], { select = {}, denyStems = [], parked, co
   const prefixes = select.excludeIdPrefixes ?? [];
   const excludeParents = select.excludeParents ?? [];
 
+  const survivors = [];
   for (const bead of beads) {
     if (!bead || typeof bead.id !== 'string') continue;
     if (typeof bead.priority === 'number' && bead.priority > maxPriority) continue;
@@ -216,9 +233,18 @@ export function chooseBead(beads = [], { select = {}, denyStems = [], parked, co
     const text = `${bead.title ?? ''}\n${bead.description ?? ''}`;
     if (denyStems.some((stem) => text.includes(stem))) continue;
 
-    return bead;
+    survivors.push(bead);
   }
-  return null;
+  return survivors;
+}
+
+/**
+ * The one the loop would work next, or `null`. A thin read of `eligibleBeads`
+ * — kept because it is the shape most callers and every filter test want, and
+ * defined in terms of the list so the two cannot answer differently.
+ */
+export function chooseBead(beads = [], opts = {}) {
+  return eligibleBeads(beads, opts)[0] ?? null;
 }
 
 /**

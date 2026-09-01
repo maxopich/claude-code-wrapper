@@ -64,6 +64,7 @@ import {
   chooseBead,
   containerIds,
   denyPathStems,
+  eligibleBeads,
   readyArgv,
   readyArgvConformsToConfig,
 } from './lib/loop/select.mjs';
@@ -713,6 +714,143 @@ describe('select: filtering the rows bd actually returns', () => {
     // drained rather than filtered.
     expect(denyPathStems(['**/*.ts', '*.mjs'])).toEqual([]);
     expect(denyPathStems(['.github/**'])).toEqual(['.github/']);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE READY WINDOW IS FILTERED AFTER bd TRUNCATES IT (Cebab-qd2.48)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The overnight run of 2026-09-01 finished four beads and then stopped at
+// second nine reporting `nothing ready to work`. Measured against the live
+// queue that morning, with the shipped `readyArgv` + `chooseBead` and the
+// operator's own `.loop/config.json`:
+//
+//   201 ready rows survived bd's `--exclude-label` / `--exclude-type`
+//    71 of them were within `maxPriority: 2`
+//     9 of those 71 fell inside the 50 rows bd was asked for
+//     0 of those 9 survived the CLIENT-side filters:
+//         Cebab-wfop                     deny stem '.npmrc'
+//         Cebab-8x8.3 .3.3 .4.1 .4.2     excludeIdPrefixes
+//         Cebab-x1n.7.22 .7.26           deny stem '.github/'
+//         Cebab-x1n.7.24                 deny stem 'vitest.setup.mjs'
+//         Cebab-x1n.7.25                 deny stem 'eslint.config.js'
+//    61 rows in the FULL list survived them; the first sat at position 63.
+//
+// bd sorts and excludes server-side and then truncates; `maxPriority`,
+// `excludeIdPrefixes`, `excludeParents`, containment and the deny-path scan all
+// run afterwards. So the window was chosen by an ordering that knows nothing
+// about the rules that empty it, and a full-but-excluded window was
+// indistinguishable from a drained queue.
+//
+// NOT FIXABLE by pushing `maxPriority` down to bd the way the label and type
+// exclusions are pushed down — measured the same morning on bd 1.1.2:
+// `bd ready -p N` is an EXACT match, not a ceiling. `-p 2` returns 58 rows, all
+// P2, silently dropping all 24 ready P1s. The obvious fix is a worse bug.
+//
+// WHAT EACH CASE MUST REDDEN:
+//   - readyArgv defaulting to a page again    -> 'the default is bd's no-limit'
+//   - eligibleBeads returning only the first  -> 'every survivor, in bd's order'
+//   - the driver asking for a page again      -> 'SELECT asks bd for no window'
+//   - the driver logging one count not two    -> 'reports what it filtered'
+
+describe('the ready window is not a window (Cebab-qd2.48)', () => {
+  const bead = (id, extra = {}) => ({
+    id,
+    title: `bead ${id}`,
+    description: '',
+    priority: 1,
+    issue_type: 'task',
+    status: 'open',
+    ...extra,
+  });
+
+  test("the default is bd's no-limit, so a caller cannot inherit the cap", () => {
+    // `-n 0` is bd's unlimited; the old default was 50. A page is still
+    // expressible, it just has to be asked for by name.
+    expect(readyArgv(DEFAULTS.select).slice(0, 4)).toEqual(['ready', '--json', '-n', '0']);
+    expect(readyArgv(DEFAULTS.select, { limit: 25 }).slice(0, 4)).toEqual([
+      'ready',
+      '--json',
+      '-n',
+      '25',
+    ]);
+  });
+
+  test("eligibleBeads returns every survivor, in bd's order", () => {
+    // THE POINT OF THE LIST. `chooseBead` returned the first hit, so an empty
+    // result and a full-but-entirely-excluded batch were the same value.
+    const rows = [
+      bead('A', { priority: 3 }), // over the ceiling
+      bead('B'),
+      bead('C', { issue_type: 'epic' }),
+      bead('D'),
+    ];
+    expect(eligibleBeads(rows, { select: DEFAULTS.select }).map((b) => b.id)).toEqual(['B', 'D']);
+    // Order is bd's, never re-derived — same rule the sibling case pins for
+    // `chooseBead`, restated here because this is now the function that decides.
+    const ordered = [bead('second', { priority: 2 }), bead('first', { priority: 0 })];
+    expect(eligibleBeads(ordered, { select: DEFAULTS.select }).map((b) => b.id)).toEqual([
+      'second',
+      'first',
+    ]);
+  });
+
+  test('a full batch with nothing eligible is not an empty batch', () => {
+    // THE PRODUCTION SHAPE, in miniature: rows exist, every one is excluded.
+    // The count is what separates it from a drained queue; the pick alone
+    // cannot, and that is what the run reported as `nothing ready to work`.
+    const stems = denyPathStems(GUARD.denyPaths);
+    const excluded = Array.from({ length: 12 }, (_, i) =>
+      bead(`X${i}`, { description: 'edits .github/workflows/ci.yml' }),
+    );
+    expect(eligibleBeads(excluded, { select: DEFAULTS.select, denyStems: stems })).toEqual([]);
+    expect(chooseBead(excluded, { select: DEFAULTS.select, denyStems: stems })).toBeNull();
+    // And the genuinely empty queue, so the assertion above is not satisfied by
+    // a function that returns [] for everything.
+    expect(eligibleBeads([], { select: DEFAULTS.select, denyStems: stems })).toEqual([]);
+    expect(
+      eligibleBeads([...excluded, bead('good')], {
+        select: DEFAULTS.select,
+        denyStems: stems,
+      }).map((b) => b.id),
+    ).toEqual(['good']);
+  });
+
+  test('chooseBead is the head of the list, not a second implementation', () => {
+    // Two filters that could drift is the defect this shape exists to prevent.
+    // Property-checked over a batch that exercises every exclusion.
+    const stems = denyPathStems(GUARD.denyPaths);
+    const rows = [
+      bead('over', { priority: 4 }),
+      bead('epic', { issue_type: 'epic' }),
+      bead('denied', { title: 'touches package-lock.json' }),
+      bead('ok-1'),
+      bead('ok-2'),
+    ];
+    for (const opts of [
+      { select: DEFAULTS.select, denyStems: stems },
+      { select: DEFAULTS.select, denyStems: stems, parked: new Set(['ok-1']) },
+      { select: { ...DEFAULTS.select, maxPriority: 0 }, denyStems: stems },
+    ]) {
+      expect(chooseBead(rows, opts)).toBe(eligibleBeads(rows, opts)[0] ?? null);
+    }
+  });
+
+  test('SELECT asks bd for no window, and reports what it filtered', () => {
+    // SOURCE-DERIVED, because the SELECT stage is inside `main`'s loop and has
+    // no seam a unit test can reach — the same idiom the repo uses for
+    // `ci_setup_steps_match`. The end-to-end proof is the `select-window`
+    // rehearsal scenario; this is the cheap belt that runs on Windows too,
+    // where the rehearsal is skipped.
+    const src = fs.readFileSync(new URL('./loop.mjs', import.meta.url), 'utf8');
+    expect(src).toContain('await beads.ready(config.select, 0)');
+    // No numeric page anywhere in a ready call. A literal other than 0 is the
+    // whole defect, and `\d+` catches a bigger cliff as readily as the old one.
+    expect(src).not.toMatch(/beads\.ready\(config\.select,\s*[1-9]\d*\)/);
+    // BOTH counts on one line. One of them cannot tell an empty queue from an
+    // entirely-excluded one, which is the state that stopped the run.
+    expect(src).toMatch(/\$\{rows\.length\} ready, \$\{eligible\.length\} eligible/);
   });
 });
 

@@ -395,7 +395,7 @@ silently rotted list fails in the direction of spending money. `Cebab-qd2.29`.
 
 1. Refuse to start unless `git status --porcelain` is empty and HEAD is `main`. Exit 2 otherwise.
 2. `git checkout main && git pull --ff-only`.
-3. `bd ready --json -n 50 -s <sortPolicy> --exclude-label <excludeLabels> --exclude-type
+3. `bd ready --json -n 0 -s <sortPolicy> --exclude-label <excludeLabels> --exclude-type
 <excludeTypes>`. **The label and type exclusions MUST be passed to `bd`, not applied to the
    result.** Measured 2026-08-25: no bd JSON output — `ready`, `list` or `show` — carried a
    `labels` field, so a driver-side `bead.labels` filter read `undefined`, treated it as "no
@@ -414,6 +414,29 @@ silently rotted list fails in the direction of spending money. `Cebab-qd2.29`.
    Then filter the returned rows on the fields bd DOES return: priority > `maxPriority`, any type
    in `excludeTypes`, any id matching `excludeIdPrefixes`, any bead in this run's in-memory
    `parked` set, any bead whose title or body names a path in `guard.denyPaths`.
+
+   **`-n 0`, and the cap it replaces was a defect rather than a tuning choice.** bd applies its
+   exclusions and the `sortPolicy` ordering server-side and THEN truncates; every filter in the
+   paragraph above runs afterwards, on whatever survived. So a capped window is chosen by an
+   ordering that knows nothing about the rules that will empty it. Measured 2026-09-01, the
+   morning an overnight run halted at second nine reporting `nothing ready to work`: 201 rows
+   survived bd's exclusions and 71 were within `maxPriority: 2`, but the hybrid ordering put only
+   NINE of those 71 inside the 50 rows the driver asked for — and all nine were excluded (four by
+   `excludeIdPrefixes`, five by a deny stem). The first eligible bead sat at position 63; 61 were
+   eligible in the full list. Self-reinforcing, which is why four good iterations preceded it: the
+   beads a run completes are the eligible ones near the top, so every success empties the window
+   further. Unbounded costs 0.23s for 201 rows against a multi-minute iteration, and the reconcile
+   pass has asked for `0` all along.
+
+   **NOT fixed by pushing `maxPriority` down to bd** the way the label and type exclusions are
+   pushed down. Measured the same morning on bd 1.1.2: `bd ready -p N` is an EXACT match, not a
+   ceiling — `-p 2` returns 58 rows, all P2, silently dropping all 24 ready P1s. The obvious
+   symmetry is a worse defect wearing the shape of the fix.
+
+   **SELECT logs both counts**, `<n> ready, <m> eligible after filters`, because the pick alone
+   cannot distinguish a drained queue from a full-but-entirely-excluded one and the run stopped
+   identically on each. `0 ready` is a drained queue; `201 ready, 0 eligible` is a filter to go
+   and look at. `Cebab-qd2.48`.
 
 4. **Skip any bead that CONTAINS other unfinished work**, computed from the bead graph:
    `bd list --json -n 0` (every ACTIVE bead — measured 2026-08-28: 249 rows, 243 open + 6
@@ -498,8 +521,10 @@ ready row; 16 were literal epics already excluded, and exactly four were not. Sk
 nothing — the child is the more specific work and is taken instead, and the parent becomes
 selectable the moment its children close.
 
-**Scoped to the batch, deliberately.** The driver asks bd for 50 rows, so a container whose
-children are BLOCKED, or sorted past the cap, is not caught: `Cebab-8x8.4` is exactly that. The
+**Scoped to the batch, deliberately.** The batch is every ready row since `Cebab-qd2.48` removed
+the 50-row cap, so "sorted past the cap" is no longer one of the ways this misses; a container
+whose children are BLOCKED still is, because a blocked child is not ready and so has no pointer in
+the batch aimed at its parent. `Cebab-8x8.4` is exactly that. The
 harm this prevents is doing a parent AND its child, which requires both to be selectable, which
 means both are in the batch. A rollup whose children are all blocked is merely large, and the
 mechanism for that already exists — `select.excludeLabels` carries `epic`, so labelling it is one
@@ -1627,7 +1652,7 @@ So the rehearsal runs the **real driver** end-to-end against a scratch git repo 
 `scripts/lib/loop/` are COPIED into the scratch repo, because the driver derives its repo root from
 its own path — the installed copy would drive this checkout.
 
-Twenty-three scenarios, each asserting on the ledger AND on the bare repo's `main`:
+Twenty-four scenarios, each asserting on the ledger AND on the bare repo's `main`:
 
 | Scenario                 | What only it can prove                                                               |
 | ------------------------ | ------------------------------------------------------------------------------------ |
@@ -1654,6 +1679,7 @@ Twenty-three scenarios, each asserting on the ledger AND on the bare repo's `mai
 | `ci-blocked`             | a green required context with another check red parks, unmerged, unrepaired (§6.6)   |
 | `ci-infra-recovers`      | a KILLED CI run is re-run once and lands, spending no repair attempt (§6.6)          |
 | `ci-infra-persists`      | a second cancellation parks `ci_infra`, and the re-run happens ONCE, not per poll    |
+| `select-window`          | a ready window filtered downstream hides eligible work — the cap is gone (§6.1)      |
 
 `driver-stale` is the one that needed a new kind of evidence. A log line saying "restarting"
 proves only that the driver said so, so the scenario pushes a commit that appends a marker
@@ -1662,6 +1688,15 @@ clone one commit behind. That statement runs at import, so it appears exactly on
 process that loaded the PULLED copy — and never at all if the restart is removed. The shim call log
 also records `CEBAB_LOOP_REEXEC` per call, so the scenario can assert the BUILD happened in the
 child while preflight ran in both.
+
+**The `bd` shim honours `-n`, and until `Cebab-qd2.48` it did not.** It returned every matching
+row whatever page was asked for, which made it a fake modelling a bd that never truncates — so the
+entire class where a full window is filtered empty downstream was invisible to the harness by
+construction. Measured while fixing it, and the split is why `select-window` asserts on both the
+outcome and the argv: reverting the driver's `-n 0` alone reddens the behavioural assertions
+(`one iteration ran (got 0)`), but reverting the shim's `-n` handling **as well turns them green
+again** — only the argv check survives. Model what the real tool REFUSES to return, not just the
+shape of what it does.
 
 **The harness was itself vacuous for `Cebab-qd2.18`, and that is the lesson worth keeping.**
 `capped-then-resume` traverses the exact path where attempt 2 reaches PUBLISH having never created
@@ -1755,6 +1790,11 @@ at 36% CPU, not the harness.
 - [ ] A turn cap that is resumed does not consume one of `maxRepairs`: a bead that is capped, then
       fails the gate, then goes red in CI still has an attempt left for the CI failure. `attempts`
       and `capResumes` together account for every `claude` invocation (§6.3).
+- [ ] SELECT asks bd for **every** ready row, not a page. A queue whose first 50 rows are all
+      excluded by a driver-side rule still yields the eligible bead further down, and the run
+      reports `<n> ready, <m> eligible after filters` so a full-but-excluded batch cannot be read
+      as a drained queue. The `bd` shim honours `-n`, without which the rehearsal cannot express
+      this at all (§6.1, §11.1).
 - [ ] SELECT never picks a bead that is the parent of another bead in the same ready batch: it
       takes the child instead, and the parent is never claimed. A bead is not excluded merely for
       HAVING a parent, and a container whose children are absent from the batch is still
