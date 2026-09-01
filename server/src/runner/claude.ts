@@ -116,17 +116,50 @@ export type RunOptions = {
  * Auth-precedence env vars that override OAuth subscription. The Anthropic
  * CLI prefers `ANTHROPIC_API_KEY` over subscription, so a stray
  * `export ANTHROPIC_API_KEY=...` in `.zshrc` would silently route us through
- * paid billing; the Bedrock/Vertex/Foundry flags switch backends entirely.
+ * paid billing; the backend flags switch backends entirely.
+ *
+ * The set is the CLI's OWN auth-precedence enumeration, not a subset. The
+ * bundled binary's credential-env array is `[ANTHROPIC_API_KEY,
+ * ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, AWS_BEARER_TOKEN_BEDROCK,
+ * ANTHROPIC_FOUNDRY_API_KEY, ANTHROPIC_FOUNDRY_AUTH_TOKEN, ANTHROPIC_AWS_API_KEY]`
+ * and its backend-flag check covers `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,
+ * ANTHROPIC_AWS,ANTHROPIC_GOOGLE_CLOUD,MANTLE}` plus the OAuth-token file
+ * descriptor, the WIF pair and the unix socket. The strongest case is
+ * `CLAUDE_CODE_OAUTH_TOKEN`: the CLI documents `export CLAUDE_CODE_OAUTH_TOKEN=…`
+ * (from `claude setup-token`) as the non-interactive auth path, and its
+ * auth-source resolver returns `{source:"CLAUDE_CODE_OAUTH_TOKEN"}` BEFORE it
+ * reaches the persisted `~/.claude/.credentials.json` OAuth session — so a
+ * stray export authenticates every spawn as the token's identity, not the
+ * operator's subscription. Any name left off here passes through
+ * `subscriptionOnlyEnv()` untouched (the SDK REPLACES the child env wholesale),
+ * so the omission is the bug — the list must track the CLI's behaviour.
  *
  * The list is exported so the WS layer can surface `getScrubbedEnvVars()`
  * on every attach (Cluster A Phase 3, BE-10/E1) — names only, never values.
  */
 export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
+  // Credential-class env keys the CLI honours over the stored OAuth session.
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'ANTHROPIC_AWS_API_KEY',
+  // WIF (workload-identity federation) pair — the CLI's own error text names
+  // `ANTHROPIC_FEDERATION_RULE_ID + ANTHROPIC_ORGANIZATION_ID` as the WIF vars.
+  'ANTHROPIC_FEDERATION_RULE_ID',
+  'ANTHROPIC_ORGANIZATION_ID',
+  // Alternate transport the CLI dials instead of the default endpoint.
+  'ANTHROPIC_UNIX_SOCKET',
+  // Backend switches that re-route off the Anthropic API entirely.
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_MANTLE',
 ];
 
 /**
@@ -144,9 +177,22 @@ export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
 export const SCRUBBED_ENV_POSTURES: Readonly<Record<string, string>> = {
   ANTHROPIC_API_KEY: 'Subscription auth (API key would override OAuth)',
   ANTHROPIC_AUTH_TOKEN: 'Subscription auth (bearer token would override OAuth)',
+  CLAUDE_CODE_OAUTH_TOKEN: 'Subscription auth (setup-token would override OAuth)',
+  CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR:
+    'Subscription auth (setup-token FD would override OAuth)',
+  AWS_BEARER_TOKEN_BEDROCK: 'Bedrock backend (bearer token re-routes off Anthropic API)',
+  ANTHROPIC_FOUNDRY_API_KEY: 'Foundry backend (API key re-routes off Anthropic API)',
+  ANTHROPIC_FOUNDRY_AUTH_TOKEN: 'Foundry backend (bearer token re-routes off Anthropic API)',
+  ANTHROPIC_AWS_API_KEY: 'AWS backend (API key re-routes off Anthropic API)',
+  ANTHROPIC_FEDERATION_RULE_ID: 'WIF auth (federation identity would override OAuth)',
+  ANTHROPIC_ORGANIZATION_ID: 'WIF auth (federation identity would override OAuth)',
+  ANTHROPIC_UNIX_SOCKET: 'Alternate transport (dials a socket instead of the API endpoint)',
   CLAUDE_CODE_USE_BEDROCK: 'Bedrock backend (re-routes off Anthropic API)',
   CLAUDE_CODE_USE_VERTEX: 'Vertex backend (re-routes off Anthropic API)',
   CLAUDE_CODE_USE_FOUNDRY: 'Foundry backend (re-routes off Anthropic API)',
+  CLAUDE_CODE_USE_ANTHROPIC_AWS: 'AWS backend (re-routes off Anthropic API)',
+  CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: 'Google Cloud backend (re-routes off Anthropic API)',
+  CLAUDE_CODE_USE_MANTLE: 'Mantle backend (re-routes off Anthropic API)',
 };
 
 /**

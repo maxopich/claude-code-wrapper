@@ -4,8 +4,11 @@
  * WHY THIS EXISTS. The `claude` CLI prefers `ANTHROPIC_API_KEY` over the OAuth
  * subscription, so a stray `export` in a shell profile silently routes an
  * agent turn to paid API billing. Cebab's SERVER has always known this:
- * `server/src/runner/claude.ts` strips the same five names before every spawn,
- * and CLAUDE.md records the reasoning.
+ * `server/src/runner/claude.ts` strips the same names before every spawn,
+ * and CLAUDE.md records the reasoning. The set is the CLI's OWN
+ * auth-precedence enumeration (credential-env array + WIF pair + backend
+ * flags), not a hand-picked subset — `CLAUDE_CODE_OAUTH_TOKEN`, the documented
+ * `claude setup-token` output, is the strongest overriding case (Cebab-ygu.18).
  *
  * The loop did not. `makeRunner` defaults to `process.env` and the driver built
  * it with no `env` argument, so every BUILD inherited whatever the operator's
@@ -26,11 +29,27 @@
 
 /** Every env var that would override OAuth subscription auth. */
 export const SCRUBBED_ENV_VAR_NAMES = Object.freeze([
+  // Credential-class env keys the CLI honours over the stored OAuth session.
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  'AWS_BEARER_TOKEN_BEDROCK',
+  'ANTHROPIC_FOUNDRY_API_KEY',
+  'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
+  'ANTHROPIC_AWS_API_KEY',
+  // WIF (workload-identity federation) pair.
+  'ANTHROPIC_FEDERATION_RULE_ID',
+  'ANTHROPIC_ORGANIZATION_ID',
+  // Alternate transport the CLI dials instead of the default endpoint.
+  'ANTHROPIC_UNIX_SOCKET',
+  // Backend switches that re-route off the Anthropic API entirely.
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+  'CLAUDE_CODE_USE_MANTLE',
 ]);
 
 /**
