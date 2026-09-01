@@ -1,5 +1,10 @@
 # Dependencies & build output
-node_modules/
+# No trailing slash on purpose: a trailing slash matches DIRECTORIES ONLY, and
+# git treats a symlink as a file. The worktree setup recipe makes
+# server/web/shared node_modules SYMLINKS to the main checkout, so `node_modules/`
+# left them un-ignored and a routine `git add -A` staged them (Cebab-u2a).
+# `node_modules` (no slash) matches a dir OR a symlink of that name at any depth.
+node_modules
 dist/
 *.tsbuildinfo
 
