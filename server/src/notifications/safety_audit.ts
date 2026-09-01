@@ -7,6 +7,7 @@ import {
   isMirrorEstablished,
   markMirrorEstablished,
   readLatestAuditTip,
+  readMaxTipForAnchor,
 } from './audit_tip.js';
 
 /**
@@ -52,9 +53,11 @@ const CHAIN_RESET_KIND = 'audit.chain_reset';
  *   2. append that marker's id here.
  * Skipping (2) makes every boot after that migration report `forged_anchor`.
  *
- * The tip mirror (`audit_tip.ts`) tolerates that fresh anchor: it sits above
- * the pre-migration tip, which still exists, so `checkAgainstTipMirror` reports
- * clean rather than a false `tail_truncated`. See that function.
+ * The tip mirror (`audit_tip.ts`) tolerates that fresh anchor: each mirror line
+ * names the rowid of the anchor its count is relative to, and a migration's
+ * marker is a NEW rowid even when it reuses the id, so the pre-migration
+ * commitments do not count against it and `checkAgainstTipMirror` reports clean
+ * rather than a false `tail_truncated`. See that function.
  */
 const KNOWN_CHAIN_RESET_IDS: ReadonlySet<string> = new Set([
   'chain-reset-015', // 015_safety_audit.sql — genesis
@@ -318,6 +321,12 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
     rowId: result.id,
     hashSelf: result.hash_self.toString('hex'),
     count: countRowsSinceAnchor(),
+    // Tag the commitment with the anchor GENERATION it counts against, so a
+    // post-truncation append (which re-counts from the shortened table) cannot
+    // lower the high-water mark `verifyChain` measures truncation against, and
+    // a migration's fresh anchor does not inherit the old anchor's count. The
+    // rowid, not the id, is the discriminator — a migration may reuse the id.
+    anchorRowid: currentAnchorRowid() ?? undefined,
   });
   if (!isMirrorEstablished()) markMirrorEstablished();
 
@@ -342,6 +351,27 @@ function countRowsSinceAnchor(): number {
     return row?.n ?? 0;
   } catch {
     return 0;
+  }
+}
+
+/**
+ * SQLite rowid of the newest chain-reset anchor — the generation a mirrored
+ * `count` is relative to. Recorded on every mirror entry so `verifyChain` can
+ * take the high-water count for the CURRENT anchor and ignore counts committed
+ * under an earlier one. Returns `null` when there is no anchor (which
+ * `verifyChain` reports as `no_anchor` on its own); like `countRowsSinceAnchor`
+ * it must not throw inside the append path's best-effort mirror write.
+ */
+function currentAnchorRowid(): number | null {
+  try {
+    const row = getDb()
+      .prepare<[string], { rowid: number | null }>(
+        `SELECT MAX(rowid) AS rowid FROM safety_audit WHERE kind = ?`,
+      )
+      .get(CHAIN_RESET_KIND);
+    return row?.rowid ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -436,7 +466,7 @@ export function verifyChain(): VerifyChainResult {
 
   // H14: the rows that ARE here all verify. That says nothing about rows that
   // are not — which is the whole point of the external mirror.
-  const truncation = checkAgainstTipMirror(rows, rowsChecked, lastMarker.rowid);
+  const truncation = checkAgainstTipMirror(rowsChecked, lastMarker.rowid);
   if (truncation) return truncation;
 
   return { ok: true, rowsChecked };
@@ -453,19 +483,24 @@ export function verifyChain(): VerifyChainResult {
  * specific finding — it names the offending row — and the operator needs the
  * row id more than they need to know the tail is also short.
  *
- * `anchorRowid` is the newest chain-reset marker's rowid — the lower bound of
- * the verified window — and is needed to tell a truncated tail apart from a
- * fresh migration anchor inserted ABOVE the mirrored tip (see the not-in-window
- * branch below).
+ * `anchorRowid` is the newest chain-reset marker's rowid. Two jobs:
+ *   - the existence of ANY mirror line is what separates a benign upgrade from
+ *     a deleted mirror (`tip_mirror_missing`), and
+ *   - the HIGH-WATER count committed for THIS anchor's generation is the
+ *     yardstick for truncation. Measuring against the newest line instead let a
+ *     single post-truncation append (which re-counts from the already-shortened
+ *     table) heal the chain over its own erasure — the defect Cebab-ygu.21
+ *     closed. Scoping to the anchor rowid also tells a truncated tail apart from
+ *     a fresh migration anchor whose first post-migration append has not landed:
+ *     the pre-migration commitments name the OLD rowid, so this anchor has no
+ *     commitment yet and there is nothing to fail against.
  */
-function checkAgainstTipMirror(
-  rows: SafetyAuditRow[],
-  rowsChecked: number,
-  anchorRowid: number,
-): VerifyChainResult | null {
-  const tip = readLatestAuditTip();
-
-  if (!tip) {
+function checkAgainstTipMirror(rowsChecked: number, anchorRowid: number): VerifyChainResult | null {
+  // Existence check first: a mirror that was established and is now gone is the
+  // second half of the two-step erasure (`audit_tip.ts`'s header), independent
+  // of any per-anchor count. `readLatestAuditTip` answers "is there any usable
+  // line at all", which is exactly this question.
+  if (!readLatestAuditTip()) {
     // No mirror. Benign on the first boot after upgrading to a build that has
     // one; suspicious once we know mirroring was live — the DB flag is what
     // separates those two, and an attacker has to find and clear it too.
@@ -475,40 +510,21 @@ function checkAgainstTipMirror(
     return null;
   }
 
-  // The mirrored tip row is not in the verified window (rows after the anchor).
-  // Two structurally different causes, and they must not be conflated:
-  //
-  //   (a) TRUNCATION — a blanket `DELETE FROM safety_audit` erased the tail, so
-  //       the tip row is GONE from the database entirely. This is the attack the
-  //       mirror exists to catch.
-  //   (b) A FRESH ANCHOR above the tip — a migration that ALTERs safety_audit
-  //       inserts a new `audit.chain_reset` marker (mandatory, per this module's
-  //       contract at KNOWN_CHAIN_RESET_IDS). On the first boot after it the
-  //       verified window (rowid > new anchor) is empty and the pre-migration
-  //       tip now sits BELOW the anchor — still present, nothing erased. Reading
-  //       that as tamper would fire a non-dismissible `danger` alarm on a
-  //       healthy install once per such migration. It self-heals at the next
-  //       append, which re-mirrors against the new anchor.
-  //
-  // The database itself is the discriminator: the tip row still existing
-  // (necessarily at rowid <= anchor, or it would be in `rows`) is (b); its
-  // absence is (a). Existence proves no tail data was deleted — the mirror's
-  // whole job.
-  if (!rows.some((r) => r.id === tip.rowId)) {
-    const tipRow = getDb()
-      .prepare<[string], { rowid: number }>(`SELECT rowid FROM safety_audit WHERE id = ?`)
-      .get(tip.rowId);
-    if (tipRow && tipRow.rowid <= anchorRowid) {
-      return null;
-    }
-    return { ok: false, reason: 'tail_truncated', brokenAt: tip.rowId };
-  }
+  // High-water commitment for the CURRENT anchor generation. `null` means the
+  // mirror holds no line for this anchor's rowid — either a fresh migration
+  // anchor whose first post-migration append has not landed (the pre-migration
+  // lines name the old rowid) or a legacy mirror predating anchor tagging.
+  // Both are benign: nothing claims this anchor ever held more rows than it
+  // does now, so there is nothing to be short of.
+  const commitment = readMaxTipForAnchor(anchorRowid);
+  if (!commitment) return null;
 
-  // The tip is still present but rows behind it were removed. `<` and not
-  // `!==`: the chain legitimately grows between an append and a verify, so
-  // only a SHORTER chain than the mirror committed to is evidence.
-  if (rowsChecked < tip.count) {
-    return { ok: false, reason: 'tail_truncated', brokenAt: tip.rowId };
+  // `<` and not `!==`: the chain legitimately grows between an append and a
+  // verify, so only a SHORTER chain than the mirror's high-water mark for this
+  // anchor is evidence of truncation. The max is what a post-truncation append
+  // cannot lower — reading the newest line instead was the self-heal defect.
+  if (rowsChecked < commitment.count) {
+    return { ok: false, reason: 'tail_truncated', brokenAt: commitment.rowId };
   }
 
   return null;

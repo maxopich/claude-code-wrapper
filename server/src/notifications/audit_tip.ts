@@ -69,6 +69,17 @@ export type AuditTipEntry = {
   rowId: string;
   hashSelf: string;
   count: number;
+  /**
+   * SQLite rowid of the chain-reset anchor this `count` is relative to, at the
+   * moment of the append. It scopes the count to one anchor GENERATION: a
+   * migration inserts a fresh marker (a NEW rowid, even when it reuses the
+   * marker's `id`, e.g. `chain-reset-023`) and the count legitimately restarts
+   * near zero under it. `verifyChain` takes the maximum count for the CURRENT
+   * anchor's rowid, so a post-truncation append cannot lower that high-water
+   * mark and a re-anchor cannot inherit the old anchor's. Absent on entries
+   * written before this field existed — see `readMaxTipForAnchor`.
+   */
+  anchorRowid?: number;
 };
 
 /**
@@ -128,6 +139,61 @@ export function readLatestAuditTip(): AuditTipEntry | null {
     }
   }
   return null;
+}
+
+/**
+ * The largest commitment the mirror holds for a given anchor — the entry with
+ * the greatest `count` among lines tagged with `anchorRowid`, or `null` when
+ * the mirror names no commitment for this anchor.
+ *
+ * WHY THE MAX, NOT THE NEWEST LINE. `readLatestAuditTip` returns only the last
+ * line, which a tail truncation defeats: delete the tail, and the next ordinary
+ * safety event appends a fresh commitment whose `count` was recomputed from the
+ * already-shortened table — a small number. Comparing the surviving chain
+ * against only that line finds it no shorter than its own post-truncation
+ * commitment and reports clean, so the chain self-heals over its own erasure.
+ * The high-water mark across every line for THIS anchor cannot be lowered by
+ * appending a smaller one, so the earlier, larger commitment still catches it.
+ *
+ * WHY PER ANCHOR (BY ROWID). A migration inserts a fresh chain-reset marker and
+ * the count legitimately restarts near zero under it; a plain repo-wide max
+ * would read the pre-migration high-water mark as a permanent truncation. The
+ * discriminator is the anchor's ROWID, not its id: a migration may reuse the
+ * marker id (`chain-reset-023`) at a new, higher rowid, and only the rowid tells
+ * the new generation from the old.
+ *
+ * Legacy entries lacking `anchorRowid` are skipped rather than counted against
+ * the current anchor — attributing them to an anchor they were not written
+ * under is exactly the false alarm this guards against. That reopens the
+ * documented upgrade window (see the header) for one anchor generation, until
+ * the first append under the new build re-commits with a tagged line.
+ */
+export function readMaxTipForAnchor(anchorRowid: number): AuditTipEntry | null {
+  let text: string;
+  try {
+    text = fs.readFileSync(auditTipPath(), 'utf8');
+  } catch {
+    return null;
+  }
+  let best: AuditTipEntry | null = null;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    try {
+      const parsed = JSON.parse(line) as AuditTipEntry;
+      if (
+        typeof parsed?.rowId === 'string' &&
+        typeof parsed?.count === 'number' &&
+        parsed?.anchorRowid === anchorRowid &&
+        (best === null || parsed.count > best.count)
+      ) {
+        best = parsed;
+      }
+    } catch {
+      // Torn or garbage line — skip, same tolerance as readLatestAuditTip.
+    }
+  }
+  return best;
 }
 
 /** Whether this installation has ever written a mirror. */
