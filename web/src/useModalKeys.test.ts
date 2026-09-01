@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi, type Mock } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act, createElement } from 'react';
 import { useModalKeys } from './useModalKeys';
@@ -156,5 +156,84 @@ describe('useModalKeys — Escape', () => {
     press('Escape', element('input', { type: 'text' }));
     press('Escape', element('textarea'));
     expect(onClose).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('useModalKeys — nested modals (Cebab-ygu.29)', () => {
+  /**
+   * A ConfirmGateModal opened inside SettingsModal/LogsModal shares the
+   * `document` listener with its host. The host modal is already open when the
+   * operator triggers the gate, so the host's listener is registered first;
+   * before the topmost-only guard Escape ran the host's onClose (closing
+   * Settings and reverting its theme snapshot) and Enter in the gate's text
+   * field reached the host's onConfirm (saving what the operator was abandoning).
+   * Only the topmost (last-mounted) modal may act on a key.
+   *
+   * These tests model the real sequence — host mounts first, gate mounts later
+   * as a child component — because effect order alone would otherwise mislead:
+   * a child component's effect runs BEFORE its parent's, so mounting both in one
+   * render would register the child first and invert what "topmost" means.
+   */
+  let parentClose: Mock<() => void>;
+  let parentConfirm: Mock<() => void>;
+  let childClose: Mock<() => void>;
+  let childConfirm: Mock<() => void>;
+
+  function Gate() {
+    // Mirrors ConfirmGateModal: the gate passes no onConfirm to useModalKeys,
+    // so its confirm path lives on a focused field, not this document listener.
+    useModalKeys({ onClose: childClose, onConfirm: childConfirm, canConfirm: true });
+    return null;
+  }
+  function Host({ gateOpen }: { gateOpen: boolean }) {
+    useModalKeys({ onClose: parentClose, onConfirm: parentConfirm, canConfirm: true });
+    return gateOpen ? createElement(Gate) : null;
+  }
+
+  /** Open the host, then (in a later commit) the nested gate — mount order the
+   *  same as the running app. */
+  function openHostThenGate(): void {
+    act(() => {
+      root.render(createElement(Host, { gateOpen: false }));
+    });
+    act(() => {
+      root.render(createElement(Host, { gateOpen: true }));
+    });
+  }
+
+  beforeEach(() => {
+    parentClose = vi.fn();
+    parentConfirm = vi.fn();
+    childClose = vi.fn();
+    childConfirm = vi.fn();
+  });
+
+  test('Escape closes only the topmost (gate), not the host', () => {
+    openHostThenGate();
+    press('Escape', element('input', { type: 'text' }));
+    expect(childClose).toHaveBeenCalledTimes(1);
+    expect(parentClose).not.toHaveBeenCalled();
+  });
+
+  test("Enter in the gate's text field does not reach the host's onConfirm", () => {
+    openHostThenGate();
+    press('Enter', element('input', { type: 'text' }));
+    expect(parentConfirm).not.toHaveBeenCalled();
+    expect(childConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  test('once the gate closes, the host handles keys again', () => {
+    openHostThenGate();
+    press('Escape', element('input', { type: 'text' }));
+    expect(childClose).toHaveBeenCalledTimes(1);
+    expect(parentClose).not.toHaveBeenCalled();
+
+    // Gate unmounts; the host is topmost again and now handles Escape.
+    act(() => {
+      root.render(createElement(Host, { gateOpen: false }));
+    });
+    press('Escape', element('input', { type: 'text' }));
+    expect(parentClose).toHaveBeenCalledTimes(1);
+    expect(childClose).toHaveBeenCalledTimes(1);
   });
 });
