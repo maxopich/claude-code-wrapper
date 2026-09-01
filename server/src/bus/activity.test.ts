@@ -28,6 +28,9 @@ function asstText(text: string): SDKMessage {
 function streamEvent(): SDKMessage {
   return { type: 'stream_event' } as unknown as SDKMessage;
 }
+function systemInit(model: string): SDKMessage {
+  return { type: 'system', subtype: 'init', model } as unknown as SDKMessage;
+}
 function resultMsg(): SDKMessage {
   return { type: 'result', subtype: 'success', session_id: 's' } as unknown as SDKMessage;
 }
@@ -170,5 +173,41 @@ describe('createAgentActivityObserver', () => {
     const last = emits.at(-1)!;
     expect(last.phase).toBe('working');
     expect(last.currentTool).toBe('Bash');
+  });
+
+  // `Cebab-ut7`: the observer harvests the participant's model from the
+  // `system/init` that opens every per-hop query() and carries it forward,
+  // so the bus finally has a model signal on the wire.
+  test('captures the model from system/init and carries it forward all turn', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    // A tick before init has no model yet — undefined, not a guess.
+    obs.onMessage('coder', asstText('booting'));
+    expect(emits.at(-1)!.model).toBeUndefined();
+    // system/init arrives and is captured; it's a debounced liveness tick
+    // (no phase/tool edge), so the value surfaces on the next emitted tick —
+    // a tool edge here forces one, and it carries the model.
+    obs.onMessage('coder', systemInit('claude-sonnet-4-5-20250929'));
+    obs.onMessage('coder', asstTool('Bash')); // tool edge → emits
+    expect(emits.at(-1)!.model).toBe('claude-sonnet-4-5-20250929');
+    // The stall edge keeps it too — it's the same turn.
+    vi.advanceTimersByTime(DEFAULT_STALL_MS + 50);
+    expect(emits.at(-1)!).toMatchObject({ phase: 'stalled', model: 'claude-sonnet-4-5-20250929' });
+  });
+
+  test('a malformed / empty init model never overwrites a real one, and idle carries it', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    obs.onMessage('coder', systemInit('claude-opus-4-1'));
+    vi.advanceTimersByTime(1100);
+    // An init with an empty model (malformed) is ignored, not adopted.
+    obs.onMessage('coder', systemInit(''));
+    expect(emits.at(-1)!.model).toBe('claude-opus-4-1');
+    // Turn end still reports the model on its idle edge.
+    obs.onTurnEnd('coder');
+    expect(emits.at(-1)!).toMatchObject({ phase: 'idle', model: 'claude-opus-4-1' });
+    // Next turn is fresh: model resets until its own init lands.
+    obs.onMessage('coder', asstText('next turn'));
+    expect(emits.at(-1)!.model).toBeUndefined();
   });
 });

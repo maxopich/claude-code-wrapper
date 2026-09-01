@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
-import { ModelChip, shortModelLabel } from './ModelChip';
+import { ModelChip, shortModelLabel, summarizeBusModel } from './ModelChip';
 
 // Cluster E Phase 2 (B4) — ModelChip contract:
 //   - Renders the model identifier in chip form
@@ -206,5 +206,70 @@ describe('shortModelLabel — unrecognised short aliases pass through', () => {
     const title = container.querySelector('.model-chip')?.getAttribute('title');
     expect(title).toContain('various');
     expect(title).toContain('Extra context here.');
+  });
+});
+
+// `Cebab-ut7` — summarizeBusModel is back, now folding the run's real
+// per-agent model map (keyed by bus agent name, harvested from
+// `agent_activity.model`) into the TopRunBar chip's single label. The map
+// keys are irrelevant to the summary; only the set of values matters.
+describe('summarizeBusModel', () => {
+  test('undefined → undefined (chip falls back to "default")', () => {
+    expect(summarizeBusModel(undefined)).toBeUndefined();
+  });
+
+  test('empty map → undefined', () => {
+    expect(summarizeBusModel({})).toBeUndefined();
+  });
+
+  test('single entry → that model', () => {
+    expect(summarizeBusModel({ 'worker-a': 'claude-sonnet-4-5-20250929' })).toBe(
+      'claude-sonnet-4-5-20250929',
+    );
+  });
+
+  test('all entries identical → that model', () => {
+    expect(
+      summarizeBusModel({
+        orchestrator: 'claude-sonnet-4-5-20250929',
+        'worker-a': 'claude-sonnet-4-5-20250929',
+        'worker-b': 'claude-sonnet-4-5-20250929',
+      }),
+    ).toBe('claude-sonnet-4-5-20250929');
+  });
+
+  test('multiple distinct → "various"', () => {
+    expect(
+      summarizeBusModel({
+        orchestrator: 'claude-sonnet-4-5-20250929',
+        'worker-a': 'claude-opus-4-1',
+      }),
+    ).toBe('various');
+  });
+
+  test('empty-string values ignored (treated as "not reported")', () => {
+    // A participant whose init has not landed yet has no model — only ""
+    // entries collapse to undefined; a stray "" alongside a real model does
+    // not push the summary to "various".
+    expect(summarizeBusModel({ 'worker-a': '' })).toBeUndefined();
+    expect(summarizeBusModel({ 'worker-a': 'claude-sonnet-4-5', 'worker-b': '' })).toBe(
+      'claude-sonnet-4-5',
+    );
+  });
+
+  test('the summarized model flows through ModelChip to the header', () => {
+    // End-to-end for the mount: a mixed run renders the "various" sentinel
+    // verbatim (shortModelLabel passthrough).
+    act(() => {
+      root.render(
+        <ModelChip
+          model={summarizeBusModel({
+            orchestrator: 'claude-sonnet-4-5-20250929',
+            'worker-a': 'claude-opus-4-1',
+          })}
+        />,
+      );
+    });
+    expect(container.querySelector('.model-chip')?.textContent).toContain('various');
   });
 });

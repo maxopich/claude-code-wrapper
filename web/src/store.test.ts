@@ -1025,6 +1025,102 @@ describe('store / session_started must not touch multi-agent state (W13)', () =>
   });
 });
 
+// `Cebab-ut7` — the model signal the bus finally carries. `agent_activity`
+// harvests each participant's `system/init` model into
+// `MultiAgentRun.modelsByAgent`, the source the TopRunBar ModelChip
+// summarizes. This is the message W13 said the chip needed: NOT
+// `session_started` (single-agent only, pinned above), but a per-agent bus
+// message of its own.
+describe('store / agent_activity records the model into modelsByAgent (ut7)', () => {
+  function seedBusSession() {
+    let s = initialState;
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'multi_agent_started',
+        participantControls: [],
+        routerDrops: [],
+        sessionId: 'bus-1',
+        mode: 'orchestrator',
+        participants: [10, 20],
+        participantAgentNames: ['orchestrator', 'worker-a'],
+        lifecycle: 'persistent',
+        sessionFolder: '/ws/.cebab/bus-1',
+        hopBudget: 30,
+        hopsUsed: 0,
+        pauseOnDangerous: false,
+        mutations: [],
+        pendingMutations: [],
+      },
+    });
+    return s;
+  }
+
+  const activity = (agentName: string, phase: 'working' | 'stalled' | 'idle', model?: string) => ({
+    type: 'server' as const,
+    msg: {
+      type: 'agent_activity' as const,
+      sessionId: 'bus-1',
+      agentName,
+      phase,
+      lastActivityTs: 1,
+      turnStartedAt: 0,
+      ...(model !== undefined ? { model } : {}),
+    },
+  });
+
+  test('a working tick with a model populates the per-agent map', () => {
+    let s = seedBusSession();
+    expect(s.multiAgent.active?.modelsByAgent).toEqual({});
+    s = reduce(s, activity('orchestrator', 'working', 'claude-opus-4-1'));
+    s = reduce(s, activity('worker-a', 'working', 'claude-sonnet-4-5-20250929'));
+    expect(s.multiAgent.active?.modelsByAgent).toEqual({
+      orchestrator: 'claude-opus-4-1',
+      'worker-a': 'claude-sonnet-4-5-20250929',
+    });
+  });
+
+  test('a tick without a model does not blank an established entry', () => {
+    let s = seedBusSession();
+    s = reduce(s, activity('worker-a', 'working', 'claude-sonnet-4-5-20250929'));
+    const before = s.multiAgent.active!.modelsByAgent;
+    // A pre-init tick (no model) must not overwrite; and referential
+    // identity is preserved so no needless re-render is triggered.
+    s = reduce(s, activity('worker-a', 'working'));
+    expect(s.multiAgent.active!.modelsByAgent).toBe(before);
+    expect(s.multiAgent.active!.modelsByAgent['worker-a']).toBe('claude-sonnet-4-5-20250929');
+  });
+
+  test('idle keeps the map even as it clears the live activity row', () => {
+    let s = seedBusSession();
+    s = reduce(s, activity('worker-a', 'working', 'claude-sonnet-4-5-20250929'));
+    s = reduce(s, activity('worker-a', 'idle', 'claude-sonnet-4-5-20250929'));
+    // The ephemeral activity row is cleared on idle...
+    expect(s.multiAgent.active!.activity).toBeNull();
+    // ...but the model map — the ModelChip's source — survives the turn.
+    expect(s.multiAgent.active!.modelsByAgent).toEqual({
+      'worker-a': 'claude-sonnet-4-5-20250929',
+    });
+  });
+
+  test('an activity tick for a different session is ignored', () => {
+    let s = seedBusSession();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'agent_activity',
+        sessionId: 'other-session',
+        agentName: 'worker-a',
+        phase: 'working',
+        lastActivityTs: 1,
+        turnStartedAt: 0,
+        model: 'claude-opus-4-1',
+      },
+    });
+    expect(s.multiAgent.active!.modelsByAgent).toEqual({});
+  });
+});
+
 describe('store / eventDefaultCollapsed', () => {
   function makeRun(mode: 'chain' | 'orchestrator'): MultiAgentRun {
     return {
@@ -1049,6 +1145,7 @@ describe('store / eventDefaultCollapsed', () => {
       recoveryContext: null,
       routerDrops: [],
       participantControls: {},
+      modelsByAgent: {},
     };
   }
   function ev(over: Partial<MultiAgentEventView>): MultiAgentEventView {

@@ -2681,6 +2681,20 @@ export type ServerMsg =
        * agent is mid tool call (undefined for plain thinking/text).
        * `turnStartedAt` anchors elapsed; `lastActivityTs` is the most
        * recent SDKMessage's wall-clock ms.
+       *
+       * `Cebab-ut7`: `model` is the SDK-reported model id this participant's
+       * turn ran on, captured server-side from the `system/init` message
+       * that opens every per-hop `query()` and carried forward on every
+       * subsequent tick of the same turn. This is the ONLY place the bus
+       * puts a model signal on the wire — `session_started`, which carries
+       * the single-agent model, is never produced by `server/src/bus/`
+       * (`translate()`'s two call sites are both the single-agent path), so
+       * a bus run's model cannot ride that message without mis-attributing
+       * whichever chat produced it. Optional because a tick can precede the
+       * first `system/init` of its turn (and pre-`ut7` servers omit it);
+       * the client harvests it into `MultiAgentRun.modelsByAgent`. Like the
+       * rest of this message it is NOT replayed on resume and NOT delivered
+       * across a live re-attach, so the map re-fills from the next hop.
        */
       type: 'agent_activity';
       sessionId: string;
@@ -2689,6 +2703,7 @@ export type ServerMsg =
       currentTool?: string;
       lastActivityTs: number;
       turnStartedAt: number;
+      model?: string;
     }
   | {
       /**

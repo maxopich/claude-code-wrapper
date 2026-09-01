@@ -102,6 +102,35 @@ export function shortModelLabel(model: string | undefined): string {
   return `${withoutDate.slice(0, firstDash)} ${withoutDate.slice(firstDash + 1)}`;
 }
 
+/**
+ * `Cebab-ut7` — summarize a multi-agent run's per-participant models into a
+ * single label for the `TopRunBar` ModelChip. Keyed by bus agent name (the
+ * map `MultiAgentRun.modelsByAgent` holds); the keys are irrelevant to the
+ * summary — only the set of values matters.
+ *
+ * Returns:
+ *   - the common model string if every entry matches (and at least one is present)
+ *   - the literal `'various'` if multiple distinct values are present
+ *   - `undefined` if the map is empty or holds only empty strings (no
+ *     `system/init` has been harvested yet — the chip then shows "default")
+ *
+ * Register W13 removed the predecessor of this function along with the dead
+ * `session_started`-fed map it summarized; its cases were correct about
+ * everything except whether the input arrived. It arrives now on
+ * `agent_activity.model`, so the function and its contract come back
+ * unchanged — the source is what changed.
+ */
+export function summarizeBusModel(
+  modelsByAgent: Record<string, string> | undefined,
+): string | undefined {
+  if (!modelsByAgent) return undefined;
+  const values = Object.values(modelsByAgent).filter((v) => v.length > 0);
+  if (values.length === 0) return undefined;
+  const distinct = new Set(values);
+  if (distinct.size === 1) return values[0];
+  return 'various';
+}
+
 export function ModelChip({ model, selectedModel, tooltipExtra }: ModelChipProps) {
   const label = shortModelLabel(model);
   const hasAnomaly = !!selectedModel && !!model && selectedModel !== model;

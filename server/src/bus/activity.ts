@@ -37,6 +37,10 @@ export type ActivitySnapshot = {
   currentTool?: string;
   lastActivityTs: number;
   turnStartedAt: number;
+  /** `Cebab-ut7`: the SDK-reported model id for this turn, read from the
+   *  `system/init` that opens the per-hop `query()` and carried forward on
+   *  every later tick. Undefined until that init arrives. */
+  model?: string;
 };
 
 export type ActivityEmit = (snap: ActivitySnapshot) => void;
@@ -54,6 +58,7 @@ type Slot = {
   startedAt: number;
   lastTs: number;
   tool: string | undefined;
+  model: string | undefined;
   timer: ReturnType<typeof setTimeout> | null;
   lastEmittedPhase: AgentActivityPhase;
   lastEmittedTool: string | undefined;
@@ -82,6 +87,20 @@ function toolFromMessage(msg: SDKMessage, prev: string | undefined): string | un
   return last?.type === 'tool_use' ? last.name : undefined;
 }
 
+/**
+ * `Cebab-ut7`: extract the SDK-reported model id from a `system/init`
+ * SDKMessage. Only that member carries it (the same field `translate()`
+ * reads to build a single-agent `session_started`); every other member is a
+ * liveness tick that leaves the model unchanged, so carry `prev` forward.
+ * A non-string / empty model is treated as "not yet known" so a malformed
+ * init can never overwrite a real value with a blank.
+ */
+function modelFromMessage(msg: SDKMessage, prev: string | undefined): string | undefined {
+  const any = msg as { type?: string; subtype?: string; model?: unknown };
+  if (any.type !== 'system' || any.subtype !== 'init') return prev;
+  return typeof any.model === 'string' && any.model.length > 0 ? any.model : prev;
+}
+
 export function createAgentActivityObserver(
   emit: ActivityEmit,
   stallMs: number = DEFAULT_STALL_MS,
@@ -105,6 +124,7 @@ export function createAgentActivityObserver(
       currentTool: slot.tool,
       lastActivityTs: slot.lastTs,
       turnStartedAt: slot.startedAt,
+      model: slot.model,
     });
   };
 
@@ -131,6 +151,7 @@ export function createAgentActivityObserver(
         startedAt: now,
         lastTs: now,
         tool: undefined,
+        model: undefined,
         timer: null,
         lastEmittedPhase: 'idle',
         lastEmittedTool: undefined,
@@ -140,6 +161,7 @@ export function createAgentActivityObserver(
     }
     slot.lastTs = now;
     slot.tool = toolFromMessage(msg, slot.tool);
+    slot.model = modelFromMessage(msg, slot.model);
     armStall(agentName, slot);
 
     // Debounce: emit only on a state edge (was not `working`, or the tool
@@ -165,6 +187,7 @@ export function createAgentActivityObserver(
       currentTool: undefined,
       lastActivityTs: slot.lastTs,
       turnStartedAt: slot.startedAt,
+      model: slot.model,
     });
   };
 
