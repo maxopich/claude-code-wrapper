@@ -3665,6 +3665,70 @@ describe('store / active_runs reducer (Phase 3b)', () => {
     expect(s.connected).toBe(false);
     expect(s.liveSessions).toEqual({});
   });
+
+  // Cebab-ygu.26: a WS reconnect mid-turn used to wedge the composer. The
+  // server aborts the turn on disconnect, but `ws_close` left the session's
+  // `status:'running'`/`runStartedAt` in place and nothing on reconnect
+  // restored it — so `running` stayed true, InputBox rendered Stop and dropped
+  // Enter, and a Stop click latched "Stopping…" against a Conn with no
+  // matching inFlight entry. `ws_close` now retires the stale running status.
+  test('ws_close retires a stale single-agent running session so the composer unwedges', () => {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'do the thing' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-wedge',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    const live = activeSession(s)!;
+    expect(live.status).toBe('running');
+    expect(live.runStartedAt).not.toBeNull();
+
+    s = reduce(s, { type: 'ws_close' });
+
+    const after = activeSession(s)!;
+    // `running` in App.tsx is `session?.status === 'running'`; flipping it to a
+    // terminal status is what re-enables Send and stops the elapsed timer.
+    expect(after.status).toBe('done');
+    expect(after.runStartedAt).toBeNull();
+    // The messages the operator already sent/received survive the retirement.
+    expect(after.messages.some((m) => m.kind === 'user' && m.text === 'do the thing')).toBe(true);
+  });
+
+  test('ws_close leaves a non-running session untouched (same reference)', () => {
+    let s = open();
+    s = reduce(s, { type: 'user_send', text: 'hi' });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-done',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: 'sess-done',
+        subtype: 'success',
+        durationMs: 10,
+        totalCostUsd: 0,
+      },
+    });
+    const before = s.sessionsByProject;
+    s = reduce(s, { type: 'ws_close' });
+    // No running session ⇒ retireRunningSessions returns the same map reference.
+    expect(s.sessionsByProject).toBe(before);
+    expect(activeSession(s)!.status).toBe('done');
+  });
 });
 
 // Cluster H B5 — `result` reducer must persist durationMs onto the message

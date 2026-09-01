@@ -1248,6 +1248,35 @@ function putSession(
   };
 }
 
+/**
+ * Cebab-ygu.26: flip every `status:'running'` single-agent session to `'done'`
+ * and drop its `runStartedAt` anchor. Called from the `ws_close` reducer: a
+ * disconnect aborts the turn server-side, so a surviving "running" is stale, not
+ * a live run the reconnect will recover. Returns the same reference when nothing
+ * was running (the common case), so a close on an idle app allocates nothing.
+ */
+function retireRunningSessions(
+  sessionsByProject: AppState['sessionsByProject'],
+): AppState['sessionsByProject'] {
+  let outerChanged = false;
+  const next: AppState['sessionsByProject'] = {};
+  for (const [pidStr, map] of Object.entries(sessionsByProject)) {
+    let mapChanged = false;
+    const nextMap: Record<string, SessionView> = {};
+    for (const [sid, view] of Object.entries(map)) {
+      if (view.status === 'running') {
+        nextMap[sid] = { ...view, status: 'done', runStartedAt: null };
+        mapChanged = true;
+      } else {
+        nextMap[sid] = view;
+      }
+    }
+    next[Number(pidStr)] = mapChanged ? nextMap : map;
+    if (mapChanged) outerChanged = true;
+  }
+  return outerChanged ? next : sessionsByProject;
+}
+
 function appendMessage(
   state: AppState,
   projectId: number,
@@ -1423,11 +1452,26 @@ export function reduce(state: AppState, action: Action): AppState {
       // and dispatches `connection_lost` with the resolved view — a
       // page-unload close (code 1000 with intent to navigate) should
       // not light up an overlay the user is about to leave.
+      //
+      // Cebab-ygu.26: retire any per-session `status:'running'` too. The
+      // server's `ws.on('close')` aborts and clears every `conn.inFlight`
+      // entry, so the turn is genuinely CANCELLED on disconnect — the
+      // stream's remaining `stream_delta`/`result` go to the closed socket
+      // and nothing re-requests the session on reconnect (`onOpen` sends
+      // only `get_settings`/`list_projects`; the `projects` reducer keeps
+      // all session state when the active project survives). Left set,
+      // `running` (App.tsx) stays true: `InputBox` renders Stop and drops
+      // Enter, and a Stop click latches "Stopping…" while `executeInterrupt`
+      // silently no-ops on the new Conn's empty `inFlight` map — a
+      // permanently wedged composer that only "New chat" or a reload
+      // escapes. Same terminal transition `session_history_end` already
+      // makes for a run that stopped being live (`running` → `done`).
       return {
         ...state,
         connected: false,
         liveSessions: {},
         activeRuns: [],
+        sessionsByProject: retireRunningSessions(state.sessionsByProject),
         // Registers W08/W09: a replay in flight when the socket dropped will
         // never get its `session_history_end`. Clearing here bounds the stuck
         // flag to the connection that stranded it — see the field's JSDoc for
