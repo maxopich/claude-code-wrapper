@@ -1168,19 +1168,42 @@ export function unarchiveMultiAgentSession(sessionId: string): boolean {
 
 /**
  * Delete every multi-agent session whose status is NOT `'running'`, along
- * with all rows in `multi_agent_events` and `multi_agent_participants` that
- * reference them. Returns the number of session rows actually removed.
+ * with every row in the five `multi_agent_*` child tables AND the three
+ * soft-FK dependents keyed on a bus session id. Returns the number of
+ * session rows actually removed.
  *
  * Used by the WS `clear_iterations` handler to wipe the iterations browser
  * — the active session (if any) is preserved so a click on "Clear" can't
  * orphan a live run.
  *
- * The four deletes run inside a single SQLite transaction so we don't
- * end up with dangling events/participants/agent-sessions on a partial
- * failure. The original tables (005) declare no foreign keys, so their
- * deletes must be explicit; `multi_agent_agent_sessions` (009) does declare
- * ON DELETE CASCADE, but it's deleted explicitly too for symmetry. Order
- * matters only insofar as we delete children before parents.
+ * The `multi_agent_*` children (events/participants/agent-sessions/mutations)
+ * are deleted explicitly. Note `multi_agent_participants` (005) and
+ * `multi_agent_events` (005) DO declare
+ * `REFERENCES multi_agent_sessions(id) ON DELETE CASCADE`
+ * (005_multi_agent.sql:22 / :31) and `PRAGMA foreign_keys` is ON (db.ts),
+ * so those two would cascade on the parent delete anyway; the explicit
+ * deletes are kept for symmetry and to make the wipe order-independent.
+ *
+ * WHAT SURVIVED, and why this now also deletes it (register D31). Three
+ * tables carry `session_id TEXT` with NO REFERENCES and NO cascade —
+ * `notifications` (014), `controllability_forensics` (019) and
+ * `recovery_log` (018) — and each is written with MULTI-AGENT session ids:
+ * sticky class:'safety' notifications by the guardrail-violation and
+ * dangerous-mutation dispatchers, forensic bundles by `persistKickForensics`
+ * (executeKickParticipant), recovery-log rows by `executeArchiveSession`.
+ * The single-agent purge (`hardDeleteSession`, repo/sessions.ts) deletes all
+ * three, but bus session ids never appear in `sessions`, so that fix could
+ * never reach them — leaving sticky safety notifications the inbox kept
+ * rendering (and `countUnackedBySession` kept badging) keyed on a session id
+ * the operator can no longer open, plus orphaned kick/forensic and
+ * recovery-log rows. All three are index-served on `session_id`
+ * (`notifications_session`, `controllability_forensics_session_ts`,
+ * `recovery_log_session_idx`).
+ *
+ * All deletes run inside a single SQLite transaction so a partial failure
+ * can't leave dangling children or orphaned dependents. The three soft-FK
+ * dependents are deleted BEFORE the parent so their `session_id IN (...)`
+ * subqueries still see the finished session rows.
  *
  * Does NOT touch on-disk artifacts (`~/.cebab/bus/iterations/`, per-session
  * folders). Those are useful for post-mortem inspection and recreating them
@@ -1188,31 +1211,17 @@ export function unarchiveMultiAgentSession(sessionId: string): boolean {
  */
 export function clearFinishedMultiAgentSessions(): number {
   const db = getDb();
+  const finishedIds = `SELECT id FROM multi_agent_sessions WHERE status != 'running'`;
   const tx = db.transaction(() => {
-    db.prepare(
-      `DELETE FROM multi_agent_events
-        WHERE session_id IN (
-          SELECT id FROM multi_agent_sessions WHERE status != 'running'
-        )`,
-    ).run();
-    db.prepare(
-      `DELETE FROM multi_agent_participants
-        WHERE session_id IN (
-          SELECT id FROM multi_agent_sessions WHERE status != 'running'
-        )`,
-    ).run();
-    db.prepare(
-      `DELETE FROM multi_agent_agent_sessions
-        WHERE session_id IN (
-          SELECT id FROM multi_agent_sessions WHERE status != 'running'
-        )`,
-    ).run();
-    db.prepare(
-      `DELETE FROM multi_agent_mutations
-        WHERE session_id IN (
-          SELECT id FROM multi_agent_sessions WHERE status != 'running'
-        )`,
-    ).run();
+    db.prepare(`DELETE FROM multi_agent_events WHERE session_id IN (${finishedIds})`).run();
+    db.prepare(`DELETE FROM multi_agent_participants WHERE session_id IN (${finishedIds})`).run();
+    db.prepare(`DELETE FROM multi_agent_agent_sessions WHERE session_id IN (${finishedIds})`).run();
+    db.prepare(`DELETE FROM multi_agent_mutations WHERE session_id IN (${finishedIds})`).run();
+    // Soft-FK dependents (register D31): no REFERENCES, no cascade, so the
+    // parent delete below leaves these behind unless we remove them here.
+    db.prepare(`DELETE FROM notifications WHERE session_id IN (${finishedIds})`).run();
+    db.prepare(`DELETE FROM controllability_forensics WHERE session_id IN (${finishedIds})`).run();
+    db.prepare(`DELETE FROM recovery_log WHERE session_id IN (${finishedIds})`).run();
     const info = db.prepare(`DELETE FROM multi_agent_sessions WHERE status != 'running'`).run();
     return info.changes;
   });
