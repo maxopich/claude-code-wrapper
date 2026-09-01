@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
+import { countUnackedBySession } from '../notifications/inbox.js';
 import { upsertProject } from './projects.js';
 import {
   addParticipant,
@@ -430,6 +431,55 @@ describe('clearFinishedMultiAgentSessions', () => {
     expect(listMultiAgentSessions()).toHaveLength(0);
     expect(listParticipants('s1')).toHaveLength(0);
     expect(listMultiAgentEvents('s1')).toHaveLength(0);
+  });
+
+  test('also wipes soft-FK dependents (notifications/forensics/recovery_log) for the deleted bus session (register D31)', () => {
+    // A finished bus session that accrued a sticky safety notification, a
+    // kick forensic bundle and a recovery-log row — all keyed on the bus
+    // session id, none with a REFERENCES/cascade. Before the D31 fix the
+    // parent delete left these three orphaned on a session id that no longer
+    // exists, so the inbox kept badging and the operator couldn't bulk-clear.
+    const db = getDb();
+    createMultiAgentSession('bus1', 'orchestrator', '001');
+    endMultiAgentSession('bus1', 'completed');
+
+    // A sticky class:'safety' notification keyed on the bus session id.
+    db.prepare(
+      `INSERT INTO notifications (id, ts, severity, class, dedupe_key, title, message, session_id, sticky, reason_code)
+       VALUES ('n1', 1, 'danger', 'safety', 'd1', 't', 'm', 'bus1', 1, 'dangerous_mutation')`,
+    ).run();
+    // A safety_audit anchor so the forensics FK (safety_audit_id NOT NULL) holds.
+    db.prepare(
+      `INSERT INTO safety_audit (id, ts, kind, reason_code, payload_json, hash_self)
+       VALUES ('a1', 1, 'kick', 'kicked', '{}', 'h')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO controllability_forensics (safety_audit_id, ts, session_id, effective_prompt_json, events_last_n_json)
+       VALUES ('a1', 1, 'bus1', '{}', '[]')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO recovery_log (ts, session_id, failure_class, operator_action)
+       VALUES (1, 'bus1', 'archive', 'archive')`,
+    ).run();
+
+    // Sanity: the inbox counts the badge pre-clear.
+    expect(countUnackedBySession().bySession['bus1']).toBe(1);
+
+    clearFinishedMultiAgentSessions();
+
+    expect(listMultiAgentSessions()).toHaveLength(0);
+    const count = (table: string): number =>
+      (
+        db
+          .prepare<[], { n: number }>(
+            `SELECT COUNT(*) AS n FROM ${table} WHERE session_id = 'bus1'`,
+          )
+          .get() as { n: number }
+      ).n;
+    expect(count('notifications')).toBe(0);
+    expect(count('controllability_forensics')).toBe(0);
+    expect(count('recovery_log')).toBe(0);
+    expect(countUnackedBySession().bySession['bus1']).toBeUndefined();
   });
 
   test('returns 0 and no-ops when only running sessions exist', () => {
