@@ -88,6 +88,23 @@ export function listSessionsForProject(
 }
 
 /**
+ * Cebab-m1f: every session id for a project, regardless of archived /
+ * soft-deleted state.
+ *
+ * Deliberately NOT `listSessionsForProject`, which hides archived and
+ * soft-deleted rows: the managed-agent delete is tearing the whole project
+ * down, so it needs to reach every session — to hard-delete it and to remove
+ * its `<id>.jsonl` log, which is keyed by session id and would otherwise be
+ * left behind under the data dir when the project row (and the tree) are gone.
+ */
+export function listAllSessionIdsForProject(projectId: number): string[] {
+  return getDb()
+    .prepare<[number], { id: string }>('SELECT id FROM sessions WHERE project_id = ?')
+    .all(projectId)
+    .map((r) => r.id);
+}
+
+/**
  * Cluster I Phase C5: flip a session's `archived` column to 1. Used by
  * the `bulk_session_op { op: 'archive' }` handler. Idempotent — a 0-row
  * UPDATE returns `false` but the caller treats both as success (operator

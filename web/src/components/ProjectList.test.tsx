@@ -77,6 +77,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Handle
         projectScans={{}}
         onCopyToManaged={() => {}}
         onEditManagedConfig={() => {}}
+        onDeleteManagedAgent={() => {}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}

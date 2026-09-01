@@ -848,6 +848,23 @@ export type ClientMsg =
     }
   | {
       /**
+       * Cebab-m1f: delete a MANAGED agent. Removes its directory tree, its
+       * sessions and events, and its per-session JSONL logs, then drops the
+       * project row. Answered by `managed_delete_result`.
+       *
+       * Only a managed agent can go this way. An ordinary workspace project is
+       * refused outright: its directory is the operator's, and its row would
+       * reappear on the next scan anyway. The act is audited BEFORE anything is
+       * destroyed and refused if that append fails — the same BE-1 contract the
+       * copy uses, because this destroys operator data rather than duplicating
+       * it. A managed agent with a running session is refused until it is
+       * stopped.
+       */
+      type: 'delete_managed_agent';
+      projectId: number;
+    }
+  | {
+      /**
        * Cebab-ws0.10: read one of a MANAGED agent's own config files.
        *
        * `kind` is a closed set, never a path. That is the containment: the
@@ -2074,6 +2091,14 @@ export type ServerMsg =
             skipsTruncated: number;
           }
         | { ok: false; error: string };
+    }
+  | {
+      /** Cebab-m1f: the managed-agent delete finished, one way or the other.
+       *  `sessionsRemoved` is how many of its sessions (and their logs) went
+       *  with it — 0 for a fresh copy the operator never ran. */
+      type: 'managed_delete_result';
+      projectId: number;
+      result: { ok: true; name: string; sessionsRemoved: number } | { ok: false; error: string };
     }
   | {
       /**

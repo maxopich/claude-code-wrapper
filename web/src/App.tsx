@@ -30,6 +30,7 @@ import {
 import { closeDrawers, DRAWERS_CLOSED, toggleDrawer, type DrawerState } from './drawerState';
 import { ProjectList } from './components/ProjectList';
 import { ManagedCopyModal } from './components/ManagedCopyModal';
+import { ManagedDeleteModal } from './components/ManagedDeleteModal';
 import { ManagedFileEditor } from './components/ManagedFileEditor';
 import { ChatView } from './components/ChatView';
 import { InputBox } from './components/InputBox';
@@ -1174,6 +1175,20 @@ function AppShell({
   function confirmManagedCopy(projectId: number) {
     dispatch({ type: 'managed_copy_started' });
     wsRef.current?.send({ type: 'copy_project_to_managed', projectId });
+  }
+
+  /**
+   * Cebab-m1f: open the delete-confirm modal for a managed agent. Unlike the
+   * copy there is no preflight to issue — a delete destroys operator data, so
+   * the modal opens straight on an explicit confirm.
+   */
+  function openManagedDelete(projectId: number, name: string) {
+    dispatch({ type: 'managed_delete_open', projectId, name });
+  }
+
+  function confirmManagedDelete(projectId: number) {
+    dispatch({ type: 'managed_delete_started' });
+    wsRef.current?.send({ type: 'delete_managed_agent', projectId });
   }
 
   function toggleTrust(projectId: number, trusted: boolean) {
@@ -2504,6 +2519,7 @@ function AppShell({
             onSetProjectStartPermissionMode={setProjectStartPermissionMode}
             onCopyToManaged={openManagedCopy}
             onEditManagedConfig={openManagedEdit}
+            onDeleteManagedAgent={openManagedDelete}
             onRenameSession={renameSession}
             onDownloadSession={downloadSession}
             onBulkSessionOp={bulkSessionOp}
@@ -2966,6 +2982,13 @@ function AppShell({
           state={state.managedCopy}
           onConfirm={() => confirmManagedCopy(state.managedCopy!.projectId)}
           onClose={() => dispatch({ type: 'managed_copy_close' })}
+        />
+      )}
+      {state.managedDelete && (
+        <ManagedDeleteModal
+          state={state.managedDelete}
+          onConfirm={() => confirmManagedDelete(state.managedDelete!.projectId)}
+          onClose={() => dispatch({ type: 'managed_delete_close' })}
         />
       )}
       {searchOpen && (

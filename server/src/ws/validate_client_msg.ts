@@ -121,6 +121,9 @@ const SHAPES: Table = {
   // caller-supplied path or name ever reaches the filesystem.
   preflight_managed_copy: { projectId: 'number' },
   copy_project_to_managed: { projectId: 'number' },
+  // Cebab-m1f: same shape as the copy — the project row is the only input, so
+  // no caller-supplied path reaches the filesystem.
+  delete_managed_agent: { projectId: 'number' },
   read_managed_file: { projectId: 'number', kind: managedFileKind },
   write_managed_file: {
     projectId: 'number',

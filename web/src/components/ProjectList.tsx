@@ -46,6 +46,8 @@ export function ProjectList(props: {
   /** Cebab-ws0.9: open the managed-copy modal for this project. */
   onCopyToManaged: (projectId: number) => void;
   onEditManagedConfig: (projectId: number, projectName: string) => void;
+  /** Cebab-m1f: open the delete-confirm modal for a managed agent. */
+  onDeleteManagedAgent: (projectId: number, projectName: string) => void;
   onRenameSession: (sessionId: string, title: string | null) => void;
   /**
    * Cluster I C2 UI: trigger a per-session JSONL download. Returns a
@@ -298,6 +300,28 @@ export function ProjectList(props: {
                         title={`Edit ${p.name}'s settings.json, .mcp.json and CLAUDE.md. Cebab owns this copy, so nothing in your own workspace is touched.`}
                       >
                         edit config
+                      </button>
+                    </li>
+                  )}
+                  {/* Cebab-m1f: the exit for a managed agent. Copies otherwise
+                   *  accumulate under the data dir with no way to remove one; an
+                   *  ordinary workspace project has no such row because Cebab
+                   *  does not own its directory. */}
+                  {p.isManaged && !inSelectMode && (
+                    <li className="session-row session-row-managed-delete">
+                      <span className="session-marker" aria-hidden="true">
+                        🗑
+                      </span>
+                      <button
+                        type="button"
+                        className="session-name"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onDeleteManagedAgent(p.id, p.name);
+                        }}
+                        title={`Delete Cebab's copy of ${p.name} — its files, conversations and logs. Your own workspace is not touched.`}
+                      >
+                        delete agent
                       </button>
                     </li>
                   )}
