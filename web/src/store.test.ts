@@ -3700,6 +3700,110 @@ describe('store / active_runs reducer (Phase 3b)', () => {
     expect(after.messages.some((m) => m.kind === 'user' && m.text === 'do the thing')).toBe(true);
   });
 
+  // Cebab-ygu.27: on disconnect the server drains every parked permission
+  // (`drainAllPendingPermissions` → deny + `client_disconnected` row). If
+  // `ws_close` leaves the card `decided:undefined` with live buttons, a
+  // post-reconnect Allow click sends `permission_decision` over the healthy new
+  // socket, `sendThenApply` runs `apply()`, and the card reads "decided: allow"
+  // for a call Cebab already DENIED — the new Conn's map is empty so the server
+  // never echoes a correction. `ws_close` now mirrors the drain so the live
+  // card matches history: denied, attributed, buttons gone.
+  test('ws_close denies a still-open permission card (mirrors the server drain)', () => {
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-perm',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'permission_request',
+        requestId: 'req-drain',
+        sessionId: 'sess-perm',
+        toolName: 'Edit',
+        input: { file_path: '/x' },
+      },
+    });
+    const openCard = activeSession(s)!.messages.find(
+      (m) => m.kind === 'permission_request' && m.requestId === 'req-drain',
+    )!;
+    expect(openCard).not.toHaveProperty('decided');
+
+    s = reduce(s, { type: 'ws_close' });
+
+    const card = activeSession(s)!.messages.find(
+      (m) => m.kind === 'permission_request' && m.requestId === 'req-drain',
+    );
+    // Denied with the same attribution the persisted `client_disconnected` row
+    // replays with, so the live tab and a later reload agree about the card.
+    expect(card).toMatchObject({
+      kind: 'permission_request',
+      decided: 'deny',
+      decidedReason: 'client_disconnected',
+    });
+  });
+
+  test('ws_close leaves an already-decided permission card untouched (same reference)', () => {
+    let s = open();
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'sess-perm-done',
+        projectId: PID,
+        model: 'claude-sonnet-4-5',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'permission_request',
+        requestId: 'req-answered',
+        sessionId: 'sess-perm-done',
+        toolName: 'Edit',
+        input: { file_path: '/x' },
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'permission_decided',
+        sessionId: 'sess-perm-done',
+        requestId: 'req-answered',
+        decision: 'allow',
+      },
+    });
+    // Land the turn so `retireRunningSessions` also returns the same reference —
+    // this test isolates the drain helper's no-op on an already-decided card.
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'result',
+        sessionId: 'sess-perm-done',
+        subtype: 'success',
+        durationMs: 10,
+        totalCostUsd: 0,
+      },
+    });
+    const before = s.sessionsByProject;
+    s = reduce(s, { type: 'ws_close' });
+    // The operator's own answer must survive verbatim — no card was open, so
+    // `drainPendingPermissionCards` returns the same map reference.
+    expect(s.sessionsByProject).toBe(before);
+    const card = activeSession(s)!.messages.find(
+      (m) => m.kind === 'permission_request' && m.requestId === 'req-answered',
+    );
+    expect(card).toMatchObject({ decided: 'allow' });
+    expect(card).not.toHaveProperty('decidedReason');
+  });
+
   test('ws_close leaves a non-running session untouched (same reference)', () => {
     let s = open();
     s = reduce(s, { type: 'user_send', text: 'hi' });

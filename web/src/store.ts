@@ -1277,6 +1277,64 @@ function retireRunningSessions(
   return outerChanged ? next : sessionsByProject;
 }
 
+/**
+ * Cebab-ygu.27: mark every still-open permission card as denied-by-disconnect.
+ * Called from the `ws_close` reducer alongside `retireRunningSessions`.
+ *
+ * When the socket drops, the server's `ws.on('close')` runs
+ * `drainAllPendingPermissions(conn.pendingPermissions)`, which resolves every
+ * parked request `{behavior:'deny', message:'client disconnected'}` and
+ * persists a `client_disconnected` decision row. The client's `ws_close`
+ * otherwise leaves those cards `decided:undefined` with live buttons, so on a
+ * reconnect a click sends `permission_decision` over the healthy new socket
+ * (`send()` returns `true`), `sendThenApply` runs `apply()`, and the card
+ * renders "decided: allow" for a call Cebab already DENIED — the new Conn's
+ * `pendingPermissions` map is empty, so the server silently drops the message
+ * (`if (!pending) return;`) and never echoes a correction. Reopening the
+ * session later replays the persisted denial, so the live and reloaded tabs
+ * disagree about the same card.
+ *
+ * Reflecting the drain here makes the live card match what the server actually
+ * did: `deny` with the `client_disconnected` reason, buttons gone. The reason
+ * is the same one the history replay carries, so the two views converge.
+ * Returns the same reference when no card was open (the common case).
+ */
+function drainPendingPermissionCards(
+  sessionsByProject: AppState['sessionsByProject'],
+): AppState['sessionsByProject'] {
+  let outerChanged = false;
+  const next: AppState['sessionsByProject'] = {};
+  for (const [pidStr, map] of Object.entries(sessionsByProject)) {
+    let mapChanged = false;
+    const nextMap: Record<string, SessionView> = {};
+    for (const [sid, view] of Object.entries(map)) {
+      let hasOpenCard = false;
+      for (const m of view.messages) {
+        if (m.kind === 'permission_request' && !m.decided) {
+          hasOpenCard = true;
+          break;
+        }
+      }
+      if (hasOpenCard) {
+        nextMap[sid] = {
+          ...view,
+          messages: view.messages.map((m) =>
+            m.kind === 'permission_request' && !m.decided
+              ? { ...m, decided: 'deny', decidedReason: 'client_disconnected' }
+              : m,
+          ),
+        };
+        mapChanged = true;
+      } else {
+        nextMap[sid] = view;
+      }
+    }
+    next[Number(pidStr)] = mapChanged ? nextMap : map;
+    if (mapChanged) outerChanged = true;
+  }
+  return outerChanged ? next : sessionsByProject;
+}
+
 function appendMessage(
   state: AppState,
   projectId: number,
@@ -1471,7 +1529,13 @@ export function reduce(state: AppState, action: Action): AppState {
         connected: false,
         liveSessions: {},
         activeRuns: [],
-        sessionsByProject: retireRunningSessions(state.sessionsByProject),
+        // Cebab-ygu.27: retire running turns AND deny any still-open permission
+        // card. The server drained both on `ws.on('close')`; leaving the card
+        // live lets a post-reconnect Allow click mislabel a denied call as
+        // "Allowed" with no server echo to correct it.
+        sessionsByProject: drainPendingPermissionCards(
+          retireRunningSessions(state.sessionsByProject),
+        ),
         // Registers W08/W09: a replay in flight when the socket dropped will
         // never get its `session_history_end`. Clearing here bounds the stuck
         // flag to the connection that stranded it — see the field's JSDoc for
