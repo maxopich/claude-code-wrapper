@@ -60,9 +60,11 @@ function historyEnd(sessionId: string, projectId = PID) {
   };
 }
 
-/** The project's pending session id, or undefined once it has been consumed. */
+/** The project's oldest pending session id, or undefined once consumed.
+ * `pendingByProject` is a FIFO queue (Cebab-ygu.25); these single-turn tests
+ * only ever have one in flight, so the head is "the" pending id. */
 function pendingId(s: AppState, projectId = PID): string | undefined {
-  return s.pendingByProject[projectId];
+  return s.pendingByProject[projectId]?.[0];
 }
 
 function userTexts(s: AppState, projectId: number, sessionId: string): string[] {

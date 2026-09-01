@@ -913,10 +913,18 @@ export type AppState = {
   sessionsByProject: Record<number, Record<string, SessionView>>;
   // The currently-shown session id per project (the chat view binds to this one).
   activeSessionByProject: Record<number, string | undefined>;
-  // Pending optimistic session id per project (used before session_started arrives
-  // for a brand-new conversation). Distinct because the user may also have a
-  // hydrated past session active and start a new turn.
-  pendingByProject: Record<number, string | undefined>;
+  // Pending optimistic session ids per project, oldest first — a FIFO queue,
+  // not a single pointer (Cebab-ygu.25). Each entry is a `pending:*` bucket
+  // awaiting the `session_started` (or failing `wrapper_error`) that renames it
+  // onto its real id. More than one can be in flight at once: after
+  // `new_session` the operator can start a SECOND fresh turn while the first is
+  // still spawning, and the server does not serialise the two. Adopting them
+  // oldest-first is what keeps each turn's optimistic message on the session
+  // that actually ran it — a single pointer let the second turn's message graft
+  // onto the first turn's session while the first's message was stranded.
+  // Distinct because the user may also have a hydrated past session active and
+  // start a new turn.
+  pendingByProject: Record<number, string[] | undefined>;
 
   // sessionId → projectId, built from session_started and project_opened so we
   // can route incoming messages to the right project bucket.
@@ -1542,15 +1550,20 @@ export function reduce(state: AppState, action: Action): AppState {
       // Drop the active session id for this project so the next user_send
       // creates a fresh "pending:*" placeholder. We deliberately keep the
       // sessionsByProject map intact — the user might come back via the list.
+      //
+      // Cebab-ygu.25: we do NOT drop the pending QUEUE. A turn already spawning
+      // still owns its optimistic bucket and is still awaiting the
+      // `session_started` that renames it. Dropping it here — the previous
+      // behaviour — stranded the first turn's message and, once a second fresh
+      // turn queued its own pending, let the first turn's `session_started`
+      // adopt the wrong bucket. The queue drains only when a turn reports in
+      // (session_started / wrapper_error), never on new_session.
       const next = { ...state.activeSessionByProject };
       delete next[action.projectId];
-      const pending = { ...state.pendingByProject };
-      delete pending[action.projectId];
       return {
         ...state,
         activeProjectId: action.projectId,
         activeSessionByProject: next,
-        pendingByProject: pending,
       };
     }
 
@@ -1603,11 +1616,18 @@ export function reduce(state: AppState, action: Action): AppState {
           [projectId]: sessionId,
         },
       };
-      // Track the pending placeholder so we can rename it when session_started fires.
+      // Track the pending placeholder so we can rename it when session_started
+      // fires. Cebab-ygu.25: append to the per-project FIFO queue rather than
+      // overwriting a single pointer — a second fresh turn started while the
+      // first is still spawning must not evict the first, or the first turn's
+      // `session_started` would adopt the second turn's bucket.
       if (sessionId!.startsWith(PENDING_PREFIX)) {
         s = {
           ...s,
-          pendingByProject: { ...s.pendingByProject, [projectId]: sessionId },
+          pendingByProject: {
+            ...s.pendingByProject,
+            [projectId]: [...(s.pendingByProject[projectId] ?? []), sessionId!],
+          },
         };
       }
       return s;
@@ -2723,7 +2743,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'session_started': {
       const projectId = msg.projectId;
       const projectMap = state.sessionsByProject[projectId] ?? {};
-      const pendingId = state.pendingByProject[projectId];
+      // Cebab-ygu.25: adopt the OLDEST un-adopted pending bucket, not "the"
+      // pending pointer. Overlapping fresh turns queue in send order and their
+      // `session_started`s arrive in that order, so oldest-first keeps each
+      // turn's optimistic message on the session that ran it.
+      const pendingQueue = state.pendingByProject[projectId] ?? [];
+      const pendingId = pendingQueue[0];
 
       // Register W08: a persisted `system/init` row replays as a
       // `session_started`, identical on the wire to a live one. Everything
@@ -2741,13 +2766,19 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // it finally starts, empty.
       let session: SessionView;
       const nextProjectMap = { ...projectMap };
-      if (!isReplay && pendingId && nextProjectMap[pendingId]) {
+      // Cebab-ygu.25: only a genuinely NEW real id adopts a pending bucket. The
+      // `!nextProjectMap[msg.sessionId]` guard stops a resume (whose id is
+      // already in the map) from grafting a still-in-flight pending — a
+      // stranded first turn's bucket, say — onto an existing conversation.
+      const adoptPending =
+        !isReplay && !nextProjectMap[msg.sessionId] && !!pendingId && !!nextProjectMap[pendingId];
+      if (adoptPending) {
         session = {
-          ...nextProjectMap[pendingId],
+          ...nextProjectMap[pendingId!],
           id: msg.sessionId,
           status: 'running',
         };
-        delete nextProjectMap[pendingId];
+        delete nextProjectMap[pendingId!];
       } else if (nextProjectMap[msg.sessionId]) {
         session = { ...nextProjectMap[msg.sessionId], status: 'running' };
       } else {
@@ -2875,14 +2906,23 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             ...knownList,
           ];
 
-      // Register W08: the pending POINTER is dropped by the same condition
+      // Register W08: the pending queue entry is dropped by the same condition
       // that migrates the pending SESSION. Clearing it on a replay would
       // strand the optimistic bucket just as thoroughly as adopting it — the
       // session would survive in `sessionsByProject` with nothing left to
       // rename it, so the operator's message would sit in a bucket the UI
       // never shows.
+      //
+      // Cebab-ygu.25: remove only the ADOPTED head, leaving any later
+      // in-flight turn's pending in place; delete the project key once the
+      // queue drains so an empty queue still reads as `undefined` (== nothing
+      // pending) for every downstream reader.
       const pendingNext = { ...state.pendingByProject };
-      if (!isReplay && pendingNext[projectId] === pendingId) delete pendingNext[projectId];
+      if (adoptPending) {
+        const remaining = pendingQueue.filter((id) => id !== pendingId);
+        if (remaining.length > 0) pendingNext[projectId] = remaining;
+        else delete pendingNext[projectId];
+      }
 
       // Register W13: this branch used to copy `msg.model` into the active
       // bus run's `modelsByProject`, on the theory that a participant's SDK
@@ -3628,11 +3668,13 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // is only ever set for the in-flight first turn whose id `session_running`
       // just mapped to this project, so there is no unrelated conversation to
       // steal focus from.
-      const pendingId = state.pendingByProject[projectId];
+      // Cebab-ygu.25: adopt the OLDEST un-adopted pending bucket, matching
+      // `session_started` — a failing first turn drains the head of the queue,
+      // leaving any later in-flight turn's pending for its own report.
+      const pendingQueue = state.pendingByProject[projectId] ?? [];
+      const pendingId = existing === undefined ? pendingQueue[0] : undefined;
       const pendingSession =
-        existing === undefined && pendingId !== undefined
-          ? state.sessionsByProject[projectId]?.[pendingId]
-          : undefined;
+        pendingId !== undefined ? state.sessionsByProject[projectId]?.[pendingId] : undefined;
 
       const base: SessionView = existing ??
         pendingSession ?? {
@@ -3678,8 +3720,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // the sidebar list rather than shown-but-unlisted.
         const adoptedMap = { ...next.sessionsByProject[projectId] };
         delete adoptedMap[pendingId];
+        // Cebab-ygu.25: drop only the adopted head from the FIFO queue; delete
+        // the key once it drains so `undefined` still means "nothing pending".
         const pendingNext = { ...next.pendingByProject };
-        if (pendingNext[projectId] === pendingId) delete pendingNext[projectId];
+        const remaining = (pendingNext[projectId] ?? []).filter((id) => id !== pendingId);
+        if (remaining.length > 0) pendingNext[projectId] = remaining;
+        else delete pendingNext[projectId];
         const activeNext = { ...next.activeSessionByProject };
         if (activeNext[projectId] === pendingId) activeNext[projectId] = sessionId;
         const knownList = next.knownSessions[projectId] ?? [];

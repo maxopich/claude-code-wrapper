@@ -213,7 +213,9 @@ describe('store / a wrapper_error for an un-adopted first-turn session (Cebab-yg
   function seedFirstTurn(): { before: AppState; pendingId: string } {
     let s = reduce(initialState, { type: 'select_project', projectId: PID });
     s = reduce(s, { type: 'user_send', text: 'hi' });
-    const pendingId = s.pendingByProject[PID]!;
+    // `pendingByProject` is a FIFO queue (Cebab-ygu.25); the first turn is at
+    // its head.
+    const pendingId = s.pendingByProject[PID]![0]!;
     expect(pendingId).toMatch(/^pending:/);
     // Server minted the real id and announced it live — this writes only
     // `sessionToProject`, never adopting the pending bucket.
