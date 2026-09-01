@@ -3604,37 +3604,109 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       const projectId = projectFor(state, sessionId) ?? state.activeProjectId;
       if (projectId === null) return state;
       const existing = state.sessionsByProject[projectId]?.[sessionId];
-      const session: SessionView = existing ?? {
+
+      // Cebab-ygu.24: an error that NAMES a session the browser has not
+      // adopted yet. A first turn whose spawn fails before `system/init`
+      // (claude binary missing, revoked OAuth, an SDK throw) sends
+      // `session_running` — which only records `sessionToProject[id]=pid` —
+      // and then this `wrapper_error`, but never the `session_started` that
+      // migrates the optimistic `pending:*` bucket onto the real id. Without
+      // adopting that pending session here the operator is stuck staring at
+      // it: the pending bucket is still the active session and still
+      // `status: 'running'`, so `sessionPhase` reads 'thinking' with the
+      // elapsed timer ticking and the composer keeps a Stop button instead of
+      // Send — the pane spins forever — while the only copy of the error text
+      // lands in a fresh `sess-uuid` bucket nothing points at, leaking another
+      // orphan on every repeat.
+      //
+      // Migrate the same way `session_started` does: rekey the pending session
+      // onto the real id (preserving the user's optimistic message), drop the
+      // `pending:*` bucket + pointer, and point `activeSessionByProject` at the
+      // real id — then the error lands in the visible session and the spinner
+      // clears. Guarded on `existing === undefined`: an already-adopted session
+      // keeps its own bucket (the CONTROL cases below), and `pendingByProject`
+      // is only ever set for the in-flight first turn whose id `session_running`
+      // just mapped to this project, so there is no unrelated conversation to
+      // steal focus from.
+      const pendingId = state.pendingByProject[projectId];
+      const pendingSession =
+        existing === undefined && pendingId !== undefined
+          ? state.sessionsByProject[projectId]?.[pendingId]
+          : undefined;
+
+      const base: SessionView = existing ??
+        pendingSession ?? {
+          id: sessionId,
+          projectId,
+          status: 'error',
+          messages: [],
+          streamingText: '',
+          runStartedAt: null,
+          heldMessages: [],
+        };
+
+      const nextAuthExpired = authExpiredAfter(state, msg.kind, msg.message);
+      let next = putSession(state, projectId, sessionId, {
+        ...base,
+        // A migrated pending session carries the `pending:*` id and its old
+        // project — rekey both onto the real session.
         id: sessionId,
         projectId,
         status: 'error',
-        messages: [],
-        streamingText: '',
+        // Turn aborted — stop the elapsed timer.
         runStartedAt: null,
-        heldMessages: [],
-      };
-      const nextAuthExpired = authExpiredAfter(state, msg.kind, msg.message);
+        // Register W01: and retire the streaming buffer with it. The `''`
+        // in the invent-a-session fallback above only covers a session we're
+        // inventing here; an EXISTING (or migrated pending) session spreads
+        // through `...base` and kept its partial text.
+        streamingText: '',
+        messages: [
+          ...base.messages,
+          {
+            kind: 'error',
+            id: nextId(),
+            errorKind: msg.kind,
+            message: msg.message,
+          },
+        ],
+      });
+
+      if (pendingSession !== undefined && pendingId !== undefined) {
+        // Drop the optimistic bucket + pointer and point the project at the
+        // real session, mirroring `session_started`'s adoption. Add it to
+        // `knownSessions` too so a session the chat pane now shows is also in
+        // the sidebar list rather than shown-but-unlisted.
+        const adoptedMap = { ...next.sessionsByProject[projectId] };
+        delete adoptedMap[pendingId];
+        const pendingNext = { ...next.pendingByProject };
+        if (pendingNext[projectId] === pendingId) delete pendingNext[projectId];
+        const activeNext = { ...next.activeSessionByProject };
+        if (activeNext[projectId] === pendingId) activeNext[projectId] = sessionId;
+        const knownList = next.knownSessions[projectId] ?? [];
+        const knownNext = knownList.some((s) => s.id === sessionId)
+          ? knownList
+          : [
+              {
+                id: sessionId,
+                title: null,
+                createdAt: Date.now(),
+                lastEventAt: Date.now(),
+                totalCostUsd: 0,
+              },
+              ...knownList,
+            ];
+        next = {
+          ...next,
+          sessionsByProject: { ...next.sessionsByProject, [projectId]: adoptedMap },
+          activeSessionByProject: activeNext,
+          pendingByProject: pendingNext,
+          sessionToProject: { ...next.sessionToProject, [sessionId]: projectId },
+          knownSessions: { ...next.knownSessions, [projectId]: knownNext },
+        };
+      }
+
       return {
-        ...putSession(state, projectId, sessionId, {
-          ...session,
-          status: 'error',
-          // Turn aborted — stop the elapsed timer.
-          runStartedAt: null,
-          // Register W01: and retire the streaming buffer with it. The `''`
-          // in the `existing ??` fallback above only covers a session we're
-          // inventing here; an EXISTING session spreads through `...session`
-          // and kept its partial text.
-          streamingText: '',
-          messages: [
-            ...session.messages,
-            {
-              kind: 'error',
-              id: nextId(),
-              errorKind: msg.kind,
-              message: msg.message,
-            },
-          ],
-        }),
+        ...next,
         failureSeq: state.failureSeq + 1,
         authExpired: nextAuthExpired,
       };
