@@ -30,6 +30,7 @@ const CLIENT_MSG_VERBS = [
   'continue_multi_agent',
   'continue_through_mutation',
   'copy_project_to_managed',
+  'delete_managed_agent',
   'delete_stray_session_folders',
   'delete_template',
   'get_artifact_content',

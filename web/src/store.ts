@@ -866,6 +866,21 @@ export type AppState = {
     result: Extract<ServerMsg, { type: 'managed_copy_result' }>['result'] | null;
   } | null;
   /**
+   * Cebab-m1f: the managed-agent delete the operator has open, or null.
+   *
+   * One slot, same reason `managedCopy` has one — driven from a modal, one at a
+   * time. `status` is what the modal renders: `confirming` shows the warning and
+   * the Delete button, `deleting` disables it, `done` shows the outcome. A
+   * delete destroys operator data, so unlike the copy it opens on an explicit
+   * confirm rather than a preflight.
+   */
+  managedDelete: {
+    projectId: number;
+    name: string;
+    status: 'confirming' | 'deleting' | 'done';
+    result: Extract<ServerMsg, { type: 'managed_delete_result' }>['result'] | null;
+  } | null;
+  /**
    * Cebab-ws0.10: the managed-agent config file the operator has open, or null.
    *
    * One slot for the same reason `managedCopy` above has one — it is driven
@@ -1091,6 +1106,7 @@ export const initialState: AppState = {
   projects: [],
   projectScans: {},
   managedCopy: null,
+  managedDelete: null,
   managedEdit: null,
   modelCatalogue: null,
   activeProjectId: null,
@@ -1452,6 +1468,12 @@ export type Action =
   | { type: 'managed_copy_started' }
   /** Cebab-ws0.9: close the modal, whatever state it was in. */
   | { type: 'managed_copy_close' }
+  /** Cebab-m1f: open the delete-confirm modal for a managed agent. */
+  | { type: 'managed_delete_open'; projectId: number; name: string }
+  /** Cebab-m1f: the operator confirmed; the delete is now running. */
+  | { type: 'managed_delete_started' }
+  /** Cebab-m1f: close the delete modal, whatever state it was in. */
+  | { type: 'managed_delete_close' }
   | {
       type: 'managed_edit_open';
       projectId: number;
@@ -1645,6 +1667,23 @@ export function reduce(state: AppState, action: Action): AppState {
 
     case 'managed_copy_close':
       return { ...state, managedCopy: null };
+
+    // ---- Cebab-m1f: managed-agent delete -----------------------------
+    case 'managed_delete_open':
+      return {
+        ...state,
+        managedDelete: {
+          projectId: action.projectId,
+          name: action.name,
+          status: 'confirming',
+          result: null,
+        },
+      };
+    case 'managed_delete_started':
+      if (!state.managedDelete) return state;
+      return { ...state, managedDelete: { ...state.managedDelete, status: 'deleting' } };
+    case 'managed_delete_close':
+      return { ...state, managedDelete: null };
 
     case 'managed_edit_open':
       // Opens on the click, before the server has answered — so `status` is
@@ -2195,6 +2234,14 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       return {
         ...state,
         managedCopy: { ...state.managedCopy, status: 'done', result: msg.result },
+      };
+
+    case 'managed_delete_result':
+      // Ignore a result for a modal the operator has already closed or replaced.
+      if (!state.managedDelete || state.managedDelete.projectId !== msg.projectId) return state;
+      return {
+        ...state,
+        managedDelete: { ...state.managedDelete, status: 'done', result: msg.result },
       };
 
     case 'managed_file': {

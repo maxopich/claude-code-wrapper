@@ -38,6 +38,7 @@ const SAMPLES: ClientMsg[] = [
   { type: 'set_project_start_permission_mode', projectId: 1, mode: null },
   { type: 'preflight_managed_copy', projectId: 1 },
   { type: 'copy_project_to_managed', projectId: 1 },
+  { type: 'delete_managed_agent', projectId: 1 },
   { type: 'read_managed_file', projectId: 1, kind: 'settings' },
   { type: 'write_managed_file', projectId: 1, kind: 'mcp', content: '{}', baseMtimeMs: 0 },
   { type: 'get_model_catalogue' },

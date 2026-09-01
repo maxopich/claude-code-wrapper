@@ -95,6 +95,7 @@ function render(opts: { expanded: boolean; sessions: SessionSummary[] }): Spies 
         projectScans={{}}
         onCopyToManaged={() => {}}
         onEditManagedConfig={() => {}}
+        onDeleteManagedAgent={() => {}}
         projects={[project()]}
         activeProjectId={opts.expanded ? PID : null}
         activeSessionByProject={{}}
@@ -196,6 +197,7 @@ describe('[a11y] session rows are operable from the keyboard', () => {
           projectScans={{}}
           onCopyToManaged={() => {}}
           onEditManagedConfig={() => {}}
+          onDeleteManagedAgent={() => {}}
           projects={[project()]}
           activeProjectId={PID}
           activeSessionByProject={{ [PID]: 'sess-aaaaaaa1' }}

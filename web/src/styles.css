@@ -1465,6 +1465,20 @@ pre {
   color: var(--fg-2);
 }
 
+/* Cebab-m1f: the managed-agent delete row + modal, mirroring the copy above. */
+.managed-delete-error {
+  color: var(--err-ink);
+}
+.managed-delete-done {
+  color: var(--ok-ink);
+}
+.managed-delete-progress {
+  color: var(--fg-2);
+}
+.session-row-managed-delete .session-name {
+  color: var(--err-ink);
+}
+
 /* ── Project scan line (Cebab-ws0.6) ───────────────────────────────────────
  * A second line inside `.project-header`, carrying what the project declares
  * on disk. The header wraps and this is a full-width flex item, so the hover

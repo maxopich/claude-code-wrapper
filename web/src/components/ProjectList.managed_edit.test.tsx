@@ -65,6 +65,7 @@ function render(activeProjectId: number | null): {
         projectScans={{}}
         onCopyToManaged={() => {}}
         onEditManagedConfig={onEditManagedConfig}
+        onDeleteManagedAgent={() => {}}
         projects={[
           project({
             id: MANAGED_ID,
@@ -137,6 +138,7 @@ describe('the edit-config affordance', () => {
           projectScans={{}}
           onCopyToManaged={() => {}}
           onEditManagedConfig={() => {}}
+          onDeleteManagedAgent={() => {}}
           projects={[
             project({ id: MANAGED_ID, name: 'ledger-agent', isManaged: true, managed: null }),
           ]}
@@ -183,6 +185,7 @@ describe('the edit-config affordance', () => {
           projectScans={{}}
           onCopyToManaged={() => {}}
           onEditManagedConfig={() => {}}
+          onDeleteManagedAgent={() => {}}
           projects={[
             project({
               id: MANAGED_ID,

@@ -31,6 +31,7 @@ import {
 } from '../assistant/identity.js';
 import { applyProjectStartPermissionMode } from '../project_start_mode.js';
 import { preflightManagedCopy, runManagedCopy } from '../managed_copy.js';
+import { runManagedDelete } from '../managed_delete.js';
 import { observeProjectHooks } from '../repo/hook_trust.js';
 import {
   createSession,
@@ -4215,6 +4216,13 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // without the operator refreshing — and, because `Cebab-ws0.6`'s file
       // scan rides along, with its declarations already read.
       if (outcome.registered) sendProjects(conn, await syncWorkspaceProjects());
+      return;
+    }
+    case 'delete_managed_agent': {
+      const outcome = await runManagedDelete(msg.projectId, (m) => send(conn.ws, m));
+      // Re-emit the list so the removed agent leaves the sidebar without a
+      // refresh, the mirror of the copy re-emit above.
+      if (outcome.removed) sendProjects(conn, await syncWorkspaceProjects());
       return;
     }
     case 'read_managed_file': {

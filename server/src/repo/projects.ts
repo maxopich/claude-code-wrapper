@@ -332,6 +332,25 @@ export function registerManagedProject(
   return getProject(row.id)!;
 }
 
+/**
+ * Delete a project row outright (Cebab-m1f) and report whether a row went.
+ *
+ * The FK cascades do the dependent work: `sessions.project_id`,
+ * `multi_agent_sessions.project_id` and `hook_trust.project_id` all carry
+ * `ON DELETE CASCADE`, so their rows (and, through `sessions`, the `events`
+ * that hang off them) go with the project in one statement.
+ *
+ * Only the managed-delete path calls this. The caller (`runManagedDelete`)
+ * FIRST hard-deletes each single-agent session so the soft-FK dependents that
+ * carry a bare `session_id` with no cascade — `notifications`,
+ * `controllability_forensics`, `recovery_log` — are cleaned up too; a raw
+ * project delete alone would leave those orphaned. `safety_audit` is append-only
+ * and deliberately survives, exactly as it does across the session purge.
+ */
+export function deleteProject(id: number): number {
+  return getDb().prepare('DELETE FROM projects WHERE id = ?').run(id).changes as number;
+}
+
 export function setProjectTrusted(id: number, trusted: boolean): void {
   getDb()
     .prepare('UPDATE projects SET trusted = ? WHERE id = ?')
