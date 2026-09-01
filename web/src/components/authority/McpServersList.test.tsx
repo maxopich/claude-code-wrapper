@@ -85,6 +85,40 @@ describe('McpServersList — rendering', () => {
     expect(container.textContent).toContain('No MCP servers found');
   });
 
+  // Cebab-66y: an untrusted project's `.mcp.json` server exists and merely
+  // will not load. The panel used to omit it entirely (or say "not checked");
+  // it must now name it as declared-but-inert.
+  test('empty loaded list but an unloaded server names it, not "not checked"', () => {
+    act(() => {
+      root.render(
+        <McpServersList
+          servers={[]}
+          projectScopeRead={false}
+          unloaded={[mk({ name: 'kitchen', scope: 'mcp-json' })]}
+        />,
+      );
+    });
+    expect(container.querySelector('.mcp-servers-unloaded')).not.toBeNull();
+    expect(container.textContent).toContain('kitchen');
+    expect(container.textContent).toContain('not load');
+    // No longer the "would not appear here" copy — it appears.
+    expect(container.textContent).not.toContain('would not appear here');
+  });
+
+  test('loaded and unloaded servers both render', () => {
+    act(() => {
+      root.render(
+        <McpServersList
+          servers={[mk({ name: 'loaded-one', scope: 'claude-json' })]}
+          unloaded={[mk({ name: 'kitchen', scope: 'mcp-json' })]}
+        />,
+      );
+    });
+    expect(container.textContent).toContain('loaded-one');
+    expect(container.querySelector('.mcp-servers-unloaded')).not.toBeNull();
+    expect(container.textContent).toContain('kitchen');
+  });
+
   test('renders one card per server alphabetically; cebab-injected to bottom', () => {
     act(() => {
       root.render(

@@ -4173,6 +4173,24 @@ export type ProjectAuthority = {
   plugins: { name: string; path: string }[];
   hooks: HookView[];
   detectedEnvInjections: EnvInjection[];
+  /**
+   * Cebab-66y: what this project DECLARES on disk in a scope the resolve's
+   * scope set does not load. Empty for a trusted single-agent project and for
+   * every bus participant (both read all three scopes); populated for an
+   * UNTRUSTED single-agent project, where the project's own
+   * `.claude/settings.json` hooks and `.mcp.json` servers are real, declared
+   * and inert until Trust is turned on.
+   *
+   * The split is the whole point, and it is the same one the sidebar tier
+   * (`ProjectScan`) already draws: `hooks` / `mcpServers` are the LOADED lists
+   * (and the only ones any spawn gate reads), while these carry the
+   * declared-but-not-loaded remainder so the panel can say "declared but will
+   * not load — Trust is off" instead of the strong-negative "none declared" it
+   * used to assert about declarations that plainly exist. Absent is treated as
+   * empty by every reader.
+   */
+  unloadedHooks?: HookView[];
+  unloadedMcpServers?: McpServerView[];
 };
 
 /**

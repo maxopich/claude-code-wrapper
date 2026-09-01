@@ -8843,6 +8843,27 @@ pre {
   color: var(--fg-2);
   text-align: center;
 }
+/* Cebab-66y: declared-but-not-loaded servers — real, inert until Trust is on. */
+.mcp-servers-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mcp-servers-unloaded {
+  border-top: 1px dashed var(--line-3);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mcp-servers-unloaded-note,
+.hooks-unloaded-note {
+  font-size: var(--t-sm);
+  color: var(--warn-ink);
+}
+.mcp-servers-unloaded-list {
+  opacity: 0.85;
+}
 .mcp-server-card {
   background: var(--bg-2);
   border: 1px solid var(--line-3);
@@ -9247,6 +9268,23 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+/* Cebab-66y: hooks declared in a scope Trust keeps out — inert but real. */
+.hooks-unloaded {
+  border-top: 1px dashed var(--line-3);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.hooks-unloaded-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  opacity: 0.85;
 }
 .hooks-kind-group {
   border: 1px solid var(--line-3);

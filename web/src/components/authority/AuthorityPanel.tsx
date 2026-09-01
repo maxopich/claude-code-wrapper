@@ -261,6 +261,12 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
   const unmeasured = !authority.sdkSnapshot;
   const projectScopeRead = authority.settingSourcesUsed.includes('project');
   const sdkEmpty = (measured: string) => (unmeasured ? 'not measured yet' : measured);
+  // Cebab-66y: declarations sitting on disk in a scope this project's next run
+  // will not load — real and inert until Trust is on. The panel names them
+  // instead of asserting "none declared", the contradiction with the sidebar
+  // this bead was filed to remove.
+  const unloadedHooks = authority.unloadedHooks ?? [];
+  const unloadedMcpServers = authority.unloadedMcpServers ?? [];
 
   return (
     <div className="authority-panel-body">
@@ -285,14 +291,25 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
         count={authority.mcpServers.length}
         sublabel={
           authority.mcpServers.length === 0
-            ? projectScopeRead
-              ? 'none declared'
-              : 'project scope not read'
-            : undefined
+            ? unloadedMcpServers.length > 0
+              ? `${unloadedMcpServers.length} declared but not loaded — Trust is off`
+              : projectScopeRead
+                ? 'none declared'
+                : 'project scope not read'
+            : unloadedMcpServers.length > 0
+              ? `${unloadedMcpServers.length} more declared but not loaded — Trust is off`
+              : undefined
         }
-        defaultOpen={false}
+        // Force-open when a declared server sits inert behind Trust — the
+        // operator is about to decide whether to trust exactly these.
+        defaultOpen={unloadedMcpServers.length > 0}
+        stripe={unloadedMcpServers.length > 0 ? 'accent' : 'none'}
       >
-        <McpServersList servers={authority.mcpServers} projectScopeRead={projectScopeRead} />
+        <McpServersList
+          servers={authority.mcpServers}
+          projectScopeRead={projectScopeRead}
+          unloaded={unloadedMcpServers}
+        />
       </AuthoritySection>
       <AuthoritySection
         title="Allow / deny rules"
@@ -326,17 +343,23 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
         count={authority.hooks.length}
         sublabel={
           authority.hooks.length === 0
-            ? 'none declared'
+            ? unloadedHooks.length > 0
+              ? `${unloadedHooks.length} declared but not loaded — Trust is off`
+              : 'none declared'
             : hasLocalHook(authority.hooks)
               ? 'project-local hook present — review'
-              : undefined
+              : unloadedHooks.length > 0
+                ? `${unloadedHooks.length} more declared but not loaded — Trust is off`
+                : undefined
         }
-        // Force-open when a project-local hook exists — UI-B40's force-
-        // expand intent.
-        defaultOpen={hasLocalHook(authority.hooks)}
-        stripe={hasLocalHook(authority.hooks) ? 'removed' : 'none'}
+        // Force-open when a project-local hook exists (UI-B40's force-expand
+        // intent) OR when a declared hook sits inert behind Trust: the operator
+        // is about to decide whether to trust the project into auto-executing
+        // exactly these (Cebab-66y).
+        defaultOpen={hasLocalHook(authority.hooks) || unloadedHooks.length > 0}
+        stripe={hasLocalHook(authority.hooks) || unloadedHooks.length > 0 ? 'removed' : 'none'}
       >
-        <HooksList hooks={authority.hooks} />
+        <HooksList hooks={authority.hooks} unloaded={unloadedHooks} />
       </AuthoritySection>
       {/* Phase 8 — UI-B41 / B42 / B43: the three name-only enumerations
        *  from the SDK init payload. All collapsed-by-default since their

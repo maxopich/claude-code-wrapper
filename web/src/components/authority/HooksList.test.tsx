@@ -133,4 +133,32 @@ describe('HooksList', () => {
     const card = container.querySelector('.hook-card')!;
     expect(card.querySelector('.hook-card-sha')).toBeNull();
   });
+
+  // Cebab-66y: declared-but-not-loaded hooks must be named, not reported as
+  // "none declared" — the strong-negative that gets a project trusted.
+  test('empty loaded list but unloaded hooks names them instead of "none declared"', () => {
+    act(() => {
+      root.render(<HooksList hooks={[]} unloaded={[mk({ hookKind: 'SessionStart' })]} />);
+    });
+    expect(container.querySelector('.hooks-empty')).toBeNull();
+    expect(container.textContent).not.toContain('No hooks declared');
+    expect(container.querySelector('.hooks-unloaded')).not.toBeNull();
+    expect(container.textContent).toContain('will');
+    expect(container.textContent).toContain('not load');
+    expect(container.querySelector('.hook-card')).not.toBeNull();
+  });
+
+  test('loaded and unloaded hooks both render, in separate sections', () => {
+    act(() => {
+      root.render(
+        <HooksList
+          hooks={[mk({ hookKind: 'PreToolUse', command: '/loaded/cmd' })]}
+          unloaded={[mk({ hookKind: 'SessionStart', command: '/inert/cmd' })]}
+        />,
+      );
+    });
+    expect(container.querySelector('.hooks-unloaded')).not.toBeNull();
+    expect(container.textContent).toContain('/loaded/cmd');
+    expect(container.textContent).toContain('/inert/cmd');
+  });
 });

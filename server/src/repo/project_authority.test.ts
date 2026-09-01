@@ -449,6 +449,56 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
     expect(out!.settingSourcesUsed).toEqual(['user']);
   });
 
+  // Cebab-66y: the panel reported the STRONG NEGATIVE ("none declared") for
+  // hooks and MCP servers an untrusted project DOES declare in its own files —
+  // scopes narrow to ['user'], so `detectHooks` and `readMcpJsonServers` never
+  // read them, and the panel asserted they did not exist. They exist and merely
+  // will not load. The loaded lists stay loaded-only (they feed the spawn
+  // gates); the declared-but-inert remainder rides `unloadedHooks` /
+  // `unloadedMcpServers`.
+  describe('Cebab-66y — declared-but-not-loaded surfacing', () => {
+    function writeProjectDeclarations(): void {
+      fs.writeFileSync(
+        path.join(projectPath, '.claude', 'settings.json'),
+        JSON.stringify({
+          hooks: {
+            SessionStart: [{ hooks: [{ command: '/bin/echo', args: ['start'] }] }],
+            PreToolUse: [{ hooks: [{ command: '/bin/guard.sh' }] }],
+          },
+        }),
+      );
+      fs.writeFileSync(
+        path.join(projectPath, '.mcp.json'),
+        JSON.stringify({ mcpServers: { kitchen: { command: '/bin/kitchen' } } }),
+      );
+    }
+
+    test('untrusted: hooks + .mcp.json server are inert-but-surfaced, absent from the loaded lists', () => {
+      setProjectTrusted(projectId, false);
+      writeProjectDeclarations();
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      // Loaded lists (the gate-fed ones) stay empty of the project's own files.
+      expect(out.hooks).toEqual([]);
+      expect(out.mcpServers.some((m) => m.name === 'kitchen')).toBe(false);
+      // The fix: they are named as declared-but-not-loaded.
+      expect((out.unloadedHooks ?? []).map((h) => h.hookKind).sort()).toEqual([
+        'PreToolUse',
+        'SessionStart',
+      ]);
+      expect((out.unloadedMcpServers ?? []).map((m) => m.name)).toEqual(['kitchen']);
+    });
+
+    test('trusted: the same declarations load, so nothing is left unloaded', () => {
+      setProjectTrusted(projectId, true);
+      writeProjectDeclarations();
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      expect(out.hooks).toHaveLength(2);
+      expect(out.mcpServers.some((m) => m.name === 'kitchen')).toBe(true);
+      expect(out.unloadedHooks ?? []).toEqual([]);
+      expect(out.unloadedMcpServers ?? []).toEqual([]);
+    });
+  });
+
   test('cache miss (no latestSessionStarted): tools/agents/skills empty but scans populated', () => {
     // Pre-flight inspection of a project that hasn't started a session
     // in this connection still surfaces declared MCP servers, env

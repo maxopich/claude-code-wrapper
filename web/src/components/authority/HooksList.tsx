@@ -34,9 +34,19 @@ const SCOPE_LABEL: Record<HookView['scope'], string> = {
   local: 'local',
 };
 
-export function HooksList(props: { hooks: HookView[] }) {
+export function HooksList(props: { hooks: HookView[]; unloaded?: HookView[] }) {
   const { hooks } = props;
+  const unloaded = props.unloaded ?? [];
   if (hooks.length === 0) {
+    // Cebab-66y: an empty LOADED list is not an empty project. On an untrusted
+    // project the project's own `.claude/settings.json` hooks sit in a scope
+    // Trust keeps out — declared, real, and inert until Trust is turned on. The
+    // panel used to assert "none declared" here, which is precisely the
+    // strong-negative the operator reads before trusting the project and making
+    // those very hooks auto-execute. Render them as inert instead.
+    if (unloaded.length > 0) {
+      return <UnloadedHooks unloaded={unloaded} />;
+    }
     return (
       <div className="hooks-empty">
         No hooks declared in this project&apos;s settings.json layers.
@@ -76,7 +86,35 @@ export function HooksList(props: { hooks: HookView[] }) {
           </ul>
         </section>
       ))}
+      {unloaded.length > 0 && <UnloadedHooks unloaded={unloaded} />}
     </div>
+  );
+}
+
+/**
+ * Cebab-66y: hooks a project declares in a scope its next run will NOT load —
+ * an untrusted project's own `.claude/settings.json` / `.mcp.json`. They are
+ * real and would auto-execute the moment Trust is turned on, so the panel names
+ * them explicitly rather than letting the section read "none declared".
+ */
+function UnloadedHooks(props: { unloaded: HookView[] }) {
+  const { unloaded } = props;
+  return (
+    <section className="hooks-unloaded">
+      <div className="hooks-unloaded-note">
+        {unloaded.length} {unloaded.length === 1 ? 'hook is' : 'hooks are'} declared in this
+        project&apos;s own settings but will <strong>not load</strong> while Trust is off. Turning
+        Trust on in the sidebar makes {unloaded.length === 1 ? 'it' : 'them'} auto-execute.
+      </div>
+      <ul className="hooks-unloaded-list">
+        {unloaded.map((h, i) => (
+          <HookCard
+            key={`unloaded:${h.hookKind}:${h.scope}:${h.scopePath}:${h.command}:${i}`}
+            hook={h}
+          />
+        ))}
+      </ul>
+    </section>
   );
 }
 
