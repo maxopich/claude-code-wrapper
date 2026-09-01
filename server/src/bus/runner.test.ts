@@ -1986,10 +1986,17 @@ describe('DEFAULT_OVERLOAD_BACKOFF_MS', () => {
 describe('AgentRunner stalled-turn watchdog', () => {
   // A benign liveness tick (not a tool, not a result) — resets the idle clock.
   const streamMsg = (): SDKMessage => ({ type: 'stream_event' }) as unknown as SDKMessage;
-  const toolUseMsg = (name: string): SDKMessage =>
+  const toolUseMsg = (name: string, id = 't1'): SDKMessage =>
     ({
       type: 'assistant',
-      message: { content: [{ type: 'tool_use', name, id: 't1', input: {} }] },
+      message: { content: [{ type: 'tool_use', name, id, input: {} }] },
+    }) as unknown as SDKMessage;
+  // A `user` message carrying one tool_result for a specific tool_use id — how
+  // the SDK streams a single parallel tool's completion.
+  const toolResultMsg = (toolUseId: string): SDKMessage =>
+    ({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'ok' }] },
     }) as unknown as SDKMessage;
 
   // Yields `initial`, then hangs until close()/interrupt() ends the generator —
@@ -2226,6 +2233,49 @@ describe('AgentRunner stalled-turn watchdog', () => {
       expect(outcomeVal).toBe('__pending__');
       expect(onTurnStalled).not.toHaveBeenCalled();
       // Past the tool ceiling → still bounded, even for a never-returning tool.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(outcomeVal).toBeInstanceOf(TurnStalledError);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a parallel slow tool keeps the lenient ceiling after a fast sibling returns', async () => {
+    // Regression for Cebab-ygu.1: two tools dispatched in parallel (one fast
+    // Read, one slow Bash), streamed as one assistant/tool_use message each with
+    // no intervening tool_result, then the fast tool's result arrives first
+    // while the slow one runs on. A boolean `toolInFlight` cleared on that first
+    // result and the hard watchdog fell back to the 5s no-tool abort — killing
+    // the healthy long Bash. Counting outstanding ids keeps the lenient ceiling
+    // (and the soft-watchdog suppression) until the LAST tool returns.
+    vi.useFakeTimers();
+    try {
+      const onTurnStalled = vi.fn();
+      let outcomeVal: unknown = '__pending__';
+      const runner = new AgentRunner({
+        onEvent: () => {},
+        onTurnStalled,
+        stallNotifyMs: 1_000,
+        stallAbortMs: 5_000,
+        stallToolCeilingMs: 60_000,
+        runnerFactory: () =>
+          hangingRunner([
+            toolUseMsg('Bash', 'A'), // slow tool, still running
+            toolUseMsg('Read', 'B'), // fast sibling, dispatched in parallel
+            toolResultMsg('B'), // fast sibling completes; Bash (A) still outstanding
+          ]),
+      });
+      runner.register({ name: 'w', cwd: '/tmp/w' });
+      void runner.deliverTurn('w', 'go').then(
+        () => (outcomeVal = 'resolved'),
+        (e) => (outcomeVal = e),
+      );
+      // Past the no-tool abort threshold (5s) but within the tool ceiling (60s):
+      // A is still in flight, so neither the hard abort nor the soft alert fires.
+      await vi.advanceTimersByTimeAsync(7_000);
+      expect(outcomeVal).toBe('__pending__');
+      expect(onTurnStalled).not.toHaveBeenCalled();
+      // Past the tool ceiling → still bounded once the slow tool never returns.
       await vi.advanceTimersByTimeAsync(60_000);
       expect(outcomeVal).toBeInstanceOf(TurnStalledError);
     } finally {

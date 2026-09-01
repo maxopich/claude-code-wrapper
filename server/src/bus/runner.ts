@@ -103,25 +103,44 @@ export function isDelegationAllowedTool(toolName: string): boolean {
 }
 
 /**
- * Track whether a tool call is mid-flight for the watchdog: an `assistant`
- * message whose last content block is a `tool_use` means the SDK is about to
- * (or is) running a tool; the matching `tool_result` on a later `user` message
- * clears it. Every other SDKMessage (`stream_event`, `result`, …) carries the
- * prior state forward. Mirrors the tool derivation in `bus/activity.ts`.
+ * Track which tool calls are mid-flight for the watchdog. An `assistant`
+ * message's `tool_use` blocks each add their id to `outstanding`; the matching
+ * `tool_result` (keyed by `tool_use_id`) on a later `user` message removes it.
+ * A tool is "in flight" iff `outstanding` is non-empty.
+ *
+ * This is a SET, not a boolean, and that is the whole point. Tools dispatched
+ * in parallel arrive as one `assistant`/`tool_use` message per tool with no
+ * intervening `tool_result`, and each result streams at its own tool's
+ * completion time — so a fast tool's result lands while a slow sibling is still
+ * running. A boolean cleared on the FIRST `tool_result` marked the still-running
+ * slow tool as idle, and the hard watchdog then applied the no-tool abort
+ * (`stallAbortMs`, 5 min) instead of the tool ceiling (`stallToolCeilingMs`,
+ * 15 min), hard-killing a healthy long `Bash`/`Agent` call at the 5-minute
+ * threshold and surfacing it to the operator as a wedged turn. It also
+ * un-suppressed the soft watchdog, raising a spurious `onTurnStalled` alert at
+ * the 60s idle mark. Counting outstanding ids keeps the lenient ceiling — and
+ * the soft-watchdog suppression — until the LAST parallel tool returns.
+ *
+ * Ids are the join key both directions; an id-less block (never observed in the
+ * measured transcripts) simply isn't tracked. Mutates `outstanding` in place.
  */
-function deriveToolInFlight(msg: SDKMessage, prev: boolean): boolean {
-  const m = msg as { type?: string; message?: { content?: Array<{ type?: string }> } };
-  if (m.type === 'assistant' && Array.isArray(m.message?.content) && m.message.content.length > 0) {
-    return m.message.content[m.message.content.length - 1]?.type === 'tool_use';
+function updateOutstandingTools(msg: SDKMessage, outstanding: Set<string>): void {
+  const m = msg as {
+    type?: string;
+    message?: { content?: Array<{ type?: string; id?: unknown; tool_use_id?: unknown }> };
+  };
+  if (!Array.isArray(m.message?.content)) return;
+  if (m.type === 'assistant') {
+    for (const b of m.message.content) {
+      if (b?.type === 'tool_use' && typeof b.id === 'string') outstanding.add(b.id);
+    }
+  } else if (m.type === 'user') {
+    for (const b of m.message.content) {
+      if (b?.type === 'tool_result' && typeof b.tool_use_id === 'string') {
+        outstanding.delete(b.tool_use_id);
+      }
+    }
   }
-  if (
-    m.type === 'user' &&
-    Array.isArray(m.message?.content) &&
-    m.message.content.some((b) => (b as { type?: string }).type === 'tool_result')
-  ) {
-    return false;
-  }
-  return prev;
 }
 
 /** Message kinds the bus understands. Cebab writes `intro`/`prompt`;
@@ -1469,7 +1488,11 @@ export class AgentRunner {
     // one message's tail at most, since the throw leaves the `for await`
     // immediately.
     let deferredBlocks: ToolUseBlock[] = [];
-    let toolInFlight = false;
+    // Set of outstanding `tool_use` ids (see `updateOutstandingTools`). A count,
+    // not a boolean, so a parallel dispatch stays "in flight" until its LAST
+    // tool returns rather than clearing on the first `tool_result`.
+    const outstandingTools = new Set<string>();
+    const toolInFlight = () => outstandingTools.size > 0;
     let softNotified = false;
     let stalledAbort = false;
     let stalledAbortMs = 0;
@@ -1487,7 +1510,7 @@ export class AgentRunner {
         () => {
           const idle = Date.now() - lastMsgAt;
           // Parked-on-question or mid-tool → working, not wedged: re-check later.
-          if (isParked() || toolInFlight) return armSoft(stallNotifyMs);
+          if (isParked() || toolInFlight()) return armSoft(stallNotifyMs);
           if (idle < stallNotifyMs) return armSoft(stallNotifyMs - idle);
           if (!softNotified) {
             softNotified = true;
@@ -1508,7 +1531,7 @@ export class AgentRunner {
         () => {
           const idle = Date.now() - lastMsgAt;
           if (isParked()) return armHard(stallNotifyMs);
-          const ceiling = toolInFlight ? stallToolCeilingMs : stallAbortMs;
+          const ceiling = toolInFlight() ? stallToolCeilingMs : stallAbortMs;
           if (idle < ceiling) return armHard(ceiling - idle);
           stalledAbort = true;
           stalledAbortMs = idle;
@@ -1553,7 +1576,7 @@ export class AgentRunner {
             console.error(`[runner] onTurnResumed(${agentName}) threw`, e);
           }
         }
-        toolInFlight = deriveToolInFlight(msg, toolInFlight);
+        updateOutstandingTools(msg, outstandingTools);
 
         this.deps.onMessage?.(agentName, msg);
 
