@@ -25,11 +25,12 @@ import { isMuteAllowed } from './muteStore';
  *   - `count > 1`: the same `dedupeKey` arrived while visible — show ×N
  *     badge per UI-9.
  *
- * Action invocation: Phase 2 only renders the actions; consumers wire the
- * action handler at the host level (the dispatch is mounted via context).
- * Some actions (open_session, etc.) need App.tsx-level routing — Phase 2
- * ships dismiss-on-activate so the toast doesn't pile up; Phase 3+ wires the
- * real navigation as sources land.
+ * Action invocation: this component only renders the actions; the host wires
+ * the handler via context (`onNotificationAction` in App.tsx, which resolves
+ * each kind through `resolveNotificationActionEffect`). Clicking dismisses the
+ * toast after invoking the action — the action navigates/acts, so the toast has
+ * done its job. Every kind routes to a live effect (Cebab-ygu.30); none is a
+ * dismiss-only no-op.
  */
 
 const DEFAULT_TIMEOUT_MS: Record<NotificationSeverity, number | null> = {
@@ -89,9 +90,9 @@ export type NotificationProps = {
   onDismiss: (id: string) => void;
   /**
    * Invoked when an action button is clicked. The host owns routing —
-   * Phase 2 wires this to a no-op or a simple console log; later phases
-   * route open_session / open_logs / reauth into App.tsx's existing
-   * navigation handlers.
+   * App.tsx's `onNotificationAction` resolves every kind through
+   * `resolveNotificationActionEffect` and dispatches the effect (WS send,
+   * settings/logs open, session select, re-auth, reopen).
    */
   onAction?: (action: NotificationAction, notification: DisplayNotification) => void;
   /**

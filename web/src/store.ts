@@ -15,6 +15,8 @@ import type {
   ManagedCopyPreflight,
   ManagedFileKind,
   ManagedFileRefusal,
+  ClientMsg,
+  NotificationAction,
   Project,
   ProjectScan,
   RecoveryContextView,
@@ -1205,6 +1207,60 @@ export function showsNewChatPreview(state: AppState): boolean {
   const projectId = state.activeProjectId;
   if (projectId === null) return false;
   return getActiveSessionId(state, projectId) === undefined;
+}
+
+/**
+ * Cebab-ygu.30: the single effect a notification action-button click resolves
+ * to. Every `NotificationAction` kind maps to exactly one of these, so a dock
+ * button is never an inert affordance — five of the eight kinds (`open_session`,
+ * `open_logs`, `open_settings`, `resume`, `restart_agent`) used to fall into a
+ * bare `return` in `App.tsx`: the button dismissed the toast and did nothing,
+ * worst on the error/danger tiers whose toasts never auto-dismiss, so the click
+ * was the operator's natural way to clear them.
+ *
+ * The mapping lives here rather than in the `onNotificationAction` switch
+ * because `App.tsx` has no test harness (`store.notification_action.test.ts`
+ * pins each kind). Interpreting an effect — the WS send, hash navigation, modal
+ * open, session select — stays in `App.tsx` where the refs and handlers live;
+ * that glue is thin, and WHICH effect fires is the part that was wrong.
+ */
+export type NotificationActionEffect =
+  | { effect: 'ws_send'; msg: ClientMsg }
+  | { effect: 'reopen'; sessionId: string }
+  | { effect: 'reauth' }
+  | { effect: 'open_settings' }
+  | { effect: 'open_logs'; sessionId: string; rowAnchor?: string }
+  | { effect: 'select_session'; sessionId: string };
+
+export function resolveNotificationActionEffect(
+  action: NotificationAction,
+): NotificationActionEffect {
+  switch (action.kind) {
+    case 'archive':
+      return { effect: 'ws_send', msg: { type: 'archive_session', sessionId: action.sessionId } };
+    case 'reopen':
+      return { effect: 'reopen', sessionId: action.sessionId };
+    case 'reauth':
+      return { effect: 'reauth' };
+    case 'open_settings':
+      return { effect: 'open_settings' };
+    case 'open_logs':
+      return action.rowAnchor
+        ? { effect: 'open_logs', sessionId: action.sessionId, rowAnchor: action.rowAnchor }
+        : { effect: 'open_logs', sessionId: action.sessionId };
+    // A reconstructed run (`resume`), a crashed single-agent turn
+    // (`restart_agent`) and a plain `open_session` all resolve to "bring this
+    // session into view": the operator continues from the run's recovery
+    // banner or resends into the crashed session there, rather than the toast
+    // firing a WS action blind. `resume` is deliberately NOT
+    // `resume_multi_agent` — that re-attach path fails on the post-restart
+    // recovered (awaiting-continue) session, whose supported action is the run
+    // view's "Continue session" banner.
+    case 'resume':
+    case 'open_session':
+    case 'restart_agent':
+      return { effect: 'select_session', sessionId: action.sessionId };
+  }
 }
 
 /**

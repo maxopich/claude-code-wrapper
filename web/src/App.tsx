@@ -23,6 +23,7 @@ import {
   initialState,
   isSessionPending,
   reduce,
+  resolveNotificationActionEffect,
   routesToAssistant,
   sessionSelectionRequests,
   showsNewChatPreview,
@@ -172,6 +173,18 @@ export function App() {
   //     layers.
   const authRefreshHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   const authRefreshRequestRef = useRef<(() => void) | null>(null);
+  // Cebab-ygu.30: refs the AppShell populates so `onNotificationAction` can
+  // route the two action effects that need AppShell-scoped state/handlers:
+  //   - `openSettingsRef` — the `open_settings` effect opens the Settings modal
+  //     (`claude_not_found` toasts carry it).
+  //   - `selectSessionByIdRef` — the `select_session` effect brings a session
+  //     into view. The action carries only a sessionId; resolving it to a
+  //     project (single-agent → chat tab) or falling back to the multi-agent
+  //     tab (bus recovery runs) needs the reducer state that lives in AppShell.
+  //   Pinned per call (not captured at mount) so a reconnect / re-render can't
+  //   strand the action on stale state — same posture as reopenRequestRef.
+  const openSettingsRef = useRef<(() => void) | null>(null);
+  const selectSessionByIdRef = useRef<((sessionId: string) => void) | null>(null);
   // Cluster D Phase 8b: bridge for the RecoveryLogProvider. Same shape
   // as inbox / gate / authority handlers — App.tsx routes the
   // `recovery_log_snapshot` ServerMsg through this ref into the
@@ -240,43 +253,53 @@ export function App() {
     wsRef.current?.send(msg);
   }, []);
 
-  // Cluster D Phase 5/5d: route NotificationStack action clicks onto the WS.
-  //   - `archive` (used by `session_superseded` toasts, Phase 5) → ships
-  //     `archive_session` ClientMsg directly.
-  //   - `reopen` (Phase 5d) → calls `reopenRequestRef.current(sessionId)`
-  //     which opens the ReopenSessionModal AND ships the `reopen_session`
-  //     probe; the modal drives the rest of the flow (confirm_required,
-  //     typed gate, commit). The ref is populated by `ReopenBridge`
-  //     below — wsRef-style indirection so a reconnect doesn't strand it.
-  //   - Other action kinds (open_session / open_logs / reauth / resume /
-  //     restart_agent) are intentional no-ops; explicit cases keep the
-  //     discriminated-union exhaustiveness check honest so a future kind
-  //     surfaces at compile time.
+  // Route NotificationStack action clicks to their effect. The action → effect
+  // mapping lives in `resolveNotificationActionEffect` (store.ts, tested);
+  // `App.tsx` only interprets the resolved effect, which is thin glue over the
+  // refs/handlers below. Cebab-ygu.30 fixed the five kinds (open_session /
+  // open_logs / open_settings / resume / restart_agent) that used to hit a bare
+  // `return` here — the button dismissed the toast and did nothing, worst on the
+  // error/danger tiers whose toasts never auto-dismiss.
   //
-  // Pinned to wsRef.current / reopenRequestRef.current per call (not
-  // captured at mount) so a transient reconnect doesn't strand the action
-  // on a dead socket.
+  // Everything is pinned per call (wsRef.current / *Ref.current, not captured at
+  // mount) so a transient reconnect / re-render can't strand the action.
   const onNotificationAction = useCallback((action: NotificationAction) => {
-    switch (action.kind) {
-      case 'archive':
-        wsRef.current?.send({ type: 'archive_session', sessionId: action.sessionId });
+    const e = resolveNotificationActionEffect(action);
+    switch (e.effect) {
+      case 'ws_send':
+        // `archive` → archive_session (Cluster D Phase 5).
+        wsRef.current?.send(e.msg);
         return;
       case 'reopen':
-        reopenRequestRef.current?.(action.sessionId);
+        // Cluster D Phase 5d: open the ReopenSessionModal AND ship the
+        // `reopen_session` probe in one call; the modal drives the rest of the
+        // flow (confirm_required, typed gate, commit). The ref is populated by
+        // `ReopenBridge` below.
+        reopenRequestRef.current?.(e.sessionId);
         return;
       case 'reauth':
-        // Cluster D Phase 6c: the dispatcher emits a notification with
-        // action.kind='reauth' alongside every wrapper_error{kind:
-        // 'auth_expired'}. Route it to the same AuthRefreshModal the
-        // banner uses so the operator has a one-click path from the
-        // transient toast (parallel to the durable banner).
+        // Cluster D Phase 6c: route to the same AuthRefreshModal the durable
+        // banner uses so the operator has a one-click path from the transient
+        // toast (paired with every wrapper_error{kind:'auth_expired'}).
         authRefreshRequestRef.current?.();
         return;
-      case 'open_session':
-      case 'open_logs':
       case 'open_settings':
-      case 'resume':
-      case 'restart_agent':
+        // `claude_not_found` toasts (ws/server.ts) carry this.
+        openSettingsRef.current?.();
+        return;
+      case 'select_session':
+        // `resume` (reconstructed run), `restart_agent` (crashed single-agent
+        // turn) and `open_session`: bring the session into view so the operator
+        // acts from the run's own affordances (recovery "Continue" banner /
+        // composer) rather than the toast firing blind.
+        selectSessionByIdRef.current?.(e.sessionId);
+        return;
+      case 'open_logs':
+        // dangerous_mutation / guardrail_violation toasts. Bring the session
+        // into view (mounts its LogsButton) then set the hash the button syncs
+        // off; an optional `rowAnchor` scrolls the modal to the offending row.
+        selectSessionByIdRef.current?.(e.sessionId);
+        window.location.hash = logsHashFor(e.sessionId, e.rowAnchor);
         return;
     }
   }, []);
@@ -316,6 +339,8 @@ export function App() {
                         reopenHandlerRef={reopenHandlerRef}
                         authRefreshHandlerRef={authRefreshHandlerRef}
                         authRefreshRequestRef={authRefreshRequestRef}
+                        openSettingsRef={openSettingsRef}
+                        selectSessionByIdRef={selectSessionByIdRef}
                         recoveryLogHandlerRef={recoveryLogHandlerRef}
                         forensicViewerHandlerRef={forensicViewerHandlerRef}
                         assistantHandlerRef={assistantHandlerRef}
@@ -460,6 +485,18 @@ type AppShellProps = {
    */
   authRefreshRequestRef: React.MutableRefObject<(() => void) | null>;
   /**
+   * Cebab-ygu.30: refs the outer `onNotificationAction` reads to route the
+   * two action effects that need AppShell-scoped state/handlers.
+   *   - `openSettingsRef` — opens the Settings modal (`open_settings` effect).
+   *   - `selectSessionByIdRef` — brings a session into view (`select_session`
+   *     / `open_logs` effects); AppShell resolves the sessionId to a project
+   *     (single-agent → chat tab) or falls back to the multi-agent tab.
+   * Populated by an effect in AppShell that re-pins them every render so they
+   * close over fresh reducer state.
+   */
+  openSettingsRef: React.MutableRefObject<(() => void) | null>;
+  selectSessionByIdRef: React.MutableRefObject<((sessionId: string) => void) | null>;
+  /**
    * Cluster D Phase 8b: bridge ref the RecoveryLogProvider populates.
    * Routes `recovery_log_snapshot` envelopes into the provider's
    * reducer so the RecoveryLogInspector renders fresh aggregates +
@@ -497,6 +534,8 @@ function AppShell({
   reopenHandlerRef,
   authRefreshHandlerRef,
   authRefreshRequestRef,
+  openSettingsRef,
+  selectSessionByIdRef,
   recoveryLogHandlerRef,
   forensicViewerHandlerRef,
   assistantHandlerRef,
@@ -1073,6 +1112,39 @@ function AppShell({
     // carries the topology.
     dispatch({ type: 'ma_set_view', view: 'multi-agent' });
   }
+
+  /**
+   * Cebab-ygu.30: bring a session into view from a notification action, which
+   * carries only a sessionId. A single-agent session id resolves to a project
+   * via `sessionToProject` — select it and flip to the chat tab (mirrors
+   * `onJumpToRun`'s single branch). Bus sessions never enter that map (they
+   * span projects), so they fall back to the multi-agent tab, where a recovered
+   * run's "Continue session" banner and its LogsButton live. Defensive on a
+   * project that vanished between deletion and the next snapshot: still switch
+   * tabs so the click isn't a silent no-op.
+   */
+  function selectSessionById(sessionId: string) {
+    const projectId = state.sessionToProject[sessionId];
+    if (projectId !== undefined && state.projects.some((p) => p.id === projectId)) {
+      selectSession(projectId, sessionId);
+      dispatch({ type: 'ma_set_view', view: 'chat' });
+      return;
+    }
+    dispatch({ type: 'ma_set_view', view: 'multi-agent' });
+  }
+
+  // Cebab-ygu.30: re-pin the notification-action refs every render so they
+  // close over fresh reducer state (`selectSessionById` reads sessionToProject
+  // / projects). No dependency array — the closures are cheap and staleness
+  // here is a wrong-navigation bug.
+  useEffect(() => {
+    openSettingsRef.current = () => setSettingsOpen(true);
+    selectSessionByIdRef.current = selectSessionById;
+    return () => {
+      openSettingsRef.current = null;
+      selectSessionByIdRef.current = null;
+    };
+  });
 
   /**
    * Cluster I C4 UI (spec C4-4): navigate to a cross-session search hit.
