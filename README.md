@@ -144,6 +144,15 @@ project's `cwd` is set to its directory when the agent spawns. Whether the
 project's own configuration is _loaded_ from that directory depends on the
 Trust toggle below — it is not automatic.
 
+There is a second kind of project that the sidebar also lists but the workspace
+scan never produces: a **managed agent**. Copying a project into Cebab's own
+space (the Copy modal) makes a full, independent snapshot under
+`~/.cebab/agents/<slug>/`, registered as an ordinary project row. Managed agents
+are deliberately exempt from the "went missing" sweep that removes a workspace
+row whose directory disappeared, so they stay in the sidebar and **persist even
+after you change the workspace folder** — only deleting their directory by hand
+removes them (there is no in-app delete; see [Local data](#local-data)).
+
 The "asks" / "trusted" toggle per project controls **two** things, and both
 halves are security-relevant:
 
@@ -193,4 +202,10 @@ and the security-critical paths to be aware of.
   stay where they were written, because each session records its own absolute
   path. Cebab drops a `.gitignore` in `~/.cebab` so none of this shows up in
   `git status` if you point `CEBAB_DATA_DIR` inside a checkout.
+- Managed agent snapshots (projects you copied into Cebab's own space via the
+  Copy modal): `~/.cebab/agents/<slug>/`. Each is a full recursive copy of the
+  source project — `node_modules` included, `.git` excluded — capped at 5 GB /
+  300k files per copy. Copies accumulate with no in-app delete path, so this is
+  typically **by far the largest thing Cebab writes**; reclaim the space by
+  deleting the individual `<slug>/` directories you no longer need.
 - Original Claude session transcripts (used by `--resume`): `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
