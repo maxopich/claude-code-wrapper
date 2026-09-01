@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { initialState, reduce, type AppState } from './store';
+import { activeSession, initialState, reduce, sessionPhase, type AppState } from './store';
 
 /**
  * Register W16 + Cebab-da6: a `wrapper_error` with no session of its own must
@@ -192,5 +192,119 @@ describe('store / a sessionless wrapper_error lands in no session (W16, Cebab-da
     const sess = s.sessionsByProject[PID]?.['sess-2'];
     expect(sess!.status).toBe('error');
     expect(sess!.messages.filter((m) => m.kind === 'error')).toHaveLength(1);
+  });
+});
+
+/**
+ * Cebab-ygu.24: a session-scoped `wrapper_error` whose id the browser has NOT
+ * adopted yet (a first-turn spawn that dies before `system/init`, so no
+ * `session_started` ever migrates the optimistic `pending:*` bucket). W16
+ * removed the orphan-bucket leak only for the SESSIONLESS variant; the
+ * unknown-session-id case still landed the error in a fresh bucket nothing
+ * pointed at, leaving the operator's pending session spinning forever.
+ *
+ * Drives the real reducer through the exact failure sequence: select_project →
+ * user_send → session_running(true) → wrapper_error.
+ */
+describe('store / a wrapper_error for an un-adopted first-turn session (Cebab-ygu.24)', () => {
+  const REAL = 'sess-uuid';
+
+  /** Fresh chat + first message in flight, server id minted but not adopted. */
+  function seedFirstTurn(): { before: AppState; pendingId: string } {
+    let s = reduce(initialState, { type: 'select_project', projectId: PID });
+    s = reduce(s, { type: 'user_send', text: 'hi' });
+    const pendingId = s.pendingByProject[PID]!;
+    expect(pendingId).toMatch(/^pending:/);
+    // Server minted the real id and announced it live — this writes only
+    // `sessionToProject`, never adopting the pending bucket.
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_running', sessionId: REAL, projectId: PID, running: true },
+    });
+    return { before: s, pendingId };
+  }
+
+  function crash(): {
+    type: 'server';
+    msg: { type: 'wrapper_error'; sessionId: string; kind: 'process_crashed'; message: string };
+  } {
+    return {
+      type: 'server',
+      msg: {
+        type: 'wrapper_error',
+        sessionId: REAL,
+        kind: 'process_crashed',
+        message: 'spawn claude ENOENT',
+      },
+    };
+  }
+
+  test('the pending session is adopted onto the real id, not left spinning in an orphan bucket', () => {
+    const { before, pendingId } = seedFirstTurn();
+    const after = reduce(before, crash());
+
+    // The optimistic bucket is gone; the real id is the only session.
+    expect(Object.keys(after.sessionsByProject[PID] ?? {})).toEqual([REAL]);
+    expect(after.sessionsByProject[PID]?.[pendingId]).toBeUndefined();
+
+    // The project now points at the real session, and the pending pointer is
+    // cleared.
+    expect(after.activeSessionByProject[PID]).toBe(REAL);
+    expect(after.pendingByProject[PID]).toBeUndefined();
+  });
+
+  test('the error is reachable — it lands in the shown session next to the user message', () => {
+    const { before } = seedFirstTurn();
+    const after = reduce(before, crash());
+
+    const shown = activeSession(after);
+    expect(shown).not.toBeNull();
+    expect(shown!.id).toBe(REAL);
+    // The user's optimistic message survived the migration...
+    expect(
+      shown!.messages.filter((m) => m.kind === 'user').map((m) => (m as { text: string }).text),
+    ).toEqual(['hi']);
+    // ...and the error text is on the same, visible transcript.
+    const errs = shown!.messages.filter((m) => m.kind === 'error');
+    expect(errs).toHaveLength(1);
+    expect((errs[0] as { message: string }).message).toBe('spawn claude ENOENT');
+  });
+
+  test('the spinner stops — the shown session is error, not a running pending bucket', () => {
+    const { before } = seedFirstTurn();
+
+    // Before the fix, the shown (pending) session is still 'running' →
+    // 'thinking' with the composer stuck on Stop.
+    const stuck = activeSession(before)!;
+    expect(stuck.status).toBe('running');
+    expect(sessionPhase(stuck, true)).toBe('thinking');
+
+    const after = reduce(before, crash());
+    const shown = activeSession(after)!;
+    expect(shown.status).toBe('error');
+    expect(sessionPhase(shown, false)).toBe('error');
+  });
+
+  test('repeated crashes for un-adopted ids leak no orphan buckets', () => {
+    let { before: s } = seedFirstTurn();
+    for (let i = 0; i < 5; i += 1) s = reduce(s, crash());
+    // Still exactly one session (idempotent re-application, no leak).
+    expect(Object.keys(s.sessionsByProject[PID] ?? {})).toEqual([REAL]);
+    expect(s.failureSeq).toBe(5);
+  });
+
+  test('still promotes auth_expired when the un-adopted spawn failed on credentials', () => {
+    const { before } = seedFirstTurn();
+    const after = reduce(before, {
+      type: 'server',
+      msg: {
+        type: 'wrapper_error',
+        sessionId: REAL,
+        kind: 'auth_expired',
+        message: 'oauth token revoked',
+      },
+    });
+    expect(after.authExpired?.count).toBe(1);
+    expect(after.activeSessionByProject[PID]).toBe(REAL);
   });
 });
