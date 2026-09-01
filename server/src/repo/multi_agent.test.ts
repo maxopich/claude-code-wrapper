@@ -14,6 +14,7 @@ import {
   clearFinishedMultiAgentSessions,
   computeRecoveryContext,
   confirmMutationByToolUseId,
+  countMultiAgentEvents,
   createMultiAgentSession,
   endMultiAgentSession,
   getLastMultiAgentEvent,
@@ -22,6 +23,7 @@ import {
   getMultiAgentSession,
   getPendingRetry,
   listMultiAgentEvents,
+  listMultiAgentEventsForAgent,
   listMultiAgentMutations,
   listMultiAgentSessions,
   listMultiAgentSessionsWithIteration,
@@ -473,6 +475,55 @@ describe('getLastMultiAgentEvent (Cebab-vie.8)', () => {
 
     expect(getLastMultiAgentEvent('mine')?.text).toBe('mine-last');
     expect(getLastMultiAgentEvent('theirs')?.text).toBe('theirs-last');
+  });
+});
+
+describe('listMultiAgentEventsForAgent + countMultiAgentEvents (Cebab-3nt)', () => {
+  test('filters to the agent as sender OR recipient, oldest-first', () => {
+    // The kick-forensics bundle wants only the events the kicked agent sent or
+    // received. Interleave a third participant so a query that dropped the
+    // `source = ? OR destination = ?` clause (or matched only one side) would
+    // come back wrong.
+    createMultiAgentSession('s', 'orchestrator', 'i');
+    appendMultiAgentEvent('s', 'orchestrator', 'scribe', 'prompt', 'to-scribe'); // recv
+    appendMultiAgentEvent('s', 'orchestrator', 'coder', 'prompt', 'to-coder'); // not scribe
+    appendMultiAgentEvent('s', 'scribe', 'orchestrator', 'reply', 'from-scribe'); // send
+    appendMultiAgentEvent('s', 'coder', 'orchestrator', 'reply', 'from-coder'); // not scribe
+
+    const rows = listMultiAgentEventsForAgent('s', 'scribe', 50);
+    expect(rows.map((r) => r.text)).toEqual(['to-scribe', 'from-scribe']);
+    // Sanity: the query did not silently narrow the whole-session count.
+    expect(countMultiAgentEvents('s')).toBe(4);
+  });
+
+  test('keeps the LAST `limit` agent events, not the first', () => {
+    // The old code loaded every row and `slice(-CAP)`'d the tail; the SQL query
+    // must reproduce that tail, not `LIMIT`-off the head. Redden a query that
+    // dropped the inner `ORDER BY id DESC` before the limit.
+    createMultiAgentSession('s', 'orchestrator', 'i');
+    for (let i = 0; i < 10; i++) {
+      appendMultiAgentEvent('s', 'orchestrator', 'scribe', 'prompt', `e${i}`);
+    }
+    const rows = listMultiAgentEventsForAgent('s', 'scribe', 3);
+    expect(rows.map((r) => r.text)).toEqual(['e7', 'e8', 'e9']);
+  });
+
+  test('is scoped to its session', () => {
+    // A tail that forgot its WHERE would fold another live session's events in.
+    createMultiAgentSession('mine', 'orchestrator', 'i');
+    createMultiAgentSession('theirs', 'chain', 'j');
+    appendMultiAgentEvent('mine', 'orchestrator', 'scribe', 'prompt', 'mine');
+    appendMultiAgentEvent('theirs', 'orchestrator', 'scribe', 'prompt', 'theirs');
+
+    expect(listMultiAgentEventsForAgent('mine', 'scribe', 50).map((r) => r.text)).toEqual(['mine']);
+    expect(countMultiAgentEvents('mine')).toBe(1);
+    expect(countMultiAgentEvents('theirs')).toBe(1);
+  });
+
+  test('empty session → no rows and a zero count', () => {
+    createMultiAgentSession('empty', 'orchestrator', 'i');
+    expect(listMultiAgentEventsForAgent('empty', 'scribe', 50)).toEqual([]);
+    expect(countMultiAgentEvents('empty')).toBe(0);
   });
 });
 

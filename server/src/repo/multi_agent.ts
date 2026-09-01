@@ -1330,6 +1330,50 @@ export function listMultiAgentEvents(sessionId: string, sinceId = 0): MultiAgent
 }
 
 /**
+ * The last `limit` events an agent SENT or RECEIVED in a session, oldest-first.
+ *
+ * `Cebab-3nt`: the kick-forensics path (`persistKickForensics`) used to call
+ * `listMultiAgentEvents` — every row of the session — then filter to the agent
+ * in JS and `slice(-50)`. So a long orchestrator run materialised its whole
+ * transcript on every kick to keep at most fifty rows. Filtering by
+ * source/destination and tail-limiting in SQL keeps the row count that crosses
+ * into JS bounded (the query the log projector's S04 fix reached for, applied
+ * here). The inner `ORDER BY id DESC LIMIT ?` takes the tail; the outer
+ * `ORDER BY id ASC` restores the chronological order `slice(-50)` produced, so
+ * the caller and the forensic viewer see the same ordering as before.
+ */
+export function listMultiAgentEventsForAgent(
+  sessionId: string,
+  agentSlug: string,
+  limit: number,
+): MultiAgentEventRow[] {
+  return getDb()
+    .prepare<[string, string, string, number], MultiAgentEventRow>(
+      `SELECT * FROM (
+         SELECT * FROM multi_agent_events
+         WHERE session_id = ? AND (source = ? OR destination = ?)
+         ORDER BY id DESC LIMIT ?
+       ) ORDER BY id ASC`,
+    )
+    .all(sessionId, agentSlug, agentSlug, limit);
+}
+
+/**
+ * Count of every event in a session. `Cebab-3nt`: lets a caller that needs only
+ * the total (the forensic bundle's `totalSessionEvents`) ask SQL for it instead
+ * of loading every row into JS to read `.length`.
+ */
+export function countMultiAgentEvents(sessionId: string): number {
+  return (
+    getDb()
+      .prepare<[string], { n: number }>(
+        'SELECT COUNT(*) AS n FROM multi_agent_events WHERE session_id = ?',
+      )
+      .get(sessionId)?.n ?? 0
+  );
+}
+
+/**
  * Sort key for one bus event — what the session-log projector needs to ORDER
  * and PAGE, and nothing that costs anything to read. `source` is here because
  * it is the projector's `agent` tiebreak, not because the caller displays it.

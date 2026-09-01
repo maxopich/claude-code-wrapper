@@ -311,7 +311,13 @@ export type CaptureMultiAgentForensicsInput = {
   now?: () => number;
 };
 
-const MULTI_AGENT_EVENTS_CAP = 50;
+/**
+ * Cap on the agent's bus events kept in a forensic bundle. Exported so the
+ * kick-forensics caller can ask SQL for exactly this many rather than load the
+ * whole transcript and let the `slice(-CAP)` below trim it (`Cebab-3nt`); the
+ * slice then only defends against a too-generous caller.
+ */
+export const MULTI_AGENT_EVENTS_CAP = 50;
 const MULTI_AGENT_MUTATIONS_CAP = 50;
 const BUS_EVENT_TEXT_PREVIEW_CHARS = 240;
 
