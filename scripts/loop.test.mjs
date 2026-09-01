@@ -1718,6 +1718,13 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
   // `--dry-run` returns DONE at the GATE boundary by design, so PUBLISH,
   // WATCH, LAND and HARVEST were unreached by four merged PRs and 118 green
   // tests. These cases exist so that stops being true.
+  //
+  // The `repoFixture`-backed cases each spawn ~10+ real `git` subprocesses
+  // (init + config + add + commit in `mkRepo`, then branch/stage/diff), so they
+  // carry an explicit 30s timeout: under windows-2022 CI parallelism the 5s
+  // default is too tight for git process latency alone and the case nearest it
+  // reds as "Test timed out" (a runner-load artefact, not a guard failure).
+  // Headroom only — no assertion is relaxed.
 
   // ── D4/D3: the guard was measuring an empty diff ────────────────────────
   //
@@ -1746,7 +1753,7 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     } finally {
       await cleanup();
     }
-  });
+  }, 30_000);
 
   // `diffForGuard` must stage for ITSELF. The case above calls `changedPaths`
   // first, which stages as a side effect — so it stayed green when
@@ -1765,7 +1772,7 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     } finally {
       await cleanup();
     }
-  });
+  }, 30_000);
 
   // The other direction. Without it the case above is satisfied by a
   // `diffForGuard` that reports every file in the repo on every call.
@@ -1779,7 +1786,7 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     } finally {
       await cleanup();
     }
-  });
+  }, 30_000);
 
   // ── D5/D6: teardown left the tree dirty, so the next run refused ────────
   //
@@ -1802,7 +1809,7 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     } finally {
       await cleanup();
     }
-  });
+  }, 30_000);
 
   // `.loop/` holds the run lock and the ledger and is gitignored. If the clean
   // took ignored paths with it the loop would delete its own lock mid-run and
@@ -1817,7 +1824,7 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
     } finally {
       await cleanup();
     }
-  });
+  }, 30_000);
 
   // ── D8: the Playground tier had never once passed ──────────────────────
   //
