@@ -76,13 +76,27 @@ export function skipLabel(reason: ManagedCopySkip['reason']): string {
   }
 }
 
+/** Stable identity so a guarded-shut modal doesn't hand the key/backdrop hooks a fresh closure each render. */
+const NOOP = () => {};
+
 export function ManagedCopyModal({
   projectName,
   state,
   onConfirm,
   onClose,
 }: ManagedCopyModalProps) {
-  const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
+  // Cebab-ygu.31 — a copy in flight cannot be dismissed. There is no cancel
+  // verb on the wire and `runManagedCopy` takes no AbortSignal, so closing the
+  // modal stops nothing on the server; it only sets `managedCopy: null`, which
+  // makes the reducer drop the incoming `managed_copy_result` — INCLUDING a
+  // failure, whose text appears nowhere else. A "Cancel" that cancels nothing
+  // and silently discards the outcome is worse than no control, so while the
+  // copy runs the modal holds itself open: Escape, the backdrop and the dismiss
+  // button are all inert until the result lands and `status` becomes 'done'.
+  const dismissable = state.status !== 'copying';
+  const { overlayRef, onBackdropMouseDown } = useModalSurface({
+    onClose: dismissable ? onClose : NOOP,
+  });
   const closeBtnRef = useRef<HTMLButtonElement>(null);
   const confirmBtnRef = useRef<HTMLButtonElement>(null);
   const titleId = `managed-copy-title-${state.projectId}`;
@@ -215,14 +229,16 @@ export function ManagedCopyModal({
         )}
 
         <div className="gate-modal-buttons">
-          <button
-            type="button"
-            ref={closeBtnRef}
-            className="ghost-btn gate-modal-btn"
-            onClick={onClose}
-          >
-            {state.status === 'done' ? 'Done' : 'Cancel'}
-          </button>
+          {dismissable && (
+            <button
+              type="button"
+              ref={closeBtnRef}
+              className="ghost-btn gate-modal-btn"
+              onClick={onClose}
+            >
+              {state.status === 'done' ? 'Done' : 'Cancel'}
+            </button>
+          )}
           {state.status !== 'done' && (
             <button
               type="button"
