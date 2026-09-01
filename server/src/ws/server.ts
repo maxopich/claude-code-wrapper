@@ -629,6 +629,61 @@ export function buildSingleAgentForensicsInput(args: {
 }
 
 /**
+ * Cebab-ygu.7: build the `onStop` forensic hook for an operator interrupt,
+ * snapshotting the parked permissions at CALL time.
+ *
+ * The interrupt case body must call this BEFORE
+ * `cleanupPendingPermissionsForSession` drains the live map. That cleanup
+ * (F12 map-hygiene, guaranteed synchronous — see line ~416) deletes every
+ * entry for the session, and `executeInterrupt` then runs `onStop` in the
+ * same tick. A hook that read the live `conn.pendingPermissions` inside its
+ * closure would therefore always see an emptied map, so `pendingToolCalls`
+ * in the Stop bundle was structurally always `null` — losing the one field
+ * that names the tool call parked when Stop was hit and the requestId that
+ * ties it to the drained permission. `recordDrainedPermission` does not
+ * compensate: it is fire-and-forget async, so its `permission_decided` row
+ * is not yet in the DB when `listEventsTail` runs synchronously here.
+ *
+ * The snapshot is a shallow copy taken at this call: the `PendingPermission`
+ * entries it holds are the same objects, and the cleanup only `.delete()`s
+ * them from the LIVE map — it never mutates the `sessionId` / `toolName` /
+ * `toolInput` fields the capture reads. Keeping the drain in the case body
+ * (F12's guarantee that a hanging runner cancel can't leak the map) and the
+ * evidence complete (this snapshot) are both satisfied, which is the
+ * conflict the inline hook silently lost.
+ */
+export function makeInterruptOnStop(args: {
+  pendingPermissions: Map<string, PendingPermission>;
+  capturedPrompts: Map<string, CapturedPromptEntry>;
+  /**
+   * Test seam: defaults to `executeStoppedAudit`. Injecting it lets a test
+   * observe the `capture` bundle without standing up the audit DB write.
+   */
+  runStoppedAudit?: (input: {
+    sessionId: string;
+    interruptAckId: string;
+    capture: NonNullable<ReturnType<typeof buildSingleAgentForensicsInput>>;
+  }) => void;
+}): (sessionId: string, interruptAckId: string) => void {
+  const parkedAtStop = new Map(args.pendingPermissions);
+  const runStoppedAudit = args.runStoppedAudit ?? ((input) => void executeStoppedAudit(input));
+  return (sessionId, interruptAckId) => {
+    const capture = buildSingleAgentForensicsInput({
+      sessionId,
+      pendingPermissions: parkedAtStop,
+      capturedPrompts: args.capturedPrompts,
+    });
+    if (!capture) {
+      console.warn(
+        `[ws] interrupt onStop: no session/project for ${sessionId}; skipping audit+forensics`,
+      );
+      return;
+    }
+    runStoppedAudit({ sessionId, interruptAckId, capture });
+  };
+}
+
+/**
  * Cluster C Phase 2 (spec §4.2 / §4.5): persist the operator's free-eval
  * reason for a Stop. Validates the inbound `interruptAckId` matches the
  * latest tracked id for the session, enforces the `'other' + reasonText`
@@ -4636,26 +4691,22 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // failure in here just logs — the runner.interrupt + ack
       // envelope still happen so the operator's Stop isn't blocked by
       // a forensics outage.
+      // Cebab-ygu.7: snapshot the parked permissions for the forensic bundle
+      // BEFORE the cleanup drains them. cleanupPendingPermissionsForSession
+      // empties conn.pendingPermissions synchronously, and executeInterrupt
+      // runs onStop in the same tick — so the hook must close over a snapshot
+      // taken here, not read the (now-empty) live map. See makeInterruptOnStop.
+      const onInterruptStop = makeInterruptOnStop({
+        pendingPermissions: conn.pendingPermissions,
+        capturedPrompts: conn.capturedPrompts,
+      });
       cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId);
       executeInterrupt({
         inFlight: conn.inFlight.get(msg.sessionId),
         sessionId: msg.sessionId,
         send: (m) => send(conn.ws, m),
         trackAckId: (sessionId, ackId) => conn.lastInterruptIds.set(sessionId, ackId),
-        onStop: (sessionId, interruptAckId) => {
-          const capture = buildSingleAgentForensicsInput({
-            sessionId,
-            pendingPermissions: conn.pendingPermissions,
-            capturedPrompts: conn.capturedPrompts,
-          });
-          if (!capture) {
-            console.warn(
-              `[ws] interrupt onStop: no session/project for ${sessionId}; skipping audit+forensics`,
-            );
-            return;
-          }
-          executeStoppedAudit({ sessionId, interruptAckId, capture });
-        },
+        onStop: onInterruptStop,
       });
       return;
     }
