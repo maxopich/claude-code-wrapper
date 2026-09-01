@@ -84,6 +84,23 @@ describe('[security][F4] verifyToken', () => {
     expect(verifyToken('x'.repeat(128))).toBe(false);
   });
 
+  test('rejects a same-code-unit-length candidate whose utf8 byte length differs', () => {
+    // Cebab-ygu.23: `String.length` is UTF-16 code units but `timingSafeEqual`
+    // compares utf8 Buffers. The 64-hex-char token has `.length === 64`, and so
+    // does `'é' + 'a'.repeat(63)` — but that candidate is 65 utf8 bytes, so a
+    // `.length`-based guard let it through and `timingSafeEqual` threw
+    // `RangeError: Input buffers must have the same byte length`. In the WS
+    // upgrade gate (arity-2 `verifyClient`, no try/catch in ws) that throw
+    // escaped to the process `uncaughtException` handler and leaked the upgrade
+    // socket instead of returning a clean 401. verifyToken must return false.
+    const tok = initAuthToken();
+    const multibyte = 'é' + 'a'.repeat(tok.length - 1);
+    expect(multibyte.length).toBe(tok.length); // equal in UTF-16 code units...
+    expect(Buffer.byteLength(multibyte, 'utf8')).not.toBe(Buffer.byteLength(tok, 'utf8')); // ...but not in utf8 bytes
+    expect(() => verifyToken(multibyte)).not.toThrow();
+    expect(verifyToken(multibyte)).toBe(false);
+  });
+
   test('rejects a same-length-but-different candidate', () => {
     const tok = initAuthToken();
     const wrong = tok.split('').reverse().join('');

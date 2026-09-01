@@ -157,11 +157,23 @@ export function getAuthToken(): string {
  * Constant-time compare of a candidate token against the in-memory value.
  * Falls back to `false` for null/empty inputs or length mismatch (which
  * `timingSafeEqual` would otherwise throw on).
+ *
+ * The length guard compares BYTE lengths, not `String.length`: the latter
+ * counts UTF-16 code units while `timingSafeEqual` compares the utf8 Buffers,
+ * so a same-code-unit-length candidate carrying any multibyte character (e.g.
+ * `'é' + 'a'.repeat(63)` against a 64-hex-char token — 64 code units, 65 bytes)
+ * would slip past a `.length` check and make `timingSafeEqual` throw
+ * `RangeError: Input buffers must have the same byte length`. That throw
+ * escapes the arity-2 `verifyClient` gate (no try/catch inside ws's
+ * `handleUpgrade`) and leaks the upgrade socket instead of returning 401
+ * (Cebab-ygu.23). Building both Buffers first and comparing `.length` keeps
+ * the guard and the compare on the same units.
  */
 export function verifyToken(candidate: string | null | undefined): boolean {
   if (!token) return false;
-  if (typeof candidate !== 'string' || candidate.length !== token.length) return false;
-  const a = Buffer.from(token);
-  const b = Buffer.from(candidate);
+  if (typeof candidate !== 'string') return false;
+  const a = Buffer.from(token, 'utf8');
+  const b = Buffer.from(candidate, 'utf8');
+  if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
