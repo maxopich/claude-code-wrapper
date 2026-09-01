@@ -2663,7 +2663,7 @@ export function UserPromptInput(props: { onSend: (text: string) => boolean }) {
  */
 export function TopRunBar(props: {
   run: MultiAgentRun;
-  onStop: (sessionId: string) => void;
+  onStop: (sessionId: string) => boolean;
   onDismiss: () => void;
   onLoadSessionLog: (
     sessionId: string,
@@ -2680,10 +2680,20 @@ export function TopRunBar(props: {
   const [stopPending, setStopPending] = useState(false);
   const { gate, requestConfirm } = useConfirmGate();
 
+  // Cebab-ygu.32: reset the optimistic "Stopping…" flag once the run leaves
+  // `running` — the canonical "stop completed" signal, mirroring InputBox's
+  // reset from `isRunning`. Without it a re-mount-free lifecycle (TopRunBar has
+  // no `key`) would carry a stale disabled spinner. The `setStopPending(true)`
+  // below is now gated on a delivered send, so a Stop clicked while the socket
+  // is down never flips the button at all.
+  useEffect(() => {
+    if (!isRunning) setStopPending(false);
+  }, [isRunning]);
+
   function handleStop() {
     if (!isTemp) {
+      if (!props.onStop(run.sessionId)) return;
       setStopPending(true);
-      props.onStop(run.sessionId);
       return;
     }
     const workerCount = isOrchestrator
@@ -2714,8 +2724,8 @@ export function TopRunBar(props: {
       confirmLabel: 'End & clean up',
       danger: true,
       onConfirm: () => {
+        if (!props.onStop(run.sessionId)) return;
         setStopPending(true);
-        props.onStop(run.sessionId);
       },
     });
   }

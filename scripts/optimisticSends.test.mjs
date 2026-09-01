@@ -91,6 +91,10 @@ describe('App.tsx optimistic sends go through sendThenApply (W29, Cebab-u0s)', (
     'continueThroughMutation',
     'answerQuestion',
     'sendControlVerb',
+    // Cebab-ygu.32: TopRunBar's Stop applied its optimistic "Stopping…" state
+    // (disabling the run's only stop control) before an unchecked send. The
+    // send now returns whether it went out and the button gates on it.
+    'stopMultiAgent',
   ];
 
   /** The five control verbs reach the helper via the shared `sendControlVerb`. */
@@ -177,7 +181,7 @@ describe('undeliverable notifications are distinguishable (Cebab-u0s)', () => {
     // fourteen — which is the half most at risk of a copy-paste.
     const keys = [...code.matchAll(/`([a-z_]+_undeliverable):/g)].map((m) => m[1]);
     // Positive control: an assertion over an empty list passes for free.
-    expect(keys.length).toBe(14);
+    expect(keys.length).toBe(15);
     expect(new Set(keys).size).toBe(keys.length);
   });
 
@@ -191,6 +195,7 @@ describe('undeliverable notifications are distinguishable (Cebab-u0s)', () => {
       ['abandonSession', 'abandon_session_undeliverable'],
       ['continueThroughMutation', 'continue_through_mutation_undeliverable'],
       ['answerQuestion', 'ask_user_answer_undeliverable'],
+      ['stopMultiAgent', 'stop_multi_agent_undeliverable'],
     ]) {
       expect(bodyOf(code, name), `${name} not found`).toContain(key);
     }
