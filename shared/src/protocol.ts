@@ -197,12 +197,16 @@ export const RESULT_SUBTYPES: ReadonlySet<ResultSubtype> = new Set([
  * `client_disconnected` — the socket closed with the card still open.
  * `interrupted` — the operator stopped the turn, which drains the session's
  * pending requests along with it.
+ * `turn_ended` — (Cebab-ygu.8) the turn itself died with the card still open:
+ * a crashed subprocess, a parse_error, an auth lapse. The socket is still up
+ * and nobody interrupted anything, so this is neither of the two above — and
+ * recording it as `interrupted` would falsely claim the operator hit Stop.
  *
- * Both deny. The distinction exists because the transcript is read later, and
+ * All deny. The distinction exists because the transcript is read later, and
  * "you denied this" and "this was denied for you" are different facts about
  * the same tool call.
  */
-export type PermissionDecisionReason = 'client_disconnected' | 'interrupted';
+export type PermissionDecisionReason = 'client_disconnected' | 'interrupted' | 'turn_ended';
 
 /**
  * Why a turn ended badly.
@@ -2299,9 +2303,9 @@ export type ServerMsg =
        * Absent means the operator answered the card — the only case that
        * existed before. Present means Cebab resolved the request on their
        * behalf because the request could no longer be answered: the socket
-       * closed, or the turn was interrupted. Both drain paths deny, and
-       * without this the transcript would claim the operator denied a tool
-       * call they never saw.
+       * closed, the turn was interrupted, or the turn died mid-permission
+       * (Cebab-ygu.8). Every drain path denies, and without this the
+       * transcript would claim the operator denied a tool call they never saw.
        *
        * Optional so replays of rows written before this field still render,
        * the same reason `permission_request` carries `category?` / `summary?`.

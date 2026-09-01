@@ -294,10 +294,13 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
           sessionId,
           requestId: w.requestId,
           decision: w.decision,
-          // Register S06: only the drain paths write a reason, and only rows
-          // written after S06 have one — hence the spread. An operator-made
-          // decision has none, which is exactly what its absence means.
-          ...(w.reason === 'client_disconnected' || w.reason === 'interrupted'
+          // Register S06 (+ Cebab-ygu.8 `turn_ended`): only the drain paths
+          // write a reason, and only rows written after S06 have one — hence the
+          // spread. An operator-made decision has none, which is exactly what
+          // its absence means.
+          ...(w.reason === 'client_disconnected' ||
+          w.reason === 'interrupted' ||
+          w.reason === 'turn_ended'
             ? { reason: w.reason }
             : {}),
         };
