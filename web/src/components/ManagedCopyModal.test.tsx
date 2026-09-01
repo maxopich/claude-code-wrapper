@@ -204,6 +204,69 @@ describe('ManagedCopyModal — running and finishing', () => {
   });
 });
 
+describe('ManagedCopyModal — a copy in flight cannot be dismissed (Cebab-ygu.31)', () => {
+  function renderWith(s: ManagedCopyState, onClose: () => void): void {
+    act(() => {
+      root.render(
+        <ManagedCopyModal projectName="Cebab" state={s} onConfirm={() => {}} onClose={onClose} />,
+      );
+    });
+  }
+
+  const buttonLabels = () => [...container.querySelectorAll('button')].map((b) => b.textContent);
+
+  test('no "Cancel" while copying — there is no cancel verb on the wire, so it would cancel nothing', () => {
+    renderWith(state({ status: 'copying', progress: null }), () => {});
+    // The only control left is the disabled progress button; nothing offers to
+    // dismiss, because dismissing only discards the pending result.
+    expect(buttonLabels()).not.toContain('Cancel');
+  });
+
+  test('Escape closes when ready but is inert while copying', () => {
+    // Positive control: the same key path DOES close before the copy starts,
+    // so an inert Escape while copying is the guard, not a broken listener.
+    const onCloseReady = vi.fn();
+    renderWith(state({ status: 'ready' }), onCloseReady);
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(onCloseReady).toHaveBeenCalledTimes(1);
+
+    const onCloseCopying = vi.fn();
+    renderWith(state({ status: 'copying', progress: null }), onCloseCopying);
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(onCloseCopying).not.toHaveBeenCalled();
+  });
+
+  test('a backdrop click does not close while copying', () => {
+    const onClose = vi.fn();
+    renderWith(state({ status: 'copying', progress: null }), onClose);
+    const overlay = container.querySelector('.gate-modal-overlay')!;
+    act(() => {
+      overlay.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  test('the failure the operator would otherwise never see is shown once the copy resolves', () => {
+    const onClose = vi.fn();
+    // The copy runs — the modal is now undismissable...
+    renderWith(state({ status: 'copying', progress: null }), onClose);
+    // ...then fails. Because the modal stayed open through the copy, the result
+    // lands in an open modal (rather than being dropped by the reducer against a
+    // null `managedCopy`) and the server's error text renders.
+    renderWith(
+      state({ status: 'done', result: { ok: false, error: 'permission denied' } }),
+      onClose,
+    );
+    expect(container.textContent).toContain('permission denied');
+    // And the dismiss control is back, now honestly labelled.
+    expect(buttonLabels()).toContain('Done');
+  });
+});
+
 describe('formatSize', () => {
   test('reads as a person would say it', () => {
     expect(formatSize(0)).toBe('0 B');
