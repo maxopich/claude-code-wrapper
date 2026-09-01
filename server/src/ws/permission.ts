@@ -25,8 +25,26 @@ export const FILE_EDIT_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'N
  * strip tools before the callback ever sees them, and a full-bypass permission
  * mode skips the callback entirely (a branch single-agent runs never take).
  * What IS true, and all this function relies on, is that acceptEdits' auto-allow
- * is now Cebab's to implement — so this is the ONLY place auto-allow lives for
- * single-agent runs, and `Options.permissionMode` does not grant it by itself.
+ * is now Cebab's to implement — so this is the only place *Cebab* auto-allows
+ * for single-agent runs, and `Options.permissionMode` does not grant it by
+ * itself.
+ *
+ * But do NOT read that as "a `false` return guarantees a permission card". The
+ * CLI still settles some tool calls before `canUseTool` is ever consulted, and
+ * those paths are not gated here:
+ *   • `permissions.allow` rules in any LOADED settings file. The SDK ships this
+ *     warning verbatim (builder `XEe` in `sdk.mjs`): "Allow rules from settings
+ *     files can also shadow the callback but are not visible here." This is NOT
+ *     Trust-gated — an untrusted project still loads `~/.claude/settings.json`
+ *     under `settingSources: ['user']`, so a user-scope `"allow": ["Bash(*)"]`
+ *     shadows the callback on every project, trusted or not.
+ *   • The CLI's in-cwd read heuristic — measured in this repo: 83 `tool_use`
+ *     Reads produced only 78 `permission_request` records across 25 real
+ *     transcripts at `permissionMode: 'default'`, the 5 missing being exactly
+ *     the reads inside the run's `cwd`.
+ * On both paths the `tool_use` block still renders (the intended signal), but no
+ * card is issued and no `permission_auto_allowed` wrapper event is persisted, so
+ * the replay carries no record of the bypass. See `project_canusetool_not_universal`.
  *
  * WHY `'default'` IS CHECKED FIRST (Cebab-ws0.14). This used to open with
  * `if (trusted) return true`, so Trust short-circuited the mode entirely and a
