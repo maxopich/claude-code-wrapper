@@ -2057,8 +2057,36 @@ function AppShell({
       ...(Object.keys(draftRoles).length > 0 ? { roles: draftRoles } : {}),
     });
   }
-  function stopMultiAgent(sessionId: string) {
-    wsRef.current?.send({ type: 'stop_multi_agent', sessionId });
+  /**
+   * Cebab-ygu.32: returns whether the stop actually went out, because
+   * `TopRunBar` disables its only Stop button and relabels it "Stopping…" the
+   * moment this is called. An unchecked send meant a Stop clicked while the
+   * socket was down left the run running with the sole control frozen on a
+   * disabled spinner — the operator's only recovery was a page reload. The
+   * button now gates its optimistic state on this boolean, and a dropped send
+   * tells the operator instead of vanishing into the console.
+   */
+  function stopMultiAgent(sessionId: string): boolean {
+    return sendThenApply({
+      send: () => wsRef.current?.send({ type: 'stop_multi_agent', sessionId }) === true,
+      // Nothing optimistic here — the reducer flips the run out of `running`
+      // on the server's teardown events. The button's "Stopping…" state is the
+      // caller's, gated on the boolean this returns.
+      apply: () => {},
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `stop_multi_agent_undeliverable:${sessionId}`,
+          title: 'Stop not sent',
+          message:
+            'Cebab is not connected, so the run was never asked to stop. ' +
+            'It is still running — try Stop again once the connection is back.',
+          sticky: false,
+        }),
+    });
   }
   function resumeSession(sessionId: string) {
     // Pure WS round-trip; success arrives as `multi_agent_started` (the

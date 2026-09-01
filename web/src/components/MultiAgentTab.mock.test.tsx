@@ -69,12 +69,12 @@ describe('TopRunBar — MockBadge mount predicate', () => {
   // Stop/Close behaviour). TS allows wider-domain (zero-arg) functions to
   // satisfy narrower parameter types, so we keep the stub bodies empty.
   const stubProps: {
-    onStop: (id: string) => void;
+    onStop: (id: string) => boolean;
     onDismiss: () => void;
     onLoadSessionLog: (id: string, o: number, l: number, r: boolean) => void;
     subscribeServerMsg: (cb: (msg: ServerMsg) => void) => () => void;
   } = {
-    onStop: () => {},
+    onStop: () => false,
     onDismiss: () => {},
     onLoadSessionLog: () => {},
     subscribeServerMsg: () => () => {},
