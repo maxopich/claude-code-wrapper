@@ -11,11 +11,13 @@ import { appendSafetyAudit, type SafetyAuditInput } from '../notifications/safet
 import { appendForensics } from '../repo/controllability_forensics.js';
 import {
   captureMultiAgentForensics,
+  MULTI_AGENT_EVENTS_CAP,
   toBusEventPreview,
 } from '../notifications/forensic_snapshot.js';
 import {
+  countMultiAgentEvents,
   getMultiAgentSession,
-  listMultiAgentEvents,
+  listMultiAgentEventsForAgent,
   listMultiAgentMutations,
   listResolvedParticipants,
 } from '../repo/multi_agent.js';
@@ -1158,10 +1160,16 @@ function persistKickForensics(args: {
   now: () => number;
 }): void {
   try {
-    const allEvents = listMultiAgentEvents(args.sessionId);
-    const agentEvents = allEvents
-      .filter((e) => e.source === args.agentSlug || e.destination === args.agentSlug)
-      .map(toBusEventPreview);
+    // `Cebab-3nt`: ask SQL for this agent's last CAP events and the session's
+    // total, rather than loading every event row into JS to filter and count.
+    // A long orchestrator run otherwise materialised its whole transcript on
+    // every kick to keep at most fifty rows plus a `.length`.
+    const agentEvents = listMultiAgentEventsForAgent(
+      args.sessionId,
+      args.agentSlug,
+      MULTI_AGENT_EVENTS_CAP,
+    ).map(toBusEventPreview);
+    const totalSessionEvents = countMultiAgentEvents(args.sessionId);
     const allMutations = listMultiAgentMutations(args.sessionId);
     const agentMutations = allMutations
       .filter((m) => m.agentName === args.agentSlug)
@@ -1180,7 +1188,7 @@ function persistKickForensics(args: {
       projectCwd: args.projectCwd,
       agentBusEvents: agentEvents,
       agentMutations,
-      totalSessionEvents: allEvents.length,
+      totalSessionEvents,
       now: args.now,
     });
     args.appendForensicsFn({
