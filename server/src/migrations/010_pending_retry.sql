@@ -3,6 +3,14 @@
 -- turn (chain or orchestrator mode), and so a Cebab server restart preserves
 -- the Retry/Abandon affordance via R-B reconstruction.
 --
+-- SUPERSEDED by migration 041 (Cebab-ygu.2). The "Columns vs. child table"
+-- note below claims "only one worker can be in the pending-retry slot at a
+-- time" — false in orchestrator mode, where a mandated N-way fan-out means two
+-- workers can fail concurrently and the second's single-row UPDATE overwrote
+-- the first's retry. Pending retries are now per-agent rows in
+-- `multi_agent_pending_retries`; these five columns are no longer read or
+-- written (left in place — dropping a column rewrites the table).
+--
 -- Background: today both routers' deliverTurn .catch() collapses every worker
 -- failure into `teardown('crashed')` and the operator sees only a red "Lost"
 -- status pill — no agent name, no reason, no way to recover. With these five

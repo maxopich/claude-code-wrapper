@@ -37,6 +37,7 @@ import {
   appendMultiAgentMutation,
   addParticipant,
   clearPendingMutations,
+  clearPendingRetry,
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
@@ -56,6 +57,7 @@ import {
   type EventKind,
   type MultiAgentLifecycle,
   type MutationRecord,
+  type PendingRetry,
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
 import type { BashClassifierReason } from '@cebab/shared';
@@ -125,6 +127,22 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 /** Bus agent name for the orchestrator. Reserved; no project may use it. */
 export const ORCHESTRATOR_AGENT_NAME = 'orchestrator';
+
+/**
+ * Map a persisted `PendingRetry` (repo shape) to the wire `PendingRetryDescriptor`
+ * — the only difference is `prompt` → `lastPrompt`. Used to emit whichever slot
+ * is now at the FRONT of the per-agent queue (migration 041) after a failure,
+ * retry, or recovery moves it.
+ */
+function pendingRetryToDescriptor(p: PendingRetry): PendingRetryDescriptor {
+  return {
+    agentName: p.agentName,
+    reason: p.reason,
+    lastPrompt: p.prompt,
+    ts: p.ts,
+    errorEventId: p.errorEventId,
+  };
+}
 
 /**
  * Hard cap on total persisted hops (`multi_agent_events` rows) per session,
@@ -1458,6 +1476,8 @@ export function createOrchestratorRouter(params: {
       errorEventId,
     };
     try {
+      // Per-agent upsert (migration 041): a concurrent second worker failure
+      // parks its OWN slot instead of overwriting this one.
       setPendingRetry(sessionId, {
         agentName,
         prompt,
@@ -1469,7 +1489,11 @@ export function createOrchestratorRouter(params: {
       console.error('[orchestrator] persist pending-retry failed', dbErr);
     }
     try {
-      sink.onPendingRetry?.(sessionId, descriptor);
+      // Emit the FRONT of the queue, not necessarily the just-failed agent: if
+      // an earlier failure is still pending its banner stays put, and this
+      // failure waits its turn (surfaced once the front is retried/cleared).
+      const front = getPendingRetry(sessionId);
+      sink.onPendingRetry?.(sessionId, front ? pendingRetryToDescriptor(front) : descriptor);
     } catch (sinkErr) {
       console.error('[orchestrator] onPendingRetry callback threw', sinkErr);
     }
@@ -1483,13 +1507,16 @@ export function createOrchestratorRouter(params: {
   const onTurnSucceeded = (agentName: string) => {
     if (ended) return;
     try {
-      const pending = getPendingRetry(sessionId);
-      if (!pending || pending.agentName !== agentName) return;
-      setPendingRetry(sessionId, null);
+      const front = getPendingRetry(sessionId);
+      if (!front || front.agentName !== agentName) return;
+      // Reap only THIS agent's slot (migration 041) so a sibling's queued retry
+      // survives, then promote whatever is now at the front onto the wire.
+      clearPendingRetry(sessionId, agentName);
+      const next = getPendingRetry(sessionId);
       try {
-        sink.onPendingRetry?.(sessionId, null);
+        sink.onPendingRetry?.(sessionId, next ? pendingRetryToDescriptor(next) : null);
       } catch (sinkErr) {
-        console.error('[orchestrator] turn-succeeded onPendingRetry-null threw', sinkErr);
+        console.error('[orchestrator] turn-succeeded onPendingRetry threw', sinkErr);
       }
     } catch (err) {
       console.error('[orchestrator] clear pending-retry on success failed', err);
@@ -2483,16 +2510,19 @@ export function wireOrchestratorSession(p: {
       if (refused === 'kicked') {
         // The worker is gone for good (kick is irreversible), so its
         // pending-retry banner is offering something that can never happen.
-        // Clear it — the operator already has the refusal in scrollback.
+        // Clear just this agent's slot (a sibling's queued retry is still
+        // valid) and promote the next front — the operator already has the
+        // refusal in scrollback.
         try {
-          setPendingRetry(sessionId, null);
+          clearPendingRetry(sessionId, pending.agentName);
         } catch (err) {
           console.error('[orchestrator] clear pending-retry for kicked agent failed', err);
         }
         try {
-          p.onPendingRetry?.(sessionId, null);
+          const next = getPendingRetry(sessionId);
+          p.onPendingRetry?.(sessionId, next ? pendingRetryToDescriptor(next) : null);
         } catch (err) {
-          console.error('[orchestrator] kicked-retry onPendingRetry-null callback threw', err);
+          console.error('[orchestrator] kicked-retry onPendingRetry callback threw', err);
         }
         return;
       }
@@ -2500,19 +2530,22 @@ export function wireOrchestratorSession(p: {
       // down). The slot stays as it is — teardown owns what happens to it, and
       // an ended session's banners are not this function's to reap.
       if (refused) return;
-      // Clear the slot BEFORE re-delivery so a racing second click sees the
-      // empty slot. A re-fail re-enters `onWorkerFailed`, which re-asserts
-      // a fresh descriptor and re-emits the `multi_agent_pending_retry`
-      // ServerMsg.
+      // Clear THIS agent's slot BEFORE re-delivery so a racing second click
+      // sees a different front (or none) rather than double-firing the same
+      // agent. Promote whatever is now at the front onto the wire — a sibling's
+      // queued retry surfaces here rather than being wiped. A re-fail re-enters
+      // `onWorkerFailed`, which re-parks this agent (at the back of the queue,
+      // by fresh `ts`) and re-emits the front.
       try {
-        setPendingRetry(sessionId, null);
+        clearPendingRetry(sessionId, pending.agentName);
       } catch (err) {
         console.error('[orchestrator] clear pending-retry on retry failed', err);
       }
       try {
-        p.onPendingRetry?.(sessionId, null);
+        const next = getPendingRetry(sessionId);
+        p.onPendingRetry?.(sessionId, next ? pendingRetryToDescriptor(next) : null);
       } catch (err) {
-        console.error('[orchestrator] retry onPendingRetry-null callback threw', err);
+        console.error('[orchestrator] retry onPendingRetry callback threw', err);
       }
       // Re-call `deliver` so the activity observer / liveness ticks see
       // the new turn. The agent's `briefed` Set is already populated by
