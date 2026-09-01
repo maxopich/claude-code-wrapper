@@ -1090,7 +1090,17 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // operator can still see total denies for the current surface, which is
   // the most-asked question. A future enhancement could surface "denied
   // but no longer on surface" as its own row when that edge case matters.
-  const tally = tallyToolUsage(input.projectId);
+  //
+  // Cebab-8ml: guarded on a non-empty tool surface. The tally only ever
+  // decorates `tools`, which is empty whenever there is no cached SDK
+  // snapshot (`initTools = []`) — the common case on the pre-spawn gate
+  // (`gateProjectsForSpawn`, before every single spawn). The walk itself is
+  // unbounded in project history (`listSessionsForProject`, then a SELECT
+  // over every event row of every session, JSON.parsed per row), so running
+  // it to decorate nothing was pure waste that grew with how long the
+  // project had been used. Nothing downstream changes: the loop below is a
+  // no-op over an empty `tools`, so an empty tally is byte-identical output.
+  const tally: ToolUsageTally = initTools.length > 0 ? tallyToolUsage(input.projectId) : new Map();
   for (const tool of tools) {
     const counts = tally.get(tool.name);
     if (!counts) continue;

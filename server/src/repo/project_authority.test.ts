@@ -983,6 +983,70 @@ describe('resolveProjectAuthority — Phase 10 usage-diff enrichment', () => {
     // Read has no tally entry → counts undefined; sanity check.
     expect(out!.tools[0].calledCount).toBeUndefined();
   });
+
+  // Cebab-8ml: the tally is an unbounded walk over the project's whole event
+  // history, and it only ever decorates `tools`. When there is no cached SDK
+  // snapshot the tool surface is empty — the common case on the pre-spawn gate
+  // (`gateProjectsForSpawn`, before every single spawn) — so running the walk
+  // to decorate nothing is pure waste. We assert on the ABSENCE of the tally's
+  // own SELECT rather than the output, which is byte-identical either way: its
+  // `FROM events` is unique to it (`listSessionsForProject` reads `sessions`),
+  // so a `prepare` interceptor sees exactly whether the walk happened.
+  function eventSelectHappened(run: () => void): boolean {
+    const db = getDb() as unknown as { prepare: (sql: string) => unknown };
+    const original = db.prepare.bind(db);
+    const sqls: string[] = [];
+    db.prepare = (sql: string) => {
+      sqls.push(sql);
+      return original(sql);
+    };
+    try {
+      run();
+    } finally {
+      db.prepare = original;
+    }
+    return sqls.some((q) => /FROM events/i.test(q));
+  }
+
+  test('Cebab-8ml: empty tool surface skips the event-history walk entirely', () => {
+    const s = createSession('s-8ml-skip', projectId).id;
+    // History exists precisely so a walk WOULD find something to do.
+    insertEvent(
+      s,
+      nextSeq(s),
+      'assistant',
+      null,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Read' }] },
+      }),
+    );
+    // No latestSessionStarted → initTools = [] → nothing to decorate.
+    const walked = eventSelectHappened(() => resolveProjectAuthority({ projectId, mode: 'cache' }));
+    expect(walked).toBe(false);
+  });
+
+  test('Cebab-8ml: non-empty tool surface still walks the event history (control)', () => {
+    const s = createSession('s-8ml-walk', projectId).id;
+    insertEvent(
+      s,
+      nextSeq(s),
+      'assistant',
+      null,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', name: 'Read' }] },
+      }),
+    );
+    const walked = eventSelectHappened(() =>
+      resolveProjectAuthority({
+        projectId,
+        mode: 'cache',
+        latestSessionStarted: { tools: ['Read'] },
+      }),
+    );
+    expect(walked).toBe(true);
+  });
 });
 
 // ---- [security] bus scope parity ----
