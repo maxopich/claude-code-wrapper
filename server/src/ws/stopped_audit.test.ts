@@ -8,10 +8,14 @@ import { captureSingleAgentForensics } from '../notifications/forensic_snapshot.
 import { getForensicsByAuditId } from '../repo/controllability_forensics.js';
 import {
   buildSingleAgentForensicsInput,
+  cleanupPendingPermissionsForSession,
   executeInterrupt,
   executeStoppedAudit,
+  makeInterruptOnStop,
   type PendingPermission,
 } from './server.js';
+import { upsertProject } from '../repo/projects.js';
+import { createSession } from '../repo/sessions.js';
 
 // Cluster C Phase 3: integration tests for the Stop forensic-bundle path.
 // - executeStoppedAudit: writes session.stopped row + forensics row in
@@ -305,5 +309,62 @@ describe('buildSingleAgentForensicsInput — orchestration seam', () => {
       fetchPermissionMode: () => null,
     });
     expect(result?.activePermissions).toEqual({ trusted: false, permissionMode: null });
+  });
+});
+
+// Cebab-ygu.7: the interrupt case body drains conn.pendingPermissions (F12
+// map-hygiene) synchronously and then runs onStop in the SAME tick. An onStop
+// that read the live map would see it emptied, so pendingToolCalls in the Stop
+// bundle was structurally always null. makeInterruptOnStop snapshots the parked
+// permissions at construction time (before the caller drains), which is the
+// ordering the case body relies on.
+describe('makeInterruptOnStop — snapshots parked permissions before the drain', () => {
+  test('pendingToolCalls names the parked tool even though cleanup drained the map first', () => {
+    // Real session + project so the (un-seamed) buildSingleAgentForensicsInput
+    // resolves against the DB, exactly as the case body invokes it.
+    const project = upsertProject('interrupt-forensics-proj', tmpRoot);
+    createSession('sess-1', project.id, null);
+
+    const pending: Map<string, PendingPermission> = new Map();
+    pending.set('req-parked', {
+      sessionId: 'sess-1',
+      resolve: () => undefined,
+      toolInput: { command: 'rm -rf build/' },
+      toolName: 'Bash',
+    });
+
+    let captured: NonNullable<ReturnType<typeof buildSingleAgentForensicsInput>> | undefined;
+    const onStop = makeInterruptOnStop({
+      pendingPermissions: pending,
+      capturedPrompts: new Map(),
+      runStoppedAudit: ({ capture }) => {
+        captured = capture;
+      },
+    });
+
+    // Reproduce the case-body ordering: drain the LIVE map, then run onStop.
+    // The recorder is stubbed to a resolved promise so no JSONL handle is held.
+    cleanupPendingPermissionsForSession(pending, 'sess-1', () => Promise.resolve());
+    expect(pending.size).toBe(0); // the map a live-reading onStop would see is empty
+
+    onStop('sess-1', 'ack-1');
+
+    expect(captured).toBeDefined();
+    // The one field the bug always nulled: the parked Bash call and its input.
+    expect(captured?.pendingToolCalls).toEqual([
+      { requestId: 'req-parked', toolName: 'Bash', toolInput: { command: 'rm -rf build/' } },
+    ]);
+  });
+
+  test('skips audit + warns when the session/project cannot be resolved', () => {
+    const runStoppedAudit = vi.fn();
+    const onStop = makeInterruptOnStop({
+      pendingPermissions: new Map(),
+      capturedPrompts: new Map(),
+      runStoppedAudit,
+    });
+    onStop('sess-unknown', 'ack-1');
+    expect(runStoppedAudit).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalled();
   });
 });
