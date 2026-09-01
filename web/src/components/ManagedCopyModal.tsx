@@ -71,6 +71,8 @@ export function skipLabel(reason: ManagedCopySkip['reason']): string {
       return 'copied, but its permissions could not be tightened';
     case 'unreadable_dir':
       return 'directory could not be read — its contents were not copied';
+    case 'copy_failed':
+      return 'could not be copied (changed or removed mid-copy) — the rest was copied';
   }
 }
 

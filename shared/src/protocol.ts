@@ -4285,7 +4285,17 @@ export type ManagedCopySkipReason =
    * an empty destination directory inside a copy that claimed success with no
    * skip — a silently incomplete snapshot the operator believes is faithful.
    */
-  | 'unreadable_dir';
+  | 'unreadable_dir'
+  /**
+   * Cebab-ygu.14: a file or directory `walkTree` enumerated but the copy could
+   * not write — an ENOENT from a file removed between the walk's lstat and the
+   * `copyFile` (a churning build cache, a `git gc` pack), an EACCES, an ENOSPC,
+   * or a failed `mkdir`. Reported per entry rather than aborting: before this,
+   * one such transient error threw out of the copy loop and the whole partial
+   * target — potentially gigabytes — was deleted and the copy failed. The entry
+   * did not arrive; the rest of the snapshot did.
+   */
+  | 'copy_failed';
 
 export type ManagedCopySkip = { rel: string; reason: ManagedCopySkipReason };
 
