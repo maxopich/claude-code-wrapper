@@ -246,6 +246,16 @@ export async function* walkTree(
  * subtree left the destination directory empty while the copy claimed success
  * with no skip, and the operator pointed a worker at a snapshot missing state
  * it believed complete.
+ *
+ * `copy_failed` (Cebab-ygu.14) is a file or directory `walkTree` enumerated but
+ * the copy could not write: an ENOENT from a file removed between `walkTree`'s
+ * lstat and `copyFile` (a churning cache file), an EACCES, an ENOSPC, or an
+ * mkdir failure. Before this it had no skip because the file/dir branches had no
+ * per-entry guard at all — the throw escaped into `runManagedCopy`, which
+ * removed the whole partial target and reported failure, so one transient error
+ * on one file discarded a multi-gigabyte copy. Tolerate-and-report matches the
+ * policy `walkTree` already uses for a failed `readdir` and the symlink branch
+ * uses for an unrecreatable link; the entry that could not be written is named.
  */
 export type SkipReason =
   | 'symlink_escapes'
@@ -253,7 +263,8 @@ export type SkipReason =
   | 'symlink_unsupported'
   | 'excluded_vcs'
   | 'permissions_unenforced'
-  | 'unreadable_dir';
+  | 'unreadable_dir'
+  | 'copy_failed';
 
 export type Skip = { rel: string; reason: SkipReason };
 
@@ -490,11 +501,34 @@ export async function copyTree(
     const dest = path.join(target, ...entry.rel.split('/'));
     switch (entry.kind) {
       case 'dir':
-        await secureMkdirAsync(dest);
+        try {
+          await secureMkdirAsync(dest);
+        } catch {
+          // A directory the copy could not create (ENOSPC, EACCES, or an
+          // ENOTDIR/ENOENT because its own parent failed just above). Reported,
+          // not fatal — see below. Its children arrive next in the walk and,
+          // finding no parent, each report their own `copy_failed` in turn.
+          result.skips.push({ rel: entry.rel, reason: 'copy_failed' });
+          break;
+        }
         result.dirs += 1;
         break;
       case 'file': {
-        await fsp.copyFile(entry.abs, dest);
+        try {
+          await fsp.copyFile(entry.abs, dest);
+        } catch {
+          // Cebab-ygu.14: the file was enumerated by `walkTree` but the copy
+          // could not write it — most often an ENOENT because it was rewritten
+          // and unlinked between the walk's lstat and this `copyFile` (a build
+          // cache, a `git gc` pack), also EACCES/ENOSPC/ENOTDIR. Without this
+          // guard the rejection escaped the loop into `runManagedCopy`, which
+          // removed the entire partial target and failed the copy — one churned
+          // cache file discarding gigabytes of finished I/O. Tolerate and report
+          // instead, exactly as `walkTree` does for a failed `readdir`: the file
+          // is not counted, so `files`/`bytes` and progress stay honest.
+          result.skips.push({ rel: entry.rel, reason: 'copy_failed' });
+          break;
+        }
         if (modesApply()) {
           // Two modes, and the difference is the point (Cebab-ws0.11).
           //

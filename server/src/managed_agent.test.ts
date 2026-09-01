@@ -225,6 +225,41 @@ describe('managed_agent — the copy', () => {
     const result = await copyTree(src, await claimManagedDir('weird'));
     expect(result.skips).toEqual([]);
   });
+
+  test('a single file the copy cannot write is reported, not fatal to the whole copy (Cebab-ygu.14)', async () => {
+    // The failure scenario: a file `walkTree` enumerated is rewritten and
+    // unlinked before `copyFile` reaches it (a build cache, a `git gc` pack),
+    // so `copyFile` rejects with ENOENT. Before this bead the file/dir branches
+    // had no per-entry guard, so that one rejection escaped the loop into
+    // `runManagedCopy`, which deleted the entire partial target and failed —
+    // one churned cache file discarding a multi-gigabyte copy.
+    const src = path.join(tmp.root(), 'churn');
+    write(path.join(src, 'a.txt'), 'first');
+    write(path.join(src, 'cache.pack'), 'volatile');
+    write(path.join(src, 'z.txt'), 'last');
+
+    const realCopyFile = fsp.copyFile;
+    (fsp as unknown as { copyFile: unknown }).copyFile = ((from: string, to: string) =>
+      String(from).endsWith('cache.pack')
+        ? Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }))
+        : (realCopyFile as (a: string, b: string) => Promise<void>)(from, to)) as unknown;
+
+    let result;
+    try {
+      result = await copyTree(src, await claimManagedDir('churn'));
+    } finally {
+      (fsp as unknown as { copyFile: unknown }).copyFile = realCopyFile;
+    }
+
+    // The churned file is named as a skip rather than aborting...
+    expect(result.skips).toEqual([{ rel: 'cache.pack', reason: 'copy_failed' }]);
+    // ...it is not counted, so the totals stay honest...
+    expect(result.files).toBe(2);
+    // ...and the rest of the snapshot arrived instead of being torn down.
+    expect(fs.existsSync(path.join(result.target, 'a.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(result.target, 'z.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(result.target, 'cache.pack'))).toBe(false);
+  });
 });
 
 describe('managed_agent — symlinks', () => {
