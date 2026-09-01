@@ -100,6 +100,33 @@ describe('[security] tail truncation is detected', () => {
     expect(after.reason).toBe('tail_truncated');
   });
 
+  test('a truncation is NOT healed by the next safety event (Cebab-ygu.21)', () => {
+    // The self-heal defect. `readLatestAuditTip` consulted only the newest line,
+    // so the first ordinary append after a truncation re-committed a `count`
+    // recomputed from the already-shortened table (here 1). Reading only that
+    // line found the surviving chain no shorter than its own post-truncation
+    // commitment and reported clean — one DELETE plus one wait (or any trust
+    // decision the attacker triggers themselves) erased the trail without ever
+    // touching the mirror. The fix takes the HIGH-WATER count for the current
+    // anchor, which a smaller later commitment cannot lower.
+    appendRows(5);
+    expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 5 });
+
+    truncateTail();
+    expect(verifyChain()).toMatchObject({ ok: false, reason: 'tail_truncated' });
+
+    // The healing append: an ordinary safety event, count recomputed as 1.
+    appendRows(1);
+    const tail = readLatestAuditTip();
+    expect(tail!.count).toBe(1); // the newest line really does commit to only 1
+    // The mirror still holds the count:5 commitment for this anchor, so the
+    // truncation is still caught rather than blessed.
+    const after = verifyChain();
+    expect(after.ok).toBe(false);
+    if (after.ok) return;
+    expect(after.reason).toBe('tail_truncated');
+  });
+
   test('a fresh migration anchor above the mirrored tip is not truncation', () => {
     // The false-alarm-in-the-other-direction that the raw `!rows.some(...)`
     // check produced. Any future migration that ALTERs safety_audit inserts a
