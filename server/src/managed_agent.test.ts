@@ -337,6 +337,69 @@ describe('managed_agent — symlinks', () => {
   });
 });
 
+describe('managed_agent — unreadable directories (Cebab-ygu.13)', () => {
+  const tmp = withTempDataDir('managed-unreadable');
+
+  // Root sees through mode 0o000, so the readdir never fails there and the case
+  // is vacuous. Windows carries no such mode either.
+  const cannotReadZeroMode = process.platform === 'win32' || process.getuid?.() === 0;
+
+  test.skipIf(cannotReadZeroMode)(
+    'a subdirectory readdir cannot enter is reported by the survey and the copy, not silently dropped',
+    async () => {
+      const src = path.join(tmp.root(), 'src');
+      write(path.join(src, 'keep.txt'), 'x');
+      // A file the copy will silently leave behind unless the unreadable parent
+      // is turned into a reported skip.
+      write(path.join(src, 'data', 'secret.txt'), 'sensitive');
+      const sealed = path.join(src, 'data');
+      fs.chmodSync(sealed, 0o000);
+      try {
+        const survey = await surveyTree(src);
+        // The dir itself is still seen (its parent's readdir yielded it); only
+        // its CONTENTS are unreachable, so the file inside is not counted...
+        expect(survey.files).toBe(1);
+        // ...and the omission is reported rather than left silent.
+        expect(survey.skips).toContainEqual({ rel: 'data', reason: 'unreadable_dir' });
+
+        const target = await claimManagedDir('unreadable');
+        const result = await copyTree(src, target);
+        expect(result.files).toBe(1);
+        expect(result.skips).toContainEqual({ rel: 'data', reason: 'unreadable_dir' });
+        // The destination directory exists (created from its own `dir` entry)
+        // but is empty — exactly the silently-incomplete snapshot the skip now
+        // warns about, no longer reported as a faithful copy.
+        expect(fs.existsSync(path.join(target, 'data'))).toBe(true);
+        expect(fs.readdirSync(path.join(target, 'data'))).toEqual([]);
+        expect(fs.existsSync(path.join(target, 'keep.txt'))).toBe(true);
+      } finally {
+        // Restore so the temp-dir teardown can recurse in and remove it.
+        fs.chmodSync(sealed, 0o755);
+      }
+    },
+  );
+
+  test.skipIf(cannotReadZeroMode)(
+    'an unreadable ROOT source is reported rather than copied as an empty success',
+    async () => {
+      const src = path.join(tmp.root(), 'rootless');
+      write(path.join(src, 'file.txt'), 'x');
+      fs.chmodSync(src, 0o000);
+      try {
+        const survey = await surveyTree(src);
+        expect(survey.files).toBe(0);
+        expect(survey.skips).toEqual([{ rel: '', reason: 'unreadable_dir' }]);
+
+        const result = await copyTree(src, await claimManagedDir('rootless'));
+        expect(result.files).toBe(0);
+        expect(result.skips).toEqual([{ rel: '', reason: 'unreadable_dir' }]);
+      } finally {
+        fs.chmodSync(src, 0o755);
+      }
+    },
+  );
+});
+
 describe('managed_agent — removeManagedDir', () => {
   const tmp = withTempDataDir('managed-remove');
 

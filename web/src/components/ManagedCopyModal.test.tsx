@@ -141,6 +141,7 @@ describe('ManagedCopyModal — skips are named, not counted away', () => {
       'symlink_unsupported',
       'excluded_vcs',
       'permissions_unenforced',
+      'unreadable_dir',
     ] as const) {
       expect(skipLabel(reason).length).toBeGreaterThan(10);
     }
