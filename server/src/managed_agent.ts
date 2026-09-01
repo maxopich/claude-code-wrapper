@@ -104,6 +104,7 @@ export type WalkEntry =
   | { kind: 'file'; abs: string; rel: string; size: number; mode: number }
   | { kind: 'symlink'; abs: string; rel: string; target: string; escapes: boolean }
   | { kind: 'excluded'; abs: string; rel: string }
+  | { kind: 'unreadable'; abs: string; rel: string }
   | { kind: 'other'; abs: string; rel: string };
 
 /**
@@ -149,10 +150,15 @@ export async function* walkTree(
     try {
       dirents = await fsp.readdir(dirAbs, { withFileTypes: true });
     } catch {
-      // An unreadable subdirectory is not a reason to abandon the whole tree.
-      // It contributes nothing to the survey and nothing to the copy, which is
-      // the same answer the operator gets from an empty directory — the copy
-      // result reports what was skipped so it is not silent.
+      // An unreadable directory (a root-owned bind mount, a 0o000 dir) is not a
+      // reason to abandon the whole tree — but it is NOT the same answer as an
+      // empty directory, and treating it as one was the bug this path used to
+      // ship. Its contents cannot be surveyed or copied, so it must arrive as an
+      // entry the survey and copy can turn into a REPORTED skip; returning here
+      // yielded nothing, so `copyTree` still created the destination directory
+      // (the parent's readdir already yielded the `dir`), left it empty, and
+      // reported `{ ok: true, skips: [] }` — a silently incomplete snapshot.
+      yield { kind: 'unreadable', abs: dirAbs, rel: dirRel };
       return;
     }
     // Stable order so a survey and the copy that follows it agree entry for
@@ -232,13 +238,22 @@ export async function* walkTree(
  * `permissions_unenforced` likewise: a file that arrived but could not be
  * tightened is copied, so calling it a skip would be wrong — but staying silent
  * about it is worse, which is what the code did before this bead.
+ *
+ * `unreadable_dir` is a directory whose entries `readdir` refused (EACCES on a
+ * 0o000 dir, a root-owned bind mount). The directory itself is copied — the
+ * parent's readdir yielded it — but its CONTENTS are omitted from both the
+ * survey and the copy, so it must be reported. Without it, an unreadable
+ * subtree left the destination directory empty while the copy claimed success
+ * with no skip, and the operator pointed a worker at a snapshot missing state
+ * it believed complete.
  */
 export type SkipReason =
   | 'symlink_escapes'
   | 'not_regular'
   | 'symlink_unsupported'
   | 'excluded_vcs'
-  | 'permissions_unenforced';
+  | 'permissions_unenforced'
+  | 'unreadable_dir';
 
 export type Skip = { rel: string; reason: SkipReason };
 
@@ -324,6 +339,9 @@ export async function surveyTree(source: string, caps: Caps = DEFAULT_CAPS): Pro
         break;
       case 'excluded':
         survey.skips.push({ rel: entry.rel, reason: 'excluded_vcs' });
+        break;
+      case 'unreadable':
+        survey.skips.push({ rel: entry.rel, reason: 'unreadable_dir' });
         break;
       case 'other':
         survey.skips.push({ rel: entry.rel, reason: 'not_regular' });
@@ -510,6 +528,11 @@ export async function copyTree(
       }
       case 'excluded':
         result.skips.push({ rel: entry.rel, reason: 'excluded_vcs' });
+        break;
+      case 'unreadable':
+        // The directory itself was created by its own `dir` entry (or already
+        // exists, for the root); its unreadable contents are what we report.
+        result.skips.push({ rel: entry.rel, reason: 'unreadable_dir' });
         break;
       case 'symlink':
         if (entry.escapes) {

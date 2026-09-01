@@ -4277,7 +4277,15 @@ export type ManagedCopySkipReason =
    * alternative is a copy that quietly left a credential file group-readable
    * and returned success.
    */
-  | 'permissions_unenforced';
+  | 'permissions_unenforced'
+  /**
+   * Cebab-ygu.13: a directory whose entries `readdir` refused (a 0o000 dir, a
+   * root-owned bind mount). The directory itself is copied, but its CONTENTS
+   * could be neither surveyed nor copied. Reported because the alternative is
+   * an empty destination directory inside a copy that claimed success with no
+   * skip — a silently incomplete snapshot the operator believes is faithful.
+   */
+  | 'unreadable_dir';
 
 export type ManagedCopySkip = { rel: string; reason: ManagedCopySkipReason };
 
