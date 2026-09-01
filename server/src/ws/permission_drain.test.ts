@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { describe, expect, test } from 'vitest';
 import { withTempDataDir } from '../test_support/temp_data_dir.js';
@@ -8,6 +11,7 @@ import { persistMessage } from '../runner/persist.js';
 import {
   cleanupPendingPermissionsForSession,
   drainAllPendingPermissions,
+  drainPendingPermissionsForEndedTurn,
   recordDrainedPermission,
   type PendingPermission,
 } from './server.js';
@@ -141,6 +145,57 @@ describe('[security] a drained permission replays as decided, not as a live card
     expect(undecidedCards(replay('sess-other'))).toEqual(['req-theirs']);
   });
 
+  test('turn death (Cebab-ygu.8): the ended turn answers its own open card, another session untouched', async () => {
+    // A turn that dies mid-permission (crash, parse_error, auth lapse) reaches
+    // neither the interrupt drain nor `ws.on('close')` — `runOneTurn`'s finally
+    // is the only cleanup, and before Cebab-ygu.8 it drained nothing, so the
+    // card survived and a later Allow persisted an operator-shaped `allow` row
+    // for a tool that never ran. This asserts the finally's drain closes it.
+    seedSession();
+    seedSession('sess-other');
+    await seedRequest('req-mine');
+    await seedRequest('req-theirs', 'sess-other');
+
+    // Before the drain, replay strands the dying turn's card.
+    expect(undecidedCards(replay())).toEqual(['req-mine']);
+
+    const pending = new Map<string, PendingPermission>([
+      ['req-mine', pendingEntry(SESSION)],
+      ['req-theirs', pendingEntry('sess-other')],
+    ]);
+    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION));
+
+    // The dead turn's card now replays as decided — and NOT as `interrupted`,
+    // which would falsely claim the operator hit Stop on a turn that crashed.
+    expect(undecidedCards(replay())).toEqual([]);
+    expect(replay().filter((m) => m.type === 'permission_decided')[0]).toMatchObject({
+      decision: 'deny',
+      reason: 'turn_ended',
+    });
+
+    // Session-scoped: a concurrent session's card on the same connection is
+    // left for its own turn to answer.
+    expect(undecidedCards(replay('sess-other'))).toEqual(['req-theirs']);
+  });
+
+  test('turn death (Cebab-ygu.8): the finally drain removes the entry so a late Allow writes nothing', async () => {
+    // The security core: after the drain, the pending map has no entry, so the
+    // `permission_decision` handler's `if (!pending) return` short-circuits and
+    // no `wrapper/permission_decided { decision: 'allow' }` row is ever written.
+    seedSession();
+    await seedRequest('req-1');
+    const pending = new Map<string, PendingPermission>([['req-1', pendingEntry(SESSION)]]);
+
+    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION));
+
+    // The map is empty — a subsequent operator click finds nothing to resolve.
+    expect(pending.has('req-1')).toBe(false);
+    // And the only decision on record is the drain's deny, never an `allow`.
+    const decisions = replay().filter((m) => m.type === 'permission_decided');
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ decision: 'deny', reason: 'turn_ended' });
+  });
+
   test('the recorded denial says Cebab decided it, not the operator', async () => {
     // The reason is the whole point of the row. A bare `deny` would clear the
     // dead card and replace it with a different falsehood — a transcript
@@ -188,8 +243,41 @@ describe('[security] a drained permission replays as decided, not as a live card
     const b = cleanupPendingPermissionsForSession(new Map(), SESSION, () => {
       throw new Error('recorder called for an empty drain');
     });
-    expect([...a, ...b]).toEqual([]);
+    const c = drainPendingPermissionsForEndedTurn(new Map(), SESSION, () => {
+      throw new Error('recorder called for an empty drain');
+    });
+    expect([...a, ...b, ...c]).toEqual([]);
 
     expect(listEvents(SESSION)).toHaveLength(before);
+  });
+});
+
+describe('[security] Cebab-ygu.8 source tripwire — runOneTurn drains on turn death', () => {
+  // The behavioural tests above prove the helper answers a dead turn's card.
+  // They cannot prove `runOneTurn`'s finally CALLS it — that giant switch-arm
+  // function is not unit-testable in isolation (see the notes in
+  // retry_rate_limited.test.ts and posture.test.ts, which use this same scan
+  // pattern for exactly that reason). This reddens the moment the drain call is
+  // dropped from the teardown, re-opening the false-`allow` row.
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const serverSrc = fs.readFileSync(path.resolve(__dirname, 'server.ts'), 'utf8');
+
+  test('the finally drains the session pending permissions after inFlight.delete', () => {
+    expect(serverSrc).toContain(
+      'drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId);',
+    );
+  });
+
+  test('the drain sits inside runOneTurn between inFlight.delete and closeLogger', () => {
+    // Position matters: the entry must be dropped as part of the turn teardown,
+    // not in some unrelated branch. Pin the ordering the fix relies on.
+    const teardown = serverSrc.indexOf('conn.inFlight.delete(sessionId);');
+    const drain = serverSrc.indexOf(
+      'drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId);',
+    );
+    const closeLog = serverSrc.indexOf('closeLogger(sessionId);');
+    expect(teardown).toBeGreaterThanOrEqual(0);
+    expect(drain).toBeGreaterThan(teardown);
+    expect(closeLog).toBeGreaterThan(drain);
   });
 });

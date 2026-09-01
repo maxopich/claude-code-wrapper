@@ -361,6 +361,39 @@ export function cleanupPendingPermissionsForSession(
 }
 
 /**
+ * Cebab-ygu.8: the turn-death sibling of the two drains around it. The
+ * single-agent turn ended with a permission card still parked, and it was
+ * neither the operator interrupting it (`cleanupPendingPermissionsForSession`
+ * already drained that path from the interrupt handler) nor the socket closing
+ * (`drainAllPendingPermissions` in `ws.on('close')`) — the turn ITSELF died:
+ * a crashed subprocess, a parse_error, an auth lapse. `runOneTurn`'s finally is
+ * the only termination that reaches here, and before this it drained nothing,
+ * so the entry survived in the map with the socket still open and the card
+ * still enabled. A later Allow click then resolved a promise nobody awaited and
+ * persisted an operator-shaped `allow` row for a tool that never ran.
+ *
+ * Session-filtered like the interrupt drain (concurrent sessions on the same
+ * connection keep their cards), but it records `turn_ended`, not `interrupted`:
+ * the operator did not stop this turn, so a transcript claiming they did would
+ * be its own lie. Idempotent — the interrupt and close paths have usually
+ * drained already, so the loop finds nothing and writes nothing.
+ */
+export function drainPendingPermissionsForEndedTurn(
+  pending: Map<string, PendingPermission>,
+  sessionId: string,
+  record: RecordDrainedPermission = recordDrainedPermission,
+): Promise<void>[] {
+  const writes: Promise<void>[] = [];
+  for (const [requestId, p] of pending) {
+    if (p.sessionId !== sessionId) continue;
+    p.resolve({ behavior: 'deny', message: 'turn ended' });
+    pending.delete(requestId);
+    writes.push(record(p.sessionId, requestId, 'turn_ended'));
+  }
+  return writes;
+}
+
+/**
  * The socket-close sibling of the above: drain EVERY pending permission on
  * this connection, whatever session it belongs to.
  *
@@ -6916,6 +6949,16 @@ async function runOneTurn(
     }
     unregister();
     conn.inFlight.delete(sessionId);
+    // Cebab-ygu.8: the turn is over — drain any permission card still parked
+    // for this session. This is the ONE termination the two other drains never
+    // cover: a turn that died mid-permission (crash, parse_error, auth lapse)
+    // reaches neither the interrupt handler nor `ws.on('close')`, so without
+    // this the entry survives with the socket open and the card enabled, and a
+    // later Allow click persists an operator-shaped `allow` row for a tool that
+    // never ran. Fire-and-forget (recordDrainedPermission swallows its own
+    // errors), session-filtered, records `turn_ended`; a no-op on the success
+    // path and idempotent when interrupt/close already drained.
+    drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId);
     closeLogger(sessionId);
     // Cluster D Phase 4b: clear the captured prompt UNLESS the turn
     // ended held by a rate-limit. This is the only path that wants the

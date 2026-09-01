@@ -208,6 +208,8 @@ export function MessageBlock(props: {
                   "this was refused for you while you were gone". */}
               {m.decidedReason === 'client_disconnected' && ' — automatic, you had disconnected'}
               {m.decidedReason === 'interrupted' && ' — automatic, the turn was interrupted'}
+              {m.decidedReason === 'turn_ended' &&
+                ' — automatic, the turn ended before you decided'}
             </div>
           ) : (
             <PermissionActions
