@@ -15,6 +15,7 @@ import {
   computeRecoveryContext,
   confirmMutationByToolUseId,
   countMultiAgentEvents,
+  clearPendingRetry,
   createMultiAgentSession,
   endMultiAgentSession,
   getLastMultiAgentEvent,
@@ -22,6 +23,7 @@ import {
   getMultiAgentMutation,
   getMultiAgentSession,
   getPendingRetry,
+  listPendingRetries,
   listMultiAgentEvents,
   listMultiAgentEventsForAgent,
   listMultiAgentMutations,
@@ -88,6 +90,8 @@ describe('session-id parameter naming (register N21)', () => {
     ['setAwaitingContinue', setAwaitingContinue],
     ['setPendingRetry', setPendingRetry],
     ['getPendingRetry', getPendingRetry],
+    ['clearPendingRetry', clearPendingRetry],
+    ['listPendingRetries', listPendingRetries],
     ['getMultiAgentSession', getMultiAgentSession],
     ['archiveMultiAgentSession', archiveMultiAgentSession],
     ['unarchiveMultiAgentSession', unarchiveMultiAgentSession],
@@ -103,6 +107,60 @@ describe('session-id parameter naming (register N21)', () => {
     ['setMutationPauseState', setMutationPauseState],
   ] as const)('%s keeps its row-id parameter named `id`', (_name, fn) => {
     expect(firstParamName(fn as (...args: never[]) => unknown)).toBe('id');
+  });
+});
+
+// Per-agent pending-retry storage (migration 041, Cebab-ygu.2). The prior
+// single-slot columns let a second concurrent worker failure overwrite the
+// first's retry; these assert the storage now keys per agent.
+describe('pending-retry queue', () => {
+  function seed(): string {
+    const sid = 's-retry';
+    createMultiAgentSession(sid, 'orchestrator', '001', '/tmp/s-retry', 'persistent');
+    return sid;
+  }
+  const at = (agentName: string, ts: number) => ({
+    agentName,
+    prompt: `prompt-${agentName}`,
+    reason: `reason-${agentName}`,
+    ts,
+    errorEventId: 1,
+  });
+
+  test('two concurrent failures each keep their own slot (no overwrite)', () => {
+    const sid = seed();
+    setPendingRetry(sid, at('reviewer', 40));
+    setPendingRetry(sid, at('editor', 55));
+    expect(listPendingRetries(sid).map((p) => p.agentName)).toEqual(['reviewer', 'editor']);
+    // getPendingRetry is the FRONT (oldest ts).
+    expect(getPendingRetry(sid)!.agentName).toBe('reviewer');
+  });
+
+  test('re-parking the same agent upserts rather than duplicating', () => {
+    const sid = seed();
+    setPendingRetry(sid, at('reviewer', 40));
+    setPendingRetry(sid, { ...at('reviewer', 90), reason: 'second failure' });
+    const all = listPendingRetries(sid);
+    expect(all).toHaveLength(1);
+    expect(all[0]!.reason).toBe('second failure');
+  });
+
+  test('clearPendingRetry reaps one agent and promotes the next front', () => {
+    const sid = seed();
+    setPendingRetry(sid, at('reviewer', 40));
+    setPendingRetry(sid, at('editor', 55));
+    clearPendingRetry(sid, 'reviewer');
+    expect(getPendingRetry(sid)!.agentName).toBe('editor');
+    expect(listPendingRetries(sid)).toHaveLength(1);
+  });
+
+  test('setPendingRetry(null) clears the whole session (teardown)', () => {
+    const sid = seed();
+    setPendingRetry(sid, at('reviewer', 40));
+    setPendingRetry(sid, at('editor', 55));
+    setPendingRetry(sid, null);
+    expect(listPendingRetries(sid)).toEqual([]);
+    expect(getPendingRetry(sid)).toBeNull();
   });
 });
 

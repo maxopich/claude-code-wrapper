@@ -477,11 +477,11 @@ describe('createChainRouter — onWorkerFailed (Item #4)', () => {
     });
     expect(pending!.reason).toContain('error_max_turns');
 
-    // And the DB row reflects the same.
-    const row = getMultiAgentSession(SESSION_ID)!;
-    expect(row.pending_retry_agent).toBe('coder');
-    expect(row.pending_retry_prompt).toBe('do your work');
-    expect(row.pending_retry_error_event_id).toBe(persisted[0]!.id);
+    // And the persisted slot reflects the same.
+    const parked = getPendingRetry(SESSION_ID)!;
+    expect(parked.agentName).toBe('coder');
+    expect(parked.prompt).toBe('do your work');
+    expect(parked.errorEventId).toBe(persisted[0]!.id);
   });
 
   test('with an empty `prompt` (failed pre-deliver), falls back to teardown crashed', () => {

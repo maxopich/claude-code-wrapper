@@ -65,15 +65,13 @@ export type MultiAgentSessionRow = {
    *  continue (R-B conservative recovery). 0 for normal/pre-009 rows.
    *  Narrowed to boolean at the boundary; SQLite has no bool. */
   awaiting_continue: number;
-  /** Pending-retry slot (Item #4, migration 010). All five are NULL together
-   *  when no pending retry, all non-NULL together when a worker turn failed
-   *  and the operator hasn't yet retried or abandoned. Narrowed to a
-   *  `PendingRetry` value at the boundary via `getPendingRetry`. */
-  pending_retry_agent: string | null;
-  pending_retry_prompt: string | null;
-  pending_retry_reason: string | null;
-  pending_retry_ts: number | null;
-  pending_retry_error_event_id: number | null;
+  /** SUPERSEDED by migration 041 — no longer read or written. The five
+   *  `pending_retry_*` columns were a single session-scoped slot, which is why
+   *  a second concurrent worker failure overwrote the first's (Cebab-ygu.2).
+   *  Pending retries are now per-agent rows in `multi_agent_pending_retries`,
+   *  read via `getPendingRetry` / `listPendingRetries`. The DB columns are left
+   *  in place (dropping one rewrites the table on older SQLite) but are absent
+   *  from this type so nothing reads the dead values. */
   /** Item #5 (migration 011, renamed in 027): opt-in pause-on-first-DANGEROUS-
    *  command flag. 1 if the operator enabled the setup-screen checkbox at
    *  session start. Narrowed to boolean at the boundary. */
@@ -142,9 +140,9 @@ export type MultiAgentSessionRow = {
 /**
  * Pending-retry descriptor: which worker's last turn failed, the bytes we
  * last delivered to it (post-briefing), the operator-facing reason, and a
- * pointer to the synthetic error event in the trail. See migration 010 for
- * column-level docs. Single slot per session — newest failure overwrites
- * the prior one if multiple workers fail in quick succession.
+ * pointer to the synthetic error event in the trail. See migration 041 for
+ * the per-agent storage. One row per (session, agent); concurrent worker
+ * failures each keep their own slot rather than overwriting.
  */
 export type PendingRetry = {
   agentName: string;
@@ -508,89 +506,108 @@ export function setAwaitingContinue(sessionId: string, awaiting: boolean): void 
     .run(awaiting ? 1 : 0, sessionId);
 }
 
+type PendingRetryRow = {
+  agent_name: string;
+  prompt: string;
+  reason: string;
+  ts: number;
+  error_event_id: number;
+};
+
+function rowToPendingRetry(row: PendingRetryRow): PendingRetry {
+  return {
+    agentName: row.agent_name,
+    prompt: row.prompt,
+    reason: row.reason,
+    ts: row.ts,
+    errorEventId: row.error_event_id,
+  };
+}
+
 /**
- * Write (or clear) the pending-retry slot for a session in a single statement
- * — the five columns always move together. Pass `null` to clear. Used by:
+ * Write (or clear) a pending-retry slot. Storage is per-agent (migration 041):
+ * a non-null `p` UPSERTs the row for `(sessionId, p.agentName)`, so a second
+ * concurrent worker failure never overwrites a different worker's slot — the
+ * defect Cebab-ygu.2 fixed. Pass `null` to clear EVERY pending retry for the
+ * session (teardown only). To reap a single agent's slot after a retry or a
+ * recovery, use `clearPendingRetry`, not this. Used by:
  *   - `router.onWorkerFailed` when a worker's deliverTurn rejects, to persist
  *     enough state that the operator can come back later (even after a Cebab
  *     restart) and click Retry.
- *   - `handle.retry()` BEFORE re-delivering, so a racing second click sees
- *     the empty slot and no-ops.
- *   - `handle.stop` / `abandon_session` to keep the row clean on teardown.
+ *   - `handle.stop` / `abandon_session` (with `null`) to keep the row clean.
  */
 export function setPendingRetry(sessionId: string, p: PendingRetry | null): void {
   if (p === null) {
-    getDb()
-      .prepare(
-        `UPDATE multi_agent_sessions
-            SET pending_retry_agent          = NULL,
-                pending_retry_prompt         = NULL,
-                pending_retry_reason         = NULL,
-                pending_retry_ts             = NULL,
-                pending_retry_error_event_id = NULL
-          WHERE id = ?`,
-      )
-      .run(sessionId);
+    getDb().prepare(`DELETE FROM multi_agent_pending_retries WHERE session_id = ?`).run(sessionId);
     return;
   }
   getDb()
     .prepare(
-      `UPDATE multi_agent_sessions
-          SET pending_retry_agent          = ?,
-              pending_retry_prompt         = ?,
-              pending_retry_reason         = ?,
-              pending_retry_ts             = ?,
-              pending_retry_error_event_id = ?
-        WHERE id = ?`,
+      `INSERT INTO multi_agent_pending_retries
+          (session_id, agent_name, prompt, reason, ts, error_event_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, agent_name) DO UPDATE SET
+          prompt         = excluded.prompt,
+          reason         = excluded.reason,
+          ts             = excluded.ts,
+          error_event_id = excluded.error_event_id`,
     )
-    .run(p.agentName, p.prompt, p.reason, p.ts, p.errorEventId, sessionId);
+    .run(sessionId, p.agentName, p.prompt, p.reason, p.ts, p.errorEventId);
 }
 
 /**
- * Read the pending-retry slot. Returns `null` when no failure is pending,
- * or a fully-populated `PendingRetry` when one is. Used by the WS
- * `retry_worker` handler (single source of truth — the client never sends
- * the agent name, the server reads it here) and by `emitResumedSession` to
- * hydrate the banner on R-A re-attach / R-B reconstruct.
- *
- * The five-columns invariant (all NULL or all non-NULL) is asserted in
- * principle by `setPendingRetry`; this getter treats any NULL as "no slot"
- * to be defensive about pre-010 rows that lack the columns entirely.
+ * Clear exactly one agent's pending-retry slot. This is what a retry (the
+ * operator re-issued that agent's turn) or a recovery (`onTurnSucceeded`) uses,
+ * so sibling agents' queued retries survive — unlike `setPendingRetry(null)`,
+ * which reaps the whole session. No-op when the agent has no slot.
+ */
+export function clearPendingRetry(sessionId: string, agentName: string): void {
+  getDb()
+    .prepare(`DELETE FROM multi_agent_pending_retries WHERE session_id = ? AND agent_name = ?`)
+    .run(sessionId, agentName);
+}
+
+/**
+ * Read the FRONT pending-retry slot (oldest by `ts`, insertion order as the
+ * tiebreak). Returns `null` when nothing is pending. The wire still carries one
+ * `PendingRetryDescriptor`, so the router surfaces the queued retries one at a
+ * time: the front shows, and clearing it promotes the next. Used by the WS
+ * `retry_worker` handler (single source of truth — the client never sends the
+ * agent name, the server reads it here) and by `emitResumedSession` to hydrate
+ * the banner on R-A re-attach / R-B reconstruct.
  */
 export function getPendingRetry(sessionId: string): PendingRetry | null {
   const row = getDb()
-    .prepare<
-      [string],
-      {
-        pending_retry_agent: string | null;
-        pending_retry_prompt: string | null;
-        pending_retry_reason: string | null;
-        pending_retry_ts: number | null;
-        pending_retry_error_event_id: number | null;
-      }
-    >(
-      `SELECT pending_retry_agent, pending_retry_prompt, pending_retry_reason,
-              pending_retry_ts, pending_retry_error_event_id
-         FROM multi_agent_sessions WHERE id = ?`,
+    .prepare<[string], PendingRetryRow>(
+      // `rowid ASC` is the FIFO tiebreak: two workers that fail in the same
+      // millisecond (a concurrent fan-out — the Cebab-ygu.2 case) have equal
+      // `ts`, and insertion order is what keeps the first-failed banner in
+      // front rather than flipping on the agent name.
+      `SELECT agent_name, prompt, reason, ts, error_event_id
+         FROM multi_agent_pending_retries
+        WHERE session_id = ?
+        ORDER BY ts ASC, rowid ASC
+        LIMIT 1`,
     )
     .get(sessionId);
-  if (!row) return null;
-  if (
-    row.pending_retry_agent === null ||
-    row.pending_retry_prompt === null ||
-    row.pending_retry_reason === null ||
-    row.pending_retry_ts === null ||
-    row.pending_retry_error_event_id === null
-  ) {
-    return null;
-  }
-  return {
-    agentName: row.pending_retry_agent,
-    prompt: row.pending_retry_prompt,
-    reason: row.pending_retry_reason,
-    ts: row.pending_retry_ts,
-    errorEventId: row.pending_retry_error_event_id,
-  };
+  return row ? rowToPendingRetry(row) : null;
+}
+
+/**
+ * Every pending-retry slot for a session, front (oldest) first. Same order as
+ * `getPendingRetry`'s single-row read. Used by tests and any future UI that
+ * stacks the banners rather than surfacing them one at a time.
+ */
+export function listPendingRetries(sessionId: string): PendingRetry[] {
+  return getDb()
+    .prepare<[string], PendingRetryRow>(
+      `SELECT agent_name, prompt, reason, ts, error_event_id
+         FROM multi_agent_pending_retries
+        WHERE session_id = ?
+        ORDER BY ts ASC, rowid ASC`,
+    )
+    .all(sessionId)
+    .map(rowToPendingRetry);
 }
 
 // ---- Item #5: pause-on-dangerous + mutation log helpers ----

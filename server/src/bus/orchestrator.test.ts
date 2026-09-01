@@ -13,8 +13,9 @@ import { computeSessionPaths, orchestratorWorkspaceDir } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT, type MultiAgentEndedReason } from './runtime.js';
 import {
   createMultiAgentSession,
-  getMultiAgentSession,
+  getPendingRetry,
   listMultiAgentEvents,
+  listPendingRetries,
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
 import type { BusEvent } from './runner.js';
@@ -544,9 +545,41 @@ describe('createOrchestratorRouter — onWorkerFailed (Item #4)', () => {
       errorEventId: persisted[0]!.id,
     });
 
-    const row = getMultiAgentSession(sessionId)!;
-    expect(row.pending_retry_agent).toBe('reviewer');
-    expect(row.pending_retry_prompt).toBe('review this draft');
+    const parked = getPendingRetry(sessionId)!;
+    expect(parked.agentName).toBe('reviewer');
+    expect(parked.prompt).toBe('review this draft');
+  });
+
+  test("a second concurrent worker failure keeps the first worker's slot (Cebab-ygu.2)", () => {
+    const { router, sessionId, onPendingRetry } = buildFailRouter();
+    // The reported scenario: reviewer's turn fails first, editor's shortly
+    // after. Both fan-out turns are concurrent by design; the single-slot
+    // storage used to let the second failure overwrite the first's retry.
+    router.onWorkerFailed('reviewer', 'review this draft', new Error('error_max_turns'));
+    router.onWorkerFailed('editor', 'edit the file', new Error('error_max_turns'));
+
+    // Both are preserved, not one — the whole point.
+    const all = listPendingRetries(sessionId);
+    expect(all.map((p) => p.agentName).sort()).toEqual(['editor', 'reviewer']);
+    expect(all.find((p) => p.agentName === 'reviewer')!.prompt).toBe('review this draft');
+    expect(all.find((p) => p.agentName === 'editor')!.prompt).toBe('edit the file');
+
+    // The banner shows the FRONT (oldest = reviewer) and stays there — the
+    // second failure does not flip or destroy it.
+    expect(getPendingRetry(sessionId)!.agentName).toBe('reviewer');
+    expect(onPendingRetry).toHaveBeenLastCalledWith(
+      sessionId,
+      expect.objectContaining({ agentName: 'reviewer', lastPrompt: 'review this draft' }),
+    );
+
+    // Clearing the front (as a retry / recovery does) promotes editor — its
+    // work is recoverable rather than lost.
+    router.onTurnSucceeded('reviewer');
+    expect(getPendingRetry(sessionId)!.agentName).toBe('editor');
+    expect(onPendingRetry).toHaveBeenLastCalledWith(
+      sessionId,
+      expect.objectContaining({ agentName: 'editor', lastPrompt: 'edit the file' }),
+    );
   });
 
   test('with empty prompt (failed pre-deliver), falls back to teardown crashed', () => {
@@ -620,13 +653,11 @@ describe('createOrchestratorRouter — onTurnSucceeded ("success clears")', () =
     // Fail the orchestrator's own turn (the exact bug: a transient error parks
     // the slot under the orchestrator), then resolve a later orchestrator turn.
     router.onWorkerFailed(ORCHESTRATOR_AGENT_NAME, 'check MCPs', new Error('401 Unauthorized'));
-    expect(getMultiAgentSession(sessionId)!.pending_retry_agent).toBe(ORCHESTRATOR_AGENT_NAME);
+    expect(getPendingRetry(sessionId)!.agentName).toBe(ORCHESTRATOR_AGENT_NAME);
 
     router.onTurnSucceeded(ORCHESTRATOR_AGENT_NAME);
 
-    const row = getMultiAgentSession(sessionId)!;
-    expect(row.pending_retry_agent).toBeNull();
-    expect(row.pending_retry_prompt).toBeNull();
+    expect(getPendingRetry(sessionId)).toBeNull();
     // Last onPendingRetry call is the authoritative null clear.
     expect(onPendingRetry).toHaveBeenLastCalledWith(sessionId, null);
   });
@@ -638,14 +669,14 @@ describe('createOrchestratorRouter — onTurnSucceeded ("success clears")', () =
 
     router.onTurnSucceeded('editor'); // a different agent's turn resolved
 
-    expect(getMultiAgentSession(sessionId)!.pending_retry_agent).toBe('reviewer');
+    expect(getPendingRetry(sessionId)!.agentName).toBe('reviewer');
     expect(onPendingRetry).not.toHaveBeenCalled();
   });
 
   test('is a no-op when no pending-retry slot is set', () => {
     const { router, sessionId, onPendingRetry } = buildRouter();
     router.onTurnSucceeded('reviewer');
-    expect(getMultiAgentSession(sessionId)!.pending_retry_agent).toBeNull();
+    expect(getPendingRetry(sessionId)).toBeNull();
     expect(onPendingRetry).not.toHaveBeenCalled();
   });
 });

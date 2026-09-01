@@ -203,10 +203,10 @@ export function reconstructOrchestratorSession(
     /** Item #4: forwarded into the rebuilt router so a failure that
      *  happens AFTER the reconstruct (e.g. on the operator's Continue or
      *  on a subsequent retry) emits the pending-retry ServerMsg to the
-     *  re-attached browser. The persisted row's `pending_retry_*` columns
-     *  already survived the restart and are hydrated by the WS layer on
-     *  `multi_agent_started`, so the initial banner restore does not need
-     *  this callback. */
+     *  re-attached browser. The persisted `multi_agent_pending_retries` rows
+     *  already survived the restart and are hydrated (front slot) by the WS
+     *  layer on `multi_agent_started`, so the initial banner restore does not
+     *  need this callback. */
     onPendingRetry?: BusSink['onPendingRetry'];
     /** Item #5: mutation + pending-mutation callbacks forwarded into the
      *  rebuilt router so a mutation observed AFTER the reconstruct (e.g.
