@@ -639,6 +639,57 @@ const SCENARIOS = {
     },
   },
 
+  'select-window': {
+    why: 'the ready window is filtered downstream, so a cap on it hides eligible work (Cebab-qd2.48)',
+    // THE 2026-09-01 HALT, REHEARSED. The overnight run finished four beads and
+    // then stopped at second nine reporting `nothing ready to work`. It was not
+    // drained: 201 rows survived bd's own exclusions, 71 were within
+    // `maxPriority`, and the hybrid ordering put only nine of those 71 inside
+    // the 50-row window the driver asked for — all nine excluded by a rule bd
+    // never saw. The first eligible bead sat at position 63.
+    //
+    // Self-reinforcing, which is why four good iterations preceded it: the
+    // beads a run completes are the eligible ones near the top, so every
+    // success empties the window further.
+    //
+    // 59 excluded rows ahead of one eligible one is the same shape at rehearsal
+    // scale. Reddens the moment SELECT asks bd for a page again — the shim
+    // truncates now, so the driver would see 50 denied rows and stop.
+    args: ['--until', '1'],
+    plan: {
+      beads: 60,
+      excludedBeads: 59,
+      ci: 'green',
+      merge: 'direct',
+      build: [{ kind: 'verdict', edit: true }],
+    },
+    check: (ctx) => {
+      ctx.eq(ctx.records.length, 1, 'one iteration ran');
+      ctx.eq(ctx.records[0]?.bead, 'Reh-60', 'the one eligible bead was found, at position 60');
+      // THE ARGV, not just the outcome, and the split is MEASURED rather than
+      // belt-and-braces. Reverting the driver's `0` alone reddens the two
+      // assertions above — 'one iteration ran (got 0)'. Reverting the shim's
+      // `-n` handling as well turns them GREEN again, because a fake that never
+      // truncates cannot express the defect: only this argv check survives.
+      // So each half guards a distinct failure — the behavioural pair catches
+      // the driver, this catches a harness that has stopped being able to look.
+      // It also refuses a driver that merely moved the cliff to a bigger page.
+      const ready = ctx.calls.bd.filter((c) => c[0] === 'ready');
+      ctx.ok(ready.length > 0, 'SELECT called bd ready');
+      ctx.ok(
+        ready.every((c) => c[c.indexOf('-n') + 1] === '0'),
+        'and every call asked for no window at all',
+      );
+      // BOTH NUMBERS, because one of them cannot tell the two failures apart.
+      // A falsy pick used to mean either "bd had nothing" or "bd had 60 and the
+      // filters took all of them", and the run stopped identically on each.
+      ctx.ok(
+        /select: 60 ready, 1 eligible after filters/.test(ctx.stdout),
+        'and the driver reports the pair, so an empty window is not an empty queue',
+      );
+    },
+  },
+
   'file-overlap': {
     why: 'two beads that write ONE file must warn the human choosing the merge order (Cebab-qd2.44)',
     // NO `--merge`, which is the point rather than a convenience. `merge:false`
@@ -838,7 +889,20 @@ if (argv[0] === 'ready') {
   const open = plan.beadRows.filter(
     (b) => b.status === 'open' && !state.claimed.includes(b.id),
   );
-  process.stdout.write(JSON.stringify(open));
+  // \`-n\` IS HONOURED FOR THE SAME REASON, and its absence was the harness
+  // hiding Cebab-qd2.48 from itself. bd truncates AFTER its own sort and
+  // exclusions and BEFORE the driver's client-side filters run, so a fake that
+  // never truncates cannot express a window that is full and entirely
+  // excluded — the exact state that stopped the run of 2026-09-01 with
+  // \`nothing ready to work\` and 61 eligible beads waiting. Model what the real
+  // tool REFUSES to return, not just the shape of what it does.
+  //
+  // \`0\` is bd's no-limit and \`100\` its default when the flag is absent; both
+  // are measured off \`bd ready --help\`, and the default matters because a
+  // caller that forgets \`-n\` gets a page rather than everything.
+  const at = argv.indexOf('-n');
+  const limit = at === -1 ? 100 : Number(argv[at + 1]);
+  process.stdout.write(JSON.stringify(limit > 0 ? open.slice(0, limit) : open));
 } else if (argv[0] === 'list') {
   // \`--all\` is every bead of every status — the containment graph's input.
   // Without this branch the shim exited 0 with EMPTY stdout, \`parseJson\` threw,
@@ -1231,6 +1295,14 @@ function buildScratch(name, scenario) {
   }
   if (scenario.plan.containerFirst && beadRows.length > 1) {
     beadRows[1].parent = beadRows[0].id;
+  }
+  // ROWS bd RETURNS AND THE DRIVER THROWS AWAY — the asymmetry Cebab-qd2.48 is
+  // about. The deny-path text scan is the cheapest real exclusion to express
+  // here: `.github/` is a stem of the default `guard.denyPaths`, so these rows
+  // are filtered by `eligibleBeads` and never by bd. Put enough of them at the
+  // head of the queue and a capped window contains nothing else.
+  for (let i = 0; i < Math.min(scenario.plan.excludedBeads ?? 0, beadRows.length); i += 1) {
+    beadRows[i].description = 'This bead edits .github/workflows/ci.yml, a denied path.';
   }
   fs.writeFileSync(
     path.join(dir, 'plan.json'),
