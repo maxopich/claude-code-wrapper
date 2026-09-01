@@ -682,6 +682,68 @@ export function classifyBashCommand(command: string): ToolClassification {
   };
 }
 
+/**
+ * Cebab-5j1 [security]. The file-path-shaped tokens of a Bash command, so a
+ * redactor can test each against `pathLooksSensitive` and decide whether the
+ * command's captured output may carry a secret.
+ *
+ * WHY THIS EXISTS. A Bash mutation row (`ws/session_log.ts`'s `mutationToLogRow`)
+ * carries `toolInput: {command}` and `filePath: null` — there is no path field
+ * for the redactor's sibling rule to key off. A command like
+ * `cat .env | tee copy` reads a credential file whose contents land in
+ * `toolResult` with no vendor prefix for the inline `SENSITIVE_VALUE_PATTERNS`
+ * to catch, which is precisely the value class `Cebab-of0` was about. This
+ * surfaces the `.env` the command names so the redactor can see it.
+ *
+ * Reuses the classifier's own quote-aware splitters rather than a second
+ * tokenizer, so it agrees with the category verdict about where a token begins
+ * and ends: `stripEnvAssignments` + `stripCommandWrappers` peel the leading
+ * `FOO=1` / `env` / `timeout 5` noise, `splitQuotedTokens` keeps a quoted path
+ * whole, `unquote` strips the quotes the shell would, and `stripRedirectPrefix`
+ * peels a redirect operator glued to its target (`>~/.ssh/known_hosts`).
+ *
+ * A SUPERSET is returned on purpose — every token, command name and flags
+ * included. `pathLooksSensitive` is the narrow judge, so a token that is not a
+ * path (`cat`, `-rf`, `>&2`) matches nothing and costs nothing; missing a real
+ * path would leak. Same fail-toward-masking direction as the rest of the
+ * redactor.
+ */
+export function bashCommandPathArguments(command: string): string[] {
+  const args: string[] = [];
+  for (const piece of splitTopLevel(command)) {
+    const stripped = stripCommandWrappers(stripEnvAssignments(piece.trim()));
+    if (!stripped) continue;
+    for (const token of splitQuotedTokens(stripped)) {
+      const peeled = stripRedirectPrefix(token);
+      if (!peeled) continue;
+      args.push(unquote(peeled));
+    }
+  }
+  return args;
+}
+
+/**
+ * Peel a redirect operator glued to the front of a token so the path beneath
+ * is visible: `>file`, `>>file`, `2>file`, `&>file`, `<file`, `>&2` → the tail.
+ * Callers pass one quote-aware token, so any operator sits at the front. A
+ * token with NO leading operator is returned unchanged (the leading fd digits
+ * are only consumed when a `>`/`<` actually follows them).
+ *
+ * Hand-rolled rather than `/^(?:\d+|&)?(?:>>?|<)&?/`, which `security/detect-
+ * unsafe-regex` rejects for the `\d+` before the optional group — the same
+ * reason `isDurationToken` and friends above are hand-rolled.
+ */
+function stripRedirectPrefix(token: string): string {
+  let i = 0;
+  if (token[i] === '&') i += 1;
+  else while (i < token.length && token[i]! >= '0' && token[i]! <= '9') i += 1;
+  if (token[i] !== '>' && token[i] !== '<') return token; // no operator → unchanged
+  i += 1;
+  if (token[i] === '>') i += 1; // `>>`
+  if (token[i] === '&') i += 1; // `>&` / `&>`
+  return token.slice(i);
+}
+
 /** Classify one segment of a compound Bash command. */
 function classifyBashPiece(piece: string): Verdict {
   const stripped = stripEnvAssignments(piece.trim());

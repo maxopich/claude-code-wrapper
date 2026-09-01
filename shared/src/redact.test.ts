@@ -734,6 +734,90 @@ describe('[security] the second copy of a sensitive file body (of0)', () => {
   });
 });
 
+/**
+ * [security] Register Cebab-5j1 — a Bash mutation names its file in the COMMAND,
+ * not in a `file_path` field.
+ *
+ * `mutationToLogRow` projects a confirmed mutation as
+ * `{toolName, category, filePath, cwd, promoted, confirmedAt, toolInput, toolResult}`.
+ * For a Bash call `filePath` is null and `toolInput` is `{command}`, so the
+ * sibling path rule had nothing to key off and the command's captured output
+ * (`toolResult` — which for `cat .env` is the whole credential file) shipped
+ * unmasked. This pins that the command string is now read for the path.
+ */
+describe('[security] a Bash mutation names its file in the command (Cebab-5j1)', () => {
+  // 40 alphanumerics, NO vendor prefix — the value class of0 was about. It
+  // matches no SENSITIVE_VALUE_PATTERN, so only the path rule can catch it; if
+  // an inline pattern ever started matching this, these tests would pass for
+  // the wrong reason. Assembled at runtime so the split literal cannot trip the
+  // secret scan.
+  const FILLER = 'A1b2C3d4E5f6G7h8J9k0';
+  const SECRET = FILLER + FILLER;
+
+  /** The shape `mutationToLogRow` builds for a confirmed Bash mutation. */
+  const bashMutation = (command: string, toolResult: unknown) => ({
+    toolName: 'Bash',
+    category: 'mutate',
+    filePath: null,
+    cwd: '/proj',
+    promoted: false,
+    confirmedAt: 1234,
+    toolInput: { command },
+    toolResult,
+  });
+
+  it('masks toolResult + toolInput when the command reads .env', () => {
+    const { redacted, fields } = redactSensitive(
+      bashMutation('cat .env | tee copy.txt', `CLIENT_SECRET=${SECRET}`),
+    );
+    const obj = redacted as Record<string, unknown>;
+    expect(JSON.stringify(redacted)).not.toContain(SECRET);
+    expect(obj.toolResult).toBe('<redacted>');
+    expect(obj.toolInput).toBe('<redacted>');
+    expect(fields.sort()).toEqual(['toolInput', 'toolResult']);
+    // The metadata that answers "which call, on what" stays readable.
+    expect(obj.toolName).toBe('Bash');
+    expect(obj.category).toBe('mutate');
+    expect(obj.filePath).toBe(null);
+  });
+
+  it('sees a quoted path, an exec-wrapper, and a glued redirect target', () => {
+    for (const command of [
+      "cp '/home/me/.aws/credentials' /tmp/x", // quoted sensitive source
+      'env FOO=1 cat ~/.ssh/id_rsa | tee out', // wrapper + assignment prefix
+      'echo hi >>~/.npmrc', // redirect operator glued to the target
+    ]) {
+      const { redacted } = redactSensitive(bashMutation(command, SECRET));
+      expect((redacted as Record<string, unknown>).toolResult).toBe('<redacted>');
+    }
+  });
+
+  // THE critical negative. Without it the rule could go unconditional — masking
+  // every Bash mutation's output — and every positive above would still pass.
+  it('does NOT mask when the command touches only benign paths', () => {
+    const { redacted, fields } = redactSensitive(
+      bashMutation('cat README.md | tee copy.txt', `build output ${SECRET}`),
+    );
+    const obj = redacted as Record<string, unknown>;
+    expect(obj.toolResult).toBe(`build output ${SECRET}`);
+    expect(obj.toolInput).toEqual({ command: 'cat README.md | tee copy.txt' });
+    expect(fields).toEqual([]);
+  });
+
+  // The trigger is the COMMAND, not the tool name: a non-Bash row with the same
+  // filePath:null shape must not start masking on a stray `command` string.
+  it('does not fire for a non-Bash tool', () => {
+    const { redacted, fields } = redactSensitive({
+      toolName: 'WebFetch',
+      filePath: null,
+      toolInput: { command: 'cat .env', url: 'https://x' },
+      toolResult: SECRET,
+    });
+    expect((redacted as Record<string, unknown>).toolResult).toBe(SECRET);
+    expect(fields).toEqual([]);
+  });
+});
+
 describe('[security] pinned limitation: a streaming delta is NOT this module’s job', () => {
   // `Cebab-ygu.47`, amended by `Cebab-ygu.51`. Recording what this redactor does
   // NOT do, because believing otherwise is what shipped plaintext credentials in
