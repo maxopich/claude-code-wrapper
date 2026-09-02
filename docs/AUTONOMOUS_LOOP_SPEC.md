@@ -54,16 +54,16 @@ Section 12 is the acceptance checklist. Work against it.
 
 Do not re-litigate these. They were settled with the maintainer.
 
-| Decision               | Value                                                                                                                              |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Concurrency            | Serial, one bead at a time                                                                                                         |
-| Workspace              | Main checkout, feature branch per bead. **No worktrees.**                                                                          |
-| Merge policy           | Auto-merge on green CI, subject to the guard (§8)                                                                                  |
-| Gate depth             | Deterministic always; Playground tier when the bead touches `server/**` or `shared/**` (§6.4)                                      |
-| CI failure disposition | Park and continue, with a 3-strike circuit breaker (§6.6, §8.3)                                                                    |
-| Follow-up beads        | Filed at priority 3, no label gate, no exclusion from selection                                                                    |
-| Repair attempts        | 2 per bead, then park                                                                                                              |
-| Usage limits           | `--max-budget-usd` per BUILD + react to the limit message on stderr (§8.4). Remaining quota still cannot be queried from a script. |
+| Decision               | Value                                                                                                                     |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| Concurrency            | Serial, one bead at a time                                                                                                |
+| Workspace              | Main checkout, feature branch per bead. **No worktrees.**                                                                 |
+| Merge policy           | Auto-merge on green CI, subject to the guard (§8)                                                                         |
+| Gate depth             | Deterministic always; Playground tier for EVERY bead except a named exemption — `web/`, `docs/`, `*.md` (§6.4)            |
+| CI failure disposition | Park and continue, with a 3-strike circuit breaker (§6.6, §8.3)                                                           |
+| Follow-up beads        | Filed at priority 3, no label gate, no exclusion from selection                                                           |
+| Repair attempts        | 2 per bead, then park                                                                                                     |
+| Usage limits           | `--max-budget-usd` per BUILD + react to the limit message from BUILD and from live smokes (§8.4). Quota is not queryable. |
 
 ---
 
@@ -1334,6 +1334,36 @@ one, so it shipped with a live false positive.
 the AGENT'S OWN PROSE — a bead about rate limiting whose verdict quotes one of these phrases would
 otherwise halt the run, and widening the matcher widens exactly that surface. The rule that removes
 it: **a usage limit is a reason the run FAILED.**
+
+**WHICH STEPS MAY BE SCANNED, and it is not all of them.** The detector had exactly one call site
+— over the BUILD agent's output — and none over GATE output. That was harmless while the Playground
+tier ran no live smokes, and stopped being harmless the moment `gate.liveSmokes` defaulted on: a
+live smoke spawns a real `claude`, so a subscription limit during one arrives as a non-zero exit
+and reads as a code defect. Cost of that misreading: a repair attempt (a second full `claude -p`
+invocation against the same wall), and then a park that labels a healthy bead `loop-stuck` —
+excluding it from every future SELECT. `Cebab-weqo`.
+
+So the scan is wired at the **live-smoke step and only there**. The ten deterministic steps are
+deliberately NOT scanned, and the reason is a false positive that is certain rather than
+hypothetical: `scripts/loop.test.mjs` and `build.mjs`'s own tests carry real CLI limit strings as
+fixtures, so a failing `npm test` prints them. Scanned, one red test would halt an overnight run
+and report it to the operator as a subscription limit. None of the ten spawns `claude`, so none of
+them can hit a limit — the scope is the truth, not a compromise. `loop.test.mjs` asserts both
+directions, and the negative control (a deterministic step whose output NAMES a limit must still
+repair) reddens when the scan is widened.
+
+A limit at GATE **halts and does not repair**, exactly as at BUILD: retrying into a limit is the
+one remedy guaranteed not to work, and halting leaves the bead open and unlabelled for the next
+run. The check sits BEFORE the repair branch in `machine.mjs`, and that order is the fix.
+
+**The network half of this is deliberately NOT implemented.** A live smoke that fails because the
+network dropped is also not the bead's fault, but `NETWORK_HINTS` cannot be reused as-is: it
+contains `ECONNREFUSED`, which is exactly what a dead local dev:server produces, and the bare
+substring `network`, which any assertion message may contain. Guessing a matcher would convert
+real smoke failures into silent halts — strictly worse than today, and the opposite of the
+operator's rule that a non-UI change must actually go through the tier. It needs a corpus of real
+failed-smoke output first; live smokes have never failed in a recorded run. `Cebab-weqo` stays open
+scoped to that half.
 
 | Kind                                | Action                                                                                        |
 | ----------------------------------- | --------------------------------------------------------------------------------------------- |

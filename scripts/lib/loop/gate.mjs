@@ -23,6 +23,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { detectUsageLimit } from './build.mjs';
 import { ConfigError } from './config.mjs';
 import { killTree, spawnDetached } from './run.mjs';
 
@@ -344,7 +345,27 @@ export function makeGate({ run, cwd, config, log = () => {} }) {
           timeoutMs: stepTimeout,
         });
         steps.push({ name: smoke.name, exitCode: r.code, ms: r.ms });
-        if (r.code !== 0) return { passed: false, steps, failedStep: smoke.name, output: tail(r) };
+        if (r.code !== 0) {
+          // A LIVE SMOKE IS THE ONLY GATE STEP THAT SPAWNS `claude`, so it is
+          // the only one whose failure can mean "the subscription ran out"
+          // rather than "this bead is broken". Read as the latter it costs a
+          // repair — a second full `claude -p` invocation against the same
+          // wall — and then parks a healthy bead `loop-stuck`, which excludes
+          // it from every future SELECT. `Cebab-weqo`.
+          //
+          // A limit HALTS rather than repairing, exactly as it does in BUILD
+          // (`machine.mjs`, STAGE.BUILD): retrying into a limit is the one
+          // remedy guaranteed not to work, and halting leaves the bead open
+          // and unlabelled for the next run.
+          const limit = detectUsageLimit(`${r.stderr ?? ''}\n${r.stdout ?? ''}`);
+          return {
+            passed: false,
+            steps,
+            failedStep: smoke.name,
+            output: tail(r),
+            ...(limit.hit ? { usageLimit: limit } : {}),
+          };
+        }
       }
       return { passed: true, steps };
     } finally {
@@ -425,6 +446,13 @@ export function makeGate({ run, cwd, config, log = () => {} }) {
         steps: [...deterministic.steps, ...playground.steps],
         failedStep: playground.failedStep,
         output: playground.output,
+        // Conditional spread, not `usageLimit: playground.usageLimit`. This
+        // return is built field-by-field rather than spread, so a new field on
+        // `runPlayground`'s result is dropped here by default — and a dropped
+        // halt signal reads as an ordinary gate failure, which is the exact
+        // outcome `Cebab-weqo` is about. Absent stays absent so
+        // `machine.mjs` sees no key rather than an explicit `undefined`.
+        ...(playground.usageLimit ? { usageLimit: playground.usageLimit } : {}),
         playgroundRan: true,
         liveSmokesRan: Boolean(config.gate.liveSmokes),
       };

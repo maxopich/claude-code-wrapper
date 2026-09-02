@@ -656,7 +656,18 @@ async function runIteration({ ctx, deps, log }) {
           };
           // STICKY, not last-write-wins. See `mergeVerdictVsGate`.
           parts.verdictVsGate = mergeVerdictVsGate(parts.verdictVsGate, attemptVerdict);
-          if (!gated.passed) {
+          if (gated.usageLimit) {
+            // No `repairContext`: the next stage is DONE, and arming a repair
+            // for a run that is halting would hand the next BUILD a failing
+            // step that was never the bead's fault. Recorded on `parts` so the
+            // ledger row says `usage_limit` rather than `gate_failed` — the
+            // two have opposite remedies. `Cebab-weqo`.
+            parts.haltReason = REASON.USAGE_LIMIT;
+            log(
+              `gate: usage limit (${gated.usageLimit.kind}) during ${gated.failedStep}, ` +
+                `resets ${gated.usageLimit.resetsAt ?? 'unknown'}`,
+            );
+          } else if (!gated.passed) {
             log(`gate: FAILED at ${gated.failedStep}`);
             repairContext = { failedStep: gated.failedStep, output: gated.output };
           }
