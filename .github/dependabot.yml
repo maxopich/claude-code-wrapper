@@ -34,6 +34,20 @@ updates:
       # README says so — so a 13.x bump would silently retract the property
       # this project is built around.
       #
+      # AND IT ALREADY BROKE CI, which is the half the first version of this
+      # comment got wrong. `Cebab-6zh` measured PR #308 on 2026-08-15: ~97 of
+      # 305 test files died on BOTH runners with `[vitest-pool]: Worker forks
+      # emitted error / Worker exited unexpectedly` — a hard process exit, not
+      # a failing assertion, and only in files that open a database. A local
+      # run of the same version passes 6120/6120, because a machine with a
+      # toolchain compiles a binding that works. The two observations are the
+      # same fact from opposite ends: no prebuild means every install falls to
+      # `node-gyp`, and where that produces a mismatched binding it dies at
+      # dlopen instead of failing loudly at install.
+      #
+      # So do not read "the tests passed locally" as evidence about this bump.
+      # That is exactly what it is not.
+      #
       # 12.11.1 is ALSO the newest 12.x on npm (12.11.2 and 12.12.0 exist as
       # GitHub releases but were never published there), so there is nothing to
       # move to inside the safe line. Revisit when a 13.x release appears with
