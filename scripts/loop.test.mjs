@@ -6551,3 +6551,143 @@ describe('the BUILD prompt tells the agent to check the issue against the tree (
     expect(existsSync(new URL('../docs/LOOP_DEVELOPMENT_STANDARD.md', import.meta.url))).toBe(true);
   });
 });
+
+describe('gate: the revert-check step is wired and can fail a bead (Cebab-pc95)', () => {
+  // The DECISION is unit-tested in `revertCheck.test.mjs` and verified against
+  // real merged commits by `scripts/revert-check.mjs`. What is checked here is
+  // the WIRING: that the gate calls it, that a vacuous verdict reddens the
+  // gate, that a skip does not, and that it runs before the Playground tier so
+  // no subscription quota is spent on a bead whose own tests do not test it.
+
+  /**
+   * A `run` seam that behaves enough like git+npm for the phase to complete.
+   * The vitest call writes the summary the classifier will read, which is what
+   * lets a test choose the verdict without spawning anything.
+   */
+  function fakeRun({ summary, patch }) {
+    const calls = [];
+    return {
+      calls,
+      run: async (file, args) => {
+        calls.push([file, args.join(' ')]);
+        const joined = args.join(' ');
+        if (file === 'git' && joined.startsWith('worktree add')) {
+          // The phase symlinks node_modules into this directory next, so it
+          // has to exist — a fake that skips it would make every case
+          // `inconclusive` and the assertions below vacuous.
+          const dir = args[args.indexOf('--quiet') + 1];
+          fs.mkdirSync(path.join(dir, 'server'), { recursive: true });
+          fs.mkdirSync(path.join(dir, 'web'), { recursive: true });
+          fs.mkdirSync(path.join(dir, 'shared'), { recursive: true });
+          return { code: 0, stdout: '', stderr: '', ms: 1 };
+        }
+        if (file === 'git' && joined.startsWith('diff --cached --')) {
+          return { code: 0, stdout: patch, stderr: '', ms: 1 };
+        }
+        if (file === 'npm' && joined.includes('vitest')) {
+          const out = args.find((a) => a.startsWith('--outputFile.json='));
+          fs.writeFileSync(out.slice('--outputFile.json='.length), JSON.stringify(summary));
+          return { code: 1, stdout: '', stderr: '', ms: 1 };
+        }
+        return { code: 0, stdout: '', stderr: '', ms: 1 };
+      },
+    };
+  }
+
+  const CHANGED = ['server/src/thing.ts', 'server/src/thing.test.ts'];
+  const PATCH = "+  test('the new case', () => {";
+
+  // For the cases that get PAST revert-check: the Playground tier's `.env`
+  // precondition is a hard gate by design (R2 — without it dev:server would run
+  // against the real ~/.cebab), so a unit test that only wants the revert-check
+  // phase has to stop before it. The ordering case below deliberately keeps
+  // `auto` instead, because "did not reach the Playground" is what it asserts.
+  const NO_PLAYGROUND = {
+    ...DEFAULTS,
+    gate: { ...DEFAULTS.gate, playgroundTier: 'never' },
+  };
+
+  test('a test that PASSES without the change fails the gate', async () => {
+    const { run } = fakeRun({
+      patch: PATCH,
+      summary: {
+        numPassedTests: 1,
+        numFailedTests: 0,
+        testResults: [{ assertionResults: [{ title: 'the new case', status: 'passed' }] }],
+      },
+    });
+    const gate = makeGate({ run, cwd: process.cwd(), config: DEFAULTS });
+    const out = await gate.run({ changedPaths: CHANGED });
+    expect(out.passed).toBe(false);
+    expect(out.failedStep).toBe('revert-check');
+    expect(out.output).toMatch(/PASS without this change/);
+  });
+
+  test('NEGATIVE CONTROL — the same test FAILING without the change passes the gate', async () => {
+    // Without this the assertion above is satisfied by a step that reddens on
+    // everything, which would stop every bead the loop ever builds.
+    const { run } = fakeRun({
+      patch: PATCH,
+      summary: {
+        numPassedTests: 0,
+        numFailedTests: 1,
+        testResults: [{ assertionResults: [{ title: 'the new case', status: 'failed' }] }],
+      },
+    });
+    const gate = makeGate({ run, cwd: process.cwd(), config: NO_PLAYGROUND });
+    const out = await gate.run({ changedPaths: CHANGED });
+    const step = out.steps.find((s) => s.name === 'revert-check');
+    expect(step.exitCode).toBe(0);
+    expect(step.skipped).toBeUndefined();
+  });
+
+  test('a collection error is recorded as SKIPPED, never as a pass', async () => {
+    // The trap, at the gate layer: vitest exits 1 for a file that never ran,
+    // and the ledger has to be able to tell that from a step that measured.
+    const { run } = fakeRun({
+      patch: PATCH,
+      summary: { numPassedTests: 0, numFailedTests: 0, numFailedTestSuites: 1 },
+    });
+    const gate = makeGate({ run, cwd: process.cwd(), config: NO_PLAYGROUND });
+    const out = await gate.run({ changedPaths: CHANGED });
+    const step = out.steps.find((s) => s.name === 'revert-check');
+    expect(step.exitCode).toBe(0);
+    expect(step.skipped).toBe('uncollectable');
+    expect(out.passed).toBe(true);
+  });
+
+  test('a docs-only bead skips it rather than reporting a pass', async () => {
+    const { run } = fakeRun({ patch: '', summary: {} });
+    const gate = makeGate({ run, cwd: process.cwd(), config: DEFAULTS });
+    const out = await gate.run({ changedPaths: ['README.md'] });
+    const step = out.steps.find((s) => s.name === 'revert-check');
+    expect(step.skipped).toBe('empty');
+    expect(step.reason).toMatch(/no test file/);
+  });
+
+  test('it runs BEFORE the Playground tier, so a vacuous bead spends no quota', async () => {
+    // Ordering is the cost argument, and it is checkable: on a failing
+    // revert-check the gate must never have started dev:server.
+    const { run, calls } = fakeRun({
+      patch: PATCH,
+      summary: {
+        numPassedTests: 1,
+        numFailedTests: 0,
+        testResults: [{ assertionResults: [{ title: 'the new case', status: 'passed' }] }],
+      },
+    });
+    const gate = makeGate({ run, cwd: process.cwd(), config: DEFAULTS });
+    const out = await gate.run({ changedPaths: CHANGED });
+    expect(out.passed).toBe(false);
+    expect(out.playgroundRan).toBe(false);
+    expect(calls.filter(([f, a]) => f === 'npm' && a.includes('dev:server'))).toEqual([]);
+  });
+
+  test('`revertCheck: false` removes the step entirely', async () => {
+    const { run } = fakeRun({ patch: PATCH, summary: { numPassedTests: 1 } });
+    const config = { ...NO_PLAYGROUND, gate: { ...NO_PLAYGROUND.gate, revertCheck: false } };
+    const gate = makeGate({ run, cwd: process.cwd(), config });
+    const out = await gate.run({ changedPaths: CHANGED });
+    expect(out.steps.find((s) => s.name === 'revert-check')).toBeUndefined();
+  });
+});

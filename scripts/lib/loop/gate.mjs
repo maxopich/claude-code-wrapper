@@ -21,9 +21,18 @@
  * at second zero rather than three parked beads that each misdescribe it.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { detectUsageLimit } from './build.mjs';
+import {
+  addedTestTitles,
+  classifyAddedCases,
+  classifyRevertRun,
+  sourceFilesInDiff,
+  stepFromVerdict,
+  testFilesInDiff,
+} from './revert_check.mjs';
 import { ConfigError } from './config.mjs';
 import { killTree, spawnDetached } from './run.mjs';
 
@@ -376,6 +385,162 @@ export function makeGate({ run, cwd, config, log = () => {} }) {
     }
   }
 
+  /**
+   * Does each test this bead ADDS actually fail without the change?
+   *
+   * `build-prompt.md` has required that since the loop was written and nothing
+   * checked it; `Cebab-dwcq` measured three tests in the run of 2026-09-01 that
+   * pass with their own fix reverted. All three are web-side — and `web/` is the
+   * tier `playgroundExemptPaths` carves out, so it had no runtime verification
+   * at all. This is its substitute and it spends no subscription quota.
+   *
+   * THE BASE TREE IS `HEAD`, not a merge base. GATE runs after `git add -A` on a
+   * branch cut from main and BEFORE PUBLISH commits anything, so the change is
+   * in the INDEX and `HEAD` is still the branch point. That is the same
+   * comparison the `lockfile` step makes with `git diff --cached`.
+   *
+   * THE LIVE TREE IS NEVER TOUCHED. A scratch worktree at `HEAD` with only the
+   * test hunks applied. The obvious alternative — reverse-apply the non-test
+   * hunks in place, run, re-apply — leaves the loop's tree broken between the
+   * two steps, and a failed restore corrupts the run. A failed teardown here
+   * costs a directory.
+   *
+   * The DECISION is `revert_check.mjs`, shared with `scripts/revert-check.mjs`
+   * and verified there against commits whose answer `Cebab-dwcq` already
+   * recorded. Only the plumbing differs, because the two read different things
+   * (a committed range vs the index).
+   */
+  async function runRevertCheck(changedPaths) {
+    const tests = testFilesInDiff(changedPaths);
+    const source = sourceFilesInDiff(changedPaths);
+    const skip = (reason) => stepFromVerdict('revert-check', { verdict: 'empty', reason });
+
+    if (tests.length === 0) return skip('the diff changes no test file');
+    if (source.length === 0) return skip('the diff changes only test files');
+
+    const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-gate-revert-'));
+    const tree = path.join(scratch, 'tree');
+    const outputFile = path.join(scratch, 'vitest.json');
+    const started = Date.now();
+    try {
+      const added = await run('git', ['worktree', 'add', '--detach', '--quiet', tree, 'HEAD'], {
+        cwd,
+        timeoutMs: stepTimeout,
+      });
+      if (added.code !== 0) {
+        return stepFromVerdict('revert-check', {
+          verdict: 'inconclusive',
+          reason: `could not create the scratch worktree: ${tail(added, 5)}`,
+        });
+      }
+      try {
+        fs.symlinkSync(path.join(cwd, 'node_modules'), path.join(tree, 'node_modules'));
+        for (const w of ['server', 'web', 'shared']) {
+          const target = path.join(cwd, w, 'node_modules');
+          if (fs.existsSync(target)) fs.symlinkSync(target, path.join(tree, w, 'node_modules'));
+        }
+      } catch (err) {
+        // Windows needs Developer Mode for this. Reported as inconclusive
+        // rather than failing a bead on a platform limitation.
+        return stepFromVerdict('revert-check', {
+          verdict: 'inconclusive',
+          reason: `could not link node_modules into the scratch worktree (${String(err)})`,
+        });
+      }
+
+      const diff = await run('git', ['diff', '--cached', '--', ...tests], {
+        cwd,
+        timeoutMs: stepTimeout,
+      });
+      const patch = diff.code === 0 ? diff.stdout : '';
+      if (patch.trim()) {
+        const patchFile = path.join(scratch, 'tests.patch');
+        fs.writeFileSync(patchFile, patch);
+        const applied = await run('git', ['apply', '--whitespace=nowarn', patchFile], {
+          cwd: tree,
+          timeoutMs: stepTimeout,
+        });
+        if (applied.code !== 0) {
+          return stepFromVerdict('revert-check', {
+            verdict: 'inconclusive',
+            reason: `the test-only patch did not apply to HEAD: ${tail(applied, 5)}`,
+          });
+        }
+      }
+
+      await run(
+        'npm',
+        [
+          'exec',
+          '--no',
+          '--',
+          'vitest',
+          'run',
+          ...tests,
+          '--reporter=json',
+          `--outputFile.json=${outputFile}`,
+        ],
+        { cwd: tree, timeoutMs: stepTimeout },
+      );
+      let summary = null;
+      try {
+        summary = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
+      } catch {
+        summary = null;
+      }
+
+      const fileLevel = classifyRevertRun(summary);
+      if (fileLevel.verdict !== 'depends' && fileLevel.verdict !== 'vacuous') {
+        return stepFromVerdict('revert-check', fileLevel, Date.now() - started);
+      }
+      // Per-CASE is the verdict. File granularity reported `depends` on a
+      // commit already recorded as carrying a vacuous test, because other
+      // tests in the same file failed — measured, see `revert_check.mjs`.
+      const titles = addedTestTitles(patch);
+      const cases = classifyAddedCases(summary, titles);
+      if (titles.length === 0) {
+        return stepFromVerdict(
+          'revert-check',
+          { verdict: 'empty', reason: 'the diff adds no statically-titled test case' },
+          Date.now() - started,
+        );
+      }
+      if (cases.vacuous.length > 0) {
+        return stepFromVerdict(
+          'revert-check',
+          {
+            verdict: 'vacuous',
+            reason:
+              `${cases.vacuous.length} of ${titles.length} added test case(s) PASS without this ` +
+              `change: ${cases.vacuous.map((t) => JSON.stringify(t)).join(', ')}`,
+          },
+          Date.now() - started,
+        );
+      }
+      return stepFromVerdict(
+        'revert-check',
+        {
+          verdict: 'depends',
+          reason:
+            `all ${cases.depends.length} added test case(s) fail without the change` +
+            (cases.unmatched.length > 0
+              ? `; ${cases.unmatched.length} not statically matchable`
+              : ''),
+        },
+        Date.now() - started,
+      );
+    } finally {
+      await run('git', ['worktree', 'remove', '--force', tree], { cwd, timeoutMs: 30000 }).catch(
+        () => {},
+      );
+      try {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      } catch {
+        /* a leaked scratch dir is not worth failing a run over */
+      }
+    }
+  }
+
   async function waitForHealth(intervalMs, playgroundPort) {
     const deadline = Date.now() + 60000;
     // The Playground's own PORT, not the loop process's — the loop never loads
@@ -437,13 +602,33 @@ export function makeGate({ run, cwd, config, log = () => {} }) {
       if (!deterministic.passed) {
         return { ...deterministic, playgroundRan: false, liveSmokesRan: false };
       }
+
+      // BEFORE the Playground tier, on purpose. It is the cheaper of the two
+      // (seconds, no subscription quota), and there is no sense spending live
+      // smokes on a bead whose own tests do not test it.
+      const steps = [...deterministic.steps];
+      if (config.gate.revertCheck !== false) {
+        const step = await runRevertCheck(changedPaths);
+        steps.push(step);
+        if (step.exitCode !== 0) {
+          return {
+            passed: false,
+            steps,
+            failedStep: step.name,
+            output: step.reason ?? '',
+            playgroundRan: false,
+            liveSmokesRan: false,
+          };
+        }
+      }
+
       if (!playgroundTriggered(changedPaths, config.gate)) {
-        return { ...deterministic, playgroundRan: false, liveSmokesRan: false };
+        return { passed: true, steps, playgroundRan: false, liveSmokesRan: false };
       }
       const playground = await runPlayground();
       return {
         passed: playground.passed,
-        steps: [...deterministic.steps, ...playground.steps],
+        steps: [...steps, ...playground.steps],
         failedStep: playground.failedStep,
         output: playground.output,
         // Conditional spread, not `usageLimit: playground.usageLimit`. This
