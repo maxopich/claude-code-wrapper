@@ -1223,14 +1223,60 @@ describe('gate: the Playground precondition is a hard gate', () => {
     }
   });
 
-  test('trigger paths decide the playground tier, and never/always override', () => {
+  // The rule: anything that is not UI goes through the Playground tier. The
+  // predicate is an EXEMPT list, so these cases are written from both sides —
+  // "too narrow" and "too wide" are different bugs and an allow-list only ever
+  // failed the first way.
+  test('every non-exempt path triggers the playground tier, and never/always override', () => {
+    // Reddens on the old allow-list for the first two only.
     expect(playgroundTriggered(['server/src/a.ts'], gate)).toBe(true);
     expect(playgroundTriggered(['shared/src/a.ts'], gate)).toBe(true);
+
+    // THE CASES THE ALLOW-LIST MISSED. Each of these reached `main` having
+    // never started a server, because none of them starts with `server/` or
+    // `shared/`. This is the half of the change that has teeth.
+    expect(playgroundTriggered(['scripts/lib/loop/gate.mjs'], gate)).toBe(true);
+    expect(playgroundTriggered(['package.json'], gate)).toBe(true);
+    expect(playgroundTriggered(['.npmrc'], gate)).toBe(true);
+    expect(playgroundTriggered(['vitest.config.ts'], gate)).toBe(true);
+
+    // Exempt: UI and documentation, the two classes that cannot change runtime
+    // behaviour. Markdown by extension as well as by the `docs/` prefix — the
+    // doc defects this loop files are usually in root CLAUDE.md / README.md.
     expect(playgroundTriggered(['docs/a.md'], gate)).toBe(false);
+    expect(playgroundTriggered(['CLAUDE.md', 'README.md'], gate)).toBe(false);
+    expect(playgroundTriggered(['web/src/store.ts'], gate)).toBe(false);
+    expect(playgroundTriggered(['web/src/App.tsx', 'web/src/styles.css'], gate)).toBe(false);
+
+    // EVERY path must be exempt, not merely some. A mixed diff is exactly
+    // where a UI change and a protocol change disagree, so it runs the tier.
+    expect(playgroundTriggered(['web/src/store.ts', 'server/src/ws/server.ts'], gate)).toBe(true);
+    expect(playgroundTriggered(['README.md', 'server/src/auth.ts'], gate)).toBe(true);
+
+    // An empty diff is "nothing to exercise", decided explicitly — `[].every()`
+    // is true, so without the guard this would read as exempt by accident.
+    expect(playgroundTriggered([], gate)).toBe(false);
+
+    // No exceptions at all, on request.
+    expect(playgroundTriggered(['docs/a.md'], { ...gate, playgroundExemptPaths: [] })).toBe(true);
+    expect(playgroundTriggered(['web/src/a.ts'], { ...gate, playgroundExemptPaths: [] })).toBe(
+      true,
+    );
+
+    // The two overrides still win outright, in both directions.
     expect(playgroundTriggered(['docs/a.md'], { ...gate, playgroundTier: 'always' })).toBe(true);
     expect(playgroundTriggered(['server/src/a.ts'], { ...gate, playgroundTier: 'never' })).toBe(
       false,
     );
+  });
+
+  // The operator's rule is worth nothing if the tier it reaches is a boot
+  // check. Measured over the run of 2026-09-01 (`.loop/runs.jsonl`, 41
+  // records): `playgroundRan` true 23 times, `liveSmokesRan` false 41 — so
+  // four managed-agent PRs shipped without `managed_file_smoke.ts` running.
+  test('live smokes are on by default', () => {
+    expect(DEFAULTS.gate.liveSmokes).toBe(true);
+    expect(playgroundSmokes(DEFAULTS.gate).length).toBeGreaterThan(0);
   });
 
   test('env parsing handles comments, quotes and blank lines', () => {
@@ -2010,6 +2056,26 @@ describe('the stages that had never run (Cebab-qd2.7)', () => {
       expect(list.map((x) => x.name)).not.toContain('ws_smoke');
       expect(list.map((x) => x.script)).not.toContain('src/ws_smoke.ts');
     }
+
+    // playground_smokes_assert — EVERY entry must fail on a failed assertion,
+    // because `runPlayground` branches on the exit code and nothing else.
+    // `bus_pause_gate_smoke.ts` does not: its only `process.exit(1)` is the
+    // `MOCK=1` guard, and it prints a `consulted` / `bypassed` /
+    // `inconclusive` summary and then exits 0 whatever it measured. As a gate
+    // step it could not fail, and a step that always passes reads as coverage
+    // while being none. Pinned so it is not added by symmetry with its
+    // neighbours, all five of which were checked and do assert.
+    for (const list of [off, on]) {
+      expect(list.map((x) => x.name)).not.toContain('bus_pause_gate_smoke');
+      expect(list.map((x) => x.script)).not.toContain('src/bus_pause_gate_smoke.ts');
+    }
+    expect(on.map((x) => x.name).sort()).toEqual([
+      'bus_max_turns_smoke',
+      'live_smoke',
+      'managed_file_smoke',
+      'mcp_scope_smoke',
+      'system_prompt_smoke',
+    ]);
   });
 
   // ── D2: WATCH called healthy CI "never started" ─────────────────────────

@@ -67,9 +67,20 @@ export const DEFAULTS = Object.freeze({
   },
   gate: {
     playgroundTier: 'auto',
-    playgroundTriggerPaths: ['server/', 'shared/'],
+    // An EXEMPT list, not a trigger list — see `playgroundTriggered`. Anything
+    // not named here reaches the Playground tier, so a subsystem nobody
+    // thought of is covered by default instead of silently skipped. A leading
+    // `*` is a suffix match; `[]` means literally no exceptions.
+    playgroundExemptPaths: ['web/', 'docs/', '*.md'],
     playgroundRoot: '../Playground',
-    liveSmokes: false,
+    // ON. The tier without live smokes is a boot check: it proves the server
+    // starts, and nothing about the behaviour the bead changed. Measured over
+    // the run of 2026-09-01 (`.loop/runs.jsonl`, 41 records): `playgroundRan`
+    // true 23 times, `liveSmokesRan` false 41 times — so four managed-agent
+    // PRs shipped without `managed_file_smoke.ts`, the smoke CLAUDE.md names
+    // by hand for exactly that verification, ever running. These spawn real
+    // `claude` sessions and bill the subscription; that is the intended trade.
+    liveSmokes: true,
     auditGate: true,
     stepTimeoutMs: 900000,
   },
