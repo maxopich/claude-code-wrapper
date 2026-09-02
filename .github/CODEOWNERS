@@ -3,7 +3,7 @@
 # on `main`).
 #
 # The rationale for each block is the threat model documented in
-# server/src/auth.ts and CLAUDE.md — same-uid worker surface, bypass-
+# server/src/auth.ts and SECURITY.md — same-uid worker surface, bypass-
 # permissions runtime trust, and irreversible state mutations.
 
 # Auth, origin gating, WS server entrypoint — same-uid threat surface.

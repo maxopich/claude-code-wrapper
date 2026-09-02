@@ -219,7 +219,8 @@ links matching page titles, and a per-page size cap.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor flow — pre-PR checks
+See [docs/](docs/) for how the internals work, and the "Developing on it" section
+above for the dev loop. Before opening a PR run the same checks CI does — pre-PR checks
 and the security-critical paths to be aware of.
 
 ## Layout

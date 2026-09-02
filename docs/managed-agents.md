@@ -1,6 +1,6 @@
 # Managed agents
 
-Reference detail lifted out of [`CLAUDE.md`](../CLAUDE.md), which keeps the rules an
+Reference detail behind managed agents. The rules an
 agent must not violate and points here for the mechanism. **Nothing under `docs/` is
 auto-loaded** — neither the SDK's project-memory load nor the bus's `readProjectClaudeMd`
 injection reads past `CLAUDE.md` — so this page arrives only when you open it.

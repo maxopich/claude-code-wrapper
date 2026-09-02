@@ -144,7 +144,7 @@ const SENSITIVE_TAILS: readonly string[] = [
   //
   // `settings.local.json` is the obvious one: gitignored, per-machine, never
   // reviewed — exactly where an operator parks a real key in an `env:` block.
-  // `settings.json` is the judgement call, and it went the same way: CLAUDE.md's
+  // `settings.json` is the judgement call, and it went the same way: `docs/safety-and-security.md`'s
   // env-precedence caveat documents that a project's `settings.json` can define
   // `env: { ANTHROPIC_API_KEY }` and silently reroute billing, which is a
   // credential by any reading. The cost is that a Read of it shows `<redacted>`

@@ -483,7 +483,7 @@ describe('redactSensitive — credential shapes [security]', () => {
 /**
  * [security] Register of0 — the files THIS REPO documents as credential-bearing.
  *
- * The class of bug: the docs knew and the list did not. CLAUDE.md's
+ * The class of bug: the docs knew and the list did not. `docs/safety-and-security.md`'s
  * env-precedence caveat, its MCP section, and README's "local data" section each
  * name a file that holds credentials; none of them was on the path list, so a
  * `Read` of one shipped its body to the Logs surface and into every export.
