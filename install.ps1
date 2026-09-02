@@ -196,8 +196,10 @@ function Invoke-Install {
   Write-Host "Done." -ForegroundColor Green
   Write-Note "Next steps:"
   Write-Note "  cd claude-code-wrapper"
-  Write-Note "  npm run dev          # server :4319 + web :5173 (Ctrl+C stops both)"
-  Write-Note "  then open http://127.0.0.1:5173"
+  Write-Note "  npm start            # one port, no dev server (Ctrl+C stops it)"
+  Write-Note "  then open http://127.0.0.1:4319"
+  Write-Note ""
+  Write-Note "  npm run dev          # to develop on it: server :4319 + web :5173"
   Write-Note "Optional: copy .env.example to .env to override workspace root / port / mock."
   Write-Note "Confirm Claude login any time with:  claude auth status"
 }

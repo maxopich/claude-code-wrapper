@@ -58,9 +58,15 @@ a human, so auto-approve is bypass in effect and a malicious transitive
 deliberately does **not** build
 `better-sqlite3`. The bootstrap script — pure Node, no shell, runnable on a
 fresh clone — does the three required steps in order: `npm install`, then the
-one re-enabled native build via `prebuild-install` (a prebuilt binary on
-macOS/Linux/Windows x64, no compiler toolchain needed), then git hooks. The
-older `npm install` && `npm run setup` two-step still works.
+one re-enabled native build via `prebuild-install`, then git hooks. The older
+`npm install` && `npm run setup` two-step still works.
+
+`prebuild-install` fetches a binary matching your platform and Node ABI, so no
+compiler toolchain is needed where one is published — verified on macOS arm64,
+and on linux-x64 + win32-x64 by CI. Anywhere else it falls back to
+`node-gyp rebuild`, which needs Python and a C++ toolchain. To tell which one
+you got: `build/Makefile` under `node_modules/better-sqlite3` exists only after
+a local compile.
 
 The repo-root `.env` is loaded automatically by both server (`--env-file-if-exists`) and web (Vite `envDir`). If you don't create one, the defaults from `.env.example` apply: `CEBAB_WORKSPACE_ROOT=~/agents`, `CEBAB_PORT=4319`, mock mode off. (Cebab's own knobs carry the `CEBAB_` prefix; the older bare names — `WORKSPACE_ROOT`, `PORT`, `MOCK`, `MOCK_SCENARIO`, `MOCK_INTERVAL_MS`, `MAX_TURNS` — still work but are deprecated and warn once at startup.)
 
@@ -219,16 +225,31 @@ links matching page titles, and a per-page size cap.
 
 ## Contributing
 
-See [docs/](docs/) for how the internals work, and the "Developing on it" section
-above for the dev loop. Before opening a PR run the same checks CI does — pre-PR checks
-and the security-critical paths to be aware of.
+[`docs/`](docs/) explains how the internals work — start with
+[`docs/README.md`](docs/README.md). [`SECURITY.md`](SECURITY.md) has the threat model and
+the disclosure policy; report vulnerabilities there rather than in a public issue.
+
+Before opening a PR, run what CI runs:
+
+```sh
+npm run lint && npm run typecheck && npm run format:check && npm test && npm run test:security
+```
+
+All three platforms are in scope for a change — CI runs `ubuntu-latest` and
+`windows-2022` and both are required. Windows is the one that bites: `.cmd` shims need
+`shell: true` to spawn, POSIX file modes are a no-op, and `SIGTERM` is never delivered
+(`SIGBREAK` is).
 
 ## Layout
 
 - `server/` — Node + Express + ws + better-sqlite3, owns the SDK runner and persistence
 - `web/` — Vite + React, talks to the server over a single WS connection
 - `shared/` — protocol types imported by both sides
+- `assistant/` — the built-in help assistant's prompt and knowledge base, read from disk
+  at runtime (absent it, the help button hides and everything else runs)
 - `fixtures/` — captured stream-json transcripts for mock mode
+- `scripts/` — the launchers (`start`, `dev`, `bootstrap`) and the source-scanning gates
+- `docs/` — how the internals work, and the measurements behind them
 
 ## Local data
 
