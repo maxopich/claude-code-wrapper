@@ -19,8 +19,16 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
   schedule:
-    # Weekly auditor-persona zizmor run picks up the louder ruleset (low-severity
-    # smells that are too noisy as a required PR check).
+    # A BACKSTOP NOW, NOT THE ONLY SIGNAL. The auditor persona used to run here
+    # and nowhere else, on the grounds that its low-severity ruleset was "too
+    # noisy as a required PR check" — a statement about the tree at the time,
+    # which carried 14 findings. The tree now carries zero, so the reason has
+    # expired and the persona runs on PRs below.
+    #
+    # That matters because a `schedule` run has no PR to redden and this
+    # workflow is not a required check, so its failures reached nobody: the
+    # auditor run failed on 2026-08-17, 2026-08-24 and 2026-08-31 and the red
+    # was never seen. `Cebab-tbpb`.
     - cron: '0 5 * * 1'
 
 permissions: {}
@@ -72,10 +80,14 @@ jobs:
       - name: Install zizmor
         run: pipx install zizmor==1.24.1
 
-      - name: zizmor (default persona)
-        if: github.event_name != 'schedule'
-        run: zizmor --no-progress .github/workflows
-
-      - name: zizmor (auditor persona, weekly)
-        if: github.event_name == 'schedule'
+      # ONE STEP, ONE PERSONA, ON EVERY EVENT. Splitting by `github.event_name`
+      # meant the strict ruleset ran only on a trigger nobody watches. Running
+      # it on the PR puts the finding in front of the person making the change
+      # — and because the autonomous loop parks on ANY completed red check, not
+      # only on the required context, it blocks an unattended merge too.
+      #
+      # zizmor is pinned to an exact version above, so a new audit cannot
+      # appear on its own and redden an unrelated PR; it arrives only with a
+      # deliberate bump, in front of whoever makes it.
+      - name: zizmor (auditor persona)
         run: zizmor --no-progress --persona auditor .github/workflows

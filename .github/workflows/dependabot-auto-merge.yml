@@ -25,6 +25,20 @@ name: Dependabot auto-merge
 
 on: pull_request_target # zizmor: ignore[dangerous-triggers]
 
+# Keyed on the PR number for the same reason `pr-label.yml` is, and the
+# reasoning there carries the measurement: on `pull_request_target`,
+# `github.ref` is the BASE ref — `refs/heads/main` for every PR — so a
+# ref-keyed group collapses into one repo-wide bucket and unrelated PRs cancel
+# each other.
+#
+# Dependabot force-pushes a branch on every rebase, so without this two runs
+# for the same PR can race on the enable step. Cancelling the older one is
+# correct: the newer run reads fresher metadata, and the merge-enable is
+# idempotent, so the survivor arms auto-merge either way.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 # Deny by default at the top; the one job grants its own writes below.
 #
 # The writes used to live here, which OpenSSF Scorecard flagged (high,
@@ -38,14 +52,15 @@ permissions: {}
 
 jobs:
   auto-merge:
+    name: Dependabot auto-merge
     if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
     # `contents: write` enables auto-merge; `pull-requests: write` covers the
     # `gh api .../pulls/N/files` read and the merge-enable. Same two scopes
     # this job already ran with — moved, not widened.
     permissions:
-      contents: write
-      pull-requests: write
+      contents: write # Enable auto-merge on the PR.
+      pull-requests: write # `gh api .../pulls/N/files` read + the merge-enable.
     steps:
       - name: Fetch dependabot metadata
         id: meta

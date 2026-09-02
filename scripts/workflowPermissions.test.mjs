@@ -407,3 +407,42 @@ describe('ci_setup_steps_match', () => {
     }
   });
 });
+
+describe('the strict workflow audit runs where someone will see it (Cebab-tbpb)', () => {
+  // WHAT WENT WRONG. `workflow-lint.yml` ran zizmor's default persona on
+  // PR/push and its stricter `auditor` persona ONLY on the weekly cron. The
+  // auditor run failed on 2026-08-17, 2026-08-24 and 2026-08-31 and nobody saw
+  // it: a `schedule` event has no PR to redden, and this workflow is not one
+  // of the seven required contexts on `main`. Three weeks of a red gate that
+  // reached no one.
+  //
+  // The split was justified as "too noisy as a required PR check" — a claim
+  // about the tree, which then carried 14 findings. It carries zero now, so the
+  // persona runs on every event and the cron is a backstop rather than the only
+  // signal.
+
+  const src = read('.github/workflows/workflow-lint.yml');
+
+  test('the auditor persona is not gated on the event that hides it', () => {
+    // The exact shape that produced the three-week blind spot.
+    expect(src).not.toMatch(/if:\s*github\.event_name\s*==\s*'schedule'/);
+  });
+
+  test('the auditor persona is actually the one that runs', () => {
+    // Without this the assertion above passes for a workflow that dropped the
+    // auditor persona altogether — which would also make the cron green, and
+    // for the worse reason.
+    expect(src).toContain('--persona auditor');
+    const steps = src.split('--persona auditor').length - 1;
+    expect(steps, 'exactly one auditor invocation').toBe(1);
+  });
+
+  test('zizmor stays pinned to an exact version', () => {
+    // The reason a strict audit is safe to run on every PR: a new audit cannot
+    // arrive on its own and redden an unrelated change. It arrives only with a
+    // deliberate bump, in front of whoever makes it. `pipx install zizmor==X`,
+    // never `>=` and never bare.
+    expect(src).toMatch(/pipx install zizmor==\d+\.\d+\.\d+/);
+    expect(src).not.toMatch(/pipx install zizmor(\s|$|[^=])/);
+  });
+});
