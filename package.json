@@ -12,6 +12,7 @@
     "web"
   ],
   "scripts": {
+    "start": "node scripts/start.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:server": "npm --workspace server run dev",
     "dev:web": "npm --workspace web run dev",

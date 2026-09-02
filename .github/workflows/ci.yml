@@ -177,6 +177,15 @@ jobs:
         # being true when the matrix repins.
         run: npm --workspace server exec tsx src/ci_smoke.ts
 
+      - name: Single-port serving smoke (mock, cross-platform)
+        # `npm start` serves the built UI from the API's own origin, which
+        # changes two things no unit test can see: whether the SPA fallback
+        # swallows /health, and whether /auth-token answers a same-origin
+        # fetch that carries no Origin header. Both were broken on the first
+        # real boot of this mode and neither would have reddened a suite.
+        # Must run AFTER Build — it needs web/dist and says so if it is absent.
+        run: npm --workspace server exec tsx src/single_port_smoke.ts
+
   tests:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
