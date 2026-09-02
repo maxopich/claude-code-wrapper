@@ -294,11 +294,15 @@ export type CaptureMultiAgentForensicsInput = {
    *  shallow workdir hash. */
   projectCwd: string | undefined;
   /**
-   * All BusEvents involving this agent in EITHER direction
-   * (source = slug OR destination = slug), most recent last. Caller
-   * (the kick handler) filters from `listMultiAgentEvents` to avoid
-   * a per-call repo query inside this helper. Cap at 50 here so a
-   * test that passes too many doesn't bloat the row.
+   * This agent's most recent BusEvents in EITHER direction
+   * (source = slug OR destination = slug), oldest first.
+   *
+   * NOT "all" of them, and no longer filtered in JS. `Cebab-3nt` moved the
+   * kick handler onto `listMultiAgentEventsForAgent`, which applies both the
+   * direction match and the row cap in SQL — a long orchestrator run had been
+   * materialising its whole transcript on every kick to keep at most fifty
+   * rows. The helper still caps at 50 itself, so a test that passes more
+   * cannot bloat the row.
    */
   agentBusEvents: MultiAgentBusEvent[];
   /** All mutations by this agent for the session, ascending ts.
