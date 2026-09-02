@@ -65,12 +65,52 @@ export const DETERMINISTIC_STEPS = Object.freeze([
 
 const NETWORK_HINTS = ['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'network'];
 
-/** Does this diff touch anything that warrants the Playground tier? */
+/**
+ * Does this diff warrant the Playground tier?
+ *
+ * AN EXEMPT LIST, NOT A TRIGGER LIST, AND THE DIRECTION IS THE WHOLE POINT.
+ * This was `playgroundTriggerPaths: ['server/', 'shared/']` — an allow-list,
+ * so the tier fired only for the two roots someone had thought of. A change
+ * under `scripts/`, a migration outside those roots, or a root config change
+ * reached `main` having never started a server. The operator's rule is the
+ * inverse: anything that is not UI has to go through the tier, and cost is not
+ * the constraint, because reworking an unattended merge costs more.
+ *
+ * So the default is now RUN, and an exemption has to be named. A subsystem
+ * nobody anticipated is covered instead of silently skipped, which is the
+ * failure mode an allow-list has and a deny-list does not.
+ *
+ * Exempt means "cannot change runtime behaviour": `web/` is the UI the rule
+ * carves out by name, and documentation is the deliverable for a docs bead
+ * (`build-prompt.md` says so — no test is required for one).
+ *
+ * An entry beginning with `*` is a SUFFIX match, everything else a path
+ * prefix, which is why `*.md` is an entry rather than a hardcoded extra
+ * condition: the doc defects this loop files are usually in root `CLAUDE.md`
+ * or `README.md`, so the extension rule is needed — but a rule living outside
+ * the list would make `playgroundExemptPaths: []` a lie, still silently
+ * exempting every markdown file while claiming no exceptions. One list, no
+ * hidden rules. (Caught by the `[]` case in `loop.test.mjs`, which failed
+ * against exactly that first implementation.)
+ *
+ * EVERY path must be exempt for the diff to skip. A bead that touches
+ * `web/src/store.ts` AND `server/src/ws/server.ts` runs the tier — the mixed
+ * diff is exactly where a UI change and a protocol change disagree.
+ *
+ * `'always'` and `'never'` still override outright; `IMPLEMENTED_VALUES` in
+ * `config.mjs` refuses any other tier value rather than treating it as `auto`.
+ */
 export function playgroundTriggered(changedPaths, gate) {
   if (gate.playgroundTier === 'always') return true;
   if (gate.playgroundTier === 'never') return false;
-  const triggers = gate.playgroundTriggerPaths ?? [];
-  return changedPaths.some((p) => triggers.some((t) => p.startsWith(t)));
+  // No diff, nothing to exercise. Not the same as "everything was exempt":
+  // `[].every()` is true, so without this the empty case would read as exempt
+  // by accident rather than by decision.
+  if (changedPaths.length === 0) return false;
+  const exempt = gate.playgroundExemptPaths ?? [];
+  const matches = (entry, p) =>
+    entry.startsWith('*') ? p.endsWith(entry.slice(1)) : p.startsWith(entry);
+  return !changedPaths.every((p) => exempt.some((e) => matches(e, p)));
 }
 
 /** Parse a dotenv file well enough for the two keys that matter. */
@@ -137,13 +177,34 @@ export function playgroundSmokeEnv(parsedEnv, baseEnv = process.env) {
  */
 export function playgroundSmokes(gate) {
   if (!gate.liveSmokes) return [];
-  // These spawn REAL `claude` sessions against the operator's subscription —
-  // that, more than their runtime, is why they are opt-in.
+  // These spawn REAL `claude` sessions against the operator's subscription.
+  // That is the accepted cost of the rule in `playgroundTriggered`, not a
+  // reason to keep them off — a boot check cannot observe the behaviour a bead
+  // changed, and four managed-agent PRs merged unreviewed in the run of
+  // 2026-09-01 without `managed_file_smoke` running once.
+  //
+  // EVERY ENTRY HERE MUST FAIL ON A FAILED ASSERTION, because `runPlayground`
+  // branches on the exit code and nothing else. Verified per script before
+  // adding: `live_smoke` ends `process.exit(resumed ? 0 : 1)`;
+  // `bus_max_turns_smoke` ends `process.exit(failures.length === 0 ? 0 : 1)`;
+  // `managed_file_smoke`, `mcp_scope_smoke` and `system_prompt_smoke` each set
+  // `process.exitCode = 1` on a failed check, and `system_prompt_smoke` carries
+  // its own positive control so a silent no-op reads as a failure rather than
+  // as a pass.
+  //
+  // `bus_pause_gate_smoke.ts` IS DELIBERATELY ABSENT and must stay absent. It
+  // is a MEASUREMENT script: its only `process.exit(1)` is the `MOCK=1` guard,
+  // and it prints a summary of `consulted` / `bypassed` / `inconclusive` and
+  // then falls off the end at exit 0 whatever it found. As a gate step it
+  // could not fail — a step that always passes reads as coverage and is none.
+  // `playground_smokes_assert` pins the exclusion so it is not re-added by
+  // symmetry with its neighbours.
   return [
     { name: 'live_smoke', script: 'src/live_smoke.ts' },
     { name: 'mcp_scope_smoke', script: 'src/mcp_scope_smoke.ts' },
     { name: 'managed_file_smoke', script: 'src/managed_file_smoke.ts' },
     { name: 'bus_max_turns_smoke', script: 'src/bus_max_turns_smoke.ts' },
+    { name: 'system_prompt_smoke', script: 'src/system_prompt_smoke.ts' },
   ];
 }
 

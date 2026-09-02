@@ -142,12 +142,14 @@ must not silently widen the guard.
   },
   "gate": {
     "playgroundTier": "auto", // "auto" | "always" | "never"
-    "playgroundTriggerPaths": ["server/", "shared/"],
+    // EXEMPT list, not a trigger list: "auto" runs the tier unless EVERY changed
+    // path is exempt. A leading `*` is a suffix match. `[]` = no exceptions.
+    "playgroundExemptPaths": ["web/", "docs/", "*.md"],
     // Sibling of the checkout, not a subdirectory of it. The `.env` written per
     // Playground/README.md must point CEBAB_DATA_DIR and WORKSPACE_ROOT inside
     // this root; preflight refuses to start otherwise (§6.4, R2).
     "playgroundRoot": "../Playground",
-    "liveSmokes": false, // see §6.4 — these spawn real `claude` sessions
+    "liveSmokes": true, // see §6.4 — these spawn real `claude` sessions, by design
     "auditGate": true, // network-dependent; a network error is a skip, not a fail
     "stepTimeoutMs": 900000,
   },
@@ -616,8 +618,21 @@ format-clean and a branch cut from it has no pre-existing misformatted file to s
 is fixed at source too — `build-prompt.md` now names the step, which it never did — and
 `gate.formatAutofixed` on the ledger row is what measures whether that instruction is obeyed.
 
-**Playground tier — when `playgroundTier` is `"always"`, or `"auto"` and the diff touches
-`playgroundTriggerPaths`:**
+**Playground tier — when `playgroundTier` is `"always"`, or `"auto"` and the diff is not
+entirely inside `playgroundExemptPaths`:**
+
+The trigger is an **exempt list, not an allow list**, and the direction is load-bearing. It was
+`playgroundTriggerPaths: ["server/", "shared/"]`, so the tier fired only for the two roots someone
+had thought of, and a change under `scripts/`, a migration outside those roots, or a root config
+change reached `main` having never started a server. The rule is now the inverse — **anything that
+is not UI goes through the tier** — so a subsystem nobody anticipated is covered by default rather
+than skipped in silence. Exempt means "cannot change runtime behaviour": `web/` is the UI carve-out,
+and documentation is the whole deliverable for a docs bead (`build-prompt.md` requires no test for
+one). An entry beginning with `*` is a **suffix** match, everything else a path prefix — `*.md` is a
+list entry rather than a hardcoded extra condition, because a rule living outside the list would
+make `playgroundExemptPaths: []` a lie. **Every** changed path must be exempt for the diff to skip,
+so a mixed `web/` + `server/` diff runs the tier. Set `playgroundExemptPaths: []` for literally no
+exceptions.
 
 Preconditions, checked before anything is spawned — **fail the stage rather than proceeding** if
 any is unmet:
@@ -635,10 +650,30 @@ bead, parks it, and does the same for the next two — halting the run on the ci
 three per-bead failures that all misdescribe one setup problem. In preflight it is a single exit 2
 at second zero, naming `Playground/README.md`, which already documents the exact file to write.
 
-Then: start `npm run dev:server` detached and poll `GET /health` until ready or 60 s. **That boot
-is the tier's signal** — it is the one thing `ci_smoke` cannot show, since `ci_smoke` runs against
-a mock server over a temp workspace. Then, and only when `gate.liveSmokes` is true, run
-`live_smoke.ts`, `mcp_scope_smoke.ts`, `managed_file_smoke.ts`, `bus_max_turns_smoke.ts`.
+Then: start `npm run dev:server` detached and poll `GET /health` until ready or 60 s. That boot is
+the tier's BASELINE signal — it is the one thing `ci_smoke` cannot show, since `ci_smoke` runs
+against a mock server over a temp workspace. It is not the tier's point: booting proves the server
+starts and says nothing about the behaviour the bead changed. Then, when `gate.liveSmokes` is true
+(now the default), run `live_smoke.ts`, `mcp_scope_smoke.ts`, `managed_file_smoke.ts`,
+`bus_max_turns_smoke.ts`, `system_prompt_smoke.ts`.
+
+**Why those five and not six.** Every entry branches the gate on its exit code, so every entry has
+to fail on a failed assertion. Verified per script: `live_smoke` ends
+`process.exit(resumed ? 0 : 1)`, `bus_max_turns_smoke` ends
+`process.exit(failures.length === 0 ? 0 : 1)`, and the other three set `process.exitCode = 1` on a
+failed check — `system_prompt_smoke` with its own positive control, so a silent no-op reads as a
+failure rather than a pass. `bus_pause_gate_smoke.ts` is **deliberately excluded**: its only
+`process.exit(1)` is the `MOCK=1` guard, and it prints a `consulted` / `bypassed` / `inconclusive`
+summary and then exits 0 whatever it measured. As a gate step it could not fail, and a step that
+always passes reads as coverage while being none. `playground_smokes_assert` in `loop.test.mjs`
+pins the exclusion.
+
+**Measured, and the reason this changed.** Over the run of 2026-09-01 (`.loop/runs.jsonl`, 41
+records): `playgroundRan` true 23 times, `liveSmokesRan` **false 41 times**. With live smokes off
+the tier's only step is `dev:server`, so four managed-agent PRs (#459, #470, #471, #472) merged
+without `managed_file_smoke.ts` — the smoke `CLAUDE.md` names by hand for exactly that
+verification — ever running. These smokes bill the operator's subscription; that is the accepted
+trade, because reworking an unattended merge costs more.
 
 **Not `ws_smoke.ts`** — this document originally prescribed it here and it can never pass in the
 Playground. `ws_smoke.ts` looks a project up by the literal name `Cebab` and exits when it is
