@@ -150,8 +150,10 @@ space (the Copy modal) makes a full, independent snapshot under
 `~/.cebab/agents/<slug>/`, registered as an ordinary project row. Managed agents
 are deliberately exempt from the "went missing" sweep that removes a workspace
 row whose directory disappeared, so they stay in the sidebar and **persist even
-after you change the workspace folder** — only deleting their directory by hand
-removes them (there is no in-app delete; see [Local data](#local-data)).
+after you change the workspace folder**. Removing one is an explicit operator
+action: the sidebar's Delete affordance tears down the agent's tree, its
+sessions and events, and its per-session logs, after an audit row is written —
+refusing the whole operation if that row cannot be appended.
 
 The "asks" / "trusted" toggle per project controls **two** things, and both
 halves are security-relevant:
@@ -163,8 +165,9 @@ halves are security-relevant:
   auto-allows only the file-edit tools (`Edit`, `Write`, `NotebookEdit`) and
   everything else still prompts. It never singles out "filesystem commands":
   `Bash` is either fully auto-allowed (trusted) or fully prompting (untrusted).
-  A fresh session on a trusted project seeds `"acceptEdits"`, so the trusted
-  behaviour is the default one. See
+  A fresh session on a trusted project seeds `"acceptEdits"` **unless the
+  project has its own starting mode set**, which outranks Trust; a resumed
+  session's stored mode outranks both (`seedPermissionMode`). See
   [`server/src/ws/permission.ts`](server/src/ws/permission.ts).
 - **`settingSources`** — `['user']` when untrusted, and all three scopes when
   trusted. Only a trusted project loads its own `CLAUDE.md`, `.claude/skills/`,
@@ -179,6 +182,27 @@ which reads exactly what the spawn will load and records what was measured.
 
 For a single-session override there's also an inline pill above the chat. It
 flips `permissionMode` only — `settingSources` is fixed when the run starts.
+
+## Built-in help
+
+There's a help assistant in the app — a floating chat widget that answers questions
+about Cebab itself. It reads a knowledge base shipped in the repo under
+[`assistant/kb/`](assistant/kb/) (fifteen pages, indexed by `00-index.md`) plus a
+per-turn snapshot of the running app's state, so it can answer "why is this project's
+MCP server not loading" with reference to _your_ session rather than in general.
+
+Its spawn posture is Cebab-owned and deliberately narrower than any project you can
+configure: `permissionMode: 'default'` so every tool routes through the permission gate,
+`settingSources: []` — an **empty** scope set, so no `~/.claude`, no project settings, no
+`CLAUDE.md` and no project-declared MCP servers or env injections reach the turn — an
+explicit tool allow-list, and `skills: []` (empty rather than omitted, because omitting
+leaves the CLI's own skills on). It is also the one path in Cebab where a turn does
+**not** run with an empty system prompt.
+
+Editing the KB is editing markdown — see
+[`assistant/CONTRIBUTING-KB.md`](assistant/CONTRIBUTING-KB.md). A test
+(`server/src/assistant/kb_gate.test.ts`) enforces the structure: one H1 per page, index
+links matching page titles, and a per-page size cap.
 
 ## Contributing
 
@@ -205,7 +229,8 @@ and the security-critical paths to be aware of.
 - Managed agent snapshots (projects you copied into Cebab's own space via the
   Copy modal): `~/.cebab/agents/<slug>/`. Each is a full recursive copy of the
   source project — `node_modules` included, `.git` excluded — capped at 5 GB /
-  300k files per copy. Copies accumulate with no in-app delete path, so this is
-  typically **by far the largest thing Cebab writes**; reclaim the space by
-  deleting the individual `<slug>/` directories you no longer need.
+  300k files per copy. Copies accumulate until you remove them, so this is
+  typically **by far the largest thing Cebab writes**; reclaim the space with
+  the in-app Delete on the agent (which also clears its sessions, events and
+  logs), or by deleting the individual `<slug>/` directories by hand.
 - Original Claude session transcripts (used by `--resume`): `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`

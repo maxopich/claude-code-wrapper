@@ -529,12 +529,26 @@ function rowToPendingRetry(row: PendingRetryRow): PendingRetry {
  * a non-null `p` UPSERTs the row for `(sessionId, p.agentName)`, so a second
  * concurrent worker failure never overwrites a different worker's slot — the
  * defect Cebab-ygu.2 fixed. Pass `null` to clear EVERY pending retry for the
- * session (teardown only). To reap a single agent's slot after a retry or a
- * recovery, use `clearPendingRetry`, not this. Used by:
- *   - `router.onWorkerFailed` when a worker's deliverTurn rejects, to persist
- *     enough state that the operator can come back later (even after a Cebab
- *     restart) and click Retry.
- *   - `handle.stop` / `abandon_session` (with `null`) to keep the row clean.
+ * session. `clearPendingRetry` is the per-agent reap and is what the
+ * orchestrator uses; prefer it wherever one agent's slot is meant.
+ *
+ * "TEARDOWN ONLY" IS WHAT THIS USED TO SAY, AND IT IS NOT WHAT THE CALLERS DO.
+ * `chain.ts` uses the null-clear at three sites and only one is teardown:
+ * `handle.stop` (teardown), `onTurnSucceeded` when the recovered agent owns the
+ * single slot, and the retry path clearing before re-delivery. That is a
+ * consequence of chain still being on the single-slot pending-retry API rather
+ * than a misuse — `Cebab-6c1m` tracks moving it over, and `Cebab-mnba` tracks
+ * the front-of-queue condition on the `onTurnSucceeded` reap. Until then a
+ * chain session has at most one slot, so session-wide and per-agent coincide
+ * there; in an orchestrator session they do not, which is why the enumeration
+ * below is worth keeping accurate.
+ *
+ * Callers:
+ *   - `router.onWorkerFailed` (non-null) when a worker's deliverTurn rejects,
+ *     to persist enough state that the operator can come back later — even
+ *     after a Cebab restart — and click Retry.
+ *   - `handle.stop` / `abandon_session` (null) to keep the row clean.
+ *   - `chain.ts`'s `onTurnSucceeded` and retry re-delivery (null), per above.
  */
 export function setPendingRetry(sessionId: string, p: PendingRetry | null): void {
   if (p === null) {

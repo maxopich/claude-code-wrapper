@@ -16,9 +16,8 @@ delivered (`SIGBREAK` is), and paths are separator- and case-insensitive.
 ```sh
 git clone https://github.com/maxopich/claude-code-wrapper.git
 cd claude-code-wrapper
-npm install
-npm run setup            # rebuilds better-sqlite3 native binding + installs husky hooks
-cp .env.example .env     # then point WORKSPACE_ROOT at your agent projects
+npm run bootstrap        # deps + better-sqlite3 native build + husky hooks, in one step
+cp .env.example .env     # then point CEBAB_WORKSPACE_ROOT at your agent projects
 ```
 
 The `setup` script is the dev-side counterpart to CI's two-stage install. Cebab

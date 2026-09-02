@@ -63,8 +63,8 @@ The defended invariants (F1–F6, R3, F12) are documented inline in code and pin
 
 CI gates (Tier 1 + Tier 2): least-privilege workflow permissions, SHA-pinned actions, actionlint + zizmor lint, OSV-Scanner, dependency-review, CodeQL, Semgrep with three Cebab-specific custom rules (F4/F5 verifyClient, F2 spawn-non-literal, win32 spawn shell guard), gitleaks with Cebab-specific rules, fixture-review gate on `fixtures/*.jsonl`, npm postinstall blocked via `.npmrc`.
 
-Those two Semgrep rules each carry a fixture in `.semgrep/cebab-bus.ts` that `semgrep --test` runs in CI, so a rule whose target is deleted fails the build instead of silently matching nothing. A third rule was removed for exactly that reason — it had been dead since the bus rewrite while still being counted here.
+Those three Semgrep rules each carry a fixture in `.semgrep/cebab-bus.ts` that `semgrep --test` runs in CI, so a rule whose target is deleted fails the build instead of silently matching nothing. A third rule was removed for exactly that reason — it had been dead since the bus rewrite while still being counted here.
 
 ## Acknowledgements
 
-Past security-related work is tracked in the [CHANGELOG](https://github.com/maxopich/claude-code-wrapper/blob/main/CHANGELOG.md) where applicable and in commit messages tagged `security(...)`.
+Past security-related work is tracked in commit messages tagged `security(...)` and in the pull requests they reference. (This used to point at a CHANGELOG; the repo has never had one.)

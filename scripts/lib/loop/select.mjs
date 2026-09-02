@@ -256,8 +256,10 @@ export function chooseBead(beads = [], opts = {}) {
  * field rather than an undefined one, and cannot silently match nothing.
  *
  * SCOPED TO THE BATCH, AND THAT LIMIT IS THE DESIGN RATHER THAN AN OVERSIGHT.
- * The driver asks bd for 50 rows, so a container whose children are BLOCKED —
- * or simply sorted past the cap — is not caught here. That is the narrower half
+ * The batch is every READY bead — `readyArgv` passes bd's no-limit `-n 0`, so
+ * "sorted past the cap" stopped being a case when `Cebab-qd2.48` removed the
+ * 50-row window this paragraph used to cite. What remains is a container whose
+ * children are BLOCKED, and so absent from a ready list. That is the narrower half
  * of the problem on purpose: the harm this exists to prevent is the loop doing
  * a parent AND its child, which requires both to be selectable, and both being
  * selectable means both are in the batch. A rollup whose children are all
