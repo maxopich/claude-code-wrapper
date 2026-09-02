@@ -1,75 +1,35 @@
 /**
- * Cluster I C2 backend: per-session JSONL export endpoint.
+ * Per-session JSONL export endpoint.
  *
  *     GET /session-log/:sid?token=<wsToken>&format=redacted|raw
  *
- * Streams `~/.cebab/logs/<sid>.jsonl` (the file written by
- * `runner/logger.ts` on every SDK turn) back to the operator's browser
- * with `Content-Disposition: attachment`. v1 surface for the C2 finding:
- * the per-session log exists on disk but had no UI affordance.
+ * Streams `~/.cebab/logs/<sid>.jsonl` — the file `runner/logger.ts` writes on
+ * every SDK turn — back to the browser with `Content-Disposition: attachment`.
  *
- * Gating mirrors `/auth-token`:
+ * THE RULES A CHANGE HERE COULD VIOLATE, all of them enforced below.
  *
- *   1. Origin allow-list (`buildAllowedOrigins`) — a cross-origin browser
- *      tab can't fetch a session's history. Empty Origin is permitted (a
- *      local non-browser client could read the file directly anyway; same
- *      trust model as the WS upgrade gate).
- *   2. Host allow-list (`isAllowedHost`) — 127.0.0.1 / localhost on the
- *      configured port only.
- *   3. `?token=` matches the per-launch WS auth token. The browser
- *      already holds it; non-browser callers must read
- *      `~/.cebab/auth-token` from disk (same posture as `/auth-token`).
+ *   1. THREE GATES, mirroring `/auth-token`: the Origin allow-list
+ *      (`buildAllowedOrigins`; an empty Origin is permitted — a local
+ *      non-browser client could read the file directly anyway), the Host
+ *      allow-list (`isAllowedHost`), and a `?token=` matching the per-launch
+ *      WS auth token.
+ *   2. `format=raw` ADDITIONALLY requires `X-Cebab-Acknowledge-Raw:
+ *      I-understand`. The UI sets it only behind a typed confirmation.
+ *   3. BE-1: the `safety_audit` row is appended BEFORE the body lands. If the
+ *      append fails the stream never starts — if the intent cannot be
+ *      recorded, the data does not ship.
+ *   4. REDACT AT DISPLAY, NEVER AT WRITE. Storage keeps raw bytes and this
+ *      never modifies the file. `redacted` is the default; `raw` is opt-in.
+ *   5. THE REDACTED CORPUS IS THE DURABLE MESSAGE CLASSES — the same set
+ *      `runner/persist.ts` writes to `events`, via the ONE `isStreamPartial`
+ *      predicate in `runner/message_classes.ts`. Not a filter over every line:
+ *      a secret chopped across two deltas cannot be matched by any per-line
+ *      rule, which is what `Cebab-ygu.47` was. Do not reintroduce partials
+ *      here without reading that section first.
  *
- * Privacy posture (per UI_Findings/medium/I-session-management.md §3 +
- * agentic-reviewer constraints):
- *
- *   - **Redact at display, not at write.** Storage retains raw bytes and the
- *     export never modifies the file. Default `format=redacted`; raw is opt-in.
- *   - **The redacted artifact's corpus is the DURABLE message classes** — the
- *     same set `runner/persist.ts` writes to the `events` table, via the
- *     shared `isStreamPartial` predicate in `runner/message_classes.ts`.
- *     Streaming partials are excluded, and the reason is structural rather
- *     than a missing pattern: `redactSensitive` masks values under sensitive
- *     KEY names plus a few value shapes, a delta carries free text under the
- *     key `text`, and a secret is CHOPPED ACROSS DELTAS so no per-line rule can
- *     match either half. Measured (`Cebab-ygu.47`): a `db_password` masked
- *     correctly in the durable `assistant` message shipped as the fragment
- *     `horse-battery-staple-…` in the `content_block_delta` that built it.
- *
- *     This paragraph used to say the export "applies LogsModal's redaction
- *     policy line-by-line", and that sentence is what let the leak through
- *     review. It was true about the POLICY and false about the CORPUS: the
- *     modal reads `events`, which never contained a partial, so anyone
- *     reasoning from the claimed parity concluded the export was covered.
- *   - **Consequence, stated rather than hidden.** A partial with no durable
- *     counterpart — a turn killed by `query.interrupt()`, an abandoned tool
- *     input — is not in the redacted artifact. `format=raw` is the only
- *     complete trace. Note it is reachable by curl only: both UI call sites
- *     hardcode `redacted`. The operator's escape hatch is that the file itself
- *     is readable on disk (same machine, same uid, mode 0600), not that the
- *     app offers it. Mock fixtures must therefore be captured from the on-disk
- *     file or a raw export, never from a redacted download.
- *   - **Lines that are not valid JSON.** See `redactJsonlLine`.
- *   - **`format=raw` requires `X-Cebab-Acknowledge-Raw: I-understand`**.
- *     The UI (slice 2) sets this header only after a typed-confirmation
- *     modal. Curl users have to set it explicitly — non-trivial, by design.
- *   - **Per-export forensic row.** Every successful export writes a
- *     `safety_audit` row (kind=`session.exported`, reasonCode=`exported_redacted`
- *     or `exported_raw`, plus `payload.contentPolicy` for a redacted one — see
- *     `REDACTED_CONTENT_POLICY`) BEFORE the body lands. If the audit append fails the
- *     stream never starts (BE-1: the operator's intent must be recorded; if
- *     we can't, we don't ship the data). Audit rows survive session deletion
- *     because of Cluster I's bulk-delete preservation invariant.
- *
- * Non-features in this slice (deferred per §10 sequencing):
- *
- *   - No UI affordance — that's slice 2 (per-session row `⤓` icon + the
- *     SessionSettingsPanel "Data" entry + the success toast).
- *   - No bulk export (C5) — that's a later slice.
- *   - Multi-agent session bodies live in DB rows (`multi_agent_events` +
- *     `multi_agent_mutations`), not on disk. v1 only serves
- *     `logger.ts`-written single-agent JSONLs; multi-agent export gets a
- *     dedicated projector in a future slice.
+ * Why the corpus rather than the values, the measurement behind it, the
+ * credential-NAMED-assignment rule, the residue that still ships, and the two
+ * honest costs to an operator: docs/safety-and-security.md#session-log-export.
  */
 import fs from 'node:fs';
 import path from 'node:path';
