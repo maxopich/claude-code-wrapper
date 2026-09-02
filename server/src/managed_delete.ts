@@ -1,57 +1,20 @@
 /**
- * Cebab-m1f — remove a managed agent, the exit `Cebab-ws0.9` did not ship.
+ * Cebab-m1f — remove a managed agent: its tree, its sessions and events, and
+ * its per-session JSONL logs.
  *
- * A managed agent is a full snapshot at `<dataDir>/agents/<slug>/`, and a
- * second copy of a project is (by operator decision) a SECOND managed agent, so
- * without this the trees and their sidebar rows only ever accumulate. This is
- * the counterpart to `managed_copy.ts`, and a module for the same reason: the
- * BE-1 contract — append the hash-chained audit row BEFORE the consequential
- * act, and refuse the act if the append fails — is only a contract if a test
- * can make the append throw and then look at the filesystem, which a `case`
- * body inside `handleClientMsg` cannot offer.
+ * TWO RULES LIVE HERE because the code below depends on them directly. The
+ * BE-1 contract: append the hash-chained audit row BEFORE the destructive act,
+ * and refuse the act if the append fails. And the ORDER: the tree comes out
+ * first, gated on success, so a failure leaves the database fully intact and
+ * the operation retryable — the reverse order risks a row pointing at nothing,
+ * which has no recovery.
  *
- * WHAT THE CONSEQUENTIAL ACT IS, AND WHY IT IS AUDITED HARDER THAN THE COPY.
- * The copy duplicates operator data; this DESTROYS it — the agent's tree, its
- * sessions, its events, and its per-session JSONL logs, none of which come
- * back. So the same audit-before-act gate the copy uses is if anything more
- * load-bearing here, and the same refusal applies: a failed append aborts with
- * NOTHING removed.
+ * A module rather than a `case` body in `handleClientMsg` so a test can make
+ * the audit append throw and then look at the filesystem.
  *
- * THE THREE QUESTIONS `Cebab-m1f` LEFT OPEN, AND THE ANSWERS TAKEN.
- *
- *   - Sessions and events. A managed agent is an ordinary `projects` row and
- *     `sessions.project_id REFERENCES projects(id) ON DELETE CASCADE`, so the
- *     row's removal already destroys its conversations. "Mark it missing"
- *     leaves a row pointing at a directory that is gone — the sidebar shows a
- *     dead agent forever. An explicit operator delete is not that ambiguous
- *     case (a directory that vanished from under Cebab); it is the operator
- *     saying they are done with this agent, exactly as a session delete is. So
- *     the sessions and events go.
- *
- *   - The per-session JSONL logs. They live under `<dataDir>/logs/<id>.jsonl`,
- *     keyed by SESSION id rather than by project, so no cascade reaches them —
- *     they have to be removed by enumerating the project's sessions first,
- *     while the rows still exist to name them. Best-effort, exactly as the
- *     session purge treats them: a stray unlink failure must not strand the
- *     database delete that is the real state.
- *
- *   - The audit. Yes, and before the act — see above.
- *
- * WHY THE TREE COMES OUT FIRST. `removeManagedDir` is idempotent (`force:true`)
- * and by far the most likely step to fail — a recursive delete of a
- * gigabyte-scale tree can hit `EBUSY`/`EACCES` where a single `DELETE` cannot.
- * Doing it first and gating on its success means a failure leaves the DATABASE
- * fully intact and the operation retryable: the sidebar row is still there, and
- * a retry re-enters here and finishes the (partially) removed tree off. The
- * reverse order would risk the one outcome `Cebab-m1f` names as bad — a row
- * left pointing at nothing.
- *
- * WHY ONLY A MANAGED AGENT. `isManagedProjectPath` is the structural gate:
- * Cebab owns every byte under `managedAgentsRoot()` and nothing outside it, so
- * an ordinary workspace project is refused outright — its directory is the
- * operator's, and its row would reappear on the next scan regardless.
- * `removeManagedDir` re-checks containment itself, so the destructive step is
- * guarded twice by independent code.
+ * Why sessions and events go rather than being marked missing, why the JSONL
+ * logs need enumerating first, and why containment is checked twice by
+ * independent code: docs/managed-agents.md#deleting-a-managed-agent.
  */
 
 import type { ServerMsg } from '@cebab/shared/protocol';
