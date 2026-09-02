@@ -7,6 +7,13 @@
 
 ## 0. How to use this document
 
+This document specifies the **driver** — stages, transitions, data formats, guard.
+What a change the loop PRODUCES has to be is a separate concern with its own page:
+[`LOOP_DEVELOPMENT_STANDARD.md`](LOOP_DEVELOPMENT_STANDARD.md), which records the four
+defect classes the run of 2026-09-01 actually produced, what each gate tier can and
+cannot see, and the revert-check design. Read that one before changing the gate or the
+BUILD prompt.
+
 You are implementing a driver that runs the maintainer's development loop unattended: take one
 ready bead, implement it, gate it, open a PR, wait for CI, merge on green, close the bead, file
 what it discovered, repeat.

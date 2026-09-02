@@ -27,7 +27,7 @@
  * real path stayed broken. Label exclusion is asserted where it actually
  * lives: in the `bd ready` argv.
  */
-import fs, { readFileSync } from 'node:fs';
+import fs, { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -6510,5 +6510,44 @@ describe('gate: a usage limit in a live smoke halts instead of repairing (Cebab-
     // And the repair assignment must still exist, in the else — otherwise this
     // passes for a driver that lost the repair path entirely.
     expect(rest.slice(elseAt)).toContain('repairContext = { failedStep');
+  });
+});
+
+describe('the BUILD prompt tells the agent to check the issue against the tree (Cebab-jjma)', () => {
+  // WHAT WENT WRONG. In the run of 2026-09-01, PR #489 implemented a docs issue
+  // faithfully and added "there is no in-app delete" to README.md — seventy-seven
+  // minutes after PR #459, in the SAME run, shipped that exact feature. The agent
+  // worked from a bead body written before the run and never re-read the tree, and
+  // no gate step reads prose, so it merged.
+  //
+  // Weak on purpose, in the same idiom as the needs_human and format assertions
+  // above: it proves the instruction is PRESENT, not that a model obeys it. The
+  // failure it catches is silent deletion during a later edit of this template.
+
+  test('the prompt carries the verify-the-premise instruction', () => {
+    expect(REAL_PROMPT).toContain('Verify its premises before acting on');
+  });
+
+  test('and it names the concrete regression, not just the rule', () => {
+    // A bare "check your assumptions" reads as boilerplate and is the first thing
+    // skimmed past. The measured incident is what makes it land — and pinning the
+    // number means a future edit that drops the evidence is visible here.
+    //
+    // Whitespace-normalised, because the sentence wraps in the template and a
+    // literal match against the raw file breaks on a re-wrap that changed
+    // nothing. `busSafetyClaims.test.mjs` records the same lesson: its first
+    // draft missed a real claim for exactly this reason.
+    const flat = REAL_PROMPT.replace(/\s+/g, ' ');
+    expect(flat).toContain('there is no in-app delete');
+    expect(flat).toMatch(/seventy-seven minutes|77 minutes/);
+  });
+
+  test('the standard it comes from is reachable from CLAUDE.md', () => {
+    // docs/ is not auto-loaded, so an unlinked page is a page nobody opens.
+    // CLAUDE.md's pointer list is the only index the repo has.
+    const claudeMd = readFileSync(new URL('../CLAUDE.md', import.meta.url), 'utf8');
+    expect(claudeMd).toContain('docs/LOOP_DEVELOPMENT_STANDARD.md');
+    // And the page actually exists — a pointer to a missing file is worse than none.
+    expect(existsSync(new URL('../docs/LOOP_DEVELOPMENT_STANDARD.md', import.meta.url))).toBe(true);
   });
 });

@@ -42,6 +42,20 @@ few turns; running out of turns costs all {{max_turns}} of them and produces not
 Judge this from what the ISSUE says, not from how hard the work looks to you. A hard but
 well-specified fix is exactly what you are here for.
 
+## Before you start: check the issue against the tree
+
+The body below was written before this run. **Verify its premises before acting on
+them** — read the code it names. A run merges many changes in sequence, and an issue
+that was accurate when filed may describe a state that no longer exists.
+
+This is not hypothetical. In the run of 2026-09-01 a documentation issue was implemented
+faithfully and added the sentence "there is no in-app delete" to the README, seventy-seven
+minutes after an earlier issue in the same run shipped that exact feature. Nothing in the
+gate reads prose, so it merged.
+
+If the premise is already false, say so in the verdict and fix what is actually wrong, or
+return `needs_human: true` if the right change is no longer clear.
+
 ## What done means
 
 - The behaviour the issue describes is actually changed. A test edited so it stops
