@@ -179,6 +179,17 @@ export function next(stage, result = {}, ctx = {}) {
     }
 
     case STAGE.GATE: {
+      // BEFORE the repair branch, and the order is the fix. A live smoke is
+      // the only gate step that spawns `claude`, so it is the only one that
+      // can fail because the subscription ran out rather than because the diff
+      // is wrong. Falling through to `repair` spends a full second `claude -p`
+      // invocation against the same wall, and then parks a healthy bead
+      // `loop-stuck` — excluding it from every future SELECT. `Cebab-weqo`.
+      //
+      // Same reason and same disposition as STAGE.BUILD's limit branch above:
+      // halting leaves the bead open and unlabelled, and every later bead in
+      // the run would hit the identical wall anyway.
+      if (result.usageLimit) return halted(REASON.USAGE_LIMIT);
       if (!result.passed) {
         const attempt = ctx.attempt ?? 1;
         const maxRepairs = ctx.maxRepairs ?? 0;

@@ -6369,3 +6369,146 @@ describe('git.shaInMain answers three ways, not two', () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe('gate: a usage limit in a live smoke halts instead of repairing (Cebab-weqo)', () => {
+  // THE DEFECT. `detectUsageLimit` had exactly one call site — over the BUILD
+  // agent's output (`build.mjs`) — and none over gate output. Harmless while
+  // the Playground tier ran no live smokes; PR #490 turned them on, and a live
+  // smoke is the only gate step that spawns `claude`. So a subscription limit
+  // during `live_smoke` read as a code defect: it burned a repair (a second
+  // full `claude -p` invocation against the same wall) and then parked a
+  // healthy bead `loop-stuck`, which excludes it from every future SELECT.
+
+  const LIMIT_LINE = "You've hit your session limit · resets 3:45pm";
+
+  test('the machine halts on a limit even when repair attempts remain', () => {
+    const halted = next(
+      STAGE.GATE,
+      { passed: false, failedStep: 'live_smoke', usageLimit: { hit: true, kind: 'session' } },
+      { attempt: 1, maxRepairs: 2 },
+    );
+    expect(halted).toMatchObject({
+      stage: STAGE.DONE,
+      disposition: DISPOSITION.HALTED,
+      reason: REASON.USAGE_LIMIT,
+    });
+  });
+
+  test('NEGATIVE CONTROL — the same failure without a limit still repairs', () => {
+    // Without this the test above passes for a `next` that halts on every gate
+    // failure, which would strand the repair path the loop depends on. The two
+    // inputs differ in exactly one key.
+    const repaired = next(
+      STAGE.GATE,
+      { passed: false, failedStep: 'live_smoke' },
+      { attempt: 1, maxRepairs: 2 },
+    );
+    expect(repaired).toEqual({ stage: STAGE.BUILD, repair: true });
+  });
+
+  test('a limit outranks the exhausted-repair park too', () => {
+    // The other order this could have been wired in. With repairs spent, a
+    // plain failure parks `gate_failed`; a limit must still halt, because
+    // `loop-stuck` on a healthy bead is the outcome being prevented.
+    const withLimit = next(
+      STAGE.GATE,
+      { passed: false, failedStep: 'live_smoke', usageLimit: { hit: true, kind: 'weekly' } },
+      { attempt: 3, maxRepairs: 2 },
+    );
+    expect(withLimit.reason).toBe(REASON.USAGE_LIMIT);
+    expect(next(STAGE.GATE, { passed: false }, { attempt: 3, maxRepairs: 2 }).reason).toBe(
+      REASON.GATE_FAILED,
+    );
+  });
+
+  test('a DETERMINISTIC step is never scanned, even when its output names a limit', async () => {
+    // THE FALSE POSITIVE THIS SCOPE EXISTS TO PREVENT, and it is not
+    // hypothetical: this very file and `build.mjs`'s own tests contain real
+    // CLI limit strings as fixtures, so a failing `npm test` prints them. Were
+    // the scan applied to every step, one red test would halt an overnight run
+    // and report it as a subscription limit.
+    //
+    // None of the ten deterministic steps spawns `claude`, so none of them can
+    // hit a limit — the scope is not a compromise, it is the truth.
+    const gate = makeGate({
+      run: async (file, args) => {
+        const isTest = file === 'npm' && args.join(' ') === 'test';
+        return {
+          code: isTest ? 1 : 0,
+          stdout: isTest ? `FAIL redact.test.ts > masks ${LIMIT_LINE}` : '',
+          stderr: '',
+          ms: 1,
+        };
+      },
+      cwd: '/repo',
+      config: DEFAULTS,
+    });
+    const out = await gate.run({ changedPaths: ['server/src/x.ts'] });
+    expect(out.passed).toBe(false);
+    expect(out.failedStep).toBe('test');
+    // The key must be ABSENT, not falsy: `machine.mjs` branches on truthiness,
+    // and an explicit `usageLimit: undefined` would read the same there but
+    // land in the ledger row as a field that means nothing.
+    expect('usageLimit' in out).toBe(false);
+  });
+
+  test('the detector is wired at the smoke site and only there', () => {
+    // A wiring assertion, because `runPlayground` cannot be reached from a unit
+    // test: it spawns a detached dev:server and polls a real /health. What is
+    // checkable without one is WHERE the call sits, and that is the property
+    // the test above measures from the other side.
+    //
+    // Comment-stripped on purpose. The prose around this change names
+    // `detectUsageLimit` several times, so a scan of the raw file would pass on
+    // the explanation alone if the call itself were deleted.
+    const code = stripComments(
+      readFileSync(new URL('./lib/loop/gate.mjs', import.meta.url), 'utf8'),
+    );
+    const calls = code.split('detectUsageLimit(').length - 1;
+    expect(calls, 'expected exactly one detectUsageLimit call in gate.mjs').toBe(1);
+
+    const detIdx = code.indexOf('async function runDeterministic');
+    const playIdx = code.indexOf('async function runPlayground');
+    const callIdx = code.indexOf('detectUsageLimit(');
+    expect(detIdx).toBeGreaterThan(-1);
+    expect(playIdx).toBeGreaterThan(detIdx);
+    // The call sits after runPlayground opens, i.e. outside runDeterministic.
+    expect(callIdx).toBeGreaterThan(playIdx);
+  });
+
+  test('the halt signal survives the gate result being rebuilt field-by-field', () => {
+    // `gate.run`'s Playground return is an object literal listing each field,
+    // not a spread of `runPlayground`'s result — so a new field is dropped by
+    // default. That is the same one-side-of-a-seam defect the run's audit
+    // found repeatedly, and here it would silently downgrade a halt to an
+    // ordinary gate failure.
+    const code = stripComments(
+      readFileSync(new URL('./lib/loop/gate.mjs', import.meta.url), 'utf8'),
+    );
+    const at = code.indexOf('const playground = await runPlayground();');
+    expect(at).toBeGreaterThan(-1);
+    expect(code.slice(at, at + 700)).toContain('playground.usageLimit');
+  });
+
+  test('the driver records the halt reason rather than a gate failure', () => {
+    // `gate_failed` and `usage_limit` have opposite remedies — fix the diff
+    // versus wait for the window — so the ledger row must not say the first
+    // when the second happened.
+    const src = stripComments(readFileSync(new URL('./loop.mjs', import.meta.url), 'utf8'));
+    const at = src.indexOf('if (gated.usageLimit)');
+    expect(at, 'the driver must branch on gated.usageLimit at GATE').toBeGreaterThan(-1);
+    // Bounded at the `else`, not by a character count: the repair branch that
+    // legitimately assigns `repairContext` starts there, and a window wide
+    // enough to include it measures nothing.
+    const rest = src.slice(at);
+    const elseAt = rest.indexOf('} else if');
+    expect(elseAt, 'the limit branch must be the `if` of an if/else').toBeGreaterThan(-1);
+    const branch = rest.slice(0, elseAt);
+    expect(branch).toContain('parts.haltReason = REASON.USAGE_LIMIT');
+    // The halting branch must not arm a repair for a run that is stopping.
+    expect(branch).not.toContain('repairContext');
+    // And the repair assignment must still exist, in the else — otherwise this
+    // passes for a driver that lost the repair path entirely.
+    expect(rest.slice(elseAt)).toContain('repairContext = { failedStep');
+  });
+});
