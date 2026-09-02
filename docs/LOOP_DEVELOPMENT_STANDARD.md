@@ -221,6 +221,19 @@ over the merged commits of 2026-09-01):
 | `3474eaa` #469 | server-side, reverted red             | **DEPENDS** 1/1                              |
 | `c686d1c` #466 | server-side, reverted red             | **DEPENDS** 4/4                              |
 
+**Wired into the gate, and measured end-to-end there too** (`Cebab-pc95`). The step runs
+after the deterministic tier and BEFORE the Playground, because it is the cheaper of the
+two and there is no sense spending live smokes on a bead whose own tests do not test it.
+Three real staged diffs through the actual gate, not a fake `run`:
+
+| Staged change                                   | revert-check                        | gate                        |
+| ----------------------------------------------- | ----------------------------------- | --------------------------- |
+| existing module + a case that passes without it | **vacuous**, names the case, 484 ms | **FAILS** at `revert-check` |
+| existing module + a case that needs it          | `depends`, 502 ms                   | passes                      |
+| a NEW module + its test                         | `skipped: uncollectable`, 535 ms    | passes                      |
+
+Half a second, and the third row is the trap behaving correctly rather than a false pass.
+
 **And one it cannot see, which bounds the claim.** `faa2fb5` #464 is dwcq's third
 vacuous finding and revert-check reports `DEPENDS` 7/7 — correctly, because that defect
 is a different class: the `[security]` suite covers the pure helper, and _the guard's

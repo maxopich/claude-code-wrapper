@@ -66,6 +66,13 @@ export const DEFAULTS = Object.freeze({
     tiers: [],
   },
   gate: {
+    // Does each test the bead ADDS actually fail without the change? Costs no
+    // subscription quota and runs before the Playground tier, because there is
+    // no sense spending live smokes on a bead whose own tests do not test it.
+    // Off is expressible so a platform that cannot make the scratch worktree
+    // (Windows without Developer Mode) can say so rather than reporting
+    // `inconclusive` on every bead. `Cebab-pc95`.
+    revertCheck: true,
     playgroundTier: 'auto',
     // An EXEMPT list, not a trigger list — see `playgroundTriggered`. Anything
     // not named here reaches the Playground tier, so a subsystem nobody
