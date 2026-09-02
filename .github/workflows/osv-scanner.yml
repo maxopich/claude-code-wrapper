@@ -39,7 +39,7 @@ jobs:
         # scan-args matches the action's documented default — newline-
         # separated arg list. `--skip-git` was a v1 flag and was removed
         # in v2; the default behavior already skips git submodule scans.
-        uses: google/osv-scanner-action/osv-scanner-action@9a498708959aeaef5ef730655706c5a1df1edbc2 # v2.3.8
+        uses: google/osv-scanner-action/osv-scanner-action@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
         with:
           scan-args: |-
             --recursive
