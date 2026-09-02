@@ -260,14 +260,24 @@ jobs:
     permissions: {}
     steps:
       - name: Require every matrix leg of every job to have passed
+        # Both results reach the script through `env`, never through `${{ }}`
+        # inside `run:`. `needs.*.result` is a GitHub-supplied enum and not
+        # attacker-controllable, so this is not a live injection — but zizmor's
+        # `template-injection` audit flags every interpolation into a shell
+        # body, on the principle that the next one added here might not be from
+        # a safe source. Reading them as shell variables makes the audit's
+        # judgement structural instead of per-expression.
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
         run: |
           failed=0
-          if [ "${{ needs.checks.result }}" != "success" ]; then
-            echo "checks matrix did not succeed (result=${{ needs.checks.result }})"
+          if [ "$CHECKS_RESULT" != "success" ]; then
+            echo "checks matrix did not succeed (result=$CHECKS_RESULT)"
             failed=1
           fi
-          if [ "${{ needs.tests.result }}" != "success" ]; then
-            echo "tests matrix did not succeed (result=${{ needs.tests.result }})"
+          if [ "$TESTS_RESULT" != "success" ]; then
+            echo "tests matrix did not succeed (result=$TESTS_RESULT)"
             failed=1
           fi
           if [ "$failed" -ne 0 ]; then exit 1; fi

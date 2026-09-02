@@ -44,8 +44,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
-      contents: read
-      pull-requests: write
+      contents: read # Read .github/labeler.yml and the changed-file list.
+      pull-requests: write # Apply the path labels this job exists to apply.
     steps:
       - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
         with:
@@ -66,7 +66,8 @@ jobs:
     # below instead, which fails loudly inside a job that still runs.
     if: always()
     permissions:
-      pull-requests: read
+      # Read-only on purpose: the gate READS label state and never writes it.
+      pull-requests: read # Read the labels the job above applied.
     steps:
       # Register C08: the gate reads label state from the API only, so if the
       # labeller FAILED, `awaiting-fixture-review` was never applied, the API

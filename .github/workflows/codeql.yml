@@ -25,9 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      actions: read
-      contents: read
-      security-events: write
+      actions: read # Read workflow run metadata for the analysis upload.
+      contents: read # Read the tree being analysed.
+      security-events: write # Upload the SARIF results to the Security tab.
 
     strategy:
       fail-fast: false

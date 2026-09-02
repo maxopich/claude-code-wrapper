@@ -28,12 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      # SARIF upload to the Security tab.
-      security-events: write
-      # OIDC token for publishing scorecard results to the public DB.
-      id-token: write
-      contents: read
-      actions: read
+      security-events: write # SARIF upload to the Security tab.
+      id-token: write # OIDC token for publishing results to the public DB.
+      contents: read # Read the tree being scored.
+      actions: read # Read workflow run metadata for the CI-tests check.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
