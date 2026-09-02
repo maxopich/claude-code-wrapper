@@ -19,6 +19,28 @@ updates:
       dev-dependencies:
         dependency-type: 'development'
         update-types: ['minor', 'patch']
+    ignore:
+      # better-sqlite3 13.x ships NO PREBUILT BINARIES AT ALL. Measured against
+      # the upstream releases API on 2026-09-02: every 12.x release carries
+      # 100-145 assets (Node ABIs 127/137/141/147 across darwin, linux,
+      # linuxmusl and win32), and v13.0.0, v13.0.1, v13.0.2 and v13.0.3 each
+      # carry ZERO. Confirmed by installing 13.0.3 in a scratch clone, where
+      # `prebuild-install` fell through to `node-gyp rebuild` and compiled
+      # SQLite from source.
+      #
+      # That is not a slow install, it is a different prerequisite: Python and
+      # a C++ toolchain, on every platform including both CI legs. `npm run
+      # bootstrap` exists to make a fresh clone work without one, and the
+      # README says so — so a 13.x bump would silently retract the property
+      # this project is built around.
+      #
+      # 12.11.1 is ALSO the newest 12.x on npm (12.11.2 and 12.12.0 exist as
+      # GitHub releases but were never published there), so there is nothing to
+      # move to inside the safe line. Revisit when a 13.x release appears with
+      # assets attached; the check is one API call:
+      #   gh api repos/WiseLibs/better-sqlite3/releases --jq '.[] | [.tag_name, (.assets|length)] | @tsv'
+      - dependency-name: 'better-sqlite3'
+        update-types: ['version-update:semver-major']
     labels:
       - 'dependencies'
 
