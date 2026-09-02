@@ -12,6 +12,11 @@
  *   real tag      Test Files  48 passed | 168 skipped     Tests  337 passed
  *   renamed tag   Test Files 216 skipped                  Tests 3048 skipped   → exit 0
  *
+ * Those numbers are the ORIGINAL measurement and are kept as the record of it;
+ * the suite has since roughly quadrupled (403 files / ~6.5k tests / ~1.3k
+ * tagged). Nothing here depends on the figures — the gate asserts a `> 0`
+ * floor, not a constant — but do not read them as current.
+ *
  * So renaming or dropping the tag silently disarms the entire security
  * regression suite while CI stays green — on a REQUIRED check whose only job
  * is to notice exactly that class of change. Dropping `passWithNoTests` (the
@@ -50,8 +55,10 @@ export const SECURITY_TAG = '[security]';
  * class `[security]`, which matches any name containing s/e/c/u/r/i/t/y —
  * i.e. very nearly every test in the repo. That silently runs the FULL suite
  * under the security gate's name, which looks like passing and is the exact
- * opposite of a filter. Caught here by asserting the executed count against
- * the known figure (337, not 3028) rather than trusting a green run.
+ * opposite of a filter. Caught here by asserting that the executed count is a
+ * SUBSET of the suite rather than trusting a green run — originally measured
+ * as 337 against 3028, now ~1.3k against ~6.5k. The ratio is the signal; the
+ * absolute numbers move with every bead.
  *
  * The old npm script carried this escaping as `'\\[security\\]'` — through a
  * shell. This spawns vitest without one, so the escaping has to live here.
@@ -164,8 +171,11 @@ async function main() {
 }
 
 // Register C01's lesson applied here: `import.meta.main` is Node 22.18+, and
-// CI runs Node 20 — where it is `undefined` and this whole file would be a
-// silent no-op. Compare against argv instead.
+// CI ran Node 20 at the time — where it is `undefined` and this whole file
+// would have been a silent no-op. CI is on Node 24 now (`Cebab-mfvu`) and the
+// repo's `engines.node` floor is >= 24, so that hazard is historical; the argv
+// compare stays because it also holds when this module is imported, which is
+// how `security-test-gate.test.mjs` reaches it.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main();
 }

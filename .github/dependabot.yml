@@ -32,8 +32,11 @@ updates:
     # Cebab-yc3: keep the codeql-action family in ONE pull request.
     #
     # Dependabot treats each sub-path as its own dependency, so a single
-    # codeql-action release arrives as three PRs — `init` (codeql.yml:37),
-    # `analyze` (codeql.yml:66) and `upload-sarif` (scorecard.yml:52). CodeQL
+    # codeql-action release arrives as three PRs — `init` and `analyze` in
+    # codeql.yml, `upload-sarif` in scorecard.yml. (Located by the `uses:` path,
+    # not by line number: the three numbers that used to be here — 37, 66 and 52
+    # — had all drifted, to 44, 73 and 59, and a citation nobody can trust is a
+    # citation nobody checks.) CodeQL
     # requires init and analyze to run the SAME version, so each of those two
     # PRs is red on its own, in either order:
     #

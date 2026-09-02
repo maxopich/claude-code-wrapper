@@ -320,10 +320,19 @@ function main() {
  * Register C01: is this module the process entry point, or was it imported?
  *
  * This used to be `import.meta.main`, which landed in Node 22.18 and is
- * `undefined` on older runtimes. ci.yml pins Node 20 — so on CI the guard was
- * always falsy, `main()` never ran, and the `Audit dependencies` step printed
- * nothing and exited 0. The gate had never once run in the environment it was
- * written for; it only ever worked on a maintainer's newer local Node.
+ * `undefined` on older runtimes. CI ran Node 20 at the time — so the guard was
+ * always falsy there, `main()` never ran, and the `Audit dependencies` step
+ * printed nothing and exited 0. The gate had never once run in the environment
+ * it was written for; it only ever worked on a maintainer's newer local Node.
+ *
+ * THAT PREMISE HAS EXPIRED and the guard stays anyway. CI moved to Node 24 in
+ * `Cebab-mfvu`, and `package.json` now declares `engines.node >= 24` with
+ * `.npmrc engine-strict=true` refusing an older install outright, so
+ * `import.meta.main` would work today. The reason to keep this form is the
+ * paragraph below, which was always the stronger one: the guard must also hold
+ * when the module is IMPORTED. Written down because a reader who checks only
+ * the first reason will find it dead and delete a guard that a test depends
+ * on.
  *
  * `pathToFileURL` rather than a string compare so a Windows `C:\…` argv and
  * `import.meta.url`'s `file:///C:/…` form still match.

@@ -1,13 +1,22 @@
 name: scorecard
 
-# OpenSSF Scorecard — weekly external posture signal. Several checks
-# will fail until T2.3 (signed commits) and branch protection are
-# fully configured at the repo level — keep this check informational
-# until the score stabilizes ≥7, then promote to required.
+# OpenSSF Scorecard — external posture signal, INFORMATIONAL by design.
+#
+# It is not one of the seven required contexts on `main` and is not proposed
+# as one: several of its checks fail on repo-level settings (signed commits,
+# branch-protection detail) rather than on anything a PR can fix, so making it
+# required would block every PR on a setting no PR can change.
+#
+# The three things it flags that ARE code — token permissions, SHA-pinned
+# actions, dangerous triggers — are already enforced by
+# `scripts/workflowPermissions.test.mjs`, which runs inside the required
+# `npm test`, and by zizmor's auditor persona in `workflow-lint.yml`. Scorecard
+# annotates; those two gate.
+#
+# An earlier note here said "promote to required once the score stabilizes ≥7".
+# That was never done, and the reasoning above is why it should not be.
 #
 # Public scorecard at https://api.securityscorecards.dev/projects/github.com/maxopich/claude-code-wrapper
-#
-# Plan reference: cebab-ci-cd-async-conway.md T2.2.
 
 on:
   push:

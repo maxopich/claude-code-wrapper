@@ -6,8 +6,6 @@ name: dependency-review
 # at the npm level — dependency-review-action sees the resolved tree).
 #
 # Free for public repos; no GHAS subscription required.
-#
-# Plan reference: cebab-ci-cd-async-conway.md T2.2.
 
 on:
   pull_request:
