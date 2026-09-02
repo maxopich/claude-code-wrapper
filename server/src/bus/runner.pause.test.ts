@@ -128,16 +128,32 @@ describe('AgentRunner — pause + resume (spec §5.2, AE-4)', () => {
   });
 
   test("different agents are unaffected by another agent's pause", async () => {
+    // This case had NO `expect()` at all — the only such test in the repo. It
+    // passed iff `await betaTurn` resolved, so the one thing it could catch was
+    // a total hang, and then as a vitest timeout rather than an assertion. A
+    // pause that leaked to beta, or a beta turn that resolved without ever
+    // starting, both passed it. `Cebab-j01i`.
     const { runnerFactory, turnReleases, turnStarted } = buildBlockingRunner();
     const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
     runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
     runner.register({ name: 'beta', cwd: '/tmp/beta' });
 
-    runner.pause('alpha');
+    // Positive control FIRST: without this the rest passes on a `pause` that
+    // silently did nothing, which is the same green for the opposite reason.
+    expect(runner.pause('alpha')).toBe(true);
+    expect(runner.isPaused('alpha')).toBe(true);
+    expect(runner.isPaused('beta')).toBe(false);
+
     const betaTurn = runner.deliverTurn('beta', 'hello');
     await turnStarted[0]; // beta turn started despite alpha being paused
     turnReleases[0]();
     await betaTurn;
+
+    // Beta really ran, and alpha is STILL paused afterwards — the pause was not
+    // quietly cleared by another agent's turn draining.
+    expect(turnStarted).toHaveLength(1);
+    expect(runner.getPendingDeliveries('beta')).toBe(0);
+    expect(runner.isPaused('alpha')).toBe(true);
   });
 
   test('re-pause returns false (idempotent no-op)', () => {
