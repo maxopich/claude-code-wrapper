@@ -24,12 +24,14 @@
  *     trigger the download, return `{ filename, bytes }` so the caller
  *     can toast the result.
  *
- * Filename convention mirrors the server's `exportFilename()` in
- * `server/src/session_log_export.ts`: `cebab-<shortid>-<YYYYMMDD-
- * HHMMSS>.jsonl` where the stamp is the session **start** time (NOT
- * the export time) so a folder of exports sorts by run order, in the
- * operator's LOCAL timezone (`Cebab-x1n.3.19` — see that server function's
- * header for why UTC filed a late-evening session under the wrong day). The
+ * The filename comes from ONE definition, `sessionLogExportFilename` in
+ * `@cebab/shared` — this header used to say it "mirrors the server's
+ * `exportFilename()`", which described the hand-written copy `Cebab-89j`
+ * replaced, and which the docstring on `pickExportFilename` below has said
+ * correctly ever since. The shape is `cebab-<shortid>-<YYYYMMDD-HHMMSS>-<format>
+ * .jsonl`, stamped with the session **start** time (NOT the export time) so a
+ * folder of exports sorts by run order, in the operator's LOCAL timezone
+ * (`Cebab-x1n.3.19` — UTC filed a late-evening session under the wrong day). The
  * server already stamps the Content-Disposition header with this
  * filename, so the client only computes a fallback for the rare case
  * where the response lacks one (offline test fixture, error paths).
