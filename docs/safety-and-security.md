@@ -1,17 +1,132 @@
 # Safety and security
 
-Reference detail lifted out of [`CLAUDE.md`](../CLAUDE.md). **Nothing under
-`docs/` is auto-loaded** — see [`bus-architecture.md`](bus-architecture.md) for
-the same note. Read this before touching `server/src/notifications/`,
-`server/src/bus/pause_gate.ts`, `server/src/bus/install_trust_gate.ts`,
-`server/src/auth.ts`, `server/src/origin.ts`, or
-`server/src/session_log_export.ts`.
+What actually gates a tool call in Cebab, and what only appears to. Read this
+before touching `server/src/notifications/`, `server/src/bus/pause_gate.ts`,
+`server/src/bus/install_trust_gate.ts`, `server/src/auth.ts`,
+`server/src/origin.ts`, or `server/src/session_log_export.ts`.
 
-The consultant-mode constraint itself, and the two limits on it, stay in
-`CLAUDE.md` — they are what an agent reads and acts on. This page is why it is
-shaped that way, plus the detect-and-contain layer sitting behind it.
+[`SECURITY.md`](../SECURITY.md) carries the threat model, the reporting policy
+and the invariant table; this page carries the mechanism behind them. The two
+are scanned together by `scripts/busSafetyClaims.test.mjs`, which fails the
+build when either describes a posture the code no longer has.
 
-## Why the consultant guardrail is advisory
+## What gates a tool call
+
+Cebab has two runtimes and they do not share a posture. Confusing them is the
+single most expensive mistake available here, because the operator-facing
+CONSEQUENCE is the same in both — the tool runs — while what stands between the
+model and the filesystem is completely different.
+
+**Bus turns are ungated by design.** Every production bus turn runs
+`permissionMode: 'default'` with a live `canUseTool` that auto-approves every
+tool except `AskUserQuestion`, which is parked for the operator. No posture puts
+a human in front of a `Bash`, `Edit` or MCP call, and because participants load
+their project's own `.claude/settings*.json`, a participant's `SessionStart` /
+`PreToolUse` / `PostToolUse` / `Stop` hooks execute on every hop with no gate.
+[`SECURITY.md`](../SECURITY.md#threat-model-summary) states the consequence:
+under that posture a malicious transitive npm `postinstall` is direct RCE. The
+one structural exception is the orchestrator's `toolPolicy: 'delegate-only'`,
+described there.
+
+**Ordinary single-agent turns are gated, but not by the option you would
+expect.** The rest of this section is that path.
+
+### Trust decides two things, and only one of them alone
+
+The per-project Trust toggle controls the initial `permissionMode` AND the
+`settingSources` scope handed to the SDK. The scope is Trust's to decide alone;
+the initial mode is only Trust's _default_ contribution.
+
+- _Trusted_: `permissionMode: "acceptEdits"`, `settingSources: ['user', 'project', 'local']`.
+  The project's own `.claude/settings*.json` — hooks, env injectors, MCP servers
+  — are layered in.
+- _Untrusted_: `permissionMode: "default"`, `settingSources: ['user']`. The
+  project's own files do not apply, so a hostile or careless
+  `.claude/settings.local.json` in a sibling repo cannot auto-load hooks the
+  moment the operator clicks that project.
+
+**What Trust does NOT stop.** MCP servers declared in `~/.claude.json`'s
+top-level `mcpServers` (`claude mcp add --scope user`) load under `['user']`
+too — measured, see `readClaudeJsonServers` in `repo/project_authority.ts`.
+Trust scopes the _project's_ files; a home-directory declaration is outside its
+reach, and TOFU is the only brake on those.
+
+A project's own `.mcp.json` loads **iff** `settingSources` includes `'project'`
+— i.e. iff the project is Trusted. Re-measure with
+`npm --workspace server exec tsx src/mcp_scope_smoke.ts`; it costs one spawn.
+
+### `default` binds on trusted projects too
+
+`shouldAutoAllow` (`ws/permission.ts`) is the only place _Cebab_ auto-allows for
+single-agent runs, so `Options.permissionMode` gates nothing by itself. It used
+to open with `if (trusted) return true`, which made the session's permission
+pill **inert on trusted projects**: the operator could press `ask`, watch the
+pill move and the server persist `default`, and every tool still auto-allowed.
+Now `default` asks everywhere. Nothing changed by default, because
+`seedPermissionMode` still seeds `acceptEdits` for a fresh trusted session —
+Trust means "auto-allow everything _by default_", not "and you may not ask me to
+stop". The change can only add permission cards, so it cannot widen privilege.
+
+### `canUseTool` is not a universal gate
+
+Do not read a `false` from `shouldAutoAllow` as "a card will appear". The CLI
+settles some calls before the callback is consulted at all:
+
+- **`permissions.allow` rules in any loaded settings file shadow the callback**
+  — the SDK warns this verbatim. `~/.claude/settings.json` loads under
+  `['user']` even for an UNTRUSTED project, so a user-scope
+  `"allow": ["Bash(*)"]` bypasses it everywhere.
+- **The CLI's in-cwd read heuristic.** Measured: 83 Reads produced 78
+  `permission_request`s; the five missing were the in-cwd ones.
+
+On those paths the `tool_use` still renders, but no card and no
+`permission_auto_allowed` event appear. Restricting a tool by NAME therefore
+needs the SDK's `tools` / `disallowedTools`, not the callback.
+
+### The starting mode is a third input
+
+`projects.start_permission_mode` holds the mode a project's NEW sessions begin
+in, or NULL for "derive from Trust". `seedPermissionMode` resolves in this
+order, and the order is the design:
+
+> a resumed session's own stored mode > the project's starting mode > the
+> trust-derived value
+
+Promoting the project setting above the stored one reads as more correct and is
+the destructive option — it would silently re-point every in-progress
+conversation the operator had already steered, on their next message. The column
+is unconstrained `TEXT`, so it is filtered through `resolveStartPermissionMode`
+at the READ site; a hand-edited value outside the two-mode union never reaches a
+spawn. Setting it is **audited** (`project.start_mode_decided`, audit-before-write,
+refused if the append fails) because it sets an initial permission posture,
+unlike the silent `set_project_model`. Single-agent only — the bus runs its own
+gate.
+
+## The consultant constraint, and its two limits
+
+Because no bus tool call is gated on a human, the **consultant-mode guardrail**
+in `runtime.ts`'s prompts is the _prompt-level_ brake between a vaguely-routed
+task and a silent repo mutation. The participant acts as a **consultant** — read,
+analyze, advise; scratch and notes inside its own project folder are fine — and
+must **not** modify, create or delete files in other directories, or produce
+deliverable changes, _unless the user's relayed request explicitly directs that
+specific change_.
+
+Two limits on that sentence, both easy to over-read:
+
+- **It reaches the orchestrator and its workers, not chain participants.**
+  `renderRosterPrompt` and `renderWorkerBriefing` render the constraint;
+  `renderChainBriefing` renders **neither** it nor its execute-mode counterpart,
+  so a chain participant receives no prompt-level mutation constraint at all. It
+  still gets the mechanical pause-on-dangerous brake below. One of the two, not
+  neither.
+- **It is per-session and the operator can turn it off.** `executeMode` — a
+  session-start opt-in, threaded through all three prompt renderers — **replaces**
+  the consultant text with explicit permission to create, modify and delete files
+  _within the worker's own project folder_. Consultant is the default, not a
+  guarantee.
+
+### Why it is advisory
 
 The guardrail is advisory in the strict sense — the model interprets the prompt and nothing denies the tool call. `bus/guardrail.ts` classifies violations post-hoc so the operator sees them, and explains why enforcement is not wired: it would cover `Write`/`Edit`/`MultiEdit`/`NotebookEdit` only, while `Bash` still escapes.
 
@@ -108,3 +223,37 @@ The WS upgrade is gated on `Origin` and `Host`. The allow-list `buildAllowedOrig
 ## Per-launch auth token
 
 **A per-launch token shipped** (`server/src/auth.ts`) — an earlier version of this file said such tokens were out of scope for v1, and someone hardening the socket gate on that basis could have removed a live control. Cebab generates the token once at boot, writes it to `~/.cebab/auth-token` (mode 0600), serves it from the Origin+Host-gated `/auth-token` endpoint, and the WS `verifyClient` gate rejects any upgrade whose `?token=` doesn't match. It closes browser-tab CSWSH (a cross-origin tab can't pass the Origin gate to fetch the token) and, on POSIX, other local users. It does **not** close same-uid: a bus agent runs as the operator, so it can read the token off disk and open its own connection — there is no boundary to build there, which is why the posture is **detect, not prevent** and the control-plane verbs are hardened individually instead. `server/src/auth.ts`'s header is the full statement.
+
+## Environment and credential precedence
+
+The CLI prefers several env-supplied credentials over the OAuth subscription:
+`CLAUDE_CODE_OAUTH_TOKEN` (the documented `claude setup-token` output) resolves
+BEFORE the persisted `~/.claude/.credentials.json` session, as do
+`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` and the workload-identity pair. So a
+stray export in a shell profile could silently re-route a spawn off the
+operator's subscription and onto paid billing under someone else's identity.
+
+`SCRUBBED_ENV_VAR_NAMES` in `runner/claude.ts` therefore mirrors the CLI's OWN
+auth-precedence enumeration: the credential-env array, the workload-identity
+pair, the OAuth-token file descriptor, the unix socket, and the seven backend
+switches. The SDK REPLACES the child env wholesale and `getScrubbedEnvVars()`
+reads the same list, so a name left off that constant would authenticate every
+run as the token's identity while reporting nothing to strip.
+`auth_refresh.ts` filters the `claude login` spawn through the same constant.
+
+**How that list is kept honest matters more than the list.** It used to end
+"track it if the binary's enumeration grows" — an instruction to remember,
+checked by a test comparing the constant against a list a human had typed out.
+Two hand-maintained copies agreed with each other, neither was ever compared to
+the CLI, and a switch the bundle had carried all along was missing.
+`claude.env_scrubbed.test.ts` now EXTRACTS the switch names from the shipped
+bundle and fails on any the constant lacks, with an anti-vacuity floor so a
+bundle whose shape changed reads as "re-derive the extraction" rather than as a
+pass.
+
+**One gap is live and accepted.** `subscriptionOnlyEnv()` strips paid-billing
+vars from `process.env`, but the SDK separately layers in `env:` injection from a
+project's `settings.json` — a worker project defining
+`env: { ANTHROPIC_API_KEY: "..." }` can route its turns through paid billing.
+That is not filtered today; it is part of the "load everything the local configs
+declare" trade that Trust exists to scope.
