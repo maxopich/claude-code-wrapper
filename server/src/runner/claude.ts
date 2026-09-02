@@ -123,8 +123,25 @@ export type RunOptions = {
  * ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, AWS_BEARER_TOKEN_BEDROCK,
  * ANTHROPIC_FOUNDRY_API_KEY, ANTHROPIC_FOUNDRY_AUTH_TOKEN, ANTHROPIC_AWS_API_KEY]`
  * and its backend-flag check covers `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,
- * ANTHROPIC_AWS,ANTHROPIC_GOOGLE_CLOUD,MANTLE}` plus the OAuth-token file
- * descriptor, the WIF pair and the unix socket. The strongest case is
+ * ANTHROPIC_AWS,ANTHROPIC_GOOGLE_CLOUD,MANTLE,GATEWAY}` plus the OAuth-token
+ * file descriptor, the WIF pair and the unix socket.
+ *
+ * `GATEWAY` WAS MISSING UNTIL Cebab-m99x, and the way it was missed is the
+ * reason the test beside this list changed shape. The claim above — "the CLI's
+ * OWN enumeration, not a subset" — was checked by a test that compared this
+ * constant against a HAND-COPIED list, so the two agreed with each other and
+ * neither was compared to the CLI. `claude.env_scrubbed.test.ts` now extracts
+ * the switch names from the shipped bundle instead, which is what makes the
+ * sentence above a measurement rather than an intention.
+ *
+ * The same bundle array also carries backend CONFIGURATION —
+ * `ANTHROPIC_VERTEX_PROJECT_ID`, `ANTHROPIC_AWS_WORKSPACE_ID`,
+ * `ANTHROPIC_GOOGLE_CLOUD_{PROJECT,LOCATION,WORKSPACE_ID}`,
+ * `ANTHROPIC_FOUNDRY_RESOURCE`, `CLOUD_ML_REGION`. Those are deliberately NOT
+ * scrubbed: none of them selects a backend on its own, they are inert unless
+ * the matching `CLAUDE_CODE_USE_*` switch is set, and every one of those is
+ * stripped here. Scrubbing them too would widen the operator-facing
+ * `getScrubbedEnvVars()` report with names that cannot re-route a spawn. The strongest case is
  * `CLAUDE_CODE_OAUTH_TOKEN`: the CLI documents `export CLAUDE_CODE_OAUTH_TOKEN=…`
  * (from `claude setup-token`) as the non-interactive auth path, and its
  * auth-source resolver returns `{source:"CLAUDE_CODE_OAUTH_TOKEN"}` BEFORE it
@@ -160,6 +177,7 @@ export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
   'CLAUDE_CODE_USE_ANTHROPIC_AWS',
   'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
   'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_GATEWAY',
 ];
 
 /**
@@ -193,6 +211,7 @@ export const SCRUBBED_ENV_POSTURES: Readonly<Record<string, string>> = {
   CLAUDE_CODE_USE_ANTHROPIC_AWS: 'AWS backend (re-routes off Anthropic API)',
   CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD: 'Google Cloud backend (re-routes off Anthropic API)',
   CLAUDE_CODE_USE_MANTLE: 'Mantle backend (re-routes off Anthropic API)',
+  CLAUDE_CODE_USE_GATEWAY: 'Gateway backend (re-routes off Anthropic API)',
 };
 
 /**

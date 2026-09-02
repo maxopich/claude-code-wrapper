@@ -1,3 +1,6 @@
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { getScrubbedEnvVars, SCRUBBED_ENV_VAR_NAMES } from './claude.js';
 
@@ -94,6 +97,7 @@ describe('getScrubbedEnvVars — name-only env audit', () => {
       'CLAUDE_CODE_USE_ANTHROPIC_AWS',
       'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
       'CLAUDE_CODE_USE_MANTLE',
+      'CLAUDE_CODE_USE_GATEWAY',
     ];
     // The constant carries every expected name (order-independent)...
     expect([...SCRUBBED_ENV_VAR_NAMES].sort()).toEqual([...expected].sort());
@@ -101,5 +105,94 @@ describe('getScrubbedEnvVars — name-only env audit', () => {
     const env: Record<string, string> = {};
     for (const name of expected) env[name] = 'x';
     expect(getScrubbedEnvVars(env).sort()).toEqual([...expected].sort());
+  });
+});
+
+describe('[security] the scrub list is derived from the CLI, not from a copy of itself', () => {
+  // WHAT WENT WRONG. `CLAUDE_CODE_USE_GATEWAY` is a backend switch in the
+  // bundled CLI's own enumeration and was absent from SCRUBBED_ENV_VAR_NAMES,
+  // so a stray `export CLAUDE_CODE_USE_GATEWAY=1` would re-route every spawn
+  // off the operator's subscription while `getScrubbedEnvVars()` reported
+  // nothing to strip. `Cebab-m99x`.
+  //
+  // It survived because the test above compares the constant to a list a
+  // human typed out, and the module's header claims the set is "the CLI's OWN
+  // enumeration, not a subset". Two hand-maintained copies agreeing with each
+  // other is not a measurement of the third thing. The comment beside the old
+  // list even said "if the CLI's enumeration grows, this list must grow with
+  // it" — an instruction to remember, which is what failed.
+  //
+  // So this reads the shipped bundle. The hand-listed test stays: it pins the
+  // credential-class names, which do not live in one extractable array.
+
+  const require_ = createRequire(import.meta.url);
+
+  /**
+   * Resolved through the SERVER workspace, which is where the dependency is
+   * declared — not from a path anchored at the repo root. npm may hoist the
+   * package or keep it under `server/node_modules` depending on the tree, and
+   * a root-anchored path breaks on a lockfile change with no source change.
+   */
+  function sdkBundle(): string {
+    const entry = require_.resolve('@anthropic-ai/claude-agent-sdk');
+    const bundle = path.join(path.dirname(entry), 'sdk.mjs');
+    return fs.readFileSync(fs.existsSync(bundle) ? bundle : entry, 'utf8');
+  }
+
+  /**
+   * The backend switches, taken from the array the CLI itself groups them in.
+   *
+   * Anchored on a name rather than on a shape: the bundle is minified and its
+   * variable names change every release, but the string literals do not. The
+   * anchor is deliberately NOT `GATEWAY` — anchoring on the name this test
+   * exists to catch would make it circular.
+   *
+   * Feature flags (`CLAUDE_CODE_USE_COWORK_PLUGINS`,
+   * `..._NATIVE_FILE_SEARCH`, `..._POWERSHELL_TOOL`) live elsewhere in the
+   * bundle and are correctly out of range: they change behaviour, not billing.
+   */
+  function backendSwitchesFromBundle(): string[] {
+    const src = sdkBundle();
+    const anchor = src.indexOf('"CLAUDE_CODE_USE_BEDROCK"');
+    if (anchor === -1) return [];
+    const open = src.lastIndexOf('[', anchor);
+    const close = src.indexOf(']', anchor);
+    if (open === -1 || close === -1) return [];
+    const arr = src.slice(open, close + 1);
+    return [...new Set(arr.match(/CLAUDE_CODE_USE_[A-Z_]+/g) ?? [])];
+  }
+
+  test('the extraction actually found the CLI list (anti-vacuity floor)', () => {
+    // Without this the assertion below passes when the bundle is minified
+    // differently and the match returns []. An empty expectation is satisfied
+    // by every possible constant, which is the exact shape of a gate that runs
+    // and measures nothing. A RED here means "re-derive the extraction", not
+    // "the constant is wrong".
+    const found = backendSwitchesFromBundle();
+    expect(
+      found.length,
+      'no CLAUDE_CODE_USE_* names extracted from the SDK bundle',
+    ).toBeGreaterThan(5);
+    for (const known of ['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX']) {
+      expect(found).toContain(known);
+    }
+  });
+
+  test('[security] every backend switch the CLI knows is scrubbed', () => {
+    const missing = backendSwitchesFromBundle().filter(
+      (name) => !SCRUBBED_ENV_VAR_NAMES.includes(name),
+    );
+    expect(
+      missing,
+      `the bundled CLI switches these backends on and Cebab does not strip them: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  test('[security] and each one is actually detected in a live env', () => {
+    // The constant containing a name and the filter reporting it are two
+    // different claims; the second is what the operator's attach banner reads.
+    for (const name of backendSwitchesFromBundle()) {
+      expect(getScrubbedEnvVars({ [name]: '1' })).toEqual([name]);
+    }
   });
 });
