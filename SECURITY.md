@@ -41,6 +41,11 @@ Items below are known limitations under Cebab's current architecture; reports fo
 
 ## Threat model summary
 
+The mechanism behind everything in this section — what gates a single-agent tool
+call, why the bus gates nothing, the consultant constraint and its two limits,
+and the credential-env scrub — is in
+[docs/safety-and-security.md](docs/safety-and-security.md).
+
 The interesting property of Cebab is **runtime trust posture**: no bus tool call is ever gated on a human. Bus turns run `permissionMode: 'default'` with a `canUseTool` that auto-approves every tool except `AskUserQuestion`, and participants load their project's own `.claude/settings*.json` — so a participant's hooks execute on every hop. Under that posture, a malicious transitive npm `postinstall` script is direct RCE on an operator's machine. So the supply-chain surface (anything that lets attacker-controlled code land in `node_modules/` or in a CI workflow) carries higher severity than for a typical dev tool.
 
 There is one structural exception, and its narrowness is the point: the **orchestrator** runs `toolPolicy: 'delegate-only'`, which is not an auto-approval at all but a default-deny. The 14 built-in file/shell/analysis tools are stripped from its context via `disallowedTools`, and `canUseTool` independently denies anything that is not `bus_send` or `AskUserQuestion` — so a future built-in that nobody remembered to list is denied too. It applies to the orchestrator alone: every worker and every chain participant runs the auto-approve posture described above, which is why the paragraph above stands as the summary of Cebab's posture rather than this one.

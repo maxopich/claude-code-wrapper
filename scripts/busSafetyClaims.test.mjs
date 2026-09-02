@@ -412,6 +412,37 @@ describe('[security] no artifact may claim the superseded bus safety model', () 
     expect(read('docs/safety-and-security.md')).toContain('pause');
   });
 
+  test('the single-agent permission posture is in the PUBLIC corpus', () => {
+    // The posture claims — Trust's two effects, `shouldAutoAllow`, the
+    // `seedPermissionMode` order, the auth-precedence scrub — lived only in
+    // CLAUDE.md, which is not a file every reader of this repo has. They now
+    // live here, and this is what stops them being deleted as duplication:
+    // each string is the SUBJECT of a scan above, so losing one silently
+    // shrinks what the gate is checking rather than failing anything.
+    const doc = read('docs/safety-and-security.md');
+    for (const claim of [
+      'settingSources',
+      'shouldAutoAllow',
+      'seedPermissionMode',
+      'SCRUBBED_ENV_VAR_NAMES',
+      'consultant',
+    ]) {
+      expect(doc, `docs/safety-and-security.md no longer covers ${claim}`).toContain(claim);
+    }
+  });
+
+  test('SECURITY.md is in range, and still states the runtime posture', () => {
+    // Listed in `collectFiles` since this gate was written and never given a
+    // coverage case of its own — so a dropped entry would have gone unnoticed
+    // exactly the way CLAUDE.md's did. It is also the one artifact here aimed
+    // at people outside this repo, which makes a stale posture sentence in it
+    // the most expensive kind.
+    expect(files).toContain('SECURITY.md');
+    const sec = read('SECURITY.md');
+    expect(sec).toContain('permissionMode');
+    expect(sec).toContain('canUseTool');
+  });
+
   test('.github/CODEOWNERS is in range', () => {
     // Extensionless and beside — not inside — the `workflows` root, so the
     // directory walk cannot reach it however the roots are arranged; it is
