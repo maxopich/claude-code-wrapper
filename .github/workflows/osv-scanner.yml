@@ -4,8 +4,6 @@ name: osv-scanner
 # Snyk DB, GitHub Advisory, etc. Runs on PR (catch new vulns introduced
 # by the diff), push (catch what's currently in main), and weekly cron
 # (catch newly-disclosed CVEs for already-installed deps).
-#
-# Plan reference: cebab-ci-cd-async-conway.md T2.2.
 
 on:
   pull_request:
