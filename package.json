@@ -26,15 +26,7 @@
     "format:check": "prettier --check .",
     "typecheck": "tsc --noEmit -p shared && tsc --noEmit -p server && tsc --noEmit -p web",
     "test": "vitest run",
-    "test:security": "node scripts/security-test-gate.mjs",
-    "loop": "node scripts/loop.mjs",
-    "loop:night": "mkdir -p .loop && tmux new -d -s cebab-loop 'caffeinate -is node scripts/loop.mjs --merge --until 8 --until 07:00 2>&1 | tee -a .loop/console.log' && echo 'started \u2014 follow it with: npm run loop:tail   (stop it with: npm run loop:stop)'",
-    "loop:stop": "mkdir -p .loop && touch .loop/HALT && echo 'HALT set \u2014 stops at the next stage boundary'",
-    "loop:tail": "tail -f .loop/console.log",
-    "loop:watch": "echo 'read-only: detach with Ctrl-B then D. Ctrl-C cannot reach the run.' && tmux attach -r -t cebab-loop",
-    "loop:status": "node scripts/loop.mjs --status",
-    "loop:rehearse": "node scripts/loop-rehearsal.mjs",
-    "loop:recover": "git reset --hard && git clean -fd && git checkout main && node scripts/predev-server.mjs && rm -f .loop/HALT && echo recovered"
+    "test:security": "node scripts/security-test-gate.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

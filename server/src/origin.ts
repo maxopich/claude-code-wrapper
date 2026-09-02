@@ -3,7 +3,7 @@
  * `/auth-token` route and `/session-log`. Hoisted out of `ws/server.ts` so
  * every authentication checkpoint (HTTP and WS) gates on the same rules.
  *
- * Browser threat model (per CLAUDE.md): the WS must reject cross-origin
+ * Browser threat model (see `docs/safety-and-security.md`): the WS must reject cross-origin
  * connections (CSWSH) — browsers ALWAYS set `Origin` on WS upgrades, so
  * an absent Origin can't be a cross-site hijack, and the WS upgrade
  * therefore ALLOWS an empty Origin (the `?token=` param is the real gate

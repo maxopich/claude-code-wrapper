@@ -1,47 +1,35 @@
 # docs/
 
-Reference detail lifted out of [`CLAUDE.md`](../CLAUDE.md).
+How Cebab works underneath — the mechanism behind the claims in
+[`README.md`](../README.md) and [`SECURITY.md`](../SECURITY.md).
 
-## The split, and why it is not a filing preference
+## What belongs here
 
-`CLAUDE.md` is **always loaded**: the SDK reads it as project memory, the bus injects it
-verbatim into every worker's and chain participant's first turn (`readProjectClaudeMd`),
-and `scripts/lib/loop/build-system.md` orders every loop BUILD agent to read it. Nothing
-under `docs/` is loaded by any of those — **both loaders read `CLAUDE.md` and stop**, so
-a page here arrives only when a person opens it.
+These pages are **reference**: mechanism, the measurements behind a design, and the
+history that explains why something is shaped the way it is. They are read on demand,
+by someone about to change the subsystem they describe.
 
-That makes the split a budget rather than a taste:
+What does NOT belong here is the rule itself. A statement someone acts on — a security
+posture, a constraint on what a component may do — belongs where it cannot be missed:
+in the code at the point of decision, in `SECURITY.md`, or in the module's own JSDoc.
+Reference detail can move; the rules cannot. `scripts/busSafetyClaims.test.mjs` scans
+these pages along with `README.md` and `SECURITY.md`, and fails the build when any of
+them describes a posture the code no longer has.
 
-|          | goes in `CLAUDE.md`                                | goes in `docs/`                                |
-| -------- | -------------------------------------------------- | ---------------------------------------------- |
-| **What** | rules and hazards — what an agent must not violate | mechanism, history, measurement records        |
-| **Test** | acting wrongly on it breaks something              | you would want it when changing this subsystem |
-| **Cost** | paid on every worker, every run                    | paid only when opened                          |
-
-Reference detail can move; the rules cannot. A wrong posture sentence is what an agent
-reads and acts on, so it belongs in the file that always loads — that is the exposure
-`#333` closed, and the reason the security-critical _claims_ stay put even where their
-mechanism moves here.
-
-Code comments follow the same rule one level down: the **why** at the point of decision,
-plus JSDoc on exported symbols, stays in the file. A file-header essay about how the
-subsystem came to be belongs on one of these pages, with a pointer where it was.
+Code comments follow the same split one level down: the **why** at the point of
+decision, plus JSDoc on exported symbols, stays in the file. A file-header essay about
+how the subsystem came to be belongs on one of these pages, with a pointer where it was.
 
 ## Pages
 
-| Page                                                           | Subject                                                                                                                                                                                                                                                                                                                                                        | Read before touching                                                                                  |
-| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| [`bus-architecture.md`](bus-architecture.md)                   | core bus modules, what "install" writes, per-participant `settingSources`, `cebab_bus` MCP namespacing, server-restart resume (R-A/R-B)                                                                                                                                                                                                                        | `server/src/bus/`                                                                                     |
-| [`safety-and-security.md`](safety-and-security.md)             | what actually gates a tool call (Trust, `settingSources`, `shouldAutoAllow`, the `seedPermissionMode` order), the consultant constraint and its two limits, the pause-on-dangerous gate, the hash-chained audit log, forensic snapshots, the TOFU install gate, operator mute/pause/kick, the Origin gate, the per-launch auth token, credential-env scrubbing | `server/src/notifications/`, `bus/pause_gate.ts`, `bus/install_trust_gate.ts`, `auth.ts`, `origin.ts` |
-| [`managed-agents.md`](managed-agents.md)                       | the copy engine's symlink rule and size caps, the `.git` exclusion, credentials in the clear, the three editable config kinds, the delete's ordering                                                                                                                                                                                                           | `server/src/managed_*.ts`                                                                             |
-| [`AUTONOMOUS_LOOP_SPEC.md`](AUTONOMOUS_LOOP_SPEC.md)           | the loop **driver**: stages, transitions, data formats, guard, usage limits                                                                                                                                                                                                                                                                                    | `scripts/loop.mjs`, `scripts/lib/loop/`                                                               |
-| [`LOOP_DEVELOPMENT_STANDARD.md`](LOOP_DEVELOPMENT_STANDARD.md) | what a change the loop **produces** has to be: the four defect classes, what each gate tier can and cannot see, the revert-check                                                                                                                                                                                                                               | the loop's gate or its BUILD prompt                                                                   |
-
-`BEADS_KANBAN_WORKFLOW.md` is gitignored — one developer's local issue-tracking setup,
-not part of the project.
+| Page                                               | Subject                                                                                                                                                                                                                                                                                                                                                        | Read before touching                                                                                  |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| [`bus-architecture.md`](bus-architecture.md)       | core bus modules, what "install" writes, per-participant `settingSources`, `cebab_bus` MCP namespacing, server-restart resume (R-A/R-B)                                                                                                                                                                                                                        | `server/src/bus/`                                                                                     |
+| [`safety-and-security.md`](safety-and-security.md) | what actually gates a tool call (Trust, `settingSources`, `shouldAutoAllow`, the `seedPermissionMode` order), the consultant constraint and its two limits, the pause-on-dangerous gate, the hash-chained audit log, forensic snapshots, the TOFU install gate, operator mute/pause/kick, the Origin gate, the per-launch auth token, credential-env scrubbing | `server/src/notifications/`, `bus/pause_gate.ts`, `bus/install_trust_gate.ts`, `auth.ts`, `origin.ts` |
+| [`managed-agents.md`](managed-agents.md)           | the copy engine's symlink rule and size caps, the `.git` exclusion, credentials in the clear, the three editable config kinds, the delete's ordering                                                                                                                                                                                                           | `server/src/managed_*.ts`                                                                             |
 
 ## Adding a page
 
-Link it from the table above **and** from `CLAUDE.md`'s pointer list. A page nobody links
-is a page nobody opens, which is the same as not writing it — and `CLAUDE.md`'s list is
-the only index the always-loaded surface has.
+Link it from the table above, and from the module it describes — a header comment
+naming the page is what makes someone editing that code open it. A page nobody links to
+is a page nobody opens, which is the same as not writing it.

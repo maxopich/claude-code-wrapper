@@ -390,17 +390,6 @@ describe('[security] no artifact may claim the superseded bus safety model', () 
     expect(files).toContain('README.md');
   });
 
-  test('CLAUDE.md is in range, and is a file with claims in it', () => {
-    // Its own coverage case, separate from the floor above, because CLAUDE.md
-    // is the one artifact this gate was built around and never looked at. A
-    // green scan proves nothing about a file that is not collected — and the
-    // two `expect`s fail for different reasons on purpose: the first if the
-    // `collectFiles` entry is dropped, the second if the path resolves to
-    // something empty or unreadable.
-    expect(files).toContain('CLAUDE.md');
-    expect(read('CLAUDE.md')).toContain('permissionMode');
-  });
-
   test('the docs/ split is in range, both files, with claim-bearing content', () => {
     // CLAUDE.md was split behind an index on 2026-08-15 and the deep bus and
     // safety reference moved here. If `docs` is dropped from the roots, the
@@ -495,29 +484,19 @@ function collectFiles() {
   const exts = new Set(['.ts', '.tsx', '.sql', '.mjs', '.yml', '.md']);
   const out = [];
   for (const root of roots) walk(root, out, exts);
-  // `CLAUDE.md` joined this list when the convention that kept it out of PRs
-  // was reversed (2026-08-14). It is the artifact that most needed scanning
-  // and was the only one exempt: it is loaded as project memory into every
-  // `claude` session run in this checkout, and `bus/runtime.ts`'s
-  // `readProjectClaudeMd` injects each bus PARTICIPANT's own project-root
-  // CLAUDE.md into that participant's first turn (per `w.cwd` / `p.cwd`; the
-  // orchestrator is excluded). So a superseded claim here is not documentation
-  // drift — it is a false statement delivered to a running model. It carried
-  // four of them (register X01, X02, X04, X05) for as long as nothing looked.
+  // `CLAUDE.md` and `CONTRIBUTING.md` were in this list until they became
+  // local-only. Losing them is not a weakening, because the claims they
+  // carried moved into `docs/safety-and-security.md` and `SECURITY.md` FIRST
+  // (#508) and are asserted there individually — a scan whose corpus shrinks
+  // silently is the exact failure this gate exists to prevent, so the two
+  // steps were deliberately separate commits.
   //
   // `.github/CODEOWNERS` is extensionless and lives beside — not inside — the
   // `workflows` root, so the walk could never reach it. It held a fourth copy
   // of the superseded posture claim until 2026-08-15, found only because
   // arming this gate on CLAUDE.md prompted a sweep for the places it cannot
   // see. Listed explicitly for that reason.
-  for (const top of [
-    'README.md',
-    'SECURITY.md',
-    'CONTRIBUTING.md',
-    'CLAUDE.md',
-    '.npmrc',
-    '.github/CODEOWNERS',
-  ]) {
+  for (const top of ['README.md', 'SECURITY.md', '.npmrc', '.github/CODEOWNERS']) {
     if (fs.existsSync(path.join(repoRoot, top))) out.push(top);
   }
   return out;

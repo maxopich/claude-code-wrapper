@@ -405,8 +405,6 @@ function collectFiles() {
   for (const top of [
     'README.md',
     'SECURITY.md',
-    'CONTRIBUTING.md',
-    'CLAUDE.md',
     '.env.example',
     '.github/PULL_REQUEST_TEMPLATE.md',
   ]) {

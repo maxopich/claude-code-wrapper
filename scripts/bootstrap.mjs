@@ -79,4 +79,5 @@ if (huskyCode !== 0) {
   console.warn('[bootstrap] husky skipped (non-git or unavailable) — fine, hooks are dev-only.');
 }
 
-console.log('\n[bootstrap] done.  Start the app with:  npm run dev');
+console.log('\n[bootstrap] done.  Run it with:      npm start   (one port, no dev server)');
+console.log('[bootstrap]                …or develop on it with:  npm run dev');

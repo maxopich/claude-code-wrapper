@@ -1,6 +1,6 @@
 # Bus architecture
 
-Reference detail lifted out of [`CLAUDE.md`](../CLAUDE.md) so that file stays
+Reference detail behind the bus, kept out of the always-loaded surfaces so those stay
 small enough to load into every session. **Nothing under `docs/` is auto-loaded
 by anything** — neither the SDK's project-memory load nor the bus's
 `readProjectClaudeMd` injection reads past `CLAUDE.md` — so this page arrives

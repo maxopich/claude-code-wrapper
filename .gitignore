@@ -34,12 +34,51 @@ logs/
 *.sqlite-wal
 *.sqlite-shm
 
-# Autonomous loop runtime state (scripts/loop.mjs). The ledger, the HALT kill
-# switch, the console tee and the resolved config are all per-machine run state
-# — never committed. The loop's CODE is tracked on purpose, so `npm test` in CI
-# gates it; scripts/kanban-sync.mjs was gitignored and CI therefore never ran
-# its 20 tests (Cebab-8fa), which is the mistake this split exists to avoid.
+# ─────────────────────────────────────────────────────────────────────────────
+# The workshop, not the tool.
+#
+# Cebab is what this repo ships. The autonomous development loop that builds
+# it, the Beads issue graph, the live-quota Playground smokes and the agent
+# briefing are one developer's local apparatus: none of it is needed to build,
+# test or run Cebab, and a public repo carrying it invites the reader to
+# mistake the workshop for the product.
+#
+# THE COST, STATED SO IT IS NOT REDISCOVERED. The loop's own ~7k lines of
+# tests no longer run in CI, because `npm test` cannot collect what git does
+# not carry. That is the same mistake `scripts/kanban-sync.mjs` made — it was
+# gitignored and CI therefore never ran its 20 tests (Cebab-8fa). The
+# difference is that this one is deliberate and paid for: the loop's gate runs
+# its own suite explicitly before it may publish anything. If that step is
+# ever dropped, this apparatus is unverified.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Loop runtime state — ledger, HALT kill switch, console tee, resolved config.
 .loop/
+
+# Loop code, its rehearsal harness and its revert-check.
+/scripts/loop.mjs
+/scripts/loop.test.mjs
+/scripts/loop-rehearsal.mjs
+/scripts/loop-rehearsal.test.mjs
+/scripts/revert-check.mjs
+/scripts/revertCheck.test.mjs
+/scripts/lib/loop/
+
+# Loop documentation — specs for the driver and for the change it must produce.
+/docs/AUTONOMOUS_LOOP_SPEC.md
+/docs/LOOP_DEVELOPMENT_STANDARD.md
+
+# The agent briefing and the contributor guide. The product claims CLAUDE.md
+# used to carry moved to docs/safety-and-security.md + SECURITY.md first (#508)
+# so nothing public depends on either file.
+/CLAUDE.md
+/CONTRIBUTING.md
+
+# Claude Code's own per-checkout state. `.claude/scheduled_tasks.lock` was
+# TRACKED until this commit and held a live session id, pid and boot timestamp
+# from one machine; `.git/info/exclude` silenced the rest, which no clone
+# inherits.
+.claude/
 
 
 # npm/yarn output

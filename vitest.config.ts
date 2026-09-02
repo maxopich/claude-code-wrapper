@@ -33,7 +33,7 @@ export default defineConfig({
     // node_modules, and contention on the shared ~/.cebab/cebab.sqlite),
     // which makes a root `npm test` unusable. vitest 4's default exclude
     // is only node_modules + .git, so we also re-add dist/build to keep
-    // stale compiled tests out (see CLAUDE.md's tsc-emit warning). eslint
+    // stale compiled tests out (`server/tsconfig.build.json` carries the why). eslint
     // already ignores `.claude/**` for the same worktree-shadowing reason.
     exclude: [...configDefaults.exclude, '**/dist/**', '**/build/**', '**/.claude/**'],
     // Register Cebab-cjm: point every worker at a throwaway data directory
