@@ -82,6 +82,19 @@ function fixtureOkIds(ts) {
  * two must be kept in sync by eye anyway.
  */
 const COUNT_CLAIM = /(zero|one|two|three|four|five|six) Cebab-specific custom rules/i;
+/**
+ * The OTHER phrasing, and the reason this gate needed a second pattern.
+ *
+ * `Cebab-m99x`: SECURITY.md said "three Cebab-specific custom rules" on one
+ * line and "Those TWO Semgrep rules each carry a fixture" two lines later. The
+ * file held both numbers, one of them wrong, and this gate stayed green —
+ * because it matched the first phrasing and stopped. A gate that checks one
+ * sentence in a file and ignores a contradicting one next to it is measuring
+ * the sentence, not the claim.
+ *
+ * `g` because ALL of them are checked now, not the first.
+ */
+const COUNT_CLAIM_ALT = /(zero|one|two|three|four|five|six) Semgrep rules/gi;
 const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six'];
 
 /** Extract a doc's spelled-out rule count as a number, or null if it no
@@ -89,6 +102,24 @@ const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six'];
 function statedRuleCount(text) {
   const found = COUNT_CLAIM.exec(text);
   return found ? NUMBER_WORDS.indexOf(found[1].toLowerCase()) : null;
+}
+
+/**
+ * EVERY count-shaped claim about the rules in a document, in order.
+ *
+ * Returns numbers, so a caller asserts they all agree with reality rather than
+ * that the first one does. An empty array means the document states no count —
+ * which the callers treat as its own failure, since a doc that stopped counting
+ * is how a wrong count becomes invisible.
+ */
+function allStatedRuleCounts(text) {
+  const out = [];
+  const first = COUNT_CLAIM.exec(text);
+  if (first) out.push(NUMBER_WORDS.indexOf(first[1].toLowerCase()));
+  for (const m of text.matchAll(COUNT_CLAIM_ALT)) {
+    out.push(NUMBER_WORDS.indexOf(m[1].toLowerCase()));
+  }
+  return out;
 }
 
 describe('[security] semgrep custom rules — liveness and counts', () => {
@@ -143,6 +174,16 @@ describe('[security] semgrep custom rules — liveness and counts', () => {
     const stated = statedRuleCount(read('SECURITY.md'));
     expect(stated, 'SECURITY.md no longer states a custom-rule count').not.toBeNull();
     expect(stated).toBe(ruleIds.length);
+  });
+
+  test('EVERY count SECURITY.md states agrees — not just the first one', () => {
+    // `Cebab-m99x`. The file said "three Cebab-specific custom rules" and, two
+    // lines below, "Those TWO Semgrep rules each carry a fixture". Both numbers
+    // sat in one file, one of them wrong, and the test above stayed green
+    // because it matched the first phrasing and stopped reading.
+    const counts = allStatedRuleCounts(read('SECURITY.md'));
+    expect(counts.length, 'SECURITY.md states no rule count at all').toBeGreaterThan(0);
+    for (const n of counts) expect(n).toBe(ruleIds.length);
   });
 
   test('the semgrep workflow header states the real number of custom rules', () => {
