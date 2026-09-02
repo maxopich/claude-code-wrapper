@@ -197,8 +197,34 @@ The third row must be recorded as a skip and never as a pass, for the same reaso
 `audit-gate` records `{ skipped: 'network' }`: a step that reports success without
 measuring anything is worse than a step that is absent, because it is counted.
 
-**Verify it against a known answer before trusting it.** `Cebab-dwcq` names three tests
-in the 2026-09-01 run that pass with their fix reverted, and twenty server-side reverts
-that correctly went red. That is a ready-made positive and negative control with the
-answer already known — a revert-check implementation that does not reproduce those
-results is wrong, whatever it does on synthetic fixtures.
+**The unit is the CASE, not the file — and that correction came from doing the
+verification below rather than from reasoning.** The first implementation classified
+whole files: run the changed test files against the base and ask whether any test
+failed. Run against `a009f68` — a commit `Cebab-dwcq` had already recorded as carrying a
+vacuous test — it reported `depends`, because 4 of its 52 tests did fail. The file
+looked sound while the one case that shipped with the fix still passed without it.
+"Some test in this file fails" is a much weaker claim than "the test that shipped with
+this fix fails", and only the second is the rule.
+
+So the titles of the test cases the diff ADDS are extracted from the `+` lines of the
+patch, and each is looked up by name in `assertionResults`. A title with no static text
+— a template literal, a `.each` table — is reported as **unmatched** rather than assumed
+sound.
+
+**Verified against a known answer, both directions** (`scripts/revert-check.mjs`, run
+over the merged commits of 2026-09-01):
+
+| Commit         | `Cebab-dwcq` recorded                 | revert-check reports                         |
+| -------------- | ------------------------------------- | -------------------------------------------- |
+| `a009f68` #484 | one vacuous case                      | **VACUOUS**, naming that case and a second   |
+| `a1c4e40` #483 | 1 of 4 new cases vacuous, other 3 red | **VACUOUS**, 3 depend / 1 vacuous, same case |
+| `3474eaa` #469 | server-side, reverted red             | **DEPENDS** 1/1                              |
+| `c686d1c` #466 | server-side, reverted red             | **DEPENDS** 4/4                              |
+
+**And one it cannot see, which bounds the claim.** `faa2fb5` #464 is dwcq's third
+vacuous finding and revert-check reports `DEPENDS` 7/7 — correctly, because that defect
+is a different class: the `[security]` suite covers the pure helper, and _the guard's
+call site in `runOneTurn` is not exercised by any test at all_. Revert-check answers
+"does this test depend on this change"; it does not answer "does this change have parts
+no test reaches". The second needs coverage analysis. A gate that claimed to catch both
+would be overselling exactly the kind of thing this document exists to stop.
