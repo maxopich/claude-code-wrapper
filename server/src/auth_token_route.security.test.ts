@@ -76,7 +76,7 @@ afterEach(async () => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-function request(opts: { origin?: string; hostHeader?: string }): Promise<{
+function request(opts: { origin?: string; hostHeader?: string; fetchSite?: string }): Promise<{
   status: number;
   headers: http.IncomingHttpHeaders;
   body: string;
@@ -84,6 +84,7 @@ function request(opts: { origin?: string; hostHeader?: string }): Promise<{
   const headers: Record<string, string> = {};
   if (opts.origin !== undefined) headers['Origin'] = opts.origin;
   if (opts.hostHeader !== undefined) headers['Host'] = opts.hostHeader;
+  if (opts.fetchSite !== undefined) headers['Sec-Fetch-Site'] = opts.fetchSite;
   return new Promise((resolve, reject) => {
     const req = http.request(
       { host: TEST_HOST, port: serverPort, path: '/auth-token', method: 'GET', headers },
@@ -118,6 +119,10 @@ describe('[security] GET /auth-token origin posture', () => {
   });
 
   test('rejects an empty Origin — non-browser clients must read the file', async () => {
+    // Unchanged by single-port serving, and that is the point: a bare curl
+    // sends no `Sec-Fetch-Site`, so the posture this endpoint has always had
+    // still holds. Gating the empty-Origin case on `Host` instead would have
+    // flipped this case to 200, because curl sets Host itself.
     const res = await request({ hostHeader: allowedHost() });
     expect(res.status).toBe(403);
     expect(res.headers['x-cebab-reject-reason']).toBe('origin_not_allowed');
@@ -139,6 +144,47 @@ describe('[security] GET /auth-token origin posture', () => {
       origin: DECLARED_WEB_ORIGIN,
       hostHeader: 'evil.example',
     });
+    expect(res.status).toBe(403);
+    expect(res.headers['x-cebab-reject-reason']).toBe('host_not_allowed');
+    expect(res.body).not.toContain(token);
+  });
+});
+
+describe('[security] GET /auth-token same-origin posture (single-port serving)', () => {
+  // When the server serves the SPA itself (`static_web.ts`), the app's fetch
+  // is same-origin and browsers OMIT `Origin` entirely. `Sec-Fetch-Site` is
+  // what separates that request from any other empty-Origin caller: it is a
+  // forbidden header name, so page JS cannot set or override it via `fetch()`.
+
+  test('serves the token to a same-origin browser fetch with no Origin', async () => {
+    const res = await request({ fetchSite: 'same-origin', hostHeader: allowedHost() });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe(token);
+    // No Origin to echo, so no CORS header — but `Vary` is still set, because
+    // WHICH requests get answered depends on Origin.
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    expect(res.headers['vary']).toBe('Origin');
+  });
+
+  test('rejects Sec-Fetch-Site: cross-site with no Origin', async () => {
+    const res = await request({ fetchSite: 'cross-site', hostHeader: allowedHost() });
+    expect(res.status).toBe(403);
+    expect(res.headers['x-cebab-reject-reason']).toBe('origin_not_allowed');
+    expect(res.body).not.toContain(token);
+  });
+
+  test('rejects Sec-Fetch-Site: none — a typed address bar is not the app', async () => {
+    const res = await request({ fetchSite: 'none', hostHeader: allowedHost() });
+    expect(res.status).toBe(403);
+    expect(res.headers['x-cebab-reject-reason']).toBe('origin_not_allowed');
+    expect(res.body).not.toContain(token);
+  });
+
+  test('still enforces Host on the same-origin path (DNS rebinding)', async () => {
+    // The two checks are independent: satisfying Sec-Fetch-Site must not
+    // become a way around the Host gate, which is the whole reason the
+    // empty-Origin branch falls THROUGH to it rather than returning early.
+    const res = await request({ fetchSite: 'same-origin', hostHeader: 'evil.example' });
     expect(res.status).toBe(403);
     expect(res.headers['x-cebab-reject-reason']).toBe('host_not_allowed');
     expect(res.body).not.toContain(token);

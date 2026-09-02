@@ -15,6 +15,7 @@ import { resolveWorkspaceRoot, workspaceRootValid } from './workspace.js';
 import { authTokenPath, generateAuthToken, persistAuthToken } from './auth.js';
 import { mountAuthTokenRoute } from './auth_token_route.js';
 import { mountSessionLogExport } from './session_log_export.js';
+import { mountWebApp } from './static_web.js';
 import { getSession } from './repo/sessions.js';
 import { getMultiAgentSession } from './repo/multi_agent.js';
 import { startSessionPurgeCron } from './bulk_session_op.js';
@@ -143,6 +144,18 @@ function main(): void {
       return null;
     },
   });
+
+  // LAST, after every API route: Express resolves in registration order, so
+  // mounting the SPA earlier would shadow /health, /auth-token and
+  // /session-log with index.html. A checkout that has never run
+  // `npm run build` has no web/dist and this is a no-op — that is the dev
+  // path, where Vite serves the UI on its own port instead.
+  const servedDist = mountWebApp(app);
+  console.log(
+    servedDist
+      ? `[cebab] serving web UI from ${servedDist}`
+      : '[cebab] no web/dist — API only (run `npm run build`, or use `npm run dev` for Vite)',
+  );
 
   const server = http.createServer(app);
   const wss = startWsServer(server);

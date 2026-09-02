@@ -15,7 +15,6 @@ import type {
   SessionPermissionMode,
   StopReasonCode,
 } from '@cebab/shared/protocol';
-import { DEFAULT_PORT } from '@cebab/shared/net';
 import { SHELL } from './breakpoints';
 import { connectWs, type WsHandle } from './ws';
 import {
@@ -91,10 +90,16 @@ import type { ActiveRunView } from './store';
 import { downloadSessionLog, isDownloadError } from './exports';
 import { readStored, writeStored } from './prefs';
 import { applyTheme, readStoredTheme, type Theme } from './theme';
+import { resolveServerUrls, SERVER_PORT } from './serverUrls';
 
-const SERVER_PORT = import.meta.env.VITE_SERVER_PORT ?? String(DEFAULT_PORT);
-const HTTP_BASE = `http://${window.location.hostname}:${SERVER_PORT}`;
-const WS_URL = `ws://${window.location.hostname}:${SERVER_PORT}`;
+// Derived rather than written out here: the same-origin case (`npm start`)
+// must read the port off `window.location`, not off the build-time constant.
+// `serverUrls.ts` carries the why and is where the two cases are pinned.
+const { httpBase: HTTP_BASE, wsUrl: WS_URL } = resolveServerUrls({
+  sameOrigin: !import.meta.env.DEV,
+  location: window.location,
+  serverPort: SERVER_PORT,
+});
 
 /**
  * Aspect ratio (display width / height) at or above which we treat the monitor

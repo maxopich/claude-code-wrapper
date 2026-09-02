@@ -18,24 +18,40 @@ import { recordRejection } from './notifications/origin_rejections.js';
  *   - `/session-log`  — empty Origin ALLOWED. It requires `verifyToken`, so an
  *                       empty-Origin caller already holds the secret; the
  *                       endpoint hands out nothing new.
- *   - `/auth-token`   — empty Origin REJECTED (here). It is the token-issuing
- *                       endpoint. Its only client is the browser, which always
- *                       sets Origin; any other local client is expected to read
- *                       `~/.cebab/auth-token` off disk instead (as ws_smoke,
- *                       live_smoke and ci_smoke already do).
+ *   - `/auth-token`   — empty Origin allowed ONLY for a same-origin browser
+ *                       fetch, proven by `Sec-Fetch-Site` (below). Every other
+ *                       empty-Origin caller is rejected and expected to read
+ *                       `~/.cebab/auth-token` off disk instead, as ci_smoke and
+ *                       the local live smokes already do.
  *
- * This is a convenience-path removal, not a boundary. A process running as the
- * operator's uid can still read the file — see the residual documented in
- * `auth.ts`. What it buys is that obtaining the token now requires filesystem
- * access, and that the code matches what `origin.ts` always claimed.
+ * THE TRAP THIS FILE PREDICTED, AND WHAT IT COST TO RESOLVE. The previous
+ * version of this comment warned that browsers omit `Origin` on same-origin
+ * GETs, so serving the SPA from the Node server's own port would make this
+ * route 403 the app itself — and it recommended inlining the token into the
+ * served HTML rather than "loosening this gate back to 'empty Origin is fine'".
+ * Single-port serving landed (`static_web.ts`), so the trap fired. Both of the
+ * obvious fixes turned out to be the SAME exposure, which is the part worth
+ * recording:
  *
- * TRAP for a future change: browsers omit `Origin` on SAME-origin GETs. Today
- * the SPA is always served by Vite on :5173 while this API is on :PORT, so the
- * fetch is cross-origin and carries an Origin. If the Node server is ever made
- * to serve the built SPA on its own port, that fetch becomes same-origin, loses
- * the header, and this route starts 403ing the app itself. At that point the
- * token should be inlined into the served HTML (or handed over the WS) rather
- * than loosening this gate back to "empty Origin is fine".
+ *   - inlining the token into `index.html` hands it to anything that can
+ *     `curl http://127.0.0.1:PORT/`, because serving the page is ungated;
+ *   - accepting empty Origin whenever `Host` is ours hands it to anything that
+ *     can `curl http://127.0.0.1:PORT/auth-token`, because curl sets `Host`
+ *     itself. The Host check does not distinguish a browser from a script and
+ *     was never going to.
+ *
+ * `Sec-Fetch-Site` is the one signal that does. It is a forbidden header name,
+ * so page JS cannot set or override it via `fetch()`, and browsers emit it on
+ * every request; a non-browser client does not send it by default. That is the
+ * same CLASS of protection this route always had — note that today
+ * `curl -H 'Origin: http://127.0.0.1:PORT'` already satisfies the check below,
+ * because `buildAllowedOrigins()` allow-lists the port Cebab binds. So this is
+ * still a convenience-path removal rather than a boundary, exactly as the
+ * paragraph after this one has always said; what changed is that it now also
+ * holds when the app and the API share an origin.
+ *
+ * A process running as the operator's uid can still read the token file — see
+ * the residual documented in `auth.ts`.
  */
 export function mountAuthTokenRoute(app: Express): void {
   const allowedOrigins = buildAllowedOrigins();
@@ -43,6 +59,7 @@ export function mountAuthTokenRoute(app: Express): void {
   app.get('/auth-token', (req: Request, res: Response): void => {
     const origin = String(req.headers.origin ?? '');
     const host = String(req.headers.host ?? '');
+    const fetchSite = String(req.headers['sec-fetch-site'] ?? '');
 
     const reject = (reason: 'origin_not_allowed' | 'host_not_allowed'): void => {
       recordRejection({
@@ -56,11 +73,15 @@ export function mountAuthTokenRoute(app: Express): void {
     };
 
     if (!origin) {
-      console.warn('[http] /auth-token reject: empty origin (non-browser client)');
-      reject('origin_not_allowed');
-      return;
-    }
-    if (!allowedOrigins.has(origin)) {
+      // The single-port case. `same-origin` is the only accepted value: a
+      // cross-site or cross-origin request would say so here, and `none` means
+      // a user-typed address bar rather than the app's own fetch.
+      if (fetchSite !== 'same-origin') {
+        console.warn('[http] /auth-token reject: empty origin (non-browser client)');
+        reject('origin_not_allowed');
+        return;
+      }
+    } else if (!allowedOrigins.has(origin)) {
       console.warn(`[http] /auth-token reject: bad origin ${JSON.stringify(origin)}`);
       reject('origin_not_allowed');
       return;
@@ -73,13 +94,21 @@ export function mountAuthTokenRoute(app: Express): void {
 
     // CORS: in dev the web origin is :5173 but the API is :4319, so a bare
     // fetch fails the browser's same-origin check. Echo back the Origin — by
-    // this line it is both non-empty and allow-listed, which is the canonical
-    // safe form of reflective CORS. Semgrep's generic rule can't see the
-    // upstream checks. No preflight is involved (the fetch sends no custom
-    // headers).
-    // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
-    res.setHeader('Access-Control-Allow-Origin', origin);
+    // this line it is allow-listed, which is the canonical safe form of
+    // reflective CORS. Semgrep's generic rule can't see the upstream checks.
+    // No preflight is involved (the fetch sends no custom headers).
+    //
+    // The echo is skipped when Origin was absent: there is no value to echo,
+    // and `Access-Control-Allow-Origin: ` (empty) is a header a same-origin
+    // response has no use for.
+    // `Vary` is set either way: the response body is the same, but WHICH
+    // requests are answered depends on Origin, and a cache keyed without it
+    // could hand a same-origin answer to a cross-origin asker.
     res.setHeader('Vary', 'Origin');
+    if (origin) {
+      // nosemgrep: javascript.express.security.cors-misconfiguration.cors-misconfiguration
+      res.setHeader('Access-Control-Allow-Origin', origin);
+    }
     res.type('text/plain').send(getAuthToken());
   });
 }

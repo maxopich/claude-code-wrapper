@@ -38,11 +38,15 @@ const NET_FILE = 'shared/src/net.ts';
  */
 const CONSUMERS = [
   { file: 'server/src/config.ts', hasComment: true },
-  { file: 'web/src/App.tsx', hasComment: false },
+  // Moved out of App.tsx when single-port serving landed: the client now has
+  // TWO ways to reach the API (same-origin, and the dev cross-port form), and
+  // the fallback constant belongs beside the code that chooses between them.
+  { file: 'web/src/serverUrls.ts', hasComment: true },
   { file: 'web/vite.config.ts', hasComment: false },
   { file: 'server/src/ci_smoke.ts', hasComment: false },
   { file: 'server/src/ws_smoke.ts', hasComment: false },
   { file: 'server/src/live_smoke.ts', hasComment: false },
+  { file: 'server/src/single_port_smoke.ts', hasComment: false },
 ];
 
 function read(rel) {

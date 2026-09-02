@@ -68,7 +68,20 @@ Requires `claude` installed and logged in (verify with `claude auth status`).
 
 ## Run
 
-One command — starts the server (`:4319`) and the web UI (`:5173`) together:
+```sh
+npm start
+```
+
+Then open http://127.0.0.1:4319. One process, one port: the server builds the
+web bundle on first run and serves it from its own origin, so there is no Vite
+and nothing watching the filesystem. **Ctrl+C stops it.** Set `CEBAB_PORT` to
+move it; the UI follows the port it was served from rather than a compiled-in
+one. Run `npm run build` to refresh the bundle after changing `web/`.
+
+### Developing on it
+
+`npm run dev` is the other mode — server (`:4319`) and Vite (`:5173`) together,
+with hot reload:
 
 ```sh
 npm run dev
