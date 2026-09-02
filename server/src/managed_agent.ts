@@ -4,53 +4,28 @@
  * A managed agent is a full, independent SNAPSHOT of a workspace project at
  * `<dataDir>/agents/<slug>/`, registered as an ordinary `projects` row so
  * Trust, the authority resolve, sessions and the bus all work on it unchanged.
- * The original is never touched and there is no live link. Because the `cwd`
- * then sits inside the data dir, this is also what makes "nothing lands in the
- * operator's workspace" true for the single-agent path — `Cebab-ws0.8` did the
- * bus half.
+ * The original is never touched and there is no live link.
  *
- * ONE TRAVERSAL SHAPE, USED TWICE. `walkTree` is the only thing in this file
- * that reads a directory, and both the preflight survey and the copy consume
- * it. That is structural rather than tidy: a preflight that measured a tree
- * differently from the way the copy writes it would report a number the
- * operator then does not get, and the two would drift apart at the first edit
- * to either. A test asserts the counts agree, but the shared generator is what
- * makes them agree.
+ * THREE RULES THE CODE BELOW DEPENDS ON DIRECTLY.
  *
- * SYMLINKS ARE THE SECURITY-SHAPED PART. `fsp.cp({ dereference: false })`
- * satisfies "do not follow symlinks" literally — it recreates each link as a
- * link — and that is the wrong answer here. A link pointing out of the source
- * would be reproduced faithfully inside the managed tree, handing the agent a
- * live path back out of the space Cebab is supposed to own: not followed, but
- * not independent either. So links resolving INSIDE the source are recreated,
- * links resolving outside are skipped and REPORTED, and directory links are
- * never descended (which is also the loop guard — a link to an ancestor cannot
- * spin the walk).
+ * `walkTree` is the ONLY thing in this file that reads a directory, and both
+ * the preflight survey and the copy consume it. Structural, not tidy: a
+ * preflight that measured the tree differently from the way the copy writes it
+ * would report a number the operator then does not get.
  *
- * WHY THE COPIED CREDENTIALS ARE NOT ENCRYPTED (Cebab-ws0.11). A managed agent
- * carries whatever its source carried — an API key in `.mcp.json`, a token in
- * `.env`, a deploy key. Encrypting them at rest here would be theatre: Cebab is
- * a single-user localhost app that has to hand those values to a subprocess on
- * demand, so the key would have to live on the same disk as the ciphertext and
- * be readable by the same account. That stops a casual grep and nothing else,
- * while adding a key-management surface that can go wrong in ways plaintext
- * cannot. What actually earns its keep is cheaper and checkable:
+ * SYMLINKS. `fsp.cp({ dereference: false })` satisfies "do not follow
+ * symlinks" literally and is the wrong answer — it recreates an escaping link
+ * faithfully, handing the agent a live path out of the space Cebab owns. Only
+ * links resolving inside-or-at the source root are recreated; everything else
+ * is skipped and REPORTED. Directory links are never descended, which is also
+ * the loop guard.
  *
- *   - the tree is 0700 and credential-bearing files are 0600, so no other
- *     account on the machine can reach them;
- *   - names, never values — nothing here opens a file to decide anything, and
- *     the preflight reports paths only;
- *   - `.git` is excluded, so the copy is not a repository and the data dir's
- *     `.gitignore` covers it: the secrets cannot be committed from it.
+ * ASYNC, NOT `cpSync`. The copy deliberately includes `node_modules`, so a
+ * gigabyte is the ordinary case; a synchronous copy parks the event loop for
+ * minutes and the app looks crashed.
  *
- * The threat this does NOT address, stated rather than implied: anything
- * running as the operator's own account can read the copy, exactly as it can
- * read the original. Encryption would not have changed that either.
- *
- * ASYNC, NOT `cpSync`. The operator chose to copy everything — `node_modules`
- * included, `.git` since excluded (see `EXCLUDED_NAMES`) — so a gigabyte is the
- * ordinary case rather than the exotic one. A synchronous copy of that parks the event loop for minutes:
- * no heartbeat, no WebSocket, an app that looks crashed.
+ * Why the copied credentials are not encrypted, what the 0700/0600 modes do
+ * and do not buy, and why `.git` is excluded: docs/managed-agents.md.
  */
 
 import { promises as fsp } from 'node:fs';
