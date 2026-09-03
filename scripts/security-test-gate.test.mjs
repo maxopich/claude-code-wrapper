@@ -36,6 +36,29 @@ describe('[security] evaluateRun — the disarmed-suite guard', () => {
     expect(v.reason).toMatch(/renamed or removed/);
   });
 
+  it('FAILS when the filter selected the WHOLE suite — the unescaped-`-t` shape', () => {
+    // The other half of C02, and the half the file only CLAIMED to check until
+    // this case existed. A bare `[security]` passed to `-t` is a character
+    // class matching nearly every name in the repo, so every test runs and the
+    // gate reports a large, healthy-looking green. Nothing distinguished that
+    // from a working filter except the ratio.
+    const r = evaluateRun({ numPassedTests: 6135, numFailedTests: 0, numTotalTests: 6135 });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/every collected test ran/);
+  });
+
+  it('a genuine subset still passes — the guard is a ratio, not a cap', () => {
+    // Guards the other direction: the check must not fire on a healthy run,
+    // however many security tests there are. ~1.3k of ~6.1k today.
+    expect(evaluateRun({ numPassedTests: 1351, numFailedTests: 0, numTotalTests: 6135 }).ok).toBe(
+      true,
+    );
+    // Even a very high proportion is fine as long as it is not the whole suite.
+    expect(evaluateRun({ numPassedTests: 6134, numFailedTests: 0, numTotalTests: 6135 }).ok).toBe(
+      true,
+    );
+  });
+
   it('fails an empty report rather than treating it as nothing-to-do', () => {
     const v = evaluateRun({ numTotalTests: 0, numPassedTests: 0, numFailedTests: 0 });
     expect(v.ok).toBe(false);
