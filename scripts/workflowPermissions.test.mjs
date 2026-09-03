@@ -322,8 +322,12 @@ describe('every workflow denies by default and pins what it fetches', () => {
   test('the scan reaches the workflow directory', () => {
     // A glob matching nothing looks exactly like a clean tree.
     const files = Object.keys(sources);
-    expect(files.length).toBeGreaterThan(8); // 10 today
-    for (const f of ['ci.yml', 'codeql.yml', 'dependabot-auto-merge.yml', 'workflow-lint.yml']) {
+    // 8 today, down from 10 when `scorecard.yml` and `dependabot-auto-merge.yml`
+    // left with the repo-workflow automation. The floor moves WITH the set on
+    // purpose: a floor kept comfortably below the real count stops being able
+    // to notice the next removal, which is the whole job of this case.
+    expect(files.length).toBeGreaterThan(6);
+    for (const f of ['ci.yml', 'codeql.yml', 'semgrep.yml', 'workflow-lint.yml']) {
       expect(files, `${f} is not in the scanned set`).toContain(f);
     }
   });

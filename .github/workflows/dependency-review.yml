@@ -25,9 +25,10 @@ jobs:
     permissions:
       contents: read # Read the base and head trees to diff their manifests.
       # `pull-requests: write` is required by comment-summary-in-pr to drop a
-      # results comment on the PR. Same trust boundary as the existing
-      # dependabot-auto-merge workflow's grant; the action only reads PR
-      # metadata + the base/head diff.
+      # results comment on the PR. It is the ONLY write grant left in the
+      # workflow set now that dependabot-auto-merge is gone, and it is narrow:
+      # the action reads PR metadata plus the base/head diff and writes one
+      # comment. It cannot merge.
       pull-requests: write # Post the dependency-review summary comment.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -275,9 +275,14 @@ describe('[security] the claim checkers actually catch the claims', () => {
     // Register X31, verbatim from `.github/CODEOWNERS` before 2026-08-15. It
     // survived the correction of every other copy because the walk cannot
     // reach an extensionless file beside the `workflows` root — the claim was
-    // fine, the gate's REACH was not. Kept as a fixture so that if
-    // `.github/CODEOWNERS` is ever dropped from `collectFiles`, the wording
-    // that hid there is still provably detectable.
+    // fine, the gate's REACH was not. It was kept as a fixture against the day
+    // `.github/CODEOWNERS` left `collectFiles`, so the wording that hid there
+    // would still be provably detectable.
+    //
+    // THAT DAY CAME: the file went with the repo-workflow automation, and this
+    // line is now the only place the phrasing exists. Which is the argument for
+    // the practice — a corpus can lose a file for reasons that have nothing to
+    // do with the claim it carried, and a fixture is what survives that.
     '# Worker / orchestrator both run with --permission-mode bypassPermissions.',
   ];
 
@@ -432,15 +437,6 @@ describe('[security] no artifact may claim the superseded bus safety model', () 
     expect(sec).toContain('canUseTool');
   });
 
-  test('.github/CODEOWNERS is in range', () => {
-    // Extensionless and beside — not inside — the `workflows` root, so the
-    // directory walk cannot reach it however the roots are arranged; it is
-    // listed by name or not at all. It held a superseded posture claim until
-    // this file started collecting it.
-    expect(files).toContain('.github/CODEOWNERS');
-    expect(read('.github/CODEOWNERS')).toContain('@');
-  });
-
   test('every file naming bypassPermissions is on the allowlist', () => {
     const unlisted = scanned.filter(
       (rel) => /bypassPermissions/.test(read(rel)) && !POSTURE_ALLOWLIST.has(rel),
@@ -491,12 +487,13 @@ function collectFiles() {
   // silently is the exact failure this gate exists to prevent, so the two
   // steps were deliberately separate commits.
   //
-  // `.github/CODEOWNERS` is extensionless and lives beside — not inside — the
-  // `workflows` root, so the walk could never reach it. It held a fourth copy
-  // of the superseded posture claim until 2026-08-15, found only because
-  // arming this gate on CLAUDE.md prompted a sweep for the places it cannot
-  // see. Listed explicitly for that reason.
-  for (const top of ['README.md', 'SECURITY.md', '.npmrc', '.github/CODEOWNERS']) {
+  // `.github/CODEOWNERS` was listed here for the same reason, and left with the
+  // repo-workflow automation. It had held a fourth copy of the superseded
+  // posture claim until 2026-08-15 — found only because arming this gate on
+  // CLAUDE.md prompted a sweep for the places the walk cannot reach. That is
+  // the lesson worth keeping: the files this scan misses are the extensionless
+  // ones beside a root rather than inside it.
+  for (const top of ['README.md', 'SECURITY.md', '.npmrc']) {
     if (fs.existsSync(path.join(repoRoot, top))) out.push(top);
   }
   return out;
