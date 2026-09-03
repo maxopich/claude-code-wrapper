@@ -190,6 +190,55 @@ Behind the consultant-mode prompt and the pause-on-dangerous toggle (the _preven
 
   Two properties are load-bearing. The predicate is the **activity bar's own** — `tailAwaitsAgent` in `@cebab/shared`, called by `web/src/store.ts:activeAgent` and by the detector — so the note fires on exactly the tails that would otherwise be labelled "working", and a false positive of the note is by construction a true positive of the lie. And it is **self-limiting without a flag**: the note's own row is addressed to `user`, so the tail stops awaiting an agent the moment it exists, and it re-arms by itself if the operator sends a prompt and the run strands again. The four conjuncts (a turn still running, a torn-down session, a held queue, and the tail rule) live in one function so dropping one is a visible edit; `turn_bracket_sites.test.ts` derives from the source that each router still has exactly one `deliverTurn` call site and that it is bracketed, because "the count is complete by construction" stops being true the moment a second one appears.
 
+## Origin-rejection forensics, and why the detector is bounded
+
+The WS upgrade gate (`ws/server.ts`'s `verifyClient`) and `GET /auth-token` both
+reject clients whose `Origin` is not in `buildAllowedOrigins()` or whose `Host` is
+not the 127.0.0.1/localhost form. Those rejections used to land only in
+`console.warn` — silent to the operator, and losing the timestamp and reason at
+process exit. `notifications/origin_rejections.ts` dual-writes instead: a
+200-entry FIFO ring in memory, surfaced as one `recent_rejections` toast on the
+next successful attach, and a JSON-lines log at
+`~/.cebab/logs/origin_rejections.log` that survives exit.
+
+**The detector had to be bounded, or it becomes the amplifier** (`Cebab-l4e`).
+Nothing reaching `recordRejection` is trusted: `origin` and `host` are raw
+request headers, and `GET /auth-token` — one of the two callers — needs no
+token, so any local page can drive the path as fast as it can issue requests.
+Under precisely the scenario the module exists to record, an unbounded log is
+the attack's own multiplier.
+
+Three independent bounds, because each leaves a hole the next closes:
+
+1. **`capHeader`** escapes what a hostile header must not carry raw and
+   truncates at `MAX_RECORDED_HEADER_CHARS`, so one entry is small AND inert.
+   That bounds the ring's memory and the `recent_rejections` WS frame, not just
+   a log line.
+2. **`DISK_DEDUPE_WINDOW_MS`** writes at most one line per distinct
+   `(origin, host, reason, channel)` per window, carrying the suppressed count
+   forward on the next written line rather than dropping it. A retry loop costs
+   one line, not one per attempt. **The ring still records every attempt** —
+   repetition is what the operator's toast counts, so suppressing it there would
+   hide the abuse instead of the bytes.
+3. **`MAX_LOG_BYTES`** rotates to a single `.1` generation. Needed because an
+   attacker who VARIES the origin defeats (2), and because nothing else stops
+   slow growth over a long-lived install.
+
+**The residual, stated rather than implied:** (3) means a determined flood with
+varying origins can still push older evidence out of the retained window. (2) is
+what makes that expensive and conspicuous. Closing it entirely would need a
+policy about which rejections are worth keeping, which is a different decision
+from bounding the file.
+
+Both writes are best-effort and synchronous on the rejection path;
+`fs.appendFileSync` is deliberate, since the request thread is already there and
+the volume is low. A failed append is itself a `console.warn` — a logging
+failure must never fail a request.
+
+The `X-Cebab-Reject-Reason` response header lives at each rejection site rather
+than here, because the response object differs between the Express and
+`verifyClient` channels.
+
 ## Session-log export
 
 `GET /session-log/:sid?token=…&format=redacted|raw` is the only route that hands a session's bytes to a human. Three gates, enforced in `session_log_export.ts`: the Origin allow-list (`buildAllowedOrigins`, where an empty Origin is permitted because a local non-browser client could read the file directly anyway), the Host allow-list (`isAllowedHost`), and a `?token=` matching the per-launch WS auth token; `format=raw` additionally requires `X-Cebab-Acknowledge-Raw: I-understand`, which the UI sets only behind a typed confirmation. Every successful export writes a `safety_audit` row **before** the body lands (BE-1 — if the intent cannot be recorded, the data does not ship).
