@@ -173,6 +173,28 @@
 # Inventory refreshed 2026-08-14, twice: once for the re-fire described above,
 # and again the same day to retire it.
 #
+# RETIRED 2026-09-03, one day after they were added. #512 bumped `qs` to 6.16.0
+# and both holds went unused immediately — which is the state this file calls
+# out as the one neither gate reports loudly, and it was true here: the audit
+# gate printed
+#
+#     note: ignore GHSA-4mjr-xmp4-gh2g matched no npm advisory — retire it
+#     Audit gate passed: ... (0 excused, 0 total reported, 2 stale)
+#
+# on an otherwise PASSING run. Nothing would have failed; the excuses would
+# simply have sat here outliving their reason. That is why the rule is "prune in
+# the same PR that lands the fixing bump" — and when the bump arrives by a route
+# that cannot prune (a dependabot merge), the prune is its own follow-up rather
+# than something to notice later.
+#
+# One caveat recorded rather than smoothed over: 6.16.0 was published
+# 2026-08-29T23:50:15Z, so at merge time it was four days old and had NOT yet
+# cleared `.npmrc`'s `min-release-age=7`. Dependabot writes lockfiles directly
+# and does not consult that setting for security updates (`.github/dependabot.yml`
+# says so), so this landed inside the cooldown by operator decision. `npm ci`
+# installs it fine; a fresh `npm install` resolving `qs` from scratch would have
+# refused until 2026-09-05T23:50Z.
+#
 # Inventory refreshed 2026-09-02: two `qs` advisories arrived and blocked every
 # PR, docs-only ones included, because `OSV scan` is a required check. This is
 # the brace-expansion case again and it is worth naming as a pattern rather
@@ -182,7 +204,7 @@
 # supply-chain control the cooldown exists to be), or hand-edit the lockfile
 # (same thing, less visibly). The third is this file.
 #
-# Two entries remain. (The count claim has to start its own line: the gate in
+# Zero entries remain. (The count claim has to start its own line: the gate in
 # `scripts/osvAllowlist.test.mjs` anchors on `^#\s*<word> entr…`, and it caught
 # this exact mistake when the sentence was folded into the line above.)
 #
@@ -190,33 +212,3 @@
 # `min-release-age=7` — by `npm update nanoid --package-lock-only`, which
 # resolved exactly 3.3.18, and by deleting the entry in the same commit. The
 # empty state is the intended resting state, not an oversight.
-
-# ─────────────────────────────────────────────────────────────────────────────
-# qs 6.15.2 — two prototype-pollution advisories, transitive via express.
-#
-# FIXED VERSION 6.16.0, published 2026-08-29T23:50:15Z, so it clears
-# `.npmrc`'s min-release-age=7 cooldown at 2026-09-05T23:50Z. Until then npm
-# refuses to resolve it at all: `npm install --package-lock-only qs@6.16.0`
-# exits ETARGET with "No matching version found for qs@6.16.0 with a date
-# before ...". That is the guard working, not a problem to route around.
-#
-# `ignoreUntil` is set just past the eligibility date, per the shape the
-# retired entries above used: bump the lockfile to 6.16.0 on or after
-# 2026-09-06 and DELETE both entries in that same commit. If the bump has not
-# landed by the 8th, the audit gate fails and that is the intended outcome —
-# a forgotten excuse should break the build, not linger.
-#
-# Both are rated 6.3 (medium), so `scripts/audit-gate.mjs`'s severity policy
-# would already let them through; these entries exist for `OSV scan`, which
-# has no severity threshold and fails on any unfiltered finding.
-# ─────────────────────────────────────────────────────────────────────────────
-
-[[IgnoredVulns]]
-id = "GHSA-4mjr-xmp4-gh2g"
-ignoreUntil = "2026-09-08T00:00:00Z"
-reason = "qs 6.15.2, transitive via express. FIXED VERSION 6.16.0, published 2026-08-29T23:50:15Z; clears .npmrc's min-release-age=7 cooldown 2026-09-05T23:50Z. Bump and delete this entry together."
-
-[[IgnoredVulns]]
-id = "GHSA-x5fp-wj9c-mxmx"
-ignoreUntil = "2026-09-08T00:00:00Z"
-reason = "qs 6.15.2, transitive via express. FIXED VERSION 6.16.0, published 2026-08-29T23:50:15Z; clears .npmrc's min-release-age=7 cooldown 2026-09-05T23:50Z. Bump and delete this entry together."
