@@ -19,6 +19,7 @@
     "build": "npm --workspace shared run build && npm --workspace server run build && npm --workspace web run build",
     "smoke": "npm --workspace server run smoke",
     "bootstrap": "node scripts/bootstrap.mjs",
+    "verify:native": "node scripts/verify-native-binary.mjs",
     "setup": "npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false && husky",
     "prepare": "husky",
     "lint": "eslint . --max-warnings 0",
