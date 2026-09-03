@@ -1,0 +1,1658 @@
+[
+  {
+    "name": "controllability_forensics",
+    "columns": [
+      {
+        "name": "active_permissions_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "agent_slug",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "bus_inbox_outbox_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "effective_prompt_json",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "events_last_n_json",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "mutation_rationale_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "operator_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": "'local-user'",
+        "pk": 0
+      },
+      {
+        "name": "parent_session_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "pending_tool_calls_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "safety_audit_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "snapshot_failed_reason",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "workdir_tree_hash",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "controllability_forensics_audit",
+        "unique": 0,
+        "columns": [
+          "safety_audit_id"
+        ]
+      },
+      {
+        "name": "controllability_forensics_session_ts",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "ts"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "events",
+    "columns": [
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "raw",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "seq",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "subtype",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "type",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "hook_trust",
+    "columns": [
+      {
+        "name": "args_json",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "command",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "first_seen_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "hook_kind",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "last_seen_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "origin_path",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "project_id",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "script_sha",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "hook_trust_project_idx",
+        "unique": 0,
+        "columns": [
+          "project_id"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "mcp_trust",
+    "columns": [
+      {
+        "name": "args_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "binary_sha",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "command",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "decision",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "operator",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "origin_path",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "script_shas_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "server_name",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "mcp_trust_null_sha_key",
+        "unique": 1,
+        "columns": [
+          "server_name",
+          "origin_path",
+          "command",
+          "args_json"
+        ]
+      },
+      {
+        "name": "mcp_trust_server_origin",
+        "unique": 0,
+        "columns": [
+          "server_name",
+          "origin_path"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "multi_agent_agent_sessions",
+    "columns": [
+      {
+        "name": "agent_name",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 2
+      },
+      {
+        "name": "cli_session_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "cost_usd",
+        "type": "REAL",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "updated_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "multi_agent_events",
+    "columns": [
+      {
+        "name": "destination",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "kind",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "source",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "text",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "multi_agent_events_session_id_idx",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "id"
+        ]
+      },
+      {
+        "name": "multi_agent_events_session_ts_idx",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "ts"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "multi_agent_mutations",
+    "columns": [
+      {
+        "name": "agent_name",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "category",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "classifier_reason_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "confirmed_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "cwd",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "file_path",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "guardrail_reason",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "guardrail_violation_path",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "pause_state",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "promoted",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "summary",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "tool_input_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "tool_name",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "tool_result_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "tool_use_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "idx_multi_agent_mutations_pause",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "agent_name",
+          "pause_state"
+        ]
+      },
+      {
+        "name": "idx_multi_agent_mutations_session",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "ts"
+        ]
+      },
+      {
+        "name": "idx_multi_agent_mutations_tool_use",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "tool_use_id"
+        ]
+      },
+      {
+        "name": "multi_agent_mutations_tool_use_key",
+        "unique": 1,
+        "columns": [
+          "session_id",
+          "tool_use_id"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "multi_agent_participants",
+    "columns": [
+      {
+        "name": "chain_order",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "kicked_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "kicked_mode",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "muted",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "pause_expiry_action",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "paused_until",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "project_id",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 2
+      },
+      {
+        "name": "role",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 1
+      }
+    ],
+    "indexes": [
+      {
+        "name": "multi_agent_participants_control_state",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "muted",
+          "paused_until",
+          "kicked_at"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "multi_agent_pending_retries",
+    "columns": [
+      {
+        "name": "agent_name",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 2
+      },
+      {
+        "name": "error_event_id",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "prompt",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "reason",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "idx_multi_agent_pending_retries_front",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "ts"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "multi_agent_sessions",
+    "columns": [
+      {
+        "name": "archived",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "awaiting_continue",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "ended_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "execute_mode",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "first_error",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "hop_budget",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "hops_used",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "iteration_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "lifecycle",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": "'persistent'",
+        "pk": 0
+      },
+      {
+        "name": "mock",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "mode",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "mutations_acknowledged",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "pause_on_dangerous",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "pending_mutation_id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "pending_retry_agent",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "pending_retry_error_event_id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "pending_retry_prompt",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "pending_retry_reason",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "pending_retry_ts",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_folder",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "started_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "status",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "template_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "total_cost_usd",
+        "type": "REAL",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "idx_multi_agent_sessions_template",
+        "unique": 0,
+        "columns": [
+          "template_id",
+          "started_at"
+        ]
+      },
+      {
+        "name": "multi_agent_sessions_archived_idx",
+        "unique": 0,
+        "columns": [
+          "archived",
+          "started_at"
+        ]
+      },
+      {
+        "name": "multi_agent_sessions_mock",
+        "unique": 0,
+        "columns": [
+          "mock"
+        ]
+      },
+      {
+        "name": "multi_agent_sessions_status_idx",
+        "unique": 0,
+        "columns": [
+          "status",
+          "started_at"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "notifications",
+    "columns": [
+      {
+        "name": "acked_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "acked_by",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "acked_reason",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "action_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "audit_row_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "class",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "dedupe_key",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "details_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "message",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "project_id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "reason_code",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "severity",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "sticky",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "title",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "notifications_dedupe",
+        "unique": 0,
+        "columns": [
+          "dedupe_key"
+        ]
+      },
+      {
+        "name": "notifications_session",
+        "unique": 0,
+        "columns": [
+          "session_id"
+        ]
+      },
+      {
+        "name": "notifications_unacked",
+        "unique": 0,
+        "columns": [
+          "ts"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "projects",
+    "columns": [
+      {
+        "name": "bus_agent_name",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "bus_installed",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "bus_trust_decision",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "kind",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": "'workspace'",
+        "pk": 0
+      },
+      {
+        "name": "last_used_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "managed_copied_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "managed_source_path",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "missing",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "model",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "name",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "path",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "start_permission_mode",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "trusted",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "projects_kind_singleton",
+        "unique": 1,
+        "columns": [
+          "kind"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "recovery_log",
+    "columns": [
+      {
+        "name": "failure_class",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "forensics_id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "invariant_results_json",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "operator_action",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "operator_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": "'local-user'",
+        "pk": 0
+      },
+      {
+        "name": "outcome",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "parent_session_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "time_to_recovery_ms",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "recovery_log_class_idx",
+        "unique": 0,
+        "columns": [
+          "failure_class",
+          "ts"
+        ]
+      },
+      {
+        "name": "recovery_log_session_idx",
+        "unique": 0,
+        "columns": [
+          "session_id"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "safety_audit",
+    "columns": [
+      {
+        "name": "agent_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "hash_prev",
+        "type": "BLOB",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "hash_self",
+        "type": "BLOB",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "kind",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "mode",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": "'live'",
+        "pk": 0
+      },
+      {
+        "name": "operator_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": "'local-user'",
+        "pk": 0
+      },
+      {
+        "name": "parent_session_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "payload_json",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "reason_code",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "session_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "ts",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "safety_audit_kind",
+        "unique": 0,
+        "columns": [
+          "kind"
+        ]
+      },
+      {
+        "name": "safety_audit_mode",
+        "unique": 0,
+        "columns": [
+          "mode"
+        ]
+      },
+      {
+        "name": "safety_audit_session_kind",
+        "unique": 0,
+        "columns": [
+          "session_id",
+          "kind"
+        ]
+      },
+      {
+        "name": "safety_audit_ts",
+        "unique": 0,
+        "columns": [
+          "ts"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "safety_audit_ack",
+    "columns": [
+      {
+        "name": "acked_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "acked_by",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "acked_reason",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "audit_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "schema_migrations",
+    "columns": [
+      {
+        "name": "applied_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "content_sha",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "filename",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      }
+    ],
+    "indexes": []
+  },
+  {
+    "name": "sessions",
+    "columns": [
+      {
+        "name": "archived",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "deleted_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "last_event_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "mock",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      },
+      {
+        "name": "permission_mode",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "project_id",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "title",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "total_cost_usd",
+        "type": "REAL",
+        "notnull": 1,
+        "dflt": "0",
+        "pk": 0
+      }
+    ],
+    "indexes": [
+      {
+        "name": "sessions_archived_deleted_idx",
+        "unique": 0,
+        "columns": [
+          "archived",
+          "deleted_at"
+        ]
+      },
+      {
+        "name": "sessions_mock",
+        "unique": 0,
+        "columns": [
+          "mock"
+        ]
+      },
+      {
+        "name": "sessions_project_idx",
+        "unique": 0,
+        "columns": [
+          "project_id",
+          "last_event_at"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "settings",
+    "columns": [
+      {
+        "name": "key",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt": null,
+        "pk": 1
+      },
+      {
+        "name": "updated_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      },
+      {
+        "name": "value",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt": null,
+        "pk": 0
+      }
+    ],
+    "indexes": []
+  }
+]
