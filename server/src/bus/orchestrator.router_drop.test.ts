@@ -1,3 +1,24 @@
+/**
+ * [security] What a drop RECORDS. Twin: `orchestrator.security.test.ts`.
+ *
+ * These two files test the same router and overlap on a handful of scenarios,
+ * which makes them look like a double-pin worth collapsing. They are not, and
+ * the worker→user case shows why — the same event, asserted two different ways:
+ *
+ *   here   the audit row, the notification and the drop envelope all carry the
+ *          right `reason_code`
+ *   twin   nothing was forwarded and nothing was persisted
+ *
+ * Neither implies the other. A router that records a perfect audit row and
+ * forwards the event anyway passes here and fails the twin; one that silently
+ * swallows the event passes the twin and fails here. Delete either and the
+ * property it owns stops being checked.
+ *
+ * This file also owns the reason-code VOCABULARY and the operator-facing
+ * consequences of a drop, which the twin does not touch. Measured 2026-09-03:
+ *   19 cases here, 12 in the twin, ~5 scenarios in common.
+
+ */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

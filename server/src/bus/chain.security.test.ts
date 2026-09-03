@@ -1,3 +1,27 @@
+/**
+ * [security] What a drop PREVENTS. Twin: `chain.router_drop.test.ts`.
+ *
+ * These two files test the same router and overlap on a handful of scenarios,
+ * which makes them look like a double-pin worth collapsing. They are not, and
+ * the worker→user case shows why — the same event, asserted two different ways:
+ *
+ *   here   nothing was forwarded (`onEvent` never called) and nothing was
+ *          persisted (`listMultiAgentEvents` is empty)
+ *   twin   the audit row, the notification and the drop envelope all carry the
+ *          right `reason_code`
+ *
+ * Neither implies the other. A router that records a perfect audit row and
+ * forwards the event anyway passes the twin and fails here; one that silently
+ * swallows the event passes here and fails the twin. Delete either and the
+ * property it owns stops being checked.
+ *
+ * Most of this file is not about drops at all — message fencing, the
+ * breakout-and-forge attempt, the pause gate refusing to dispatch, and the
+ * session controls. The twin covers none of that. Measured 2026-09-03:
+ *   12 cases here, 31 in the twin, ~3 scenarios in common — the rest here is
+ *   fencing, the pause hold, and Retry/Continue on an ended or capped session.
+
+ */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
