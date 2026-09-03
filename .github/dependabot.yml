@@ -69,7 +69,7 @@ updates:
     #
     # Dependabot treats each sub-path as its own dependency, so a single
     # codeql-action release arrives as three PRs — `init` and `analyze` in
-    # codeql.yml, `upload-sarif` in scorecard.yml. (Located by the `uses:` path,
+    # codeql.yml. (Located by the `uses:` path,
     # not by line number: the three numbers that used to be here — 37, 66 and 52
     # — had all drifted, to 44, 73 and 59, and a citation nobody can trust is a
     # citation nobody checks.) CodeQL

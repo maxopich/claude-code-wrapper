@@ -11,8 +11,8 @@
  * `buildAllowedOrigins`/`isAllowedHost` and `auth.test.ts` covers
  * `verifyToken`, but the composition — and, crucially, its ORDER and the
  * empty-Origin carve-out — had no coverage at all. Flipping the origin
- * condition or deleting the token check broke no test, in a file CODEOWNERS
- * specifically protects.
+ * condition or deleting the token check broke no test — in the file `SECURITY.md`
+ * names for F5, the Origin + Host allowlist on the WS upgrade.
  *
  * WHY RAW `http.request` AND NOT A `ws` CLIENT. Same reason
  * `auth_token_route.security.test.ts` gives for its own probes: `fetch` (and

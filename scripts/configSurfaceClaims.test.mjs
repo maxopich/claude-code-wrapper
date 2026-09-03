@@ -402,12 +402,7 @@ function collectFiles() {
   // roots are arranged — `.env.example` is rule 1's entire subject, and
   // `busSafetyClaims.test.mjs` records a superseded claim surviving in
   // `.github/CODEOWNERS` for exactly this reason. Listed by name or not at all.
-  for (const top of [
-    'README.md',
-    'SECURITY.md',
-    '.env.example',
-    '.github/PULL_REQUEST_TEMPLATE.md',
-  ]) {
+  for (const top of ['README.md', 'SECURITY.md', '.env.example']) {
     if (fs.existsSync(path.join(repoRoot, top))) out.push(top);
   }
   return out;
