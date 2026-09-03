@@ -1,79 +1,39 @@
 /**
- * Cluster F Phase D5+: per-mutation guardrail-violation classifier.
+ * Per-mutation guardrail-violation classifier: a pure function over
+ * (agentCwd, filePath) deciding whether a worker's Write/Edit/MultiEdit/
+ * NotebookEdit targets a path inside the agent's own project folder. Called
+ * from the bus runner's stream tap (`runner.ts`, `runOneAttempt`).
  *
- * Pure function over (agentCwd, filePath). Used by the bus runner's
- * stream tap (see `runner.ts`'s `runOneAttempt` mutation-classification
- * loop) to decide whether a worker's Write/Edit/MultiEdit/NotebookEdit
- * targets a path inside the agent's own project folder.
+ * WHY IT IS ADVISORY, since the obvious reading is wrong: it is NOT that the
+ * bus runs headless. Both routers wire `onAskUserQuestion` (`orchestrator.ts` /
+ * `chain.ts`), so every production bus turn runs `permissionMode: 'default'`
+ * with a live `canUseTool` — the `bypassPermissions` branch in `runner.ts` is
+ * reached only by callers that skip the hook, i.e. tests. The gate exists; it
+ * just returns `allow` for every tool except `AskUserQuestion` on any agent
+ * without `toolPolicy: 'delegate-only'`, which today means every worker and
+ * every chain participant.
  *
- * The consultant-mode prompt baked into `runtime.ts`'s
- * `renderRosterPrompt` / `renderWorkerBriefing` tells every bus
- * participant to read/analyze/advise and NOT mutate files outside its
- * own project folder unless the operator's relayed request explicitly
- * directs that change. The constraint is advisory — the model interprets
- * the prompt, and nothing denies the tool call. This classifier surfaces
- * violations post-hoc so the operator sees them.
+ * So a deny seam IS available if enforcement is ever wanted. Wiring THIS
+ * classifier into it would cover Write/Edit/MultiEdit/NotebookEdit only, while
+ * `Bash` and symlink races still escape — and enforcing a guarantee with those
+ * holes open is worse than not claiming one. That is the decision to re-open if
+ * you are here to add enforcement.
  *
- * Note on WHY it is advisory, since the obvious reading is wrong: it is
- * NOT that the bus runs headless. Both routers wire `onAskUserQuestion`
- * (`orchestrator.ts` / `chain.ts`), so every production bus turn runs
- * `permissionMode: 'default'` with a live `canUseTool` — the
- * `bypassPermissions` branch in `runner.ts`'s `runOneAttempt` is reached
- * only by callers that skip the hook (i.e. tests). The gate exists; it
- * just returns `allow` for every tool except `AskUserQuestion` on any
- * agent without `toolPolicy: 'delegate-only'`, which today means every
- * worker and every chain participant. So a deny seam IS available if
- * enforcement is ever wanted — but wiring this classifier into it would
- * cover Write/Edit/MultiEdit/NotebookEdit only, while `Bash` (no
- * `filePath`, see below) and symlinked paths still escape. Enforcing a
- * guarantee with those holes open is worse than not claiming one.
+ * Bash gets a free pass at this layer BY CONSTRUCTION: callers pass
+ * `filePath: undefined` when the tool has no canonical file argument, and the
+ * classifier returns `inScope: true` — no signal, not a clean verdict.
+ * `classifyBashCommand` is for severity (read/mutate/dangerous) only, never for
+ * path scoping.
  *
- * Why server-side and not in `shared/`: path resolution depends on
- * `node:path` (`resolve`, `sep`) and `~` expansion depends on
- * `node:os` (`homedir`). The web doesn't need to run this — the wire
- * envelope (`MultiAgentMutationView.guardrailViolation`) carries the
- * already-classified verdict; the client just renders the badge.
+ * Server-side rather than `shared/` because resolution needs `node:path` and
+ * `node:os`; the web never runs it, since the wire envelope
+ * (`MultiAgentMutationView.guardrailViolation`) carries the settled verdict and
+ * the client only renders the badge.
  *
- * The classifier is intentionally conservative — it only flags as
- * out-of-scope when the resolved path is definitively outside the
- * agent's cwd. Edge cases it does NOT try to handle:
- *   - Symlinks: HANDLED since `Cebab-2t9.3`. Both the target and the
- *     cwd are resolved through links before comparison; see
- *     `resolveThroughLinks` below for what that does and does not
- *     buy. This bullet previously said the opposite, and the reasons
- *     it gave were: `realpathSync` blocks on a read, and following
- *     links "isn't a sandbox property" because the link could point
- *     back inside the cwd. Both were re-examined:
- *
- *       - The read cost is two `realpathSync` chains at the ONE call
- *         site (`runner.ts`), which is inside an async function whose
- *         very next statement awaits a DB write and a WS broadcast.
- *         MEASURED over 20k calls on a four-deep real cwd: 0.87 µs
- *         lexical vs 31.85 µs through links. That is ~36x, and it is
- *         also 31 microseconds — once per MUTATING tool call, in front
- *         of an awaited round-trip that costs milliseconds. Both
- *         framings are true; the second is the one that decides.
- *       - "Not a sandbox property" is true and is not an argument
- *         against DETECTING. This module is detection, not
- *         prevention — its own header says so, and `hook_trust` makes
- *         the same distinction. A classifier that reports the path
- *         actually written is strictly better than one that reports
- *         the path typed, even though neither can stop the write.
- *
- *     What made it worth reversing is that the hole was reachable and
- *     composed with the Bash one below: `Bash` gets a free pass at
- *     this layer, so an agent can `ln -s /etc/passwd ./notes.txt` and
- *     then `Write` to `./notes.txt` — lexically inside the cwd, which
- *     the old comparison called in-scope while the write landed
- *     outside.
- *   - Bash commands: callers pass `filePath: undefined` when the tool
- *     has no canonical file argument; the classifier returns `inScope:
- *     true` (no signal). Bash commands that touch arbitrary files
- *     aren't auto-classified — `classifyBashCommand` is for severity
- *     (read/mutate/dangerous) only, not for path scoping. A future
- *     slice could add Bash-command path inference (parse first arg of
- *     `mv`/`cp`/`rm`), but the current scope keeps the classifier
- *     pure-function and avoids the parsing rabbit hole.
+ * The symlink handling below (`resolveThroughLinks`, `Cebab-2t9.3`) — what it
+ * buys, why BOTH sides must resolve or neither, and the 0.87 µs vs 31.85 µs
+ * measurement that settled the cost question: `docs/safety-and-security.md`,
+ * "The consultant constraint, and its two limits".
  */
 
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs';

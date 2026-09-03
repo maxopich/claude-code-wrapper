@@ -1,76 +1,32 @@
 /**
- * Cluster G E3 (server-side): durable diagnostic for Origin/Host rejections
- * at the HTTP layer.
+ * Durable diagnostic for Origin/Host rejections at the HTTP and WS layers.
  *
- * Why this exists. The WS upgrade gate (`ws/server.ts:verifyClient`) and
- * the Express `/auth-token` route each reject browser clients whose
- * `Origin` isn't in `buildAllowedOrigins()` or whose `Host` isn't the
- * 127.0.0.1/localhost form. Until now those rejections only landed in
- * `console.warn`, which (a) is silent to the operator (the browser sees
- * a stale-feeling 403 with no actionable copy) and (b) loses the
- * timestamp + reason at process exit.
+ * Dual-writes every rejection: a 200-entry FIFO ring in memory, surfaced as one
+ * `recent_rejections` toast on the next successful attach, and a JSON-lines log
+ * at `~/.cebab/logs/origin_rejections.log` that survives process exit.
  *
- * The spec calls this "agentic-systems-low, infra-medium" — it's not an
- * agent-authority surface, but the failure mode (a misconfigured
- * reverse proxy, a stale browser tab from a renamed host, a hostile
- * page attempting CSWSH) deserves a forensic record. So we dual-write:
+ * THE RULE, because everything below follows from it: nothing that reaches
+ * `recordRejection` is trusted. `origin` and `host` are raw request headers,
+ * and `GET /auth-token` needs no token — so any local page can drive this path
+ * as fast as it can issue requests. An unbounded detector would be the attack's
+ * own amplifier, which is why three independent bounds apply and why none of
+ * them may be relaxed without replacing what it covers:
  *
- *   1. **Ring buffer** in process memory (cap 200, FIFO). Recent
- *      entries within a 5-minute window are emitted as a `recent_rejections`
- *      ServerMsg on the *next* successful WS attach so the operator
- *      gets a single warning toast: "3 origin-rejected WS attempts in
- *      the last 5 min".
+ *   - `capHeader` + `MAX_RECORDED_HEADER_CHARS` — one entry stays small AND
+ *     inert. Bounds the ring and the WS frame, not only a log line.
+ *   - `DISK_DEDUPE_WINDOW_MS` — at most one line per distinct
+ *     (origin, host, reason, channel) per window, count carried forward. The
+ *     RING still records every attempt; that repetition is the operator's
+ *     signal.
+ *   - `MAX_LOG_BYTES` — rotates one `.1` generation, for the attacker who
+ *     varies the origin and defeats the dedupe.
  *
- *   2. **Disk log** appended to `~/.cebab/logs/origin_rejections.log`,
- *      one JSON line per rejection. Survives process exit; what the
- *      operator (or an auditor) needs for forensics of repeated abuse.
+ * Both writes are best-effort and synchronous on the rejection path. A failed
+ * append is a `console.warn` and nothing more: a logging failure must never
+ * fail a request.
  *
- * Both writes are best-effort and synchronous in the rejection hot
- * path; the disk write is `fs.appendFileSync` because we're already on
- * the request thread and the volume is low (single-user, mostly empty).
- * A disk-write failure is itself written to `console.warn` — we never
- * want a failed log append to bring down a request.
- *
- * ---
- *
- * WHAT BOUNDS THIS (`Cebab-l4e`). "The volume is low" above was an
- * assumption about a well-behaved operator, and this module exists for
- * the case where that assumption is false. Nothing that reaches
- * `recordRejection` is trusted: `origin` and `host` are raw request
- * headers, and `GET /auth-token` — one of the two callers — needs no
- * token, so any local page can drive this path as fast as it can issue
- * requests. Under the exact scenario the module was written to record,
- * an unbounded log makes the detector the amplifier.
- *
- * Three independent bounds, because each one leaves a hole the next
- * closes:
- *
- *   1. `capHeader` escapes the characters a hostile header must not
- *      carry raw and truncates at `MAX_RECORDED_HEADER_CHARS`, so one
- *      entry is small AND inert. This bounds the ring's memory and the
- *      `recent_rejections` WS frame as well as a log line.
- *   2. `DISK_DEDUPE_WINDOW_MS` writes at most one line per distinct
- *      (origin, host, reason, channel) per window. A retry loop or a
- *      flood on one origin costs one line, not one per attempt — and
- *      the count is carried forward on the next written line rather
- *      than dropped. The RING still records every attempt: repetition
- *      is what the operator's toast counts, and suppressing it there
- *      would hide the abuse instead of the bytes.
- *   3. `MAX_LOG_BYTES` rotates to a single `.1` generation. Needed
- *      because an attacker who VARIES the origin defeats (2) — and
- *      because nothing else stops slow growth over a long-lived
- *      install.
- *
- * The residual, stated rather than implied: (3) means a sufficiently
- * determined flood with varying origins can still push older evidence
- * out of the retained window. (2) is what makes that expensive and
- * conspicuous; closing it entirely would need a policy about which
- * rejections are worth keeping, which is a different decision.
- *
- * The X-Cebab-Reject-Reason HTTP response header lives at the rejection
- * site (Express + verifyClient), not here, because the response object
- * shape differs between channels. This module only owns the in-process
- * record + disk log.
+ * Why each bound exists, what the residual is, and why the ring deliberately
+ * does not dedupe: `docs/safety-and-security.md`, "Origin-rejection forensics".
  */
 import fs from 'node:fs';
 import path from 'node:path';
