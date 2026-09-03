@@ -117,7 +117,29 @@ jobs:
         # prebuild-install pulls a prebuilt binary on both Linux and
         # Windows x64 (no compiler toolchain needed) — this is also the
         # documented cross-platform `npm run setup` step.
+        #
+        # THE DECISION THIS STEP CARRIES (Cebab-wfop). That prebuild is the one
+        # thing in the dependency tree npm's lockfile integrity does NOT cover.
+        # On Node 20 there was no matching prebuild, so this compiled from the
+        # npm tarball — sha512-pinned in package-lock.json and checked by npm.
+        # Moving to Node 24 made a v137 prebuild available, and prebuild-install
+        # verifies nothing it fetches: its only sha512 hashes the URL to name a
+        # cache file, and the payload goes from gunzip into tar extraction.
+        #
+        # Keeping the prebuild is deliberate. `--build-from-source` would
+        # restore npm's check and reintroduce the node-gyp dependency that
+        # windows-2022 is pinned to work around, at ~70s per Windows leg. The
+        # binary is verified separately instead, by the step after this one.
         run: npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false
+
+      - name: Verify the native binary
+        # Fails the build if better_sqlite3.node is not the artifact recorded in
+        # scripts/verify-native-binary.mjs. Trust-on-first-use, like Cebab's MCP
+        # server pinning: it cannot prove the recorded asset was honest, but a
+        # later substitution — the actual attack — stops here. An unrecognised
+        # platform or version is FATAL on CI and a warning locally, so a bump
+        # cannot silently retire the check.
+        run: node scripts/verify-native-binary.mjs
 
       - name: Lockfile drift check
         # Catches the case where a contributor ran `npm install` locally
@@ -235,7 +257,33 @@ jobs:
         # prebuild-install pulls a prebuilt binary on both Linux and
         # Windows x64 (no compiler toolchain needed) — this is also the
         # documented cross-platform `npm run setup` step.
+        #
+        # THE DECISION THIS STEP CARRIES (Cebab-wfop). That prebuild is the one
+        # thing in the dependency tree npm's lockfile integrity does NOT cover.
+        # On Node 20 there was no matching prebuild, so this compiled from the
+        # npm tarball — sha512-pinned in package-lock.json and checked by npm.
+        # Moving to Node 24 made a v137 prebuild available, and prebuild-install
+        # verifies nothing it fetches: its only sha512 hashes the URL to name a
+        # cache file, and the payload goes from gunzip into tar extraction.
+        #
+        # Keeping the prebuild is deliberate. `--build-from-source` would
+        # restore npm's check and reintroduce the node-gyp dependency that
+        # windows-2022 is pinned to work around, at ~70s per Windows leg. The
+        # binary is verified separately instead, by the step after this one.
         run: npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false
+
+      - name: Verify the native binary
+        # Fails the build unless better_sqlite3.node is the artifact recorded in
+        # scripts/verify-native-binary.mjs. Trust-on-first-use, like Cebab's MCP
+        # server pinning: it cannot prove the recorded asset was honest, but a
+        # later substitution — the actual attack — stops here. An unrecognised
+        # platform or version is FATAL on CI and a warning locally, so a version
+        # bump cannot silently retire the check.
+        #
+        # In BOTH jobs on purpose: `ci_setup_steps_match` requires them to
+        # install identically, and `tests` loads this binding in every
+        # DB-touching file.
+        run: node scripts/verify-native-binary.mjs
 
       - name: Test
         run: npm test

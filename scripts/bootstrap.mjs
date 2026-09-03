@@ -62,6 +62,16 @@ const steps = [
     label: 'build the native better-sqlite3 binding',
     args: ['rebuild', 'better-sqlite3', '--foreground-scripts', '--ignore-scripts=false'],
   },
+  {
+    // That binding is the one dependency npm's lockfile integrity does not
+    // cover (Cebab-wfop): on Node 24+ a prebuilt binary is downloaded, and
+    // `prebuild-install` verifies nothing it fetches. Checking here rather than
+    // only in CI is the point — CI protects the repo, this protects the person
+    // who just cloned it. A platform nobody has recorded warns instead of
+    // failing, so this can never brick an install; a MISMATCH always aborts.
+    label: 'verify the native binary',
+    args: ['run', 'verify:native'],
+  },
 ];
 
 for (const step of steps) {
