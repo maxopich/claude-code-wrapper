@@ -25,9 +25,13 @@
  * `should` followed by an uppercase letter must declare a return type of
  * `boolean` or a type predicate (`v is T`). Both are booleans at runtime, and
  * the type-predicate form is the one that makes narrowing work — a rule that
- * demanded literal `boolean` would flag eight correct guards
+ * demanded literal `boolean` would flag fifteen correct guards
  * (`isKickMode(v): v is KickMode` and friends) and force an allowlist where a
- * rule belongs. That rejected variant is in the revert-check.
+ * rule belongs. The rejected variant is one line: drop the type-predicate
+ * alternative from `RETURNS_BOOLEAN` and re-run — those fifteen redden, which
+ * is what "forces an allowlist" means in practice. Written out rather than
+ * cited, because the revert-check harness that used to hold it is a local
+ * development tool and is not part of the repo.
  *
  * WHAT IT DELIBERATELY DOES NOT COVER. Non-exported functions: the corpus is
  * the API surface, where a caller reads the name without the body in view. A
@@ -247,8 +251,10 @@ describe('every exported predicate in the repo returns a boolean', () => {
   });
 
   test('the corpus is the predicates, not an empty set', () => {
-    // 34 today. A floor well below it survives churn while catching a regex
-    // that stopped matching — which would make the scan below pass on nothing.
+    // 46 as of 2026-09-04. The floor stays well below it on purpose: it is a
+    // liveness check on the regex, not a claim about how many predicates the
+    // repo should have, so moving it with the count would redden on ordinary
+    // deletions and eventually get raised past the point of noticing.
     expect(names.length).toBeGreaterThan(25);
   });
 

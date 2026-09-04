@@ -39,7 +39,7 @@
  *   1. No name DECLARED in `shared/src` may be declared again in `server/src`
  *      or `web/src`.
  *   2. No name may be declared twice WITHIN `shared/src`. `shared/src/index.ts`
- *      is five `export *` lines, and TypeScript drops an ambiguous star
+ *      is nine `export *` lines, and TypeScript drops an ambiguous star
  *      re-export silently — no error, the name simply stops being exported.
  *      Measured at zero today, so this half is a ratchet, not a fix.
  *
@@ -340,8 +340,12 @@ describe('shared/ is the one home for the names it declares', () => {
   });
 
   test('the corpus is the declarations, not an empty set', () => {
-    // 95 / 1039 today. Floors well below survive churn while catching a regex
-    // that stopped matching — which would make the scan pass on nothing.
+    // 125 / 1272 as of 2026-09-04. Floors well below survive churn while
+    // catching a regex that stopped matching — which would make the scan pass
+    // on nothing. The floors are deliberately NOT moved with the counts: this
+    // pair is a liveness check on the scanner, not a size assertion about the
+    // tree, so a floor that tracked the real number would redden on ordinary
+    // deletions and get raised past the point of noticing anything.
     expect(declarations(shared).size).toBeGreaterThan(60);
     expect(declarations(outside).size).toBeGreaterThan(600);
   });

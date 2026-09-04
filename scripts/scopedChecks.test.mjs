@@ -10,9 +10,9 @@
  *
  * C11: `server/tsconfig.json` emitted with no exclude, so 87 of 186 emitted
  * `.js` files in `dist/` were compiled tests — which is why `vitest.config.ts`
- * has to blacklist the dist directory. The obvious fix, adding an `exclude` to that
- * file, ALSO drops all 161 test files from `npm run typecheck`, since both
- * commands read it. Hence a separate build config, and hence the second half
+ * has to blacklist the dist directory. The obvious fix, adding an `exclude` to
+ * that file, ALSO drops every server test file from `npm run typecheck` (275
+ * `.test.ts` in the repo as of 2026-09-04), since both commands read it. Hence a separate build config, and hence the second half
  * of these assertions: the exclude must exist in one file and NOT in the other.
  */
 import fs from 'node:fs';
@@ -34,25 +34,58 @@ const ARRAY_PATTERNS = {
   regexes: /^regexes\s*=\s*\[([\s\S]*?)^\]/m,
 };
 
-function tomlArray(toml, key) {
+function arrayBody(toml, key) {
   const body = toml
     .split('\n')
     .filter((l) => !/^\s*#/.test(l))
     .join('\n');
   const m = ARRAY_PATTERNS[key].exec(body);
-  if (!m) return null;
-  return [...m[1].matchAll(/'''([\s\S]*?)'''/g)].map((x) => x[1]);
+  return m ? m[1] : null;
+}
+
+function tomlArray(toml, key) {
+  const body = arrayBody(toml, key);
+  if (body === null) return null;
+  return [...body.matchAll(/'''([\s\S]*?)'''/g)].map((x) => x[1]);
+}
+
+/**
+ * Lines inside the array that carry a value, counted without understanding
+ * TOML quoting. `tomlArray` reads only `'''…'''`; an entry written `"…"` or
+ * `\"\"\"…\"\"\"` parses to NOTHING and the array comes back empty rather than null,
+ * so every per-entry rule below iterates zero times and passes. That is the
+ * C21 exemption returning through a quoting style, which is why the two counts
+ * are compared rather than the parsed one trusted.
+ */
+function rawEntryCount(toml, key) {
+  const body = arrayBody(toml, key);
+  if (body === null) return 0;
+  return body.split('\n').filter((l) => /['"]/.test(l)).length;
 }
 
 describe('[security] gitleaks allow-list names files, never file classes', () => {
   const toml = read('.gitleaks.toml');
 
-  it('the config parses and the allow-list is non-empty', () => {
-    // Anti-vacuity: a renamed key would make every assertion below hold
-    // against null, which is exactly how this kind of gate goes quiet.
+  it('the config parses and every entry in it is read', () => {
+    // Anti-vacuity, in two directions. A renamed key makes every assertion
+    // below hold against null — the way this kind of gate first goes quiet.
     expect(toml).toContain('[allowlist]');
     expect(tomlArray(toml, 'paths')).not.toBeNull();
     expect(tomlArray(toml, 'regexes')).not.toBeNull();
+
+    // And the way it goes quiet second: a key that still parses while the
+    // reader sees none of its values. The title used to say "non-empty" and
+    // the assertions only said "not null", so an entry the reader could not
+    // parse was indistinguishable from no entry at all.
+    for (const key of ['paths', 'regexes']) {
+      expect(
+        tomlArray(toml, key).length,
+        `${key} has entries this reader did not parse. It understands only ` +
+          `'''…''' values; a double-quoted or multi-line entry reads as absent, ` +
+          `which would make every rule below iterate over nothing.`,
+      ).toBe(rawEntryCount(toml, key));
+    }
+    expect(rawEntryCount(toml, 'regexes')).toBeGreaterThan(0);
   });
 
   it('no path pattern exempts a whole class of test files', () => {
@@ -91,8 +124,11 @@ describe('[security] tests leave the build without leaving the typecheck', () =>
   });
 
   it('the typecheck config does NOT exclude them', () => {
-    // The half that matters. `npm run typecheck` is `tsc --noEmit -p server`,
-    // so an exclude here silently stops checking every test file in the repo.
+    // The half that matters. `npm run typecheck` runs three projects —
+    // `tsc --noEmit -p shared && … -p server && … -p web` — and the server leg
+    // reads THIS file, so an exclude here silently stops checking every server
+    // test in the repo. The case below pins `-p server` for that reason; it is
+    // a substring of the real script, not the whole of it.
     expect(baseCfg).not.toMatch(/"exclude"/);
   });
 

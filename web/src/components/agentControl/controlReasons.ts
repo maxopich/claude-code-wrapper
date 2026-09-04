@@ -14,8 +14,11 @@
  * choice" signal, which is the part an operator picking a reason under time
  * pressure actually needs.
  *
- * `reasonList_single_definition.test.ts` derives from the source that no modal
- * declares a list of its own, so a fourth copy cannot appear quietly.
+ * `scripts/controlReasonVocabulary.test.mjs` derives from the source that no
+ * modal declares a list of its own, so a fourth copy cannot appear quietly.
+ * It lives in `scripts/` rather than beside this file because it reads three
+ * component sources plus this one, and `web/tsconfig.json` sets `types: []`,
+ * so a web-side test cannot open a file — see `docs/source-gates.md`.
  *
  * THE RULE FOR `help`: it describes the OBSERVATION that prompted the
  * operator, never the outcome of the verb. That is what lets one vocabulary
