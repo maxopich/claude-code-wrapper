@@ -99,9 +99,17 @@ const WATCHED = new Map([
   ],
 ]);
 
-/** Test files are not consumers for this gate's purposes. */
+/**
+ * Test files are not consumers for this gate's purposes.
+ *
+ * This used to end `|| rel.endsWith('.security.test.ts')`, which never ran: the
+ * regex above already matches `….security.test.ts` (it ends `.test.ts`). A
+ * disjunct that cannot fire reads as a second rule and is really a comment, and
+ * the next person adjusting the regex would have trusted a guard that was not
+ * there.
+ */
 function isTestFile(rel) {
-  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(rel) || rel.endsWith('.security.test.ts');
+  return /\.(test|spec)\.[cm]?[jt]sx?$/.test(rel);
 }
 
 /**

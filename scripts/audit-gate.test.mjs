@@ -95,7 +95,28 @@ describe('parseIgnoreFile', () => {
   });
 
   it('parses the real osv-scanner.toml [security]', () => {
-    const real = parseIgnoreFile(readFileSync(join(REPO_ROOT, 'osv-scanner.toml'), 'utf8'));
+    // The loop below asserts nothing when the file is empty, and the empty
+    // state is the file's INTENDED resting state — every entry is a temporary
+    // excuse. So from #519, when the last two `qs` holds were retired, this
+    // case ran zero assertions and passed. A test whose corpus can legitimately
+    // be empty needs something to check that is true at zero.
+    //
+    // That something is the parser agreeing with the raw text about HOW MANY
+    // entries there are. Verified: declare one entry and make `parseIgnoreFile`
+    // return nothing, and this fails where the bare loop passed.
+    //
+    // BE HONEST ABOUT THE BOUNDARY. At zero entries `0 === 0`, so a parser that
+    // returns nothing still satisfies this line. What that case is really for
+    // is the REAL FILE's well-formedness — `parseIgnoreFile` throws on an entry
+    // with no id, no `ignoreUntil`, or an unparseable date, so a malformed hold
+    // fails here the moment one is added. The parser itself is pinned by the
+    // fixtures above, which do not depend on what the committed file happens to
+    // contain today.
+    const raw = readFileSync(join(REPO_ROOT, 'osv-scanner.toml'), 'utf8');
+    const real = parseIgnoreFile(raw);
+    const declared = (raw.match(/^\s*\[\[IgnoredVulns\]\]\s*$/gm) ?? []).length;
+    expect(real).toHaveLength(declared);
+
     for (const entry of real) {
       expect(entry.id).toMatch(/^GHSA-/);
       expect(Number.isNaN(entry.expiry.getTime())).toBe(false);

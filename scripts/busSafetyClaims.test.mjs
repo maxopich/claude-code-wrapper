@@ -333,7 +333,16 @@ describe('[security] the claim checkers actually catch the claims', () => {
  * "it carries claims A and B, and project convention keeps it out of PRs".
  * That convention is gone, and the exemption it justified is why the file kept
  * an inverted posture claim through four releases: an exemption whose premise
- * expires does not announce itself. It is now collected and listed below.
+ * expires does not announce itself.
+ *
+ * THEN IT HAPPENED AGAIN, TO THIS LIST. CLAUDE.md became local-only in #509,
+ * `collectFiles` stopped appending it, and its entry below stayed — an
+ * exemption for a file the scan can no longer reach, which is the same failure
+ * one level up. Nothing noticed, because the list was only ever read as
+ * `!POSTURE_ALLOWLIST.has(rel)`: an entry that excuses nothing is
+ * indistinguishable from one doing its job. The stale-entry case below is the
+ * mechanism that was missing, modelled on the one `bounded_reads.test.ts`
+ * already has for its own allowlist.
  */
 const POSTURE_ALLOWLIST = new Map([
   ['server/src/bus/runner.ts', 'the branch itself'],
@@ -351,7 +360,6 @@ const POSTURE_ALLOWLIST = new Map([
   ['web/src/components/templatePreview/TemplatePreviewBanners.test.tsx', 'asserts its absence'],
   ['web/src/components/MultiAgentTab.busGates.test.tsx', 'asserts its absence'],
   ['.npmrc', 'carries the canonical corrected wording'],
-  ['CLAUDE.md', 'names the branch to say it is test-only, not the chain path'],
   // Cebab-ws0.4 — all five name the mode to say Cebab NEVER exposes it. They
   // are single-agent permission narrowing, not claims about how the bus runs.
   [
@@ -435,6 +443,22 @@ describe('[security] no artifact may claim the superseded bus safety model', () 
     const sec = read('SECURITY.md');
     expect(sec).toContain('permissionMode');
     expect(sec).toContain('canUseTool');
+  });
+
+  test('every allowlist entry still excuses something — no stale exemptions', () => {
+    // The direction the gate never checked. An entry whose file was deleted,
+    // renamed, moved out of the corpus, or which no longer names the token, is
+    // an exemption nobody is using — and it reads exactly like one that is.
+    // CLAUDE.md's entry sat here dead from #509 until this case was written.
+    const unused = [...POSTURE_ALLOWLIST.keys()].filter(
+      (rel) => rel !== SELF && !(files.includes(rel) && /bypassPermissions/.test(read(rel))),
+    );
+    expect(
+      unused,
+      'POSTURE_ALLOWLIST entries that no longer excuse anything — the file is ' +
+        'outside collectFiles() or no longer names `bypassPermissions`. Delete ' +
+        'them: a list that stops describing the code stops being read.',
+    ).toEqual([]);
   });
 
   test('every file naming bypassPermissions is on the allowlist', () => {

@@ -55,10 +55,13 @@ export const SECURITY_TAG = '[security]';
  * class `[security]`, which matches any name containing s/e/c/u/r/i/t/y —
  * i.e. very nearly every test in the repo. That silently runs the FULL suite
  * under the security gate's name, which looks like passing and is the exact
- * opposite of a filter. Caught here by asserting that the executed count is a
- * SUBSET of the suite rather than trusting a green run — originally measured
- * as 337 against 3028, now ~1.3k against ~6.5k. The ratio is the signal; the
- * absolute numbers move with every bead.
+ * opposite of a filter.
+ *
+ * `evaluateRun` asserts the executed count is a strict SUBSET of the suite, so
+ * a filter that stopped filtering fails instead of passing loudly. That
+ * sentence used to be here describing a check the file did not contain —
+ * `numTotalTests` was read only to build a failure message. The ratio is the
+ * signal; the absolute numbers move with every bead.
  *
  * The old npm script carried this escaping as `'\\[security\\]'` — through a
  * shell. This spawns vitest without one, so the escaping has to live here.
@@ -98,6 +101,25 @@ export function evaluateRun(summary) {
   if (failed > 0) {
     return { ok: false, executed, reason: `${failed} security test(s) failed` };
   }
+
+  // The unescaped-`-t` hazard the header describes. A bare `[security]` is a
+  // character class matching nearly every name in the repo, so the run stops
+  // being a filter and becomes the whole suite wearing this gate's name — a
+  // green result that proves nothing. Today ~1.3k of ~6.5k execute; if that
+  // ratio ever reaches 1 the filter has stopped filtering.
+  const total = Number(summary.numTotalTests ?? 0);
+  if (total > 0 && executed >= total) {
+    return {
+      ok: false,
+      executed,
+      reason:
+        `every collected test ran (${executed} of ${total}). The ${SECURITY_TAG} ` +
+        `filter selected the WHOLE suite, which is what an unescaped \`-t\` ` +
+        `pattern does — the brackets must stay escaped. A green run here would ` +
+        `mean the tag no longer selects anything in particular.`,
+    };
+  }
+
   return { ok: true, executed };
 }
 
