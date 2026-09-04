@@ -182,9 +182,11 @@ export function evaluate(advisories, ignores, now) {
     // Register C17: the severity filter used to sit above this whole block, so
     // a lapsed `ignoreUntil` on a moderate or low advisory was never even
     // looked at — while this file's own header promises "the date is a real
-    // deadline, not decoration". Four of the seven entries in
-    // `osv-scanner.toml` are moderate or low today, so most of the allowlist's
-    // expiry dates meant nothing.
+    // deadline, not decoration". When C17 was written, four of the seven live
+    // entries were moderate or low, so most of the allowlist's expiry dates
+    // meant nothing. The allowlist is EMPTY today, which is its intended
+    // resting state — the count is history, and the branch below is what makes
+    // the next moderate hold's date binding rather than decorative.
     //
     // The reasoning was already here, eleven lines down, for `unused`: an
     // entry covering a moderate advisory is doing real work because OSV blocks

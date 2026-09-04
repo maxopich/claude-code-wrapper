@@ -3,8 +3,11 @@
  * reporting success when the labeller that feeds it failed.
  *
  * `Fixture review gate` blocks a PR while `awaiting-fixture-review` is on it,
- * and a CODEOWNER removes that label after checking the recorded SDK turns for
- * real OAuth artifacts and API keys (gitleaks does not see them in JSONL prose).
+ * and the maintainer removes that label after checking the recorded SDK turns
+ * for real OAuth artifacts and API keys (gitleaks does not see them in JSONL
+ * prose). That used to say "a CODEOWNER"; `.github/CODEOWNERS` was dropped with
+ * the repo-workflow automation in #520, and since `require_code_owner_reviews`
+ * was already false it was naming a mechanism that had never gated anything.
  * The gate reads label state from the API only. So if `apply-labels` FAILS the
  * label is never applied, the API shows nothing, and the gate prints
  * "Gate clear." — a fixtures PR merges unreviewed. `if: always()` is what let
@@ -35,12 +38,17 @@ const WORKFLOW = path.join(
 /**
  * Drop `#` comments, keeping line numbering so indentation still lines up.
  *
- * CRLF is normalised FIRST. The repo has no `.gitattributes`, so a Windows
- * checkout hands this file back with `\r\n` and every `\n`-split line ends in a
- * stray `\r` — which silently breaks the exact-match job lookup below and the
- * `$`-anchored regexes. Verified by converting the workflow to CRLF locally:
- * five of these six tests fail. That is a Windows-only red CI on a file nobody
- * would think to suspect.
+ * CRLF is normalised FIRST, and the reason has changed since this was written.
+ * It said "the repo has no `.gitattributes`, so a Windows checkout hands this
+ * file back with `\r\n`". There IS one now, and its first rule is
+ * `* text=auto eol=lf` — added precisely because CRLF checkouts were breaking
+ * text-scanning tests.
+ *
+ * The normalisation stays, because `.gitattributes` binds what git writes and
+ * not what a contributor's editor, a patch tool, or a `core.autocrlf=true`
+ * global leaves behind. A test that scans a file as text should not assume its
+ * input. Verified by converting the workflow to CRLF locally: five of these six
+ * tests fail without it — a Windows-only red on a file nobody would suspect.
  */
 export function stripComments(yaml) {
   return yaml

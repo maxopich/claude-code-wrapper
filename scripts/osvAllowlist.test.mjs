@@ -6,9 +6,12 @@
  * maintained by hand, are load-bearing for two required security checks, and
  * have no other reader.
  *
- * THE ONE THAT ACTUALLY BITES is the cooldown coupling. Every entry is a
- * "wait, don't override" excuse whose expiry was computed from `.npmrc`'s
- * `min-release-age` — publish date plus N days. Raise N in `.npmrc` and every
+ * THE ONE THAT ACTUALLY BITES is the cooldown coupling — and note it bites
+ * PROSPECTIVELY: `osv-scanner.toml` holds zero entries today, which is its
+ * intended resting state, so the cases below run against an empty allowlist and
+ * the fixture in `the parser really parses` is what keeps them honest. Every
+ * entry, when there is one, is a "wait, don't override" excuse whose expiry was
+ * computed from `.npmrc`'s `min-release-age` — publish date plus N days. Raise N in `.npmrc` and every
  * eligibility date written into a reason becomes wrong, silently, in the
  * direction that hurts: an entry expires BEFORE its fix is installable, and
  * register C17 made that expiry a hard CI failure. The only exits from that

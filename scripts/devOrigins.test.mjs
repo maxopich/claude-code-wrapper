@@ -10,11 +10,19 @@
  * Origin and echoes CORS back so browser JS can read it.
  *
  * The register filed this as "dev origins are allow-listed even in production
- * launches". That premise does not hold — nothing in `server/src` reads
- * `NODE_ENV`, nothing serves `web/dist`, and `npm run dev` is the only
- * documented way to run the app — so the fix is not an environment check. It
- * is ownership: the launcher that STARTS the web server is the one entitled
- * to declare its origin.
+ * launches", and proposed an environment check. The fix is ownership instead:
+ * the launcher that STARTS the web server is the one entitled to declare its
+ * origin.
+ *
+ * That reasoning USED to rest on "nothing serves `web/dist` and `npm run dev`
+ * is the only documented way to run the app". Both halves stopped being true
+ * in #507 — `server/src/static_web.ts` mounts `express.static(dist)` and
+ * `npm start` serves the UI from the API's own origin. The conclusion is
+ * unchanged and now rests on something better: in single-port mode there is no
+ * separate web origin to declare at all, because the page and the API share
+ * one. `buildAllowedOrigins()` already allow-lists the port Cebab binds, so
+ * the declared-origin path is still exactly the dev case it was written for —
+ * and still must not hardcode Vite's default.
  *
  * WHY A SOURCE GATE AND NOT ONLY A UNIT TEST. Three separate files have to
  * agree, and none of them fails a behavioural test when they drift:
