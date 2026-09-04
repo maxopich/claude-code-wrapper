@@ -1,9 +1,12 @@
 # Source-scanning gates
 
-Twenty-five files in [`scripts/`](../scripts) — 5,814 lines, 346 vitest cases — read this
-repo's own source as text and assert something about it. They are not unit tests of a
-module; they are checks on the shape of the tree. This page says what they protect, the
-ways they fail, and what to do before adding another.
+Twenty-five files in [`scripts/`](../scripts) read this repo's own source as text and
+assert something about it — 6,023 lines and 349 vitest cases, measured 2026-09-04 and
+dated because everything below is about numbers that quietly stop being true. Count them in
+a clean checkout, not the maintainer's: `scripts/` also holds the gitignored loop, whose
+own suite is larger than every gate here combined, so a local `wc -l` reads more than
+double. They are not unit tests of a module; they are checks on the shape of the tree. This page says what they
+protect, the ways they fail, and what to do before adding another.
 
 Read it before writing a new gate, and before "simplifying" one that looks redundant.
 Several of them exist precisely because something looked redundant.
@@ -107,6 +110,15 @@ ignore a gate.
 on both CI runners and needs no subprocess." Neither is the general answer. They are asking
 different questions: _does the shipped index match the shipped pages_ needs the tracked
 set, and _does any file carry a superseded claim_ is still true of a file only you have.
+
+The costly version of this is not choosing wrong between two candidates — it is not
+noticing there was a choice. `audit-gate.mjs` built its list of expired allow-list entries
+inside a loop over the advisories `npm audit` reported that run, so the corpus was the
+advisories when the question was about the entries. An entry whose advisory npm cannot see
+was never checked against its own deadline — and that gate's own header records that the
+two scanners read different databases, so the OSV-only holds, the ones most likely to be
+load-bearing, were exactly the ones whose dates could never lapse. Fixed 2026-09-04. Ask
+what the rule is about, then hand the scan that.
 
 ### 3. The gate's own header is inside its corpus
 
