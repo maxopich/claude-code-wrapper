@@ -112,9 +112,14 @@ describe('the configuration facts the prose must match', () => {
  * to have no allowlist:
  *
  *   - FILES are filtered by PATH: `*.test.ts` (tests set env vars to arrange
- *     cases, they do not read config) and `*_smoke.ts` (three dev tools —
- *     `ws_smoke`, `live_smoke`, `ci_smoke` — whose `CEBAB_AUTH_TOKEN*` and
- *     `WS_URL` are harness plumbing an operator never sets).
+ *     cases, they do not read config) and `*_smoke.ts` — NINE dev tools as of
+ *     2026-09-04, not the three this line used to name. Re-checked when the
+ *     count was corrected, because six more excluded files is six more places
+ *     a config surface could hide: the four variables read ONLY by smokes
+ *     (`CEBAB_AUTH_TOKEN`, `CEBAB_AUTH_TOKEN_FILE`, `WS_URL`, `PROJECT`) are
+ *     harness plumbing an operator never sets, and the three the newer smokes
+ *     read that ARE operator config (`CEBAB_DATA_DIR`, `PORT`, `MOCK`) all
+ *     have readers outside the filter, so nothing left the gate's view.
  *   - NAMES are filtered by the explicit `NOT_OPERATOR_CONFIG` map below.
  *
  * KNOWN BLIND SPOT, stated because a silent one is how a gate goes vacuous:
@@ -320,9 +325,11 @@ describe('the operator-facing config surface names things that exist', () => {
   // so the files each rule depends on are named too.
   test('the scan reaches the tree', () => {
     expect(files.length).toBeGreaterThan(200);
-    // 84 today, of 229 `.ts` under `server/src` — the path filter drops the
-    // rest as tests and smokes. A floor well below that survives ordinary
-    // churn while still catching a collapse to a handful.
+    // 108 as of 2026-09-04, of 318 `.ts` under `server/src` — the path filter
+    // drops the rest as tests and smokes. The floor stays well below that: it
+    // is a liveness check on the filter, not a size claim about the tree, and
+    // one that tracked the real number would redden on ordinary deletions
+    // until somebody raised it past the point of catching a collapse.
     expect(serverConfigSources.length).toBeGreaterThan(60);
   });
 

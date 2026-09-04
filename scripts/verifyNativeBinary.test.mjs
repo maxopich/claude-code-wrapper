@@ -100,12 +100,30 @@ describe('platformKey', () => {
 });
 
 describe('[security] the real table', () => {
-  test('covers the two platforms CI actually gates on', () => {
+  test('covers the two platforms CI actually gates on, at the INSTALLED version', () => {
     // CI pins Node 24 = ABI 137 on ubuntu-latest and windows-2022. If either
     // entry disappears, CI degrades to `unknown-platform` — which is fatal
     // there by design, but this says so at the table rather than at 3am.
-    const only = TABLE['12.11.1'];
-    expect(only, 'no entry for the pinned better-sqlite3 version').toBeTruthy();
+    //
+    // The version comes from `readInstalled()`, the same source the runtime
+    // check asks, and NOT from a literal. It used to read `TABLE['12.11.1']`,
+    // which made this case unable to do the one job it claims: after a
+    // better-sqlite3 bump the gate returns `unknown-version` and CI goes red at
+    // 3am, while a stale `12.11.1` row kept satisfying `toBeTruthy()` and this
+    // test stayed green. The early warning went quiet at exactly the moment it
+    // was needed, "covering" a version nobody installs. Measured: rename the
+    // table's key and the old form passes 12/12 on the broken tree.
+    const { version } = readInstalled();
+    expect(
+      version,
+      'no better-sqlite3 installed — cannot tell what the gate will ask for',
+    ).toBeTruthy();
+    const only = TABLE[version];
+    expect(
+      only,
+      `no recorded hashes for better-sqlite3 ${version} — the INSTALLED version. ` +
+        `A bump lands here first: add the row, or the CI check fails as unknown-version.`,
+    ).toBeTruthy();
     expect(Object.keys(only)).toEqual(expect.arrayContaining(['v137-linux-x64', 'v137-win32-x64']));
   });
 
