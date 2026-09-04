@@ -20,9 +20,15 @@
  * from the launcher and then agree with itself.
  *
  * Deliberately NOT asserted: that `tsx` fails to resolve from the repo root.
- * That is true today and is the shape of the bug, but npm is free to hoist it
- * back tomorrow — the control would then go red for something that is not a
- * defect. What is asserted instead is that the helper reports a miss at all
+ * That was the shape of the bug and was true when this was written, but npm is
+ * free to hoist it back — the control would then go red for something that is
+ * not a defect. It since did: as of 2026-09-04 `tsx` IS at the repo root and
+ * resolves from there, so the assertion this file declined to make would now
+ * be failing on a tree with no defect in it. The gate is unaffected, because
+ * what it pins is the ANCHOR — `resolveDevBins` resolving from the workspace
+ * that DECLARES the dependency — and a hoist that relocates the package is
+ * exactly the churn a root-anchored resolve cannot survive.
+ * What is asserted instead is that the helper reports a miss at all
  * (`project_gates_pass_vacuously`): a resolver that swallowed failures would
  * satisfy every case below while finding nothing.
  */
