@@ -24,7 +24,7 @@
  * console, and forcing every list-refresh through a decision helper would be
  * noise.
  *
- * Cebab-u0s widened it from the two W29 sites to eleven, and added the
+ * Cebab-u0s widened it from the two W29 sites to ten, and added the
  * child-component half. That half is not decoration: `ParticipantControlMenu`
  * closed its modal AND the modal closed itself (its own comment said so —
  * "closeModal() here is just defensive"), so gating only the menu would have
@@ -175,10 +175,12 @@ describe('undeliverable notifications are distinguishable (Cebab-u0s)', () => {
   test('every undeliverable dedupeKey is unique', () => {
     const code = codeOf(APP);
     // Matches the key wherever it is written, because it is written two ways:
-    // as a `dedupeKey:` property at the nine direct sites, and as a positional
+    // as a `dedupeKey:` property at the ten direct sites, and as a positional
     // argument to `sendControlVerb` at the five control verbs. Keying on
     // `dedupeKey:` alone silently skipped the second group — five of the
-    // fourteen — which is the half most at risk of a copy-paste.
+    // fifteen — which is the half most at risk of a copy-paste. (The prose
+    // said nine and fourteen while the assertion below said 15: three numbers
+    // for one list, and only the assertion was checked.)
     const keys = [...code.matchAll(/`([a-z_]+_undeliverable):/g)].map((m) => m[1]);
     // Positive control: an assertion over an empty list passes for free.
     expect(keys.length).toBe(15);
