@@ -23,10 +23,15 @@
  *      prose counts. A rule added without a fixture is red here, before it
  *      ever reaches the workflow.
  *
- * Parsing is line-oriented rather than via a YAML library on purpose:
- * `yaml` resolves only as an unhoisted transitive in this repo, so importing
- * it works locally and breaks on a clean `npm ci`. Same choice, same reason,
- * as `scripts/pr-label-gate.test.mjs`.
+ * Parsing is line-oriented rather than via a YAML library on purpose: `yaml`
+ * is UNDECLARED here — it appears in no `package.json`, and resolves only
+ * because npm happens to hoist it to the root as somebody else's transitive.
+ * (Re-measured 2026-09-04: it does resolve from the repo root today, so the
+ * older wording "unhoisted transitive" named the wrong mechanism. The
+ * conclusion is if anything stronger — a dependency nothing declares can be
+ * relocated or dropped by a lockfile change with no source edit, and no source
+ * scan can see it coming.) Same choice, same reason, as
+ * `scripts/pr-label-gate.test.mjs`.
  */
 import fs from 'node:fs';
 import path from 'node:path';

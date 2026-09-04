@@ -3,7 +3,8 @@
  * passing while running nothing.
  *
  * The shapes below are real vitest JSON-reporter output from this repo, not
- * invented fixtures:
+ * invented fixtures. The numbers are a RECORD of one run, not a live count —
+ * the suite was 3,048 tests then and is 6,146 as of 2026-09-04:
  *
  *   with the tag intact      numTotalTests 3048, numPassedTests  337
  *   with the tag renamed     numTotalTests 3048, numPassedTests    0   → exit 0
@@ -98,9 +99,11 @@ describe('[security] the -t pattern stays regex-escaped', () => {
   it('escapes the brackets', () => {
     // Caught during implementation: passing a bare `[security]` to `-t` makes
     // vitest read it as the CHARACTER CLASS [security], which matches any
-    // test name containing s, e, c, u, r, i, t or y — i.e. nearly all 3028 of
-    // them. The gate then "passes" having run the entire suite under the
-    // security check's name. The old npm script got this escaping from the
+    // test name containing s, e, c, u, r, i, t or y — i.e. nearly every test
+    // in the repo. The gate then "passes" having run the entire suite under
+    // the security check's name. (This line used to put a number on it, 3028,
+    // which was neither the header's recorded 3048 nor any live count — two
+    // stale figures in one file, disagreeing.) The old npm script got this escaping from the
     // shell; spawning vitest directly means it has to live in the script.
     expect(SECURITY_TAG_PATTERN).toBe('\\[security\\]');
     // Pinned against a regex LITERAL rather than `new RegExp(pattern)`: the

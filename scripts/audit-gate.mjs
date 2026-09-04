@@ -31,7 +31,9 @@
  *     writing one down). At ANY severity: the entry's existence is what
  *     makes the date binding, not the severity of what it covers. Until
  *     register C17 this line was false for moderate and low, which was
- *     most of the allowlist.
+ *     most of the allowlist. And until 2026-09-04 it was false for every
+ *     entry `npm audit` did not report this run — including, by
+ *     construction, every OSV-only hold. See `evaluate`.
  *   - an ignore entry missing `id` or `ignoreUntil`      → exit 1
  *   - any high/critical advisory not on the list         → exit 1
  *
@@ -45,6 +47,13 @@
  * no such failure mode, and the CI runs cited as proof were failing on real
  * unfiltered vulnerabilities in the same log. See osv-scanner.toml's header
  * for the full measurement.
+ *
+ * Re-run 2026-09-04 on 2.4.0 and it still holds — same message, same exit 0.
+ * But CI pins `osv-scanner-action` at v2.5.1 (`.github/workflows/osv-scanner.yml`),
+ * and the claim is UNMEASURED there. One command settles it on a machine with
+ * 2.5.1 installed: append an `[[IgnoredVulns]]` entry with an id matching
+ * nothing to a copy of the config, then
+ * `osv-scanner scan source --lockfile=package-lock.json --config=<copy>; echo $?`.
  *
  * The warning stays a warning anyway, for a reason that survives scrutiny: the
  * two gates read DIFFERENT advisory databases. `npm audit` sees the npm
@@ -193,7 +202,7 @@ export function evaluate(advisories, ignores, now) {
     // on it even though this gate doesn't. An entry doing real work has a real
     // deadline. Expiry now follows the entry, and blocking still follows the
     // severity — they are separate questions and were conflated.
-    if (now >= ig.expiry) expired.push({ ...adv, until: ig.until });
+    if (now >= ig.expiry) expired.push({ ...adv, until: ig.until, matched: true });
     else excused.push({ ...adv, until: ig.until });
   }
 
@@ -203,7 +212,28 @@ export function evaluate(advisories, ignores, now) {
   // usage by the blocking set would nag reviewers to retire entries that
   // are load-bearing for the other gate.
   const present = new Set(advisories.map((adv) => adv.id));
-  const unused = ignores.filter((ig) => !present.has(ig.id));
+  const unmatched = ignores.filter((ig) => !present.has(ig.id));
+
+  // AN UNMATCHED ENTRY STILL HAS A DEADLINE. The loop above can only expire an
+  // entry whose advisory `npm audit` reported THIS run, so until now a lapsed
+  // date on an entry npm cannot see was never checked at all — it landed in
+  // the warning list beside the entries that are merely stale. That is the
+  // case the header's "the date is a real deadline, not decoration" was most
+  // wrong about, and it is not a rare corner: this file's own header records
+  // that the two gates read different databases, and that GHSA-frvp-7c67-39w9
+  // was an OSV-only finding here. An OSV-only hold is invisible to npm audit
+  // by construction, so its date could never lapse.
+  //
+  // This does NOT break "a gate may only block on what it can see". The date
+  // is not the advisory: it is a commitment the operator wrote down, in this
+  // file's own format, fully visible from here. A lapsed one means either
+  // retire the entry or re-date it with a fresh reason — both actions someone
+  // has to take, and neither requires knowing what the advisory says.
+  const lapsed = unmatched.filter((ig) => now >= ig.expiry);
+  const unused = unmatched.filter((ig) => now < ig.expiry);
+  for (const ig of lapsed) {
+    expired.push({ id: ig.id, pkg: null, severity: null, until: ig.until, matched: false });
+  }
 
   return { blocked, excused, expired, unused, ok: blocked.length === 0 && expired.length === 0 };
 }
@@ -287,8 +317,14 @@ function main() {
     console.log(`excused: ${adv.id} (${adv.pkg}, ${adv.severity}) until ${adv.until}`);
   }
   for (const adv of result.expired) {
+    // An unmatched entry has no package or severity to name — npm audit never
+    // reported the advisory. Saying `(null, null)` would read as a bug in the
+    // gate rather than as the thing it is.
+    const what = adv.matched
+      ? `${adv.id} (${adv.pkg}, ${adv.severity})`
+      : `${adv.id} (no npm advisory this run — an OSV-only hold, or already fixed)`;
     console.error(
-      `EXPIRED: ${adv.id} (${adv.pkg}, ${adv.severity}) — ignoreUntil ${adv.until} has passed. ` +
+      `EXPIRED: ${what} — ignoreUntil ${adv.until} has passed. ` +
         `Fix it, or re-date the entry with a reason.`,
     );
   }

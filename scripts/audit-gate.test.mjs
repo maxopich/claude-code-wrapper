@@ -188,12 +188,14 @@ describe('evaluate', () => {
   });
 
   // Register C17. `GHSA-dddd-eeee-ffff` is the allowlist's moderate entry, and
-  // these four cases are the whole of the fix: the DATE follows the entry, the
-  // BLOCK follows the severity. Before this, the severity filter ran first and
-  // an expired moderate entry was silently excused — while the script's header
-  // promised a lapsed date exits 1. Four of the seven live entries in
-  // osv-scanner.toml are moderate or low, so most of the allowlist's dates
-  // were decoration.
+  // the cases in this block are the whole of the fix: the DATE follows the
+  // entry, the BLOCK follows the severity. Before this, the severity filter
+  // ran first and an expired moderate entry was silently excused — while the
+  // script's header promised a lapsed date exits 1. When C17 was written, four
+  // of the seven live entries in osv-scanner.toml were moderate or low, so
+  // most of the allowlist's dates were decoration. The live allowlist is empty
+  // today — that count is history, and these fixtures are what keep the branch
+  // measured while it is.
   // Deliberately the SAME entry and clock as 'blocks the same advisory once
   // ignoreUntil has passed' above, which covers it at `high`. Severity is then
   // the only variable between that passing test and these — which is exactly
@@ -239,10 +241,55 @@ describe('evaluate', () => {
   it('does not block an unexcused moderate even after the allowlist dates pass', () => {
     // The severity policy, pinned against the fix over-reaching. An advisory
     // with NO entry has no deadline to miss, whatever the clock says.
-    const r = evaluate(collectAdvisories(advisory('GHSA-no-entry', 'moderate')), ignores, after);
+    //
+    // Rewritten 2026-09-04. This case used to pass `ignores` and assert
+    // `ok === true` at `after` — which reads as "the severity policy holds"
+    // and was ALSO asserting that the fixture's own lapsed entries do not
+    // expire, because nothing then expired an entry `npm audit` had not
+    // reported. It was defending that hole. The severity claim is what the
+    // case is for, so it is now made against an EMPTY allowlist, where the two
+    // questions cannot be confused; the entry-deadline half is the case below.
+    const r = evaluate(collectAdvisories(advisory('GHSA-no-entry', 'moderate')), [], after);
     expect(r.ok).toBe(true);
     expect(r.blocked).toEqual([]);
     expect(r.expired).toEqual([]);
+  });
+
+  it('expires a lapsed entry npm audit never reported [security]', () => {
+    // The hole the case above was hiding. `expired` used to be filled only
+    // inside the loop over reported advisories, so an entry whose advisory npm
+    // cannot see — every OSV-only hold, by construction — had a date that
+    // could never lapse. `scripts/audit-gate.mjs`'s own header records
+    // GHSA-frvp-7c67-39w9 as exactly such a finding, so this is not a corner.
+    const r = evaluate([], ignores, after);
+    expect(r.ok).toBe(false);
+    // Only the one whose date has actually passed. `GHSA-dddd-eeee-ffff` runs
+    // to 2026-10-28, so it stays a warning — which is what stops this case
+    // being satisfied by expiring every unmatched entry.
+    expect(r.expired.map((e) => e.id)).toEqual(['GHSA-aaaa-bbbb-cccc']);
+    expect(r.unused.map((ig) => ig.id)).toEqual(['GHSA-dddd-eeee-ffff']);
+    // Reported as unmatched, so `main`'s output does not name a package and a
+    // severity it was never told.
+    for (const e of r.expired) {
+      expect(e.matched).toBe(false);
+      expect(e.pkg).toBeNull();
+    }
+  });
+
+  it('an unmatched entry still inside its date is a warning, not a failure', () => {
+    // The other side of the same line, so the change above cannot be satisfied
+    // by expiring every unmatched entry regardless of its date.
+    const r = evaluate([], ignores, before);
+    expect(r.ok).toBe(true);
+    expect(r.expired).toEqual([]);
+    expect(r.unused.map((ig) => ig.id).sort()).toEqual(ignores.map((ig) => ig.id).sort());
+  });
+
+  it('a lapsed entry and an unrelated blocking advisory are counted separately', () => {
+    const r = evaluate(collectAdvisories(advisory('GHSA-9999', 'high')), ignores, after);
+    expect(r.ok).toBe(false);
+    expect(r.blocked.map((a) => a.id)).toEqual(['GHSA-9999']);
+    expect(r.expired.map((e) => e.id)).toEqual(['GHSA-aaaa-bbbb-cccc']);
   });
 
   it('reports an unused ignore without failing the run', () => {

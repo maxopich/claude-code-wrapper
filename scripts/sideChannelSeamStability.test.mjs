@@ -4,12 +4,17 @@
  *
  * `subscribeServerMsg` and `readLastRunForTemplate` are passed as props into
  * components that put them in `useEffect` dependency arrays — TemplatesPanel's
- * `multi_agent_ended` listener, `useLogStream`'s chunk/tail listener,
- * SessionSearchModal, and ArtifactContentContext's `useMemo`. As plain
- * `function` declarations inside the component body they got a new identity on
- * every App render, and App renders on every WS message: each of those
- * consumers unsubscribed and resubscribed constantly, and the memo never
- * memoised anything.
+ * `multi_agent_ended` listener, `useLogStream`'s chunk/tail listener, and
+ * ArtifactContentContext's `useMemo`. As plain `function` declarations inside
+ * the component body they got a new identity on every App render, and App
+ * renders on every WS message: each of those consumers unsubscribed and
+ * resubscribed constantly, and the memo never memoised anything.
+ *
+ * SessionSearchModal was listed here too and does not belong: it hands the prop
+ * to `useSessionSearch`, which mirrors it into a ref precisely "so an unstable
+ * parent" cannot churn the subscription (`web/src/useSessionSearch.ts:62`). It
+ * is the local version of this fix, not a victim of the bug — and naming it as
+ * a consumer overstated the reach of the seam.
  *
  * WHY A SOURCE GATE. The behavioural half — that TemplatesPanel subscribes
  * once across N re-renders — is covered in
