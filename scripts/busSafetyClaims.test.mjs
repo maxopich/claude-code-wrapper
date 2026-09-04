@@ -387,6 +387,11 @@ const POSTURE_ALLOWLIST = new Map([
     'server/src/bus_pause_gate_smoke.ts',
     'names the test-only branch to explain a mis-measurement it corrects',
   ],
+  // The reference page for this gate family. It names the token to say what
+  // THIS scan matches on — "a sentence that never writes `bypassPermissions`
+  // is invisible" — which is a statement about the matcher's reach, not about
+  // how a bus hop runs.
+  ['docs/source-gates.md', 'describes what this gate matches on'],
   [SELF, 'this gate'],
 ]);
 

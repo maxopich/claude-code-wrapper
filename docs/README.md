@@ -27,9 +27,13 @@ how the subsystem came to be belongs on one of these pages, with a pointer where
 | [`bus-architecture.md`](bus-architecture.md)       | core bus modules, what "install" writes, per-participant `settingSources`, `cebab_bus` MCP namespacing, server-restart resume (R-A/R-B)                                                                                                                                                                                                                        | `server/src/bus/`                                                                                     |
 | [`safety-and-security.md`](safety-and-security.md) | what actually gates a tool call (Trust, `settingSources`, `shouldAutoAllow`, the `seedPermissionMode` order), the consultant constraint and its two limits, the pause-on-dangerous gate, the hash-chained audit log, forensic snapshots, the TOFU install gate, operator mute/pause/kick, the Origin gate, the per-launch auth token, credential-env scrubbing | `server/src/notifications/`, `bus/pause_gate.ts`, `bus/install_trust_gate.ts`, `auth.ts`, `origin.ts` |
 | [`managed-agents.md`](managed-agents.md)           | the copy engine's symlink rule and size caps, the `.git` exclusion, credentials in the clear, the three editable config kinds, the delete's ordering                                                                                                                                                                                                           | `server/src/managed_*.ts`                                                                             |
+| [`source-gates.md`](source-gates.md)               | the 24 source-scanning gates in `scripts/` — what each protects, the five ways one fails vacuously, why a cross-package gate cannot live inside a package                                                                                                                                                                                                      | `scripts/*.test.mjs`, or adding any new gate                                                          |
 
 ## Adding a page
 
 Link it from the table above, and from the module it describes — a header comment
 naming the page is what makes someone editing that code open it. A page nobody links to
 is a page nobody opens, which is the same as not writing it.
+`scripts/docsIndex.test.mjs` enforces that in both directions: an unlinked page fails, and
+so does a link to a page that left. Its corpus is `git ls-files docs`, not the directory —
+[`source-gates.md`](source-gates.md) explains why that distinction is the whole design.
