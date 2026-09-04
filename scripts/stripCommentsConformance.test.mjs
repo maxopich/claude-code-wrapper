@@ -195,6 +195,81 @@ describe('the copies agree on the real tree, not only on fixtures', () => {
   });
 });
 
+describe('there is no fourth copy', () => {
+  // The blind spot in everything above: it pins the THREE copies it imports,
+  // so a hand-rolled stripper somewhere else is invisible to all of it. One was
+  // live — `scripts/defaultPortSingleSource.test.mjs` carried a two-line
+  // `.replace(/\/\/[^\n]*/g, '')` that cut from the `//` of a URL onward, which
+  // is the case the fixture table above already pins for the three ("a URL in a
+  // string is not a comment"). That gate exists to reject
+  // `const base = 'ws://127.0.0.1:4319';`, and its own stripper turned that
+  // line into `const base = 'ws:` — so it read the pre-fix shape as clean.
+  //
+  // A declaration, not a call: every gate that imports one of the three names
+  // it `stripComments` too, and forbidding the NAME would forbid using it.
+  // No `(?:export\s+)?` prefix: `export function stripComments(` already
+  // contains `function stripComments(`, and the optional group made this
+  // ambiguous enough for eslint's `security/detect-unsafe-regex` to flag it.
+  const DECLARES = /(?:function\s+stripComments\s*\(|const\s+stripComments\s*=)/;
+
+  /** Files allowed to declare one, and why each is not a fourth copy. */
+  const HOMES = new Map([
+    ...IMPLEMENTATIONS.map(([rel]) => [rel, 'one of the three this file pins']),
+    // A different language: `#` to end of line, over YAML, with CRLF
+    // normalisation its own header explains. Nothing about the TS/JS fixture
+    // table applies to it.
+    ['scripts/pr-label-gate.test.mjs', 'strips YAML comments, not TS/JS'],
+    // Also a different language: CSS has no `//` form at all, so its stripper
+    // is block-comments-only and every TS/JS case above is inapplicable.
+    ['web/src/styleTokens.test.ts', 'strips CSS comments, not TS/JS'],
+  ]);
+
+  // This file writes the declaration shapes out as string fixtures two tests
+  // down, so it matches its own detector. Excluded by name rather than by a
+  // cleverer regex — the fixtures are the point, and a detector taught to
+  // ignore quoted text would stop seeing a real copy inside a template string.
+  const SELF = 'scripts/stripCommentsConformance.test.mjs';
+
+  const files = [];
+  for (const root of ['web/src', 'server/src', 'shared/src', 'scripts']) {
+    walk(root, files);
+  }
+
+  test('every allowed home still declares one — no stale exemption', () => {
+    // Without this, deleting a copy leaves an entry that excuses nothing and
+    // the map slowly stops describing the tree. Same failure the posture
+    // allowlist in scripts/busSafetyClaims.test.mjs took.
+    const silent = [...HOMES.keys()].filter(
+      (rel) => !DECLARES.test(fs.readFileSync(path.join(repoRoot, rel), 'utf8')),
+    );
+    expect(silent, 'listed as a stripComments home but declares none').toEqual([]);
+  });
+
+  test('the detector fires on the shape it is looking for', () => {
+    // Anti-vacuity: the sweep below is "this list is empty", which a regex that
+    // matches nothing satisfies forever.
+    expect(DECLARES.test('function stripComments(src) { return src; }')).toBe(true);
+    expect(DECLARES.test('const stripComments = (src) => src;')).toBe(true);
+    expect(DECLARES.test('export function stripComments(yaml) {')).toBe(true);
+    expect(DECLARES.test("import { stripComments } from './lib/strip_comments.mjs';")).toBe(false);
+  });
+
+  test('nothing outside the allowed homes declares its own', () => {
+    const extra = files.filter(
+      (rel) =>
+        rel !== SELF &&
+        !HOMES.has(rel) &&
+        DECLARES.test(fs.readFileSync(path.join(repoRoot, rel), 'utf8')),
+    );
+    expect(
+      extra,
+      'a hand-rolled stripComments outside the pinned set. Import one of the ' +
+        'three instead — the fixture table above is the accumulated bug history ' +
+        'of this function, and a private copy inherits none of it.',
+    ).toEqual([]);
+  });
+});
+
 function walk(rel, out) {
   const abs = path.join(repoRoot, rel);
   if (!fs.existsSync(abs)) return;

@@ -19,11 +19,24 @@
  * that they MUST flag and post-fix strings they must NOT, independently of the
  * tree — so scanning the corrected tree cannot pass just because the checkers
  * measure nothing.
+ *
+ * THE COMMENT STRIPPER IS THE SHARED ONE, and it has to be. This file used to
+ * carry its own two-line `stripComments` — block comments, then `//` to end of
+ * line — which strips from the `//` of a URL onward. Measured: it turns
+ * `const base = 'ws://127.0.0.1:4319';` into `const base = 'ws:`, so the check
+ * below found no literal and passed. That string is the pre-fix shape this
+ * gate was written to reject, and a URL is the only form a hardcoded port
+ * takes in this tree, so the gate was blind to its entire subject. The copy
+ * was also a fourth hand-rolled stripper outside the three that
+ * `scripts/stripCommentsConformance.test.mjs` pins byte-identical — the exact
+ * arrangement that file's header says the repo already paid for once.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
+
+import { stripComments } from './lib/strip_comments.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -60,11 +73,6 @@ function importsDefaultPort(src) {
   );
 }
 
-/** Strip line and block comments so a literal in prose is not mistaken for code. */
-function stripComments(src) {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
-}
-
 describe('register N27: default port single source', () => {
   test('shared/src/net.ts is the one definition of DEFAULT_PORT = 4319', () => {
     const src = read(NET_FILE);
@@ -97,6 +105,19 @@ describe('register N27: default port single source', () => {
         /4319/,
       );
       expect(stripComments(`/** ... ?? 4319 ... */`)).not.toMatch(/4319/);
+    });
+
+    test('a port inside a URL survives stripping — the shape the old copy ate', () => {
+      // Not a style preference. The replaced local stripper cut from the `//`
+      // of the scheme onward, so every one of these read as "no literal here"
+      // and the per-consumer check above passed on the pre-fix source.
+      for (const src of [
+        `const base = 'ws://127.0.0.1:4319';`,
+        `const u = "http://localhost:4319/health";`,
+        'const t = `ws://127.0.0.1:4319`;',
+      ]) {
+        expect(stripComments(src), src).toMatch(/4319/);
+      }
     });
   });
 });
