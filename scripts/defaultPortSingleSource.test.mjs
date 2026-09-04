@@ -2,16 +2,26 @@
  * Register N27: the default server port has ONE source of truth.
  *
  * `4319` used to be repeated as a literal fallback in six files — the client
- * (`web/src/App.tsx`), the server config (`server/src/config.ts`), three smoke
- * scripts (`ci_smoke.ts`, `ws_smoke.ts`, `live_smoke.ts`) and the Vite config
- * (`web/vite.config.ts`). Changing the default meant finding all six, and a
- * missed one silently targeted the old port. `DEFAULT_PORT` in
+ * (then `web/src/App.tsx`; the client's copy now lives in
+ * `web/src/serverUrls.ts`, and App.tsx carries no `4319` at all), the server
+ * config (`server/src/config.ts`), three smoke scripts (`ci_smoke.ts`,
+ * `ws_smoke.ts`, `live_smoke.ts`) and the Vite config (`web/vite.config.ts`).
+ * Changing the default meant finding all six, and a missed one silently
+ * targeted the old port. `DEFAULT_PORT` in
  * `shared/src/net.ts` is now the single definition; this gate keeps it that
  * way.
  *
  * WHY A GATE. The failure this fixes is exactly the one a lint pass cannot see:
- * a seventh copy, or one of the six drifting back to a bare literal, typechecks
- * and runs fine while re-opening the maintenance hazard. Same shape as
+ * one of the named consumers drifting back to a bare literal typechecks and
+ * runs fine while re-opening the maintenance hazard.
+ *
+ * WHAT IT DOES NOT CATCH, and the header used to imply it did: a SEVENTH copy.
+ * `CONSUMERS` is a hand-maintained list, and a brand-new file with a bare
+ * `4319` is never read. Making it a repo-wide sweep is not free — `4319`
+ * legitimately appears in `.env.example`, the README, `scripts/*.mjs` and the
+ * shipped KB pages, none of which are `.ts` and all of which would need
+ * exempting. Stated rather than left implied, because an unstated scope limit
+ * reads as coverage. Same shape as
  * `scripts/configSurfaceClaims.test.mjs` — read the files, assert a structural
  * property, keep a parser out of it.
  *

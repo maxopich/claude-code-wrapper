@@ -20,10 +20,21 @@ import { describe, expect, test } from 'vitest';
  * scan hang rather than fail, and vitest's timeout is JS — it cannot fire on an
  * event loop frozen inside a backtracking regex.
  *
- * Scoped to the two patterns that scan ATTACKER-CONTROLLED strings — the
- * assignment scanner and `SENSITIVE_VALUE_PATTERNS`. Not to the whole file:
- * `isIdentifier` and friends run on already-bounded tokens, and a gate that
- * flags every `*` in a source file gets an exemption list and then gets ignored.
+ * Scoped to ONE pattern: the credential-assignment scanner. The header used to
+ * claim `SENSITIVE_VALUE_PATTERNS` as well, and that was never true — the name
+ * appears nowhere in this file but that sentence, so a reader believed a second
+ * attacker-facing surface was guarded when nothing looked at it.
+ *
+ * It is not an oversight that transfers, either. That array opens with
+ * `/\bauthorization:\s*\S+/i`, whose `+` is unbounded and entirely safe —
+ * `\s` and `\S` are disjoint, so there is nothing to backtrack over. The cheap
+ * `[*+]` rule below would flag it on day one and earn the exemption list this
+ * gate exists to avoid. Covering the array needs real ambiguity analysis rather
+ * than a character scan; tracked separately.
+ *
+ * Not the whole file either: `isIdentifier` and friends run on already-bounded
+ * tokens, and a gate that flags every `*` in a source file gets an exemption
+ * list and then gets ignored.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -38,7 +49,7 @@ function unboundedQuantifiers(pattern) {
   return [...stripClasses(pattern).matchAll(/[*+]/g)].map((m) => m[0]);
 }
 
-describe('[security] redact.ts scanning patterns are bounded (Cebab-ygu.51)', () => {
+describe('[security] the redact.ts assignment scanner is bounded (Cebab-ygu.51)', () => {
   const source = fs.readFileSync(SRC, 'utf8');
 
   test('the credential-assignment scanner has no unbounded repetition', () => {

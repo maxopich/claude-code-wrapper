@@ -111,7 +111,8 @@ describe('react-hooks rules are live in web/ (Cebab-1uk)', () => {
     'a nested web/ directory is covered, not just the top level',
     async () => {
       // `web/**/*.{ts,tsx}` vs `web/src/*.tsx` is a difference no other test in
-      // this repo would notice — 12 of 13 hook-bearing directories are nested.
+      // this repo would notice — 13 of the 14 hook-bearing directories under
+      // `web/src` are nested (measured 2026-09-04; only `web/src` itself is not).
       const ids = await ruleIdsFor(
         BAD_EXHAUSTIVE_DEPS,
         'web/src/components/agentControl/__x__.tsx',
