@@ -1,14 +1,20 @@
 /**
  * Workflow token scope and supply-chain pinning — `Cebab-5nv`.
  *
- * WHY A TEST AND NOT THE ALERT. OpenSSF Scorecard already found all of this.
- * Its findings **annotate; they do not gate** — nothing in CI fails on them and
- * nothing surfaces them unless somebody runs
+ * WHY A TEST AND NOT THE ALERT. OpenSSF Scorecard found all of this first, and
+ * its findings **annotate; they do not gate** — nothing in CI failed on them
+ * and nothing surfaced them unless somebody ran
  * `gh api repos/:owner/:repo/code-scanning/alerts`. That is how seven of them
  * sat open from May to August unnoticed. An alert can also simply be dismissed,
  * which changes the alert and not the config: the two `TokenPermissionsID`
  * findings this file's rules cover were dismissed on 2026-08-15 while both
  * workflows still had the flagged scopes. A test cannot be dismissed.
+ *
+ * AND SCORECARD NO LONGER RUNS HERE AT ALL — `scorecard.yml` was dropped with
+ * the repo-workflow automation in #520. So this file is not a redundant second
+ * opinion any more; it is the only thing checking workflow token scope and
+ * action pinning. The argument above is why that is survivable rather than
+ * alarming: the scanner was never the control, because nothing gated on it.
  *
  * THE RULES, each measured against the tree before being written:
  *
@@ -233,8 +239,9 @@ describe('the workflow checker catches what it is for', () => {
   });
 
   test('rule 2: finds EVERY job, not only the first', () => {
-    // `pr-label.yml` and `ci.yml` and `workflow-lint.yml` each have two jobs.
-    // A matcher that stopped after one would silently halve the corpus.
+    // `pr-label.yml` and `workflow-lint.yml` have two jobs each; `ci.yml` has
+    // three (`checks`, `tests`, and the `required` aggregator added later). A
+    // matcher that stopped after the first would silently halve the corpus.
     const src = [
       'permissions: {}',
       '',
@@ -395,9 +402,15 @@ describe('ci_setup_steps_match', () => {
   test('exactly two setup blocks, byte-identical, and non-empty', () => {
     // THE FLOOR IS NOT DECORATION. A regex that stopped matching would yield
     // two empty strings, which are equal — the comparison alone would pass on
-    // nothing at all. Measured length today is ~1.1k chars per block.
+    // nothing at all.
+    //
+    // Measured 2026-09-04: 2624 chars per block, not the ~1.1k this comment
+    // claimed. The blocks grew when #523 added the native-binary verification
+    // and its reasoning, and a floor left at 600 would no longer notice a block
+    // cut to a fifth of itself. A floor that drifts this far below its subject
+    // has stopped being a floor, so it moves with the measurement.
     expect(blocks.length).toBe(2);
-    expect(blocks[0].length).toBeGreaterThan(600);
+    expect(blocks[0].length).toBeGreaterThan(2000);
     expect(blocks[1]).toBe(blocks[0]);
   });
 
