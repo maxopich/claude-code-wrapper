@@ -90,6 +90,12 @@ logs/
 .cebab/
 
 
+# `npm run coverage` output. The run is a measurement, not a gate, so the
+# report is regenerated on demand and never committed — a stale one would be
+# read as current, which is the whole failure mode `vitest.config.ts`'s
+# coverage block was added to stop.
+/coverage/
+
 # npm/yarn output
 *.tgz
 .npm/
