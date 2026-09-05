@@ -59,6 +59,24 @@ export default defineConfig({
     // and its logic is extracted into `store.ts` to be testable at all
     // (`store.ts` is 83% of 789, which is that strategy working).
     //
+    // WHAT THIS NUMBER CANNOT SEE, and it is specific rather than a caveat for
+    // form's sake: 20 test files in this repo read PRODUCT SOURCE AS TEXT and
+    // assert properties of it — 11 under `scripts/` (see `docs/source-gates.md`)
+    // and 9 under `server/src/ws`. A source gate never EXECUTES the line it
+    // protects, so v8 attributes nothing to it. Real assurance on those lines
+    // is invisible here, and the total understates it by an amount nobody can
+    // compute.
+    //
+    // `ws/server.ts` at 49.3% is the clearest case, and reading the report
+    // before acting on it matters: its 730 uncovered statements are spread over
+    // 332 ranges, the largest 24 lines. That is not a dead subsystem to delete
+    // — it is switch-arm dispatch glue whose logic is extracted into helpers
+    // that ARE tested (`executeContinueMultiAgent` and friends), with the
+    // wiring pinned by source gates like `ws/bus_cap_sites.test.ts` and
+    // `ws/single_agent_model_wiring.test.ts`. Same shape as App.tsx/store.ts,
+    // one layer down. Chasing this number by executing those arms would be
+    // work; deleting anything on the strength of it would be a mistake.
+    //
     // NO THRESHOLD, deliberately. A floor pinned near the real number gets
     // raised until it notices nothing, and one pinned far below is a claim
     // nobody checks — the same trap the corpus floors in `scripts/` carry

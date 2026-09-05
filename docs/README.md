@@ -20,6 +20,17 @@ Code comments follow the same split one level down: the **why** at the point of
 decision, plus JSDoc on exported symbols, stays in the file. A file-header essay about
 how the subsystem came to be belongs on one of these pages, with a pointer where it was.
 
+That split is about KIND, not volume, and the difference is worth a number because the
+volume looks alarming without one. Measured 2026-09-05 across the 674 tracked `.ts`/`.tsx`
+files under `server/src`, `web/src` and `shared/src`: **52,070 comment-only lines, 26.9%
+of every line in the tree**. Almost all of it is the kind that stays — `shared/src/protocol.ts`
+is 69% comment, and what that buys is a per-message contract on each wire type, listing
+its validation, its side effects and the conditions it rejects under, on the declaration
+someone implementing a handler is already looking at. The kind this page asks for is
+file-header essays, and they are **2,333 lines across 59 files — 4.5% of the total**, none
+longer than 65 lines. So the migration this section describes is mostly already how the
+tree is written; what is left is small, and each case is a judgement rather than a sweep.
+
 ## Pages
 
 | Page                                               | Subject                                                                                                                                                                                                                                                                                                                                                        | Read before touching                                                                                  |
