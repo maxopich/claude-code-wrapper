@@ -1,42 +1,19 @@
 /**
- * "Is this scroller still following its tail?"
+ * "Is this scroller still following its tail?" — register W14.
  *
- * Register W14: the chat pane re-scrolled to `scrollHeight` on every streamed
- * delta with no check of where the operator was, so reading back through a
- * running session was impossible — each token yanked the pane down. The same
- * unguarded re-scroll existed a second time in `AuthRefreshModal`, spelled
- * `scrollTop = scrollHeight` rather than `scrollTo` but identical in effect,
- * and worse in kind there: that modal exists so the operator can read an OAuth
- * URL, and every new chunk dragged it off screen mid-read.
+ * THE DECISION THAT MATTERS, because the obvious implementation is wrong: the
+ * offset is measured in the `scroll` handler, never in the effect that reacts
+ * to new content. By the time that effect runs `scrollHeight` has already
+ * grown, so an operator pinned to the bottom reads as "scrolled up by the
+ * height of whatever just arrived" and the pane silently stops following.
+ * `scrollAnchor.test.ts`'s W14 describe enforces that against both call sites;
+ * it carries the incident, and it is why this paragraph is three lines rather
+ * than the twenty it used to be.
  *
- * THE DECISION THAT MATTERS, because the obvious implementation is wrong.
- * Measuring the offset *inside the effect that reacts to new content* does not
- * work: by then `scrollHeight` has already grown, so an operator who was pinned
- * to the bottom reads as "scrolled up by the height of whatever just arrived".
- * One long tool result and the pane silently stops following. So the pin is
- * tracked on `scroll` — where the number still describes where the operator
- * chose to be — and the content effect only *consults* it.
- *
- * A programmatic scroll-to-bottom fires `scroll` too, and lands at distance ≈ 0
- * → the handler recomputes `true`, the value it already held. So this needs no
- * "was that scroll ours or theirs?" bookkeeping, which is the usual source of
- * flapping in stick-to-bottom implementations.
- *
- * Extracted as a pure function rather than inlined into the two components, for
- * the reason `drawerState.ts` gives and one more that is specific to scrolling:
- * **jsdom performs no layout, so `scrollTop`, `scrollHeight` and `clientHeight`
- * all read `0`** — and `0 - 0 - 0 <= threshold` is `true`, whatever `scrollTop`
- * is set to. Measured, because the obvious way to describe that is wrong: an
- * unstaged component spec does not silently go green, it cannot express the bug
- * at all. The negative case ("scrolled up, so no scroll") fails against this
- * fix *and* against the unguarded original, and the only assertion left
- * writable is the positive one — which the unguarded original passes too. So
- * the trap is not a green test hiding a red one; it is that skipping the setup
- * leaves you asserting the half both implementations satisfy.
- *
- * `scrollAnchor.test.ts` feeds synthetic metrics so the rule is pinned somewhere
- * the environment cannot answer for it, and both component specs stage the three
- * numbers explicitly. See the all-zeroes note on `isPinnedToBottom` below.
+ * A programmatic scroll-to-bottom fires `scroll` too and lands at distance ≈ 0,
+ * so the handler recomputes the value it already held. No "was that scroll ours
+ * or theirs?" bookkeeping is needed — which is the usual source of flapping in
+ * stick-to-bottom implementations, and the reason not to add any.
  */
 
 /**
