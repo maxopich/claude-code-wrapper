@@ -80,6 +80,15 @@ logs/
 # inherits.
 .claude/
 
+# Cebab's own per-checkout state, when the tool is pointed at this repo — and
+# the second half of the same finding. `.claude/` was moved here from
+# `.git/info/exclude` above; `.cebab/` was left behind in it, so the sentence
+# directly above stayed true of this directory for another three weeks. It
+# holds operator- and agent-authored review notes (three markdown files here
+# today), and any clone running Cebab on itself was one `git add -A` from
+# publishing them.
+.cebab/
+
 
 # npm/yarn output
 *.tgz
