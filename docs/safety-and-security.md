@@ -52,8 +52,10 @@ Trust scopes the _project's_ files; a home-directory declaration is outside its
 reach, and TOFU is the only brake on those.
 
 A project's own `.mcp.json` loads **iff** `settingSources` includes `'project'`
-— i.e. iff the project is Trusted. Re-measure with
-`npm --workspace server exec tsx src/mcp_scope_smoke.ts`; it costs one spawn.
+— i.e. iff the project is Trusted. Last confirmed 2026-09-05 against SDK
+0.3.251, identical to the 0.3.220 run 31 releases earlier. Re-measure on the
+next SDK bump with `npm --workspace server exec tsx src/mcp_scope_smoke.ts`; it
+costs one spawn and no model turn, because the probe breaks at `system/init`.
 
 ### `default` binds on trusted projects too
 

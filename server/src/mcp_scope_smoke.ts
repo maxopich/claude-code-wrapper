@@ -18,6 +18,12 @@
  * upgraded, and when a project's MCP servers are missing and you need to know
  * whether the scope rule still holds.
  *
+ * Re-run 2026-09-05 on SDK 0.3.251 (dependabot #541) — every row identical to
+ * the 0.3.220 record below, so the rule has held across 31 SDK releases. That
+ * gap had been open and flagged unmeasured since the lockfile moved past
+ * 0.3.220; running this is what closed it, and it is why the header says to run
+ * it on an SDK bump rather than trusting the sentence.
+ *
  * Measured 2026-08-19, SDK 0.3.220, CLI 2.1.212:
  *
  *   ['user','project','local'] → probeserver PRESENT   (status 'failed' — the
@@ -29,8 +35,9 @@
  *   ['user']                   → probeserver ABSENT
  *   []                         → probeserver ABSENT
  *
- * So the rule still holds on 0.3.220: a project's own `.mcp.json` loads iff
- * the scopes include 'project' — i.e. iff the project is Trusted.
+ * So the rule still holds on 0.3.220 and on 0.3.251: a project's own
+ * `.mcp.json` loads iff the scopes include 'project' — i.e. iff the project is
+ * Trusted.
  *
  * READ ONLY THE `probeserver` COLUMN. `mcp_servers` also carries whatever
  * claude.ai cloud connectors the ambient `~/.claude/settings.json` pulls in,
