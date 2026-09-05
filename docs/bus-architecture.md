@@ -1,14 +1,17 @@
 # Bus architecture
 
-Reference detail behind the bus, kept out of the always-loaded surfaces so those stay
-small enough to load into every session. **Nothing under `docs/` is auto-loaded
-by anything** — neither the SDK's project-memory load nor the bus's
-`readProjectClaudeMd` injection reads past `CLAUDE.md` — so this page arrives
-only when you open it. Read it before touching `server/src/bus/`.
+Reference detail behind the bus. **Nothing under `docs/` is auto-loaded by
+anything** — the SDK's project-memory load and the bus's `readProjectClaudeMd`
+injection both read a project's own root `CLAUDE.md` and stop there — so this
+page arrives only when you open it. Read it before touching `server/src/bus/`.
 
 The security-critical claims about this subject matter — the live permission
-posture, the consultant constraint and its two limits — deliberately stayed in
-`CLAUDE.md`. What is here is mechanism, not policy.
+posture, the consultant constraint and its two limits — live in
+[`SECURITY.md`](../SECURITY.md) and
+[`safety-and-security.md`](safety-and-security.md), which
+`scripts/busSafetyClaims.test.mjs` scans on every build. What is here is
+mechanism, not policy: a rule someone acts on belongs where a gate can check it
+is still true.
 
 ## Core modules
 

@@ -1,14 +1,15 @@
 # Managed agents
 
-Reference detail behind managed agents. The rules an
-agent must not violate and points here for the mechanism. **Nothing under `docs/` is
-auto-loaded** — neither the SDK's project-memory load nor the bus's `readProjectClaudeMd`
-injection reads past `CLAUDE.md` — so this page arrives only when you open it.
+Reference detail behind managed agents. **Nothing under `docs/` is auto-loaded** — the
+SDK's project-memory load and the bus's `readProjectClaudeMd` injection both read a
+project's own root `CLAUDE.md` and stop there — so this page arrives only when you open
+it.
 
-What is here is mechanism and the measurements behind it. The rules that survive in
-`CLAUDE.md` are the two that an agent could act wrongly on: **Cebab owns every byte under
-`managedAgentsRoot()` and none outside it**, and **the wire carries a KIND, never a
-path**. Everything below explains how those are enforced.
+What is here is mechanism and the measurements behind it. The two rules an agent could act
+wrongly on are stated in [`SECURITY.md`](../SECURITY.md) rather than here, because a rule
+belongs where it cannot be missed: **Cebab owns every byte under `managedAgentsRoot()` and
+none outside it**, and **the wire carries a KIND, never a path**. Everything below explains
+how those are enforced.
 
 **Read before touching** `server/src/managed_agent.ts`, `managed_copy.ts`,
 `managed_delete.ts`, `managed_file.ts`, or `repo/projects.ts`'s managed helpers.
