@@ -10,6 +10,7 @@ import {
   getAuthToken,
   initAuthToken,
   persistAuthToken,
+  tokenWriteOptions,
   verifyToken,
 } from './auth.js';
 
@@ -179,4 +180,49 @@ describe('[security][Cebab-ygu.41] generateAuthToken / persistAuthToken', () => 
     expect(() => persistAuthToken()).toThrowError(/not initialized/);
     expect(fs.existsSync(authTokenPath())).toBe(false);
   });
+});
+
+describe('[security] the Windows residual is a decision, not an accident', () => {
+  // Every mode assertion above skips on win32, so before this block the branch
+  // was asserted on NO platform: the full 1,349-test [security] suite stayed
+  // green with `process.platform === 'win32' ? {} : …` replaced by a flat
+  // `{ mode: 0o600 }`, silently falsifying SECURITY.md's stated residual.
+  //
+  // These pass the platform in, which is what makes them run identically on a
+  // Mac, a Linux runner and a Windows runner.
+
+  test('POSIX platforms get owner-only 0600', () => {
+    for (const platform of ['darwin', 'linux', 'freebsd'] as NodeJS.Platform[]) {
+      expect(tokenWriteOptions(platform)).toEqual({ mode: 0o600 });
+    }
+  });
+
+  test('win32 gets NO mode key at all — not a mode that happens to be absent', () => {
+    // `toEqual({})` alone would pass for `{ mode: undefined }`, which reads as
+    // deliberate omission and is not: `writeFileSync` treats that as 0o666.
+    expect(tokenWriteOptions('win32')).toEqual({});
+    expect('mode' in tokenWriteOptions('win32')).toBe(false);
+  });
+
+  test.skipIf(process.platform === 'win32')(
+    'and the WRITE uses it — a win32 write really does land without 0600',
+    () => {
+      // The pure function above could be correct and simply never called. This
+      // drives the real write path twice, with only the platform differing, and
+      // observes the mode the file actually ends up with. umask is pinned so
+      // the non-0600 outcome is deterministic rather than runner-dependent.
+      const priorUmask = process.umask(0o022);
+      try {
+        generateAuthToken();
+        persistAuthToken('linux');
+        expect(fs.statSync(authTokenPath()).mode & 0o777).toBe(0o600);
+
+        generateAuthToken();
+        persistAuthToken('win32');
+        expect(fs.statSync(authTokenPath()).mode & 0o777).toBe(0o644);
+      } finally {
+        process.umask(priorUmask);
+      }
+    },
+  );
 });

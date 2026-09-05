@@ -1,11 +1,11 @@
 /**
  * Bounded, TOCTOU-safe reads of paths Cebab does not control.
  *
- * WHY THIS EXISTS (register H02 + H03). Cebab reads several files that a
- * *project* supplies: its `.claude/settings*.json`, absolute paths named
- * inside that file (MCP server commands, hook targets), its root `CLAUDE.md`,
- * and any file a bus agent recorded touching. A bare `fs.readFileSync(path)`
- * on any of those is three separate hazards on a single-threaded server:
+ * WHY THIS EXISTS (register H02 + H03). Cebab reads files a *project* supplies:
+ * its `.claude/settings*.json`, absolute paths named inside that file (MCP
+ * server commands, hook targets), its root `CLAUDE.md`, and any file a bus
+ * agent recorded touching. A bare `fs.readFileSync(path)` on any of those is
+ * three hazards at once on a single-threaded server:
  *
  *   1. BLOCKING. A FIFO planted at the path parks the event loop until some
  *      writer shows up. Not the request — the whole server.
@@ -14,49 +14,25 @@
  *      project can swap a regular file for a symlink to a secret in between
  *      (CodeQL `js/file-system-race`).
  *
- * The fix for all three is one shape: open ONCE with `O_NONBLOCK`, `fstat`
- * that descriptor rather than the path, reject anything that isn't a regular
- * file, and read at most `maxBytes`. The check and the use then act on one
- * inode instead of a name that can be re-pointed.
+ * All three have one fix: open ONCE with `O_NONBLOCK`, `fstat` that descriptor
+ * rather than the path, reject anything that is not a regular file, and read at
+ * most `maxBytes`. Check and use then land on one inode instead of on a name
+ * that can be re-pointed in between. `safe_fs.test.ts` holds each of the three.
  *
- * WHY EVERY CALLER IS NOW HERE (register H11 + `Cebab-x1n.6.21`). When this
- * module landed in #277 it was the fifth writing of that shape and took over
- * only the two call sites that had no protection at all. Its header then said
- * the other four were "deliberately left alone (they work)". Three of them did
- * not:
+ * SO EVERY SUCH READ BELONGS HERE — and `bounded_reads.test.ts` is what makes
+ * that enforced rather than merely asserted: every `openSync` / `readFileSync` /
+ * `createReadStream` under `server/src` must be in this file or on an allowlist
+ * naming the Cebab-owned path it reads. It exists because the header it replaced
+ * vouched for four call sites elsewhere as already fine, and three of the four
+ * were not (`docs/source-gates.md` carries that as its own defect class).
  *
- *   - `bus/runtime.ts` (twice) read the WHOLE file and applied their character
- *     cap to the string afterwards — hazard 2, on the first turn of every bus
- *     participant.
- *   - `repo/hook_trust.ts` opened without `O_NONBLOCK` and read without a cap
- *     — hazards 1 and 2 both, on a path named in a project's settings file.
- *   - `repo/artifact_content.ts` was the one that genuinely implemented it.
- *
- * That is the argument against keeping a security-critical shape in five
- * places: not that five copies are untidy, but that four of them were vouched
- * for by a comment nobody could check. `bounded_reads.test.ts` now checks it —
- * every `openSync` / `readFileSync` / `createReadStream` under `server/src`
- * must be in this file or on an allowlist that names the Cebab-owned path it
- * reads.
- *
- * Never throws. A project-supplied file must not be able to crash a turn, so
- * every failure — missing, unreadable, wrong type, too big, short read —
- * comes back as a typed refusal the caller can map onto its own "no data"
- * path.
- *
- * WHY A DESTROY CHECK ALSO LIVES HERE (Cebab-ws0.13). `resolveSessionFolderInside`
- * at the bottom is not a read. It is here because it is the same discipline
- * seen from the other side: the check and the use must land on ONE resolution,
- * not on a name that can be re-pointed in between. Reads solve that by holding
- * a descriptor; a delete cannot, so it resolves once and hands the caller the
- * resolved path to act on. Putting it in a module of its own would re-open
- * exactly the mistake the paragraph above narrates — a security-critical path
- * shape written somewhere else, vouched for by a comment nobody re-checks.
- *
- * Note the asymmetry in what guards them: `bounded_reads.test.ts` polices every
- * `openSync`/`readFileSync`/`createReadStream` under `server/src`, but nothing
- * polices `rm`/`rmSync`. That gap is filed (Cebab-pop) rather than bolted onto
- * the reads gate, whose value is narrating one hazard well.
+ * `resolveSessionFolderInside` at the bottom is not a read (Cebab-ws0.13). It is
+ * the same discipline from the other side: a delete cannot hold a descriptor, so
+ * it resolves once and hands the caller the resolved path to act on. It lives
+ * here to keep that shape in one place. Note the asymmetry, though — nothing
+ * polices `rm`/`rmSync` the way `bounded_reads.test.ts` polices reads. That gap
+ * is filed as `Cebab-pop` rather than bolted onto a gate whose value is
+ * narrating one hazard well.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -72,6 +48,12 @@ export type SafeReadRefusal =
   /** fstat or read failed after a successful open. */
   | 'read_failed';
 
+/**
+ * NEVER THROWN, always returned. A project-supplied file must not be able to
+ * crash a turn, so every failure — missing, unreadable, wrong type, too big,
+ * short read — arrives as a typed refusal the caller maps onto its own "no
+ * data" path.
+ */
 export type SafeReadResult =
   | { ok: true; bytes: Buffer; size: number; mtimeMs: number }
   | { ok: false; refusal: SafeReadRefusal };
