@@ -231,7 +231,7 @@ export function isValidBusDestination(s: string): boolean {
  * `SessionPaths.iterationDir` joins it straight into the artifact path — and
  * on Windows these names address a device, not a file, so `mkdir con` fails.
  * A project named "Con" or "Aux" would therefore have every hop archive fail
- * on a first-class supported platform (CI runs windows-2022) and nowhere else.
+ * on a first-class supported platform (CI runs a Windows leg) and nowhere else.
  *
  * `slugifyAgentName` lowercases and strips non-alphanumerics, so only the
  * bare lowercase forms can ever be produced: no `CON`, and no `con.txt`

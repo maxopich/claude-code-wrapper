@@ -93,10 +93,31 @@ describe('the configuration facts the prose must match', () => {
     );
   });
 
-  test('the Windows CI image is pinned, not rolling', () => {
-    // Rule 3's premise, and the reason the rolling name may still appear in
-    // `ci.yml`: that file explains the pin and carries the revert condition.
-    expect(read('.github/workflows/ci.yml')).toMatch(/os:\s*\[ubuntu-latest,\s*windows-2022\]/);
+  test('the CI matrix still names both operating systems', () => {
+    // Was 'the Windows CI image is pinned, not rolling', asserting the literal
+    // `windows-2022`. The pin was retired 2026-09-05 by running the experiment
+    // its own comment specified, so that assertion now describes a repo that
+    // does not exist. What is still worth pinning is the SHAPE: two entries,
+    // one Linux and one Windows. A matrix silently reduced to one OS is the
+    // regression this file can actually see.
+    // EVERY `os:` matrix, not the first. ci.yml has two — `checks` and
+    // `tests` — and the first draft of this case matched once and passed while
+    // the second still read `windows-2022`, which is the whole failure mode
+    // `filesContaining` exists to prevent, reintroduced one function away.
+    const matrices = [...read('.github/workflows/ci.yml').matchAll(/os:\s*\[([^\]]+)\]/g)];
+    expect(matrices, 'no `os:` matrix found in ci.yml').toHaveLength(2);
+    for (const m of matrices) {
+      const entries = m[1].split(',').map((x) => x.trim());
+      expect(entries, m[1]).toHaveLength(2);
+      expect(
+        entries.some((e) => e.startsWith('ubuntu-')),
+        m[1],
+      ).toBe(true);
+      expect(
+        entries.some((e) => e.startsWith('windows-')),
+        m[1],
+      ).toBe(true);
+    }
   });
 });
 
@@ -194,7 +215,6 @@ function readAll(files) {
  * found verbatim in this file and every scan would report it.
  */
 const MCP_UNDER_DOT_CLAUDE = `.claude${'/'}mcp.json`;
-const ROLLING_WINDOWS = `windows${'-'}latest`;
 
 // ===========================================================================
 // 3. Anti-vacuity: prove the checkers fire, independent of the tree.
@@ -272,22 +292,6 @@ describe('the checkers actually catch the claims', () => {
     ]);
   });
 
-  test('RULE 3 flags both pre-correction sentences, and not the pinned image', () => {
-    // Verbatim from `git show fd67a95`. The `ci.yml` one is the one that
-    // mattered: it used the rolling name as its EXAMPLE of an emitted context,
-    // and context names are generated from the matrix VALUES — so pinning the
-    // matrix falsified the sentence that explains why the aggregator exists.
-    const sources = {
-      'README.md': 'CI exercises both `ubuntu-latest` and\n`' + ROLLING_WINDOWS + '`.',
-      'ci.yml':
-        '# above reports per-OS contexts ("... (ubuntu-latest)" / "...\n  # (' +
-        ROLLING_WINDOWS +
-        ')"), so the bare name is never produced',
-      'corrected.yml': '# "... (windows-2022)"), so the bare name is never produced',
-    };
-    expect(filesContaining(sources, ROLLING_WINDOWS)).toEqual(['README.md', 'ci.yml']);
-  });
-
   test('filesContaining reports every hit, not just the first', () => {
     // Rules 2 and 3 both report a LIST; a checker that stopped at the first hit
     // would fix one copy per CI round and look green in between — which is the
@@ -301,13 +305,6 @@ describe('the checkers actually catch the claims', () => {
 // ===========================================================================
 // 4. The scans.
 // ===========================================================================
-
-/**
- * The rolling Windows image may be named in `ci.yml` and nowhere else: that
- * workflow pins the image and carries the revert condition, so it has to say
- * which image it is NOT using. One file, one reason.
- */
-const ROLLING_IMAGE_ALLOWLIST = new Set(['.github/workflows/ci.yml']);
 
 describe('the operator-facing config surface names things that exist', () => {
   const files = collectFiles();
@@ -376,20 +373,6 @@ describe('the operator-facing config surface names things that exist', () => {
         '`.mcp.json`, and it loads only when `settingSources` includes ' +
         "'project' — i.e. only for a trusted project. See the measured table " +
         'in `server/src/repo/project_authority.ts` (register X17).',
-    ).toEqual([]);
-  });
-
-  test('RULE 3: the rolling Windows image is named only where it is pinned', () => {
-    const unlisted = filesContaining(scannedSources, ROLLING_WINDOWS).filter(
-      (rel) => !ROLLING_IMAGE_ALLOWLIST.has(rel),
-    );
-    expect(
-      unlisted,
-      'An artifact names the rolling Windows runner image. The matrix pins ' +
-        '`windows-2022` (`.github/workflows/ci.yml` carries the reason and the ' +
-        'revert condition). If this is a portability claim, name the OS ' +
-        'instead — that stays true when the matrix repins. If it is about the ' +
-        'pin itself, it belongs in ci.yml (register X12).',
     ).toEqual([]);
   });
 });

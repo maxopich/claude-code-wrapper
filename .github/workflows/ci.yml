@@ -57,28 +57,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pinned to windows-2022 (was windows-latest). ORIGINAL CAUSE, and it
-        # names a runtime this workflow no longer uses: the newer
-        # windows-latest image ships Visual Studio 18 (2026), which the node-gyp
-        # bundled with NODE 20 could not parse (read it as version
-        # "undefined"). better-sqlite3's `prebuild-install || node-gyp rebuild`
-        # then died in the compile fallback at "Rebuild native modules", before
-        # any test ran.
+        # UNPINNED 2026-09-05, by running the experiment this block used to
+        # describe rather than repeating that it was available.
         #
-        # CI has been on Node 24 since `Cebab-mfvu`, which ships a newer
-        # node-gyp, so the pin's premise may already be gone — UNMEASURED
-        # either way. It is left in place because the failure mode it prevents
-        # costs a red required check on every PR, and because nothing here
-        # needs windows-latest.
+        # ORIGINAL CAUSE: the newer windows-latest image ships Visual Studio 18
+        # (2026), which the node-gyp bundled with NODE 20 could not parse (read
+        # it as version "undefined"). better-sqlite3's `prebuild-install ||
+        # node-gyp rebuild` then died in the compile fallback at "Rebuild
+        # native modules", before any test ran. `windows-2022` avoided the
+        # image; moving CI to Node 24 (`Cebab-mfvu`) removed the other half of
+        # the premise, and after that the pin was carrying a claim nobody had
+        # re-measured.
         #
-        # REVERT CONDITION, stated so it is testable rather than a hope
-        # ("once node-gyp/the image stabilise" was neither): open a PR that
-        # changes this one value to `windows-latest` and read the "Rebuild
-        # native modules" step. Green means the pin can go. That is the whole
-        # experiment, it costs one CI run, and it is the only thing that
-        # settles it. The `required` aggregate below keys off matrix results,
-        # not per-OS names, so the rename needs no branch-protection change.
-        os: [ubuntu-latest, windows-2022]
+        # The revert condition written here was "change this one value and read
+        # the Rebuild step". That is what this commit does. If you are reading
+        # this because Windows CI is failing at "Rebuild native modules", the
+        # answer is to put `windows-2022` back and say what the image did —
+        # not to re-derive it from scratch.
+        #
+        # `scripts/verify-native-binary.mjs` is the second net now: it pins the
+        # sha256 of the shipped better_sqlite3.node per ABI and platform, so a
+        # silent fall-through to a locally compiled binding fails CI rather
+        # than running on an unverified one. That check did not exist when the
+        # pin was added.
+        os: [ubuntu-latest, windows-latest]
     permissions:
       contents: read
 
@@ -211,14 +213,16 @@ jobs:
   tests:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # The slow half — see the header. ~555s measured on windows-2022 against a
-    # 1500s cap. Deliberately generous: the failure this replaces was a correct
-    # change parked because a runner ran ~1.4x slow.
+    # The slow half — see the header. ~555s measured on the windows-2022 image
+    # against a 1500s cap. Deliberately generous: the failure this replaces was
+    # a correct change parked because a runner ran ~1.4x slow. The image moved
+    # to windows-latest on 2026-09-05 (see the `checks` matrix above); the
+    # headroom was chosen to absorb exactly this kind of change.
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-2022]
+        os: [ubuntu-latest, windows-latest]
     permissions:
       contents: read
 
