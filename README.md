@@ -127,7 +127,11 @@ instead (it's read by the server on every start) and just run
 reads the repo-root `.env` exactly like `npm run dev:server`, so the whole
 stack runs mock on every OS with no shell-specific syntax.
 
-`fixtures/hello.jsonl` is a real captured `claude -p` run. Capture more with:
+`fixtures/hello.jsonl` is a real captured `claude -p` run, with the identity
+fields of its `system/init` line replaced — connector names, session ids, and
+the local skill and slash-command lists. Everything the replay path reads is
+untouched, including the one MCP server that reports a non-`connected` status,
+which `server/src/runner/probe.test.ts` depends on. Capture more with:
 
 ```sh
 claude -p "<prompt>" --output-format stream-json --verbose --include-partial-messages \
