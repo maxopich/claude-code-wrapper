@@ -177,6 +177,21 @@ Not a style preference — measured, and pinned:
 So a gate that must read across packages lives in `scripts/`. A gate about one package's
 own source belongs inside that package, using its local stripper.
 
+**A web-side gate reads source anyway, just not with `fs`.** `import.meta.glob` with
+Vite's `?raw` query hands a test every matching file as literal text —
+`operatorCopy.test.ts` and `scrollAnchor.test.ts` both scan components that way. So
+"a web test cannot open a file" bounds the mechanism, not the ambition.
+
+**And jsdom runs no layout, which is a trap rather than a limitation.** Every scroll
+metric — `scrollTop`, `scrollHeight`, `clientHeight` — reads `0` on a rendered element,
+and zero is frequently a _legal_ value that means something else: `isPinnedToBottom`
+returns `true` for all-zeroes because a container with nothing to scroll genuinely is at
+its bottom. Same answer, opposite significance. A component spec that asserts on scroll
+behaviour without staging those three numbers is measuring "layout never ran" while
+claiming to measure the rule, and it passes against the broken implementation too. Stage
+the metrics, or pin the rule on synthetic numbers somewhere the environment cannot answer
+for it.
+
 ## What none of them can see
 
 - **Whether the gate is wired in.** Nothing asserts `ci.yml` still invokes

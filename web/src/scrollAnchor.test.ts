@@ -4,10 +4,10 @@ import { isPinnedToBottom, SCROLL_STICK_THRESHOLD_PX, type ScrollMetrics } from 
 /**
  * Register W14 — the stick-to-bottom predicate, on synthetic numbers.
  *
- * These are plain objects on purpose. The component specs that consume this
- * predicate run under jsdom, where no layout happens and all three metrics
- * read `0`; pinning the rule here means the rule is measured somewhere the
- * environment cannot quietly answer for it. See `scrollAnchor.ts`'s header.
+ * Plain objects on purpose: jsdom runs no layout, so a rendered element reports
+ * all three metrics as `0`. `isPinnedToBottom`'s own JSDoc has the trap that
+ * follows from that; this file just needs numbers the environment cannot answer
+ * for.
  */
 
 /** A 3000px document in a 600px viewport — bottom is `scrollTop === 2400`. */
@@ -81,5 +81,93 @@ describe('SCROLL_STICK_THRESHOLD_PX', () => {
     // as pinned, restoring W14 while every other case above still passed.
     expect(SCROLL_STICK_THRESHOLD_PX).toBeGreaterThan(0);
     expect(SCROLL_STICK_THRESHOLD_PX).toBeLessThan(100);
+  });
+});
+
+/**
+ * WHERE the predicate is called, which is the half no assertion above reaches.
+ *
+ * Every case in this file feeds synthetic numbers to a pure function. All ten
+ * of them stay green if a component moves the call from its `onScroll` handler
+ * into the effect that reacts to new content — and that move silently
+ * reintroduces W14, because by the time the content effect runs `scrollHeight`
+ * has already grown, so an operator pinned to the bottom measures as "scrolled
+ * up by the height of whatever just arrived". One long tool result and the pane
+ * stops following.
+ *
+ * That claim lived only in `scrollAnchor.ts`'s header until 2026-09-05 — seven
+ * lines of prose asking politely, in a file whose test suite could not tell the
+ * difference. This is the mechanism version.
+ */
+describe('W14: the predicate is consulted where the operator chose the position', () => {
+  // Vite's ?raw + glob, same idiom as operatorCopy.test.ts — `web/tsconfig.json`
+  // sets `types: []`, so a web-side test cannot open a file with `fs`.
+  const SOURCES = Object.fromEntries(
+    Object.entries(
+      import.meta.glob(['./**/*.tsx'], {
+        query: '?raw',
+        import: 'default',
+        eager: true,
+      }) as Record<string, string>,
+    ).filter(([file]) => !file.endsWith('.test.tsx')),
+  );
+
+  const CALL = /\bisPinnedToBottom\s*\(/g;
+  const callers = Object.entries(SOURCES).filter(([, src]) => CALL.test(src.replace(CALL, '$&')));
+
+  /** Body of every `useEffect(` in `src`, braces matched. */
+  function effectBodies(src: string): string[] {
+    const out: string[] = [];
+    for (let i = src.indexOf('useEffect('); i !== -1; i = src.indexOf('useEffect(', i + 1)) {
+      let depth = 0;
+      for (let j = i; j < src.length; j++) {
+        if (src[j] === '(') depth++;
+        else if (src[j] === ')' && --depth === 0) {
+          out.push(src.slice(i, j + 1));
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  test('the corpus found the known call sites — anti-vacuity', () => {
+    // Both assertions below are "this list is empty", which an empty corpus
+    // satisfies for free. Name the two components the register was written
+    // about, so a rename or a glob that stops matching fails here first.
+    expect(callers.map(([f]) => f).sort()).toEqual([
+      './components/ChatView.tsx',
+      './components/authRefresh/AuthRefreshModal.tsx',
+    ]);
+    expect(effectBodies(SOURCES['./components/ChatView.tsx']).length).toBeGreaterThan(0);
+  });
+
+  test('no useEffect body calls it', () => {
+    const offenders: string[] = [];
+    for (const [file, src] of callers) {
+      if (effectBodies(src).some((b) => /\bisPinnedToBottom\s*\(/.test(b))) offenders.push(file);
+    }
+    expect(
+      offenders,
+      'isPinnedToBottom is called inside a useEffect. By then scrollHeight has ' +
+        'already grown, so a scroller pinned to the bottom measures as scrolled ' +
+        'up and the pane stops following its tail. Measure in the `scroll` ' +
+        'handler, where the number still describes where the operator chose to be.',
+    ).toEqual([]);
+  });
+
+  test('every call sits in an onScroll handler', () => {
+    const offenders: string[] = [];
+    for (const [file, src] of callers) {
+      for (const m of src.matchAll(/\bisPinnedToBottom\s*\(/g)) {
+        // The nearest `onScroll` before the call must be nearer than the
+        // nearest `useEffect(` — a positional rule rather than a shape one, so
+        // it survives the handler being reformatted or given a name.
+        const before = src.slice(0, m.index);
+        if (before.lastIndexOf('onScroll') <= before.lastIndexOf('useEffect('))
+          offenders.push(file);
+      }
+    }
+    expect(offenders, 'a call to isPinnedToBottom is not inside an onScroll handler').toEqual([]);
   });
 });
