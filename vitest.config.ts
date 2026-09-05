@@ -44,6 +44,40 @@ export default defineConfig({
     // default. Removing this line does not fail silently — DB-touching tests
     // that arrange nothing will throw with a message naming this line.
     setupFiles: ['./vitest.setup.mjs'],
+    // Headroom for RUNNER VARIANCE, which is a different problem from a slow
+    // test and is the only one a global number can fix.
+    //
+    // Measured 2026-09-05 across the 6,147 tracked cases: the slowest is 1,396ms
+    // (`session_log.pagination.test.ts`, which inserts 4 MB), five are over
+    // 500ms, and NOTHING exceeds 2s. So vitest's 5s default is not tight for the
+    // work — it is tight for the outliers. The same afternoon, a `[security]`
+    // case that runs in 10ms locally blew 5,000ms on a windows runner and passed
+    // on re-run: a 500x stall, not gradual slowness, and it reddened an
+    // unrelated PR.
+    //
+    // The repo had already met this twice and fixed it two ways, both correct
+    // and neither applicable here:
+    //   - legitimately slow  -> an explicit per-test budget
+    //                           (`session_log.pagination.test.ts`, 20000)
+    //   - accidentally slow  -> make it fast (`multi_agent.test.ts` moved from
+    //                           prepare-per-call to cached+batched inserts)
+    //   - fast, but STALLED  -> neither works. There is nothing to speed up and
+    //                           no budget to state. Only headroom helps.
+    // That third case is 122 test files wide — everything that calls `getDb()`
+    // and runs 41 migrations against a fresh file — so the next occurrence lands
+    // on a different innocent file, which is how the last three were reported.
+    //
+    // 15s is ~7x the worst legitimate case after allowing for the ~1.4x slower
+    // Windows runner that `ci.yml` records. Explicit per-test timeouts still
+    // win, so the two fixes above are untouched.
+    //
+    // WHAT THIS DOES NOT WEAKEN, which is the objection worth answering: a
+    // blocking regression HANGS rather than failing, and vitest's timeout is JS
+    // — it cannot fire on a frozen event loop, so it never caught that class at
+    // 5s either. What is traded away is noticing a test that got several times
+    // slower, which nothing was asserting and no case depends on.
+    testTimeout: 15_000,
+    hookTimeout: 15_000,
     // Coverage is a MEASUREMENT TOOL here, not a gate — `npm run coverage`,
     // nothing in CI. It exists because "is this test reaching code?" was
     // unanswerable: there was no provider installed and no config anywhere, so
