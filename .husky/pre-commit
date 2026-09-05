@@ -7,9 +7,9 @@ set -e
 npx lint-staged
 
 # Register C04: gitleaks is not an npm dependency and `npm run setup` doesn't
-# install it, but setup DOES install this hook — so a fresh clone following
-# CONTRIBUTING hit exit 127 here on every single commit, with no hint that the
-# missing piece was a binary they were never told to install.
+# install it, but setup DOES install this hook — so a fresh clone hit exit 127
+# here on every single commit, with no hint that the missing piece was a binary
+# nothing had told them to install.
 #
 # `command -v` sits in the `if` CONDITION, which `set -e` exempts, while
 # `gitleaks protect` sits in the BODY, which it does not. So a real finding
@@ -19,10 +19,19 @@ npx lint-staged
 # runs gitleaks on every PR and every push to main with fetch-depth: 0. What
 # it costs the individual contributor is real, though: without the binary you
 # find out about a committed secret from CI instead of before the commit —
-# after it is already in your local history. Install it (see CONTRIBUTING).
+# after it is already in your local history.
+#
+# The install line lives in the message below rather than behind a pointer.
+# This block used to say "see CONTRIBUTING", which stopped shipping, and the
+# message said "see SECURITY.md to install", which has never carried an install
+# instruction — two dead ends for the one reader who is looking at this because
+# something did not work.
 if command -v gitleaks >/dev/null 2>&1; then
   gitleaks protect --staged --redact --no-banner
 else
   echo "pre-commit: gitleaks not found — skipping local secret scan." >&2
-  echo "            CI still enforces it; see SECURITY.md to install." >&2
+  echo "            CI enforces it on every PR, so the repo is covered; you" >&2
+  echo "            just find out after the commit instead of before it." >&2
+  echo "            Install: brew install gitleaks, or see" >&2
+  echo "            https://github.com/gitleaks/gitleaks#installing" >&2
 fi
