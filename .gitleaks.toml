@@ -46,11 +46,18 @@ keywords = ["auth_token", "auth-token", "authtoken"]
 # old one; a path pattern silently covers whatever arrives later.
 [allowlist]
 description = "Cebab project allowlist"
+# EMPTY, and the empty list is the point — `scripts/scopedChecks.test.mjs`
+# reads this key and would report a RENAMED one as a silent hole, so the array
+# stays even at zero entries.
+#
+# It held `fixtures/hello\.jsonl$`, justified as "one reviewed artifact, not a
+# class of files" because other fixtures went through review via the path-label
+# gate. That gate is gone, so the justification is too. Measured before
+# removing: gitleaks 8.30.1 with this config finds nothing in `fixtures/` either
+# way, and an injected `sk-ant-…` in `hello.jsonl` is HIDDEN with the entry and
+# FOUND without it — so the exemption bought nothing and cost a blind spot on
+# the one fixture a reader is most likely to copy from.
 paths = [
-  # Canonical mock fixture — manually verified clean. Other fixture files
-  # are NOT allowlisted; they go through review via the path-label gate.
-  # This is one reviewed artifact, not a class of files.
-  '''fixtures/hello\.jsonl$''',
 ]
 # The five literals the removed `.*\.test\.ts$` exemption had been covering.
 #
