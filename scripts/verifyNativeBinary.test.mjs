@@ -101,7 +101,7 @@ describe('platformKey', () => {
 
 describe('[security] the real table', () => {
   test('covers the two platforms CI actually gates on, at the INSTALLED version', () => {
-    // CI pins Node 24 = ABI 137 on ubuntu-latest and windows-2022. If either
+    // CI pins Node 24 = ABI 137 on its Linux and Windows legs. If either
     // entry disappears, CI degrades to `unknown-platform` — which is fatal
     // there by design, but this says so at the table rather than at 3am.
     //

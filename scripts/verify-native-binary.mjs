@@ -27,8 +27,11 @@
  *
  * The alternative considered and rejected: `--build-from-source` restores
  * npm's integrity check, and reintroduces the node-gyp dependency on Windows
- * that `ci.yml` pins `windows-2022` to work around. That trades a verified
- * install for a fragile one, and costs ~70s per Windows leg.
+ * that the `windows-2022` pin existed to work around. That trades a verified
+ * install for a fragile one, and costs ~70s per Windows leg. The pin itself
+ * was retired 2026-09-05 — see `ci.yml` — which makes THIS check the thing
+ * standing between a silent compile fallback and a green build, since a
+ * locally built binding will not match a recorded hash.
  *
  * Scope: ONE module. Every other dependency is still covered by the lockfile.
  */

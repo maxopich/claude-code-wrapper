@@ -14,7 +14,7 @@
  *
  * FIFO cases are POSIX-only — `mkfifo` does not exist on Windows, and the
  * O_NONBLOCK constant it depends on is absent there too. The size and type
- * cases run everywhere, so windows-2022 still covers the caps.
+ * cases run everywhere, so the Windows leg still covers the caps.
  */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
