@@ -1,57 +1,21 @@
 /**
- * Per-launch WebSocket authentication token.
+ * Per-launch WebSocket authentication token: generated at boot, written to
+ * `~/.cebab/auth-token`, fetched by the browser from the Origin+Host-gated
+ * `/auth-token` endpoint, and checked by the WS `verifyClient` gate. That
+ * mechanism is held by `auth.test.ts`; SECURITY.md's threat-model table is
+ * where it, and everything it does and does not close, is stated in full.
  *
- * Generated once at server boot and written to `~/.cebab/auth-token`
- * (mode 0600). Browsers fetch the token via the Origin+Host-gated
- * `/auth-token` HTTP endpoint mounted alongside `/health`, then pass
- * it as a `?token=` query param on the WS upgrade. The WS verifyClient
- * gate rejects upgrades whose token doesn't match.
+ * THE POSTURE IS DETECT, NOT PREVENT, and that is the one thing to know before
+ * changing anything here. The token is a boundary against other local users and
+ * against browser tabs. It is not one against the agents Cebab itself runs:
+ * they have the operator's own uid and can read the file. No control added to
+ * THIS module can become that boundary, so hardening happens per control-plane
+ * verb instead — `set_trusted` audits before it writes, `mcp_trust_decision`
+ * persists only against a live parked gate entry. Reach for those, not for this.
  *
- * What this closes: browser-tab Cross-Site WebSocket Hijacking (a
- * cross-origin tab can't pass the Origin gate to fetch the token) and
- * OTHER local users on POSIX (mode 0600 = owner-only read; see the
- * Windows caveat below).
- *
- * What this does NOT close — and cannot: a bus agent runs as the
- * operator's own uid, so it can read `~/.cebab/auth-token` off disk and
- * open its own WS connection. There is no same-uid boundary to build
- * here. Origin/Host are not one either — a Node client sets any header it
- * likes — which is why `/auth-token` requiring an Origin (index.ts) only
- * removes the convenience path, not the capability.
- *
- * So the posture is DETECT, not prevent, and the control-plane verbs are
- * hardened where an ungated call was never legitimate in the first place:
- *
- *   - `mcp_trust_decision` only persists `trust`/`trust_pinned` when a
- *     live gate entry is parked, so a trust row can never be pre-seeded to
- *     silently pass the operator's next session-start gate. Denials stay
- *     ungated (reducing authority needs no prompt).
- *   - `set_trusted` writes a `project.trust_decided` row to the
- *     hash-chained audit log before it flips anything, and refuses if that
- *     append fails.
- *
- * Everything else a token-holder can reach (starting sessions, reading
- * transcripts, template CRUD) is inside what the operator's own uid could
- * do regardless. Treat the token as a boundary against other local users
- * and browser tabs, never against the agents Cebab itself runs.
- *
- * Windows: the 0600 mode below is deliberately NOT passed (`win32` gets
- * `{}` — see `initAuthToken`), because it is meaningless without an ACL
- * call. On a multi-user Windows box the token file is readable by other
- * users of that machine. SECURITY.md records this as a known residual.
- *
- * Bus identity spoofing is closed by construction in the pure-SDK
- * model: a worker's `source` is pinned by Cebab in the per-agent
- * `bus_send` tool closure (`bus/runner.ts`), not read from a
- * worker-controlled env var or file, so a worker cannot forge another
- * participant's identity. The F2/F3 source-allowlist drop filters in
- * the routers are kept verbatim as defense-in-depth (source ∈
- * {orchestrator, workers}; sentinels `user`/`_sink` and Cebab's own
- * `cebab` identity rejected as senders).
- *
- * Single-process, single-token: regenerated on every boot. There's no
- * persistence to disk beyond the file itself, and the in-process value
- * lives in module-level state.
+ * The Windows residual — the 0600 mode is deliberately NOT passed there — lives
+ * in `tokenWriteOptions` below, which takes the platform as an argument so the
+ * decision is assertable from a machine that is not Windows.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -90,14 +54,39 @@ export function generateAuthToken(): string {
 }
 
 /**
- * Write the cached token to disk (mode 0600). THE DESTRUCTIVE HALF — it
- * unlinks any existing file first — so call it only once the server is
+ * Write options for the token file, as a function of the platform rather than
+ * of ambient `process.platform`, so BOTH branches are assertable from either
+ * one. That signature is the whole point of this function existing.
+ *
+ * POSIX gets `mode: 0o600` — owner-only read is the cross-uid protection.
+ * Windows gets nothing: Node maps only the write bit to the read-only
+ * attribute there, so `0o600` would buy no ACL guarantee while making the code
+ * read as though it had. SECURITY.md carries that as a stated residual.
+ *
+ * Why it is pinned rather than left inline: `auth.test.ts`'s mode assertions
+ * skip on win32, so the branch was asserted on no platform at all. Measured —
+ * with `process.platform === 'win32' ? {} : …` replaced by an unconditional
+ * `{ mode: 0o600 }`, the entire 1,349-test `[security]` suite stayed green and
+ * SECURITY.md's "deliberately not passed" line became false with nothing to
+ * notice. An edit that reads as hardening is exactly the shape that gets made.
+ */
+export function tokenWriteOptions(platform: NodeJS.Platform = process.platform): { mode?: number } {
+  return platform === 'win32' ? {} : { mode: 0o600 };
+}
+
+/**
+ * Write the cached token to disk (mode 0600 on POSIX). THE DESTRUCTIVE HALF —
+ * it unlinks any existing file first — so call it only once the server is
  * actually listening (`index.ts` does it from `startListening`'s `onBound`).
  *
  * Throws if no token has been generated: writing an empty file here would
  * lock out every client while looking like a successful boot.
+ *
+ * `platform` is injected for the same reason as in `tokenWriteOptions`, and is
+ * what lets a POSIX runner observe the resulting FILE MODE of the win32
+ * decision — the pure function alone could be correct and simply not called.
  */
-export function persistAuthToken(): string {
+export function persistAuthToken(platform: NodeJS.Platform = process.platform): string {
   const current = getAuthToken();
   // See the db.ts call site: either of the two can be first depending on boot
   // order, so both go through `ensureDataDir` (Cebab-ws0.8).
@@ -111,15 +100,7 @@ export function persistAuthToken(): string {
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw err;
   }
-  // POSIX-only: `mode: 0o600` is the cross-uid protection (owner-only read
-  // of ~/.cebab/auth-token). Windows ignores POSIX mode bits — Node maps
-  // only the write bit to the read-only attribute, so 0o600 there grants
-  // no ACL guarantee. The file still lives under the operator's profile;
-  // multi-user Windows hardening (per-user ACLs) is a documented residual,
-  // not enforced here. Passing the mode on Windows is harmless but
-  // misleading, so gate it.
-  const writeOpts = process.platform === 'win32' ? {} : { mode: 0o600 };
-  fs.writeFileSync(p, current, writeOpts);
+  fs.writeFileSync(p, current, tokenWriteOptions(platform));
   return current;
 }
 

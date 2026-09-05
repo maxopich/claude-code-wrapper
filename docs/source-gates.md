@@ -26,12 +26,31 @@ including `scripts/audit-gate.mjs`, which cited a file that by then said the opp
 "This port has one definition." "An exported predicate returns `boolean`." A second copy
 typechecks, lints and runs; it just re-opens the hazard the first fix closed.
 
+**Prose that vouches for code it never checked.** Distinct from the first class: the
+sentence was not true when it was written, and no drift is involved. `safe_fs.ts` landed as
+the fifth writing of one TOCTOU-safe read shape and took over only the two call sites that
+had no protection at all; its header then described the other four as "deliberately left
+alone (they work)". Three of the four did not — two read the whole file before applying
+their cap, one opened without `O_NONBLOCK` and read without a cap at all. A reviewer had no
+way to tell, because checking the claim meant auditing four other files. `bounded_reads.test.ts`
+is the answer to that: every `openSync`/`readFileSync`/`createReadStream` under `server/src`
+must be in `safe_fs.ts` or on an allowlist naming the Cebab-owned path it reads. The general
+form is that a comment asserting **other** files are correct is unfalsifiable by review, and
+so is worth exactly as much as a gate that has not been written yet.
+
 **A configuration whose entire value is its scope.** A gitleaks allow-list, a `files:`
 glob in the ESLint config, the `types: []` in `web/tsconfig.json`. Widen any of them and
 every test still passes — the check simply stops covering anything. This is the most
 dangerous class, because the symptom of the regression is a faster, greener build.
 
 ## The catalogue
+
+**Scope, stated because the tables below look complete and are not.** These list the gates
+under `scripts/`. Gates also live _inside_ the packages they scan, which is what the type
+programs require of anything reading one package's own source (see below) — measured today
+at 26 more test files, 21 of them in `web/`, plus `bounded_reads.test.ts`. Those are not
+catalogued here yet; `Cebab-ga7s` tracks finishing the inventory. Read a green table as "the
+`scripts/` gates are listed", never as "this is every gate the repo has".
 
 ### Gates over product source
 
