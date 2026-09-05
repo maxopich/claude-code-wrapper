@@ -94,3 +94,58 @@ describe('the launcher actually uses the shared resolver', () => {
     expect(devScript).not.toMatch(/createRequire\(/);
   });
 });
+
+describe('npm start does not need vite to serve a built bundle', () => {
+  // `tsx` was promoted to a RUNTIME dependency so single-port mode works on an
+  // install without dev tooling. `vite` is still a `web` devDependency, needed
+  // only to BUILD a bundle that is usually already there — so resolving it
+  // eagerly hands that promotion straight back. Measured before the fix: with
+  // `tsx` present, `web/dist/index.html` present and `vite` absent,
+  // `resolveDevBins` throws MODULE_NOT_FOUND and start.mjs exits 1 saying
+  // "could not locate the toolchain", on a tree that needed nothing built.
+  //
+  // A source scan rather than a behavioural test because `start.mjs` spawns a
+  // server at import time; there is no seam to drive it through, and an
+  // uninstall-vite-and-run test would have to mutate the shared node_modules.
+  const startScript = stripComments(
+    fs.readFileSync(path.join(repoRoot, 'scripts', 'start.mjs'), 'utf8').replace(/\r\n/g, '\n'),
+  );
+
+  /** The body of the `if (!fs.existsSync(webDistIndex))` block, braces matched. */
+  function buildBranch(src) {
+    const open = src.indexOf('if (!fs.existsSync(webDistIndex))');
+    if (open === -1) return null;
+    let i = src.indexOf('{', open);
+    if (i === -1) return null;
+    let depth = 0;
+    for (let j = i; j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}' && --depth === 0) return src.slice(i, j + 1);
+    }
+    return null;
+  }
+
+  test('the brace walk finds a real block — anti-vacuity', () => {
+    // Every assertion below is about what is inside or outside this slice. A
+    // null or empty slice satisfies "vite is not outside it" for free.
+    const branch = buildBranch(startScript);
+    expect(branch, 'no `if (!fs.existsSync(webDistIndex))` block found').toBeTruthy();
+    expect(branch.length).toBeGreaterThan(80);
+    expect(branch).toContain("'build'");
+  });
+
+  test('start.mjs resolves vite ONLY inside the build branch', () => {
+    const branch = buildBranch(startScript) ?? '';
+    const total = [...startScript.matchAll(/resolveViteBin\(/g)].length;
+    const inside = [...branch.matchAll(/resolveViteBin\(/g)].length;
+    expect(total, 'start.mjs should resolve vite exactly once').toBe(1);
+    expect(inside, 'the one resolveViteBin call must sit inside the build branch').toBe(1);
+  });
+
+  test('start.mjs never asks for both at once', () => {
+    // `resolveDevBins` is the eager pair. Using it here is the regression,
+    // and it reads as a tidy-up rather than as one.
+    expect(startScript).not.toMatch(/resolveDevBins/);
+    expect(startScript).toMatch(/resolveTsxCli\(root\)/);
+  });
+});

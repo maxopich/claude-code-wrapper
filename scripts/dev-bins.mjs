@@ -37,10 +37,26 @@ export function requireFromWorkspace(root, workspace) {
   return createRequire(path.join(root, workspace, 'package.json'));
 }
 
-/** `{ tsxCli, viteBin }` — absolute paths, both spawned as `node <path>`. */
-export function resolveDevBins(root) {
-  const tsxCli = requireFromWorkspace(root, 'server').resolve('tsx/cli');
+/**
+ * The two halves are separately callable because `scripts/start.mjs` needs
+ * exactly one of them.
+ *
+ * `tsx` is a RUNTIME dependency — it is what runs the server, which is why it
+ * was promoted out of devDependencies when single-port mode landed. `vite` is
+ * still a `web` devDependency, needed only to BUILD a bundle that is usually
+ * already there. Resolving both up front made `npm start` exit 1 with "could
+ * not locate the toolchain" on an `--omit=dev` install that had a built
+ * `web/dist` and needed nothing else. Measured: with `tsx` present,
+ * `web/dist/index.html` present and `vite` absent, `resolveDevBins` throws
+ * MODULE_NOT_FOUND — half the point of promoting `tsx` undone by the eager
+ * resolve of its neighbour.
+ */
+export function resolveTsxCli(root) {
+  return requireFromWorkspace(root, 'server').resolve('tsx/cli');
+}
 
+/** Vite's bin path. Only needed on the build path. */
+export function resolveViteBin(root) {
   // vite's package `exports` block a direct `vite/bin/vite.js` resolve, so go
   // via its package.json + the `bin` field instead.
   const vitePkgPath = requireFromWorkspace(root, 'web').resolve('vite/package.json');
@@ -57,5 +73,14 @@ export function resolveDevBins(root) {
     );
   }
 
-  return { tsxCli, viteBin: path.join(path.dirname(vitePkgPath), viteBinRel) };
+  return path.join(path.dirname(vitePkgPath), viteBinRel);
+}
+
+/**
+ * `{ tsxCli, viteBin }` — absolute paths, both spawned as `node <path>`.
+ * `scripts/dev.mjs` spawns both children unconditionally, so it wants both and
+ * wants to fail before starting either.
+ */
+export function resolveDevBins(root) {
+  return { tsxCli: resolveTsxCli(root), viteBin: resolveViteBin(root) };
 }

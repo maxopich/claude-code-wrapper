@@ -23,15 +23,19 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveDevBins } from './dev-bins.mjs';
+import { resolveTsxCli, resolveViteBin } from './dev-bins.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const webDistIndex = path.join(root, 'web', 'dist', 'index.html');
 
+// `tsx` only. It is a RUNTIME dependency and always needed; `vite` is a `web`
+// devDependency needed only to build a bundle that is usually already there.
+// Resolving both here made `npm start` exit 1 on an `--omit=dev` install that
+// had a built `web/dist` and needed nothing else — undoing half the point of
+// promoting `tsx` out of devDependencies for this very mode.
 let tsxCli;
-let viteBin;
 try {
-  ({ tsxCli, viteBin } = resolveDevBins(root));
+  tsxCli = resolveTsxCli(root);
 } catch (err) {
   console.error(`[start] could not locate the toolchain: ${err.message}`);
   console.error('[start] if this is a fresh clone, run `npm run bootstrap` first.');
@@ -55,6 +59,15 @@ function run(cwd, args) {
 // someone; `npm run build` is the explicit way to refresh it.
 if (!fs.existsSync(webDistIndex)) {
   console.log('[start] no web/dist — building the UI once (this takes a moment)…');
+  let viteBin;
+  try {
+    viteBin = resolveViteBin(root);
+  } catch (err) {
+    console.error(`[start] no web/dist to serve, and vite is not installed: ${err.message}`);
+    console.error('[start] run `npm run build` on a machine with devDependencies, or');
+    console.error('[start] install them here with `npm install` and try again.');
+    process.exit(1);
+  }
   const code = await run(path.join(root, 'web'), [viteBin, 'build']);
   if (code !== 0) {
     console.error('[start] the web build failed; not starting the server.');
