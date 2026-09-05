@@ -44,6 +44,35 @@ export default defineConfig({
     // default. Removing this line does not fail silently — DB-touching tests
     // that arrange nothing will throw with a message naming this line.
     setupFiles: ['./vitest.setup.mjs'],
+    // Coverage is a MEASUREMENT TOOL here, not a gate — `npm run coverage`,
+    // nothing in CI. It exists because "is this test reaching code?" was
+    // unanswerable: there was no provider installed and no config anywhere, so
+    // every judgement about the size of the suite was an opinion.
+    //
+    // Baseline on 2026-09-05, 6,146 tests over 281 product files:
+    //   statements 79.43%   branches 74.40%   functions 76.55%   lines 80.82%
+    // Eight files sit at zero, 204 statements between them, and four of those
+    // are entry points and dev tools (`server/src/index.ts`, `smoke.ts`,
+    // `runner_demo.ts`). The gap is concentrated rather than spread:
+    // `ws/server.ts` is 49.3% of 1,440 statements and `web/src/App.tsx` is
+    // 3.6% of 612 — the second by construction, since App.tsx has no test file
+    // and its logic is extracted into `store.ts` to be testable at all
+    // (`store.ts` is 83% of 789, which is that strategy working).
+    //
+    // NO THRESHOLD, deliberately. A floor pinned near the real number gets
+    // raised until it notices nothing, and one pinned far below is a claim
+    // nobody checks — the same trap the corpus floors in `scripts/` carry
+    // comments about. If this ever becomes a gate, 70% statements is the
+    // number that would catch a collapse without reddening on ordinary churn.
+    coverage: {
+      provider: 'v8',
+      reportsDirectory: './coverage',
+      // Product source only. Tests measuring themselves inflates the number,
+      // and the smokes are dev tools that spend live quota — they never run
+      // under vitest, so they would read as permanently dead.
+      include: ['server/src/**', 'web/src/**', 'shared/src/**'],
+      exclude: ['**/*.test.*', '**/*_smoke.ts', '**/test_support/**', '**/migrations/**'],
+    },
     // Vitest mocks CSS imports to an empty string by default. Enabling
     // CSS processing lets the `?raw` query suffix resolve to the file's
     // literal text — needed by cssGate.test.ts to scan the stylesheet
