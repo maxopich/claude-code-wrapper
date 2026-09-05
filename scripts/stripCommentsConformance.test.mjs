@@ -215,11 +215,7 @@ describe('there is no fourth copy', () => {
   /** Files allowed to declare one, and why each is not a fourth copy. */
   const HOMES = new Map([
     ...IMPLEMENTATIONS.map(([rel]) => [rel, 'one of the three this file pins']),
-    // A different language: `#` to end of line, over YAML, with CRLF
-    // normalisation its own header explains. Nothing about the TS/JS fixture
-    // table applies to it.
-    ['scripts/pr-label-gate.test.mjs', 'strips YAML comments, not TS/JS'],
-    // Also a different language: CSS has no `//` form at all, so its stripper
+    // A different language: CSS has no `//` form at all, so its stripper
     // is block-comments-only and every TS/JS case above is inapplicable.
     ['web/src/styleTokens.test.ts', 'strips CSS comments, not TS/JS'],
   ]);
@@ -239,9 +235,16 @@ describe('there is no fourth copy', () => {
     // Without this, deleting a copy leaves an entry that excuses nothing and
     // the map slowly stops describing the tree. Same failure the posture
     // allowlist in scripts/busSafetyClaims.test.mjs took.
-    const silent = [...HOMES.keys()].filter(
-      (rel) => !DECLARES.test(fs.readFileSync(path.join(repoRoot, rel), 'utf8')),
-    );
+    // A DELETED home counts as silent, rather than throwing ENOENT out of the
+    // filter. That is not defensive coding: deleting the file IS the case this
+    // test exists for, and the first time it happened — `pr-label.yml`'s gate
+    // leaving with the fixture-review workflow — the read threw before the
+    // message below could render, so the failure named a missing file instead
+    // of a stale exemption.
+    const silent = [...HOMES.keys()].filter((rel) => {
+      const abs = path.join(repoRoot, rel);
+      return !fs.existsSync(abs) || !DECLARES.test(fs.readFileSync(abs, 'utf8'));
+    });
     expect(silent, 'listed as a stripComments home but declares none').toEqual([]);
   });
 

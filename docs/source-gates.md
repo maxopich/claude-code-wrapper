@@ -1,7 +1,7 @@
 # Source-scanning gates
 
-Twenty-five files in [`scripts/`](../scripts) read this repo's own source as text and
-assert something about it — 6,023 lines and 349 vitest cases, measured 2026-09-04 and
+Twenty-four files in [`scripts/`](../scripts) read this repo's own source as text and
+assert something about it — 5,897 lines and 343 vitest cases, measured 2026-09-05 and
 dated because everything below is about numbers that quietly stop being true. Count them in
 a clean checkout, not the maintainer's: `scripts/` also holds the gitignored loop, whose
 own suite is larger than every gate here combined, so a local `wc -l` reads more than
@@ -59,7 +59,6 @@ dangerous class, because the symptom of the regression is a faster, greener buil
 | [`reactHooksLint`](../scripts/reactHooksLint.test.mjs)           | the two `react-hooks` rules can actually fire under the real `eslint.config.js`                            |
 | [`devBins`](../scripts/devBins.test.mjs)                         | `npm run dev` resolves the two binaries it spawns, from the workspace that declares them                   |
 | [`verifyNativeBinary`](../scripts/verifyNativeBinary.test.mjs)   | the native-binary hash check's decision table, aimed at the ways it could report OK having checked nothing |
-| [`pr-label-gate`](../scripts/pr-label-gate.test.mjs)             | the fixture-review job fails **closed** when the labeller that feeds it did not succeed                    |
 | [`docsIndex`](../scripts/docsIndex.test.mjs)                     | `docs/README.md` links every page that ships, and nothing else                                             |
 
 ### Gates over prose

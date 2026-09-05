@@ -31,7 +31,9 @@
  * conclusion is if anything stronger — a dependency nothing declares can be
  * relocated or dropped by a lockfile change with no source edit, and no source
  * scan can see it coming.) Same choice, same reason, as
- * `scripts/pr-label-gate.test.mjs`.
+ * `scripts/workflowPermissions.test.mjs`, whose own `PARSING is line-oriented
+ * by indentation, not a YAML library` note records the same undeclared-`js-yaml`
+ * reasoning for the same file type.
  */
 import fs from 'node:fs';
 import path from 'node:path';

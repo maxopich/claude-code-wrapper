@@ -239,9 +239,9 @@ describe('the workflow checker catches what it is for', () => {
   });
 
   test('rule 2: finds EVERY job, not only the first', () => {
-    // `pr-label.yml` and `workflow-lint.yml` have two jobs each; `ci.yml` has
-    // three (`checks`, `tests`, and the `required` aggregator added later). A
-    // matcher that stopped after the first would silently halve the corpus.
+    // `workflow-lint.yml` has two jobs; `ci.yml` has three (`checks`, `tests`,
+    // and the `required` aggregator added later). A matcher that stopped after
+    // the first would silently halve the corpus.
     const src = [
       'permissions: {}',
       '',
@@ -329,10 +329,13 @@ describe('every workflow denies by default and pins what it fetches', () => {
   test('the scan reaches the workflow directory', () => {
     // A glob matching nothing looks exactly like a clean tree.
     const files = Object.keys(sources);
-    // 8 today, down from 10 when `scorecard.yml` and `dependabot-auto-merge.yml`
-    // left with the repo-workflow automation. The floor moves WITH the set on
-    // purpose: a floor kept comfortably below the real count stops being able
-    // to notice the next removal, which is the whole job of this case.
+    // 7 today, down from 10 as the repo-workflow automation left: `scorecard.yml`
+    // and `dependabot-auto-merge.yml` first, then `pr-label.yml` with the
+    // fixture-review gate. The floor moves WITH the set on purpose — a floor
+    // kept comfortably below the real count stops being able to notice the next
+    // removal, which is the whole job of this case — so 6 against 7 is the
+    // intended state, not a near miss. It was 6 against 8, which is what let
+    // this last removal pass without anyone having to look at it.
     expect(files.length).toBeGreaterThan(6);
     for (const f of ['ci.yml', 'codeql.yml', 'semgrep.yml', 'workflow-lint.yml']) {
       expect(files, `${f} is not in the scanned set`).toContain(f);
