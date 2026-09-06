@@ -50,10 +50,22 @@ export type AuthorityPreflightBodyProps = {
   projectIds: number[];
   model?: PreflightModelSlot;
   startMode?: PreflightStartModeSlot;
+  /**
+   * Cebab-ph8r [security]: true when the projects below are about to run as BUS
+   * participants, which load `['user', 'project', 'local']` regardless of Trust
+   * (`chain.ts` and `orchestrator.ts` hardcode it at all three `register`
+   * sites). Without this the shared panel repeats the single-agent scope rule
+   * and tells the operator a project hook is inert while Trust is off, when on
+   * this path it will auto-execute on every hop with no human gate.
+   *
+   * Default false, so the single-agent surfaces this body is shared with keep
+   * the behaviour they had.
+   */
+  runsWithAllScopes?: boolean;
 };
 
 export function AuthorityPreflightBody(props: AuthorityPreflightBodyProps) {
-  const { projectIds, model, startMode } = props;
+  const { projectIds, model, startMode, runsWithAllScopes = false } = props;
   const isAggregate = projectIds.length > 1;
 
   return (
@@ -87,7 +99,13 @@ export function AuthorityPreflightBody(props: AuthorityPreflightBodyProps) {
       )}
       <div className="authority-preflight-panels">
         {projectIds.map((id) => (
-          <AuthorityPanel key={id} projectId={id} mode="preflight" wantLive />
+          <AuthorityPanel
+            key={id}
+            projectId={id}
+            mode="preflight"
+            wantLive
+            runsWithAllScopes={runsWithAllScopes}
+          />
         ))}
       </div>
     </>
